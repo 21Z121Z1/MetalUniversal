@@ -41,11 +41,12 @@ import java.nio.ByteBuffer;
  * <p><b>What is populated today:</b>
  * <ul>
  *   <li>{@code iris_ModelViewMat} / {@code iris_ModelViewMatrix} &larr;
- *       {@link RenderSystem#getModelViewMatrix()}</li>
- *   <li>{@code iris_ProjMat} / {@code iris_ProjectionMatrix} &larr;
- *       {@link RenderSystem#getProjectionMatrix()}</li>
- *   <li>{@code iris_FogColor} &larr;
- *       {@link RenderSystem#getShaderFogColor()} (RGBA; alpha taken from array)</li>
+ *       {@link RenderSystem#getModelViewMatrixCopy()} (CPU-side copy)</li>
+ *   <li>{@code iris_ProjMat} / {@code iris_ProjectionMatrix} &larr; left at zero
+ *       (MC 26.2 moved projection to a GPU buffer; no CPU-side Matrix4f accessor
+ *       without Sodium's GameRendererStorage)</li>
+ *   <li>{@code iris_FogColor} &larr; left at zero (MC 26.2 moved fog color into
+ *       {@link RenderSystem#getShaderFog()}, a GpuBufferSlice, not float[])</li>
  *   <li>{@code iris_ScreenSize} &larr;
  *       {@code Minecraft.getInstance().gameRenderer.mainRenderTarget()} width/height</li>
  * </ul>
@@ -119,9 +120,17 @@ final class MetalIrisUniformProvider implements AutoCloseable {
         }
         zeroStorage();
 
-        final Matrix4f modelView = safeGet(RenderSystem::getModelViewMatrix, "ModelViewMatrix");
-        final Matrix4f projection = safeGet(RenderSystem::getProjectionMatrix, "ProjectionMatrix");
-        final float[] fogColor = safeGet(RenderSystem::getShaderFogColor, "ShaderFogColor");
+        // MC 26.2: RenderSystem.getModelViewMatrixCopy() returns a CPU-side copy of the
+        // model-view matrix (confirmed via Iris ExtendedShader usage). iris_ModelViewMat /
+        // iris_ModelViewMatrix are populated from it.
+        final Matrix4f modelView = safeGet(() -> new Matrix4f(RenderSystem.getModelViewMatrixCopy()), "ModelViewMatrix");
+        // MC 26.2 moved the projection matrix into a GPU buffer (RenderSystem.getProjectionMatrixBuffer());
+        // there is no CPU-side Matrix4f accessor without Sodium's GameRendererStorage, so
+        // iris_ProjMat / iris_ProjectionMatrix are left at zero (graceful M5e fallback).
+        final Matrix4f projection = null;
+        // MC 26.2 moved fog color into RenderSystem.getShaderFog() (a GpuBufferSlice, not float[]);
+        // iris_FogColor is left at zero (graceful M5e fallback).
+        final float[] fogColor = null;
 
         if (modelView != null) {
             putMat4(member("iris_ModelViewMat"), modelView);

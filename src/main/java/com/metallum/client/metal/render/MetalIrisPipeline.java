@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.iris.MetalIrisBridge;
+import com.metallum.client.metal.iris.MetalIrisBridge.LooseUniformLayout;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCompareFunction;
 import com.metallum.client.metal.render.mtl.MTLCullMode;
@@ -197,7 +198,7 @@ final class MetalIrisPipeline implements AutoCloseable {
      * (existing M5d-2 behaviour) — never an unbound argument.
      */
     @Nullable
-    private final MetalIrisBridge.LooseUniformLayout looseUniformLayout;
+    private final LooseUniformLayout looseUniformLayout;
     private boolean closed;
 
     /**
@@ -579,7 +580,7 @@ final class MetalIrisPipeline implements AutoCloseable {
      * to the zeroed scratch buffer.
      */
     @Nullable
-    MetalIrisBridge.LooseUniformLayout looseUniformLayout() {
+    LooseUniformLayout looseUniformLayout() {
         return this.looseUniformLayout;
     }
 
