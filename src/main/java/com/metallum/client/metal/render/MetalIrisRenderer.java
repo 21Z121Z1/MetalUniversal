@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.iris.MetalIrisBridge;
+import com.metallum.client.metal.iris.MetalIrisRenderingPipeline;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.metallum.client.metal.render.mtl.MTLPrimitiveType;
@@ -18,6 +19,7 @@ import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.systems.GpuDeviceBackend;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.vertex.VertexFormat;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -289,6 +291,66 @@ public final class MetalIrisRenderer {
     }
 
     /**
+     * Ensures the gbuffers Iris pipeline for the given program name is cached
+     * (M5g-1), creating it on first use from the compiled MSL and the vanilla
+     * vertex format captured at {@code MetalRenderPass.setPipeline} time
+     * (M5g-2). Returns the cached pipeline, or {@code null} if the MSL is
+     * unavailable or pipeline creation fails.
+     *
+     * <p>Unlike {@link #getActiveIrisPipeline()} which only looks up an
+     * already-cached pipeline, this method creates the pipeline on demand
+     * using the vanilla {@link VertexFormat} bindings so the Iris vertex
+     * descriptor's {@code [[attribute(N)]]} mapping matches the vertex
+     * buffers vanilla will bind via {@code setVertexBuffer}.
+     *
+     * <p>The pipeline is created with {@value #GBUFFER_MRT_COUNT} RGBA8 color
+     * attachments (matching the gbuffer MRT pool) and a Depth32Float depth
+     * attachment, so M5c's render-target redirect routes output into the
+     * correct gbuffer textures.
+     *
+     * @param name          the gbuffers program name (e.g. {@code "gbuffers_terrain"})
+     * @param vertexFormats the vanilla vertex format bindings captured from
+     *                      the active {@code RenderPipeline}; may be empty for
+     *                      programs that don't declare vertex attributes
+     * @return the cached or newly-created {@link MetalIrisPipeline}, or
+     *         {@code null} on failure (safe fallback to vanilla shader)
+     */
+    static MetalIrisPipeline ensureGbuffersPipelineCached(
+            final String name,
+            final VertexFormat[] vertexFormats
+    ) {
+        if (name == null) {
+            return null;
+        }
+        final MetalIrisPipeline existing = pipelineCache.get(name);
+        if (existing != null) {
+            return existing;
+        }
+        final MetalIrisBridge.ShaderPair msl = MetalIrisRenderingPipeline.getCompiledShader(name);
+        if (msl == null || msl.vertex() == null || msl.fragment() == null) {
+            return null;
+        }
+        final MetalDevice device = getMetalDevice();
+        if (device == null) {
+            return null;
+        }
+        final MTLPixelFormat[] colorFormats = new MTLPixelFormat[GBUFFER_MRT_COUNT];
+        Arrays.fill(colorFormats, MTLPixelFormat.RGBA8Unorm);
+        try {
+            final MetalIrisPipeline pipeline = getOrCreatePipelineMulti(
+                    device, name, msl.vertex().source(), msl.fragment().source(),
+                    colorFormats, true, vertexFormats);
+            LOGGER.info("[MetalUniversal] M5g: cached gbuffers pipeline '{}' (vertexBuffers={})",
+                    name, pipeline.vertexBufferCount());
+            return pipeline;
+        } catch (Throwable t) {
+            LOGGER.warn("[MetalUniversal] M5g: failed to cache gbuffers pipeline '{}': {}",
+                    name, t.toString());
+            return null;
+        }
+    }
+
+    /**
      * The final-pass render target view produced by {@link #renderFinalPass},
      * handed off to {@link MetalSurface#blitFromTexture} for presentation.
      *
@@ -354,6 +416,34 @@ public final class MetalIrisRenderer {
     private static MetalGpuTextureView shadowDepthView = null;
     private static GpuTexture shadowDummyColorTexture = null;
     private static MetalGpuTextureView shadowDummyColorView = null;
+
+    // ---- Shadow color render targets (M5g-7) ----
+
+    /**
+     * Persistent shadow color render targets (M5g-7). Iris shaderpacks sample
+     * {@code shadowcolor0} / {@code shadowcolor1} to read color data written
+     * during the shadow pass (e.g. for colored shadows). These are RGBA8
+     * textures at {@link #SHADOW_MAP_SIZE}, created lazily and reused across
+     * frames. They are bound as samplers via
+     * {@link #getIrisRenderTargetTexture} when a shaderpack's reflected sampler
+     * name matches {@code shadowcolor0} or {@code shadowcolor1}.
+     */
+    private static GpuTexture[] shadowColorTextures = null;
+    private static MetalGpuTextureView[] shadowColorViews = null;
+
+    // ---- Noise texture (M5g-7) ----
+
+    /**
+     * Persistent noise texture for the {@code noisetex} sampler (M5g-7). Iris
+     * shaderpacks sample {@code noisetex} for procedural noise. The texture is
+     * a 256×256 RGBA8 texture filled with random byte data, created lazily on
+     * first access and reused across frames (the data is static — Iris does
+     * not regenerate it per frame unless the shaderpack requests it, which is
+     * not supported in this beta).
+     */
+    private static GpuTexture noiseTexture = null;
+    private static MetalGpuTextureView noiseTextureView = null;
+    private static final int NOISE_TEXTURE_SIZE = 256;
 
     private MetalIrisRenderer() {
     }
@@ -1085,6 +1175,116 @@ public final class MetalIrisRenderer {
             }
             shadowDummyColorTexture = null;
         }
+        // M5g-7: release shadow color render targets too.
+        releaseShadowColorTargets();
+    }
+
+    /**
+     * Ensures the shadow color render targets exist (M5g-7). Creates two RGBA8
+     * textures at {@link #SHADOW_MAP_SIZE} (shadowcolor0, shadowcolor1) with
+     * render-attachment + shader-read usage, each with a view. Called lazily
+     * from {@link #getIrisRenderTargetTexture} when a shaderpack samples
+     * {@code shadowcolor0} or {@code shadowcolor1}.
+     */
+    private static void ensureShadowColorTargets(final MetalDevice device) {
+        if (shadowColorTextures != null) {
+            return;
+        }
+        final int count = 2;
+        shadowColorTextures = new GpuTexture[count];
+        shadowColorViews = new MetalGpuTextureView[count];
+        final int usage = GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING;
+        for (int i = 0; i < count; i++) {
+            shadowColorTextures[i] = device.createTexture(
+                    "iris_shadowcolor" + i, usage,
+                    GpuFormat.RGBA8_UNORM, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 1, 1);
+            shadowColorViews[i] = (MetalGpuTextureView) device.createTextureView(shadowColorTextures[i]);
+        }
+    }
+
+    /**
+     * Releases the shadow color render targets (M5g-7).
+     */
+    private static void releaseShadowColorTargets() {
+        if (shadowColorViews != null) {
+            for (MetalGpuTextureView v : shadowColorViews) {
+                if (v != null) {
+                    try {
+                        v.close();
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            shadowColorViews = null;
+        }
+        if (shadowColorTextures != null) {
+            for (GpuTexture t : shadowColorTextures) {
+                if (t != null) {
+                    try {
+                        t.close();
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            shadowColorTextures = null;
+        }
+    }
+
+    /**
+     * Ensures the noise texture exists (M5g-7). Creates a 256×256 RGBA8
+     * texture filled with random byte data, then uploads it via a blit
+     * encoder. Called lazily from {@link #getIrisRenderTargetTexture} when a
+     * shaderpack samples {@code noisetex}.
+     */
+    private static void ensureNoiseTexture(final MetalDevice device) {
+        if (noiseTexture != null) {
+            return;
+        }
+        noiseTexture = device.createTexture(
+                "iris_noisetex",
+                GpuTexture.USAGE_TEXTURE_BINDING,
+                GpuFormat.RGBA8_UNORM,
+                NOISE_TEXTURE_SIZE, NOISE_TEXTURE_SIZE, 1, 1);
+        noiseTextureView = (MetalGpuTextureView) device.createTextureView(noiseTexture);
+        // Fill with random byte data. Iris's noise texture is a static RGBA8
+        // texture with random values per channel; shaderpacks sample it for
+        // procedural noise. We upload via writeToTexture (staging buffer +
+        // blit encoder).
+        try {
+            final int byteCount = NOISE_TEXTURE_SIZE * NOISE_TEXTURE_SIZE * 4;
+            final java.nio.ByteBuffer noiseData = java.nio.ByteBuffer.allocateDirect(byteCount);
+            final java.util.Random rng = new java.util.Random(0L);
+            for (int i = 0; i < byteCount; i++) {
+                noiseData.put((byte) rng.nextInt(256));
+            }
+            noiseData.flip();
+            device.createCommandEncoder().writeToTexture(
+                    noiseTexture, noiseData,
+                    0, 0, 0, 0,
+                    NOISE_TEXTURE_SIZE, NOISE_TEXTURE_SIZE);
+        } catch (Throwable t) {
+            LOGGER.warn("[MetalUniversal] M5g-7: could not upload noisetex data: {}", t.toString());
+        }
+    }
+
+    /**
+     * Releases the noise texture (M5g-7).
+     */
+    private static void releaseNoiseTexture() {
+        if (noiseTextureView != null) {
+            try {
+                noiseTextureView.close();
+            } catch (Exception ignored) {
+            }
+            noiseTextureView = null;
+        }
+        if (noiseTexture != null) {
+            try {
+                noiseTexture.close();
+            } catch (Exception ignored) {
+            }
+            noiseTexture = null;
+        }
     }
 
     /**
@@ -1119,6 +1319,19 @@ public final class MetalIrisRenderer {
             ensureShadowTarget(device);
         } catch (Exception e) {
             LOGGER.error("[MetalUniversal] Failed to ensure shadow target", e);
+        }
+        // M5g-7: ensure shadow color targets and noise texture exist so
+        // composite passes can sample shadowcolor0/1 and noisetex without
+        // falling back to dummy textures.
+        try {
+            ensureShadowColorTargets(device);
+        } catch (Exception e) {
+            LOGGER.error("[MetalUniversal] M5g-7: failed to ensure shadowcolor targets", e);
+        }
+        try {
+            ensureNoiseTexture(device);
+        } catch (Exception e) {
+            LOGGER.error("[MetalUniversal] M5g-7: failed to ensure noisetex", e);
         }
     }
 
@@ -1360,6 +1573,9 @@ public final class MetalIrisRenderer {
         releaseCompositeTargets();
         releaseGbufferTargets();
         releaseShadowTarget();
+        // M5g-7: release the noise texture (shadowcolor targets are released
+        // by releaseShadowTarget → releaseShadowColorTargets).
+        releaseNoiseTexture();
         // The pipeline cache is now empty, so any active gbuffers program /
         // swap flag would reference stale state. Clear both (M5d-1).
         activeGbuffersProgram = null;
@@ -1375,7 +1591,7 @@ public final class MetalIrisRenderer {
 
     /**
      * Resolves an Iris sampler name to a {@link MetalGpuTextureView} from the
-     * gbuffer/composite/shadow render-target pools (M5f). Used by
+     * gbuffer/composite/shadow/noise render-target pools (M5f/M5g-7). Used by
      * {@code MetalRenderPass.pushIrisTextureBindings} to bind real render-target
      * textures to reflected Iris {@code [[texture(N)]]} slots whose names match
      * Iris's sampler naming conventions (e.g. {@code colortex0},
@@ -1395,8 +1611,12 @@ public final class MetalIrisRenderer {
      *   <tr><td>{@code shadowtex0}, {@code shadowtex1}, {@code shadow},
      *           {@code watershadow}</td>
      *       <td>shadow-map depth view</td></tr>
-     *   <tr><td>{@code noisetex}, {@code shadowcolor*}, {@code dhDepthTex*}</td>
-     *       <td>{@code null} (no pool yet — caller falls back to dummy)</td></tr>
+     *   <tr><td>{@code shadowcolor0}, {@code shadowcolor1}</td>
+     *       <td>shadow color render-target views [0–1] (M5g-7)</td></tr>
+     *   <tr><td>{@code noisetex}</td>
+     *       <td>256×256 RGBA8 random noise texture view (M5g-7)</td></tr>
+     *   <tr><td>{@code dhDepthTex0}, {@code dhDepthTex1}</td>
+     *       <td>gbuffer depth view (fallback — DH not available, M5g-7)</td></tr>
      * </table>
      *
      * @param name the reflected Iris texture binding name
@@ -1438,7 +1658,44 @@ public final class MetalIrisRenderer {
         if (name.startsWith("shadowtex") || "shadow".equals(name) || "watershadow".equals(name)) {
             return shadowDepthView;
         }
-        // noisetex, shadowcolor*, dhDepthTex* — no pool yet
+        // M5g-7: shadowcolor0/1 → shadow color render-target views
+        if (name.startsWith("shadowcolor")) {
+            final int idx = parseIndexSuffix(name, "shadowcolor");
+            if (idx >= 0 && shadowColorViews != null && idx < shadowColorViews.length) {
+                return shadowColorViews[idx];
+            }
+            // Lazily ensure shadow color targets exist on first access.
+            final MetalDevice device = getMetalDevice();
+            if (device != null) {
+                try {
+                    ensureShadowColorTargets(device);
+                } catch (Exception e) {
+                    LOGGER.warn("[MetalUniversal] M5g-7: could not create shadowcolor targets", e);
+                }
+            }
+            if (shadowColorViews != null && idx >= 0 && idx < shadowColorViews.length) {
+                return shadowColorViews[idx];
+            }
+            return null;
+        }
+        // M5g-7: noisetex → 256×256 RGBA8 random noise texture
+        if ("noisetex".equals(name)) {
+            if (noiseTextureView == null) {
+                final MetalDevice device = getMetalDevice();
+                if (device != null) {
+                    try {
+                        ensureNoiseTexture(device);
+                    } catch (Exception e) {
+                        LOGGER.warn("[MetalUniversal] M5g-7: could not create noisetex", e);
+                    }
+                }
+            }
+            return noiseTextureView;
+        }
+        // M5g-7: dhDepthTex0/1 → fallback to gbuffer depth (DH not available)
+        if (name.startsWith("dhDepthTex")) {
+            return gbufferDepthView;
+        }
         return null;
     }
 

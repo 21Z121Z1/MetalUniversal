@@ -106,6 +106,21 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
      */
     private static volatile MetalIrisRenderingPipeline activeInstance = null;
 
+    // ---- PBR texture tracking (M5g-6) ----
+
+    /**
+     * The current albedo texture GL id (M5g-6). On GL backends Iris looks up
+     * the matching normal/specular PBR textures via {@code PBRTextureManager}
+     * when the albedo texture changes. On Metal, {@code PBRTextureManager.init()}
+     * is canceled by {@link com.metallum.mixin.iris.MixinIris}, so PBR textures
+     * are not loaded — these fields track the albedo id for future use but
+     * {@link #getCurrentNormalTexture} / {@link #getCurrentSpecularTexture}
+     * return {@code 0} (no PBR).
+     */
+    private int currentAlbedoTextureId = 0;
+    private int currentNormalTextureId = 0;
+    private int currentSpecularTextureId = 0;
+
     public MetalIrisRenderingPipeline(ProgramSet programSet) {
         this.programSet = programSet;
         activeInstance = this;
@@ -441,12 +456,54 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
 
     @Override
     public void renderShadows(LevelRendererAccessor worldRenderer, Camera camera, CameraRenderState renderState) {
-        // stub
+        // M5g-4: Render the shadow pass — create a shadow render command
+        // encoder targeting the shadow-map depth texture (clearing it to far),
+        // so the shadow map is in a valid state for composite/deferred passes
+        // to sample via shadowtex0/shadowtex1 (already wired in
+        // MetalIrisRenderer.getIrisRenderTargetTexture).
+        //
+        // Full chunk/entity shadow rendering (frustum culling, Sodium chunk
+        // iteration, entity dispatch) requires a ShadowRenderer equivalent
+        // and is a future milestone. This beta scaffolding ensures the shadow
+        // map exists and is cleared each frame so composite passes that sample
+        // shadowtex0/shadowtex1 read a valid (cleared) texture instead of
+        // unbound garbage.
+        final MetalIrisBridge.ShaderPair shadowMsl = getCompiledShader("shadow");
+        if (shadowMsl == null || shadowMsl.vertex() == null || shadowMsl.fragment() == null) {
+            return;
+        }
+        try {
+            final com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder shadowEnc =
+                    MetalIrisRenderer.beginShadowPass(
+                            "shadow",
+                            shadowMsl.vertex().source(),
+                            shadowMsl.fragment().source());
+            if (shadowEnc != null) {
+                // The shadow pass encoder is now active with the shadow
+                // pipeline bound and the shadow map cleared. A full
+                // implementation would iterate shadow-camera-visible chunks
+                // and entities here, issuing draws via shadowEnc. The encoder
+                // lifecycle is managed by MetalCommandEncoder (ended when the
+                // next encoder is created or the command buffer is submitted).
+                MetalIrisRenderer.endShadowPass();
+                LOGGER.debug("[MetalUniversal] M5g: shadow pass completed (shadow map cleared)");
+            }
+        } catch (Throwable t) {
+            LOGGER.warn("[MetalUniversal] M5g: shadow pass failed: {}", t.toString());
+        }
     }
 
     @Override
     public void addDebugText(DebugScreenDisplayer messages) {
-        // stub
+        // M5g-8: Output Iris Metal adaptation status to the F3 debug screen
+        // so users and developers can verify the pipeline state.
+        final String program = MetalIrisRenderer.getActiveGbuffersProgram();
+        final String phase = String.valueOf(getEffectivePhase());
+        final String swap = MetalIrisRenderer.isPipelineSwapEnabled() ? "on" : "off";
+        messages.addLine("[MetalUniversal] Phase: " + phase);
+        messages.addLine("[MetalUniversal] Gbuffers program: " + (program != null ? program : "(none)"));
+        messages.addLine("[MetalUniversal] Pipeline swap: " + swap);
+        messages.addLine("[MetalUniversal] Compiled programs: " + compiledShaders.size());
     }
 
     @Override
@@ -492,24 +549,56 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
 
     @Override
     public int getCurrentNormalTexture() {
-        return 0;
+        // M5g-6: PBR normal texture handle. Returns 0 (no PBR) because
+        // PBRTextureManager.init() is canceled on non-GL backends
+        // (MixinIris cancels onRenderSystemInit), so no PBR textures are
+        // loaded. Full PBR support requires initializing PBRTextureManager
+        // on Metal, a future milestone.
+        return currentNormalTextureId;
     }
 
     @Override
     public int getCurrentSpecularTexture() {
-        return 0;
+        // M5g-6: PBR specular texture handle. See getCurrentNormalTexture.
+        return currentSpecularTextureId;
     }
 
     @Override
     public void onSetAlbedoTex(GpuTextureView id) {
+        // M5g-6: Track the albedo texture. On GL backends, Iris looks up the
+        // matching normal/specular PBR textures via PBRTextureManager here.
+        // On Metal, PBRTextureManager is not initialized (MixinIris cancels
+        // onRenderSystemInit), so we only track the albedo id for future use.
+        // MetalGpuTexture.iris$getGlId() returns 0 (MixinMetalGpuTexture),
+        // so currentAlbedoTextureId stays 0 — this is safe and matches the
+        // no-PBR fallback.
+        if (id != null) {
+            currentAlbedoTextureId = 0;
+            // PBR lookup would go here once PBRTextureManager is supported.
+            currentNormalTextureId = 0;
+            currentSpecularTextureId = 0;
+        }
     }
 
     @Override
     public void beginHand() {
+        // M5g-5: Switch to the hand gbuffers program so hand geometry renders
+        // through the Iris gbuffers_hand pipeline (falling back to
+        // gbuffers_terrain if the shaderpack has no gbuffers_hand, per
+        // resolveGbuffersProgram). Setting the phase triggers
+        // updateActiveGbuffersProgram which pushes the resolved program name
+        // to MetalIrisRenderer, activating the Iris pipeline swap for hand.
+        setPhase(WorldRenderingPhase.HAND_SOLID);
     }
 
     @Override
     public void beginTranslucents() {
+        // M5g-5: Switch to the translucent gbuffers program (gbuffers_water,
+        // falling back to gbuffers_translucent → gbuffers_terrain) so
+        // translucent geometry renders through the Iris gbuffers_water
+        // pipeline. Setting the phase triggers updateActiveGbuffersProgram
+        // which pushes the resolved program name to MetalIrisRenderer.
+        setPhase(WorldRenderingPhase.TERRAIN_TRANSLUCENT);
     }
 
     @Override
@@ -634,7 +723,7 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
             case "TERRAIN_TRANSLUCENT" -> "gbuffers_water";
             case "ENTITIES", "ENTITIES_TRANSLUCENT" -> "gbuffers_entities";
             case "BLOCK_ENTITIES", "BLOCK_ENTITIES_TRANSLUCENT" -> "gbuffers_block";
-            case "HAND", "HAND_TRANSLUCENT" -> "gbuffers_hand";
+            case "HAND_SOLID", "HAND_TRANSLUCENT" -> "gbuffers_hand";
             case "SKY", "SUN", "MOON", "STARS", "SKY_BASIC" -> "gbuffers_skybasic";
             default -> null;
         };
@@ -875,6 +964,8 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
 
     @Override
     public int getAlbedoTex() {
-        return 0;
+        // M5g-6: Return the tracked albedo texture id (set by onSetAlbedoTex).
+        // Returns 0 on Metal since MetalGpuTexture.iris$getGlId() returns 0.
+        return currentAlbedoTextureId;
     }
 }

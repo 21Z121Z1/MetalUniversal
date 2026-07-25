@@ -122,18 +122,28 @@ final class MetalRenderPass implements RenderPassBackend {
             vertexBuffersDirty = true;
             pipelineDirty = true;
         }
-        // M5d-1: when the Iris pipeline swap is enabled and a gbuffers phase is
-        // active, resolve the cached Iris gbuffers pipeline. If found,
-        // bindDrawState substitutes its native pipeline state (and vertex
-        // buffer layout) for vanilla's, and reflected UBO/texture/sampler
-        // bindings are pushed (M5d-2/M5d-3). The swap is enabled by
-        // MetalIrisRenderer.pipelineSwapEnabled (flipped to true in
-        // MetalIrisRenderingPipeline.beginLevelRendering once binding was
-        // complete); when no gbuffers phase is active, getActiveIrisPipeline
-        // returns null and vanilla rendering is unaffected.
-        MetalIrisPipeline resolved = MetalIrisRenderer.isPipelineSwapEnabled()
-                ? MetalIrisRenderer.getActiveIrisPipeline()
-                : null;
+        // M5g-1/M5g-2/M5g-3: when the Iris pipeline swap is enabled and a
+        // gbuffers phase is active, ensure the gbuffers Iris pipeline is
+        // cached — creating it on first use from the compiled MSL and the
+        // vanilla vertex format captured here from the active RenderPipeline
+        // (M5g-2). The captured VertexFormat[] ensures the Iris vertex
+        // descriptor's [[attribute(N)]] mapping matches the vertex buffers
+        // vanilla will bind via setVertexBuffer, so Iris gbuffers MSL reads
+        // correct per-vertex position/color/UV/lightmap/normal data.
+        //
+        // Once cached, bindDrawState substitutes the Iris pipeline's native
+        // state (and vertex buffer layout) for vanilla's, and reflected
+        // UBO/texture/sampler bindings are pushed (M5d-2/M5d-3). When no
+        // gbuffers phase is active or the MSL is unavailable, resolved is
+        // null and vanilla rendering is unaffected (safe fallback).
+        MetalIrisPipeline resolved = null;
+        if (MetalIrisRenderer.isPipelineSwapEnabled()) {
+            final String programName = MetalIrisRenderer.getActiveGbuffersProgram();
+            if (programName != null) {
+                resolved = MetalIrisRenderer.ensureGbuffersPipelineCached(
+                        programName, pipeline.getVertexFormatBindings());
+            }
+        }
         if (this.irisPipeline != resolved) {
             this.irisPipeline = resolved;
             vertexBuffersDirty = true;
