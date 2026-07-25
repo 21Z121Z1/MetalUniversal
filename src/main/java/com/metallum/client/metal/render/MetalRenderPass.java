@@ -745,10 +745,12 @@ final class MetalRenderPass implements RenderPassBackend {
      *
      * <p>The provider's {@link MetalIrisUniformProvider#marshal()} is called
      * once per {@link #bindDrawState} to refresh the buffer from live Iris
-     * state before binding. Dirtiness tracking is not yet implemented — all
-     * reflected UBOs are re-bound on every {@link #bindDrawState} call while
-     * the Iris override is active. This is correct (idempotent) and can be
-     * optimized later.
+     * state before binding. The marshal zero-fill was optimized in M6-3 to use
+     * 8-byte bulk writes instead of byte-by-byte. UBO binding dirtiness
+     * tracking (skipping re-bind when the same buffer is already bound) is not
+     * yet implemented — all reflected UBOs are re-bound on every
+     * {@link #bindDrawState} call while the Iris override is active. This is
+     * correct (idempotent) and can be optimized later.
      */
     private void pushIrisUniformBindings(final MTLRenderCommandEncoder enc, final MetalIrisPipeline iris) {
         final MetalGpuBuffer scratch = device.getOrEnsureIrisScratchUniformBuffer();

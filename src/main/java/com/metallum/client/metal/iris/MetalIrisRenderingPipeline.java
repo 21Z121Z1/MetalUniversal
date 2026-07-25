@@ -608,7 +608,7 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
 
     @Override
     public void finalizeLevelRendering() {
-        // M4e/M4g/M4h: Render the Iris fullscreen pass chain.
+        // M4e/M4g/M4h/M5g: Render the Iris fullscreen pass chain.
         //
         // Composite/deferred/prepare/shadowcomp passes are fullscreen passes
         // that write to multiple colortex outputs (MRT) — rendered via
@@ -617,10 +617,16 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
         // to MetalSurface for presentation).
         //
         // The gbuffer MRT pool and shadow-map target are allocated up-front in
-        // beginLevelRendering (M4h) so composite passes can sample them, but
-        // the actual gbuffers/shadow scene draws are NOT yet redirected into
-        // those targets — that requires intercepting vanilla's terrain/entity
-        // draws (vertex buffers, attribute binding), a separate effort.
+        // beginLevelRendering (M4h) so composite passes can sample them.
+        // The gbuffers/shadow scene draws are redirected through Iris MSL
+        // pipelines via MetalRenderPass.setPipeline → ensureGbuffersPipelineCached
+        // (M5g-1/2/3), and the shadow map is cleared via renderShadows (M5g-4).
+        //
+        // After composite + final passes, reset the phase to NONE so any
+        // post-scene vanilla rendering (HUD, GUI) doesn't trigger the
+        // gbuffers pipeline swap (getActiveGbuffersProgram returns null for
+        // NONE phase, so the swap is a no-op even if pipelineSwapEnabled
+        // is still true).
         //
         // All rendering is best-effort and wrapped in try/catch so a single
         // failing pass doesn't prevent the rest.
@@ -667,6 +673,12 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
                 LOGGER.error("[MetalUniversal] Failed to render final pass", t);
             }
         }
+
+        // Reset the phase to NONE so post-scene vanilla rendering (HUD, GUI,
+        // hand) doesn't accidentally trigger the gbuffers pipeline swap.
+        currentPhase = WorldRenderingPhase.NONE;
+        overridePhase = null;
+        MetalIrisRenderer.setActiveGbuffersProgram(null);
     }
 
     /**
