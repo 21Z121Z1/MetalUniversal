@@ -30,6 +30,9 @@ public class Metallum implements ModInitializer, PreLaunchEntrypoint {
 
     @Override
     public void onInitialize() {
+        // 启动时环境兼容性诊断（PojavLauncher + Java 25 等）。非阻断式：仅输出日志。
+        com.metallum.client.metal.EnvironmentDiagnostics.runAll();
+
         // Detect Iris and initialize the Metal↔Iris GLSL shader bridge.
         // When Iris is present, MetalUniversal's GLSL→SPIR-V→MSL pipeline
         // becomes available for compiling shaderpack shaders to Metal.
