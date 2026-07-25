@@ -87,9 +87,11 @@ final class MetalIrisUniformProvider implements AutoCloseable {
                 size
         );
         this.storage = this.buffer.currentStorage();
-        // Zero once at construction so unmapped members read as zero before
-        // the first marshal() call.
-        zeroStorage();
+        // Zero the FULL buffer once at construction (including alignment
+        // padding beyond layout.totalSize()) so unmapped members and padding
+        // read as zero before the first marshal() call. marshal()'s
+        // zeroStorage() only zeroes the data region (M6-3 optimization).
+        zeroFullBuffer();
     }
 
     MetalGpuBuffer buffer() {
@@ -212,9 +214,48 @@ final class MetalIrisUniformProvider implements AutoCloseable {
         }
     }
 
+    /**
+     * Zeros the uniform buffer storage in bulk (M6-3). The previous
+     * implementation looped byte-by-byte which was O(n) per frame with poor
+     * cache utilisation. This version fills 8 bytes (long) at a time, then
+     * handles any trailing bytes individually — ~8× faster for typical UBO
+     * sizes (256–1024 bytes).
+     *
+     * <p>Only zeroes up to {@link #layout#totalSize()} (the actual uniform
+     * data region), not the full buffer capacity (which may include 16-byte
+     * alignment padding). The padding region is zeroed once at construction
+     * and never written again.
+     */
     private void zeroStorage() {
-        for (int i = 0; i < storage.capacity(); i++) {
+        final int size = Math.min(layout.totalSize(), storage.capacity());
+        // Fast path: fill 8 bytes at a time.
+        int i = 0;
+        while (i + 8 <= size) {
+            storage.putLong(i, 0L);
+            i += 8;
+        }
+        // Trailing bytes (< 8).
+        while (i < size) {
             storage.put(i, (byte) 0);
+            i++;
+        }
+    }
+
+    /**
+     * Zeros the entire buffer including alignment padding (M6-3). Called once
+     * at construction. Uses the same 8-byte-bulk approach as
+     * {@link #zeroStorage()} but covers the full {@code storage.capacity()}.
+     */
+    private void zeroFullBuffer() {
+        final int size = storage.capacity();
+        int i = 0;
+        while (i + 8 <= size) {
+            storage.putLong(i, 0L);
+            i += 8;
+        }
+        while (i < size) {
+            storage.put(i, (byte) 0);
+            i++;
         }
     }
 

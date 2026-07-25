@@ -142,6 +142,13 @@ final class MetalIrisPipeline implements AutoCloseable {
     }
 
     private final String name;
+    /**
+     * The Metal device used to create this pipeline (M6-2). Stored so
+     * {@link #close()} can queue native handle releases via
+     * {@link MetalDevice#queueResourceRelease(MemorySegment)} for deferred
+     * release (safe even if the GPU is still using the pipeline state).
+     */
+    private final MetalDevice device;
     private final MemorySegment pipelineWithDepth;
     private final MemorySegment pipelineWithoutDepth;
     private final MemorySegment depthStencilState;
@@ -273,6 +280,7 @@ final class MetalIrisPipeline implements AutoCloseable {
             final VertexFormat[] vertexFormats
     ) {
         this.name = name;
+        this.device = device;
 
         String vertexEntry = extractEntryPoint(vertexMsl, VERTEX_ENTRY_PATTERN, "main0");
         String fragmentEntry = extractEntryPoint(fragmentMsl, FRAGMENT_ENTRY_PATTERN, "main0");
@@ -588,12 +596,36 @@ final class MetalIrisPipeline implements AutoCloseable {
     public void close() {
         if (closed) return;
         closed = true;
-        // Pipeline states and depth-stencil states are managed by MetalNativeBridge.
-        // We release them through the device's deferred release queue to ensure
-        // they're not in use by the GPU when freed.
-        // For simplicity in this beta, we leak them — the pipeline lives for the
-        // lifetime of MetalIrisRenderingPipeline which is only destroyed on
-        // shaderpack reload (infrequent).
-        LOGGER.debug("[MetalUniversal] MetalIrisPipeline '{}' closed (native handles deferred)", name);
+        // M6-2: Release native handles via the device's deferred-release queue
+        // so they are reclaimed only after the GPU finishes any in-flight
+        // command buffers that reference them. This is safe to call during
+        // shaderpack reload (clearCache) while the previous frame's command
+        // buffer may still be executing.
+        //
+        // The MTLFunction handles (vertexFn/fragmentFn) are NOT released here —
+        // they are owned by MetalDevice's function cache (getOrCompileFunction)
+        // and released when the device itself closes.
+        try {
+            if (!MetalNativeBridge.isNullHandle(pipelineWithDepth)) {
+                device.queueResourceRelease(pipelineWithDepth);
+            }
+        } catch (Throwable t) {
+            LOGGER.warn("[MetalUniversal] M6-2: failed to queue release of pipelineWithDepth for '{}': {}", name, t.toString());
+        }
+        try {
+            if (!MetalNativeBridge.isNullHandle(pipelineWithoutDepth)) {
+                device.queueResourceRelease(pipelineWithoutDepth);
+            }
+        } catch (Throwable t) {
+            LOGGER.warn("[MetalUniversal] M6-2: failed to queue release of pipelineWithoutDepth for '{}': {}", name, t.toString());
+        }
+        try {
+            if (!MetalNativeBridge.isNullHandle(depthStencilState)) {
+                device.queueResourceRelease(depthStencilState);
+            }
+        } catch (Throwable t) {
+            LOGGER.warn("[MetalUniversal] M6-2: failed to queue release of depthStencilState for '{}': {}", name, t.toString());
+        }
+        LOGGER.debug("[MetalUniversal] MetalIrisPipeline '{}' closed (native handles queued for deferred release)", name);
     }
 }

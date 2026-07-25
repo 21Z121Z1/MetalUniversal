@@ -262,5 +262,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         if (!MetalNativeBridge.isNullHandle(this.withoutDepthPipeline)) {
             MetalNativeBridge.metallum_release_object(this.withoutDepthPipeline);
         }
+        // M6-2: release the depth-stencil state too (was leaked previously).
+        if (!MetalNativeBridge.isNullHandle(this.depthStencilState)) {
+            MetalNativeBridge.metallum_release_object(this.depthStencilState);
+        }
     }
 }
