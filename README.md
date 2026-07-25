@@ -20,7 +20,7 @@ MetalUniversal 是一个基于 Apple Metal API 的 Minecraft 渲染后端模组�
 
 - **Sodium**：通过 Mixin 注入 `DrawBackend`、`DrawContext` 和 `SodiumPreferredGraphicsApi`，将 Metal 后端映射为 Sodium 的间接绘制路径
 - **macOS**：Apple Silicon（M1 或更新），通过 Native Bridge 直接加载 `libmetaluniversal.dylib`
-- **iOS**：iOS 14.0 或更高版本，预编译 `libmetaluniversal.dylib`（arm64）和 `libspvc.dylib`（带 MSL 后端）内置于 jar 中
+- **iOS**：iOS 14.0 或更高版本，预编译 `libmetallum.dylib`（arm64）和 `libspvc.dylib`（带 MSL 后端）内置于 jar 中
 
 ## 构建
 
