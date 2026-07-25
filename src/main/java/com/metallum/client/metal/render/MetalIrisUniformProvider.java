@@ -176,6 +176,44 @@ final class MetalIrisUniformProvider implements AutoCloseable {
             LOGGER.debug("[MetalUniversal] iris_ScreenSize not populated for '{}': {}",
                     programName, t.toString());
         }
+
+        // M5e+: iris_ColorModulator default is (1,1,1,1) per Iris's
+        // ShaderCreator. At zero, all rendered geometry would be black.
+        // MC 26.2 has no CPU-side getter for the shader color (it was moved
+        // to a GPU buffer), so we use the default. This matches Iris's own
+        // fallback when no ExtendedShader sets it.
+        putVec4(member("iris_ColorModulator"), 1.0f, 1.0f, 1.0f, 1.0f);
+
+        // M5e+: iris_TextureMat default is identity per Iris's ShaderCreator.
+        // At zero, all texture coordinates would be (0,0). MC 26.2 has no
+        // CPU-side getter for the texture matrix, so we use identity.
+        final LooseUniformMember texMatMember = member("iris_TextureMat");
+        if (texMatMember != null) {
+            try {
+                final int base = texMatMember.offset();
+                // Identity matrix in column-major float order:
+                // 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
+                storage.putFloat(base, 1.0f);
+                storage.putFloat(base + 4, 0.0f);
+                storage.putFloat(base + 8, 0.0f);
+                storage.putFloat(base + 12, 0.0f);
+                storage.putFloat(base + 16, 0.0f);
+                storage.putFloat(base + 20, 1.0f);
+                storage.putFloat(base + 24, 0.0f);
+                storage.putFloat(base + 28, 0.0f);
+                storage.putFloat(base + 32, 0.0f);
+                storage.putFloat(base + 36, 0.0f);
+                storage.putFloat(base + 40, 1.0f);
+                storage.putFloat(base + 44, 0.0f);
+                storage.putFloat(base + 48, 0.0f);
+                storage.putFloat(base + 52, 0.0f);
+                storage.putFloat(base + 56, 0.0f);
+                storage.putFloat(base + 60, 1.0f);
+            } catch (Throwable t) {
+                LOGGER.debug("[MetalUniversal] iris_TextureMat not populated for '{}': {}",
+                        programName, t.toString());
+            }
+        }
     }
 
     @Nullable
