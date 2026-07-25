@@ -209,6 +209,29 @@ public final class MetalIrisRenderer {
         return provider;
     }
 
+    // ---- Captured state accessors (M5e+) ----
+    // Delegate to MetalIrisRenderingPipeline (which can reference Iris's
+    // CapturedRenderingState). MetalIrisUniformProvider (in this package)
+    // cannot reference net.irisshaders.iris.* directly, so it calls these.
+
+    /**
+     * Returns the captured gbuffer projection matrix (M5e+), or {@code null}.
+     * @see com.metallum.client.metal.iris.MetalIrisRenderingPipeline#getCapturedProjection()
+     */
+    @org.jspecify.annotations.Nullable
+    static org.joml.Matrix4f getCapturedProjection() {
+        return MetalIrisRenderingPipeline.getCapturedProjection();
+    }
+
+    /**
+     * Returns the captured fog color (M5e+) as {@code float[]{r,g,b}}, or {@code null}.
+     * @see com.metallum.client.metal.iris.MetalIrisRenderingPipeline#getCapturedFogColor()
+     */
+    @org.jspecify.annotations.Nullable
+    static float[] getCapturedFogColor() {
+        return MetalIrisRenderingPipeline.getCapturedFogColor();
+    }
+
     /** Cached 1x1 dummy texture handle (created lazily, reused across frames). */
     private static MemorySegment dummyTextureHandle = MemorySegment.NULL;
 

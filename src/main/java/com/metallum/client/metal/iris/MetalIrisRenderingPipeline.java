@@ -18,6 +18,7 @@ import net.irisshaders.iris.pipeline.transform.PatchShaderType;
 import net.irisshaders.iris.pipeline.transform.TransformPatcher;
 import net.irisshaders.iris.shaderpack.loading.ProgramArrayId;
 import net.irisshaders.iris.shaderpack.loading.ProgramGroup;
+import net.irisshaders.iris.uniforms.CapturedRenderingState;
 import net.irisshaders.iris.shaderpack.loading.ProgramId;
 import net.irisshaders.iris.shaderpack.materialmap.WorldRenderingSettings;
 import net.irisshaders.iris.shaderpack.properties.CloudSetting;
@@ -37,6 +38,10 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+
+import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
+import org.joml.Vector3d;
 
 /**
  * A Metal-native implementation of Iris's {@link WorldRenderingPipeline}
@@ -819,6 +824,49 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
             return null;
         }
         return activeInstance.compiledShaders.get(name);
+    }
+
+    // ---- Captured state accessors (M5e+) ----
+    // These read from Iris's CapturedRenderingState, which is populated by
+    // Iris mixins (MixinLevelRenderer, MixinFogRenderer) that fire regardless
+    // of which WorldRenderingPipeline implementation is active. The values
+    // are therefore available even when the Metal pipeline replaces Iris's
+    // IrisRenderingPipeline.
+    //
+    // MetalIrisUniformProvider (in the render package) cannot reference
+    // net.irisshaders.iris.* directly, so it calls these methods via
+    // MetalIrisRenderer (which already imports this class).
+
+    /**
+     * Returns the captured gbuffer projection matrix (M5e+), or {@code null}
+     * if Iris hasn't captured one yet this frame. The projection is captured
+     * by {@code MixinLevelRenderer} from
+     * {@code GameRendererStorage.sodium$getProjectionMatrix()}.
+     */
+    public static Matrix4f getCapturedProjection() {
+        try {
+            final Matrix4fc proj = CapturedRenderingState.INSTANCE.getGbufferProjection();
+            return proj != null ? new Matrix4f(proj) : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * Returns the captured fog color (M5e+) as a 3-component vector
+     * {@code (r, g, b)}, or {@code null} if Iris hasn't captured one yet.
+     * Captured by {@code MixinFogRenderer}.
+     */
+    public static float[] getCapturedFogColor() {
+        try {
+            final Vector3d fog = CapturedRenderingState.INSTANCE.getFogColor();
+            if (fog != null) {
+                return new float[]{(float) fog.x(), (float) fog.y(), (float) fog.z()};
+            }
+        } catch (Throwable t) {
+            // fall through
+        }
+        return null;
     }
 
     @Override

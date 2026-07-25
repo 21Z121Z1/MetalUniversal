@@ -42,16 +42,22 @@ import java.nio.ByteBuffer;
  * <ul>
  *   <li>{@code iris_ModelViewMat} / {@code iris_ModelViewMatrix} &larr;
  *       {@link RenderSystem#getModelViewMatrixCopy()} (CPU-side copy)</li>
- *   <li>{@code iris_ProjMat} / {@code iris_ProjectionMatrix} &larr; left at zero
- *       (MC 26.2 moved projection to a GPU buffer; no CPU-side Matrix4f accessor
- *       without Sodium's GameRendererStorage)</li>
- *   <li>{@code iris_FogColor} &larr; left at zero (MC 26.2 moved fog color into
- *       {@link RenderSystem#getShaderFog()}, a GpuBufferSlice, not float[])</li>
+ *   <li>{@code iris_NormalMat} &larr; inverse-transpose of the model-view
+ *       matrix's upper-left 3×3 (computed via JOML, same as Iris's
+ *       ExtendedShader)</li>
+ *   <li>{@code iris_ProjMat} / {@code iris_ProjectionMatrix} &larr;
+ *       {@link com.metallum.client.metal.iris.MetalIrisRenderingPipeline#getCapturedProjection()}
+ *       (read from Iris's {@code CapturedRenderingState}, captured by
+ *       {@code MixinLevelRenderer})</li>
+ *   <li>{@code iris_FogColor} &larr;
+ *       {@link com.metallum.client.metal.iris.MetalIrisRenderingPipeline#getCapturedFogColor()}
+ *       (read from Iris's {@code CapturedRenderingState}, captured by
+ *       {@code MixinFogRenderer})</li>
  *   <li>{@code iris_ScreenSize} &larr;
  *       {@code Minecraft.getInstance().gameRenderer.mainRenderTarget()} width/height</li>
  * </ul>
  *
- * <p>Other loose uniforms ({@code iris_NormalMat}, {@code iris_TextureMat},
+ * <p>Other loose uniforms ({@code iris_TextureMat},
  * {@code iris_ColorModulator}, {@code iris_FogStart/End}, ...) are left at
  * zero — they will be added as their source-of-truth APIs are confirmed for
  * the current MC version. Even partially-zeroed, this UBO is a strict
@@ -126,17 +132,30 @@ final class MetalIrisUniformProvider implements AutoCloseable {
         // model-view matrix (confirmed via Iris ExtendedShader usage). iris_ModelViewMat /
         // iris_ModelViewMatrix are populated from it.
         final Matrix4f modelView = safeGet(() -> new Matrix4f(RenderSystem.getModelViewMatrixCopy()), "ModelViewMatrix");
-        // MC 26.2 moved the projection matrix into a GPU buffer (RenderSystem.getProjectionMatrixBuffer());
-        // there is no CPU-side Matrix4f accessor without Sodium's GameRendererStorage, so
-        // iris_ProjMat / iris_ProjectionMatrix are left at zero (graceful M5e fallback).
-        final Matrix4f projection = null;
-        // MC 26.2 moved fog color into RenderSystem.getShaderFog() (a GpuBufferSlice, not float[]);
-        // iris_FogColor is left at zero (graceful M5e fallback).
-        final float[] fogColor = null;
+        // M5e+: projection matrix from Iris's CapturedRenderingState (captured by
+        // MixinLevelRenderer from GameRendererStorage.sodium$getProjectionMatrix()).
+        final Matrix4f projection = MetalIrisRenderer.getCapturedProjection();
+        // M5e+: fog color from Iris's CapturedRenderingState (captured by MixinFogRenderer).
+        final float[] fogColor = MetalIrisRenderer.getCapturedFogColor();
 
         if (modelView != null) {
             putMat4(member("iris_ModelViewMat"), modelView);
             putMat4(member("iris_ModelViewMatrix"), modelView);
+
+            // M5e+: iris_NormalMat = inverse-transpose of the upper-left 3×3 of
+            // the model-view matrix. Computed the same way as Iris's
+            // ExtendedShader: modelView.invert().transpose3x3(Matrix3f).
+            try {
+                final Matrix4f inv = new Matrix4f(modelView).invert();
+                final org.joml.Matrix3f normalMat = new org.joml.Matrix3f();
+                inv.transpose3x3(normalMat);
+                final float[] normalMat3 = new float[9];
+                normalMat.get(normalMat3);
+                putMat3(member("iris_NormalMat"), normalMat3);
+            } catch (Throwable t) {
+                LOGGER.debug("[MetalUniversal] iris_NormalMat not populated for '{}': {}",
+                        programName, t.toString());
+            }
         }
         if (projection != null) {
             putMat4(member("iris_ProjMat"), projection);
@@ -144,8 +163,7 @@ final class MetalIrisUniformProvider implements AutoCloseable {
         }
         if (fogColor != null && fogColor.length >= 3) {
             putVec4(member("iris_FogColor"),
-                    fogColor[0], fogColor[1], fogColor[2],
-                    fogColor.length >= 4 ? fogColor[3] : 1.0f);
+                    fogColor[0], fogColor[1], fogColor[2], 1.0f);
         }
 
         // iris_ScreenSize — VanillaUniforms uses the main render target dims.
@@ -180,6 +198,33 @@ final class MetalIrisUniformProvider implements AutoCloseable {
             }
         } catch (Throwable t) {
             LOGGER.debug("[MetalUniversal] Failed to marshal mat4 '{}' for '{}': {}",
+                    m.name(), programName, t.toString());
+        }
+    }
+
+    /**
+     * Writes a std140 mat3 (9 floats, but padded to 48 bytes = 3 vec4 columns
+     * in std140 layout). M5e+.
+     */
+    private void putMat3(@Nullable final LooseUniformMember m, final float[] col3x3) {
+        if (m == null || col3x3 == null || col3x3.length < 9) {
+            return;
+        }
+        try {
+            final int base = m.offset();
+            // std140 mat3 is stored as 3 column vectors, each padded to vec4
+            // (16 bytes). Column 0 = (m[0], m[1], m[2], 0),
+            // Column 1 = (m[3], m[4], m[5], 0),
+            // Column 2 = (m[6], m[7], m[8], 0).
+            for (int col = 0; col < 3; col++) {
+                final int colBase = base + col * 16; // each column is 16 bytes
+                storage.putFloat(colBase, col3x3[col * 3]);
+                storage.putFloat(colBase + 4, col3x3[col * 3 + 1]);
+                storage.putFloat(colBase + 8, col3x3[col * 3 + 2]);
+                storage.putFloat(colBase + 12, 0.0f); // padding
+            }
+        } catch (Throwable t) {
+            LOGGER.debug("[MetalUniversal] Failed to marshal mat3 '{}' for '{}': {}",
                     m.name(), programName, t.toString());
         }
     }
