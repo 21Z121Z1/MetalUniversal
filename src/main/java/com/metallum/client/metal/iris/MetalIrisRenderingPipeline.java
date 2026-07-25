@@ -360,6 +360,29 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
                 compiledShaders.put(name, pair);
                 LOGGER.info("[MetalUniversal] Compiled '{}' → MSL (vsh: {} chars, fsh: {} chars)",
                     name, pair.vertex().source().length(), pair.fragment().source().length());
+                // M5e: compute and register the std140 layout of the
+                // iris_LooseUniforms UBO for this program. Both stages get a
+                // UBO injected by MetalIrisBridge.wrapLooseUniformsInUbo (if
+                // they have loose uniforms); register the larger layout so the
+                // provider's buffer covers whichever stage has more members.
+                // The layout is keyed by source hash inside MetalIrisBridge, so
+                // this is a cheap cache lookup (the layout was already computed
+                // during ensureSpirvCompatible).
+                try {
+                    final MetalIrisBridge.LooseUniformLayout vertexLayout =
+                        MetalIrisBridge.computeLooseUniformLayout(patchedVertex);
+                    final MetalIrisBridge.LooseUniformLayout fragmentLayout =
+                        MetalIrisBridge.computeLooseUniformLayout(patchedFragment);
+                    final MetalIrisBridge.LooseUniformLayout layout =
+                        vertexLayout.totalSize() >= fragmentLayout.totalSize()
+                            ? vertexLayout : fragmentLayout;
+                    if (layout.totalSize() > 0) {
+                        MetalIrisRenderer.registerLooseUniformLayout(name, layout);
+                    }
+                } catch (Throwable t) {
+                    LOGGER.debug("[MetalUniversal] Could not register loose uniform layout for '{}': {}",
+                        name, t.toString());
+                }
                 return 1;
             }
             return -1;

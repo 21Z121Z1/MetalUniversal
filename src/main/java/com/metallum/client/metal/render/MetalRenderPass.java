@@ -705,19 +705,66 @@ final class MetalRenderPass implements RenderPassBackend {
     }
 
     /**
-     * Binds reflected Iris MSL UBO slots (M5d-2). For each reflected
-     * {@link MetalIrisPipeline.IrisResourceBinding} of kind
+     * Binds reflected Iris MSL UBO slots (M5d-2, extended in M5e). For each
+     * reflected {@link MetalIrisPipeline.IrisResourceBinding} of kind
      * {@link MetalIrisPipeline.IrisResourceKind#UNIFORM_BUFFER}, binds the
      * matching {@link #uniforms} entry if one was provided via
-     * {@link #setUniform}; otherwise binds the device's zeroed scratch uniform
-     * buffer so the MSL's {@code [[buffer(N)]]} argument is never left unbound.
+     * {@link #setUniform}; otherwise, if the pipeline has a registered
+     * {@code iris_LooseUniforms} layout (M5e), binds the per-program
+     * {@link MetalIrisUniformProvider}'s marshalled buffer (real camera
+     * matrices, fog, ...); otherwise falls back to the device's zeroed scratch
+     * uniform buffer so the MSL's {@code [[buffer(N)]]} argument is never left
+     * unbound.
      *
-     * <p>Dirtiness tracking is not yet implemented — all reflected UBOs are
-     * re-bound on every {@link #bindDrawState} call while the Iris override is
-     * active. This is correct (idempotent) and can be optimized later.
+     * <p><b>M5e name-matching heuristic.</b> SPIRV-Cross may emit the
+     * {@code iris_LooseUniforms} UBO variable with a generated name (e.g.
+     * {@code _19}) rather than the GLSL block name, so exact name matching is
+     * unreliable. Instead, the provider's buffer is bound when either:
+     * <ol>
+     *   <li>the reflected binding name contains {@code "looseuniform"} (case-
+     *       insensitive) — matches when SPIRV-Cross preserves the block name;
+     *       <em>or</em></li>
+     *   <li>the pipeline has a non-null {@link MetalIrisPipeline#looseUniformLayout}
+     *       and the binding is the <em>only</em> unprovided UBO slot — the
+     *       common case for Iris programs which declare a single UBO.</li>
+     * </ol>
+     * For programs with multiple unprovided UBOs and no name match, the slot
+     * falls back to the 16 KiB scratch buffer (safe — large enough for any
+     * typical UBO struct, avoiding Metal validation traps on undersized
+     * buffers).
+     *
+     * <p>The provider's {@link MetalIrisUniformProvider#marshal()} is called
+     * once per {@link #bindDrawState} to refresh the buffer from live Iris
+     * state before binding. Dirtiness tracking is not yet implemented — all
+     * reflected UBOs are re-bound on every {@link #bindDrawState} call while
+     * the Iris override is active. This is correct (idempotent) and can be
+     * optimized later.
      */
     private void pushIrisUniformBindings(final MTLRenderCommandEncoder enc, final MetalIrisPipeline iris) {
         final MetalGpuBuffer scratch = device.getOrEnsureIrisScratchUniformBuffer();
+        // M5e: obtain the per-program uniform provider (if the program has a
+        // registered iris_LooseUniforms layout) and refresh its contents.
+        MetalIrisUniformProvider provider = null;
+        if (iris.looseUniformLayout() != null) {
+            provider = MetalIrisRenderer.getUniformProvider(device, iris.name());
+            if (provider != null) {
+                provider.marshal();
+            }
+        }
+        // Count unprovided UBO bindings to apply the single-UBO heuristic
+        // below (see method javadoc, M5e name-matching heuristic #2).
+        int unprovidedUboCount = 0;
+        if (provider != null) {
+            for (MetalIrisPipeline.IrisResourceBinding b : iris.bindings()) {
+                if (b.kind() != MetalIrisPipeline.IrisResourceKind.UNIFORM_BUFFER) {
+                    continue;
+                }
+                final GpuBufferSlice s = uniforms.get(b.name());
+                if (s == null || s.buffer().isClosed()) {
+                    unprovidedUboCount++;
+                }
+            }
+        }
         for (MetalIrisPipeline.IrisResourceBinding binding : iris.bindings()) {
             if (binding.kind() != MetalIrisPipeline.IrisResourceKind.UNIFORM_BUFFER) {
                 continue;
@@ -727,6 +774,14 @@ final class MetalRenderPass implements RenderPassBackend {
                 enc.setBuffer(
                         ((MetalGpuBuffer) slice.buffer()).nativeHandle(),
                         slice.offset(),
+                        binding.bindingIndex(),
+                        binding.stageMask());
+            } else if (provider != null && isLikelyLooseUniforms(binding.name(), unprovidedUboCount)) {
+                // M5e: bind the marshalled real uniform data instead of the
+                // zeroed scratch buffer.
+                enc.setBuffer(
+                        provider.buffer().nativeHandle(),
+                        0L,
                         binding.bindingIndex(),
                         binding.stageMask());
             } else {
@@ -740,23 +795,51 @@ final class MetalRenderPass implements RenderPassBackend {
     }
 
     /**
-     * Binds reflected Iris MSL texture and sampler slots (M5d-3). SPIRV-Cross
-     * emits a GLSL combined image sampler ({@code uniform sampler2D foo;}) as a
-     * texture argument {@code [[texture(N)]]} plus a sampler argument
-     * {@code [[sampler(N)]]} sharing the same index {@code N}. Metal binds the
-     * pair together via {@code setTextureAndSampler}, so this method pairs each
-     * reflected {@link MetalIrisPipeline.IrisResourceKind#TEXTURE} binding with
-     * the {@link MetalIrisPipeline.IrisResourceKind#SAMPLER} at the same index.
+     * Heuristic for whether a reflected UBO binding is the
+     * {@code iris_LooseUniforms} UBO (M5e). See
+     * {@link #pushIrisUniformBindings} javadoc for the full rationale.
+     */
+    private static boolean isLikelyLooseUniforms(final String bindingName, final int unprovidedUboCount) {
+        if (bindingName != null
+                && bindingName.toLowerCase(java.util.Locale.ROOT).contains("looseuniform")) {
+            return true;
+        }
+        // If this is the only unprovided UBO, assume it's iris_LooseUniforms.
+        return unprovidedUboCount == 1;
+    }
+
+    /**
+     * Binds reflected Iris MSL texture and sampler slots (M5d-3, extended in
+     * M5f). SPIRV-Cross emits a GLSL combined image sampler
+     * ({@code uniform sampler2D foo;}) as a texture argument
+     * {@code [[texture(N)]]} plus a sampler argument {@code [[sampler(N)]]}
+     * sharing the same index {@code N}. Metal binds the pair together via
+     * {@code setTextureAndSampler}, so this method pairs each reflected
+     * {@link MetalIrisPipeline.IrisResourceKind#TEXTURE} binding with the
+     * {@link MetalIrisPipeline.IrisResourceKind#SAMPLER} at the same index.
      *
-     * <p>For each texture binding, if a {@link #samplers} entry was provided
-     * (via {@link #bindTexture}) whose name matches the reflected texture
-     * binding name, its texture view and sampler are bound; otherwise the
-     * device's cached dummy texture and default sampler are bound so the MSL's
-     * {@code [[texture(N)]]} / {@code [[sampler(N)]]} arguments are never left
-     * unbound. Name matching is best-effort: Iris MSL binding names (cross-
-     * compiled from Iris GLSL) generally differ from vanilla's named samplers,
-     * so most slots fall back to the dummy until a later milestone maps Iris
-     * samplers explicitly.
+     * <p><b>M5f name resolution.</b> For each texture binding, the method
+     * resolves the texture + sampler in this priority order:
+     * <ol>
+     *   <li><b>Vanilla-provided sampler (with Iris aliases).</b> If the
+     *       {@link #samplers} map has an entry for the reflected name (direct
+     *       match) or for an Iris alias of the name (e.g. {@code gtexture}
+     *       &rarr; {@code Sampler0}, {@code lightmap} &rarr; {@code Sampler1},
+     *       {@code iris_overlay} &rarr; {@code Sampler2}), bind that texture
+     *       view + sampler. See {@link #resolveProvidedSampler} and
+     *       {@link #irisSamplerAlias}.</li>
+     *   <li><b>Iris render-target texture.</b> Otherwise, if the reflected name
+     *       matches an Iris render-target convention ({@code colortex0..7},
+     *       {@code depthtex0..2}, {@code shadowtex0/1}, {@code shadow},
+     *       {@code watershadow}, {@code gcolor}), bind the corresponding pool
+     *       view from {@link MetalIrisRenderer#getIrisRenderTargetTexture}
+     *       paired with the dummy sampler (clamp-to-edge, linear — appropriate
+     *       for color/depth target sampling).</li>
+     *   <li><b>Dummy fallback.</b> Otherwise, bind the device's cached 1&times;1
+     *       dummy texture + default sampler so the MSL's
+     *       {@code [[texture(N)]]} / {@code [[sampler(N)]]} arguments are never
+     *       left unbound.</li>
+     * </ol>
      *
      * <p>Like {@link #pushIrisUniformBindings}, all reflected texture/sampler
      * pairs are re-bound on every {@link #bindDrawState} call (idempotent).
@@ -789,12 +872,27 @@ final class MetalRenderPass implements RenderPassBackend {
 
             MemorySegment textureHandle = dummyTexture;
             MemorySegment samplerHandle = dummySampler;
-            final TextureViewAndSampler provided = samplers.get(binding.name());
+
+            // M5f-1: vanilla-provided sampler (with Iris name aliases).
+            final TextureViewAndSampler provided = resolveProvidedSampler(binding.name());
             if (provided != null
                     && !provided.textureView().isClosed()
                     && !((MetalGpuSampler) provided.sampler()).isClosed()) {
                 textureHandle = ((MetalGpuTextureView) provided.textureView()).nativeHandle();
                 samplerHandle = ((MetalGpuSampler) provided.sampler()).nativeHandle();
+            } else {
+                // M5f-2: Iris render-target texture (colortex*, depthtex*,
+                // shadowtex*, gcolor, shadow, watershadow).
+                final MetalGpuTextureView rtView =
+                        MetalIrisRenderer.getIrisRenderTargetTexture(binding.name());
+                if (rtView != null && !rtView.isClosed()) {
+                    textureHandle = rtView.nativeHandle();
+                    // Use the dummy sampler for render-target textures
+                    // (clamp-to-edge, linear filter — appropriate for color/
+                    // depth target sampling).
+                    samplerHandle = dummySampler;
+                }
+                // else: fall through to dummy texture + dummy sampler.
             }
 
             if (MetalNativeBridge.isNullHandle(textureHandle) || MetalNativeBridge.isNullHandle(samplerHandle)) {
@@ -802,6 +900,67 @@ final class MetalRenderPass implements RenderPassBackend {
             }
             enc.setTextureAndSampler(textureHandle, samplerHandle, index, stageMask);
         }
+    }
+
+    /**
+     * Resolves a reflected Iris texture binding name to a vanilla-provided
+     * sampler, applying Iris name aliases (M5f). Iris shaderpacks use names like
+     * {@code gtexture}, {@code lightmap}, {@code iris_overlay} instead of
+     * vanilla's {@code Sampler0}, {@code Sampler1}, {@code Sampler2}. This
+     * method first tries a direct match in the {@link #samplers} map, then
+     * maps the Iris alias to the vanilla name and looks that up.
+     *
+     * @param bindingName the reflected MSL texture binding name
+     * @return the vanilla-provided texture view + sampler, or {@code null} if
+     *         no vanilla sampler was provided for this name or its alias
+     */
+    private TextureViewAndSampler resolveProvidedSampler(final String bindingName) {
+        if (bindingName == null) {
+            return null;
+        }
+        // Direct match first (handles vanilla names like "Sampler0" and any
+        // names vanilla happened to provide under the Iris name).
+        final TextureViewAndSampler direct = samplers.get(bindingName);
+        if (direct != null) {
+            return direct;
+        }
+        // Iris alias → vanilla sampler name.
+        final String vanillaName = irisSamplerAlias(bindingName);
+        if (vanillaName != null) {
+            return samplers.get(vanillaName);
+        }
+        return null;
+    }
+
+    /**
+     * Maps an Iris sampler alias to the vanilla sampler name (M5f). Returns
+     * {@code null} if the name is not a known vanilla-sampler alias.
+     *
+     * <p>Based on Iris's {@code IrisSamplers.addLevelSamplers} naming
+     * conventions (studied from the read-only {@code /workspace/MU-iris}
+     * reference). Note: {@code gcolor} is intentionally NOT mapped here — it
+     * is an alias for {@code colortex0} (a render-target texture), resolved by
+     * {@link MetalIrisRenderer#getIrisRenderTargetTexture}, not a vanilla
+     * sampler.
+     *
+     * <table>
+     *   <tr><th>Iris alias</th><th>Vanilla name</th><th>Meaning</th></tr>
+     *   <tr><td>{@code gtexture}, {@code tex}, {@code texture},
+     *           {@code u_MainSampler}</td>
+     *       <td>{@code Sampler0}</td><td>main albedo texture</td></tr>
+     *   <tr><td>{@code lightmap}</td>
+     *       <td>{@code Sampler1}</td><td>lightmap texture</td></tr>
+     *   <tr><td>{@code iris_overlay}, {@code overlay}</td>
+     *       <td>{@code Sampler2}</td><td>overlay texture</td></tr>
+     * </table>
+     */
+    private static String irisSamplerAlias(final String name) {
+        return switch (name) {
+            case "gtexture", "tex", "texture", "u_MainSampler" -> "Sampler0";
+            case "lightmap" -> "Sampler1";
+            case "iris_overlay", "overlay" -> "Sampler2";
+            default -> null;
+        };
     }
 
     record TextureViewAndSampler(GpuTextureView textureView, GpuSampler sampler) {

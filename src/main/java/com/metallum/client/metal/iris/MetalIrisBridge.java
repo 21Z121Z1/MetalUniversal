@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -67,6 +68,17 @@ public final class MetalIrisBridge {
     /** Cache of compiled MSL shaders keyed by (name + source hash). */
     private static final Map<String, MslShader> shaderCache = new LinkedHashMap<>();
     private static final int CACHE_LIMIT = 256;
+
+    /**
+     * Cache of computed std140 layouts for the {@code iris_LooseUniforms} UBO
+     * (M5e), keyed by GLSL source hash. Populated by
+     * {@link #computeLooseUniformLayout} (called from
+     * {@link #wrapLooseUniformsInUbo} during compilation, and re-callable from
+     * the rendering layer when a {@link MetalIrisPipeline} is constructed
+     * against already-compiled MSL). Thread-safe: a {@link ConcurrentHashMap}
+     * so concurrent program compilations don't race.
+     */
+    private static final Map<Integer, LooseUniformLayout> looseUniformLayoutCache = new ConcurrentHashMap<>();
 
     private MetalIrisBridge() {
     }
@@ -335,6 +347,12 @@ public final class MetalIrisBridge {
      *
      * <p>Initializers ({@code = ...}) are stripped — UBO members cannot have
      * initializers. Array specifiers ({@code [N]}) are preserved.
+     *
+     * <p>M5e: also computes the std140 layout of the resulting
+     * {@code iris_LooseUniforms} block (via {@link #computeLooseUniformLayout})
+     * and caches it for later retrieval by the rendering layer, so
+     * {@code MetalIrisUniformProvider} can marshal real values at the correct
+     * offsets when binding the UBO.
      */
     private static String wrapLooseUniformsInUbo(final String glslSource) {
         Matcher matcher = LOOSE_UNIFORM.matcher(glslSource);
@@ -350,8 +368,16 @@ public final class MetalIrisBridge {
         }
 
         if (members.isEmpty()) {
+            // Still cache an empty layout so consumers can distinguish
+            // "no loose uniforms" from "layout not yet computed".
+            computeLooseUniformLayout(glslSource);
             return glslSource;
         }
+
+        // Compute (and cache) the std140 layout for this source. The cache is
+        // keyed by source hash, so this is idempotent if the same source is
+        // wrapped multiple times.
+        computeLooseUniformLayout(glslSource);
 
         StringBuilder ubo = new StringBuilder();
         ubo.append("layout(std140) uniform iris_LooseUniforms {\n");
@@ -373,6 +399,217 @@ public final class MetalIrisBridge {
         }
         result.append(glslSource, lastPos, glslSource.length());
         return result.toString();
+    }
+
+    // ---- std140 layout computation (M5e) ----
+    //
+    // The iris_LooseUniforms UBO is declared with layout(std140), so its
+    // members are laid out according to the GLSL std140 rules. The rendering
+    // layer (MetalIrisUniformProvider) needs the precise byte offset of each
+    // member to marshal real values (camera matrices, fog, color modulator,
+    // ...) into a single CPU-mapped MetalGpuBuffer that gets bound to the
+    // reflected [[buffer(N)]] slot.
+    //
+    // std140 rules implemented here (informal summary — see the GLSL spec
+    // for the precise wording):
+    //   - scalar (float/int/uint/bool): base align = 4, size = 4
+    //   - 2-component vector: base align = 8, size = 8
+    //   - 3-component vector: base align = 16, size = 12 (next member pads to 16)
+    //   - 4-component vector: base align = 16, size = 16
+    //   - matrix: column alignment = alignment of column vector, column stride
+    //     = column alignment, size = columns × column stride. For mat3 this
+    //     gives 3×16 = 48 bytes; for mat4 it gives 4×16 = 64.
+    //   - array: each element is padded to 16-byte stride (std140 rounds array
+    //     element stride up to vec4 alignment).
+    //   - The total block size is rounded up to the alignment of the
+    //     largest-aligned member (typically 16).
+
+    /**
+     * Computes (or returns the cached) std140 layout for the
+     * {@code iris_LooseUniforms} UBO that {@link #wrapLooseUniformsInUbo}
+     * would inject into the given GLSL source.
+     *
+     * <p>The layout is cached by source hash, so this is cheap to call
+     * repeatedly (e.g. once during compilation and again when the
+     * {@link MetalIrisPipeline} is constructed for the already-compiled MSL).
+     *
+     * @param glslSource the patched GLSL source (pre-{@code wrapLooseUniformsInUbo})
+     * @return the std140 layout; never {@code null}. An empty layout (zero
+     *         members, zero size) is returned if the source has no loose
+     *         non-opaque uniforms.
+     */
+    public static LooseUniformLayout computeLooseUniformLayout(final String glslSource) {
+        final int key = glslSource == null ? 0 : glslSource.hashCode();
+        LooseUniformLayout cached = looseUniformLayoutCache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        final LooseUniformLayout layout = buildLooseUniformLayout(glslSource);
+        looseUniformLayoutCache.put(key, layout);
+        return layout;
+    }
+
+    private static LooseUniformLayout buildLooseUniformLayout(final String glslSource) {
+        if (glslSource == null || glslSource.isBlank()) {
+            return new LooseUniformLayout(List.of(), java.util.Map.of(), 0);
+        }
+        final Matcher matcher = LOOSE_UNIFORM.matcher(glslSource);
+        final List<LooseUniformMember> members = new ArrayList<>();
+        int cursor = 0;
+        int maxAlign = 1;
+        while (matcher.find()) {
+            final String type = matcher.group(1);
+            final String name = matcher.group(2);
+            final String arraySpec = matcher.group(3);
+            final int arrayLength = parseArrayLength(arraySpec);
+            final int align = std140Alignment(type);
+            final int size = std140Size(type, arrayLength);
+            cursor = alignUp(cursor, align);
+            members.add(new LooseUniformMember(name, type, cursor, size, arrayLength));
+            cursor += size;
+            if (align > maxAlign) {
+                maxAlign = align;
+            }
+        }
+        final int totalSize = alignUp(cursor, Math.max(maxAlign, 16));
+        final Map<String, LooseUniformMember> byName = new LinkedHashMap<>();
+        for (LooseUniformMember m : members) {
+            byName.putIfAbsent(m.name(), m);
+        }
+        return new LooseUniformLayout(List.copyOf(members), java.util.Map.copyOf(byName), totalSize);
+    }
+
+    private static int parseArrayLength(final String arraySpec) {
+        if (arraySpec == null) {
+            return 1;
+        }
+        Matcher m = ARRAY_SIZE_PATTERN.matcher(arraySpec);
+        if (m.find()) {
+            try {
+                return Math.max(1, Integer.parseInt(m.group(1)));
+            } catch (NumberFormatException ignored) {
+                return 1;
+            }
+        }
+        return 1;
+    }
+
+    /**
+     * Returns the std140 base alignment (in bytes) for a GLSL primitive type.
+     * Matrices return the alignment of their column vector. Unknown types
+     * (structs, etc.) conservatively return 16.
+     */
+    private static int std140Alignment(final String type) {
+        return switch (type) {
+            case "float", "int", "uint", "bool", "double" -> 4;
+            case "vec2", "ivec2", "uvec2", "bvec2", "dvec2" -> 8;
+            case "vec3", "ivec3", "uvec3", "bvec3", "dvec3" -> 16;
+            case "vec4", "ivec4", "uvec4", "bvec4", "dvec4" -> 16;
+            case "mat2" -> 8;
+            case "mat2x3", "mat3x2" -> 16;
+            case "mat2x4", "mat4x2" -> 16;
+            case "mat3", "mat3x4", "mat4x3" -> 16;
+            case "mat4" -> 16;
+            default -> 16;
+        };
+    }
+
+    /**
+     * Returns the std140 size (in bytes) of a uniform of the given type and
+     * array length. For matrices, size = columns × column-stride where
+     * column-stride = column alignment (rounded up). For arrays, each element
+     * is padded to 16-byte stride (std140 array rule).
+     */
+    private static int std140Size(final String type, final int arrayLength) {
+        final int scalarSize = scalarTypeSize(type);
+        final int columns = matrixColumnCount(type);
+        if (columns > 1) {
+            // Matrix: column stride = column alignment; size = columns × stride.
+            // For mat3, column alignment = 16 → stride 16 → size 48.
+            // For mat4, column alignment = 16 → stride 16 → size 64.
+            // For mat2, column alignment = 8  → stride 8  → size 16.
+            final int columnStride = std140Alignment(type);
+            final int elementSize = columns * columnStride;
+            return arrayLength > 1 ? arrayLength * roundUpToVec4(elementSize) : elementSize;
+        }
+        final int elementSize = scalarSize;
+        if (arrayLength > 1) {
+            // std140 array: each element padded to vec4 (16-byte) stride.
+            return arrayLength * roundUpToVec4(elementSize);
+        }
+        return elementSize;
+    }
+
+    private static int scalarTypeSize(final String type) {
+        return switch (type) {
+            case "float", "int", "uint", "bool", "double" -> 4;
+            case "vec2", "ivec2", "uvec2", "bvec2", "dvec2" -> 8;
+            case "vec3", "ivec3", "uvec3", "bvec3", "dvec3" -> 12;
+            case "vec4", "ivec4", "uvec4", "bvec4", "dvec4" -> 16;
+            case "mat2" -> 16;
+            case "mat2x3", "mat3x2" -> 32;
+            case "mat2x4", "mat4x2" -> 32;
+            case "mat3", "mat3x4", "mat4x3" -> 48;
+            case "mat4" -> 64;
+            default -> 16;
+        };
+    }
+
+    private static int matrixColumnCount(final String type) {
+        return switch (type) {
+            case "mat2" -> 2;
+            case "mat2x3", "mat3x2" -> 2;
+            case "mat2x4", "mat4x2" -> 2;
+            case "mat3" -> 3;
+            case "mat3x4", "mat4x3" -> 3;
+            case "mat4" -> 4;
+            default -> 1;
+        };
+    }
+
+    private static int roundUpToVec4(final int size) {
+        return (size + 15) & ~15;
+    }
+
+    private static int alignUp(final int value, final int alignment) {
+        if (alignment <= 1) {
+            return value;
+        }
+        return (value + alignment - 1) & ~(alignment - 1);
+    }
+
+    /**
+     * Immutable std140 layout of the {@code iris_LooseUniforms} UBO (M5e).
+     * Carries the byte offset and size of each loose uniform member so the
+     * rendering layer can marshal real values into a single CPU-mapped
+     * {@link com.metallum.client.metal.render.MetalGpuBuffer} bound to the
+     * reflected {@code [[buffer(N)]]} slot.
+     */
+    public record LooseUniformLayout(
+            List<LooseUniformMember> members,
+            Map<String, LooseUniformMember> byName,
+            int totalSize
+    ) {
+        /**
+         * @return the member with the given name, or {@code null} if the
+         *         UBO has no member with that name
+         */
+        public LooseUniformMember member(final String name) {
+            return byName.get(name);
+        }
+    }
+
+    /**
+     * One member of the {@code iris_LooseUniforms} UBO (M5e). {@code offset}
+     * and {@code size} are in bytes, computed per std140 rules.
+     */
+    public record LooseUniformMember(
+            String name,
+            String type,
+            int offset,
+            int size,
+            int arrayLength
+    ) {
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.metal.iris.MetalIrisBridge;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.metallum.client.metal.render.mtl.MTLPrimitiveType;
@@ -12,16 +13,20 @@ import com.metallum.client.metal.render.mtl.MTLStorageMode;
 import com.metallum.client.metal.render.mtl.MTLTextureUsage;
 import com.metallum.mixin.accessor.MetallumGpuDeviceAccessor;
 import com.mojang.blaze3d.GpuFormat;
+import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.systems.GpuDeviceBackend;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -106,6 +111,101 @@ public final class MetalIrisRenderer {
 
     /** Cache of MetalIrisPipeline objects, keyed by program name. */
     private static final Map<String, MetalIrisPipeline> pipelineCache = new HashMap<>();
+
+    /**
+     * Registered std140 layouts for the {@code iris_LooseUniforms} UBO (M5e),
+     * keyed by program name. Populated by
+     * {@link com.metallum.client.metal.iris.MetalIrisRenderingPipeline#patchAndCompile}
+     * via {@link #registerLooseUniformLayout} after a program is compiled,
+     * using {@link MetalIrisBridge#computeLooseUniformLayout}. Consumed by
+     * {@link MetalIrisPipeline}'s constructor (via
+     * {@link #getRegisteredLooseUniformLayout}) so the pipeline can expose the
+     * layout through {@link MetalIrisPipeline#looseUniformLayout()} for
+     * {@code MetalRenderPass.pushIrisUniformBindings} to use when binding the
+     * UBO slot.
+     */
+    private static final Map<String, MetalIrisBridge.LooseUniformLayout> registeredLooseUniformLayouts = new HashMap<>();
+
+    /**
+     * Per-program {@link MetalIrisUniformProvider} cache (M5e). Keyed by
+     * program name. Each provider owns a CPU-mapped uniform buffer sized to
+     * the program's {@link MetalIrisBridge.LooseUniformLayout}; on first
+     * request it is created and the buffer is zeroed, and on every
+     * {@link MetalIrisUniformProvider#marshal()} call its contents are
+     * refreshed from {@link net.irisshaders.iris.uniforms.CapturedRenderingState}
+     * + {@link net.minecraft.client.Minecraft}. Closed in {@link #clearCache}.
+     */
+    private static final Map<String, MetalIrisUniformProvider> uniformProviderCache = new HashMap<>();
+
+    /**
+     * Registers the std140 layout of the {@code iris_LooseUniforms} UBO for a
+     * given program name (M5e). Called by
+     * {@link com.metallum.client.metal.iris.MetalIrisRenderingPipeline#patchAndCompile}
+     * after a program is compiled, using
+     * {@link MetalIrisBridge#computeLooseUniformLayout} on the patched GLSL.
+     * The layout is later retrieved by {@link MetalIrisPipeline}'s constructor
+     * (via {@link #getRegisteredLooseUniformLayout}) so the pipeline can expose
+     * it for {@code MetalRenderPass.pushIrisUniformBindings} to use when
+     * binding the UBO slot.
+     *
+     * <p>Safe to call multiple times for the same program name — the last
+     * registration wins (layouts are immutable, so overwriting is harmless).
+     */
+    public static void registerLooseUniformLayout(
+            final String programName,
+            final MetalIrisBridge.LooseUniformLayout layout
+    ) {
+        if (programName == null || layout == null) {
+            return;
+        }
+        registeredLooseUniformLayouts.put(programName, layout);
+    }
+
+    /**
+     * Returns the std140 layout registered for the given program name (M5e),
+     * or {@code null} if no layout was registered (e.g. the program has no
+     * loose uniforms, or {@link #registerLooseUniformLayout} was not called
+     * for this program). Called by {@link MetalIrisPipeline}'s constructor.
+     */
+    static MetalIrisBridge.LooseUniformLayout getRegisteredLooseUniformLayout(final String programName) {
+        return programName == null ? null : registeredLooseUniformLayouts.get(programName);
+    }
+
+    /**
+     * Returns the per-program {@link MetalIrisUniformProvider} (M5e), creating
+     * it on first request. The provider owns a CPU-mapped uniform buffer sized
+     * to the registered {@link MetalIrisBridge.LooseUniformLayout}; its
+     * {@link MetalIrisUniformProvider#marshal()} method refreshes the buffer
+     * contents from live Iris state before each bind.
+     *
+     * <p>Returns {@code null} if no layout was registered for the program
+     * (meaning it has no {@code iris_LooseUniforms} UBO), in which case the
+     * caller ({@code MetalRenderPass.pushIrisUniformBindings}) falls back to
+     * the zeroed scratch buffer for all UBO slots.
+     *
+     * @param device      the active Metal device (used to allocate the
+     *                    provider's buffer on first creation)
+     * @param programName the Iris program name (e.g. "gbuffers_terrain")
+     */
+    static MetalIrisUniformProvider getUniformProvider(
+            final MetalDevice device,
+            final String programName
+    ) {
+        if (programName == null) {
+            return null;
+        }
+        final MetalIrisUniformProvider existing = uniformProviderCache.get(programName);
+        if (existing != null && !existing.isClosed()) {
+            return existing;
+        }
+        final MetalIrisBridge.LooseUniformLayout layout = registeredLooseUniformLayouts.get(programName);
+        if (layout == null || layout.totalSize() <= 0) {
+            return null;
+        }
+        final MetalIrisUniformProvider provider = new MetalIrisUniformProvider(device, programName, layout);
+        uniformProviderCache.put(programName, provider);
+        return provider;
+    }
 
     /** Cached 1x1 dummy texture handle (created lazily, reused across frames). */
     private static MemorySegment dummyTextureHandle = MemorySegment.NULL;
@@ -1246,6 +1346,17 @@ public final class MetalIrisRenderer {
             }
         }
         pipelineCache.clear();
+        // M5e: close all uniform providers (each owns a CPU-mapped MetalGpuBuffer)
+        // and clear the layout/provider caches so a shaderpack reload starts fresh.
+        for (MetalIrisUniformProvider provider : uniformProviderCache.values()) {
+            try {
+                provider.close();
+            } catch (Exception e) {
+                LOGGER.warn("[MetalUniversal] Error closing uniform provider for '{}'", provider.programName(), e);
+            }
+        }
+        uniformProviderCache.clear();
+        registeredLooseUniformLayouts.clear();
         releaseCompositeTargets();
         releaseGbufferTargets();
         releaseShadowTarget();
@@ -1257,6 +1368,93 @@ public final class MetalIrisRenderer {
         MetalGpuTextureView stale = pendingFinalPassView.getAndSet(null);
         if (stale != null) {
             closePendingView(stale);
+        }
+    }
+
+    // ---- Iris sampler name → render-target texture resolution (M5f) ----
+
+    /**
+     * Resolves an Iris sampler name to a {@link MetalGpuTextureView} from the
+     * gbuffer/composite/shadow render-target pools (M5f). Used by
+     * {@code MetalRenderPass.pushIrisTextureBindings} to bind real render-target
+     * textures to reflected Iris {@code [[texture(N)]]} slots whose names match
+     * Iris's sampler naming conventions (e.g. {@code colortex0},
+     * {@code depthtex0}, {@code shadowtex0}).
+     *
+     * <p>Supported name → pool mappings:
+     * <table>
+     *   <tr><th>Sampler name</th><th>Maps to</th></tr>
+     *   <tr><td>{@code colortex0}–{@code colortex3}</td>
+     *       <td>gbuffer color views [0–3]</td></tr>
+     *   <tr><td>{@code colortex4}–{@code colortex7}</td>
+     *       <td>composite read-set views [0–3]</td></tr>
+     *   <tr><td>{@code gcolor}</td><td>gbuffer color view [0] (alias)</td></tr>
+     *   <tr><td>{@code depthtex0}, {@code gdepthtex}, {@code depthtex1},
+     *           {@code depthtex2}</td>
+     *       <td>gbuffer depth view</td></tr>
+     *   <tr><td>{@code shadowtex0}, {@code shadowtex1}, {@code shadow},
+     *           {@code watershadow}</td>
+     *       <td>shadow-map depth view</td></tr>
+     *   <tr><td>{@code noisetex}, {@code shadowcolor*}, {@code dhDepthTex*}</td>
+     *       <td>{@code null} (no pool yet — caller falls back to dummy)</td></tr>
+     * </table>
+     *
+     * @param name the reflected Iris texture binding name
+     * @return the matching pool view, or {@code null} if no pool texture is
+     *         available for this name (caller should fall back to dummy)
+     */
+    @Nullable
+    static MetalGpuTextureView getIrisRenderTargetTexture(final String name) {
+        if (name == null) {
+            return null;
+        }
+        // colortex0..3 → gbuffer color views
+        if (name.startsWith("colortex")) {
+            final int idx = parseIndexSuffix(name, "colortex");
+            final MetalGpuTextureView[] gbufferViews = gbufferColorViews;
+            if (idx >= 0 && idx < GBUFFER_MRT_COUNT && gbufferViews != null) {
+                return gbufferViews[idx];
+            }
+            // colortex4..7 → composite read-set views (offset by GBUFFER_MRT_COUNT)
+            final int compositeIdx = idx - GBUFFER_MRT_COUNT;
+            if (compositeIdx >= 0 && compositeIdx < COMPOSITE_TARGET_COUNT) {
+                final MetalGpuTextureView[] compositeViews = getCompositeReadViews();
+                if (compositeViews != null && compositeIdx < compositeViews.length) {
+                    return compositeViews[compositeIdx];
+                }
+            }
+            return null;
+        }
+        // gcolor → colortex0 alias
+        if ("gcolor".equals(name)) {
+            final MetalGpuTextureView[] gbufferViews = gbufferColorViews;
+            return gbufferViews != null && gbufferViews.length > 0 ? gbufferViews[0] : null;
+        }
+        // depthtex0/1/2, gdepthtex → gbuffer depth view
+        if (name.startsWith("depthtex") || "gdepthtex".equals(name)) {
+            return gbufferDepthView;
+        }
+        // shadowtex0/1, shadow, watershadow → shadow-map depth view
+        if (name.startsWith("shadowtex") || "shadow".equals(name) || "watershadow".equals(name)) {
+            return shadowDepthView;
+        }
+        // noisetex, shadowcolor*, dhDepthTex* — no pool yet
+        return null;
+    }
+
+    /**
+     * Parses the integer suffix of a name like {@code "colortex3"} (prefix
+     * {@code "colortex"}) → {@code 3}. Returns {@code -1} if the suffix is not
+     * a non-negative integer.
+     */
+    private static int parseIndexSuffix(final String name, final String prefix) {
+        if (name.length() <= prefix.length()) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(name.substring(prefix.length()));
+        } catch (NumberFormatException ignored) {
+            return -1;
         }
     }
 }

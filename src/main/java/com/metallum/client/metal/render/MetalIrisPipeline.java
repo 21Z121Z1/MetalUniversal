@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.metal.iris.MetalIrisBridge;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCompareFunction;
 import com.metallum.client.metal.render.mtl.MTLCullMode;
@@ -12,6 +13,7 @@ import com.metallum.client.metal.render.mtl.MTLVertexFormat;
 import com.metallum.client.metal.render.mtl.MTLVertexStepFunction;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormatElement;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -179,6 +181,23 @@ final class MetalIrisPipeline implements AutoCloseable {
      * is enabled.
      */
     private final List<IrisResourceBinding> bindings;
+    /**
+     * The std140 layout of the {@code iris_LooseUniforms} UBO injected into
+     * this program's GLSL by {@link MetalIrisBridge#ensureSpirvCompatible}
+     * (M5e). Looked up from {@link MetalIrisRenderer}'s registration table at
+     * construction time — {@code null} if no layout was registered for this
+     * program name (e.g. the program has no loose uniforms, or the layout
+     * wasn't computed yet).
+     *
+     * <p>When non-null, {@code MetalRenderPass.pushIrisUniformBindings} uses
+     * it to obtain (or create) a {@link MetalIrisUniformProvider} that
+     * marshals real values (camera matrices, fog, color modulator, ...) into a
+     * single CPU-mapped buffer bound to the reflected {@code iris_LooseUniforms}
+     * UBO slot. When null, the slot falls back to the zeroed scratch buffer
+     * (existing M5d-2 behaviour) — never an unbound argument.
+     */
+    @Nullable
+    private final MetalIrisBridge.LooseUniformLayout looseUniformLayout;
     private boolean closed;
 
     /**
@@ -274,6 +293,12 @@ final class MetalIrisPipeline implements AutoCloseable {
         this.firstAvailableVertexBufferSlot = 0;
         this.vertexBufferCount = countVertexBuffers(vertexFormats);
         this.bindings = reflectBindings(vertexMsl, fragmentMsl);
+        // M5e: look up the std140 layout registered for this program name by
+        // MetalIrisRenderingPipeline.patchAndCompile. May be null if no layout
+        // was registered (e.g. the program has no loose uniforms); in that
+        // case the iris_LooseUniforms UBO slot falls back to the zeroed
+        // scratch buffer.
+        this.looseUniformLayout = MetalIrisRenderer.getRegisteredLooseUniformLayout(name);
 
         this.pipelineWithDepth = hasDepth
                 ? createPipelineState(device, vertexFn, fragmentFn, colorFormats, MTLPixelFormat.Depth32Float, vertexFormats, this.firstAvailableVertexBufferSlot)
@@ -542,6 +567,20 @@ final class MetalIrisPipeline implements AutoCloseable {
      */
     List<IrisResourceBinding> bindings() {
         return this.bindings;
+    }
+
+    /**
+     * Returns the std140 layout of the {@code iris_LooseUniforms} UBO for this
+     * program (M5e), or {@code null} if no layout was registered for this
+     * program name. {@code MetalRenderPass.pushIrisUniformBindings} uses this
+     * to obtain a {@link MetalIrisUniformProvider} that marshals real uniform
+     * values (camera matrices, fog, ...) into a single buffer bound to the
+     * reflected {@code iris_LooseUniforms} UBO slot, instead of falling back
+     * to the zeroed scratch buffer.
+     */
+    @Nullable
+    MetalIrisBridge.LooseUniformLayout looseUniformLayout() {
+        return this.looseUniformLayout;
     }
 
     @Override
