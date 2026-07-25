@@ -21,6 +21,7 @@ import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import org.jspecify.annotations.Nullable;
+import org.joml.Matrix4f;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -218,8 +219,8 @@ public final class MetalIrisRenderer {
      * Returns the captured gbuffer projection matrix (M5e+), or {@code null}.
      * @see com.metallum.client.metal.iris.MetalIrisRenderingPipeline#getCapturedProjection()
      */
-    @org.jspecify.annotations.Nullable
-    static org.joml.Matrix4f getCapturedProjection() {
+    @Nullable
+    static Matrix4f getCapturedProjection() {
         return MetalIrisRenderingPipeline.getCapturedProjection();
     }
 
@@ -227,7 +228,7 @@ public final class MetalIrisRenderer {
      * Returns the captured fog color (M5e+) as {@code float[]{r,g,b}}, or {@code null}.
      * @see com.metallum.client.metal.iris.MetalIrisRenderingPipeline#getCapturedFogColor()
      */
-    @org.jspecify.annotations.Nullable
+    @Nullable
     static float[] getCapturedFogColor() {
         return MetalIrisRenderingPipeline.getCapturedFogColor();
     }
