@@ -413,10 +413,25 @@ terrain TRANSLUCENT writes DRAWBUFFERS [0,1] ... staying native   ← 预期,待
   (最新的 crash-report 时间戳是上一轮 06:31,不是本轮 06:38);
 - 无 `CapturedRenderingState still holds identity matrices` 告警 → S4 的矩阵**不是**单位阵。
 
-**仍未完成的判读**:没有截图对照 vanilla,也没有观察到持续渲染(本轮进程在我这侧的
-等待窗口结束时已退出,退出原因未确证——日志干净收尾于 TRANSLUCENT 那条 WARN,
-既无崩溃栈也无 `Stopping!`)。所以**「画面出现 pack 着色」这一条仍未验证**,
-S7 判定维持未通过。下一轮:重跑并在世界里停留 90s,截图与 vanilla 对照。
+**退出原因(补测)**:`runClient` 以 **exit 134 = SIGABRT** 结束,`BUILD FAILED in 13m 42s`。
+SIGABRT 是原生 abort,不走 Java 异常路径——这解释了为什么 `latest.log` 没有崩溃栈、
+`run/crash-reports/` 里也没有本轮的记录。
+
+**关键的未知**:`latest.log` 最后一行是 06:38:40(TRANSLUCENT 那条 WARN),而进程一直活到
+约 06:51。**中间约 12 分钟没有任何日志**。两种解释无法区分:
+- (a) 客户端在世界里正常渲染了 ~12 分钟(进世界后本来就几乎不产生日志),最后才 abort;
+- (b) 客户端在 06:38:40 之后就卡住/异常,只是没写日志。
+gradle 日志里也没有捕到任何原生错误文本(既无 Metal API validation 断言,也无 signal handler 输出)。
+
+**下一轮必须先解决可观测性,再谈判读**——否则还会得到同样无法解释的结果:
+1. 用 `Monitor` 或 `tail -f` 在运行期实时看日志,不要跑完再读;
+2. 在世界里主动产生日志证据(例如给 `IrisMetalPipelineOverrides` 加一个每 N 帧一次的
+   INFO,证明覆盖 PSO 在持续被绑定,而不是只在首帧编译过);
+3. 抓原生 abort:`runClient` 的 stderr 单独重定向,或设 `MTL_DEBUG_LAYER=1`
+   (**注意**:`MTL_SHADER_VALIDATION=1` 在本机会破坏 Apple MetalFX 内核,禁止用于客户端);
+4. 截图对照 vanilla 才是「画面出现 pack 着色」的判据,日志不能替代。
+
+**S7 判定:未通过**(崩溃已消失,但持续渲染与画面均未证实)。
 
 ## 5. 风险与预案
 
