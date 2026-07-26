@@ -241,12 +241,19 @@ keeps a hidden or minimized window from blocking shutdown forever.
   family that now carries falling blocks, so the shader side is in place, but the
   sample never gets attached: block entities are dispatched by
   `BlockEntityRenderDispatcher`, not `EntityRenderDispatcher`, so no entity
-  submission window is open when their submits are constructed. Closing it needs a
-  block-entity entry point alongside `MetalFxManager.captureEntityMotion`, because
-  the current/previous transform pair has to come from the manager's own
-  `MetalMotionStateStore`: that store commits only once a frame's output has been
-  encoded, and a second store kept elsewhere would commit on frames the manager
-  discarded and hand out a previous transform that was never presented.
+  submission window is open when their submits are constructed.
+
+  What remains is only the wiring. The root transform and the identity it is keyed
+  under are in `MetalBlockEntityObjectPose`: the moved block carries the
+  progress-interpolated offset and the base does not, and the id comes from the block
+  position because `BlockEntityRenderDispatcher` builds a fresh render state every
+  frame. Producing the sample needs a block-entity entry point alongside
+  `MetalFxManager.captureEntityMotion`, because the current/previous pair has to come
+  from the manager's own `MetalMotionStateStore`: that store commits only once a
+  frame's output has been encoded, and a second store kept elsewhere would commit on
+  frames the manager discarded and hand out a previous transform that was never
+  presented. A `BlockEntityRenderDispatcher` mixin then brackets the submission
+  window the way `EntityRenderDispatcherMetalFxMixin` does.
 - No block entity gets object motion, whichever family its geometry belongs to.
   `beginEntitySubmission` is called only from `EntityRenderDispatcher.submit`, so a
   chest or a sign rendering entity-format models through `ModelFeatureRenderer` is
