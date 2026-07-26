@@ -613,6 +613,14 @@ final class MetalRenderPass implements RenderPassBackend {
         if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
             TextureViewAndSampler textureBinding = samplers.get(binding.name());
             if (textureBinding == null) {
+                // An Iris terrain override declares the pack's samplers on top
+                // of the ones sodium binds; the registry supplies the remainder.
+                // Returns null for every non-override pipeline, so a genuine
+                // missing binding still fails loudly.
+                textureBinding = IrisMetalPipelineOverrides.fallbackTexture(
+                        device, compiledPipeline, binding.name(), samplers);
+            }
+            if (textureBinding == null) {
                 throw new IllegalStateException("Missing sampler " + binding.name());
             }
 
@@ -632,6 +640,11 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         GpuBufferSlice uniformSlice = uniforms.get(binding.name());
+        if (uniformSlice == null) {
+            // The pack's uniform block (see fallbackTexture above for the
+            // rationale); null for every non-override pipeline.
+            uniformSlice = IrisMetalPipelineOverrides.fallbackUniform(device, compiledPipeline, binding.name());
+        }
         if (uniformSlice == null) {
             throw new IllegalStateException("Missing uniform " + binding.name());
         }

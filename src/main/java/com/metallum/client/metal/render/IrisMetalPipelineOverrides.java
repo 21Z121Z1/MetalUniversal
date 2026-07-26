@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
@@ -109,7 +110,56 @@ final class IrisMetalPipelineOverrides {
     }
 
     static void deactivate() {
+        Instance previous = active;
         active = null;
+        if (previous != null) {
+            previous.close();
+        }
+    }
+
+    /** Per-frame uniform refresh; driven by {@link MetalWorldRenderingPipeline#beginLevelRendering()}. */
+    static void updateFrame() {
+        Instance instance = active;
+        if (instance != null) {
+            instance.uniformValues.updateFrame();
+        }
+    }
+
+    /**
+     * Draw-time resource fallback for a bound terrain override, consulted by
+     * {@link MetalRenderPass} when a name the PSO declares has no value set.
+     *
+     * <p>Sodium sets the resources <i>its own</i> shader needs; the pack's
+     * program declares more. Rather than teach the sodium mixin about pack
+     * resources (at pass-creation time sodium has not yet bound its textures,
+     * so they cannot be forwarded), the gap is closed here, where everything
+     * sodium bound is already visible.</p>
+     *
+     * @return the resolved binding, or {@code null} to let the caller raise the
+     *         normal missing-resource error
+     */
+    static MetalRenderPass.@Nullable TextureViewAndSampler fallbackTexture(
+            final MetalDevice device,
+            final MetalCompiledRenderPipeline pipeline,
+            final String name,
+            final Map<String, MetalRenderPass.TextureViewAndSampler> bound
+    ) {
+        Instance instance = active;
+        if (instance == null) {
+            return null;
+        }
+        return instance.resolveTexture(device, pipeline, name, bound);
+    }
+
+    /** Uniform-buffer counterpart of {@link #fallbackTexture}. */
+    static @Nullable GpuBufferSlice fallbackUniform(
+            final MetalDevice device, final MetalCompiledRenderPipeline pipeline, final String name
+    ) {
+        Instance instance = active;
+        if (instance == null) {
+            return null;
+        }
+        return instance.resolveUniform(device, pipeline, name);
     }
 
     static @Nullable Instance active() {
@@ -139,7 +189,15 @@ final class IrisMetalPipelineOverrides {
         private final Map<TerrainKind, RenderPipeline> syntheticPipelines = new EnumMap<>(TerrainKind.class);
         private final Map<Identifier, String> generatedGlsl = new HashMap<>();
         private final Set<TerrainKind> reportedFailures = EnumSet.noneOf(TerrainKind.class);
+        /** Compiled override -> kind, so draw-time fallbacks know whose block to bind. */
+        private final Map<MetalCompiledRenderPipeline, TerrainKind> compiledKinds = new java.util.IdentityHashMap<>();
+        private final IrisMetalUniformValues uniformValues;
+        private final Set<String> reportedPlaceholders = new java.util.HashSet<>();
+        private @Nullable IrisMetalPlaceholderTextures placeholders;
+        /** The device the overrides were compiled on; needed to drop them again on teardown. */
+        private @Nullable MetalDevice device;
         private boolean reportedMissingVertexFormat;
+        private boolean closed;
 
         private Instance(
                 final int generation,
@@ -147,6 +205,7 @@ final class IrisMetalPipelineOverrides {
                 final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap
         ) {
             this.generation = generation;
+            this.uniformValues = new IrisMetalUniformValues(programSet.getPackDirectives().getSunPathRotation());
             for (TerrainKind kind : TerrainKind.values()) {
                 ProgramSource source = resolveSource(programSet, kind.shaderKey.getProgram());
                 if (source == null) {
@@ -157,9 +216,11 @@ final class IrisMetalPipelineOverrides {
                     continue;
                 }
                 try {
-                    this.programs.put(kind, MetalIrisShaderCompiler.translateSodiumTerrain(
+                    MetalIrisShaderCompiler.GlslProgram program = MetalIrisShaderCompiler.translateSodiumTerrain(
                             source.getName(), source, kind.shaderKey.getAlphaTest(), textureMap
-                    ));
+                    );
+                    this.programs.put(kind, program);
+                    this.uniformValues.register(kind, program);
                     Metallum.LOGGER.info(
                             "[metallum-iris] translated sodium terrain {} from pack program {} (drawBuffers={})",
                             kind, source.getName(),
@@ -260,7 +321,10 @@ final class IrisMetalPipelineOverrides {
                         "[metallum-iris] compiling terrain override {} for {} via {}",
                         kind, pipeline.getLocation(), synthetic.getLocation()
                 );
-                return MetalCrossShaderCompiler.compile(device, synthetic, source);
+                MetalCompiledRenderPipeline compiled = MetalCrossShaderCompiler.compile(device, synthetic, source);
+                this.compiledKinds.put(compiled, kind);
+                this.device = device;
+                return compiled;
             } catch (Throwable t) {
                 if (this.reportedFailures.add(kind)) {
                     Metallum.LOGGER.error(
@@ -343,6 +407,102 @@ final class IrisMetalPipelineOverrides {
             builder.withBindGroupLayout(extras.build());
             builder.withVertexBinding(0, chunkFormat);
             return builder.build();
+        }
+
+        /**
+         * Resolves a sampler the pack declared but sodium never bound.
+         *
+         * <p>Two names map to real content: the pack's {@code gtexture} is the
+         * block atlas sodium binds as {@code u_BlockTex}, and {@code lightmap}
+         * is its {@code u_LightTex}. Everything else — noise textures, shadow
+         * maps, previous-pass buffers — has no source until the shadow pass and
+         * composite chain exist, so it gets a 1×1 placeholder of the matching
+         * kind (depth+compare for {@code sampler2DShadow}, colour otherwise).</p>
+         */
+        private MetalRenderPass.@Nullable TextureViewAndSampler resolveTexture(
+                final MetalDevice device,
+                final MetalCompiledRenderPipeline pipeline,
+                final String name,
+                final Map<String, MetalRenderPass.TextureViewAndSampler> bound
+        ) {
+            if (this.closed || !this.compiledKinds.containsKey(pipeline)) {
+                return null;
+            }
+            MetalRenderPass.TextureViewAndSampler alias = switch (name) {
+                case "gtexture", "tex", "texture" -> bound.get("u_BlockTex");
+                case "lightmap" -> bound.get("u_LightTex");
+                default -> null;
+            };
+            if (alias != null) {
+                return alias;
+            }
+            IrisMetalPlaceholderTextures textures = placeholders(device);
+            boolean shadow = isShadowSampler(this.compiledKinds.get(pipeline), name);
+            if (this.reportedPlaceholders.add(name)) {
+                Metallum.LOGGER.info(
+                        "[metallum-iris] pack sampler '{}' has no source in B2-1; bound a 1x1 {} placeholder",
+                        name, shadow ? "shadow" : "colour"
+                );
+            }
+            return shadow ? textures.shadow() : textures.color();
+        }
+
+        private boolean isShadowSampler(final TerrainKind kind, final String name) {
+            MetalIrisShaderCompiler.GlslProgram program = this.programs.get(kind);
+            if (program == null) {
+                return false;
+            }
+            for (MetalIrisShaderCompiler.SamplerDecl sampler : program.samplers()) {
+                if (sampler.name().equals(name)) {
+                    return sampler.glslType().toLowerCase(Locale.ROOT).contains("shadow");
+                }
+            }
+            return false;
+        }
+
+        private IrisMetalPlaceholderTextures placeholders(final MetalDevice device) {
+            IrisMetalPlaceholderTextures existing = this.placeholders;
+            if (existing == null) {
+                existing = new IrisMetalPlaceholderTextures(device);
+                this.placeholders = existing;
+            }
+            return existing;
+        }
+
+        private @Nullable GpuBufferSlice resolveUniform(
+                final MetalDevice device, final MetalCompiledRenderPipeline pipeline, final String name
+        ) {
+            if (this.closed || !MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME.equals(name)) {
+                return null;
+            }
+            TerrainKind kind = this.compiledKinds.get(pipeline);
+            return kind == null ? null : this.uniformValues.slice(device, kind);
+        }
+
+        /** Offline-gate hook: the bytes last written for a kind's uniform block. */
+        java.nio.@Nullable ByteBuffer uniformStaging(final TerrainKind kind) {
+            return this.uniformValues.lastUpload(kind);
+        }
+
+        private void close() {
+            if (this.closed) {
+                return;
+            }
+            this.closed = true;
+            // The overrides are cached against sodium's own RenderPipeline
+            // objects, which outlive this instance; without dropping the cache a
+            // pack reload (or turning shaders off) would keep drawing terrain
+            // with the previous pack's PSOs.
+            if (this.device != null) {
+                this.device.clearPipelineCache();
+                this.device = null;
+            }
+            this.uniformValues.close();
+            if (this.placeholders != null) {
+                this.placeholders.close();
+                this.placeholders = null;
+            }
+            this.compiledKinds.clear();
         }
     }
 

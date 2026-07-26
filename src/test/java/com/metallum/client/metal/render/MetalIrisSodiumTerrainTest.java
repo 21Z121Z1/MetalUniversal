@@ -10,6 +10,7 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BlendFunction;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
+import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
@@ -152,6 +153,10 @@ final class MetalIrisSodiumTerrainTest {
         }
     }
 
+    /** The four resources sodium's DefaultChunkRenderer binds itself before drawing. */
+    private static final java.util.Set<String> SODIUM_SUPPLIED_RESOURCES = java.util.Set.of(
+            "u_Globals", "u_SectionTimeInfo", "u_BlockTex", "u_LightTex", "push_constants");
+
     private void compileToDevice(
             final String packName,
             final TerrainKind kind,
@@ -174,12 +179,69 @@ final class MetalIrisSodiumTerrainTest {
                     packName + " " + kind + ": resources lack " + MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME
                             + "; got " + resourceNames);
         }
+        verifyUniformSupply(packName, kind, instance, program, compiled);
         notes.add(packName + " " + kind + ": PSO ok; drawBuffers="
                 + Arrays.toString(program.drawBuffers())
                 + "; uniforms=" + program.uniformLayout().size()
                 + " (block " + program.uniformBlockSize() + "B)"
                 + "; samplers=" + program.samplers().stream().map(MetalIrisShaderCompiler.SamplerDecl::name).toList()
                 + "; resources=" + resourceNames);
+    }
+
+    /**
+     * Every resource the compiled override declares must be resolvable at draw
+     * time, either by sodium (which binds its own four) or by the registry's
+     * fallback. A name no one supplies would throw
+     * {@code Missing uniform/sampler} on the first terrain draw in game, so the
+     * whole binding table is walked here rather than trusting the PSO alone.
+     *
+     * <p>Sodium's own names are simulated as already bound, which is what
+     * {@code DefaultChunkRenderer} does before drawing.</p>
+     */
+    private void verifyUniformSupply(
+            final String packName,
+            final TerrainKind kind,
+            final IrisMetalPipelineOverrides.Instance instance,
+            final GlslProgram program,
+            final MetalCompiledRenderPipeline compiled
+    ) {
+        Map<String, MetalRenderPass.TextureViewAndSampler> boundBySodium = Map.of();
+        for (MetalCompiledRenderPipeline.ResourceBinding binding : compiled.resources()) {
+            if (SODIUM_SUPPLIED_RESOURCES.contains(binding.name())) {
+                continue;
+            }
+            switch (binding.kind()) {
+                case SAMPLED_IMAGE -> assertNotNull(
+                        IrisMetalPipelineOverrides.fallbackTexture(device, compiled, binding.name(), boundBySodium),
+                        packName + " " + kind + ": nothing supplies sampler '" + binding.name() + "'");
+                case UNIFORM_BUFFER -> assertNotNull(
+                        IrisMetalPipelineOverrides.fallbackUniform(device, compiled, binding.name()),
+                        packName + " " + kind + ": nothing supplies uniform '" + binding.name() + "'");
+                case TEXEL_BUFFER -> { /* sodium's u_SectionTimeInfo only; covered above */ }
+            }
+        }
+
+        // The block must actually be filled, not just allocated: check the
+        // identity model-view the neutral frame writes lands at its offset.
+        if (!program.hasUniformBlock()) {
+            return;
+        }
+        UniformMember modelView = program.uniformLayout().stream()
+                .filter(m -> m.name().equals("gbufferModelView"))
+                .findFirst().orElse(null);
+        if (modelView == null) {
+            return;
+        }
+        java.nio.ByteBuffer data = instance.uniformStaging(kind);
+        assertNotNull(data, packName + " " + kind + ": uniform block was never filled");
+        for (int column = 0; column < 4; column++) {
+            for (int row = 0; row < 4; row++) {
+                float expected = column == row ? 1.0f : 0.0f;
+                assertEquals(expected,
+                        data.getFloat(modelView.offset() + (column * 4 + row) * Float.BYTES), 0.0f,
+                        packName + " " + kind + ": gbufferModelView[" + column + "][" + row + "] not written");
+            }
+        }
     }
 
     private void verifyStd140(final String packName, final TerrainKind kind, final GlslProgram program) {

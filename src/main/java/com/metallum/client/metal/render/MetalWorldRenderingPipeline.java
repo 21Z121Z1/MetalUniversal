@@ -92,6 +92,8 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
      */
     @Override
     public void beginLevelRendering() {
+        // Refresh the pack's uniform block before sodium draws terrain.
+        IrisMetalPipelineOverrides.updateFrame();
         if (this.initializedBlockIds) {
             return;
         }

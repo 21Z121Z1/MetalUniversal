@@ -68,14 +68,14 @@ MetalDevice.computeIfAbsent(sodiumPipeline) ─→ IrisMetalPipelineOverrides.tr
 - [x] **S1 转译 lane**(`MetalIrisShaderCompiler`):`translateSodiumTerrain(ProgramSource, ShaderKey, textureMap)`;patchSodium(§2.3 约定)→ stripComments→renameHostileIdentifiers→wrapLooseUniforms;新增:wrap 返回 **std140 成员布局**(name/glslType/offset/size,按收集顺序);文本枚举 wrapped GLSL 的 sampler/UBO 声明;从 `ProgramSource.getDirectives()` 取 DRAWBUFFERS。产物 record `SodiumTerrainProgram`(vertexGlsl/fragmentGlsl/uniformLayout/samplers/ubos/drawBuffers/alpha)。**注意**:此 lane 停在 GLSL,不出 MSL(库存链负责)。
 - [x] **S2 注册表+合成管线**(`IrisMetalPipelineOverrides` 新类):`activate(device, programSet, textureMap)`(翻译 3 kind,失败记日志并跳过该 kind)/`deactivate()`/`tryCompile(device, RenderPipeline)`(§2.2 判定;懒构建合成管线,XHFP VertexFormat 来自 WorldRenderingSettings;colorTargets 按 §1 显示语义;BindGroupLayout=枚举出的资源;合成 ShaderSource 闭包返回 GLSL)→ `MetalCrossShaderCompiler.compile`。**MetalDevice 两处 computeIfAbsent lambda 前置查询**。
 - [x] **S3 离线 GPU 测试**(`MetalIrisSodiumTerrainTest` 新测试,归入 `metalIrisShaderTranslationTest` 同套件 task):真机 device;BSL+Potato;对 solid/cutout/translucent:S1 翻译→S2 合成→库存链编译→断言 isValid() + 资源表含 MetallumIrisUniforms/gtexture(名字以 dump 为准);失败 dump 到 build/reports/metallum/sodium-terrain-dumps/。**首跑即 ground truth 采集**(patched GLSL 的属性名/uniform 名/输出布局落盘)。
-- [ ] **S4 uniform 供给**(`IrisMetalUniformValues` 新类):按 S1 布局填 std140 buffer(transient 环);首版实值:gbufferModelView(+Inverse/Prev)、gbufferProjection(+Inverse/Prev)、cameraPosition(+prev)、frameTimeCounter/worldTime/worldDay、viewWidth/viewHeight、near/far、fogColor/skyColor/fogDensity 近似、sunAngle/shadowAngle/sunPosition/moonPosition/shadowLightPosition/upPosition、eyeAltitude、isEyeInWater=0、rainStrength、screenBrightness、ambientLight 类缺省;**未覆盖名置零并每名一次日志**。矩阵源用 Iris `CapturedRenderingState`(其填充 mixin 在 Metal 上活跃)+ 天体公式按 CelestialUniforms 语义(sunPathRotation=programSet 值)。
+- [x] **S4 uniform 供给**(已落地,见 §4.1;实现与本条规格的差异在 §4.2 顶部说明)(`IrisMetalUniformValues` 新类):按 S1 布局填 std140 buffer(transient 环);首版实值:gbufferModelView(+Inverse/Prev)、gbufferProjection(+Inverse/Prev)、cameraPosition(+prev)、frameTimeCounter/worldTime/worldDay、viewWidth/viewHeight、near/far、fogColor/skyColor/fogDensity 近似、sunAngle/shadowAngle/sunPosition/moonPosition/shadowLightPosition/upPosition、eyeAltitude、isEyeInWater=0、rainStrength、screenBrightness、ambientLight 类缺省;**未覆盖名置零并每名一次日志**。矩阵源用 Iris `CapturedRenderingState`(其填充 mixin 在 Metal 上活跃)+ 天体公式按 CelestialUniforms 语义(sunPathRotation=programSet 值)。
 - [x] **S5 唤醒 mixin 组**(已落地,见 §4.1 实际实现;默认关,`-Dmetallum.iris.semantic=true` 开):
   - `IrisBootstrapCompatMixin.loadShaderpack`:`holdIrisDormant()` → 改为 `holdIrisDormant() && !MetalIrisCompat.semanticLayerEnabled()` 时取消。
   - 新 `IrisPipelineFactoryMixin`(target `Iris.createPipeline` HEAD):semantic 启用且 currentPack 存在 → 返回 `new MetalWorldRenderingPipeline(...)`。
   - `GlStateManagerCompatMixin`:加 `_getString` 假接(VENDOR="Apple", RENDERER="Metallum Metal", VERSION="4.6.0 Metallum", GLSL="4.60");`_getInteger` 加 `GL_NUM_EXTENSIONS(33309)→0`。
   - `IrisRenderSystemCompatMixin`:加 `getStringi` 假接(返回 null——NUM_EXTENSIONS=0 时不会被调;防御性)。
   - 新 `MetalWorldRenderingPipeline`(§2.13 置位 + 41 方法默认值,参照 VanillaRenderingPipeline 返回;getTextureMap 返回 pack 的 customTextureDataMap 若可得否则空 map)。
-- [ ] **S6 地形 pass 附件扩展**:新 sodium mixin(mixins.json 加包)redirect `DefaultChunkRenderer` 的 `createRenderPass` 调用 → `IrisMetalTerrainPass.begin(...)`:活跃且 kind 判定命中 → 扩展附件 + 预置资源;否则原样。IrisMetalRenderTargets 实例由注册表持有(主帧缓冲尺寸,resize 跟随)。
+- [~] **S6 地形 pass 附件扩展**(S6a 资源供给已落地;S6b 多附件扩展未做):新 sodium mixin(mixins.json 加包)redirect `DefaultChunkRenderer` 的 `createRenderPass` 调用 → `IrisMetalTerrainPass.begin(...)`:活跃且 kind 判定命中 → 扩展附件 + 预置资源;否则原样。IrisMetalRenderTargets 实例由注册表持有(主帧缓冲尺寸,resize 跟随)。
 - [ ] **S7 客户端冒烟**(哨兵纪律:确认 options.txt `startedCleanly:true`+`preferredGraphicsBackend:"default"`,删 run/logs/latest.log):BSL 启用,进世界 90s;判定:日志出现覆盖编译标记、无崩溃、截图可见非 vanilla 地形着色。截图对照 vanilla。
 - [ ] **S8 文档+提交**:validation(B2-1 章节:判定、显示语义边界、迭代记录)、acceptance(缺口 2 状态更新——**只有真实渲染验证通过才可标进展;阶段一仍不通过**)、plan、runbook(新开关/任务)、记忆、提交。
 
@@ -85,7 +85,18 @@ MetalDevice.computeIfAbsent(sodiumPipeline) ─→ IrisMetalPipelineOverrides.tr
   实测产物(供 S4/S6 参照):BSL SOLID drawBuffers=[0] / 48 个 uniform / 800B 块 / samplers=[u_SectionTimeInfo,gtexture,noisetex,shadowtex0,shadowtex1,shadowcolor0];BSL TRANSLUCENT drawBuffers=[0,1] / 55 uniform / 1024B / 另加 gaux1,gaux2,depthtex1;Potato 三种 kind 均 28 uniform / 656B / samplers=[u_SectionTimeInfo,noisetex,gtexture,lightmap],SOLID+CUTOUT drawBuffers=[0,2]、TRANSLUCENT drawBuffers=[3,4]。
 - 2026-07-27: **S5 完成(代码落地,未冒烟)**。唤醒线见 §4.1 表。`compileTestJava` 通过;`metalIrisShaderTranslationTest --rerun-tasks` 全绿(B2-2 矩阵 + B2-1 terrain 6/6)。
   **语义层默认关**(`-Dmetallum.iris.semantic=true` 才开),因为 S4/S6 未做,开了会在首次地形绘制抛`Missing uniform MetallumIrisUniforms`。下一步严格按 §4.2(S4)→ §4.3 S6a → 冒烟(S7)→ 把默认改成 true。
-  **未验证项(不得当成已通过)**:游戏内 pack 解析、`Iris.createPipeline` 重定向、`MetalWorldRenderingPipeline` 的 WorldRenderingSettings 置位、XHFP mesh 重建、任何真实渲染。
+  (该条已被下一条更新)**当时未验证项**:游戏内 pack 解析、`Iris.createPipeline` 重定向、`MetalWorldRenderingPipeline` 的 WorldRenderingSettings 置位、XHFP mesh 重建、任何真实渲染。
+- 2026-07-27: **S4 + S6a 完成,语义层默认改为开**(`-Dmetallum.iris.semantic=false` 为 kill switch)。
+  新增 `IrisMetalUniformValues`(按 std140 布局逐名填块,懒分配 GPU buffer,采样失败降级为中性帧)、
+  `IrisMetalPlaceholderTextures`(1×1 彩色 + 1×1 深度/compare,后者供 `sampler2DShadow`)、
+  `MetalRenderPass.pushDescriptor` 的缺名 fallback(仅当覆盖注册表活跃且该 PSO 是覆盖时生效,否则照旧抛)。
+  **顺带修掉一个会静默渲染错误的 bug**:见 §6 迭代 3(sodium 的 per-draw push constants 被折进了包 uniform 块)。
+  离线门新增 `verifyUniformSupply`:走一遍 PSO 的完整绑定表,断言每个非 sodium 提供的资源都能被 fallback 解析,
+  并断言 `gbufferModelView` 的 16 个 float 真的被写进了块的正确偏移。
+  验证:`metalIrisShaderTranslationTest` / `test` / `metalMrtBackendIntegrationTest` /
+  `metalComputeBackendIntegrationTest` / `metalIrisTargetsIntegrationTest` 全绿。
+  **仍未验证**:任何游戏内运行(S7 冒烟未做)。**已知边界**:DRAWBUFFERS 长度 >1 的 kind 仍走 sodium 原生
+  (BSL solid/cutout 是 `[0]` 会生效;BSL translucent `[0,1]`、Potato 全部 `[0,2]`/`[3,4]` 不生效),需 S6b。
 
 ## 4.1 S5 的实际实现(已落地,与原计划的差异)
 
@@ -166,6 +177,25 @@ MetalDevice.computeIfAbsent(sodiumPipeline) ─→ IrisMetalPipelineOverrides.tr
   **注意**:只在 `IrisMetalPipelineOverrides.active() != null` 时才做 fallback,否则原样抛——别掩盖真实 bug。
 
 **S6b — 扩展 pass 附件(多 DRAWBUFFERS)**:在 `DefaultChunkRendererMetalFxMixin` 已有的 `createRenderPass` redirect 里追加分支(**不要新开一个 redirect,同一 invoke 上两个 redirect 会冲突**):活跃且当前 kind 的 `drawBuffersFor(kind).length > 1` 时,用 `RenderPassDescriptor.create(label).withColorAttachment(colorTexture, clearColor).withColorAttachment(<IrisMetalRenderTargets 的第 i 个>)…` 建 pass;然后把 `IrisMetalPipelineOverrides.setExtendedTerrainTargets(true)` 置位。附件格式必须与 `IrisMetalPipelineOverrides.EXTENDED_TARGET_FORMAT`(RGBA8_UNORM)一致,否则 PSO 查表落空。
+
+### 迭代 3 — sodium 的 per-draw push constants 被折进了包 uniform 块(S4 前发现)
+
+- **现象**:无(离线门全绿,PSO 有效)。是在写 S4 逐名填值时,看着 dump 里的
+  `u_CurrentTime` / `u_RegionID` / `u_RegionOffset` 出现在 `MetallumIrisUniforms` 里才发现的。
+- **根因**:sodium 的 `block_layer_opaque.vsh` 里这三个是
+  `#ifdef VULKAN → layout(push_constant) uniform PC {...}` / `#else → 松散 uniform`,
+  Iris 的 `patchSodium` 产出走的是 `#else` 分支,于是我们的 `wrapLooseUniforms` 把它们
+  当成包的 uniform 收进了统一块。而 `MetalDrawContext.updateData` 是**每个 render region**
+  写 20 字节(`u_RegionOffset`@0 / `u_CurrentTime`@12 / `u_RegionID`@16)并
+  `setUniform("push_constants", slice)` —— 它永远不会写到我们的块里。
+- **后果(若不修)**:编译通过、PSO 有效、绘制不报错,但每个 region 读到的 `u_RegionOffset`
+  恒为 0 → **所有区块塌到区域原点**,是那种“测试全绿但画面全错”的 bug。
+- **修复**(`MetalIrisShaderCompiler`):`partitionSodiumPushConstants` 把这三个从松散 uniform
+  里摘出去,再以 `layout(push_constant) uniform MetallumSodiumPushConstants {...}` 原样重新
+  发射(只发射给原本声明它们的 stage)。库存链于是产出与原生 sodium 管线**完全相同**的
+  `push_constants` 资源,per-draw ABI 不变。类型/顺序对不上就抛 `TranslationException`——
+  sodium 改了这个块要炸在转译期,而不是变成几何错位。
+- **验证**:6/6 的资源表都多出 `push_constants`,uniform 数各减 3(BSL SOLID 48→45)。
 
 ## 5. 风险与预案
 

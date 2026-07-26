@@ -632,6 +632,83 @@ final class MetalIrisShaderCompiler {
 
     static final String PHASE_LINK = "pair-link";
 
+    /**
+     * Sodium's per-draw values, which must stay outside the pack uniform block.
+     *
+     * <p>Sodium's own {@code block_layer_opaque.vsh} declares these three in a
+     * {@code layout(push_constant) uniform PC} block (its {@code #else} branch
+     * declares them as loose GL uniforms, and that is the branch Iris's
+     * {@code patchSodium} output carries). {@link MetalDrawContext#updateData}
+     * writes exactly this block — 20 bytes, {@code u_RegionOffset} at 0,
+     * {@code u_CurrentTime} at 12, {@code u_RegionID} at 16 — once per render
+     * region and hands it to the pass as {@code "push_constants"}.</p>
+     *
+     * <p>Folding them into {@code MetallumIrisUniforms} would compile fine and
+     * render wrong: every region would read a zero {@code u_RegionOffset}, so
+     * all chunks would collapse onto the region origin. Re-emitting the
+     * push-constant block verbatim keeps the override on exactly the same
+     * per-draw ABI as sodium's own pipeline.</p>
+     *
+     * <p>The declared order and types are the ABI; {@code partitionSodiumPushConstants}
+     * fails loudly if the patched source disagrees, so a sodium change surfaces
+     * as a translation error instead of silent geometry corruption.</p>
+     */
+    private static final List<LooseUniform> SODIUM_PUSH_CONSTANTS = List.of(
+            new LooseUniform("vec3", "u_RegionOffset", ""),
+            new LooseUniform("int", "u_CurrentTime", ""),
+            new LooseUniform("uint", "u_RegionID", "")
+    );
+
+    /** Byte size {@link MetalDrawContext} writes for {@link #SODIUM_PUSH_CONSTANTS}. */
+    static final int SODIUM_PUSH_CONSTANT_BYTES = 20;
+
+    private static final String SODIUM_PUSH_CONSTANT_BLOCK = """
+            layout(push_constant) uniform MetallumSodiumPushConstants {
+                vec3 u_RegionOffset;
+                int u_CurrentTime;
+                uint u_RegionID;
+            };""";
+
+    /**
+     * Splits sodium's per-draw uniforms out of the collected loose uniforms.
+     * Returns the pack-owned remainder; the sodium ones are re-emitted by
+     * {@link #SODIUM_PUSH_CONSTANT_BLOCK}.
+     */
+    private static List<LooseUniform> partitionSodiumPushConstants(
+            final String name, final List<LooseUniform> uniforms
+    ) {
+        Map<String, LooseUniform> byName = new java.util.LinkedHashMap<>();
+        for (LooseUniform sodium : SODIUM_PUSH_CONSTANTS) {
+            byName.put(sodium.name(), sodium);
+        }
+        List<LooseUniform> pack = new ArrayList<>(uniforms.size());
+        int matched = 0;
+        for (LooseUniform uniform : uniforms) {
+            LooseUniform expected = byName.get(uniform.name());
+            if (expected == null) {
+                pack.add(uniform);
+                continue;
+            }
+            if (!expected.equals(uniform)) {
+                throw new TranslationException(
+                        name, PHASE_LINK, null,
+                        "sodium push constant '" + uniform.name() + "' is declared as '"
+                                + uniform.glslDeclaration() + "' but MetalDrawContext writes '"
+                                + expected.glslDeclaration() + "'; the per-draw ABI changed"
+                );
+            }
+            matched++;
+        }
+        if (matched != 0 && matched != SODIUM_PUSH_CONSTANTS.size()) {
+            throw new TranslationException(
+                    name, PHASE_LINK, null,
+                    "patched source declares " + matched + " of " + SODIUM_PUSH_CONSTANTS.size()
+                            + " sodium push constants; the block must be all-or-nothing"
+            );
+        }
+        return pack;
+    }
+
     /** std140 member of the unified {@code MetallumIrisUniforms} block. */
     record UniformMember(String type, String name, int arrayCount, int offset, int byteSize) {
     }
@@ -705,7 +782,9 @@ final class MetalIrisShaderCompiler {
             String fragmentSrc = renameHostileIdentifiers(stripComments(patchedFragment));
             LooseExtraction vertexLoose = extractLooseUniforms(vertexSrc);
             LooseExtraction fragmentLoose = extractLooseUniforms(fragmentSrc);
-            List<LooseUniform> unified = dedupeByName(List.of(vertexLoose.uniforms(), fragmentLoose.uniforms()));
+            List<LooseUniform> vertexPack = partitionSodiumPushConstants(name, vertexLoose.uniforms());
+            List<LooseUniform> fragmentPack = partitionSodiumPushConstants(name, fragmentLoose.uniforms());
+            List<LooseUniform> unified = dedupeByName(List.of(vertexPack, fragmentPack));
 
             List<UniformMember> layout = computeStd140Layout(name, unified);
             String vertexOut = vertexLoose.body();
@@ -714,6 +793,14 @@ final class MetalIrisShaderCompiler {
                 String block = renderUniformBlock(unified);
                 vertexOut = insertUniformBlock(vertexOut, block);
                 fragmentOut = insertUniformBlock(fragmentOut, block);
+            }
+            // Sodium's per-draw values must stay in the push-constant block the
+            // draw context feeds; only the stage that declared them gets it.
+            if (vertexPack.size() != vertexLoose.uniforms().size()) {
+                vertexOut = insertUniformBlock(vertexOut, SODIUM_PUSH_CONSTANT_BLOCK);
+            }
+            if (fragmentPack.size() != fragmentLoose.uniforms().size()) {
+                fragmentOut = insertUniformBlock(fragmentOut, SODIUM_PUSH_CONSTANT_BLOCK);
             }
 
             Map<String, String> samplers = new java.util.LinkedHashMap<>();

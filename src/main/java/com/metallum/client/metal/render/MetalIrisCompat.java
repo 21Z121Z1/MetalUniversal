@@ -25,24 +25,24 @@ import net.fabricmc.api.Environment;
 @Environment(EnvType.CLIENT)
 public final class MetalIrisCompat {
     /**
-     * Switch for the Iris-on-Metal semantic layer (B2-1 onwards).
+     * Kill switch for the Iris-on-Metal semantic layer (B2-1 onwards). With
+     * {@code -Dmetallum.iris.semantic=false} the shims fall back to the pure
+     * dormancy behaviour described above: no pack is loaded, no terrain
+     * pipeline is overridden, and the client renders exactly as it did before
+     * the semantic layer existed. Any doubt about a regression should be
+     * bisected with this flag first.
      *
-     * <p><b>Currently opt-in and NOT yet usable in game.</b> The pack-loading
-     * and pipeline-override lines are in place and the offline gate proves
-     * every terrain program compiles to a valid PSO, but nothing supplies the
-     * generated {@code MetallumIrisUniforms} block or the pack's samplers to
-     * the sodium terrain pass yet (handoff steps S4 and S6). Enabling this with
-     * a pack selected therefore fails at the first terrain draw with
-     * {@code Missing uniform MetallumIrisUniforms}. It defaults to off so the
-     * client keeps the shipped dormant-coexistence behaviour; flip the default
-     * to {@code "true"} when S4 and S6 land.</p>
-     *
-     * <p>{@code -Dmetallum.iris.semantic=true} opts in;
-     * {@code -Dmetallum.iris.semantic=false} is the kill switch once the
-     * default flips.</p>
+     * <p>What B2-1 actually covers: a pack's {@code gbuffers_terrain} draws
+     * sodium's solid and cutout terrain, with its uniform block filled from
+     * real frame state and its samplers resolved (block atlas and lightmap from
+     * sodium, placeholders for the rest). Terrain kinds whose DRAWBUFFERS name
+     * more than the main target stay on sodium's own shader until the terrain
+     * pass carries those attachments. There is no shadow pass and no
+     * composite/final chain, so what reaches the screen is the raw gbuffer0
+     * output.</p>
      */
     private static final boolean SEMANTIC_LAYER =
-            "true".equalsIgnoreCase(System.getProperty("metallum.iris.semantic", "false"));
+            !"false".equalsIgnoreCase(System.getProperty("metallum.iris.semantic", "true"));
 
     private static volatile boolean announced;
     private static volatile boolean semanticAnnounced;
