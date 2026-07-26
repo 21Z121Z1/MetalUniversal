@@ -95,6 +95,14 @@ public final class MetalValidationClient implements ClientModInitializer {
     // yRotO -> yRot; pinning old == new makes that lerp exact, so the vehicle
     // scenario carries no wall-clock term at all.
     private static final float VEHICLE_TURN_DEGREES_PER_FRAME = 6.0F;
+    // Spin angle the item is pinned to on its capture frame. bobOffs is
+    // randomised per ItemEntity and is final, so rather than pinning the offset
+    // itself the integer tick base absorbs it (see installObjectMotionScene).
+    // Landing on a fixed angle keeps the capture off the face-on phase, where
+    // the whole visible face shares one depth and the horizontal motion spread
+    // that carries the rotation largely collapses.
+    private static final double ITEM_CAPTURE_SPIN_RADIANS = Math.PI / 4.0;
+    private static int itemTickBase;
     private static final int ITEM_ENTITY_ID = -2_147_000_002;
     private static final int VEHICLE_ENTITY_ID = -2_147_000_003;
     private static final UUID ITEM_ENTITY_UUID =
@@ -164,6 +172,17 @@ public final class MetalValidationClient implements ClientModInitializer {
             return;
         }
         Minecraft minecraft = Minecraft.getInstance();
+        // Cleared here rather than in applyDeterministicWorldState, which only
+        // runs once a level frame has already been driven. Under Gradle the
+        // window usually opens unfocused, and the pause screen then opens on
+        // the same frame the player joins — before that first level frame. The
+        // paused, unfocused client is throttled by the compositor to
+        // effectively zero frames, so the timeline never starts and the run
+        // exits reporting success while having asserted nothing. This runs from
+        // the first rendered frame, well before the world loads.
+        if (minecraft.options != null) {
+            minecraft.options.pauseOnLostFocus = false;
+        }
         if (minecraft.level == null || minecraft.player == null) {
             return;
         }
@@ -527,7 +546,8 @@ public final class MetalValidationClient implements ClientModInitializer {
             // is final), but it enters getSpin as a constant additive phase and
             // therefore cancels exactly in the frame-to-frame rotation delta
             // the interpolator consumes.
-            spinningItem.tickCount = Math.max(0, frame - OBJECT_SCENE_FRAME) * ITEM_SPIN_TICKS_PER_FRAME;
+            int stepsFromCapture = (frame - ITEM_CAPTURE_FRAME) * ITEM_SPIN_TICKS_PER_FRAME;
+            spinningItem.tickCount = Math.max(0, itemTickBase + stepsFromCapture);
             spinningItem.setDeltaMovement(Vec3.ZERO);
             spinningItem.setOldPosAndRot(itemPosition, 0.0F, 0.0F);
             spinningItem.setPos(itemPosition);
@@ -944,6 +964,21 @@ public final class MetalValidationClient implements ClientModInitializer {
         item.setDeltaMovement(Vec3.ZERO);
         minecraft.level.addEntity(item);
         spinningItem = item;
+        // getSpin is ageInTicks/20 + bobOffs, so choosing the tick count at the
+        // capture frame pins the rendered spin angle there regardless of the
+        // random offset. Two full turns are added before rounding so the base
+        // stays comfortably positive across the whole scenario (the earliest
+        // frame sits 8 steps below it) without approximating the 2*pi wrap.
+        itemTickBase = (int) Math.round(
+                20.0 * (ITEM_CAPTURE_SPIN_RADIANS - item.bobOffs + 4.0 * Math.PI)
+        );
+        Metallum.LOGGER.info(
+                "Item spin pinned: bobOffs={} tickBase={} (capture frame {} lands at {} rad)",
+                item.bobOffs,
+                itemTickBase,
+                ITEM_CAPTURE_FRAME,
+                ITEM_CAPTURE_SPIN_RADIANS
+        );
 
         Boat boat = new Boat(EntityTypes.OAK_BOAT, minecraft.level, () -> Items.OAK_BOAT);
         boat.setId(VEHICLE_ENTITY_ID);
