@@ -89,10 +89,6 @@ tasks.register("buildMacNative") {
 		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
 	}
 
-	doFirst {
-		file("src/main/resources/natives/macos").mkdirs()
-	}
-
 	// Compile MetallumShaderBridge.c separately with clang so we have full
 	// control over -I flags (swiftc's -Xcc forwarding sometimes drops paths
 	// when the .c file's includes are nested). Then link the resulting object
@@ -100,42 +96,47 @@ tasks.register("buildMacNative") {
 	// are left undefined (-undefined dynamic_lookup) and resolved at runtime
 	// from libglslang.dylib / libspvc.dylib loaded by MetalNativeBridge.
 	def cObjFile = file("${buildDir}/native-obj/MetallumShaderBridge.macos.o")
+	def outDir = file("src/main/resources/natives/macos")
+	def projectDir = project.projectDir
+	def jdkInc = jdkInclude
+	def jdkIncDarwin = jdkIncludeDarwin
 
-	doFirst {
+	doLast {
+		outDir.mkdirs()
 		cObjFile.parentFile.mkdirs()
-	}
 
-	// Step 1: compile C → object with clang (explicit -I for jni.h, glslang, spvc)
-	project.exec {
-		workingDir project.projectDir
-		commandLine "clang",
-			"-O2",
-			"-target", "arm64-apple-macosx14.0",
-			"-Ithird_party/glslang",
-			"-Ithird_party/SPIRV-Cross",
-			"-I${jdkInclude}",
-			"-I${jdkIncludeDarwin}",
-			"-fPIC",
-			"-c", "src/main/native/MetallumShaderBridge.c",
-			"-o", cObjFile.absolutePath
-	}
+		// Step 1: compile C → object with clang (explicit -I for jni.h, glslang, spvc)
+		project.exec {
+			workingDir projectDir
+			commandLine "clang",
+				"-O2",
+				"-target", "arm64-apple-macosx14.0",
+				"-Ithird_party/glslang",
+				"-Ithird_party/SPIRV-Cross",
+				"-I${jdkInc}",
+				"-I${jdkIncDarwin}",
+				"-fPIC",
+				"-c", "src/main/native/MetallumShaderBridge.c",
+				"-o", cObjFile.absolutePath
+		}
 
-	// Step 2: compile + link Swift with the C object file
-	project.exec {
-		workingDir project.projectDir
-		commandLine "swiftc",
-			"-O",
-			"-whole-module-optimization",
-			"-emit-library",
-			"-module-name", "metallum_native",
-			"-target", "arm64-apple-macosx14.0",
-			"-framework", "Foundation",
-			"-framework", "Metal",
-			"-framework", "QuartzCore",
-			"-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup",
-			"-o", "src/main/resources/natives/macos/libmetallum.dylib",
-			cObjFile.absolutePath,
-			"src/main/native/MetallumNative.swift"
+		// Step 2: compile + link Swift with the C object file
+		project.exec {
+			workingDir projectDir
+			commandLine "swiftc",
+				"-O",
+				"-whole-module-optimization",
+				"-emit-library",
+				"-module-name", "metallum_native",
+				"-target", "arm64-apple-macosx14.0",
+				"-framework", "Foundation",
+				"-framework", "Metal",
+				"-framework", "QuartzCore",
+				"-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup",
+				"-o", "src/main/resources/natives/macos/libmetallum.dylib",
+				cObjFile.absolutePath,
+				"src/main/native/MetallumNative.swift"
+		}
 	}
 }
 
@@ -174,10 +175,6 @@ def iosSdkPath = {
 tasks.register("buildIOSNative") {
 	onlyIf { iosSdkPath != null }
 
-	doFirst {
-		file("src/main/resources/natives/ios").mkdirs()
-	}
-
 	// The dylib is built with `-static`-style linking of the Swift stdlib so it
 	// can be loaded directly via dlopen on a jailbroken/signable device.
 	// MetallumShaderBridge.c is compiled separately with clang (same pattern as
@@ -186,45 +183,51 @@ tasks.register("buildIOSNative") {
 	// dynamic_lookup (resolved at runtime from libglslang.dylib / libspvc.dylib
 	// loaded by MetalNativeBridge).
 	def cObjFile = file("${buildDir}/native-obj/MetallumShaderBridge.ios.o")
+	def outDir = file("src/main/resources/natives/ios")
+	def projectDir = project.projectDir
+	def sdk = iosSdkPath
+	def jdkInc = jdkInclude
+	def jdkIncDarwin = jdkIncludeDarwin
 
-	doFirst {
+	doLast {
+		outDir.mkdirs()
 		cObjFile.parentFile.mkdirs()
-	}
 
-	// Step 1: compile C → object with clang (iOS target, explicit -I flags)
-	project.exec {
-		workingDir project.projectDir
-		commandLine "xcrun", "clang",
-			"-O2",
-			"-target", "arm64-apple-ios14.0",
-			"-isysroot", iosSdkPath,
-			"-Ithird_party/glslang",
-			"-Ithird_party/SPIRV-Cross",
-			"-I${jdkInclude}",
-			"-I${jdkIncludeDarwin}",
-			"-fPIC",
-			"-c", "src/main/native/MetallumShaderBridge.c",
-			"-o", cObjFile.absolutePath
-	}
+		// Step 1: compile C → object with clang (iOS target, explicit -I flags)
+		project.exec {
+			workingDir projectDir
+			commandLine "xcrun", "clang",
+				"-O2",
+				"-target", "arm64-apple-ios14.0",
+				"-isysroot", sdk,
+				"-Ithird_party/glslang",
+				"-Ithird_party/SPIRV-Cross",
+				"-I${jdkInc}",
+				"-I${jdkIncDarwin}",
+				"-fPIC",
+				"-c", "src/main/native/MetallumShaderBridge.c",
+				"-o", cObjFile.absolutePath
+		}
 
-	// Step 2: compile + link Swift with the C object file
-	project.exec {
-		workingDir project.projectDir
-		commandLine "swiftc",
-			"-O",
-			"-whole-module-optimization",
-			"-emit-library",
-			"-module-name", "metallum_native",
-			"-target", "arm64-apple-ios14.0",
-			"-sdk", iosSdkPath,
-			"-framework", "Foundation",
-			"-framework", "Metal",
-			"-framework", "QuartzCore",
-			"-framework", "UIKit",
-			"-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup",
-			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
-			cObjFile.absolutePath,
-			"src/main/native/MetallumNative.swift"
+		// Step 2: compile + link Swift with the C object file
+		project.exec {
+			workingDir projectDir
+			commandLine "swiftc",
+				"-O",
+				"-whole-module-optimization",
+				"-emit-library",
+				"-module-name", "metallum_native",
+				"-target", "arm64-apple-ios14.0",
+				"-sdk", sdk,
+				"-framework", "Foundation",
+				"-framework", "Metal",
+				"-framework", "QuartzCore",
+				"-framework", "UIKit",
+				"-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup",
+				"-o", "src/main/resources/natives/ios/libmetallum.dylib",
+				cObjFile.absolutePath,
+				"src/main/native/MetallumNative.swift"
+		}
 	}
 }
 
