@@ -21,6 +21,8 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.projectile.arrow.Arrow;
 import net.minecraft.world.entity.vehicle.boat.Boat;
 import net.minecraft.world.entity.vehicle.minecart.Minecart;
+import net.minecraft.world.entity.vehicle.minecart.MinecartBehavior;
+import net.minecraft.world.entity.vehicle.minecart.NewMinecartBehavior;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
@@ -101,7 +103,9 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final int ARROW_CAPTURE_FRAME = 200;
     private static final int MINECART_TURN_FRAME = 204;
     private static final int MINECART_CAPTURE_FRAME = 212;
-    private static final int OBJECT_SERIES_END_FRAME = 216;
+    private static final int MINECART_NEW_TURN_FRAME = 216;
+    private static final int MINECART_NEW_CAPTURE_FRAME = 224;
+    private static final int OBJECT_SERIES_END_FRAME = 228;
     // The timeline now runs past the old 220-frame ceiling.
     private static final int TIMELINE_TIMEOUT_FRAME = 300;
     // Item spin is driven by ageInTicks, which the renderer builds as
@@ -153,12 +157,15 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final int LIVING_ENTITY_ID = -2_147_000_004;
     private static final int ARROW_ENTITY_ID = -2_147_000_005;
     private static final int MINECART_ENTITY_ID = -2_147_000_006;
+    private static final int MINECART_NEW_ENTITY_ID = -2_147_000_007;
     private static final UUID LIVING_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf04");
     private static final UUID ARROW_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf05");
     private static final UUID MINECART_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf06");
+    private static final UUID MINECART_NEW_ENTITY_UUID =
+            UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf07");
     // Pinned FRAMEBUFFER size. All metric thresholds and golden baselines
     // are calibrated at this capture size (the 2x-backing framebuffer of the
     // 854x480 logical window the Gradle task requests via --width/--height).
@@ -177,6 +184,7 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static Pig turningLiving;
     private static Arrow turningArrow;
     private static Minecart shakingMinecart;
+    private static Minecart newBehaviorMinecart;
     private static Vec3 cameraOrigin;
     private static float cameraYaw;
     private static float cameraPitch;
@@ -337,7 +345,8 @@ public final class MetalValidationClient implements ClientModInitializer {
         } else if (frame == VEHICLE_TURN_FRAME
                 || frame == LIVING_TURN_FRAME
                 || frame == ARROW_TURN_FRAME
-                || frame == MINECART_TURN_FRAME) {
+                || frame == MINECART_TURN_FRAME
+                || frame == MINECART_NEW_TURN_FRAME) {
             // Swapping which object is in view is a large one-frame jump for
             // both the outgoing and incoming object; the capture sits 8 frames
             // later, and the reset keeps that transient out of the accumulated
@@ -382,7 +391,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                 && MetalFxManager.flickerMetricCompleted("cutout_sky_hold")) {
             int completed = MetalFxManager.validationCapturesCompleted();
             int failures = MetalFxManager.validationCaptureFailures();
-            if (completed != 15 || failures != 0) {
+            if (completed != 16 || failures != 0) {
                 removeOcclusionWall(minecraft);
                 removeCutoutScene(minecraft);
                 removeObjectMotionScene();
@@ -390,7 +399,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                 finishRunState("failed", completed, failures);
                 throw new IllegalStateException(
                         "Automated Minecraft GPU validation failed: completed="
-                                + completed + "/15, failures=" + failures
+                                + completed + "/16, failures=" + failures
                 );
             }
             finishAndStop(minecraft, completed, failures);
@@ -478,7 +487,10 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (timelineFrame < MINECART_TURN_FRAME) {
             return new ScenarioPose("arrow_turn", 0.80, 0.40);
         }
-        return new ScenarioPose("minecart_rail", 0.80, 0.40);
+        if (timelineFrame < MINECART_NEW_TURN_FRAME) {
+            return new ScenarioPose("minecart_rail", 0.80, 0.40);
+        }
+        return new ScenarioPose("minecart_new", 0.80, 0.40);
     }
 
     /**
@@ -584,7 +596,8 @@ public final class MetalValidationClient implements ClientModInitializer {
                 || "vehicle_turn".equals(scenario)
                 || "living_turn".equals(scenario)
                 || "arrow_turn".equals(scenario)
-                || "minecart_rail".equals(scenario);
+                || "minecart_rail".equals(scenario)
+                || "minecart_new".equals(scenario);
     }
 
     /**
@@ -622,6 +635,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         boolean living = "living_turn".equals(scenario);
         boolean arrow = "arrow_turn".equals(scenario);
         boolean minecart = "minecart_rail".equals(scenario);
+        boolean minecartNew = "minecart_new".equals(scenario);
 
         Vec3 itemPosition = item ? itemHome : parked;
         Vec3 vehiclePosition = vehicle ? vehicleHome : parked;
@@ -638,6 +652,11 @@ public final class MetalValidationClient implements ClientModInitializer {
         // rail-sampled branch re-selects itself the moment the cart is back on
         // the track, with a history reset on that same frame.
         Vec3 minecartPosition = minecart ? minecartHome : parked;
+        // The new-behavior cart needs no rail: newExtractState reads the cart's
+        // own position and rotation rather than sampling the track, so it hangs
+        // in open air where the level camera frames it.
+        Vec3 minecartNewHome = cameraOrigin.add(look.scale(3.0)).add(right.scale(0.40)).add(0.0, 0.6, 0.0);
+        Vec3 minecartNewPosition = minecartNew ? minecartNewHome : parked;
 
         if (spinningItem != null) {
             // The spin phase is a pure function of the timeline frame index.
@@ -719,7 +738,35 @@ public final class MetalValidationClient implements ClientModInitializer {
                     : 0.0F);
             shakingMinecart.setHurtDir(1);
         }
+        if (newBehaviorMinecart != null) {
+            // The new behavior reconstructs as T(pos) * R_y(yRot) * R_z(-xRot)
+            // * T_y(0.375): unlike the rail-sampled path it uses the cart's own
+            // yaw, so this scenario simply turns it. With no lerp steps queued
+            // cartHasPosRotLerp() is false and newExtractState reads getXRot /
+            // getYRot with no partialTick term, which makes this the most
+            // reproducible of the object scenarios.
+            //
+            // The hurt shake is left at zero here on purpose. It is already
+            // covered by minecart_rail, and it is the one term that would
+            // reintroduce a wall-clock component; keeping it out leaves the
+            // yaw as the only rotation under test.
+            float yaw = minecartNew
+                    ? (frame - MINECART_NEW_TURN_FRAME) * OBJECT_TURN_DEGREES_PER_FRAME
+                    : 0.0F;
+            newBehaviorMinecart.setDeltaMovement(Vec3.ZERO);
+            newBehaviorMinecart.setOldPosAndRot(minecartNewPosition, yaw, 0.0F);
+            newBehaviorMinecart.setPos(minecartNewPosition);
+            newBehaviorMinecart.setYRot(yaw);
+            newBehaviorMinecart.yRotO = yaw;
+            newBehaviorMinecart.setXRot(0.0F);
+            newBehaviorMinecart.xRotO = 0.0F;
+            newBehaviorMinecart.setHurtTime(0);
+            newBehaviorMinecart.setDamage(0.0F);
+        }
 
+        if (minecartNew) {
+            return minecartNewPosition;
+        }
         if (item) {
             return itemPosition;
         }
@@ -733,6 +780,43 @@ public final class MetalValidationClient implements ClientModInitializer {
             return arrowPosition;
         }
         return minecartPosition;
+    }
+
+    /**
+     * A minecart that reports the new movement behavior to the renderer.
+     *
+     * <p>The two minecart behaviors are separate reconstruction paths, and the
+     * old one is all this world can produce on its own: {@code AbstractMinecart}
+     * picks {@code NewMinecartBehavior} only when the level enables
+     * {@code FeatureFlags.MINECART_IMPROVEMENTS}, and the validation world
+     * enables {@code minecraft:vanilla} alone. Turning that flag on would change
+     * a world three sessions share and move every existing golden capture.</p>
+     *
+     * <p>The renderer selects its extraction branch purely on
+     * {@code entity.getBehavior()}, so overriding that reaches
+     * {@code newExtractState} — and therefore
+     * {@code MetalEntityObjectPose.minecartNewRender} — without touching the
+     * world at all. The behavior's physics never run here: the driver pins the
+     * cart's position and rotation every frame regardless.</p>
+     *
+     * <p>Scope worth being explicit about: this covers the reconstruction, not
+     * the feature-flag plumbing that would select the behavior in a real
+     * world.</p>
+     */
+    private static final class NewBehaviorMinecart extends Minecart {
+        private final NewMinecartBehavior newBehavior;
+
+        private NewBehaviorMinecart(final net.minecraft.world.level.Level level) {
+            super(EntityTypes.MINECART, level);
+            this.newBehavior = new NewMinecartBehavior(this);
+        }
+
+        @Override
+        public MinecartBehavior getBehavior() {
+            // The superclass constructor can reach getBehavior before the field
+            // is assigned; fall back until it is.
+            return newBehavior == null ? super.getBehavior() : newBehavior;
+        }
     }
 
     /** Centre of the rail tile the minecart sits on, lifted onto the rail. */
@@ -1197,6 +1281,21 @@ public final class MetalValidationClient implements ClientModInitializer {
         minecraft.level.addEntity(cart);
         shakingMinecart = cart;
 
+        NewBehaviorMinecart newCart = new NewBehaviorMinecart(minecraft.level);
+        newCart.setId(MINECART_NEW_ENTITY_ID);
+        newCart.setUUID(MINECART_NEW_ENTITY_UUID);
+        newCart.setNoGravity(true);
+        newCart.setDeltaMovement(Vec3.ZERO);
+        newCart.setPos(parked);
+        minecraft.level.addEntity(newCart);
+        newBehaviorMinecart = newCart;
+        if (!(newCart.getBehavior() instanceof NewMinecartBehavior)) {
+            throw new IllegalStateException(
+                    "Validation minecart did not report the new movement behavior;"
+                            + " the new-behavior reconstruction branch would not be exercised"
+            );
+        }
+
         // The re-seal plus the new silhouettes disocclude most of the frame;
         // the captures sit 8 frames later so history is settled by then.
         MetalFxManager.resetHistory("automated validation object motion scene");
@@ -1289,6 +1388,10 @@ public final class MetalValidationClient implements ClientModInitializer {
             shakingMinecart.discard();
             shakingMinecart = null;
         }
+        if (newBehaviorMinecart != null) {
+            newBehaviorMinecart.discard();
+            newBehaviorMinecart = null;
+        }
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level != null && !OBJECT_SCENE.isEmpty()) {
             OBJECT_SCENE.forEach((pos, state) -> minecraft.level.setBlock(pos, state, 19));
@@ -1356,7 +1459,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         Metallum.LOGGER.info(
                 "Automated Minecraft MetalFX validation passed {}/{} GPU captures; stopping client",
                 completed,
-                15
+                16
         );
         removeOcclusionWall(minecraft);
         removeCutoutScene(minecraft);
@@ -1406,7 +1509,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "usedComputerUse": false,
                       "controlledFrames": 90,
                       "controlledEntity": "armor_stand",
-                      "expectedGpuCaptures": 15,
+                      "expectedGpuCaptures": 16,
                       "completedGpuCaptures": %d,
                       "failedGpuCaptures": %d,
                       "status": "%s"

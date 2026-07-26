@@ -1829,11 +1829,13 @@ public final class MetalFxManager {
                     && Double.isFinite(motionSpreadX)
                     && motionSpreadX >= OBJECT_MIN_SPIN_SPREAD_X
                     && maxAbsMotion <= OBJECT_MAX_MOTION;
-            // A boat turning on the spot, and a pig turning its body: both are
-            // yaw rotations reconstructed as R_y(180 - rot), so the signature is
-            // the same horizontal spread. Both render through core/entity, so
-            // neither carries a core/item assertion.
-            case "vehicle_turn", "living_turn" -> depthContractPassed
+            // A boat turning on the spot, a pig turning its body, and a
+            // new-behavior minecart turning on its own yaw. The reconstructions
+            // differ in sign and offset — R_y(180 - rot) for the first two,
+            // R_y(yRot) for the cart — but all three are rotations about the
+            // vertical axis, so they share the horizontal-spread signature. All
+            // render through core/entity, so none carries a core/item assertion.
+            case "vehicle_turn", "living_turn", "minecart_new" -> depthContractPassed
                     && validPixels > OBJECT_MIN_VALID_PIXELS
                     && Double.isFinite(motionSpreadX)
                     && motionSpreadX >= OBJECT_MIN_SPIN_SPREAD_X
@@ -1986,7 +1988,7 @@ public final class MetalFxManager {
                     || frame == 42 || frame == 46 || frame == 54 || frame == 62
                     || frame == 74 || frame == 82
                     || frame == 164 || frame == 176 || frame == 188
-                    || frame == 200 || frame == 212;
+                    || frame == 200 || frame == 212 || frame == 224;
         }
     }
 
