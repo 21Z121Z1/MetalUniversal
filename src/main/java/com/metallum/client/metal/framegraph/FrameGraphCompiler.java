@@ -92,13 +92,6 @@ final class FrameGraphCompiler {
                             + " from stage " + stage + ", which that resource does not permit "
                             + descriptor.stages());
                 }
-                if (usage.getValue().writes() && descriptor.lifetime() == Lifetime.EXTERNAL
-                        && stage != ResourceDescriptor.PipelineStage.FRAGMENT
-                        && stage != ResourceDescriptor.PipelineStage.BLIT
-                        && stage != ResourceDescriptor.PipelineStage.PRESENT) {
-                    throw new FrameGraphException("Pass " + pass.name() + " writes externally owned "
-                            + semantic + " from stage " + stage);
-                }
             }
         }
     }
