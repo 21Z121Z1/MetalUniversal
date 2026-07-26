@@ -1,5 +1,6 @@
 package com.metallum.mixin.iris;
 
+import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalIrisCompat;
 import net.irisshaders.iris.Iris;
 import org.spongepowered.asm.mixin.Mixin;
@@ -20,11 +21,35 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(value = Iris.class, remap = false)
 public abstract class IrisBootstrapCompatMixin {
+    /**
+     * The method body is GL from its first statement ({@code GL.getCapabilities},
+     * {@code glMaxShaderCompilerThreads}, {@code PBRTextureManager.init}), so it
+     * is cancelled wholesale. Its <b>last</b> statement is
+     * {@code loadShaderpack()}, though — and that is the only call site that
+     * runs at startup. With the semantic layer active we therefore have to
+     * perform it ourselves; gating {@code loadShaderpack} alone accomplishes
+     * nothing because nothing ever reaches it.
+     *
+     * <p>A pack that fails to load must not take the client's renderer init
+     * down with it: Iris's own {@code currentPack} simply stays empty, which
+     * {@link IrisPipelineFactoryMixin} reads as "no pack" and serves the
+     * vanilla pipeline.</p>
+     */
     @Inject(method = "onRenderSystemInit", at = @At("HEAD"), cancellable = true)
     private static void metallum$skipGlRendererInit(final CallbackInfo ci) {
-        if (MetalIrisCompat.holdIrisDormant()) {
-            ci.cancel();
+        if (!MetalIrisCompat.holdIrisDormant()) {
+            return;
         }
+        if (MetalIrisCompat.semanticLayerEnabled()) {
+            try {
+                Iris.loadShaderpack();
+            } catch (Throwable t) {
+                Metallum.LOGGER.error(
+                        "[metallum-iris] shader pack failed to load; continuing without one", t
+                );
+            }
+        }
+        ci.cancel();
     }
 
     /**

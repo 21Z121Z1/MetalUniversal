@@ -197,6 +197,48 @@ MetalDevice.computeIfAbsent(sodiumPipeline) ─→ IrisMetalPipelineOverrides.tr
   sodium 改了这个块要炸在转译期,而不是变成几何错位。
 - **验证**:6/6 的资源表都多出 `push_constants`,uniform 数各减 3(BSL SOLID 48→45)。
 
+### 迭代 4 — 唤醒线的三个真实客户端阻塞(S7 首跑)
+
+按顺序踩到,每个都靠日志栈直接定位:
+
+1. **`loadShaderpack` 根本没被调到**。放行 `loadShaderpack` 的注入是空操作——
+   字节码确认它在启动期**只有一个调用点**:`Iris.onRenderSystemInit` 的最后一句
+   (offset 149),而我们对 `onRenderSystemInit` 是无条件取消的(它从第一句就是
+   `GL.getCapabilities`)。**修**:`IrisBootstrapCompatMixin.metallum$skipGlRendererInit`
+   在语义层开启时先自己 `Iris.loadShaderpack()`(包在 try/catch 里,装载失败只让
+   `currentPack` 留空,不能把渲染器初始化拖下水)再 cancel。
+   *`onRenderSystemInit` 被跳过的其余内容*:`PBRTextureManager.init`(GL)、
+   4 个 `VertexSerializerRegistry.registerSerializer`(纯 CPU,目前不需要)。
+2. **`ShaderPack.<init>` 撞 GL capability 探测**:
+   `FeatureFlags.isUsable` → `IrisRenderSystem.supportsImageLoadStore` → `GL.getCapabilities()`
+   → `IllegalStateException: No GLCapabilities instance set`。**修**:`IrisRenderSystemCompatMixin`
+   把 `supportsImageLoadStore` / `supportsBufferBlending` / `supportsCompute` /
+   `supportsTesselation` 一并假接为 false(`supportsSSBO` 早已假接)。全 false 是**故意**的:
+   B2-1 只实现 gbuffer terrain,不能让包走 compute/image 分支;真要求这些特性的包会被 Iris
+   按正常流程拒绝,这比渲染错误好。
+3. **`MetalWorldRenderingPipeline` 构造顺序 NPE**:`VanillaRenderingPipeline` 的构造器会调用
+   虚方法 `shouldDisableDirectionalShading()`,此时子类字段还没赋值 → `programSet` 为 null。
+   **修**:该覆写加 null 检查(超类构造期返回 vanilla 默认值),构造器里改用
+   `directives.isOldLighting()` 直接算并写进 WorldRenderingSettings。
+
+**S7 首跑结果(2026-07-27,BSL 10.1.3,`enableShaders=true`)**:
+```
+[metallum] Iris-on-Metal semantic layer active: ...
+[Iris] Profile: HIGH (+0 options changed by user)
+[Iris] Using shaderpack: bsl-shaders.zip
+[metallum-iris] translated sodium terrain SOLID from pack program gbuffers_terrain (drawBuffers=[0])
+[metallum-iris] translated sodium terrain CUTOUT from pack program gbuffers_terrain (drawBuffers=[0])
+[metallum-iris] translated sodium terrain TRANSLUCENT from pack program gbuffers_water (drawBuffers=[0, 1])
+[metallum-iris] semantic pipeline generation 1 online for pack program set Profile: HIGH
+```
+到标题画面为止 0 崩溃、管线创建后无任何 ERROR。**注意 in-game 的 drawBuffers 与离线不同**:
+离线跑的是默认 profile,in-game 是 BSL 的 HIGH profile,translucent 变成 `[0,1]`——
+**S6b 的必要性由 profile 决定,不能只看离线结果**。
+
+**S7 仍未完成的部分**:没有进世界,因此 `IrisMetalPipelineOverrides.tryCompile` 是否真的
+在地形绘制时被命中、`MetallumIrisUniforms`/采样器 fallback 是否真的喂上、画面是否出现
+pack 着色——**全部未验证**。接手第一件事就是进世界看 `compiling terrain override` 日志。
+
 ## 5. 风险与预案
 
 | 风险 | 信号 | 预案 |

@@ -66,7 +66,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         settings.setEntityIds(this.pack.getIdMap().getEntityIdMap());
         settings.setItemIds(this.pack.getIdMap().getItemIdMap());
         settings.setAmbientOcclusionLevel(directives.getAmbientOcclusionLevel());
-        settings.setDisableDirectionalShading(shouldDisableDirectionalShading());
+        settings.setDisableDirectionalShading(!directives.isOldLighting());
         settings.setUseSeparateAo(directives.shouldUseSeparateAo());
         settings.setBreaksAnisotropy(directives.breaksAnisotropy());
         settings.setVoxelizeLightBlocks(directives.shouldVoxelizeLightBlocks());
@@ -118,9 +118,16 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         return this.programSet.getPackDirectives().getSunPathRotation();
     }
 
+    /**
+     * {@code VanillaRenderingPipeline}'s constructor calls this before our own
+     * fields are assigned (it seeds {@code WorldRenderingSettings} from it), so
+     * the null check is load-bearing: during super construction it answers with
+     * the vanilla default, and our constructor writes the pack's real value to
+     * the settings straight afterwards.
+     */
     @Override
     public boolean shouldDisableDirectionalShading() {
-        return !this.programSet.getPackDirectives().isOldLighting();
+        return this.programSet != null && !this.programSet.getPackDirectives().isOldLighting();
     }
 
     @Override

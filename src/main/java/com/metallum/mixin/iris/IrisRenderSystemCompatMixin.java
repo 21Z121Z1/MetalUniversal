@@ -35,6 +35,31 @@ public abstract class IrisRenderSystemCompatMixin {
     }
 
     /**
+     * The remaining capability probes, all of which read
+     * {@code GL.getCapabilities()}. {@code ShaderPack}'s constructor reaches
+     * them through {@code FeatureFlags.isUsable} while resolving a pack's
+     * declared feature flags, so they are on the pack-loading path, not just
+     * the renderer-init path.
+     *
+     * <p>All report unsupported for B2-1: the semantic layer implements the
+     * gbuffer terrain program and nothing else, so a pack must not take a code
+     * path that assumes compute, image load/store, per-buffer blending or
+     * tessellation is available. A pack that <i>requires</i> one of these is
+     * rejected by Iris with its normal "unsupported feature" message, which is
+     * the correct outcome rather than a broken render.</p>
+     */
+    @Inject(
+            method = {"supportsImageLoadStore", "supportsBufferBlending", "supportsCompute", "supportsTesselation"},
+            at = @At("HEAD"),
+            cancellable = true
+    )
+    private static void metallum$noGlFeatureCaps(final CallbackInfoReturnable<Boolean> cir) {
+        if (MetalIrisCompat.holdIrisDormant()) {
+            cir.setReturnValue(false);
+        }
+    }
+
+    /**
      * {@code StandardMacros} enumerates GL extensions with
      * {@code getStringi(GL_EXTENSIONS, i)}. {@link GlStateManagerCompatMixin}
      * already reports {@code GL_NUM_EXTENSIONS == 0}, so the loop never runs;
