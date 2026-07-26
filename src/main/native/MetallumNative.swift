@@ -87,6 +87,10 @@ private enum NativeState {
     // presenter is constructed; flipping it later has no effect, which matches how
     // the presenter is started.
     static var metal4PresentEnabled = false
+    // Appends the barrier map's consumer barriers to the existing Metal 3 encoders
+    // (spec M6-B). Independent of the metal4 master gate: the API is gated on
+    // macOS 26, not on Metal 4 family support.
+    static var metal4BarrierEnabled = false
     // MTL4LibraryFunctionDescriptor requires the MTLLibrary a function came
     // from, and MTLFunction does not expose it, so the association is kept
     // beside it. Weak keys: the entry disappears when the function is released,
@@ -3081,6 +3085,7 @@ public func metallum_metalfx_apply_cutout_reactive(
                 return 0
             }
             encoder.label = "MetalFX CUTOUT Coverage Reactive Dilation"
+            metal4BarrierComputeAfterRender(encoder)
             if let fence {
                 encoder.waitForFence(fence)
             }
@@ -3178,6 +3183,7 @@ public func metallum_metalfx_encode_hand_overlay(
             return 0
         }
         encoder.label = "MetalFX Hand Overlay Motion"
+        metal4BarrierComputeAfterRender(encoder)
         if let fence {
             encoder.waitForFence(fence)
         }
@@ -3244,6 +3250,7 @@ public func metallum_metalfx_clear_motion_inputs(
                 return 0
             }
             encoder.label = "MetalFX Clear Object Motion Inputs"
+            metal4BarrierComputeAfterRender(encoder)
             if let fence {
                 encoder.waitForFence(fence)
             }
@@ -3291,6 +3298,8 @@ public func metallum_metalfx_mark_transparency(
                 logMetalFxFailureOnce("transparency-mask-encode", "could not create transparency mask pipeline or encoder")
                 return 0
             }
+            // E7: this encoder has no fence at all under Metal 3 (barrier map section 0).
+            metal4BarrierComputeAfterRender(encoder)
 
             var flags: UInt32 = 0
             if translucentTexture != nil { flags |= 1 << 0 }
@@ -3537,6 +3546,7 @@ public func metallum_metalfx_encode_v2(
             }
             NativeState.lastTemporalScalerForInterpolation = scalerObject
             cameraEncoder.label = "MetalFX Camera Motion Reconstruction"
+            metal4BarrierComputeAfterRender(cameraEncoder)
             if let fence {
                 cameraEncoder.waitForFence(fence)
             }
@@ -3578,6 +3588,8 @@ public func metallum_metalfx_encode_v2(
                 return 0
             }
             mergeEncoder.label = "MetalFX Object and Camera Motion Merge"
+            // E9 is the one dispatch->dispatch edge: it reads the camera encoder above.
+            metal4BarrierComputeAfterCompute(mergeEncoder)
             if let fence {
                 mergeEncoder.waitForFence(fence)
             }
@@ -3647,6 +3659,8 @@ public func metallum_metalfx_encode_v2(
                 return 0
             }
             historyBlit.label = "MetalFX Previous Depth Update"
+            // E10: this encoder has no fence at all under Metal 3 (barrier map section 0).
+            metal4BarrierBlitAfterRender(historyBlit)
             historyBlit.copy(
                 from: depthTexture,
                 sourceSlice: 0,
@@ -3895,6 +3909,7 @@ public func metallum_encode_texture_copy(
             #endif
             return 0
         }
+        metal4BarrierRenderAfterRender(encoder)
         if let fence {
             encoder.waitForFence(fence, before: .fragment)
         }
@@ -4406,7 +4421,11 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
     _ commandBuffer: MTLCommandBuffer
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        retainedPointer(commandBuffer.makeBlitCommandEncoder())
+        guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
+            return nil
+        }
+        metal4BarrierBlitAfterRender(encoder)
+        return retainedPointer(encoder)
     }
 }
 
@@ -4754,6 +4773,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             return nil
         }
+        metal4BarrierRenderAfterUploadAndRender(encoder)
         encoder.setViewport(MTLViewport(originX: 0.0, originY: 0.0, width: viewportWidth, height: viewportHeight, znear: 0.0, zfar: 1.0))
         return retainedPointer(encoder)
     }
@@ -4857,6 +4877,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             return nil
         }
+        metal4BarrierRenderAfterUploadAndRender(encoder)
         encoder.setViewport(MTLViewport(
             originX: 0.0,
             originY: 0.0,
@@ -5171,6 +5192,7 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
             return
         }
 
+        metal4BarrierRenderAfterRender(encoder)
         if let globalFence {
             encoder.waitForFence(globalFence, before: .fragment)
         }
@@ -5327,6 +5349,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             return
         }
 
+        metal4BarrierRenderAfterRender(encoder)
         if let globalFence {
             encoder.waitForFence(globalFence, before: .fragment)
         }
@@ -5445,6 +5468,16 @@ public func metallum_set_metal4_compiler_enabled(_ enabled: Int32) {
 /// Java only passes 1 when the capability gate, metallum.opt.metal4Compiler and
 /// metallum.opt.metal4Present all hold; the presenter still falls back to Metal 3
 /// on its own if any Metal 4 object cannot be built.
+/// Appends the barrier map's consumer barriers to the existing Metal 3 encoders
+/// (spec M6-B). Independent of the metal4 master gate, like the residency set:
+/// barrierAfterQueueStages:beforeStages: is gated on macOS 26, not on Metal 4
+/// family support. Appending can only strengthen ordering, so with this on the
+/// output must stay byte-identical.
+@_cdecl("metallum_set_metal4_barrier_enabled")
+public func metallum_set_metal4_barrier_enabled(_ enabled: Int32) {
+    NativeState.metal4BarrierEnabled = enabled != 0
+}
+
 @_cdecl("metallum_set_metal4_present_enabled")
 public func metallum_set_metal4_present_enabled(_ enabled: Int32) {
     NativeState.metal4PresentEnabled = enabled != 0
@@ -5683,6 +5716,80 @@ private func descriptorHasLiveColorWrite(_ descriptor: MTLRenderPipelineDescript
         }
     }
     return false
+}
+
+// MARK: - Appended queue barriers (migration spec M6-B)
+
+/// Raw MTLStages bits. Kept as plain integers so the call sites below need no
+/// #available: MTLStages itself is a macOS 26 symbol and cannot appear in an
+/// unversioned signature. Values verified bit-for-bit against MTLCommandEncoder.h,
+/// and identical to the low bits of the project's existing mtl/MTLRenderStages
+/// values, which is what lets the Java `long stages` ABI be reused later.
+private enum Metal4Stage {
+    static let vertex: UInt = 1 << 0
+    static let fragment: UInt = 1 << 1
+    static let tile: UInt = 1 << 2
+    static let dispatch: UInt = 1 << 27
+    static let blit: UInt = 1 << 28
+}
+
+/// Appends the consumer barrier from docs/metal4-barrier-map.md to an ordinary
+/// *Metal 3* encoder.
+///
+/// This is the M6-B validation vehicle, and it works because macOS 26 added
+/// `barrierAfterQueueStages:beforeStages:` to the Metal 3 base protocol
+/// MTLCommandEncoder (no visibilityOptions — that is MTL4-only). Appending is
+/// strictly stronger than the existing fence chain: it can only add ordering, never
+/// remove any. So with the switch on, rendering must be byte-identical. If it is
+/// not, the barrier map's stage pairs are wrong, and finding that out here is far
+/// cheaper than finding it out inside M7e where the fences are gone and there is
+/// nothing left to compare against.
+///
+/// Deliberately independent of the metal4 master gate: this API is gated on the OS
+/// version, not on MTLGPUFamily.metal4, exactly like the residency set in M3.
+private func metal4AppendConsumerBarrier(_ encoder: MTLCommandEncoder, after: UInt, before: UInt) {
+    guard NativeState.metal4BarrierEnabled else { return }
+    if #available(macOS 26.0, iOS 26.0, *) {
+        encoder.barrier(
+            afterQueueStages: MTLStages(rawValue: after),
+            beforeStages: MTLStages(rawValue: before)
+        )
+    }
+}
+
+/// Consumer barrier for a compute pass that reads what render passes wrote.
+/// Covers E4/E5/E6/E7 in the barrier map.
+private func metal4BarrierComputeAfterRender(_ encoder: MTLComputeCommandEncoder) {
+    metal4AppendConsumerBarrier(encoder, after: Metal4Stage.fragment, before: Metal4Stage.dispatch)
+}
+
+/// Consumer barrier for a compute pass that reads another compute pass's output.
+/// The only such edge is E9, the merge encoder reading the camera encoder.
+private func metal4BarrierComputeAfterCompute(_ encoder: MTLComputeCommandEncoder) {
+    metal4AppendConsumerBarrier(encoder, after: Metal4Stage.dispatch, before: Metal4Stage.dispatch)
+}
+
+/// Consumer barrier for a copy that reads what render passes wrote (E10/E12).
+private func metal4BarrierBlitAfterRender(_ encoder: MTLBlitCommandEncoder) {
+    metal4AppendConsumerBarrier(encoder, after: Metal4Stage.fragment, before: Metal4Stage.blit)
+}
+
+/// Consumer barrier for a render pass that samples or loads an upstream target
+/// (E11/E15/E16).
+private func metal4BarrierRenderAfterRender(_ encoder: MTLRenderCommandEncoder) {
+    metal4AppendConsumerBarrier(encoder, after: Metal4Stage.fragment, before: Metal4Stage.fragment)
+}
+
+/// Consumer barrier for the Java-driven render encoders, whose single Metal 3 fence
+/// covers both uploads and upstream targets, so the stage masks are the union
+/// (E13/E14). One barrier with combined masks, not two — each barrier is its own
+/// cache flush.
+private func metal4BarrierRenderAfterUploadAndRender(_ encoder: MTLRenderCommandEncoder) {
+    metal4AppendConsumerBarrier(
+        encoder,
+        after: Metal4Stage.blit | Metal4Stage.fragment,
+        before: Metal4Stage.vertex | Metal4Stage.fragment
+    )
 }
 
 // MARK: - CPU wait for GPU completion (migration spec M7g)

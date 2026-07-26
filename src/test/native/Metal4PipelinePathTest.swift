@@ -792,6 +792,85 @@ private func runCopyAndWaitTest(device: MTLDevice) throws {
     try copyAndWaitTest(device: device)
 }
 
+/// M6-B: appending the barrier map's consumer barriers to the existing Metal 3
+/// encoders must not change what is rendered.
+///
+/// This drives a shipping export that now carries an appended barrier
+/// (metallum_encode_texture_copy, edge E11) with the switch off and on, and
+/// requires byte-identical output. The argument is the same one the golden-frame
+/// run makes, at test scale: a queue barrier can only add ordering, never remove
+/// it, so if the output moves then the stage pair in the barrier map is wrong.
+/// Finding that out here is far cheaper than finding it out in M7e, where the
+/// fences are gone and there is nothing left to compare against.
+///
+/// Runs under MTL_DEBUG_LAYER, so a malformed barrier is reported rather than
+/// silently accepted.
+private func barrierAppendTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    // metallum_encode_texture_copy takes its sampler from the shared state that
+    // metallum_init_pipelines fills in, exactly as MetalDevice's constructor does.
+    // Without this it fails its sampler guard before reaching any barrier.
+    metallum_init_pipelines(device)
+
+    func copyOnce(barriersEnabled: Bool, withFence: Bool) throws -> [UInt8] {
+        metallum_set_metal4_barrier_enabled(barriersEnabled ? 1 : 0)
+
+        let sourceDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: 8, height: 8, mipmapped: false
+        )
+        sourceDescriptor.storageMode = .shared
+        sourceDescriptor.usage = [.shaderRead, .renderTarget]
+        guard let source = device.makeTexture(descriptor: sourceDescriptor) else {
+            try fail("could not allocate the barrier-test source")
+        }
+        var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
+        for index in 0..<(8 * 8) {
+            pixels[index * 4 + 0] = 64
+            pixels[index * 4 + 1] = 128
+            pixels[index * 4 + 2] = 191
+            pixels[index * 4 + 3] = 255
+        }
+        source.replace(region: MTLRegionMake2D(0, 0, 8, 8), mipmapLevel: 0, withBytes: &pixels, bytesPerRow: 8 * 4)
+        let destination = try makeTarget(device: device, label: "barrier test destination")
+
+        guard let commandBuffer = queue.makeCommandBuffer() else {
+            try fail("could not allocate the barrier-test command buffer")
+        }
+        // Exercised both with and without a fence, because the appended barrier has
+        // to coexist with the existing fence rather than replace it yet.
+        let fence: MTLFence? = withFence ? device.makeFence() : nil
+        let status = metallum_encode_texture_copy(commandBuffer, source, destination, 0, fence)
+        try check(status != 0, "metallum_encode_texture_copy failed (barriers=\(barriersEnabled))")
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try check(commandBuffer.status == .completed,
+                  "barrier-test submit failed (barriers=\(barriersEnabled)): \(String(describing: commandBuffer.error))")
+
+        var readback = [UInt8](repeating: 0, count: 8 * 8 * 4)
+        destination.getBytes(&readback, bytesPerRow: 8 * 4, from: MTLRegionMake2D(0, 0, 8, 8), mipmapLevel: 0)
+        return readback
+    }
+
+    for withFence in [false, true] {
+        let off = try copyOnce(barriersEnabled: false, withFence: withFence)
+        let on = try copyOnce(barriersEnabled: true, withFence: withFence)
+        try check(off == on,
+                  "appending the consumer barrier changed the output (fence=\(withFence)); "
+                  + "the barrier map's stage pair for E11 is wrong")
+        try check(on[0] == 64 && on[1] == 128 && on[2] == 191 && on[3] == 255,
+                  "barrier-test copy produced the wrong colour: \(Array(on.prefix(4)))")
+    }
+    metallum_set_metal4_barrier_enabled(0)
+    print("Metal 4 barrier append: metallum_encode_texture_copy is byte-identical with the consumer barrier appended, both with and without the existing fence")
+}
+
+private func runBarrierAppendTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 26.0, *) else {
+        print("barrier append test skipped: barrierAfterQueueStages needs macOS 26")
+        return
+    }
+    try barrierAppendTest(device: device, queue: queue)
+}
+
 private func runPathTest() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
         try fail("MTLCreateSystemDefaultDevice returned nil")
@@ -940,6 +1019,9 @@ private func runPathTest() throws {
 
     // (8) M7g/M7h: the completion wait, and every copy shape on a compute encoder.
     try runCopyAndWaitTest(device: device)
+
+    // (9) M6-B: appended consumer barriers must not change rendering.
+    try runBarrierAppendTest(device: device, queue: queue)
 
     print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, an unregistered library falls back cleanly, the pipeline data set archive flushes on both a cold and a warm launch, and the residency set tracks native allocations")
 }

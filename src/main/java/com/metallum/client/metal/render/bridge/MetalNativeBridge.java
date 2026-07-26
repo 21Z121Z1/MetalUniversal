@@ -522,6 +522,7 @@ public final class MetalNativeBridge {
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
             residencySetEnable = downcall(lookup, "metallum_residency_set_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
+            setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
             // The archive open path performs disk IO inside the native call;
             // avoid the critical-linker fast path like other IO-adjacent calls.
             psoArchiveOpen = downcallWithoutCritical(lookup, "metallum_pso_archive_open", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -759,6 +760,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle setMetal4CompilerEnabled;
     private static final MethodHandle residencySetEnable;
     private static final MethodHandle setMetal4PresentEnabled;
+    private static final MethodHandle setMetal4BarrierEnabled;
     private static final MethodHandle psoArchiveOpen;
     private static final MethodHandle psoArchiveFlush;
     private static final MethodHandle MTLBlitCommandEncoderUpdateFence;
@@ -2341,6 +2343,20 @@ public final class MetalNativeBridge {
             return (int) metal4Supported.invokeExact(segment(device));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metal4_supported", throwable);
+        }
+    }
+
+    /**
+     * Appends the Metal 4 barrier map's consumer barriers to the existing Metal 3
+     * encoders (spec M6-B). Strengthens ordering only, so rendering must be
+     * unchanged; it exists to validate the barrier positions before M7e removes the
+     * fences they will replace.
+     */
+    public static void metallum_set_metal4_barrier_enabled(final int enabled) {
+        try {
+            setMetal4BarrierEnabled.invokeExact(enabled);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_metal4_barrier_enabled", throwable);
         }
     }
 

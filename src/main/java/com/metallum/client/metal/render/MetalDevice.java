@@ -90,6 +90,14 @@ final class MetalDevice implements GpuDeviceBackend {
      * table gets built and measured on the existing Metal 3 queue, and M7 only
      * has to connect it.
      */
+    /**
+     * Appends the Metal 4 barrier map's consumer barriers to the existing Metal 3
+     * encoders (spec M6-B). Independent of the master switch: the API is gated on
+     * macOS 26, not on Metal 4 family support. Strengthens ordering only, so golden
+     * frames must stay byte-identical with it on.
+     */
+    private static final boolean METAL4_BARRIER =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Barrier", "false"));
     private static final boolean RESIDENCY_SET =
             Boolean.parseBoolean(System.getProperty("metallum.opt.residencySet", "false"));
     private static final boolean RENDER_PIPELINE_IDENTITY_EQUALS = renderPipelineUsesIdentityEquals();
@@ -168,12 +176,14 @@ final class MetalDevice implements GpuDeviceBackend {
         // takes an MTL4Compiler, so the present pilot cannot run without it.
         boolean metal4Present = metal4Compiler && METAL4_PRESENT;
         MetalNativeBridge.metallum_set_metal4_present_enabled(metal4Present ? 1 : 0);
+        MetalNativeBridge.metallum_set_metal4_barrier_enabled(METAL4_BARRIER ? 1 : 0);
         Metallum.LOGGER.info(
-                "[Metallum] Metal 4: requested={} available={} compiler={} present={}",
+                "[Metallum] Metal 4: requested={} available={} compiler={} present={} barrier={}",
                 METAL4_REQUESTED,
                 this.metal4Available,
                 metal4Compiler,
-                metal4Present
+                metal4Present,
+                METAL4_BARRIER
         );
         if (PSO_ARCHIVE) {
             try {
