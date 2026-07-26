@@ -85,18 +85,38 @@ public final class MetalFxManager {
     // 0.35 and < depth-edge cap 0.5).
     private static final int INTERIOR_REACTIVE_MAX = 48;
     private static final int EDGE_REACTIVE_MIN = 72;
-    // Object-motion acceptance thresholds (item_spin / vehicle_turn). These
+    // Object-motion acceptance thresholds (item_spin / vehicle_turn). Both
     // scenarios hold the object at a fixed world position under a static
-    // camera, so the only motion in frame is the object's own rotation and the
-    // single-mean model does not apply: a Y-spin moves points on opposite
-    // sides of the axis in opposite directions, leaving a mean near zero —
-    // exactly what a regression that emitted no object motion at all would
-    // also produce. The peak-to-peak spread separates the two, and requiring
-    // it to dominate the mean is what confirms the rotation rather than a
-    // stray translation.
+    // camera, so the expected motion is a per-pixel field rather than one
+    // vector and the single-mean model does not apply. A dropped item makes
+    // that concrete: it carries a hover bob (a genuine vertical translation,
+    // ItemEntityRenderer's `sin(ageInTicks/10 + bobOffset)` term) on top of its
+    // Y spin, and the two land on different axes.
+    //
+    //   - the bob is a near-uniform vertical shift, so it dominates mean Y and
+    //     contributes almost nothing to horizontal spread;
+    //   - the spin moves points by an amount proportional to their offset from
+    //     the axis, so it shows up as horizontal peak-to-peak spread.
+    //
+    // Separating them by axis is what makes the spin assertable. Measured at
+    // frame 164: spreadX 0.028 with meanY 0.021, and the mean-vector error was
+    // 0.024 — inside the 0.03 tolerance, i.e. the old model would have passed
+    // this frame while proving nothing about the rotation. Dropping the
+    // rotateY term from MetalEntityObjectPose.droppedItem collapses the field
+    // to that uniform translation and takes spreadX to ~0, which this floor
+    // catches. The boat's yaw is also a Y rotation and measures 0.061.
+    //
+    // The floor is sized from the measured entity-motion error envelope rather
+    // than from the observed values directly: object motion runs 30-55% off the
+    // analytic magnitude (partial-tick and limb-depth broadening, see
+    // docs/metalfx-frame-generation.md), so the lowest spread seen across runs
+    // (0.023) has to stay above the floor even after a 55% deflation, i.e.
+    // above 0.0104. 0.008 clears that with margin while still sitting an order
+    // of magnitude above the regression case: a translation-only field has no
+    // horizontal component to spread at all, so dropping the rotation takes
+    // spreadX to ~0.001 or below rather than merely reducing it.
     private static final int OBJECT_MIN_VALID_PIXELS = 2_000;
-    private static final double OBJECT_MIN_MOTION_SPREAD = 0.004;
-    private static final double OBJECT_SPIN_TO_MEAN_RATIO = 2.0;
+    private static final double OBJECT_MIN_SPIN_SPREAD_X = 0.008;
     private static final double OBJECT_MAX_MOTION = 0.5;
     private final boolean motionPipelineV2Available;
     private final boolean cutoutReactivePipelineAvailable;
@@ -192,6 +212,10 @@ public final class MetalFxManager {
     private final long[] flickerControlHistogram = new long[256];
     private final long[] flickerSkyEdgeHistogram = new long[256];
     private final long[] flickerSkyInteriorHistogram = new long[256];
+    // 16 buckets of 16 reactive levels each, over the render-space silhouette
+    // band. Identifies which policy writer owns the band's reactivity.
+    private final long[] flickerSkyEdgeReactiveBuckets = new long[16];
+    private int flickerSkyEdgeRenderPixels;
     @Nullable
     private String lastLoggedResetReason;
     @Nullable
@@ -1175,6 +1199,12 @@ public final class MetalFxManager {
         ValidationReadback depthReadback = requested.first
                 ? validationReadback("flicker-depth", depth)
                 : null;
+        // Attribution: the final reactive mask on the silhouette band, bucketed
+        // so each policy writer is identifiable by its value (0.35 cutout edge
+        // band, 0.5 depth-edge cap, 0.85 disocclusion cap, 0.9 transparency).
+        ValidationReadback reactiveReadback = requested.first && reactiveTexture != null
+                ? validationReadback("flicker-reactive", reactiveTexture)
+                : null;
         if (coverageReadback != null) {
             device.commandEncoder().copyTextureToBuffer(
                     coverageReadback.texture, coverageReadback.buffer, 0L, () -> { }, 0);
@@ -1183,11 +1213,16 @@ public final class MetalFxManager {
             device.commandEncoder().copyTextureToBuffer(
                     depthReadback.texture, depthReadback.buffer, 0L, () -> { }, 0);
         }
+        if (reactiveReadback != null) {
+            device.commandEncoder().copyTextureToBuffer(
+                    reactiveReadback.texture, reactiveReadback.buffer, 0L, () -> { }, 0);
+        }
         device.commandEncoder().copyTextureToBuffer(
                 outputReadback.texture,
                 outputReadback.buffer,
                 0L,
-                () -> finishFlickerCapture(requested, outputReadback, coverageReadback, depthReadback),
+                () -> finishFlickerCapture(
+                        requested, outputReadback, coverageReadback, depthReadback, reactiveReadback),
                 0
         );
     }
@@ -1196,7 +1231,8 @@ public final class MetalFxManager {
             final FlickerRequest requested,
             final ValidationReadback outputReadback,
             @Nullable final ValidationReadback coverageReadback,
-            @Nullable final ValidationReadback depthReadback
+            @Nullable final ValidationReadback depthReadback,
+            @Nullable final ValidationReadback reactiveReadback
     ) {
         try {
             byte[] output = readbackBytes(outputReadback);
@@ -1205,7 +1241,8 @@ public final class MetalFxManager {
             if (requested.first) {
                 byte[] coverage = readbackBytes(coverageReadback);
                 byte[] depth = depthReadback == null ? null : readbackBytes(depthReadback);
-                beginFlickerSeries(width, height, coverage, depth);
+                byte[] reactive = reactiveReadback == null ? null : readbackBytes(reactiveReadback);
+                beginFlickerSeries(width, height, coverage, depth, reactive);
             }
             accumulateFlickerFrame(output, width, height);
             // Requests already in flight when the series closes must not
@@ -1231,6 +1268,9 @@ public final class MetalFxManager {
             if (depthReadback != null) {
                 depthReadback.buffer.close();
             }
+            if (reactiveReadback != null) {
+                reactiveReadback.buffer.close();
+            }
             this.flickerCapturePending = false;
         }
     }
@@ -1249,7 +1289,8 @@ public final class MetalFxManager {
             final int width,
             final int height,
             final byte[] coverage,
-            @Nullable final byte[] depth
+            @Nullable final byte[] depth,
+            @Nullable final byte[] reactive
     ) {
         this.flickerDisplayWidth = width;
         this.flickerDisplayHeight = height;
@@ -1314,6 +1355,38 @@ public final class MetalFxManager {
         this.flickerSkyPixels = skyPixels;
         this.flickerSkyInteriorMask = skyInterior;
         this.flickerSkyInteriorPixels = skyInteriorPixels;
+        buildReactiveAttribution(coverage, sky, reactive);
+    }
+
+    /**
+     * Bucketed reactive values on the silhouette band, in render space. Each
+     * policy writer lands on its own value, so the distribution says which one
+     * is responsible for the residual flicker instead of requiring one full
+     * validation run per knob:
+     * 0 interior, ~89 cutout edge band (0.35), ~128 depth-edge cap (0.5),
+     * ~217 disocclusion cap (0.85), ~230 transparency (0.9), 255 full.
+     */
+    private void buildReactiveAttribution(
+            final byte[] coverage,
+            @Nullable final boolean[] sky,
+            @Nullable final byte[] reactive
+    ) {
+        java.util.Arrays.fill(this.flickerSkyEdgeReactiveBuckets, 0L);
+        this.flickerSkyEdgeRenderPixels = 0;
+        if (reactive == null || sky == null || reactive.length < renderWidth * renderHeight) {
+            return;
+        }
+        for (int y = 0; y < renderHeight; y++) {
+            for (int x = 0; x < renderWidth; x++) {
+                if (!hasCutoutCoverageNeighbor(coverage, x, y, renderWidth, renderHeight, 1)
+                        || !hasSkyNeighbor(sky, x, y, renderWidth, renderHeight, 1)) {
+                    continue;
+                }
+                int value = Byte.toUnsignedInt(reactive[y * renderWidth + x]);
+                flickerSkyEdgeReactiveBuckets[value >> 4]++;
+                flickerSkyEdgeRenderPixels++;
+            }
+        }
     }
 
     private static boolean hasSkyNeighbor(
@@ -1416,13 +1489,16 @@ public final class MetalFxManager {
                   "skyEdgeP95Delta": %d,
                   "skyInteriorPixels": %d,
                   "skyInteriorMeanDelta": %.6f,
-                  "skyInteriorP95Delta": %d
+                  "skyInteriorP95Delta": %d,
+                  "skyEdgeRenderPixels": %d,
+                  "skyEdgeReactiveBuckets": [%s]
                 }
                 """,
                 scenario, flickerFramesAccumulated, flickerDisplayWidth, flickerDisplayHeight,
                 flickerMaskPixels, maskedMean, maskedP95, controlMean, controlP95,
                 flickerSkyPixels, flickerSkyEdgePixels, skyEdgeMean, skyEdgeP95,
-                flickerSkyInteriorPixels, skyInteriorMean, skyInteriorP95
+                flickerSkyInteriorPixels, skyInteriorMean, skyInteriorP95,
+                flickerSkyEdgeRenderPixels, bucketList(flickerSkyEdgeReactiveBuckets)
         );
         Files.writeString(root.resolve("flicker-" + scenario + ".json"), json, StandardCharsets.UTF_8);
         Metallum.LOGGER.info(
@@ -1435,6 +1511,17 @@ public final class MetalFxManager {
                 flickerSkyInteriorPixels,
                 String.format(java.util.Locale.ROOT, "%.4f", skyInteriorMean), skyInteriorP95
         );
+    }
+
+    private static String bucketList(final long[] buckets) {
+        StringBuilder text = new StringBuilder();
+        for (int index = 0; index < buckets.length; index++) {
+            if (index > 0) {
+                text.append(", ");
+            }
+            text.append(buckets[index]);
+        }
+        return text.toString();
     }
 
     /** Mean of an empty histogram is 0, not NaN: the JSON must stay parseable. */
@@ -1621,9 +1708,6 @@ public final class MetalFxManager {
         }
         double motionSpreadX = validPixels == 0 ? Double.NaN : maxMotionX - minMotionX;
         double motionSpreadY = validPixels == 0 ? Double.NaN : maxMotionY - minMotionY;
-        double motionSpread = validPixels == 0
-                ? Double.NaN
-                : Math.max(motionSpreadX, motionSpreadY);
         double maxAbsMotion = validPixels == 0 ? Double.NaN : Math.max(
                 Math.max(Math.abs(minMotionX), Math.abs(maxMotionX)),
                 Math.max(Math.abs(minMotionY), Math.abs(maxMotionY))
@@ -1730,17 +1814,15 @@ public final class MetalFxManager {
             case "item_spin" -> depthContractPassed
                     && validPixels > OBJECT_MIN_VALID_PIXELS
                     && itemMotionDraws > 0
-                    && Double.isFinite(motionSpread)
-                    && motionSpread >= OBJECT_MIN_MOTION_SPREAD
-                    && motionSpread >= OBJECT_SPIN_TO_MEAN_RATIO * Math.hypot(meanX, meanY)
+                    && Double.isFinite(motionSpreadX)
+                    && motionSpreadX >= OBJECT_MIN_SPIN_SPREAD_X
                     && maxAbsMotion <= OBJECT_MAX_MOTION;
             // A boat turning on the spot. Same rotational envelope, but the
             // vehicle renders through core/entity, so no core/item assertion.
             case "vehicle_turn" -> depthContractPassed
                     && validPixels > OBJECT_MIN_VALID_PIXELS
-                    && Double.isFinite(motionSpread)
-                    && motionSpread >= OBJECT_MIN_MOTION_SPREAD
-                    && motionSpread >= OBJECT_SPIN_TO_MEAN_RATIO * Math.hypot(meanX, meanY)
+                    && Double.isFinite(motionSpreadX)
+                    && motionSpreadX >= OBJECT_MIN_SPIN_SPREAD_X
                     && maxAbsMotion <= OBJECT_MAX_MOTION;
             case "cutout_leaves", "cutout_grass" -> depthContractPassed
                     && cutoutCoveragePixels > 32

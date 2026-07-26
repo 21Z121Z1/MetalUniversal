@@ -9,15 +9,58 @@ import com.mojang.blaze3d.shaders.UniformType;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.resources.Identifier;
+import org.jspecify.annotations.Nullable;
 
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Optional;
 
-/** Builds motion-only MRT variants of Minecraft's ordinary entity pipelines. */
+/** Builds motion-only MRT variants of the Minecraft pipelines that can be replayed. */
 @Environment(EnvType.CLIENT)
 final class MetalEntityMotionPipeline {
-    private static final Identifier SHADER = Identifier.fromNamespaceAndPath("metallum", "core/entity_motion");
+    /**
+     * A group of Minecraft pipelines whose clip position one reduced motion
+     * shader can reproduce.
+     *
+     * <p>Family membership is decided by the clip transform, not by what the
+     * geometry represents. Two pipelines belong together exactly when the same
+     * reduced vertex shader rebuilds their raster clip position from the same
+     * attributes and uniforms; anything else needs its own family, because a
+     * shader that reconstructs the wrong clip position produces motion vectors
+     * that look plausible and are wrong.</p>
+     */
+    enum Family {
+        /**
+         * {@code core/entity} and {@code core/item}: {@code DefaultVertexFormat.ENTITY}
+         * with clip position {@code ProjMat * ModelViewMat * Position}. Entity
+         * models, dropped items, item frames and held items.
+         */
+        ENTITY("core/entity_motion", "entity_motion/"),
+        /**
+         * {@code core/block}: {@code DefaultVertexFormat.BLOCK} with clip position
+         * {@code ProjMat * ModelViewMat * (Position + ModelOffset)}. Falling
+         * blocks and block entities reach the interpolator only through this
+         * family; before it existed they arrived with no object motion at all.
+         */
+        BLOCK("core/block_motion", "block_motion/");
+
+        private final Identifier shader;
+        private final String locationPrefix;
+
+        Family(final String shaderPath, final String locationPrefix) {
+            this.shader = Identifier.fromNamespaceAndPath("metallum", shaderPath);
+            this.locationPrefix = locationPrefix;
+        }
+
+        Identifier shader() {
+            return shader;
+        }
+
+        String locationPrefix() {
+            return locationPrefix;
+        }
+    }
+
     private static final BindGroupLayout RESOURCES = BindGroupLayout.builder()
             .withUniform("MetallumMotion", UniformType.UNIFORM_BUFFER)
             .build();
@@ -31,18 +74,25 @@ final class MetalEntityMotionPipeline {
     }
 
     /**
-     * Ordinary entity models and item models are two separate Minecraft 26.2
-     * pipeline families with the same {@code DefaultVertexFormat.ENTITY} layout
-     * and the same {@code ProjMat * ModelViewMat * Position} clip transform, so
-     * one reduced motion shader replays both. Dropped items, item frames and
-     * held items only reach the interpolator through {@code core/item}.
+     * The family that can replay {@code source}, or null if none can.
+     *
+     * <p>Keyed on the Minecraft vertex shader path, which is what identifies the
+     * clip transform. A pipeline whose shader is not listed here is left alone
+     * rather than replayed by the closest-looking family.</p>
      */
-    static boolean isSplittableVertexShader(final RenderPipeline source) {
+    static @Nullable Family familyOf(final RenderPipeline source) {
         if (source == null) {
-            return false;
+            return null;
         }
-        String vertexShader = source.getVertexShader().getPath();
-        return "core/entity".equals(vertexShader) || "core/item".equals(vertexShader);
+        return switch (source.getVertexShader().getPath()) {
+            case "core/entity", "core/item" -> Family.ENTITY;
+            case "core/block" -> Family.BLOCK;
+            default -> null;
+        };
+    }
+
+    static boolean isSplittableVertexShader(final RenderPipeline source) {
+        return familyOf(source) != null;
     }
 
     static boolean supports(final RenderPipeline source) {
@@ -64,13 +114,18 @@ final class MetalEntityMotionPipeline {
     }
 
     private static RenderPipeline build(final RenderPipeline source) {
+        Family family = familyOf(source);
+        if (family == null) {
+            throw new IllegalArgumentException(
+                    "No motion family replays " + source.getLocation() + " (" + source.getVertexShader() + ")");
+        }
         String sourceName = source.getLocation().toString()
                 .replace(':', '/')
                 .replaceAll("[^a-zA-Z0-9_./-]", "_");
         RenderPipeline.Builder builder = RenderPipeline.builder()
-                .withLocation(Identifier.fromNamespaceAndPath("metallum", "entity_motion/" + sourceName))
-                .withVertexShader(SHADER)
-                .withFragmentShader(SHADER)
+                .withLocation(Identifier.fromNamespaceAndPath("metallum", family.locationPrefix() + sourceName))
+                .withVertexShader(family.shader())
+                .withFragmentShader(family.shader())
                 .withCull(source.isCull())
                 .withPolygonMode(source.getPolygonMode())
                 .withPrimitiveTopology(source.getPrimitiveTopology())
@@ -92,12 +147,12 @@ final class MetalEntityMotionPipeline {
                 try {
                     builder.withShaderDefine(name, Float.parseFloat(value));
                 } catch (NumberFormatException floatFailure) {
-                    // Entity shader values currently consist of numeric
+                    // Both families' shader values currently consist of numeric
                     // ALPHA_CUTOUT thresholds. Unknown textual defines are not
                     // safe to reinterpret and therefore make this variant
                     // fail closed at shader compilation.
                     throw new IllegalArgumentException(
-                            "Unsupported entity motion shader define " + name + "=" + value,
+                            "Unsupported motion shader define " + name + "=" + value,
                             floatFailure
                     );
                 }

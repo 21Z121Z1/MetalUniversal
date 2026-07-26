@@ -32,6 +32,10 @@ func probe(device: MTLDevice, layer: CAMetalLayer, buffer: MTLBuffer, texture: M
 
     // --- queue / command buffer / allocator ---
     let queue: MTL4CommandQueue = device.makeMTL4CommandQueue()!
+    // MTL4CommandQueue.label is GET-ONLY, unlike MTLCommandQueue.label:
+    // `queue.label = "x"` fails with "cannot assign to property: 'label' is a
+    // get-only property". The label must come from the descriptor, and that
+    // overload throws while the no-argument one does not.
     let qd = MTL4CommandQueueDescriptor()
     qd.label = "metallum-m4"
     _ = try device.makeMTL4CommandQueue(descriptor: qd)
@@ -96,6 +100,11 @@ func probe(device: MTLDevice, layer: CAMetalLayer, buffer: MTLBuffer, texture: M
     rpd.renderTargetWidth = 16
     rpd.renderTargetHeight = 16
     let enc = cmd.makeRenderCommandEncoder(descriptor: rpd)!
+    // Pipeline states are interchangeable in BOTH directions, and both directions
+    // were confirmed by running them, not just by typechecking (M2 step 0 and the
+    // M4 precondition): an MTL4Compiler pipeline binds to a Metal 3 encoder, and a
+    // pipeline from the ordinary device.makeRenderPipelineState binds here, on an
+    // MTL4 encoder, reading its texture and sampler from the argument table below.
     enc.setRenderPipelineState(pso)
     enc.setDepthStencilState(dsState)
     enc.setViewport(MTLViewport(originX: 0, originY: 0, width: 16, height: 16, znear: 0, zfar: 1))

@@ -75,6 +75,13 @@ final class MetalDevice implements GpuDeviceBackend {
      */
     private static final boolean METAL4_COMPILER =
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"));
+    /**
+     * Runs the frame-generation present thread on a Metal 4 queue (spec M4).
+     * Depends on the compiler switch, because the MTL4 frame interpolator is built
+     * from an MTL4Compiler.
+     */
+    private static final boolean METAL4_PRESENT =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Present", "false"));
     /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
     private final boolean metal4Available;
     /**
@@ -157,11 +164,16 @@ final class MetalDevice implements GpuDeviceBackend {
                 && MetalNativeBridge.metallum_metal4_supported(metalDeviceHandle) != 0;
         boolean metal4Compiler = this.metal4Available && METAL4_COMPILER;
         MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4Compiler ? 1 : 0);
+        // Depends on the compiler switch: the MTL4 frame interpolator factory
+        // takes an MTL4Compiler, so the present pilot cannot run without it.
+        boolean metal4Present = metal4Compiler && METAL4_PRESENT;
+        MetalNativeBridge.metallum_set_metal4_present_enabled(metal4Present ? 1 : 0);
         Metallum.LOGGER.info(
-                "[Metallum] Metal 4: requested={} available={} compiler={}",
+                "[Metallum] Metal 4: requested={} available={} compiler={} present={}",
                 METAL4_REQUESTED,
                 this.metal4Available,
-                metal4Compiler
+                metal4Compiler,
+                metal4Present
         );
         if (PSO_ARCHIVE) {
             try {

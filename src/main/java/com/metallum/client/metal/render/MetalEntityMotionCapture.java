@@ -37,6 +37,11 @@ public final class MetalEntityMotionCapture {
             // scene with dropped items in view and a zero here means the item
             // motion path is not reaching the interpolator.
             int itemMotionDrawsEncoded,
+            // Subset of motionDrawsEncoded that came from the core/block family.
+            // Falling blocks and block entities are the only source, so a scene
+            // with a falling block in view and a zero here means the block motion
+            // path is not reaching the interpolator.
+            int blockMotionDrawsEncoded,
             @Nullable String lastMotionDrawSkip,
             @Nullable String lastVertexShader
     ) {
@@ -84,6 +89,7 @@ public final class MetalEntityMotionCapture {
     private static int executesConsumed;
     private static int motionDrawsEncoded;
     private static int itemMotionDrawsEncoded;
+    private static int blockMotionDrawsEncoded;
     private static @Nullable String lastMotionDrawSkip;
     private static @Nullable String lastVertexShader;
 
@@ -107,6 +113,7 @@ public final class MetalEntityMotionCapture {
         executesConsumed = 0;
         motionDrawsEncoded = 0;
         itemMotionDrawsEncoded = 0;
+        blockMotionDrawsEncoded = 0;
         lastMotionDrawSkip = null;
         lastVertexShader = null;
     }
@@ -220,6 +227,7 @@ public final class MetalEntityMotionCapture {
                 executesConsumed,
                 motionDrawsEncoded,
                 itemMotionDrawsEncoded,
+                blockMotionDrawsEncoded,
                 lastMotionDrawSkip,
                 lastVertexShader
         );
@@ -227,8 +235,15 @@ public final class MetalEntityMotionCapture {
 
     static void recordMotionDrawEncoded(final RenderPipeline source) {
         motionDrawsEncoded++;
-        if (source != null && "core/item".equals(source.getVertexShader().getPath())) {
-            itemMotionDrawsEncoded++;
+        if (source != null) {
+            switch (source.getVertexShader().getPath()) {
+                case "core/item" -> itemMotionDrawsEncoded++;
+                case "core/block" -> blockMotionDrawsEncoded++;
+                default -> {
+                    // core/entity carries no subset counter of its own; it is
+                    // motionDrawsEncoded minus the two subsets.
+                }
+            }
         }
         lastMotionDrawSkip = null;
     }

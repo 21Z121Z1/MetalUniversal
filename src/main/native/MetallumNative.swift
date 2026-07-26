@@ -83,6 +83,10 @@ private enum NativeState {
     // and metallum.opt.metal4Compiler both hold; false means every PSO takes
     // the Metal 3 path below, unchanged.
     static var metal4CompilerEnabled = false
+    // Metal 4 frame-generation present pilot (spec M4). Read once when the
+    // presenter is constructed; flipping it later has no effect, which matches how
+    // the presenter is started.
+    static var metal4PresentEnabled = false
     // MTL4LibraryFunctionDescriptor requires the MTLLibrary a function came
     // from, and MTLFunction does not expose it, so the association is kept
     // beside it. Weak keys: the entry disappears when the function is released,
@@ -224,6 +228,170 @@ struct MetalFrameGenerationDiagnosticSnapshot {
     let outcome: String
 }
 
+/// Metal 4 side of the frame-generation present path (migration spec M4).
+///
+/// This is the migration's first MTL4 queue, and the present thread is the pilot
+/// because it is the smallest self-contained surface: no Java ABI crosses it, one
+/// command buffer carries at most an interpolator encode plus a three-vertex copy
+/// pass, the binding surface is one texture and one sampler, and — decisively —
+/// it touches no MTLFence. Metal 4 fences are same-queue only, so a pilot that
+/// used fences would collide with the main queue's fence chain immediately. The
+/// cross-queue ordering here is already an MTLSharedEvent, and shared events work
+/// between a Metal 3 and a Metal 4 queue: the main Metal 3 queue keeps signalling
+/// exactly as before and only the wait side moves.
+///
+/// The presenter keeps owning all lifecycle, deadline and diagnostic state; this
+/// type owns only the Metal 4 mechanics.
+@available(macOS 26.0, *)
+final class Metal4PresentPath {
+    private let queue: MTL4CommandQueue
+    private let commandBuffer: MTL4CommandBuffer
+    private let allocators: [MTL4CommandAllocator]
+    private let argumentTable: MTL4ArgumentTable
+    private let residencySet: MTLResidencySet
+    private var frameIndex = 0
+
+    init?(device: MTLDevice, layer: CAMetalLayer) {
+        let queueDescriptor = MTL4CommandQueueDescriptor()
+        // MTL4CommandQueue.label is get-only, unlike MTLCommandQueue's: the label
+        // has to come from the descriptor.
+        queueDescriptor.label = "MetalFX Frame Generation Present (Metal 4)"
+        guard let queue = try? device.makeMTL4CommandQueue(descriptor: queueDescriptor),
+              let commandBuffer = device.makeCommandBuffer() else {
+            return nil
+        }
+        commandBuffer.label = "MetalFX Frame Generation Present (Metal 4)"
+        // One allocator per in-flight frame. maxOutstandingFrames is 1, so two is
+        // enough — but one would be wrong: reset() reclaims command memory the GPU
+        // may still be reading.
+        var allocators: [MTL4CommandAllocator] = []
+        for index in 0..<2 {
+            let allocatorDescriptor = MTL4CommandAllocatorDescriptor()
+            allocatorDescriptor.label = "MetalFX Frame Generation Allocator \(index)"
+            guard let allocator = try? device.makeCommandAllocator(descriptor: allocatorDescriptor) else {
+                return nil
+            }
+            allocators.append(allocator)
+        }
+        let tableDescriptor = MTL4ArgumentTableDescriptor()
+        tableDescriptor.maxTextureBindCount = 1
+        tableDescriptor.maxSamplerStateBindCount = 1
+        // Unbound slots must read as a defined empty value; without this they are
+        // undefined behaviour.
+        tableDescriptor.initializeBindings = true
+        let residencyDescriptor = MTLResidencySetDescriptor()
+        residencyDescriptor.label = "MetalFX Frame Generation Residency"
+        residencyDescriptor.initialCapacity = 32
+        guard let argumentTable = try? device.makeArgumentTable(descriptor: tableDescriptor),
+              let residencySet = try? device.makeResidencySet(descriptor: residencyDescriptor) else {
+            return nil
+        }
+        self.queue = queue
+        self.commandBuffer = commandBuffer
+        self.allocators = allocators
+        self.argumentTable = argumentTable
+        self.residencySet = residencySet
+        queue.addResidencySet(residencySet)
+        // Read-only and drawable-tracking: never add anything to it by hand.
+        queue.addResidencySet(layer.residencySet)
+    }
+
+    /// Republishes the presenter's texture set after every rebuild. Metal 4 has no
+    /// automatic residency, so a texture missing here is read as unmapped memory.
+    /// Memoryless textures are excluded: they have no backing allocation.
+    func adopt(textures: [MTLTexture]) {
+        residencySet.removeAllAllocations()
+        residencySet.addAllocations(textures.filter { $0.storageMode != .memoryless })
+        residencySet.commit()
+        residencySet.requestResidency()
+    }
+
+    /// Starts a frame: rotates to this frame's allocator, reclaims its command
+    /// memory, and opens the reusable command buffer. Unlike Metal 3 the command
+    /// buffer is not allocated per frame.
+    func beginFrame() -> MTL4CommandBuffer {
+        let allocator = allocators[frameIndex % allocators.count]
+        frameIndex += 1
+        allocator.reset()
+        commandBuffer.beginCommandBuffer(allocator: allocator)
+        return commandBuffer
+    }
+
+    /// Queue-level, not command-buffer-level: Metal 4 moved event waits off the
+    /// command buffer. Must be called before commit.
+    func waitForReady(event: MTLSharedEvent, value: UInt64) {
+        queue.waitForEvent(event, value: value)
+    }
+
+    /// The full-screen copy, with the texture and sampler routed through the
+    /// argument table instead of setFragmentTexture / setFragmentSamplerState.
+    /// The pipeline is the presenter's ordinary Metal 3 copy PSO; Metal 3 and
+    /// Metal 4 pipeline states interoperate (checked by metal4PipelineSmokeTest).
+    func encodeCopy(
+        commandBuffer: MTL4CommandBuffer,
+        source: MTLTexture,
+        destination: MTLTexture,
+        pipeline: MTLRenderPipelineState,
+        sampler: MTLSamplerState,
+        label: String
+    ) -> Bool {
+        let descriptor = MTL4RenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = destination
+        descriptor.colorAttachments[0].loadAction = .dontCare
+        descriptor.colorAttachments[0].storeAction = .store
+        // MTL4RenderPassDescriptor carries no attachment size implicitly.
+        descriptor.renderTargetWidth = destination.width
+        descriptor.renderTargetHeight = destination.height
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+            return false
+        }
+        encoder.label = label
+        argumentTable.setTexture(source.gpuResourceID, index: 0)
+        argumentTable.setSamplerState(sampler.gpuResourceID, index: 0)
+        encoder.setArgumentTable(argumentTable, stages: .fragment)
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: Double(destination.width),
+            height: Double(destination.height),
+            znear: 0.0,
+            zfar: 1.0
+        ))
+        encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        return true
+    }
+
+    /// Closes the command buffer and presents. The four steps are ordered and the
+    /// order is not interchangeable: waitForDrawable before commit,
+    /// signalDrawable after it, then the drawable's own present. This is an
+    /// ordinary present because CAMetalDisplayLink owns the drawable's scheduling,
+    /// which makes targeted present illegal here, and it is synchronous so the
+    /// commit still lands inside the needsUpdate callback — a present committed in
+    /// a later run-loop pass reports presentedTime == 0.
+    func submit(
+        drawable: CAMetalDrawable,
+        onCompleted: @escaping (Error?) -> Void
+    ) {
+        commandBuffer.endCommandBuffer()
+        let options = MTL4CommitOptions()
+        // MTL4CommandBufferFeedback has no status, only error: succeeded is
+        // error == nil.
+        options.addFeedbackHandler { feedback in onCompleted(feedback.error) }
+        queue.waitForDrawable(drawable)
+        queue.commit([commandBuffer], options: options)
+        queue.signalDrawable(drawable)
+        drawable.present()
+    }
+
+    /// Abandons a frame that failed during encoding, so the reusable command
+    /// buffer is not left open across frames.
+    func abandonFrame() {
+        commandBuffer.endCommandBuffer()
+    }
+}
+
 @available(macOS 26.0, *)
 final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate {
     private struct PendingFrame {
@@ -305,6 +473,15 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var copyPipeline: MTLRenderPipelineState
     private var copySampler: MTLSamplerState
     private var copyFormat: MTLPixelFormat
+    // Metal 4 present path (spec M4), non-nil only when metallum.opt.metal4Present
+    // and the capability gate both hold and construction succeeded. Nil means
+    // present() takes the unchanged Metal 3 branch.
+    private var metal4Path: Metal4PresentPath?
+    // The MTL4 interpolator encodes into an MTL4CommandBuffer, so it cannot be the
+    // same object as frameInterpolator. Both exist while the switch is on: keeping
+    // the Metal 3 one lets the Metal 3 branch stay untouched, at the cost of a
+    // second set of MetalFX internal resources on an experimental path.
+    private var metal4Interpolator: (any MTL4FXFrameInterpolator)?
 
     private var sceneBuffers: [MTLTexture] = []
     private var composedBuffers: [MTLTexture] = []
@@ -397,6 +574,27 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         layer.displaySyncEnabled = true
         presentQueue.label = "MetalFX Frame Generation Present"
         readyEvent.label = "MetalFX Frame Generation Ready"
+        // Metal 4 pilot (spec M4). Built only when asked for and supported; any
+        // failure leaves metal4Path nil and the Metal 3 path runs unchanged. The
+        // Metal 3 presentQueue above is still created either way, because the
+        // render thread's own submissions and the readyEvent signalling side stay
+        // on Metal 3 regardless.
+        if NativeState.metal4PresentEnabled, device.supportsFamily(.metal4) {
+            if let path = Metal4PresentPath(device: device, layer: layer),
+               let interpolator = Self.makeMetal4FrameInterpolator(
+                   device: device,
+                   sceneColor: sceneColor,
+                   uiColor: uiColor,
+                   depth: depth,
+                   motion: motion
+               ) {
+                self.metal4Path = path
+                self.metal4Interpolator = interpolator
+                NSLog("[metallum] frame generation present path: Metal 4")
+            } else {
+                NSLog("[metallum] Metal 4 present path unavailable; using Metal 3")
+            }
+        }
         super.init()
 
         guard rebuildTextures(
@@ -456,6 +654,45 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             descriptor.scaler = nil
         }
         return descriptor.makeFrameInterpolator(device: device)
+    }
+
+    /// MTL4 twin of makeFrameInterpolator. The descriptor fields are identical —
+    /// MTLFXFrameInterpolator and MTL4FXFrameInterpolator share
+    /// MTLFXFrameInterpolatorBase — only the factory differs, taking an
+    /// MTL4Compiler. Scaler linking is attempted and abandoned on failure exactly
+    /// as on the Metal 3 path; the recorded scaler is a Metal 3 one while the
+    /// upscaling path is still Metal 3, so the link is expected to be refused more
+    /// often here.
+    @available(macOS 26.0, *)
+    private static func makeMetal4FrameInterpolator(
+        device: MTLDevice,
+        sceneColor: MTLTexture,
+        uiColor: MTLTexture,
+        depth: MTLTexture,
+        motion: MTLTexture
+    ) -> (any MTL4FXFrameInterpolator)? {
+        guard let compiler = NativeState.metal4Compiler(device) else {
+            return nil
+        }
+        let descriptor = MTLFXFrameInterpolatorDescriptor()
+        descriptor.colorTextureFormat = sceneColor.pixelFormat
+        descriptor.outputTextureFormat = sceneColor.pixelFormat
+        descriptor.depthTextureFormat = depth.pixelFormat
+        descriptor.motionTextureFormat = motion.pixelFormat
+        descriptor.uiTextureFormat = uiColor.pixelFormat
+        descriptor.inputWidth = depth.width
+        descriptor.inputHeight = depth.height
+        descriptor.outputWidth = sceneColor.width
+        descriptor.outputHeight = sceneColor.height
+        if let linked = NativeState.lastTemporalScalerForInterpolation
+                as? (any MTLFXFrameInterpolatableScaler) {
+            descriptor.scaler = linked
+            if let interpolator = descriptor.makeFrameInterpolator(device: device, compiler: compiler) {
+                return interpolator
+            }
+            descriptor.scaler = nil
+        }
+        return descriptor.makeFrameInterpolator(device: device, compiler: compiler)
     }
 
     private func makeTexture(
@@ -575,6 +812,17 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.depthBuffers = textureSet.depth
         self.motionBuffers = textureSet.motion
         self.interpolationOutputs = textureSet.interpolation
+        // Every rebuild path funnels through here, so this is the one place the
+        // Metal 4 residency set has to be republished. Missing a texture here
+        // means the GPU reads unmapped memory, since Metal 4 does not track
+        // residency automatically.
+        metal4Path?.adopt(
+            textures: textureSet.scene
+                + textureSet.composed
+                + textureSet.depth
+                + textureSet.motion
+                + textureSet.interpolation
+        )
     }
 
     private func rebuildTextures(
@@ -648,6 +896,26 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             motionFormat: motion.pixelFormat
         )
         self.frameInterpolator = newInterpolator
+        // The MTL4 interpolator is format-bound the same way, so a resize has to
+        // rebuild it too. Failing here disables the Metal 4 present path for the
+        // rest of the session rather than failing the resize: the Metal 3 branch
+        // is always a valid fallback, and metal4Path is what present() dispatches
+        // on, so both must be cleared together.
+        if metal4Path != nil {
+            if let rebuilt = Self.makeMetal4FrameInterpolator(
+                device: device,
+                sceneColor: textureSet.scene[0],
+                uiColor: textureSet.composed[0],
+                depth: textureSet.depth[0],
+                motion: textureSet.motion[0]
+            ) {
+                self.metal4Interpolator = rebuilt
+            } else {
+                NSLog("[metallum] Metal 4 interpolator rebuild failed after resize; reverting to Metal 3 present")
+                self.metal4Interpolator = nil
+                self.metal4Path = nil
+            }
+        }
         self.copyPipeline = newCopyPipeline
         self.copyFormat = layer.pixelFormat
         self.nextBufferIndex = 0
@@ -1048,6 +1316,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     }
 
     private func present(_ work: PresentationWork) {
+        // Metal 4 pilot (spec M4). Two-way dispatch on the switch; everything
+        // below this point is the original Metal 3 branch, unmodified.
+        if let metal4Path, let metal4Interpolator {
+            presentMetal4(work, path: metal4Path, interpolator: metal4Interpolator)
+            return
+        }
         let frame = work.frame
         guard let commandBuffer = presentQueue.makeCommandBuffer() else {
             failPresentationBeforeSubmission(work, reason: "present command buffer unavailable")
@@ -1169,6 +1443,152 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         // on this path.
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+
+    /// Metal 4 twin of present(_:) (spec M4). Same lifecycle, deadline and
+    /// diagnostic bookkeeping — deliberately duplicated rather than factored out,
+    /// so the Metal 3 branch stays exactly as it was.
+    ///
+    /// Two orderings differ from Metal 3 and both matter:
+    ///   - the event wait is a queue operation, not a command-buffer one, so it is
+    ///     issued only once the frame is certain to be committed. Issuing it
+    ///     earlier would leave a wait on the queue timeline for a frame that the
+    ///     deadline check went on to drop.
+    ///   - the command buffer is reusable and must be closed on every path out of
+    ///     here, which is what abandonFrame() is for.
+    @available(macOS 26.0, *)
+    private func presentMetal4(
+        _ work: PresentationWork,
+        path: Metal4PresentPath,
+        interpolator: any MTL4FXFrameInterpolator
+    ) {
+        let frame = work.frame
+        let commandBuffer = path.beginFrame()
+
+        if work.step == .generated {
+            interpolator.colorTexture = sceneBuffers[frame.index]
+            interpolator.prevColorTexture = sceneBuffers[work.previousIndex]
+            interpolator.depthTexture = depthBuffers[frame.index]
+            interpolator.motionTexture = motionBuffers[frame.index]
+            interpolator.uiTexture = composedBuffers[frame.index]
+            interpolator.outputTexture = interpolationOutputs[frame.index]
+            interpolator.isUITextureComposited = true
+            interpolator.jitterOffsetX = frame.jitterX
+            interpolator.jitterOffsetY = frame.jitterY
+            interpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
+            interpolator.motionVectorScaleY = Float(frame.inputHeight) * 0.5
+            interpolator.fieldOfView = frame.fieldOfView
+            interpolator.nearPlane = frame.nearPlane
+            interpolator.farPlane = frame.farPlane
+            interpolator.aspectRatio = frame.aspectRatio
+            interpolator.deltaTime = work.deltaTime
+            interpolator.isDepthReversed = true
+            interpolator.shouldResetHistory = work.shouldResetHistory
+            interpolator.encode(commandBuffer: commandBuffer)
+            guard path.encodeCopy(
+                commandBuffer: commandBuffer,
+                source: interpolationOutputs[frame.index],
+                destination: work.update.drawable.texture,
+                pipeline: copyPipeline,
+                sampler: copySampler,
+                label: "Frame Generation Interpolation Copy"
+            ) else {
+                path.abandonFrame()
+                failPresentationBeforeSubmission(work, reason: "interpolated copy encoder unavailable")
+                return
+            }
+        } else {
+            guard path.encodeCopy(
+                commandBuffer: commandBuffer,
+                source: composedBuffers[frame.index],
+                destination: work.update.drawable.texture,
+                pipeline: copyPipeline,
+                sampler: copySampler,
+                label: "Frame Generation Rendered Copy"
+            ) else {
+                path.abandonFrame()
+                failPresentationBeforeSubmission(work, reason: "rendered copy encoder unavailable")
+                return
+            }
+        }
+
+        let commitTime = CACurrentMediaTime()
+        guard commitTime <= work.update.targetTimestamp else {
+            path.abandonFrame()
+            condition.lock()
+            presentationDeadlineMisses += 1
+            droppedDisplayUpdates += 1
+            appendDiagnosticLocked(
+                sourceFrameID: frame.sourceFrameID,
+                frameKind: diagnosticKind(work.step),
+                update: work.update,
+                outcome: "dropped:deadline-missed-before-commit"
+            )
+            condition.unlock()
+            return
+        }
+
+        let eventValue = frame.eventValue
+        let drawable = work.update.drawable
+        let updateID = work.update.updateID
+        // Unchanged from Metal 3: addPresentedHandler is CAMetalDrawable API and
+        // has no Metal 4 equivalent to move to.
+        drawable.addPresentedHandler { [weak self] drawable in
+            self?.handlePresented(
+                eventValue: eventValue,
+                step: work.step,
+                displayUpdateID: updateID,
+                presentedTime: drawable.presentedTime
+            )
+        }
+
+        condition.lock()
+        guard !stopping,
+              currentFrame?.eventValue == eventValue,
+              var lifecycle = currentLifecycle,
+              lifecycle.nextPresentationStep == work.step else {
+            cancelCurrentSourceLocked(reason: "presentation cancelled before commit")
+            condition.unlock()
+            path.abandonFrame()
+            return
+        }
+        let actions = lifecycle.submitPresentation(work.step)
+        currentLifecycle = lifecycle
+        applyLifecycleActionsLocked(actions, eventValue: eventValue)
+        if work.step == .real {
+            realPresentationTimeoutAt = work.update.targetPresentationTimestamp
+                    + Self.presentationCallbackTimeout
+            displayUpdateStarvationTimeoutAt = nil
+        } else {
+            displayUpdateStarvationTimeoutAt = commitTime
+                    + Self.displayUpdateStarvationTimeout
+        }
+        appendDiagnosticLocked(
+            sourceFrameID: frame.sourceFrameID,
+            frameKind: diagnosticKind(work.step),
+            update: work.update,
+            cpuCommitTime: commitTime,
+            outcome: "submitted"
+        )
+        condition.unlock()
+
+        // The main Metal 3 queue signals readyEvent; this Metal 4 queue waits on
+        // it. Shared events cross the Metal 3 / Metal 4 boundary, which is what
+        // makes this pilot possible without touching the main queue at all.
+        path.waitForReady(event: readyEvent, value: eventValue)
+        path.submit(drawable: drawable) { [weak self] error in
+            // MTL4CommandBufferFeedback carries no status, so error == nil is the
+            // only success signal. Routing into the same handler as Metal 3 keeps
+            // the failure path — which advances readyEvent so the present thread
+            // cannot hang on a stale wait — identical.
+            self?.handlePresentGPUCompletion(
+                eventValue: eventValue,
+                step: work.step,
+                displayUpdateID: updateID,
+                succeeded: error == nil,
+                error: error
+            )
+        }
     }
 
     private func failPresentationBeforeSubmission(_ work: PresentationWork, reason: String) {
@@ -5166,6 +5586,15 @@ public func metallum_set_deferred_depth_store(_ enabled: Int32) {
 @_cdecl("metallum_set_metal4_compiler_enabled")
 public func metallum_set_metal4_compiler_enabled(_ enabled: Int32) {
     NativeState.metal4CompilerEnabled = enabled != 0
+}
+
+/// Routes the frame-generation present thread onto a Metal 4 queue (spec M4).
+/// Java only passes 1 when the capability gate, metallum.opt.metal4Compiler and
+/// metallum.opt.metal4Present all hold; the presenter still falls back to Metal 3
+/// on its own if any Metal 4 object cannot be built.
+@_cdecl("metallum_set_metal4_present_enabled")
+public func metallum_set_metal4_present_enabled(_ enabled: Int32) {
+    NativeState.metal4PresentEnabled = enabled != 0
 }
 
 @_cdecl("metallum_release_object")
