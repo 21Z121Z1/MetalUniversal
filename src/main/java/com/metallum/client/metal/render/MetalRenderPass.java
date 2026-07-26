@@ -560,7 +560,12 @@ final class MetalRenderPass implements RenderPassBackend {
                 enc.setDepthBias(depthBiasConstant, depthBiasScaleFactor, 0.0f);
             }
 
-            enc.setFrontFacingWinding(MTLWinding.CounterClockwise);
+            // Clockwise (not CounterClockwise) because SPIRV-Cross's
+            // FLIP_VERTEX_Y flips the Y coordinate in the vertex shader,
+            // which reverses triangle winding (OpenGL CCW -> Metal CW).
+            // Using CounterClockwise here causes Back culling to remove
+            // all front-facing triangles, resulting in a black screen.
+            enc.setFrontFacingWinding(MTLWinding.Clockwise);
             enc.setCullMode(cullMode);
             enc.setTriangleFillMode(fillMode);
 
