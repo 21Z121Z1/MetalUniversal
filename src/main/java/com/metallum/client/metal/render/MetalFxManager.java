@@ -116,6 +116,10 @@ public final class MetalFxManager {
     // horizontal component to spread at all, so dropping the rotation takes
     // spreadX to ~0.001 or below rather than merely reducing it.
     private static final int OBJECT_MIN_VALID_PIXELS = 2_000;
+    // Arrows are a few pixels wide along most of their length, so they clear a
+    // far smaller silhouette than the bulky models even placed closest to the
+    // camera. Still large enough that a vanished object fails the gate.
+    private static final int OBJECT_MIN_VALID_PIXELS_THIN = 400;
     private static final double OBJECT_MIN_SPIN_SPREAD_X = 0.008;
     private static final double OBJECT_MAX_MOTION = 0.5;
     private final boolean motionPipelineV2Available;
@@ -1708,6 +1712,14 @@ public final class MetalFxManager {
         }
         double motionSpreadX = validPixels == 0 ? Double.NaN : maxMotionX - minMotionX;
         double motionSpreadY = validPixels == 0 ? Double.NaN : maxMotionY - minMotionY;
+        // Rotations about the vertical axis (item spin, boat/pig/arrow yaw)
+        // land in the horizontal component, but the minecart's hurt shake is a
+        // roll about X and shows up vertically, so the axis-agnostic maximum is
+        // what generalises across categories. Either way a rigid translation
+        // stays near-uniform and spreads in neither.
+        double motionSpread = validPixels == 0
+                ? Double.NaN
+                : Math.max(motionSpreadX, motionSpreadY);
         double maxAbsMotion = validPixels == 0 ? Double.NaN : Math.max(
                 Math.max(Math.abs(minMotionX), Math.abs(maxMotionX)),
                 Math.max(Math.abs(minMotionY), Math.abs(maxMotionY))
@@ -1817,12 +1829,32 @@ public final class MetalFxManager {
                     && Double.isFinite(motionSpreadX)
                     && motionSpreadX >= OBJECT_MIN_SPIN_SPREAD_X
                     && maxAbsMotion <= OBJECT_MAX_MOTION;
-            // A boat turning on the spot. Same rotational envelope, but the
-            // vehicle renders through core/entity, so no core/item assertion.
-            case "vehicle_turn" -> depthContractPassed
+            // A boat turning on the spot, and a pig turning its body: both are
+            // yaw rotations reconstructed as R_y(180 - rot), so the signature is
+            // the same horizontal spread. Both render through core/entity, so
+            // neither carries a core/item assertion.
+            case "vehicle_turn", "living_turn" -> depthContractPassed
                     && validPixels > OBJECT_MIN_VALID_PIXELS
                     && Double.isFinite(motionSpreadX)
                     && motionSpreadX >= OBJECT_MIN_SPIN_SPREAD_X
+                    && maxAbsMotion <= OBJECT_MAX_MOTION;
+            // An arrow turning in place: R_y(yRot - 90) * R_z(xRot). Same
+            // horizontal signature, but an arrow is a thin sliver rather than a
+            // bulky model, so it clears a much smaller silhouette even placed
+            // closest to the camera.
+            case "arrow_turn" -> depthContractPassed
+                    && validPixels > OBJECT_MIN_VALID_PIXELS_THIN
+                    && Double.isFinite(motionSpreadX)
+                    && motionSpreadX >= OBJECT_MIN_SPIN_SPREAD_X
+                    && maxAbsMotion <= OBJECT_MAX_MOTION;
+            // A minecart resting on a straight rail while its hurt shake runs.
+            // The rail samples drive position and orientation, and the shake is
+            // a roll about X, so this one is asserted on the axis-agnostic
+            // spread rather than the horizontal component.
+            case "minecart_rail" -> depthContractPassed
+                    && validPixels > OBJECT_MIN_VALID_PIXELS
+                    && Double.isFinite(motionSpread)
+                    && motionSpread >= OBJECT_MIN_SPIN_SPREAD_X
                     && maxAbsMotion <= OBJECT_MAX_MOTION;
             case "cutout_leaves", "cutout_grass" -> depthContractPassed
                     && cutoutCoveragePixels > 32
@@ -1946,13 +1978,15 @@ public final class MetalFxManager {
             // synchronous section rebuilds the reveal happens on exactly this
             // frame, and its one-frame disocclusion transient is the signal
             // being validated.
-            // 164 and 176 are the object-motion acceptance captures, placed 8
-            // frames after their scenario starts so temporal history has
-            // settled; see MetalValidationClient's OBJECT_SCENE_FRAME block.
+            // 164/176/188/200/212 are the object-motion acceptance captures,
+            // one per root-transform category, each placed 8 frames after its
+            // scenario starts so temporal history has settled; see
+            // MetalValidationClient's OBJECT_SCENE_FRAME block.
             return frame == 6 || frame == 12 || frame == 22 || frame == 32
                     || frame == 42 || frame == 46 || frame == 54 || frame == 62
                     || frame == 74 || frame == 82
-                    || frame == 164 || frame == 176;
+                    || frame == 164 || frame == 176 || frame == 188
+                    || frame == 200 || frame == 212;
         }
     }
 
