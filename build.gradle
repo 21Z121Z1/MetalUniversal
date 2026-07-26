@@ -481,6 +481,52 @@ tasks.named("check") {
 	dependsOn "metalFrameGenerationPresentationValidation"
 }
 
+// One-shot debug configuration with EVERYTHING on at once: MetalFX TEMPORAL +
+// frame generation + the Iris-on-Metal semantic layer. This is the combination
+// no automated gate covers — the offline gates run the Iris lane with MetalFX
+// off, and the MetalFX validation runs with Iris dormant — so it is the one
+// that has to be driven by hand.
+//
+//   ./gradlew runClientAll                       (title screen)
+//   ./gradlew runClientAll -Pworld="New World"   (straight into a world)
+//
+// Override any single knob from the command line; -D wins over the defaults
+// below, because runClient forwards every metallum.* system property.
+//
+// KNOWN INTERACTION (handoff §6 iteration 7): with MetalFX TEMPORAL on, its
+// reactive pipeline replaces sodium's cutout terrain program under the
+// "metallum" namespace, so the pack's CUTOUT program is bypassed. A one-shot
+// warning is logged when that happens. Use -Dmetallum.metalfx.mode=OFF to see
+// the pack's cutout shading.
+tasks.register("runClientAll") {
+	group = "application"
+	description = "Runs the client with MetalFX TEMPORAL + frame generation + Iris shaders all enabled (manual debugging)."
+	doFirst {
+		def defaults = [
+			"metallum.metalfx.mode"           : "TEMPORAL",
+			"metallum.metalfx.frameGeneration": "true",
+			"metallum.iris.semantic"          : "true",
+		]
+		defaults.each { key, value ->
+			if (System.getProperty(key) == null) {
+				System.setProperty(key, value)
+			}
+		}
+		def world = project.findProperty("world")
+		if (world != null && !world.toString().isBlank()) {
+			System.setProperty("metallum.validation.world", world.toString())
+		}
+		logger.lifecycle("runClientAll: metalfx.mode=${System.getProperty('metallum.metalfx.mode')}" +
+			" frameGeneration=${System.getProperty('metallum.metalfx.frameGeneration')}" +
+			" iris.semantic=${System.getProperty('metallum.iris.semantic')}" +
+			(world ? " world='${world}'" : ""))
+		logger.lifecycle("runClientAll: enable a pack in run/config/iris.properties" +
+			" (shaderPack=<name>.zip + enableShaders=true); check options.txt has" +
+			" startedCleanly:true and preferredGraphicsBackend:\"default\" first.")
+	}
+	finalizedBy "runClient"
+}
+
 tasks.register("minecraftMetalFxClientValidation") {
 	group = "verification"
 	description = "Runs the deterministic Minecraft client MetalFX attachment readback validation and exits automatically."

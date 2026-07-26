@@ -5,6 +5,7 @@ import com.mojang.blaze3d.opengl.GlStateManager;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
@@ -40,6 +41,31 @@ public abstract class GlStateManagerCompatMixin {
             case GL_NUM_EXTENSIONS -> 0;
             default -> 8;
         });
+    }
+
+    /**
+     * Iris's own widgets ({@code IrisButton}, {@code OldImageButton} — the
+     * buttons on the shader-pack and shader-option screens) call these raw GL
+     * state setters on every draw. Unlike the query primitives above they are
+     * not reads: {@code _enableBlend} / {@code _enableDepthTest} reach
+     * {@code glEnable} directly, so opening any Iris settings screen on the
+     * Metal backend kills the client.
+     *
+     * <p>Cancelling is correct rather than merely safe: blend and depth-test
+     * state on this backend is owned by the pipeline object baked into each
+     * {@code MetalCompiledRenderPipeline}, not by a global switch. There is no
+     * state for these calls to set.
+     */
+    @Inject(
+            method = {"_enableBlend", "_enableDepthTest", "_disableBlend", "_disableDepthTest"},
+            at = @At("HEAD"),
+            cancellable = true,
+            require = 0
+    )
+    private static void metallum$skipGlStateToggles(final CallbackInfo ci) {
+        if (MetalIrisCompat.holdIrisDormant()) {
+            ci.cancel();
+        }
     }
 
     /**

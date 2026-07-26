@@ -486,6 +486,41 @@ BSL 的 CUTOUT(`[0]`,本该生效)在 TEMPORAL 下会退回 metallum 自己的 s
   默认关,不需实现只需验证+打开;但它是**无条件收窄而非按管线反射**,composite 链里若有 pass
   在**顶点阶段**采样上一 pass 输出,split 模式下会欠同步——打开前必须补对抗用例。
 
+### 迭代 8 — 打开 Iris 设置界面必闪退(已修)
+
+**现象**:游戏里点开 Iris 的光影设置就闪退。
+
+**根因**:Iris 自己的控件 `IrisButton` / `OldImageButton`(光影包选择页与光影选项页上的按钮)
+在每次绘制里直接调 `GlStateManager._enableBlend` / `_enableDepthTest`。这两个与之前假接的
+查询原语不同——**它们不是读,是直达 `glEnable` 的写**,Metal 上没有 GL 上下文,必炸。
+`GlStateManagerCompatMixin` 此前只假接了 `_getInteger`/`_getString`,这条路径完全没遮蔽。
+
+定位手法(可复用):把 Iris jar 里 `net/irisshaders/iris/gui/**` 全部 javap,
+grep `Method com/mojang/blaze3d/opengl/GlStateManager\.` 与 `org/lwjgl/opengl/`,
+两个类立刻浮出来。**任何"某个界面/某个操作必崩"的报告都该先这样扫一遍对应包**。
+
+**修**:`GlStateManagerCompatMixin` 增加 `_enableBlend`/`_enableDepthTest`/
+`_disableBlend`/`_disableDepthTest` 的 HEAD cancel(`require = 0`,MC 版本间这些方法可能
+增删,缺失不应导致 mixin 应用失败)。取消是**正确**而不只是安全:该后端的 blend 与
+depth-test 状态烘焙在每个 `MetalCompiledRenderPipeline` 的管线对象里,不存在全局开关可设。
+
+**顺带**:这次也可能同时踩到迭代 7 的 `PipelineManager.resetTextureState`——设置页关闭/
+应用会触发 `destroyPipeline`。两个都已修,但**它们是两个独立的根因**,不要合并理解。
+
+### 手动调试配置:`runClientAll`
+
+```
+./gradlew runClientAll                       # 标题画面
+./gradlew runClientAll -Pworld="New World"   # 直接进世界
+```
+默认 `metalfx.mode=TEMPORAL` + `frameGeneration=true` + `iris.semantic=true`——
+**这是所有自动化门都不覆盖的组合**(离线门跑 Iris 线时 MetalFX 是关的,
+MetalFX 验证跑时 Iris 是休眠的),只能手动驱动。任何 `-D` 覆盖优先于这些默认值。
+
+**已知交互(迭代 7 ②)**:TEMPORAL 开着时,MetalFX 的 reactive 管线会以 `metallum`
+命名空间顶替 sodium 的 cutout 地形程序,于是**包的 CUTOUT 程序被绕过**(有一次性 warn)。
+要看包的 cutout 着色,用 `-Dmetallum.metalfx.mode=OFF`。
+
 ## 5. 风险与预案
 
 | 风险 | 信号 | 预案 |
