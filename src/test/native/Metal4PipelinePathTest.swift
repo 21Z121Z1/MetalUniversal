@@ -201,6 +201,81 @@ private func drawAndRead(
     return values
 }
 
+/// Exercises metallum_residency_set_enable plus the creation, submit and release
+/// hooks, all through the shipping exports (migration spec M3).
+@available(macOS 15.0, iOS 18.0, *)
+private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    try check(metallum_residency_set_enable(device, queue) != 0,
+              "metallum_residency_set_enable failed")
+    try check(metallum_residency_set_enable(device, queue) != 0,
+              "metallum_residency_set_enable is not idempotent")
+
+    // Counts, not object identity: the stats export deliberately does not hand
+    // out the set, and counts are enough to pin down every property here.
+    func residencyCount(_ label: String) throws -> UInt32 {
+        var allocations: UInt32 = 0
+        var bytes: UInt64 = 0
+        try check(metallum_residency_set_stats(&allocations, &bytes) != 0,
+                  "metallum_residency_set_stats reported no active set at \(label)")
+        return allocations
+    }
+    /// Residency changes are published at most once per submit, so nothing is
+    /// observable until one happens.
+    func flushResidency(_ label: String) throws {
+        guard let commandBuffer = queue.makeCommandBuffer() else {
+            try fail("could not allocate the \(label) command buffer")
+        }
+        metallum_MTLCommandBuffer_commit(commandBuffer)
+        commandBuffer.waitUntilCompleted()
+    }
+
+    let baseline = try residencyCount("baseline")
+
+    guard let bufferPointer = metallum_create_buffer(device, 4096, []) else {
+        try fail("metallum_create_buffer returned nil")
+    }
+    guard let texturePointer = "residency-test".withCString({ label in
+        metallum_create_texture_2d(device, .rgba8Unorm, 16, 16, 1, 1, 0, [.shaderRead], .private, label)
+    }) else {
+        try fail("metallum_create_texture_2d returned nil")
+    }
+    // Memoryless needs renderTarget usage to be a legal texture at all; it must
+    // still be excluded from the set.
+    guard let memorylessPointer = "residency-test-memoryless".withCString({ label in
+        metallum_create_texture_2d(device, .depth32Float, 16, 16, 1, 1, 0, [.renderTarget], .memoryless, label)
+    }) else {
+        try fail("metallum_create_texture_2d returned nil for the memoryless texture")
+    }
+
+    try flushResidency("residency additions")
+    let afterCreate = try residencyCount("after create")
+    // Three resources created, but the memoryless one must not be tracked.
+    try check(afterCreate == baseline + 2,
+              "expected \(baseline + 2) tracked allocations after creating a buffer, a texture and a "
+              + "memoryless texture, got \(afterCreate)")
+
+    metallum_release_object(bufferPointer)
+    try flushResidency("residency removal")
+    let afterRelease = try residencyCount("after release")
+    try check(afterRelease == baseline + 1,
+              "releasing the buffer should leave \(baseline + 1) tracked allocations, got \(afterRelease)")
+
+    metallum_release_object(texturePointer)
+    metallum_release_object(memorylessPointer)
+    try flushResidency("residency drain")
+    let afterDrain = try residencyCount("after drain")
+    try check(afterDrain == baseline,
+              "releasing everything should return to \(baseline) tracked allocations, got \(afterDrain)")
+}
+
+private func runResidencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 15.0, iOS 18.0, *) else {
+        print("residency set test skipped: needs macOS 15 / iOS 18")
+        return
+    }
+    try residencyTest(device: device, queue: queue)
+}
+
 private func runPathTest() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
         try fail("MTLCreateSystemDefaultDevice returned nil")
@@ -291,8 +366,57 @@ private func runPathTest() throws {
     try check(fallbackPixel == metal3Pixel,
               "fallback pipeline rendered \(fallbackPixel), Metal 3 rendered \(metal3Pixel)")
 
+    // (4) M2c: pipeline data set round trip. MTLBinaryArchive cannot re-serialize
+    // an archive it loaded from disk, which is why the Metal 3 path is
+    // "build on first launch, read-only afterwards". MTL4PipelineDataSetSerializer
+    // has no such limit, so a flush must succeed on a warm launch too — that is
+    // what this checks, along with the archive landing beside the Metal 3 file
+    // rather than on top of it.
+    let archiveDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("metallum-metal4-archive-test", isDirectory: true)
+    try? FileManager.default.removeItem(at: archiveDirectory)
+    try FileManager.default.createDirectory(at: archiveDirectory, withIntermediateDirectories: true)
+    let binaryArchivePath = archiveDirectory.appendingPathComponent("pso.binaryarchive").path
+    let metal4ArchivePath = archiveDirectory.appendingPathComponent("pso.mtl4archive").path
+
+    for launch in ["cold", "warm"] {
+        try check(binaryArchivePath.withCString { metallum_pso_archive_open(device, $0) } != 0,
+                  "metallum_pso_archive_open failed on the \(launch) launch")
+        let pipeline = try createShippingPipeline(
+            device: device,
+            descriptor: makeDescriptor(
+                vertexFunction: vertexFunction,
+                fragmentFunction: fragmentFunction,
+                label: "metal4-path-archive-\(launch)"
+            )
+        )
+        let pixel = try drawAndRead(
+            queue: queue,
+            pipeline: pipeline,
+            target: try makeTarget(device: device, label: "metal4 path archive \(launch)"),
+            label: "\(launch) archive launch draw"
+        )
+        try check(pixel == metal3Pixel,
+                  "\(launch) archive launch rendered \(pixel), Metal 3 rendered \(metal3Pixel)")
+        try check(binaryArchivePath.withCString { metallum_pso_archive_flush($0) } != 0,
+                  "metallum_pso_archive_flush failed on the \(launch) launch")
+        try check(FileManager.default.fileExists(atPath: metal4ArchivePath),
+                  "no Metal 4 pipeline archive at \(metal4ArchivePath) after the \(launch) launch")
+        try check(!FileManager.default.fileExists(atPath: binaryArchivePath),
+                  "the Metal 4 path wrote to the Metal 3 binary archive path")
+    }
+    try? FileManager.default.removeItem(at: archiveDirectory)
+
     metallum_set_metal4_compiler_enabled(0)
-    print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, and an unregistered library falls back cleanly")
+
+    // (5) M3: residency set on a plain Metal 3 queue. Checks that enabling is
+    // idempotent, that resources created afterwards land in the set, that a
+    // memoryless texture is kept out of it (it has no backing allocation, so
+    // adding one is invalid), that a submit publishes pending changes, and that
+    // releasing a resource removes it again.
+    try runResidencyTest(device: device, queue: queue)
+
+    print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, an unregistered library falls back cleanly, the pipeline data set archive flushes on both a cold and a warm launch, and the residency set tracks native allocations")
 }
 
 // Multi-file compile: no top-level code, so the entry point is explicit (same

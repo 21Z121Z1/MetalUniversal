@@ -101,6 +101,19 @@ private enum NativeState {
     // compiler above.
     static var metal4LookupArchive: AnyObject?
     static let metal4CompilerLock = NSLock()
+    // Residency set (migration spec M3), enabled by metallum.opt.residencySet.
+    // MTLResidencySet is macOS 15 / iOS 18 and needs no Metal 4, so the table of
+    // "what the GPU may touch" is built on the existing Metal 3 queue first;
+    // under Metal 4 residency becomes mandatory and this is already wired.
+    // Erased as AnyObject? for the same versioning reason as the compiler.
+    // MTLResidencySet is NOT thread safe: every addAllocation / removeAllocation
+    // / commit must hold residencyLock. This project has the render thread, the
+    // frame-generation present thread and the async precompile thread all able to
+    // create and destroy resources, so the lock is not optional.
+    static var residencySetStorage: AnyObject?
+    static let residencyLock = NSLock()
+    static var residencyDirty = false
+    static var residencyRequested = false
     // One-shot logging so a run can tell "the Metal 4 pipeline path worked" from
     // "every pipeline silently fell back to Metal 3" — the two are otherwise
     // indistinguishable, since falling back is by design never an error. Racing
@@ -3870,6 +3883,7 @@ public func metallum_MTLCommandQueue_makeCommandBuffer(
 
 @_cdecl("metallum_MTLCommandBuffer_commit")
 public func metallum_MTLCommandBuffer_commit(_ commandBuffer: MTLCommandBuffer) {
+    residencyFlushBeforeSubmit()
     commandBuffer.commit()
 }
 
@@ -3884,6 +3898,7 @@ public func metallum_MTLCommandBuffer_commitWithSignal(_ commandBuffer: MTLComma
     commandBuffer.addCompletedHandler { _ in
         semaphore.signal()
     }
+    residencyFlushBeforeSubmit()
     commandBuffer.commit()
 }
 
@@ -4054,7 +4069,11 @@ public func metallum_create_buffer(
     _ options: MTLResourceOptions
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        retainedPointer(device.makeBuffer(length: length, options: options))
+        guard let buffer = device.makeBuffer(length: length, options: options) else {
+            return nil
+        }
+        residencyTrackCreated(buffer)
+        return retainedPointer(buffer)
     }
 }
 
@@ -4100,6 +4119,7 @@ public func metallum_create_texture_2d(
             return nil
         }
         texture.label = stringFromOptionalCString(labelPtr)
+        residencyTrackCreated(texture)
         return retainedPointer(texture)
     }
 }
@@ -4978,6 +4998,12 @@ public func metallum_set_metal4_compiler_enabled(_ enabled: Int32) {
 public func metallum_release_object(_ obj: UnsafeMutableRawPointer?) {
     autoreleasepool {
         guard let obj else { return }
+        // Residency bookkeeping happens here rather than at destruction-queue
+        // enqueue time: this is the point the Java side has already deferred past
+        // every submit that could still be reading the resource (S1 made the
+        // queue depth in-flight+1), so the set never loses an allocation the GPU
+        // is still using.
+        residencyTrackReleased(obj)
         Unmanaged<AnyObject>.fromOpaque(obj).release()
     }
 }
@@ -5203,6 +5229,127 @@ private func descriptorHasLiveColorWrite(_ descriptor: MTLRenderPipelineDescript
     return false
 }
 
+// MARK: - Residency set (migration spec M3)
+
+/// Adds a freshly created resource to the residency set, if one is active.
+/// Memoryless textures are excluded: they have no backing allocation, so adding
+/// them is invalid.
+@available(macOS 15.0, iOS 18.0, *)
+private func residencyAdd(_ resource: MTLResource) {
+    NativeState.residencyLock.lock()
+    defer { NativeState.residencyLock.unlock() }
+    guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
+    if let texture = resource as? MTLTexture, texture.storageMode == .memoryless {
+        return
+    }
+    set.addAllocation(resource)
+    NativeState.residencyDirty = true
+}
+
+/// Drops a resource from the residency set. Called from the release path, which
+/// the Java destruction queue already defers past the frames still in flight.
+@available(macOS 15.0, iOS 18.0, *)
+private func residencyRemove(_ resource: MTLResource) {
+    NativeState.residencyLock.lock()
+    defer { NativeState.residencyLock.unlock() }
+    guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
+    set.removeAllocation(resource)
+    NativeState.residencyDirty = true
+}
+
+/// Publishes pending additions and removals. commit() is expensive, so it runs
+/// at most once per submit — this is the one performance trap of residency sets.
+/// requestResidency() is persistent and only needs the first commit.
+@available(macOS 15.0, iOS 18.0, *)
+private func residencyCommitIfDirty() {
+    NativeState.residencyLock.lock()
+    defer { NativeState.residencyLock.unlock() }
+    guard NativeState.residencyDirty,
+          let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
+    set.commit()
+    NativeState.residencyDirty = false
+    if !NativeState.residencyRequested {
+        set.requestResidency()
+        NativeState.residencyRequested = true
+    }
+}
+
+/// Version-erased entry points so the call sites stay free of #available noise.
+private func residencyTrackCreated(_ resource: MTLResource?) {
+    guard let resource, NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *) {
+        residencyAdd(resource)
+    }
+}
+
+/// Takes the raw pointer rather than the object: this runs for every native
+/// object release, and with no residency set active it must cost one nil check
+/// and nothing else — materializing an AnyObject here would add an ARC
+/// retain/release per release on a per-frame-hot path.
+private func residencyTrackReleased(_ pointer: UnsafeMutableRawPointer) {
+    guard NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *) {
+        guard let resource = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLResource else {
+            return
+        }
+        residencyRemove(resource)
+    }
+}
+
+private func residencyFlushBeforeSubmit() {
+    guard NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *) {
+        residencyCommitIfDirty()
+    }
+}
+
+/// Creates the residency set and attaches it to `queue`, plus the layer's own
+/// read-only set when a layer is available (it tracks drawables automatically,
+/// so nothing is ever added to it by hand). Returns 1 on success.
+@_cdecl("metallum_residency_set_enable")
+public func metallum_residency_set_enable(_ device: MTLDevice, _ queue: MTLCommandQueue) -> Int32 {
+    return autoreleasepool {
+        guard #available(macOS 15.0, iOS 18.0, *) else { return 0 }
+        NativeState.residencyLock.lock()
+        defer { NativeState.residencyLock.unlock() }
+        if NativeState.residencySetStorage != nil { return 1 }
+        let descriptor = MTLResidencySetDescriptor()
+        descriptor.label = "metallum-residency"
+        descriptor.initialCapacity = 1024
+        guard let set = try? device.makeResidencySet(descriptor: descriptor) else {
+            NSLog("[metallum] residency set creation failed; staying on automatic residency")
+            return 0
+        }
+        NativeState.residencySetStorage = set
+        NativeState.residencyDirty = false
+        NativeState.residencyRequested = false
+        queue.addResidencySet(set)
+        NSLog("[metallum] residency set attached to the main command queue")
+        return 1
+    }
+}
+
+/// Reports how much the residency set currently pins: the number of tracked
+/// allocations and their total size in bytes. Returns 0 when no set is active.
+/// This is the measurement M3 is accepted against (resident footprint must not
+/// move materially versus automatic residency), and it is how a run can tell an
+/// empty set from a populated one.
+@_cdecl("metallum_residency_set_stats")
+public func metallum_residency_set_stats(
+    _ outAllocations: UnsafeMutablePointer<UInt32>?,
+    _ outBytes: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    return autoreleasepool {
+        guard #available(macOS 15.0, iOS 18.0, *) else { return 0 }
+        NativeState.residencyLock.lock()
+        defer { NativeState.residencyLock.unlock() }
+        guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return 0 }
+        outAllocations?.pointee = UInt32(set.allAllocations.count)
+        outBytes?.pointee = UInt64(set.allocatedSize)
+        return 1
+    }
+}
+
 /// The Metal 4 pipeline data set lives beside the Metal 3 binary archive rather
 /// than in it. Java passes one path and its ABI does not change; the two caches
 /// are simply different formats written by different APIs
@@ -5288,8 +5435,20 @@ public func metallum_pso_archive_open(
             let device = device
             NativeState.metal4CompilerLock.lock()
             let serializerDescriptor = MTL4PipelineDataSetSerializerDescriptor()
-            serializerDescriptor.configuration = .captureDescriptors
+            // .captureBinaries, not .captureDescriptors: the configuration is an
+            // options mask that selects which serializer method is usable, and
+            // serializeAsArchiveAndFlush(url:) needs binaries. With
+            // .captureDescriptors only, the flush throws (nilError) and the
+            // pipeline cache silently never lands — .captureDescriptors pairs with
+            // serializeAsPipelinesScript(), which is for offline metal-tt builds.
+            serializerDescriptor.configuration = .captureBinaries
             NativeState.metal4Serializer = device.makePipelineDataSetSerializer(descriptor: serializerDescriptor)
+            // The serializer is only collected through the compiler it was
+            // attached to at creation. Drop any compiler built before this point
+            // so it is rebuilt with the serializer; otherwise a single pipeline
+            // created ahead of the archive opening would silently disable
+            // archiving for the whole session.
+            NativeState.metal4CompilerStorage = nil
             // Previous launch's archive, if any, becomes the compiler lookup set.
             // Absent or unreadable simply means a cold start.
             if FileManager.default.fileExists(atPath: url.path) {

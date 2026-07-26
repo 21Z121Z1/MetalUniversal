@@ -63,14 +63,25 @@ func probe(device: MTLDevice, layer: CAMetalLayer, buffer: MTLBuffer, texture: M
     let pso: MTLRenderPipelineState = try compiler.makeRenderPipelineState(descriptor: rp)
     // async variant probed separately in probeAsync()
     let taskOptions = MTL4CompilerTaskOptions()
+    // A *synchronous* overload taking compilerTaskOptions exists as well, which is
+    // what lets lookupArchives be used without moving pipeline creation onto
+    // Swift concurrency (M2c depends on this).
+    _ = try compiler.makeRenderPipelineState(descriptor: rp, compilerTaskOptions: taskOptions)
     // unspecialized / flexible
     rp.colorAttachments[0].pixelFormat = .unspecialized
     rp.colorAttachments[0].blendingState = .unspecialized
     _ = try compiler.makeRenderPipelineStateBySpecialization(descriptor: rp, pipeline: pso)
 
     // --- archive / serializer ---
+    // configuration is an NS_OPTIONS mask that selects which serializer method is
+    // usable, and the pairing is not interchangeable:
+    //   .captureDescriptors -> serializeAsPipelinesScript()   (offline metal-tt)
+    //   .captureBinaries    -> serializeAsArchiveAndFlush(url:)
+    // Typechecking cannot catch a wrong pairing: .captureDescriptors +
+    // serializeAsArchiveAndFlush compiles and then throws `nilError` at run time,
+    // so the pipeline cache silently never lands. Found by running it (M2c).
     let serDesc = MTL4PipelineDataSetSerializerDescriptor()
-    serDesc.configuration = .captureDescriptors
+    serDesc.configuration = .captureBinaries
     let serializer = device.makePipelineDataSetSerializer(descriptor: serDesc)
     try serializer.serializeAsArchiveAndFlush(url: url)
     let archive = try device.makeArchive(url: url)

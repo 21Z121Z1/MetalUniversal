@@ -77,6 +77,14 @@ final class MetalDevice implements GpuDeviceBackend {
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"));
     /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
     private final boolean metal4Available;
+    /**
+     * Explicit residency tracking (spec M3). MTLResidencySet is macOS 15 / iOS 18
+     * and needs no Metal 4, so this switch is independent of the master one: the
+     * table gets built and measured on the existing Metal 3 queue, and M7 only
+     * has to connect it.
+     */
+    private static final boolean RESIDENCY_SET =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.residencySet", "false"));
     private static final boolean RENDER_PIPELINE_IDENTITY_EQUALS = renderPipelineUsesIdentityEquals();
     /**
      * Serializes the whole GLSL→SPIR-V→MSL→PSO chain across threads: the
@@ -130,6 +138,11 @@ final class MetalDevice implements GpuDeviceBackend {
         this.cocoaView = cocoaView;
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
+        // Before metallum_init_pipelines and before any texture or buffer exists:
+        // resources created earlier would never enter the set.
+        if (RESIDENCY_SET && !this.commandQueue.enableResidencySet(metalDeviceHandle)) {
+            Metallum.LOGGER.warn("[metallum] residency set unavailable; residency stays automatic");
+        }
         MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
         // Must agree with MetalCommandEncoder.DEFERRED_DEPTH_STORE before the
         // first render encoder: the native side only sets storeAction=.unknown

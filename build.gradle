@@ -177,6 +177,7 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
 	}
 	workingDir project.projectDir
+	// Source set mirrors buildMacNative, so this test links what ships.
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
@@ -187,9 +188,15 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 	doFirst {
 		metal4PipelinePathBinary.parentFile.mkdirs()
 	}
-	// Same source set as buildMacNative, so this test links what ships.
+	// -whole-module-optimization is required, not just a speed knob:
+	// MetallumInterface.swift takes the address of MetallumNative.swift's @_cdecl
+	// functions as @convention(c), which emits a thunk carrying the same C symbol
+	// in each file's object. One object file per module (as buildMacNative does)
+	// is what keeps those from colliding at link time.
 	commandLine "swiftc",
 		"-O",
+		"-whole-module-optimization",
+		"-module-name", "metallum_native",
 		"-target", "arm64-apple-macosx14.0",
 		"-framework", "AppKit",
 		"-framework", "Foundation",

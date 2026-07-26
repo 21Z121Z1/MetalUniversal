@@ -520,6 +520,7 @@ public final class MetalNativeBridge {
             setDeferredDepthStore = downcall(lookup, "metallum_set_deferred_depth_store", FunctionDescriptor.ofVoid(INT));
             metal4Supported = downcall(lookup, "metallum_metal4_supported", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
+            residencySetEnable = downcall(lookup, "metallum_residency_set_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             // The archive open path performs disk IO inside the native call;
             // avoid the critical-linker fast path like other IO-adjacent calls.
             psoArchiveOpen = downcallWithoutCritical(lookup, "metallum_pso_archive_open", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -755,6 +756,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle setDeferredDepthStore;
     private static final MethodHandle metal4Supported;
     private static final MethodHandle setMetal4CompilerEnabled;
+    private static final MethodHandle residencySetEnable;
     private static final MethodHandle psoArchiveOpen;
     private static final MethodHandle psoArchiveFlush;
     private static final MethodHandle MTLBlitCommandEncoderUpdateFence;
@@ -2337,6 +2339,20 @@ public final class MetalNativeBridge {
             return (int) metal4Supported.invokeExact(segment(device));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metal4_supported", throwable);
+        }
+    }
+
+    /**
+     * Creates a residency set and attaches it to {@code queue}, after which
+     * natively created buffers and textures are tracked in it. Non-zero on
+     * success; 0 means the OS is too old or the set could not be created, and
+     * residency stays automatic.
+     */
+    public static int metallum_residency_set_enable(final MemorySegment device, final MemorySegment queue) {
+        try {
+            return (int) residencySetEnable.invokeExact(segment(device), segment(queue));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_residency_set_enable", throwable);
         }
     }
 
