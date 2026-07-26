@@ -9,6 +9,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -116,11 +117,25 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final float OBJECT_TURN_DEGREES_PER_FRAME = 6.0F;
     // Minecart hurt shake. On a straight rail the renderer re-derives yaw from
     // the rail samples and ignores the cart's own, so the shake is the only
-    // rotation available without curving the track. hurtTime counts down one
-    // per frame from this base and damage is held constant, giving a smoothly
-    // varying `sin(hurtTime) * hurtTime * damage / 10` wobble.
-    private static final int MINECART_HURT_TIME_BASE = 10;
-    private static final float MINECART_DAMAGE = 40.0F;
+    // rotation available without curving the track.
+    //
+    // The shake angle is `sin(hurtTime) * hurtTime * damage / 10` degrees, and
+    // hurtTime is fed to sin as if it were radians. Counting hurtTime down a
+    // step per frame therefore does not give a smooth wobble at all: 10 -> 9 at
+    // damage 40 swings 36 degrees in a single frame, which is precisely the
+    // large per-frame motion these scenarios avoid. Holding hurtTime fixed and
+    // ramping damage instead makes the angle linear in the ramp: at hurtTime 5
+    // the angle is -0.479 * damage degrees, so a 4.0 step is about 1.9 degrees
+    // a frame, matching the other scenarios' 6 degree yaw step in magnitude.
+    //
+    // This is the one object scenario that keeps a wall-clock term: the
+    // renderer extracts hurtTime as `getHurtTime() - partialTick`, which no
+    // amount of old == new pinning removes. The effective hurtTime therefore
+    // roams [4, 5] and the realised step lands somewhere in 1.9-6.9 degrees.
+    // That stays small in absolute terms and well inside the spread envelope,
+    // but it is why this scenario is the least reproducible of the five.
+    private static final int MINECART_HURT_TIME = 5;
+    private static final float MINECART_DAMAGE_PER_FRAME = 4.0F;
     // Spin angle the item is pinned to on its capture frame. bobOffs is
     // randomised per ItemEntity and is final, so rather than pinning the offset
     // itself the integer tick base absorbs it (see installObjectMotionScene).
@@ -612,10 +627,17 @@ public final class MetalValidationClient implements ClientModInitializer {
         Vec3 vehiclePosition = vehicle ? vehicleHome : parked;
         Vec3 livingPosition = living ? livingHome : parked;
         Vec3 arrowPosition = arrow ? arrowHome : parked;
-        // The minecart stays on its rail even while parked-out scenarios run:
-        // moving it off the rail and back would make the rail-sampled branch
-        // re-acquire mid-scenario. It is simply out of frame until its turn.
-        Vec3 minecartPosition = minecartHome;
+        // Parked like the rest when it is not its turn. Leaving it on the rail
+        // throughout does not keep it out of frame: the rail sits about 23
+        // degrees below the horizon at this distance, well inside the 35 degree
+        // half-FOV, so a resident cart would add a second silhouette of
+        // zero-motion object pixels to every other scenario's measurement — and
+        // would on its own clear the arrow scenario's pixel floor. Parking
+        // costs nothing, because OldMinecartBehavior.getPos is evaluated from
+        // the cart's current position every frame rather than latched: the
+        // rail-sampled branch re-selects itself the moment the cart is back on
+        // the track, with a history reset on that same frame.
+        Vec3 minecartPosition = minecart ? minecartHome : parked;
 
         if (spinningItem != null) {
             // The spin phase is a pure function of the timeline frame index.
@@ -688,11 +710,13 @@ public final class MetalValidationClient implements ClientModInitializer {
             // orientation from the front/back rail samples, so turning the cart
             // would change nothing on a straight track. The hurt shake is the
             // rotation this scenario drives, and it is the other half of the
-            // minecart row in the coverage table. Damage is held constant and
-            // the wobble comes from hurtTime, which steps once per frame.
-            int hurtTime = minecart ? MINECART_HURT_TIME_BASE - (frame - MINECART_TURN_FRAME) : 0;
-            shakingMinecart.setHurtTime(Math.max(0, hurtTime));
-            shakingMinecart.setDamage(minecart ? MINECART_DAMAGE : 0.0F);
+            // minecart row in the coverage table. hurtTime is held fixed and
+            // damage carries the ramp, which keeps the angle linear in the step
+            // rather than swinging with sin(hurtTime).
+            shakingMinecart.setHurtTime(minecart ? MINECART_HURT_TIME : 0);
+            shakingMinecart.setDamage(minecart
+                    ? (frame - MINECART_TURN_FRAME) * MINECART_DAMAGE_PER_FRAME
+                    : 0.0F);
             shakingMinecart.setHurtDir(1);
         }
 
@@ -1210,6 +1234,21 @@ public final class MetalValidationClient implements ClientModInitializer {
             placeObjectSceneBlock(minecraft, pos.below(), Blocks.STONE.defaultBlockState());
         }
         requestImportantRebuild(OBJECT_SCENE.keySet());
+
+        // Without a rail under the cart, OldMinecartBehavior.getPos returns
+        // null and the reconstruction quietly falls back to the non-rail
+        // branch. The scenario would still pass — the hurt shake alone produces
+        // a spread — while validating a different code path than the one it
+        // claims to cover. Fail loudly instead of silently covering the wrong
+        // thing.
+        BlockPos cartTile = BlockPos.containing(minecartRailPosition()).below();
+        if (!minecraft.level.getBlockState(cartTile).is(BlockTags.RAILS)) {
+            throw new IllegalStateException(
+                    "Minecart validation rail missing at " + cartTile
+                            + " (found " + minecraft.level.getBlockState(cartTile) + "); the"
+                            + " rail-sampled reconstruction branch would not be exercised"
+            );
+        }
     }
 
     /** Rail axis closest to the camera's forward direction. */
