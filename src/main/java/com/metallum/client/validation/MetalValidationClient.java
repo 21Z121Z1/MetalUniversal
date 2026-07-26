@@ -9,20 +9,26 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.decoration.ArmorStand;
+import net.minecraft.world.entity.animal.pig.Pig;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.projectile.arrow.Arrow;
 import net.minecraft.world.entity.vehicle.boat.Boat;
+import net.minecraft.world.entity.vehicle.minecart.Minecart;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.RailBlock;
 import net.minecraft.world.level.block.VineBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.RailShape;
 import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.saveddata.WeatherData;
 import net.minecraft.world.phys.Vec3;
@@ -80,21 +86,56 @@ public final class MetalValidationClient implements ClientModInitializer {
     // belong to the shimmer-remediation thread
     // (docs/cutout-shimmer-remediation-2026-07-27.md §8/§14) and nothing at or
     // below 155 changes behaviour here.
+    // One scenario per root-transform category MetalEntityObjectPose covers, so
+    // a regression in any single reconstruction shows up as its own failing
+    // frame. Each scenario runs 12 frames and captures 8 frames in, leaving the
+    // scene swap's disocclusion transient behind. See the coverage table in
+    // docs/metalfx-frame-generation.md.
     private static final int OBJECT_SCENE_FRAME = 156;
     private static final int ITEM_CAPTURE_FRAME = 164;
     private static final int VEHICLE_TURN_FRAME = 168;
     private static final int VEHICLE_CAPTURE_FRAME = 176;
-    private static final int OBJECT_SERIES_END_FRAME = 180;
+    private static final int LIVING_TURN_FRAME = 180;
+    private static final int LIVING_CAPTURE_FRAME = 188;
+    private static final int ARROW_TURN_FRAME = 192;
+    private static final int ARROW_CAPTURE_FRAME = 200;
+    private static final int MINECART_TURN_FRAME = 204;
+    private static final int MINECART_CAPTURE_FRAME = 212;
+    private static final int OBJECT_SERIES_END_FRAME = 216;
+    // The timeline now runs past the old 220-frame ceiling.
+    private static final int TIMELINE_TIMEOUT_FRAME = 300;
     // Item spin is driven by ageInTicks, which the renderer builds as
     // `tickCount + partialTick`. partialTick is wall-clock and cannot be
     // pinned from here, so the commanded per-frame step is made large enough
     // to dominate it: 5 ticks is 0.25 rad of spin per frame against at most
     // 1 tick (0.05 rad) of jitter, leaving the true delta inside [0.20, 0.30].
     private static final int ITEM_SPIN_TICKS_PER_FRAME = 5;
-    // The boat's yaw is read through getYRot(partialTick), which lerps
-    // yRotO -> yRot; pinning old == new makes that lerp exact, so the vehicle
-    // scenario carries no wall-clock term at all.
-    private static final float VEHICLE_TURN_DEGREES_PER_FRAME = 6.0F;
+    // Rotation step shared by the boat, pig and arrow scenarios. Every one of
+    // those angles is read through a partialTick lerp of old -> new, so pinning
+    // old == new makes the rendered pose exact and these scenarios carry no
+    // wall-clock term at all. 6 degrees a frame keeps per-frame motion small.
+    private static final float OBJECT_TURN_DEGREES_PER_FRAME = 6.0F;
+    // Minecart hurt shake. On a straight rail the renderer re-derives yaw from
+    // the rail samples and ignores the cart's own, so the shake is the only
+    // rotation available without curving the track.
+    //
+    // The shake angle is `sin(hurtTime) * hurtTime * damage / 10` degrees, and
+    // hurtTime is fed to sin as if it were radians. Counting hurtTime down a
+    // step per frame therefore does not give a smooth wobble at all: 10 -> 9 at
+    // damage 40 swings 36 degrees in a single frame, which is precisely the
+    // large per-frame motion these scenarios avoid. Holding hurtTime fixed and
+    // ramping damage instead makes the angle linear in the ramp: at hurtTime 5
+    // the angle is -0.479 * damage degrees, so a 4.0 step is about 1.9 degrees
+    // a frame, matching the other scenarios' 6 degree yaw step in magnitude.
+    //
+    // This is the one object scenario that keeps a wall-clock term: the
+    // renderer extracts hurtTime as `getHurtTime() - partialTick`, which no
+    // amount of old == new pinning removes. The effective hurtTime therefore
+    // roams [4, 5] and the realised step lands somewhere in 1.9-6.9 degrees.
+    // That stays small in absolute terms and well inside the spread envelope,
+    // but it is why this scenario is the least reproducible of the five.
+    private static final int MINECART_HURT_TIME = 5;
+    private static final float MINECART_DAMAGE_PER_FRAME = 4.0F;
     // Spin angle the item is pinned to on its capture frame. bobOffs is
     // randomised per ItemEntity and is final, so rather than pinning the offset
     // itself the integer tick base absorbs it (see installObjectMotionScene).
@@ -109,6 +150,15 @@ public final class MetalValidationClient implements ClientModInitializer {
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf02");
     private static final UUID VEHICLE_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf03");
+    private static final int LIVING_ENTITY_ID = -2_147_000_004;
+    private static final int ARROW_ENTITY_ID = -2_147_000_005;
+    private static final int MINECART_ENTITY_ID = -2_147_000_006;
+    private static final UUID LIVING_ENTITY_UUID =
+            UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf04");
+    private static final UUID ARROW_ENTITY_UUID =
+            UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf05");
+    private static final UUID MINECART_ENTITY_UUID =
+            UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf06");
     // Pinned FRAMEBUFFER size. All metric thresholds and golden baselines
     // are calibrated at this capture size (the 2x-backing framebuffer of the
     // 854x480 logical window the Gradle task requests via --width/--height).
@@ -124,6 +174,9 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static ArmorStand controlledEntity;
     private static ItemEntity spinningItem;
     private static Boat turningVehicle;
+    private static Pig turningLiving;
+    private static Arrow turningArrow;
+    private static Minecart shakingMinecart;
     private static Vec3 cameraOrigin;
     private static float cameraYaw;
     private static float cameraPitch;
@@ -131,6 +184,9 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static Vec3 previousEntityPosition;
     private static final Map<BlockPos, BlockState> OCCLUSION_WALL = new LinkedHashMap<>();
     private static final Map<BlockPos, BlockState> CUTOUT_SCENE = new LinkedHashMap<>();
+    // Kept separate from CUTOUT_SCENE so restoring the object-motion rail never
+    // interacts with the shimmer thread's cutout scene bookkeeping.
+    private static final Map<BlockPos, BlockState> OBJECT_SCENE = new LinkedHashMap<>();
     private static final StringBuilder FRAME_JSON = new StringBuilder("[\n");
 
     @Override
@@ -278,11 +334,16 @@ public final class MetalValidationClient implements ClientModInitializer {
             installCutoutSkyScene(minecraft);
         } else if (frame == OBJECT_SCENE_FRAME) {
             installObjectMotionScene(minecraft);
-        } else if (frame == VEHICLE_TURN_FRAME) {
+        } else if (frame == VEHICLE_TURN_FRAME
+                || frame == LIVING_TURN_FRAME
+                || frame == ARROW_TURN_FRAME
+                || frame == MINECART_TURN_FRAME) {
             // Swapping which object is in view is a large one-frame jump for
-            // both; the capture sits 8 frames later, and the reset keeps that
-            // transient out of the accumulated history the capture reads.
-            MetalFxManager.resetHistory("automated validation vehicle scenario");
+            // both the outgoing and incoming object; the capture sits 8 frames
+            // later, and the reset keeps that transient out of the accumulated
+            // history the capture reads. The swap is staging, not the thing
+            // under test: no scenario validates a reveal with it.
+            MetalFxManager.resetHistory("automated validation object scenario swap");
         }
 
         ScenarioPose pose = scenarioPoseFor(frame);
@@ -321,7 +382,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                 && MetalFxManager.flickerMetricCompleted("cutout_sky_hold")) {
             int completed = MetalFxManager.validationCapturesCompleted();
             int failures = MetalFxManager.validationCaptureFailures();
-            if (completed != 12 || failures != 0) {
+            if (completed != 15 || failures != 0) {
                 removeOcclusionWall(minecraft);
                 removeCutoutScene(minecraft);
                 removeObjectMotionScene();
@@ -329,11 +390,11 @@ public final class MetalValidationClient implements ClientModInitializer {
                 finishRunState("failed", completed, failures);
                 throw new IllegalStateException(
                         "Automated Minecraft GPU validation failed: completed="
-                                + completed + "/12, failures=" + failures
+                                + completed + "/15, failures=" + failures
                 );
             }
             finishAndStop(minecraft, completed, failures);
-        } else if (frame >= 220) {
+        } else if (frame >= TIMELINE_TIMEOUT_FRAME) {
             throw new IllegalStateException(
                     "Timed out waiting for automated Minecraft GPU readbacks: pending="
                             + MetalFxManager.validationCapturesPending()
@@ -408,7 +469,16 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (timelineFrame < VEHICLE_TURN_FRAME) {
             return new ScenarioPose("item_spin", 0.80, 0.40);
         }
-        return new ScenarioPose("vehicle_turn", 0.80, 0.40);
+        if (timelineFrame < LIVING_TURN_FRAME) {
+            return new ScenarioPose("vehicle_turn", 0.80, 0.40);
+        }
+        if (timelineFrame < ARROW_TURN_FRAME) {
+            return new ScenarioPose("living_turn", 0.80, 0.40);
+        }
+        if (timelineFrame < MINECART_TURN_FRAME) {
+            return new ScenarioPose("arrow_turn", 0.80, 0.40);
+        }
+        return new ScenarioPose("minecart_rail", 0.80, 0.40);
     }
 
     /**
@@ -510,35 +580,64 @@ public final class MetalValidationClient implements ClientModInitializer {
     }
 
     private static boolean isObjectMotionScenario(final String scenario) {
-        return "item_spin".equals(scenario) || "vehicle_turn".equals(scenario);
+        return "item_spin".equals(scenario)
+                || "vehicle_turn".equals(scenario)
+                || "living_turn".equals(scenario)
+                || "arrow_turn".equals(scenario)
+                || "minecart_rail".equals(scenario);
     }
 
     /**
-     * Drives the dropped item and the vehicle for one object-motion frame and
-     * returns the position of whichever is on screen.
+     * Drives every object-motion entity for one frame and returns the position
+     * of whichever one is on screen.
      *
      * <p>The returned position is what the capture reports as the validated
      * entity centre, so it has to be the object actually producing the motion
      * pixels — and it has to be in front of the camera, because the readback
      * rejects a centre outside the valid clip half-space.</p>
      *
-     * <p>Only one object is ever in view: the other is parked behind the
-     * camera, where it is frustum-culled and contributes no pixels. Both are
-     * held at a fixed world position throughout, so the object motion the
-     * capture measures is purely rotational.</p>
+     * <p>Exactly one object is in view per scenario; the rest are parked behind
+     * the camera, where they are frustum-culled and contribute no pixels. Each
+     * is held at a fixed world position throughout its scenario, so per-frame
+     * translation is zero and the motion the capture measures is purely the
+     * object's own rotation. That matters beyond tidiness: measured object
+     * motion runs 30-55% off the analytic value, so a scenario that leaned on
+     * large per-frame translation would be measuring mostly that error.</p>
      */
     private static Vec3 driveObjectMotionEntities(final String scenario) {
-        boolean itemScenario = "item_spin".equals(scenario);
         Vec3 look = horizontalLook(cameraYaw);
         Vec3 right = horizontalRight(cameraYaw);
         Vec3 parked = cameraOrigin.add(look.scale(-4.0));
-        // Close enough that the silhouette covers a few thousand pixels at the
-        // pinned capture size, and lifted to roughly eye height so the level
-        // camera frames it.
+        // Distances are chosen per category so each silhouette covers enough
+        // pixels at the pinned capture size: the arrow is a thin sliver and has
+        // to sit closest, the pig and boat are bulky and sit further out.
         Vec3 itemHome = cameraOrigin.add(look.scale(1.5)).add(right.scale(0.40)).add(0.0, 1.3, 0.0);
         Vec3 vehicleHome = cameraOrigin.add(look.scale(3.0)).add(right.scale(0.40)).add(0.0, 0.9, 0.0);
-        Vec3 itemPosition = itemScenario ? itemHome : parked;
-        Vec3 vehiclePosition = itemScenario ? parked : vehicleHome;
+        Vec3 livingHome = cameraOrigin.add(look.scale(2.5)).add(right.scale(0.40)).add(0.0, 0.9, 0.0);
+        Vec3 arrowHome = cameraOrigin.add(look.scale(1.0)).add(right.scale(0.40)).add(0.0, 1.3, 0.0);
+        Vec3 minecartHome = minecartRailPosition();
+
+        boolean item = "item_spin".equals(scenario);
+        boolean vehicle = "vehicle_turn".equals(scenario);
+        boolean living = "living_turn".equals(scenario);
+        boolean arrow = "arrow_turn".equals(scenario);
+        boolean minecart = "minecart_rail".equals(scenario);
+
+        Vec3 itemPosition = item ? itemHome : parked;
+        Vec3 vehiclePosition = vehicle ? vehicleHome : parked;
+        Vec3 livingPosition = living ? livingHome : parked;
+        Vec3 arrowPosition = arrow ? arrowHome : parked;
+        // Parked like the rest when it is not its turn. Leaving it on the rail
+        // throughout does not keep it out of frame: the rail sits about 23
+        // degrees below the horizon at this distance, well inside the 35 degree
+        // half-FOV, so a resident cart would add a second silhouette of
+        // zero-motion object pixels to every other scenario's measurement — and
+        // would on its own clear the arrow scenario's pixel floor. Parking
+        // costs nothing, because OldMinecartBehavior.getPos is evaluated from
+        // the cart's current position every frame rather than latched: the
+        // rail-sampled branch re-selects itself the moment the cart is back on
+        // the track, with a history reset on that same frame.
+        Vec3 minecartPosition = minecart ? minecartHome : parked;
 
         if (spinningItem != null) {
             // The spin phase is a pure function of the timeline frame index.
@@ -553,9 +652,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             spinningItem.setPos(itemPosition);
         }
         if (turningVehicle != null) {
-            float yaw = itemScenario
-                    ? 0.0F
-                    : (frame - VEHICLE_TURN_FRAME) * VEHICLE_TURN_DEGREES_PER_FRAME;
+            float yaw = vehicle ? (frame - VEHICLE_TURN_FRAME) * OBJECT_TURN_DEGREES_PER_FRAME : 0.0F;
             turningVehicle.setDeltaMovement(Vec3.ZERO);
             // old == new on every lerped rotation channel: getYRot(partialTick)
             // then returns the commanded yaw exactly, so the vehicle's rendered
@@ -567,7 +664,84 @@ public final class MetalValidationClient implements ClientModInitializer {
             turningVehicle.setXRot(0.0F);
             turningVehicle.xRotO = 0.0F;
         }
-        return itemScenario ? itemPosition : vehiclePosition;
+        if (turningLiving != null) {
+            // LivingEntityRenderer reads bodyRot as rotLerp(partialTick,
+            // yBodyRotO, yBodyRot); pinning old == new makes it exact. Head and
+            // body are held together so the head-turn animation, which is not a
+            // root transform, contributes nothing.
+            float yaw = living ? (frame - LIVING_TURN_FRAME) * OBJECT_TURN_DEGREES_PER_FRAME : 0.0F;
+            turningLiving.setDeltaMovement(Vec3.ZERO);
+            turningLiving.setOldPosAndRot(livingPosition, yaw, 0.0F);
+            turningLiving.setPos(livingPosition);
+            turningLiving.setYRot(yaw);
+            turningLiving.yRotO = yaw;
+            turningLiving.setXRot(0.0F);
+            turningLiving.xRotO = 0.0F;
+            turningLiving.yBodyRot = yaw;
+            turningLiving.yBodyRotO = yaw;
+            turningLiving.yHeadRot = yaw;
+            turningLiving.yHeadRotO = yaw;
+            // A standing entity still accumulates a walk cycle if the animation
+            // position drifts; zeroing it keeps the limbs out of the measured
+            // field, which the root transform does not cover anyway.
+            turningLiving.walkAnimation.setSpeed(0.0F);
+        }
+        if (turningArrow != null) {
+            // ArrowRenderer takes both angles through getXRot/getYRot with
+            // partialTick, so both channels are pinned old == new.
+            float yaw = arrow ? (frame - ARROW_TURN_FRAME) * OBJECT_TURN_DEGREES_PER_FRAME : 0.0F;
+            turningArrow.setDeltaMovement(Vec3.ZERO);
+            turningArrow.setOldPosAndRot(arrowPosition, yaw, 0.0F);
+            turningArrow.setPos(arrowPosition);
+            turningArrow.setYRot(yaw);
+            turningArrow.yRotO = yaw;
+            turningArrow.setXRot(0.0F);
+            turningArrow.xRotO = 0.0F;
+        }
+        if (shakingMinecart != null) {
+            shakingMinecart.setDeltaMovement(Vec3.ZERO);
+            shakingMinecart.setOldPosAndRot(minecartPosition, 0.0F, 0.0F);
+            shakingMinecart.setPos(minecartPosition);
+            shakingMinecart.setYRot(0.0F);
+            shakingMinecart.yRotO = 0.0F;
+            shakingMinecart.setXRot(0.0F);
+            shakingMinecart.xRotO = 0.0F;
+            // On a rail the renderer discards the cart's own yaw and re-derives
+            // orientation from the front/back rail samples, so turning the cart
+            // would change nothing on a straight track. The hurt shake is the
+            // rotation this scenario drives, and it is the other half of the
+            // minecart row in the coverage table. hurtTime is held fixed and
+            // damage carries the ramp, which keeps the angle linear in the step
+            // rather than swinging with sin(hurtTime).
+            shakingMinecart.setHurtTime(minecart ? MINECART_HURT_TIME : 0);
+            shakingMinecart.setDamage(minecart
+                    ? (frame - MINECART_TURN_FRAME) * MINECART_DAMAGE_PER_FRAME
+                    : 0.0F);
+            shakingMinecart.setHurtDir(1);
+        }
+
+        if (item) {
+            return itemPosition;
+        }
+        if (vehicle) {
+            return vehiclePosition;
+        }
+        if (living) {
+            return livingPosition;
+        }
+        if (arrow) {
+            return arrowPosition;
+        }
+        return minecartPosition;
+    }
+
+    /** Centre of the rail tile the minecart sits on, lifted onto the rail. */
+    private static Vec3 minecartRailPosition() {
+        Vec3 look = horizontalLook(cameraYaw);
+        Vec3 right = horizontalRight(cameraYaw);
+        Vec3 sample = cameraOrigin.add(look.scale(3.0)).add(right.scale(0.40)).add(0.0, -1.0, 0.0);
+        BlockPos rail = BlockPos.containing(sample);
+        return new Vec3(rail.getX() + 0.5, rail.getY() + 1.0, rail.getZ() + 0.5);
     }
 
     /**
@@ -989,14 +1163,109 @@ public final class MetalValidationClient implements ClientModInitializer {
         minecraft.level.addEntity(boat);
         turningVehicle = boat;
 
-        // The re-seal plus two new silhouettes disocclude most of the frame;
+        Pig pig = new Pig(EntityTypes.PIG, minecraft.level);
+        pig.setId(LIVING_ENTITY_ID);
+        pig.setUUID(LIVING_ENTITY_UUID);
+        pig.setNoGravity(true);
+        pig.setNoAi(true);
+        pig.setDeltaMovement(Vec3.ZERO);
+        pig.setPos(parked);
+        minecraft.level.addEntity(pig);
+        turningLiving = pig;
+
+        Arrow arrowEntity = new Arrow(EntityTypes.ARROW, minecraft.level);
+        arrowEntity.setId(ARROW_ENTITY_ID);
+        arrowEntity.setUUID(ARROW_ENTITY_UUID);
+        arrowEntity.setNoGravity(true);
+        arrowEntity.setDeltaMovement(Vec3.ZERO);
+        arrowEntity.setPos(parked);
+        minecraft.level.addEntity(arrowEntity);
+        turningArrow = arrowEntity;
+
+        // The rail has to exist before the cart is placed: OldMinecartBehavior
+        // only reports posOnRail/frontPos/backPos when a rail block sits at or
+        // just below the cart, and those are what select the rail-sampled
+        // branch of the reconstruction rather than the plain fallback.
+        installMinecartRail(minecraft);
+        Vec3 railPosition = minecartRailPosition();
+        Minecart cart = new Minecart(EntityTypes.MINECART, minecraft.level);
+        cart.setId(MINECART_ENTITY_ID);
+        cart.setUUID(MINECART_ENTITY_UUID);
+        cart.setNoGravity(true);
+        cart.setDeltaMovement(Vec3.ZERO);
+        cart.setPos(railPosition);
+        minecraft.level.addEntity(cart);
+        shakingMinecart = cart;
+
+        // The re-seal plus the new silhouettes disocclude most of the frame;
         // the captures sit 8 frames later so history is settled by then.
         MetalFxManager.resetHistory("automated validation object motion scene");
         Metallum.LOGGER.info(
-                "Installed object-motion scene: item id={} vehicle id={}",
+                "Installed object-motion scene: item={} vehicle={} living={} arrow={} minecart={} rail={}",
                 ITEM_ENTITY_ID,
-                VEHICLE_ENTITY_ID
+                VEHICLE_ENTITY_ID,
+                LIVING_ENTITY_ID,
+                ARROW_ENTITY_ID,
+                MINECART_ENTITY_ID,
+                railPosition
         );
+    }
+
+    /**
+     * Lays a short straight rail under the minecart's home tile. Straight is
+     * deliberate: a curve would change the sampled direction and therefore the
+     * cart's orientation, but only by moving the cart along it, and this
+     * scenario keeps per-frame translation at zero and drives the hurt shake
+     * instead.
+     */
+    private static void installMinecartRail(final Minecraft minecraft) {
+        Vec3 look = horizontalLook(cameraYaw);
+        BlockPos centre = BlockPos.containing(minecartRailPosition()).below();
+        BlockState rail = Blocks.RAIL.defaultBlockState()
+                .setValue(RailBlock.SHAPE, railShapeAlong(look));
+        for (int step = -2; step <= 2; step++) {
+            BlockPos pos = BlockPos.containing(
+                    Vec3.atCenterOf(centre).add(look.scale(step))
+            );
+            placeObjectSceneBlock(minecraft, pos, rail);
+            // Rails need a solid block beneath or they pop off on the first
+            // block update; the room's floor is already stone, but the tile
+            // under a lifted rail may not be.
+            placeObjectSceneBlock(minecraft, pos.below(), Blocks.STONE.defaultBlockState());
+        }
+        requestImportantRebuild(OBJECT_SCENE.keySet());
+
+        // Without a rail under the cart, OldMinecartBehavior.getPos returns
+        // null and the reconstruction quietly falls back to the non-rail
+        // branch. The scenario would still pass — the hurt shake alone produces
+        // a spread — while validating a different code path than the one it
+        // claims to cover. Fail loudly instead of silently covering the wrong
+        // thing.
+        BlockPos cartTile = BlockPos.containing(minecartRailPosition()).below();
+        if (!minecraft.level.getBlockState(cartTile).is(BlockTags.RAILS)) {
+            throw new IllegalStateException(
+                    "Minecart validation rail missing at " + cartTile
+                            + " (found " + minecraft.level.getBlockState(cartTile) + "); the"
+                            + " rail-sampled reconstruction branch would not be exercised"
+            );
+        }
+    }
+
+    /** Rail axis closest to the camera's forward direction. */
+    private static RailShape railShapeAlong(final Vec3 look) {
+        return Math.abs(look.x) > Math.abs(look.z)
+                ? RailShape.EAST_WEST
+                : RailShape.NORTH_SOUTH;
+    }
+
+    private static void placeObjectSceneBlock(
+            final Minecraft minecraft,
+            final BlockPos pos,
+            final BlockState state
+    ) {
+        BlockPos immutable = pos.immutable();
+        OBJECT_SCENE.putIfAbsent(immutable, minecraft.level.getBlockState(immutable));
+        minecraft.level.setBlock(immutable, state, 19);
     }
 
     private static void removeObjectMotionScene() {
@@ -1008,6 +1277,24 @@ public final class MetalValidationClient implements ClientModInitializer {
             turningVehicle.discard();
             turningVehicle = null;
         }
+        if (turningLiving != null) {
+            turningLiving.discard();
+            turningLiving = null;
+        }
+        if (turningArrow != null) {
+            turningArrow.discard();
+            turningArrow = null;
+        }
+        if (shakingMinecart != null) {
+            shakingMinecart.discard();
+            shakingMinecart = null;
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level != null && !OBJECT_SCENE.isEmpty()) {
+            OBJECT_SCENE.forEach((pos, state) -> minecraft.level.setBlock(pos, state, 19));
+            requestImportantRebuild(OBJECT_SCENE.keySet());
+        }
+        OBJECT_SCENE.clear();
     }
 
     private static void placeCutoutSceneBlock(
@@ -1069,7 +1356,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         Metallum.LOGGER.info(
                 "Automated Minecraft MetalFX validation passed {}/{} GPU captures; stopping client",
                 completed,
-                12
+                15
         );
         removeOcclusionWall(minecraft);
         removeCutoutScene(minecraft);
@@ -1119,7 +1406,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "usedComputerUse": false,
                       "controlledFrames": 90,
                       "controlledEntity": "armor_stand",
-                      "expectedGpuCaptures": 12,
+                      "expectedGpuCaptures": 15,
                       "completedGpuCaptures": %d,
                       "failedGpuCaptures": %d,
                       "status": "%s"

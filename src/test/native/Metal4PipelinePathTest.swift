@@ -117,6 +117,36 @@ fragment float4 path_copy_fs(CopyOut in [[stage_in]],
 }
 """
 
+/// Reads a uniform by GPU address out of an argument table, which is how every
+/// former set*Bytes site will supply its uniform under Metal 4.
+private let bumpShaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+
+struct BumpOut {
+    float4 position [[position]];
+};
+
+struct BumpUniforms {
+    float4 color;
+};
+
+vertex BumpOut bump_vs(uint vertexID [[vertex_id]]) {
+    const float2 positions[3] = {
+        float2(-1.0, -1.0),
+        float2( 3.0, -1.0),
+        float2(-1.0,  3.0)
+    };
+    BumpOut output;
+    output.position = float4(positions[vertexID], 0.0, 1.0);
+    return output;
+}
+
+fragment float4 bump_fs(constant BumpUniforms& u [[buffer(0)]]) {
+    return u.color;
+}
+"""
+
 private func fail(_ message: String) throws -> Never {
     throw PathFailure.message(message)
 }
@@ -410,9 +440,16 @@ private func presentPathTest(device: MTLDevice) throws {
         print("Metal 4 present path: constructed and encoded, but this host vended no drawable, so submit was not exercised")
         return
     }
+    // submit() now owns the readyEvent wait, so it needs an event and a value.
+    // Pre-signalling it to the value being waited on keeps this test independent
+    // of a producer queue while still going through the real wait.
+    guard let readyEvent = device.makeSharedEvent() else {
+        try fail("could not create the ready event")
+    }
+    readyEvent.signaledValue = 7
     let completed = DispatchSemaphore(value: 0)
     var submitError: Error?
-    path.submit(drawable: drawable) { error in
+    path.submit(drawable: drawable, readyEvent: readyEvent, eventValue: 7) { error in
         submitError = error
         completed.signal()
     }
@@ -425,7 +462,53 @@ private func presentPathTest(device: MTLDevice) throws {
     destination.getBytes(&readback, bytesPerRow: 4, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
     try check(readback == [64, 128, 191, 255],
               "present-path copy readback mismatch: \(readback)")
-    print("Metal 4 present path: queue, allocator ring, argument table, residency set, MTL4 interpolator, copy encode and the commit/present handshake all functional")
+
+    // An abandoned frame must not wedge the queue. This is the regression test for
+    // the one failure mode that would be invisible until it deadlocked: Metal 4's
+    // queue.waitForEvent takes effect when called, not when the command buffer is
+    // committed, so issuing it before the deadline check — which fires in normal
+    // operation — would leave a wait nothing ever satisfies, and every later
+    // commit would queue behind it forever. Here a frame is encoded and abandoned
+    // exactly as the deadline path does, abandonFrame is called twice to confirm it
+    // is idempotent, and then a real frame must still complete.
+    let abandoned = path.beginFrame()
+    try check(path.encodeCopy(
+        commandBuffer: abandoned,
+        source: source,
+        destination: destination,
+        pipeline: copyPipeline,
+        sampler: copySampler,
+        label: "present path abandoned copy"
+    ), "encodeCopy failed on the frame that is about to be abandoned")
+    path.abandonFrame()
+    path.abandonFrame()
+
+    guard let secondDrawable = layer.nextDrawable() else {
+        print("Metal 4 present path: abandon path exercised, but no second drawable was vended")
+        return
+    }
+    let secondCommandBuffer = path.beginFrame()
+    try check(path.encodeCopy(
+        commandBuffer: secondCommandBuffer,
+        source: source,
+        destination: destination,
+        pipeline: copyPipeline,
+        sampler: copySampler,
+        label: "present path post-abandon copy"
+    ), "encodeCopy failed after an abandoned frame")
+    let secondCompleted = DispatchSemaphore(value: 0)
+    var secondError: Error?
+    readyEvent.signaledValue = 8
+    path.submit(drawable: secondDrawable, readyEvent: readyEvent, eventValue: 8) { error in
+        secondError = error
+        secondCompleted.signal()
+    }
+    try check(secondCompleted.wait(timeout: .now() + .seconds(5)) == .success,
+              "the queue is wedged: no completion within 5s after a frame was abandoned")
+    try check(secondError == nil,
+              "the post-abandon submit failed: \(String(describing: secondError))")
+
+    print("Metal 4 present path: queue, allocator ring, argument table, residency set, MTL4 interpolator, copy encode and the commit/present handshake all functional, and an abandoned frame leaves the queue usable")
 }
 
 private func runPresentPathTest(device: MTLDevice) throws {
@@ -434,6 +517,279 @@ private func runPresentPathTest(device: MTLDevice) throws {
         return
     }
     try presentPathTest(device: device)
+}
+
+/// M5: the bump allocator that replaces set*Bytes.
+///
+/// Metal 4 removed set*Bytes outright, so uniforms have to be copied into a
+/// buffer and bound by GPU address. The properties that matter are that the
+/// address the allocator returns really is where the bytes landed, that a second
+/// allocation in the same frame does not overlap the first, that overflow is
+/// reported rather than silently dropping a binding, and that reset reuses the
+/// space. Only a GPU read can confirm the first one, which is why this draws
+/// with the uniform instead of just inspecting the pointer arithmetic.
+@available(macOS 26.0, *)
+private func bumpAllocatorTest(device: MTLDevice) throws {
+    guard let ring = Metal4BumpAllocatorRing(device: device) else {
+        try fail("could not create the bump allocator ring")
+    }
+    let allocator = ring.beginFrame()
+
+    // A first allocation of an odd length, so the second one is only correctly
+    // placed if alignment is actually applied.
+    var filler: UInt8 = 0xAB
+    guard allocator.allocate(bytes: &filler, length: 1) != nil else {
+        try fail("the first bump allocation failed")
+    }
+
+    var color = SIMD4<Float>(0.25, 0.50, 0.75, 1.0)
+    guard let uniformAddress = withUnsafeBytes(of: &color, { bytes in
+        allocator.allocate(bytes: bytes.baseAddress!, length: bytes.count)
+    }) else {
+        try fail("the uniform bump allocation failed")
+    }
+    try check(uniformAddress % 16 == 0,
+              "bump allocation is not 16-byte aligned: offset \(uniformAddress % 16)")
+    try check(uniformAddress > allocator.primaryBacking.gpuAddress,
+              "the uniform was placed on top of the preceding allocation")
+
+    // Exhausting a chunk must chain another, not fail: Metal 4 has no set*Bytes to
+    // fall back to, so a nil return would mean a draw with no uniform bound at all.
+    // Push well past one chunk and require every allocation to succeed.
+    let perChunk = Metal4BumpAllocatorRing.capacityPerFrame / 240
+    var chunk = [UInt8](repeating: 0, count: 240)
+    var accepted = 0
+    for _ in 0..<(perChunk * 2 + 8) {
+        guard chunk.withUnsafeBytes({ allocator.allocate(bytes: $0.baseAddress!, length: 240) }) != nil else {
+            try fail("the arena failed to grow: allocation \(accepted + 1) returned nil")
+        }
+        accepted += 1
+    }
+    try check(allocator.chunkCount >= 2,
+              "the arena served \(accepted) allocations without chaining a chunk, so growth was never exercised")
+    ring.logGrowthOnce(chunkCount: allocator.chunkCount)
+
+    // The one genuinely unservable case: a single allocation bigger than a whole
+    // chunk. Chaining cannot help, so nil is correct here.
+    var oversized = [UInt8](repeating: 0, count: Metal4BumpAllocatorRing.capacityPerFrame + 16)
+    try check(oversized.withUnsafeBytes({
+        allocator.allocate(bytes: $0.baseAddress!, length: oversized.count)
+    }) == nil, "an allocation larger than a whole chunk was accepted")
+    ring.logOversizedOnce(oversized.count)
+
+    // reset() must make the space available again, which is what the ring relies on.
+    let recycled = ring.beginFrame()
+    guard let recycledAddress = withUnsafeBytes(of: &color, { bytes in
+        recycled.allocate(bytes: bytes.baseAddress!, length: bytes.count)
+    }) else {
+        try fail("allocation after a ring rotation failed")
+    }
+    try check(recycledAddress == recycled.primaryBacking.gpuAddress,
+              "a rotated allocator did not start from the beginning of its arena")
+
+    // Now the part only the GPU can answer: is the uniform actually readable at
+    // the address the allocator handed back?
+    let library = try device.makeLibrary(source: bumpShaderSource, options: nil)
+    guard let vertexFunction = library.makeFunction(name: "bump_vs"),
+          let fragmentFunction = library.makeFunction(name: "bump_fs") else {
+        try fail("missing bump MSL entry points")
+    }
+    let pipelineDescriptor = MTLRenderPipelineDescriptor()
+    pipelineDescriptor.vertexFunction = vertexFunction
+    pipelineDescriptor.fragmentFunction = fragmentFunction
+    pipelineDescriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
+    let pipeline = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    let target = try makeTarget(device: device, label: "bump allocator target")
+
+    guard let queue = device.makeMTL4CommandQueue(),
+          let commandBuffer = device.makeCommandBuffer(),
+          let commandAllocator = device.makeCommandAllocator(),
+          let completionEvent = device.makeSharedEvent() else {
+        try fail("could not create the Metal 4 objects for the bump test")
+    }
+    // The arena is registered with the global residency set when it is created,
+    // but that set is attached to the Metal 3 queue; this queue needs its own.
+    let residencyDescriptor = MTLResidencySetDescriptor()
+    residencyDescriptor.initialCapacity = 4
+    let residencySet = try device.makeResidencySet(descriptor: residencyDescriptor)
+    residencySet.addAllocations(recycled.allBackings + [target])
+    residencySet.commit()
+    residencySet.requestResidency()
+    queue.addResidencySet(residencySet)
+
+    let argumentTableDescriptor = MTL4ArgumentTableDescriptor()
+    argumentTableDescriptor.maxBufferBindCount = 1
+    argumentTableDescriptor.initializeBindings = true
+    let argumentTable = try device.makeArgumentTable(descriptor: argumentTableDescriptor)
+
+    commandAllocator.reset()
+    commandBuffer.beginCommandBuffer(allocator: commandAllocator)
+    let passDescriptor = MTL4RenderPassDescriptor()
+    passDescriptor.colorAttachments[0].texture = target
+    passDescriptor.colorAttachments[0].loadAction = .dontCare
+    passDescriptor.colorAttachments[0].storeAction = .store
+    passDescriptor.renderTargetWidth = 8
+    passDescriptor.renderTargetHeight = 8
+    guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
+        commandBuffer.endCommandBuffer()
+        try fail("could not create the render encoder for the bump test")
+    }
+    // This is the set*Bytes replacement in one line.
+    argumentTable.setAddress(recycledAddress, index: 0)
+    encoder.setArgumentTable(argumentTable, stages: .fragment)
+    encoder.setRenderPipelineState(pipeline)
+    encoder.setViewport(MTLViewport(originX: 0, originY: 0, width: 8, height: 8, znear: 0, zfar: 1))
+    encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+    encoder.endEncoding()
+    commandBuffer.endCommandBuffer()
+    queue.commit([commandBuffer])
+    queue.signalEvent(completionEvent, value: 1)
+    try check(completionEvent.wait(untilSignaledValue: 1, timeoutMS: 5000),
+              "the bump-allocator draw did not complete within 5s")
+
+    var readback = [UInt8](repeating: 0, count: 4)
+    target.getBytes(&readback, bytesPerRow: 4, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
+    try check(readback == [64, 128, 191, 255],
+              "the GPU did not read the bump-allocated uniform: \(readback)")
+    print("Metal 4 bump allocator: \(accepted) largest-case (240 B) allocations served across \(allocator.chunkCount) chunks, alignment holds, growth chains instead of failing, an oversized request is refused, ring rotation recycles, and the GPU reads the uniform at the returned address")
+}
+
+private func runBumpAllocatorTest(device: MTLDevice) throws {
+    guard #available(macOS 26.0, *) else {
+        print("bump allocator test skipped: needs macOS 26")
+        return
+    }
+    try bumpAllocatorTest(device: device)
+}
+
+/// M7g + M7h: the CPU completion wait, and every copy shape the tree actually
+/// uses, on an MTL4ComputeCommandEncoder.
+///
+/// MTLBlitCommandEncoder is gone in Metal 4 and its work folds into the compute
+/// encoder under renamed labels. The spec's translation table lists three copy
+/// shapes; the tree uses four, and the two it omits (texture to texture with an
+/// origin and size, and texture to buffer) are exercised here so M7a's rewiring
+/// is mechanical rather than exploratory.
+///
+/// The copies deliberately chain — buffer to texture, texture to texture, texture
+/// to buffer — with an explicit barrier between each. Metal 4 has no hazard
+/// tracking, so without those barriers this would read stale data; the chain
+/// therefore also demonstrates the same-encoder barrier form that M7e needs.
+@available(macOS 26.0, *)
+private func copyAndWaitTest(device: MTLDevice) throws {
+    guard let queue = device.makeMTL4CommandQueue(),
+          let commandBuffer = device.makeCommandBuffer(),
+          let commandAllocator = device.makeCommandAllocator(),
+          let event = device.makeSharedEvent() else {
+        try fail("could not create the Metal 4 objects for the copy test")
+    }
+
+    // M7g: a value that is never signalled must time out, not hang. Checking the
+    // negative case first, because a wait helper that always returns 1 would make
+    // every positive assertion below meaningless.
+    let timeoutStart = Date()
+    try check(event.wait(untilSignaledValue: 999, timeoutMS: 200) == false,
+              "waiting for an unsignalled value reported success")
+    try check(Date().timeIntervalSince(timeoutStart) < 5.0,
+              "the timeout path took far longer than the timeout requested")
+
+    let bytesPerRow = 4 * 4
+    let pixelCount = 4 * 4
+    guard let sourceBuffer = device.makeBuffer(length: bytesPerRow * 4, options: [.storageModeShared]),
+          let destinationBuffer = device.makeBuffer(length: bytesPerRow * 4, options: [.storageModeShared]),
+          let scratchBuffer = device.makeBuffer(length: bytesPerRow * 4, options: [.storageModeShared]) else {
+        try fail("could not allocate the copy buffers")
+    }
+    // Distinct per-pixel values, so a copy that silently moves nothing or moves
+    // the wrong region is visible in the readback.
+    let source = sourceBuffer.contents().bindMemory(to: UInt8.self, capacity: bytesPerRow * 4)
+    for index in 0..<(pixelCount * 4) {
+        source[index] = UInt8(index % 251)
+    }
+
+    let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .rgba8Unorm, width: 4, height: 4, mipmapped: false
+    )
+    textureDescriptor.storageMode = .private
+    textureDescriptor.usage = [.shaderRead, .shaderWrite]
+    guard let textureA = device.makeTexture(descriptor: textureDescriptor),
+          let textureB = device.makeTexture(descriptor: textureDescriptor) else {
+        try fail("could not allocate the copy textures")
+    }
+
+    let residencyDescriptor = MTLResidencySetDescriptor()
+    residencyDescriptor.initialCapacity = 8
+    let residencySet = try device.makeResidencySet(descriptor: residencyDescriptor)
+    residencySet.addAllocations([sourceBuffer, destinationBuffer, scratchBuffer, textureA, textureB])
+    residencySet.commit()
+    residencySet.requestResidency()
+    queue.addResidencySet(residencySet)
+
+    commandAllocator.reset()
+    commandBuffer.beginCommandBuffer(allocator: commandAllocator)
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+        commandBuffer.endCommandBuffer()
+        try fail("could not create the MTL4 compute command encoder")
+    }
+
+    // 1. buffer -> buffer. Metal 3: copy(from:sourceOffset:to:destinationOffset:size:)
+    encoder.copy(
+        sourceBuffer: sourceBuffer, sourceOffset: 0,
+        destinationBuffer: scratchBuffer, destinationOffset: 0,
+        size: bytesPerRow * 4
+    )
+    encoder.barrier(afterEncoderStages: .blit, beforeEncoderStages: .blit, visibilityOptions: .device)
+
+    // 2. buffer -> texture. Metal 3 used from:/to:; Metal 4 names both ends.
+    encoder.copy(
+        sourceBuffer: scratchBuffer, sourceOffset: 0,
+        sourceBytesPerRow: bytesPerRow, sourceBytesPerImage: bytesPerRow * 4,
+        sourceSize: MTLSize(width: 4, height: 4, depth: 1),
+        destinationTexture: textureA, destinationSlice: 0, destinationLevel: 0,
+        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+    )
+    encoder.barrier(afterEncoderStages: .blit, beforeEncoderStages: .blit, visibilityOptions: .device)
+
+    // 3. texture -> texture with an origin and size. NOT in the spec's table.
+    encoder.copy(
+        sourceTexture: textureA, sourceSlice: 0, sourceLevel: 0,
+        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+        sourceSize: MTLSize(width: 4, height: 4, depth: 1),
+        destinationTexture: textureB, destinationSlice: 0, destinationLevel: 0,
+        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+    )
+    encoder.barrier(afterEncoderStages: .blit, beforeEncoderStages: .blit, visibilityOptions: .device)
+
+    // 4. texture -> buffer. Also NOT in the spec's table.
+    encoder.copy(
+        sourceTexture: textureB, sourceSlice: 0, sourceLevel: 0,
+        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+        sourceSize: MTLSize(width: 4, height: 4, depth: 1),
+        destinationBuffer: destinationBuffer, destinationOffset: 0,
+        destinationBytesPerRow: bytesPerRow, destinationBytesPerImage: bytesPerRow * 4
+    )
+    encoder.endEncoding()
+    commandBuffer.endCommandBuffer()
+    queue.commit([commandBuffer])
+
+    // M7g positive case: this is how the shipping helper waits.
+    try check(metal4WaitForCompletion(queue: queue, event: event, value: 1, timeoutMs: 5000) == 1,
+              "metal4WaitForCompletion did not observe completion within 5s")
+
+    let result = destinationBuffer.contents().bindMemory(to: UInt8.self, capacity: bytesPerRow * 4)
+    for index in 0..<(pixelCount * 4) {
+        try check(result[index] == UInt8(index % 251),
+                  "copy chain corrupted byte \(index): expected \(index % 251), got \(result[index])")
+    }
+    print("Metal 4 copy/wait: all four copy shapes in use (buffer-buffer, buffer-texture, texture-texture with region, texture-buffer) round-trip through an MTL4 compute encoder, and the completion wait handles both timeout and success")
+}
+
+private func runCopyAndWaitTest(device: MTLDevice) throws {
+    guard #available(macOS 26.0, *) else {
+        print("copy/wait test skipped: needs macOS 26")
+        return
+    }
+    try copyAndWaitTest(device: device)
 }
 
 private func runPathTest() throws {
@@ -578,6 +934,12 @@ private func runPathTest() throws {
 
     // (6) M4: the frame-generation present path's Metal 4 object graph.
     try runPresentPathTest(device: device)
+
+    // (7) M5: the bump allocator that replaces set*Bytes.
+    try runBumpAllocatorTest(device: device)
+
+    // (8) M7g/M7h: the completion wait, and every copy shape on a compute encoder.
+    try runCopyAndWaitTest(device: device)
 
     print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, an unregistered library falls back cleanly, the pipeline data set archive flushes on both a cold and a warm launch, and the residency set tracks native allocations")
 }

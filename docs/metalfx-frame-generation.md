@@ -23,14 +23,30 @@ supported way to turn the feature off after the constant is eventually flipped.
 
 ## Object-motion coverage
 
-Object motion is produced per draw by splitting an entity's geometry out of the
-batched feature-renderer draw and replaying it through
-`metallum:core/entity_motion` (`MetalEntityMotionCapture`,
-`MetalEntityMotionPipeline`). Two Minecraft 26.2 pipeline families reach it:
-`core/entity` (entity models) and `core/item` (dropped items, item frames, held
-items). Both share `DefaultVertexFormat.ENTITY` and the same
-`ProjMat * ModelViewMat * Position` clip transform, so one reduced shader
-replays both.
+Object motion is produced per draw by splitting an object's geometry out of the
+batched feature-renderer draw and replaying it through a reduced motion shader
+(`MetalEntityMotionCapture`, `MetalEntityMotionPipeline`). A family is a group of
+Minecraft pipelines whose clip position one reduced shader can reproduce;
+membership is decided by that transform and nothing else, because a shader that
+reconstructs the wrong clip position yields motion vectors that look plausible
+and are wrong.
+
+| Family | Minecraft pipelines | Format | Clip position | Replayed by |
+| --- | --- | --- | --- | --- |
+| `ENTITY` | `core/entity`, `core/item` | `ENTITY` | `ProjMat * ModelViewMat * Position` | `metallum:core/entity_motion` |
+| `BLOCK` | `core/block` | `BLOCK` | `ProjMat * ModelViewMat * (Position + ModelOffset)` | `metallum:core/block_motion` |
+
+`core/entity` carries entity models and `core/item` dropped items, item frames and
+held items; they share a format and a transform, so one shader replays both.
+`core/block` needs its own because of the `ModelOffset` term. That uniform lives in
+the shared `DynamicTransforms` block the source pipeline already binds, so the
+reduced shader reads the value the color pass used.
+
+Two renderers emit `core/block` geometry, via `submitMovingBlock`:
+`FallingBlockRenderer`, whose submits are bracketed by
+`MovingBlockFeatureRendererMetalFxMixin` and do produce object motion; and
+`PistonHeadRenderer`, which is a block entity and has no motion producer yet — see
+Known limits.
 
 The root object-to-world transform is rebuilt by `MetalEntityObjectPose`, which
 mirrors each renderer's transform order. Covered today:
@@ -220,9 +236,23 @@ keeps a hidden or minimized window from blocking shutdown forever.
 - Production Frame Generation remains disabled pending the attended visual and
   pacing QA in the audit's 13.4 matrix, not for lack of an object-motion
   producer.
-- Falling blocks and block entities render through `core/block` and would need a
-  second motion pipeline family; they currently reach the interpolator with
-  translation-only or no object motion.
+- Piston-moved blocks reach the interpolator with no object motion.
+  `PistonHeadRenderer` submits two moving blocks through the same `core/block`
+  family that now carries falling blocks, so the shader side is in place, but the
+  sample never gets attached: block entities are dispatched by
+  `BlockEntityRenderDispatcher`, not `EntityRenderDispatcher`, so no entity
+  submission window is open when their submits are constructed. Closing it needs a
+  block-entity entry point alongside `MetalFxManager.captureEntityMotion`, because
+  the current/previous transform pair has to come from the manager's own
+  `MetalMotionStateStore`: that store commits only once a frame's output has been
+  encoded, and a second store kept elsewhere would commit on frames the manager
+  discarded and hand out a previous transform that was never presented.
+- No block entity gets object motion, whichever family its geometry belongs to.
+  `beginEntitySubmission` is called only from `EntityRenderDispatcher.submit`, so a
+  chest or a sign rendering entity-format models through `ModelFeatureRenderer` is
+  in a family that can replay it and still has no sample to replay it with. The
+  block-entity entry point above is the single missing piece for all of them; the
+  piston is only the case that additionally needed the `BLOCK` family.
 - Display entities, item frames, paintings, armour stands and end crystals get
   translation only; their non-translation motion is left to disocclusion
   rejection.

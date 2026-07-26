@@ -250,6 +250,11 @@ final class Metal4PresentPath {
     private let argumentTable: MTL4ArgumentTable
     private let residencySet: MTLResidencySet
     private var frameIndex = 0
+    /// True between beginFrame() and the close that submit() or abandonFrame()
+    /// performs. The command buffer is reusable, so leaving it open across frames
+    /// would make the next beginCommandBuffer illegal; this makes closing
+    /// idempotent so every exit path can close unconditionally.
+    private var isRecording = false
 
     init?(device: MTLDevice, layer: CAMetalLayer) {
         let queueDescriptor = MTL4CommandQueueDescriptor()
@@ -314,13 +319,14 @@ final class Metal4PresentPath {
         frameIndex += 1
         allocator.reset()
         commandBuffer.beginCommandBuffer(allocator: allocator)
+        isRecording = true
         return commandBuffer
     }
 
-    /// Queue-level, not command-buffer-level: Metal 4 moved event waits off the
-    /// command buffer. Must be called before commit.
-    func waitForReady(event: MTLSharedEvent, value: UInt64) {
-        queue.waitForEvent(event, value: value)
+    private func endRecording() {
+        guard isRecording else { return }
+        commandBuffer.endCommandBuffer()
+        isRecording = false
     }
 
     /// The full-screen copy, with the texture and sampler routed through the
@@ -363,32 +369,51 @@ final class Metal4PresentPath {
         return true
     }
 
-    /// Closes the command buffer and presents. The four steps are ordered and the
-    /// order is not interchangeable: waitForDrawable before commit,
-    /// signalDrawable after it, then the drawable's own present. This is an
-    /// ordinary present because CAMetalDisplayLink owns the drawable's scheduling,
-    /// which makes targeted present illegal here, and it is synchronous so the
-    /// commit still lands inside the needsUpdate callback — a present committed in
-    /// a later run-loop pass reports presentedTime == 0.
+    /// Closes the command buffer and presents.
+    ///
+    /// The readyEvent wait lives here, deliberately, and taking it is the whole
+    /// reason this method owns it rather than exposing a separate wait call.
+    /// Metal 3 recorded the wait *into* the command buffer
+    /// (encodeWaitForEvent), so dropping an unsubmitted buffer dropped the wait
+    /// with it — which is what lets present(_:) return from four places after
+    /// encoding. Metal 4's queue.waitForEvent is a queue-timeline operation that
+    /// takes effect when called: issued before those early returns it would leave
+    /// an orphan wait that nothing ever satisfies (the deadline-miss return is hit
+    /// in normal operation), and every later commit would queue behind it — a
+    /// permanently wedged present queue with the display-link callback blocked in
+    /// commit. Issuing it here means it is only ever reached once the frame is
+    /// certain to be committed. Queue operations take effect in call order, so
+    /// waiting immediately before commit on the same thread is equivalent.
+    ///
+    /// The four present steps are ordered and not interchangeable: waitForDrawable
+    /// before commit, signalDrawable after it, then the drawable's own present.
+    /// It is an ordinary present because CAMetalDisplayLink owns the drawable's
+    /// scheduling, which makes targeted present illegal here, and it is
+    /// synchronous so the commit still lands inside the needsUpdate callback — a
+    /// present committed in a later run-loop pass reports presentedTime == 0.
     func submit(
         drawable: CAMetalDrawable,
+        readyEvent: MTLSharedEvent,
+        eventValue: UInt64,
         onCompleted: @escaping (Error?) -> Void
     ) {
-        commandBuffer.endCommandBuffer()
+        endRecording()
         let options = MTL4CommitOptions()
         // MTL4CommandBufferFeedback has no status, only error: succeeded is
         // error == nil.
         options.addFeedbackHandler { feedback in onCompleted(feedback.error) }
+        queue.waitForEvent(readyEvent, value: eventValue)
         queue.waitForDrawable(drawable)
         queue.commit([commandBuffer], options: options)
         queue.signalDrawable(drawable)
         drawable.present()
     }
 
-    /// Abandons a frame that failed during encoding, so the reusable command
-    /// buffer is not left open across frames.
+    /// Abandons a frame that will not be submitted, so the reusable command buffer
+    /// is not left open across frames. Idempotent, so every early return can call
+    /// it without tracking whether an earlier one already did.
     func abandonFrame() {
-        commandBuffer.endCommandBuffer()
+        endRecording()
     }
 }
 
@@ -1451,11 +1476,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     ///
     /// Two orderings differ from Metal 3 and both matter:
     ///   - the event wait is a queue operation, not a command-buffer one, so it is
-    ///     issued only once the frame is certain to be committed. Issuing it
-    ///     earlier would leave a wait on the queue timeline for a frame that the
-    ///     deadline check went on to drop.
+    ///     issued inside submit() rather than up front. Every early return below
+    ///     happens before any wait has been placed on the queue timeline; see
+    ///     Metal4PresentPath.submit for what issuing it early would wedge.
     ///   - the command buffer is reusable and must be closed on every path out of
-    ///     here, which is what abandonFrame() is for.
+    ///     here, which is what abandonFrame() is for. All four early returns call
+    ///     it, and it is idempotent.
     @available(macOS 26.0, *)
     private func presentMetal4(
         _ work: PresentationWork,
@@ -1574,9 +1600,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
 
         // The main Metal 3 queue signals readyEvent; this Metal 4 queue waits on
         // it. Shared events cross the Metal 3 / Metal 4 boundary, which is what
-        // makes this pilot possible without touching the main queue at all.
-        path.waitForReady(event: readyEvent, value: eventValue)
-        path.submit(drawable: drawable) { [weak self] error in
+        // makes this pilot possible without touching the main queue at all. The
+        // wait is issued inside submit(), past every path that can still abandon
+        // the frame — see its documentation for why that placement is load-bearing.
+        path.submit(drawable: drawable, readyEvent: readyEvent, eventValue: eventValue) { [weak self] error in
             // MTL4CommandBufferFeedback carries no status, so error == nil is the
             // only success signal. Routing into the same handler as Metal 3 keeps
             // the failure path — which advances readyEvent so the present thread
@@ -5830,6 +5857,232 @@ private func descriptorHasLiveColorWrite(_ descriptor: MTLRenderPipelineDescript
         }
     }
     return false
+}
+
+// MARK: - CPU wait for GPU completion (migration spec M7g)
+
+/// Metal 4 replacement for MTLCommandBuffer.waitUntilCompleted, which neither
+/// MTL4CommandQueue nor MTL4CommandBuffer has.
+///
+/// The queue signals `event` to `value` after everything already committed, so
+/// waiting for that value is waiting for those submits. Returns 1 when the value
+/// was reached, 0 on timeout — the same contract as the Metal 3 export, whose
+/// caller (Encoder.awaitSubmitCompletion) implements glClientWaitSync semantics
+/// and must be able to distinguish a timeout from completion. The GL semantics
+/// and the implicit flush that S10 corrected live on the Java side and are not
+/// touched here; only the waiting mechanism changes.
+///
+/// Each submit needs its own increasing value, paired one-to-one with the
+/// existing submitIndex, or a later wait would be satisfied by an earlier submit.
+@available(macOS 26.0, iOS 26.0, *)
+func metal4WaitForCompletion(
+    queue: MTL4CommandQueue,
+    event: MTLSharedEvent,
+    value: UInt64,
+    timeoutMs: UInt64
+) -> Int32 {
+    queue.signalEvent(event, value: value)
+    return event.wait(untilSignaledValue: value, timeoutMS: timeoutMs) ? 1 : 0
+}
+
+// MARK: - Bump allocator (migration spec M5)
+
+/// Per-frame linear allocator that replaces set*Bytes, which Metal 4 removed
+/// entirely. Uniforms are copied into a shared-storage buffer and bound by GPU
+/// address through an argument table (`setAddress(_:index:)`) instead of being
+/// handed to an encoder.
+///
+/// Sizing is measured, not guessed. The seven remaining set*Bytes sites push:
+///   ClearUniforms 48 B (the only vertex one, and the only one that can repeat
+///   many times per frame — once per clear), CutoutReactiveUniforms 32 B,
+///   HandOverlayUniforms 16 B, SIMD2<UInt32> 8 B, TransparencyMaskUniforms 48 B,
+///   MergeUniforms 48 B, and MotionUniforms 240 B, the largest (three 4x4
+///   matrices plus three vectors).
+/// Every one of those has an alignment requirement of at most 16 B, so the 16 B
+/// default below covers them; `allocate` still takes an alignment so a future
+/// uniform with a stricter requirement cannot silently be under-aligned.
+///
+/// Metal 3's 4 KB set*Bytes ceiling does not apply here. That is a side effect,
+/// not an invitation: the uniform-caching invariants from S11 still hold.
+/// Running out of room cannot fall back to a Metal 3 binding: there is no
+/// set*Bytes anywhere on the MTL4 encoders (the whole family is absent from the
+/// SDK headers), so a nil here would mean the draw runs with no uniform at all.
+/// The arena therefore grows instead, by chaining another chunk.
+///
+/// Growth is a plain `makeBuffer` rather than a transient block put through the
+/// destruction queue, specifically to protect M3's one rule: a new chunk only
+/// marks the residency set dirty, and the single batched `commit()` still happens
+/// once per submit. Routing growth through transient blocks would force a
+/// residency `commit()` per overflow, and `commit()` is the one expensive
+/// operation in the residency design.
+@available(macOS 26.0, iOS 26.0, *)
+final class Metal4BumpAllocator {
+    private let device: MTLDevice
+    private let chunkCapacity: Int
+    private let label: String
+    /// Chunk 0 is allocated up front; later chunks appear only if a frame overflows
+    /// and are then kept for reuse, so a frame that overflows once pays for the
+    /// allocation once rather than every frame.
+    private var chunks: [MTLBuffer] = []
+    private var bases: [UnsafeMutableRawPointer] = []
+    private var chunkIndex = 0
+    private var cursor: Int = 0
+
+    init?(device: MTLDevice, capacity: Int, label: String) {
+        self.device = device
+        self.chunkCapacity = capacity
+        self.label = label
+        guard appendChunk() else { return nil }
+    }
+
+    @discardableResult
+    private func appendChunk() -> Bool {
+        guard let buffer = device.makeBuffer(length: chunkCapacity, options: [.storageModeShared]) else {
+            return false
+        }
+        buffer.label = "\(label)-chunk\(chunks.count)"
+        chunks.append(buffer)
+        bases.append(buffer.contents())
+        // The GPU reads this by address, so it has to be resident: Metal 4 does no
+        // automatic residency and an address into a non-resident buffer is a read
+        // of unmapped memory. This only sets the dirty flag; the commit stays
+        // batched to once per submit.
+        residencyTrackCreated(buffer)
+        return true
+    }
+
+    /// Chunk 0. Allocation after a reset always starts here.
+    var primaryBacking: MTLBuffer { chunks[0] }
+
+    /// Every chunk, for callers that must make the whole arena resident on a queue
+    /// of their own.
+    var allBackings: [MTLBuffer] { chunks }
+
+    /// Bytes handed out since the last reset, across chunks. Capacity tuning input:
+    /// if this regularly exceeds one chunk, raise the chunk size instead of paying
+    /// for chaining every frame.
+    private(set) var peakUsage: Int = 0
+
+    /// Called at frame start, and only for the allocator belonging to a frame that
+    /// is no longer in flight — the ring is what guarantees that. Resetting an
+    /// allocator whose frame the GPU is still reading would let the next frame
+    /// overwrite live uniform data. Chunks are kept, only the cursor rewinds.
+    func reset() {
+        chunkIndex = 0
+        cursor = 0
+        usedThisFrame = 0
+    }
+
+    private var usedThisFrame = 0
+
+    /// Copies `length` bytes in and returns the GPU address to bind.
+    ///
+    /// Nil is returned only when `length` exceeds a whole chunk, which no uniform
+    /// in this project comes close to (the largest is MotionUniforms at 240 B) and
+    /// which chaining cannot fix. Ordinary exhaustion grows the arena instead.
+    func allocate(bytes: UnsafeRawPointer, length: Int, alignment: Int = 16) -> MTLGPUAddress? {
+        let effectiveAlignment = max(16, alignment)
+        guard length <= chunkCapacity else { return nil }
+        var aligned = (cursor + effectiveAlignment - 1) & ~(effectiveAlignment - 1)
+        if aligned + length > chunkCapacity {
+            // Current chunk is full: move to the next one, allocating it if this is
+            // the first frame to need it.
+            if chunkIndex + 1 >= chunks.count {
+                guard appendChunk() else { return nil }
+            }
+            chunkIndex += 1
+            cursor = 0
+            aligned = 0
+        }
+        bases[chunkIndex].advanced(by: aligned).copyMemory(from: bytes, byteCount: length)
+        cursor = aligned + length
+        usedThisFrame += length
+        peakUsage = max(peakUsage, usedThisFrame)
+        return chunks[chunkIndex].gpuAddress + UInt64(aligned)
+    }
+
+    /// Chunks currently held, for diagnostics: more than one means some frame
+    /// overflowed the primary chunk.
+    var chunkCount: Int { chunks.count }
+}
+
+/// One bump allocator per in-flight frame, rotated at frame start.
+///
+/// The depth is MAX_SUBMITS_IN_FLIGHT + 1 = 4, matching the destruction queue
+/// depth S1 established, and for the same reason: an allocator may only be reset
+/// once every submit that could still be reading it has completed. A single
+/// shared allocator would overwrite uniforms the GPU is still fetching, and the
+/// symptom would be intermittently wrong uniform values rather than a crash.
+@available(macOS 26.0, iOS 26.0, *)
+final class Metal4BumpAllocatorRing {
+    /// MetalCommandEncoder.MAX_SUBMITS_IN_FLIGHT (3) + 1.
+    static let depth = 4
+    /// 240 B largest uniform, and the clear path can allocate once per clear; 64 KiB
+    /// leaves room for ~270 largest-case allocations per frame, far above any
+    /// observed frame, at a total cost of 256 KiB across the ring. Exceeding it
+    /// chains another chunk rather than failing, so this is a "how often do we pay
+    /// for a second chunk" knob, not a correctness bound.
+    static let capacityPerFrame = 64 * 1024
+
+    private var allocators: [Metal4BumpAllocator] = []
+    private var frameIndex = 0
+    private var overflowLogged = false
+
+    init?(device: MTLDevice) {
+        for index in 0..<Self.depth {
+            guard let allocator = Metal4BumpAllocator(
+                device: device,
+                capacity: Self.capacityPerFrame,
+                label: "metallum-uniform-bump-\(index)"
+            ) else {
+                return nil
+            }
+            allocators.append(allocator)
+        }
+    }
+
+    /// Rotates to the next frame's allocator and clears it. Call once per frame,
+    /// before any allocation for that frame.
+    func beginFrame() -> Metal4BumpAllocator {
+        let allocator = allocators[frameIndex % allocators.count]
+        frameIndex += 1
+        allocator.reset()
+        return allocator
+    }
+
+    var current: Metal4BumpAllocator {
+        allocators[(frameIndex + allocators.count - 1) % allocators.count]
+    }
+
+    /// Reports the first chunk chain only. Not an error — the arena grew and the
+    /// frame is correct — but it means the chunk size is undersized for real
+    /// frames, which is worth knowing because every such frame allocates.
+    func logGrowthOnce(chunkCount: Int) {
+        guard !overflowLogged else { return }
+        overflowLogged = true
+        NSLog(
+            "[metallum] uniform bump allocator chained a chunk (now %ld x %ld B); consider raising capacityPerFrame",
+            chunkCount,
+            Self.capacityPerFrame
+        )
+    }
+
+    /// A single allocation larger than one whole chunk cannot be served by chaining.
+    /// No uniform in this project is close (largest is 240 B), so this is a
+    /// programming error rather than a capacity problem.
+    func logOversizedOnce(_ length: Int) {
+        guard !overflowLogged else { return }
+        overflowLogged = true
+        NSLog(
+            "[metallum] uniform of %ld B exceeds the %ld B bump chunk; binding skipped",
+            length,
+            Self.capacityPerFrame
+        )
+    }
+
+    var peakUsage: Int {
+        allocators.reduce(0) { max($0, $1.peakUsage) }
+    }
 }
 
 // MARK: - Residency set (migration spec M3)

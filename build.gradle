@@ -579,6 +579,64 @@ if (gradle.startParameter.taskNames.any {
 				"--height", "480"
 		environment "MTL_DEBUG_LAYER", "1"
 		environment "MTL_SHADER_VALIDATION", "0"
+		// A run that validated nothing must not pass by omission.
+		// MetalValidationClient.finishRunState is the only writer of
+		// run-state.json, and the client calls minecraft.stop() only on its
+		// success path, so an absent file means the scripted timeline never
+		// ran to completion. That is reachable without any error: if the
+		// window opens unfocused the pause screen can open on the same frame
+		// the player joins, the compositor throttles the paused unfocused
+		// client to ~0 frames, and beforeFrame never reaches a frame with a
+		// non-null level. Three such runs on 2026-07-27 captured zero GPU
+		// readbacks and still reported BUILD SUCCESSFUL.
+		doLast {
+			def runStateFile = file(
+					"${buildDir}/metal-validation/minecraft-client-current/run-state.json")
+			if (!runStateFile.isFile()) {
+				throw new GradleException(
+						"Vacuous MetalFX client validation: no run-state.json at ${runStateFile}."
+								+ " The client exited without completing its scripted timeline, so no"
+								+ " GPU readbacks were captured and nothing was asserted."
+				)
+			}
+			def runState
+			try {
+				runState = new groovy.json.JsonSlurper().parseText(runStateFile.getText("UTF-8"))
+			} catch (Exception parseFailure) {
+				throw new GradleException(
+						"Could not parse ${runStateFile}: ${parseFailure.message}", parseFailure)
+			}
+			def status = runState.status
+			def completed = runState.completedGpuCaptures
+			def expected = runState.expectedGpuCaptures
+			if (!(status instanceof String) || !(completed instanceof Number)
+					|| !(expected instanceof Number)) {
+				throw new GradleException(
+						"Malformed ${runStateFile}: status=${status},"
+								+ " completedGpuCaptures=${completed}, expectedGpuCaptures=${expected}"
+				)
+			}
+			def problems = []
+			if (status != "passed") {
+				problems << "status is \"${status}\", expected \"passed\"".toString()
+			}
+			// Compared against the client's own expectation rather than a
+			// literal so the gate follows MetalValidationClient's capture count.
+			if (completed != expected) {
+				problems << "captured ${completed} of ${expected} GPU readbacks".toString()
+			}
+			if (!problems.isEmpty()) {
+				problems.each { logger.error("VALIDATION ${it}") }
+				throw new GradleException(
+						"MetalFX client validation did not pass: ${problems.join('; ')}."
+								+ " See ${runStateFile}."
+				)
+			}
+			logger.lifecycle(
+					"MetalFX client validation: PASS (${completed}/${expected} GPU readbacks,"
+							+ " ${runState.failedGpuCaptures} failed)"
+			)
+		}
 	}
 }
 
