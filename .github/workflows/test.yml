@@ -41,8 +41,12 @@ jobs:
       - name: checkout MetalUniversal
         uses: actions/checkout@v6
         with:
-          # We need history depth 1 only; the test suite does not inspect git.
+          # Fetch submodules (glslang, SPIRV-Headers, SPIRV-Cross) so the
+          # test suite can reference their source if needed. Shallow clone
+          # is sufficient — tests only need the working-tree source, not
+          # submodule history.
           fetch-depth: 1
+          submodules: true
 
       - name: setup python
         uses: actions/setup-python@v6

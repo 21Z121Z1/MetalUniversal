@@ -1,11 +1,12 @@
 package com.metallum.client.metal.render.bridge;
 
+import com.metallum.Metallum;
 import com.metallum.client.metal.render.mtl.*;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
-import org.lwjgl.system.Configuration;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.foreign.*;
@@ -24,6 +25,27 @@ public final class MetalNativeBridge {
     private static final ValueLayout.OfFloat FLOAT = ValueLayout.JAVA_FLOAT;
     private static final ValueLayout.OfDouble DOUBLE = ValueLayout.JAVA_DOUBLE;
     private static final Linker LINKER = Linker.nativeLinker();
+
+    /**
+     * Native library resource paths for the GLSL→SPIR-V (glslang) and
+     * SPIR-V→MSL (SPIRV-Cross) shader compiler bridges. These dylibs are
+     * built by build.gradle's buildGlslangMac / buildSpvcMac / buildGlslangIOS
+     * / buildIOSSpvc tasks and bundled in the jar under
+     * {@code /natives/<platform>/}. They are extracted at runtime by
+     * {@link #ensureShaderLibrariesLoaded()} and loaded with {@code RTLD_GLOBAL}
+     * so their {@code glslang_*} / {@code spvc_*} symbols are visible to
+     * {@code libmetallum.dylib} (which was linked with
+     * {@code -undefined dynamic_lookup}).
+     */
+    private static final String GLSLANG_RESOURCE_PATH_MACOS = "/natives/macos/libglslang.dylib";
+    private static final String GLSLANG_RESOURCE_PATH_IOS = "/natives/ios/libglslang.dylib";
+    private static final String SPVC_RESOURCE_PATH_MACOS = "/natives/macos/libspvc.dylib";
+    private static final String SPVC_RESOURCE_PATH_IOS = "/natives/ios/libspvc.dylib";
+
+    /** macOS dlopen flags (values per {@code <dlfcn.h>}) for loading shader dependencies. */
+    private static final int RTLD_NOW = 0x2;
+    private static final int RTLD_GLOBAL = 0x100;
+    private static final int RTLD_NOLOAD = 0x10;
 
     /**
      * iOS (e.g. via PojavLauncher) forbids dlopen of unsigned dylibs from the app's
@@ -63,92 +85,265 @@ public final class MetalNativeBridge {
     }
 
     /**
-     * 在 iOS 上确保完整版 libspvc.dylib（带 MSL 后端）被加载并设置到
-     * {@link org.lwjgl.system.Configuration#SPVC_LIBRARY_NAME}。
+     * 加载 native 着色器编译库（libglslang.dylib、libspvc.dylib、libmetallum.dylib）。
      *
-     * <p>背景：Amethyst-iOS 捆绑的 libMoltenVK.dylib 内部静态链接了 SPIRV-Cross，
-     * 但只编译了 Vulkan 后端（MoltenVK 自己用 C++ API 做 SPIR-V→MSL 转换，不需要 C API
-     * 的 MSL 后端）。LWJGL 的 Spvc 类在 iOS 上没有自己的 natives，回退到
-     * dlsym(RTLD_DEFAULT, ...) 时找到的是 MoltenVK 的精简版符号，导致
-     * spvc_context_create_compiler(SPVC_BACKEND_MSL) 返回 -4 "Invalid backend"。
+     * <p>这是 ShaderBridge JNI 桥接（{@code ShaderBridge.glslangCompile} /
+     * {@code spvcCompileToMsl}）的前置条件。三个库必须按依赖顺序加载：
+     * <ol>
+     *   <li>{@code libglslang.dylib} — GLSL→SPIR-V 编译器（无 native 依赖）</li>
+     *   <li>{@code libspvc.dylib} — SPIRV-Cross C API（SPIR-V→MSL，无 native 依赖）</li>
+     *   <li>{@code libmetallum.dylib} — Metal 设备桥接 + JNI 着色器桥接
+     *       （依赖前两者的 {@code glslang_*} / {@code spvc_*} 符号）</li>
+     * </ol>
      *
-     * <p>修复：在 LWJGL 的 Spvc 类被首次加载之前，从 jar 中抽取完整版 libspvc.dylib
-     * （带 MSL 后端），用 System.load 加载（经 Amethyst 的 hooked dlopen），然后设置
-     * Configuration.SPVC_LIBRARY_NAME 指向该路径。LWJGL 加载时会用该绝对路径直接
-     * dlopen，dlsym(handle, ...) 只查询该镜像的符号，不会被 MoltenVK 抢占。
+     * <p>{@code libmetallum.dylib} 在链接时使用了 {@code -undefined dynamic_lookup}，
+     * 因此其对 {@code glslang_*} / {@code spvc_*} 的调用在运行时通过全局符号表
+     * 解析。本方法先用 {@code System.load} 加载依赖库（在 iOS 上经 Amethyst 的
+     * hooked {@code dlopen}，能绕过代码签名），再用 {@code dlopen(RTLD_NOLOAD | RTLD_GLOBAL)}
+     * 将其提升为全局可见，最后 {@code System.load(libmetallum.dylib)} 让 JVM 的
+     * JNI 符号查找机制（按 {@code Java_*} 名称）能定位到 JNI 函数。
      *
-     * <p><b>关键：必须在 Spvc 类首次初始化前调用。</b> Spvc.SPVC 是 static final 字段，
-     * 在类初始化时通过 Library.loadNative(...) 读取 Configuration.SPVC_LIBRARY_NAME
-     * 并缓存结果。一旦 Spvc 类被加载，后续修改 Configuration.SPVC_LIBRARY_NAME 无效。
-     * 因此本方法必须在任何可能触发 Spvc 类加载的代码（如 MetalCrossShaderCompiler、
-     * VulkanBackend）之前调用。MetalBackend.createDevice 是 Metal 后端的最早入口点，
-     * 在此处调用可保证早于 precompilePipeline 和 VulkanBackend 回退。
+     * <p><b>加载顺序关键</b>：依赖库必须在 {@code libmetallum.dylib} 之前加载并提升为
+     * 全局，否则 JNI 调用 {@code ShaderBridge.glslangCompile} 时 spvc_* / glslang_*
+     * 符号会解析失败（{@code dlsym(RTLD_DEFAULT)} 返回 NULL）。
      *
-     * <p>幂等：多次调用安全，只会真正加载一次。
+     * <p>幂等：线程安全，多次调用只会真正加载一次。本方法在
+     * {@link MetalNativeBridge} 的 static 块中被调用，先于
+     * {@link #createSymbolLookup()}。
      */
-    private static volatile boolean spvcConfigured = false;
+    private static volatile boolean shaderLibrariesLoaded = false;
 
-    public static void ensureSpvcLibraryConfigured() {
-        if (spvcConfigured) return;
+    public static void ensureShaderLibrariesLoaded() {
+        if (shaderLibrariesLoaded) return;
         synchronized (MetalNativeBridge.class) {
-            if (spvcConfigured) return;
-            if (!isIOS()) {
-                spvcConfigured = true;
-                return;
-            }
+            if (shaderLibrariesLoaded) return;
             try {
-                configureBundledSpvcLibrary();
-            } catch (Throwable t) {
+                // 1. 加载并提升 libglslang.dylib（libmetallum.dylib 的依赖）
+                //    非致命：若库未打包进 jar（例如开发者环境未运行 buildGlslangMac），
+                //    ShaderBridge JNI 不可用，但 MetalNativeBridge 仍可正常工作。
+                try {
+                    loadAndPromoteShaderLibrary(GLSLANG_RESOURCE_PATH_MACOS, GLSLANG_RESOURCE_PATH_IOS,
+                            "glslang", "libglslang.dylib");
+                } catch (Throwable t) {
+                    Metallum.LOGGER.warn("Failed to load libglslang.dylib: {}. ShaderBridge JNI will be unavailable.", t.getMessage());
+                }
+                // 2. 加载并提升 libspvc.dylib（libmetallum.dylib 的依赖）
+                try {
+                    loadAndPromoteShaderLibrary(SPVC_RESOURCE_PATH_MACOS, SPVC_RESOURCE_PATH_IOS,
+                            "spvc", "libspvc.dylib");
+                } catch (Throwable t) {
+                    Metallum.LOGGER.warn("Failed to load libspvc.dylib: {}. ShaderBridge JNI will be unavailable.", t.getMessage());
+                }
+                // 3. 加载 libmetallum.dylib —— JNI 符号查找需要 System.load
+                loadMetallumLibrary();
             } finally {
-                spvcConfigured = true;
+                shaderLibrariesLoaded = true;
             }
         }
     }
 
     /**
-     * 从 jar 中抽取完整版 libspvc.dylib 并设置 LWJGL Configuration.SPVC_LIBRARY_NAME。
-     * 库文件位于 jar 的 /natives/ios/libspvc.dylib，由 build.gradle 的 buildIOSSpvc
-     * 任务从 SPIRV-Cross 源码编译（启用 C API + MSL 后端）。
+     * 加载一个着色器依赖库（libglslang / libspvc），并通过 {@code dlopen} 将其符号
+     * 提升为 {@code RTLD_GLOBAL} 可见。
+     *
+     * <p>步骤：
+     * <ol>
+     *   <li>从 jar 抽取 dylib 到可写目录（iOS 上是 PojavLauncher 主目录，
+     *       macOS 上是临时文件）</li>
+     *   <li>{@code System.load}（iOS 上经 Amethyst hooked dlopen，绕过签名）</li>
+     *   <li>{@code dlopen(path, RTLD_NOLOAD | RTLD_GLOBAL)} —— RTLD_NOLOAD 返回
+     *       已加载句柄，RTLD_GLOBAL 提升为全局符号可见（macOS 行为）</li>
+     * </ol>
+     *
+     * @param macosPath jar 中 macOS dylib 的资源路径
+     * @param iosPath jar 中 iOS dylib 的资源路径
+     * @param libName 用于 {@code System.loadLibrary} 的库名（无前缀/后缀）
+     * @param fileName 抽取后的文件名
+     * @return 抽取后的绝对路径；若库未在 jar 中（例如 iOS Frameworks/ 路径）则返回 {@code null}
      */
-    private static void configureBundledSpvcLibrary() throws IOException {
-        String resourcePath = "/natives/ios/libspvc.dylib";
+    private static String loadAndPromoteShaderLibrary(String macosPath, String iosPath,
+                                                       String libName, String fileName) {
+        String resourcePath = isIOS() ? iosPath : macosPath;
+        Path extracted = null;
         try (InputStream stream = MetalNativeBridge.class.getResourceAsStream(resourcePath)) {
-            if (stream == null) {
-                return;
-            }
-            // 抽取到可写目录（与 createIOSSymbolLookup 相同的策略）
-            Path tempLib = null;
-            IOException lastError = null;
-            for (String dirProperty : new String[]{"pojav.launcher.home", "POJAV_HOME", "user.home", "java.io.tmpdir"}) {
-                String dir = System.getProperty(dirProperty);
-                if (dir == null || dir.isBlank()) continue;
-                Path dirPath = Path.of(dir);
-                if (!Files.isDirectory(dirPath)) continue;
+            if (stream != null) {
+                extracted = extractNativeToWritableDir(stream, fileName);
+                extracted.toFile().deleteOnExit();
+                System.load(extracted.toString());
+            } else {
+                // 库未打包进 jar —— 尝试 System.loadLibrary（iOS Frameworks/ 路径）
                 try {
-                    tempLib = dirPath.resolve("libspvc_metallum.dylib");
-                    Files.copy(stream, tempLib, StandardCopyOption.REPLACE_EXISTING);
-                    break;
-                } catch (IOException e) {
-                    lastError = e;
-                    tempLib = null;
+                    System.loadLibrary(libName);
+                } catch (UnsatisfiedLinkError e) {
+                    // 依赖库找不到 —— 抛出，让静态块失败并报错
+                    throw new IllegalStateException("Native shader library not found in jar or java.library.path: " + fileName, e);
                 }
             }
-            if (tempLib == null) {
-                if (lastError != null) throw lastError;
-                throw new IOException("No writable directory available for libspvc.dylib extraction");
-            }
-            tempLib.toFile().deleteOnExit();
-
-            // System.load 经 Amethyst 的 hooked dlopen 加载（能绕过 iOS 代码签名）
-            System.load(tempLib.toString());
-            // 让 LWJGL 在 Spvc 类初始化时用该绝对路径直接 dlopen，避免
-            // dlsym(RTLD_DEFAULT) 被 MoltenVK 抢占
-            Configuration.SPVC_LIBRARY_NAME.set(tempLib.toString());
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to load native shader library: " + fileName, e);
         }
+        // 提升到 RTLD_GLOBAL，让 libmetallum.dylib 的 dynamic_lookup 能解析符号
+        String promotePath = extracted != null ? extracted.toString() : findLibraryPath(libName);
+        if (promotePath != null) {
+            promoteLibraryToGlobal(promotePath);
+        }
+        return extracted != null ? extracted.toString() : null;
+    }
+
+    /**
+     * 加载 libmetallum.dylib —— Metal 设备桥接 + JNI 着色器桥接的主库。
+     *
+     * <p>iOS 上先尝试 {@code System.loadLibrary}（Frameworks/ 目录，已签名），
+     * 失败则从 jar 抽取并通过 {@code System.load} 加载（经 Amethyst hooked dlopen）。
+     * macOS 上直接从 jar 抽取并 {@code System.load}。
+     *
+     * <p>必须使用 {@code System.load}（而非 FFM 的 {@code libraryLookup}），因为
+     * JVM 的 JNI 符号查找机制（按 {@code Java_com_metallum_..._glslangCompile} 名称）
+     * 只识别通过 {@code System.load} / {@code System.loadLibrary} 加载的库。
+     */
+    private static void loadMetallumLibrary() {
+        // iOS：先尝试 Frameworks/ 路径
+        if (isIOS()) {
+            try {
+                System.loadLibrary("metallum");
+                return;
+            } catch (UnsatisfiedLinkError ignored) {
+                // 库不在 Frameworks/ —— 回退到 jar 抽取
+            }
+            try {
+                System.loadLibrary("metallum_native");
+                return;
+            } catch (UnsatisfiedLinkError ignored) {
+                // 库不在 Frameworks/ —— 回退到 jar 抽取
+            }
+        }
+        // 从 jar 抽取并 System.load
+        String resourcePath = isIOS() ? IOS_RESOURCE_PATH : MACOS_RESOURCE_PATH;
+        try (InputStream stream = MetalNativeBridge.class.getResourceAsStream(resourcePath)) {
+            if (stream == null) {
+                throw new IllegalStateException("Missing native library resource: " + resourcePath);
+            }
+            Path tempLib = extractNativeToWritableDir(stream, "libmetallum.dylib");
+            tempLib.toFile().deleteOnExit();
+            System.load(tempLib.toString());
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to load libmetallum.dylib", e);
+        }
+    }
+
+    /**
+     * 通过 {@code dlopen(RTLD_NOLOAD | RTLD_GLOBAL)} 将已加载的库提升为全局符号可见。
+     *
+     * <p>{@code RTLD_NOLOAD}：返回已加载的库句柄（不重新加载）；
+     * {@code RTLD_GLOBAL}：使该库的符号进入全局符号表，供后续通过
+     * {@code dlsym(RTLD_DEFAULT, ...)} 查找的代码使用（包括 libmetallum.dylib 的
+     * {@code -undefined dynamic_lookup} 符号）。
+     *
+     * <p>若 RTLD_NOLOAD 返回 NULL（库未加载），则用 {@code RTLD_NOW | RTLD_GLOBAL}
+     * 重新加载。
+     */
+    private static void promoteLibraryToGlobal(String path) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment pathSegment = arena.allocateFrom(path);
+            MemorySegment handle = (MemorySegment) DLOPEN.invoke(pathSegment, RTLD_NOLOAD | RTLD_GLOBAL);
+            if (handle.address() == 0L) {
+                // 库未加载 —— 用 RTLD_GLOBAL 重新加载
+                handle = (MemorySegment) DLOPEN.invoke(pathSegment, RTLD_NOW | RTLD_GLOBAL);
+            }
+            if (handle.address() == 0L) {
+                Metallum.LOGGER.warn("Failed to promote {} to RTLD_GLOBAL (dlopen returned NULL)", path);
+            }
+        } catch (Throwable t) {
+            Metallum.LOGGER.warn("Failed to promote {} to RTLD_GLOBAL: {}", path, t.getMessage());
+        }
+    }
+
+    /**
+     * 在 {@code java.library.path} 中查找 {@code lib<libName>.dylib}，用于提升
+     * Frameworks/ 路径加载的库到全局可见。
+     */
+    private static String findLibraryPath(String libName) {
+        String libPath = System.getProperty("java.library.path", "");
+        if (libPath.isBlank()) return null;
+        for (String dir : libPath.split(File.pathSeparator)) {
+            if (dir.isBlank()) continue;
+            Path candidate = Path.of(dir, "lib" + libName + ".dylib");
+            if (Files.exists(candidate)) {
+                return candidate.toString();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 将 jar 中的 native 库抽取到可写目录。
+     *
+     * <p>iOS 上尝试 PojavLauncher 主目录（{@code pojav.launcher.home} / {@code POJAV_HOME} /
+     * {@code user.home} / {@code java.io.tmpdir}），因为 Amethyst 的 hooked dlopen 只识别
+     * 这些路径下的 dylib。macOS 上用 {@code Files.createTempFile}。
+     */
+    private static Path extractNativeToWritableDir(InputStream stream, String fileName) throws IOException {
+        byte[] bytes = stream.readAllBytes();
+        if (!isIOS()) {
+            Path tempLib = Files.createTempFile("metallum-", ".dylib");
+            Files.write(tempLib, bytes);
+            return tempLib;
+        }
+        IOException lastError = null;
+        for (String dirProperty : new String[]{"pojav.launcher.home", "POJAV_HOME", "user.home", "java.io.tmpdir"}) {
+            String dir = System.getProperty(dirProperty);
+            if (dir == null || dir.isBlank()) continue;
+            Path dirPath = Path.of(dir);
+            if (!Files.isDirectory(dirPath)) continue;
+            try {
+                Path lib = dirPath.resolve(fileName);
+                Files.write(lib, bytes);
+                return lib;
+            } catch (IOException e) {
+                lastError = e;
+            }
+        }
+        if (lastError != null) throw lastError;
+        throw new IOException("No writable directory available for " + fileName + " on iOS");
+    }
+
+    /**
+     * 兼容性入口点（由 {@link com.metallum.Metallum#onPreLaunch()} 和
+     * {@code MetalBackend.createDevice} 调用）。
+     *
+     * <p>历史背景：原先用于配置 LWJGL 的 {@code Spvc} 类使用我们的完整版
+     * libspvc.dylib（带 MSL 后端），避免 iOS 上 Amethyst 捆绑的 libMoltenVK.dylib
+     * 内部静态链接的精简版 SPIRV-Cross 符号抢占（导致
+     * {@code spvc_context_create_compiler(SPVC_BACKEND_MSL)} 返回 -4 "Invalid backend"）。
+     *
+     * <p>现在 MetalUniversal 已改用自建 {@link ShaderBridge} JNI 桥接，不再依赖
+     * LWJGL 的 {@code Spvc} / {@code SpvcCompiler} 绑定，无需设置
+     * {@code Configuration.SPVC_LIBRARY_NAME}。此方法仅保留为兼容性入口点，
+     * 内部委托给 {@link #ensureShaderLibrariesLoaded()}（幂等，通常已由 static 块完成）。
+     */
+    public static void ensureSpvcLibraryConfigured() {
+        // 自建 ShaderBridge JNI 不依赖 LWJGL Spvc，无需配置 Configuration.SPVC_LIBRARY_NAME。
+        // native 库（libglslang + libspvc + libmetallum）加载由 static 块中的
+        // ensureShaderLibrariesLoaded() 完成，此处仅作幂等兜底。
+        ensureShaderLibrariesLoaded();
     }
 
     static {
         try {
+            // Initialize dlopen handle first — needed by promoteLibraryToGlobal()
+            // (called from ensureShaderLibrariesLoaded → loadAndPromoteShaderLibrary)
+            // to promote libglslang/libspvc symbols to RTLD_GLOBAL.
+            DLOPEN = LINKER.downcallHandle(
+                LINKER.defaultLookup().findOrThrow("dlopen"),
+                FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT)
+            );
+
+            // Load shader dependency libraries (glslang, spvc) and libmetallum.dylib.
+            // Must happen before createSymbolLookup() so dependency symbols are
+            // promoted to RTLD_GLOBAL before libmetallum.dylib's dynamic_lookup
+            // references are resolved.
+            ensureShaderLibrariesLoaded();
+
             SymbolLookup lookup = createSymbolLookup();
 
 
@@ -443,6 +638,14 @@ public final class MetalNativeBridge {
         if (isIOS()) {
             return createIOSSymbolLookup();
         }
+        // If libmetallum.dylib was already loaded by ensureShaderLibrariesLoaded()
+        // (via System.load), reuse the JVM's loader lookup instead of loading a
+        // second copy via SymbolLookup.libraryLookup. This also ensures JNI
+        // symbols (Java_*) and FFM symbols (metallum_*) come from the same image.
+        SymbolLookup loader = SymbolLookup.loaderLookup();
+        if (loader.find("metallum_create_system_default_device").isPresent()) {
+            return loader;
+        }
         return extractAndLoad(MACOS_RESOURCE_PATH);
     }
 
@@ -626,6 +829,15 @@ public final class MetalNativeBridge {
     private static final MethodHandle initPipelines;
     private static final MethodHandle iosFindSurfaceView; // null on macOS
     private static final MethodHandle iosGetViewMetalLayer; // null on macOS
+
+    /**
+     * Handle for libc {@code dlopen}, used by {@link #promoteLibraryToGlobal} to
+     * promote libglslang.dylib / libspvc.dylib to {@code RTLD_GLOBAL} so their
+     * symbols are visible to libmetallum.dylib (which was linked with
+     * {@code -undefined dynamic_lookup}). Initialized in the static block before
+     * {@link #ensureShaderLibrariesLoaded()}.
+     */
+    private static final MethodHandle DLOPEN;
 
 
     private static MethodHandle downcall(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
