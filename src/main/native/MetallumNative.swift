@@ -1774,7 +1774,7 @@ public func metallum_fx_supports_spatial_scaler(_ device: MTLDevice) -> Int {
             if let cached = MetalFxSupportCache.spatial[key] {
                 return cached ? 1 : 0
             }
-            let supported = MTLFXSpatialScaler.supportsDevice(device)
+            let supported = MTLFXSpatialScalerDescriptor.supportsDevice(device)
             MetalFxSupportCache.spatial[key] = supported
             return supported ? 1 : 0
         }
@@ -1790,7 +1790,7 @@ public func metallum_fx_supports_temporal_scaler(_ device: MTLDevice) -> Int {
             if let cached = MetalFxSupportCache.temporal[key] {
                 return cached ? 1 : 0
             }
-            let supported = MTLFXTemporalScaler.supportsDevice(device)
+            let supported = MTLFXTemporalScalerDescriptor.supportsDevice(device)
             MetalFxSupportCache.temporal[key] = supported
             return supported ? 1 : 0
         }
@@ -1810,7 +1810,7 @@ public func metallum_fx_supports_frame_interpolation(_ device: MTLDevice) -> Int
             // appropriate OS / chip. On Apple Silicon, frame interpolation is
             // gated to M3+ on macOS and A17 Pro+ on iOS; `supportsDevice`
             // already encodes that gate.
-            let supported = MTLFXFrameInterpolator.supportsDevice(device)
+            let supported = MTLFXFrameInterpolatorDescriptor.supportsDevice(device)
             MetalFxSupportCache.interpolation[key] = supported
             return supported ? 1 : 0
         }
