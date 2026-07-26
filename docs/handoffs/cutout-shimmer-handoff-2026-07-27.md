@@ -131,6 +131,17 @@ flicker JSON 里的 **`skyPixels: 0` 就是"这个场景测不到你以为的东
 git apply ../../../../cutout-shimmer-inflight-2026-07-27.patch
 ```
 
+**⚠️ §16 同号冲突,应用前必看。** 写这份交接文档时,`cutout-shimmer` worktree 里已经有一处未暂存的 `docs/cutout-shimmer-remediation-2026-07-27.md` 改动(+103 行),内容是**另一份 §16**,标题为
+`## 16. Follow-up (2026-07-27d): the knob sweep, and what actually gates the run`,
+小节包括 `16.1 The client could not start for the whole preceding window`、
+`16.4 Why this does not simply become the new default`、
+`16.5 The CUTOUT acceptance criteria were never the blocker`。
+
+我补丁里的 §16 是
+`## 16. Follow-up (2026-07-27d): reactive attribution, and the linear law`。
+
+**两者章节号相同、结论取向不同,直接 `git apply` 一定出问题**(轻则冲突,重则一方内容被吞)。建议:先决定保留哪一份叙述,或把我的那份改成 §17 再合;两份的**数据是同一批**,不是互相矛盾的观测,差别在解读——尤其是"要不要直接改默认值"这一点上(我的立场见本文 §1.2 与 §6,反方立场见对方 16.4)。**这正是需要用户裁决的第 5 项。**
+
 ### ⚠️ 必须先处理的不一致
 
 - 用户两个实例里正在跑的 jar 是 **`f4ebcb8e0708c306…`**,带 **0.20/0.25**。
@@ -163,6 +174,7 @@ git apply ../../../../cutout-shimmer-inflight-2026-07-27.patch
 2. **transparency 的 alpha 正比是否回退**。这是我最不放心的改动(§2.7),疑似造成云边缘抖动回退,且 harness 结构性测不到(强制关云)。回退方式:让无运动矢量的层(clouds/weather/particles)保持配置值,只让 translucent/itemEntity 按 alpha 正比;或直接 `-Dmetallum.metalfx.transparencyReactiveValue=1.0` 观察。**注意目前没有任何旋钮能退回二值行为**,要退需要改代码。
 3. **是否继续往下压 reactive**。线性律预测 `edge=0.10 / cap=0.10` 还有明显收益,但零点是外推不是实测(三次尝试都死在 §4.1 那个 OpenGL 崩溃上),而且 ghosting 未测。
 4. 用户最后一次反馈是:**要看树顶、藤蔓和云边,特别是转视角移动时有没有拖影**。这个体感验收还没做。
+5. **两份 §16 的叙述取舍**(见 §5 的冲突说明)。数据同源,分歧在"要不要把 0.20/0.25 变成默认值"。我的依据是线性律加逐场景契约不变;反方依据见对方 16.4。合并前需要定一个。
 
 ---
 
