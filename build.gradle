@@ -273,11 +273,42 @@ tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
 		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
 }
 
+// MetalFrameGenerationPresentationValidation.swift guards its whole body with
+// @available(macOS 26.0, *) and signals "unsupported host" by exiting 77, the
+// autotools skip convention. Exec has no notion of 77: it fails on any nonzero
+// exit, so on macOS 15 the build failed with a message that said SKIPPED. The
+// version has to be gated here instead, and gating it in onlyIf rather than
+// mapping 77 to exit 0 is deliberate — a skipped task is reported as SKIPPED,
+// whereas a zero exit would be reported as a task that ran and passed while
+// validating nothing.
+def macOsMajorVersion = -1
+if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+	def versionMatch = (System.getProperty("os.version", "") =~ /^(\d+)/)
+	if (versionMatch.find()) {
+		macOsMajorVersion = versionMatch.group(1) as int
+	}
+}
+def presentationValidationSkipReason = {
+	if (!org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		return "macOS is required"
+	}
+	// -1 means os.version did not parse; treat that as unknown rather than old,
+	// so a host that can run the harness is never silently skipped.
+	if (macOsMajorVersion >= 0 && macOsMajorVersion < 26) {
+		return "macOS 26 is required (found ${System.getProperty('os.version')})"
+	}
+	return null
+}
+
 tasks.register("metalFrameGenerationPresentationValidation", Exec) {
 	group = "verification"
 	description = "Runs an automatic visible-window CAMetalDisplayLink pacing, resize and shutdown validation."
 	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+		def reason = presentationValidationSkipReason()
+		if (reason != null) {
+			logger.lifecycle("metalFrameGenerationPresentationValidation SKIPPED: ${reason}")
+		}
+		reason == null
 	}
 	dependsOn "compileMetalFrameGenerationPresentationValidation"
 	doFirst {
@@ -297,8 +328,13 @@ tasks.register("metalFrameGenerationPresentationValidation", Exec) {
 tasks.register("metal4PresentValidation", Exec) {
 	group = "verification"
 	description = "Runs the frame-generation presentation validation with the Metal 4 present path enabled (migration spec M4)."
+	// Same binary, so the same macOS 26 floor applies.
 	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+		def reason = presentationValidationSkipReason()
+		if (reason != null) {
+			logger.lifecycle("metal4PresentValidation SKIPPED: ${reason}")
+		}
+		reason == null
 	}
 	dependsOn "compileMetalFrameGenerationPresentationValidation"
 	doFirst {
