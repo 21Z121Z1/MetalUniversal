@@ -84,18 +84,79 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return encoder;
     }
 
+    MTLComputeCommandEncoder computeCommandEncoder() {
+        endEncoder();
+        MTLComputeCommandEncoder encoder = commandBuffer().makeComputeCommandEncoder();
+        encoder.waitForFence(fence);
+        currentEncoder = encoder;
+        return encoder;
+    }
+
     void endEncoder() {
         if (currentEncoder != null) {
             if (currentEncoder instanceof MTLRenderCommandEncoder renderEncoder) {
                 renderEncoder.updateFence(fence, MTLRenderStages.VertexAndFragment);
             } else if (currentEncoder instanceof MTLBlitCommandEncoder blitEncoder) {
                 blitEncoder.updateFence(fence);
+            } else if (currentEncoder instanceof MTLComputeCommandEncoder computeEncoder) {
+                computeEncoder.updateFence(fence);
             }
             currentEncoder.endEncoding();
             currentEncoder = null;
         }
         renderColorAttachments = new MemorySegment[0];
         renderDepthAttachment = MemorySegment.NULL;
+    }
+
+    /**
+     * Begins a mod-private compute pass. Vanilla Blaze3D 26.2 has no compute
+     * abstraction, so this API is only reachable from metallum code (Iris
+     * backend). The pass owns the underlying compute encoder until
+     * {@link MetalComputePass#close()}; interleaving other encoder work while
+     * a pass is open is a caller error.
+     */
+    MetalComputePass createComputePass() {
+        submitRenderPass();
+        // Pending deferred clears materialize through transient render
+        // encoders; they must all land BEFORE the compute encoder opens, since
+        // flushing mid-pass would tear the pass's encoder out from under it.
+        flushAllPendingClears();
+        return new MetalComputePass(this, computeCommandEncoder());
+    }
+
+    private void flushAllPendingClears() {
+        while (!pendingColorClears.isEmpty() || !pendingDepthClears.isEmpty()) {
+            MetalGpuTexture next = !pendingColorClears.isEmpty()
+                    ? pendingColorClears.keySet().iterator().next()
+                    : pendingDepthClears.keySet().iterator().next();
+            flushPendingClear(next);
+        }
+    }
+
+    boolean hasPendingClear(final MetalGpuTexture texture) {
+        return pendingColorClears.containsKey(texture) || pendingDepthClears.containsKey(texture);
+    }
+
+    void endComputePass(final MTLComputeCommandEncoder encoder) {
+        if (currentEncoder != encoder) {
+            throw new IllegalStateException(
+                    "Compute pass closed after another encoder was started; passes must be closed before other encoding"
+            );
+        }
+        endEncoder();
+    }
+
+    /**
+     * GPU mipmap generation for a texture whose levels should derive from
+     * level 0 (Iris {@code setupMipmapping}/{@code glGenerateMipmap} semantics).
+     * Runs on a blit encoder inside the global fence chain.
+     */
+    void generateMipmaps(final MetalGpuTexture texture) {
+        if (texture.getMipLevels() <= 1) {
+            return;
+        }
+        flushPendingClear(texture);
+        blitCommandEncoder().generateMipmaps(texture.nativeHandle());
     }
 
     @Override
@@ -675,6 +736,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return;
         }
 
+        // Heap buffers have no stable native address; the transient-memory
+        // staging upload memcpys from memAddress(data) and would SIGBUS the JVM.
+        if (!data.isDirect()) {
+            throw new IllegalArgumentException("writeToBuffer requires a direct ByteBuffer");
+        }
+
         GpuBufferSlice staging = transientMemory.uploadStaging(data, 4L, GpuBuffer.USAGE_COPY_SRC);
         MetalGpuBuffer stagingBuffer = (MetalGpuBuffer) staging.buffer();
 
@@ -754,6 +821,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     ) {
         MetalGpuTexture metalDst = (MetalGpuTexture) destination;
         flushPendingClearForWrite(metalDst);
+
+        // Heap buffers have no stable native address; the transient-memory
+        // staging upload memcpys from memAddress(source) and would SIGBUS.
+        if (!source.isDirect()) {
+            throw new IllegalArgumentException("writeToTexture requires a direct ByteBuffer");
+        }
 
         int pixelSize = metalDst.pixelSize();
         int rowBytes = width * pixelSize;

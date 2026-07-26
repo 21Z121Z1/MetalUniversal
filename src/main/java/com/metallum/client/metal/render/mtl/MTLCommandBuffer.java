@@ -22,6 +22,14 @@ public final class MTLCommandBuffer {
         return new MTLBlitCommandEncoder(encoder);
     }
 
+    public MTLComputeCommandEncoder makeComputeCommandEncoder() {
+        MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeComputeCommandEncoder(handle());
+        if (MetalNativeBridge.isNullHandle(encoder)) {
+            throw new IllegalStateException("Failed to create MTLComputeCommandEncoder");
+        }
+        return new MTLComputeCommandEncoder(encoder);
+    }
+
     public MTLRenderCommandEncoder makeRenderCommandEncoder(
             final MemorySegment colorTexture,
             final MemorySegment depthTexture,

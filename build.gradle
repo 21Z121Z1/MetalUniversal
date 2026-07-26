@@ -26,6 +26,7 @@ dependencies {
 tasks.test {
 	useJUnitPlatform()
 	exclude "**/MetalMrtBackendIntegrationTest.class"
+	exclude "**/MetalComputeBackendIntegrationTest.class"
 	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
 		environment "MTL_DEBUG_LAYER", "1"
@@ -267,9 +268,28 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 	environment "MTL_SHADER_VALIDATION", "1"
 }
 
+tasks.register("metalComputeBackendIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS compute/SSBO/image/mipmap/compare-sampler GPU readback suite through the production backend."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+}
+
 tasks.named("check") {
 	dependsOn "metalFrameGenerationLifecycleTest"
 	dependsOn "metalMrtBackendIntegrationTest"
+	dependsOn "metalComputeBackendIntegrationTest"
 	dependsOn "metalFxOffscreenValidation"
 }
 

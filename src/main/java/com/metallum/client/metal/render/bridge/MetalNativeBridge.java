@@ -482,6 +482,74 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderWaitForFence = downcallWithoutCritical(lookup, "MTLRenderCommandEncoder_waitForFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             MTLBlitCommandEncoderUpdateFence = downcall(lookup, "MTLBlitCommandEncoder_updateFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLBlitCommandEncoderWaitForFence = downcallWithoutCritical(lookup, "MTLBlitCommandEncoder_waitForFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            // Generic compute / mipmap / compare-sampler ABI (Iris backend B0).
+            // Optional so a stale dylib degrades to a clear "unsupported"
+            // failure in the Java layer instead of a load-time crash.
+            MTLCommandBufferMakeComputeCommandEncoder = optionalDowncall(
+                    lookup,
+                    "metallum_MTLCommandBuffer_makeComputeCommandEncoder",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            MTLComputeCommandEncoderSetComputePipelineState = optionalDowncall(
+                    lookup,
+                    "metallum_MTLComputeCommandEncoder_setComputePipelineState",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            MTLComputeCommandEncoderSetBuffer = optionalDowncall(
+                    lookup,
+                    "metallum_MTLComputeCommandEncoder_setBuffer",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, INT)
+            );
+            MTLComputeCommandEncoderSetTexture = optionalDowncall(
+                    lookup,
+                    "metallum_MTLComputeCommandEncoder_setTexture",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT)
+            );
+            MTLComputeCommandEncoderSetSamplerState = optionalDowncall(
+                    lookup,
+                    "metallum_MTLComputeCommandEncoder_setSamplerState",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT)
+            );
+            MTLComputeCommandEncoderDispatchThreadgroups = optionalDowncall(
+                    lookup,
+                    "metallum_MTLComputeCommandEncoder_dispatchThreadgroups",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT, INT, INT, INT, INT, INT)
+            );
+            MTLComputeCommandEncoderDispatchThreadgroupsIndirect = optionalDowncall(
+                    lookup,
+                    "metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, INT, INT, INT)
+            );
+            MTLComputeCommandEncoderUpdateFence = optionalDowncall(
+                    lookup,
+                    "metallum_MTLComputeCommandEncoder_updateFence",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            MTLComputeCommandEncoderWaitForFence = optionalDowncall(
+                    lookup,
+                    "metallum_MTLComputeCommandEncoder_waitForFence",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            MTLDeviceMakeComputePipelineState = optionalDowncall(
+                    lookup,
+                    "metallum_MTLDevice_makeComputePipelineState",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            MTLComputePipelineStateMaxTotalThreadsPerThreadgroup = optionalDowncall(
+                    lookup,
+                    "metallum_MTLComputePipelineState_maxTotalThreadsPerThreadgroup",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
+            );
+            MTLBlitCommandEncoderGenerateMipmaps = optionalDowncall(
+                    lookup,
+                    "metallum_MTLBlitCommandEncoder_generateMipmaps",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            createSamplerV2 = optionalDowncall(
+                    lookup,
+                    "metallum_create_sampler_v2",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, INT, DOUBLE, INT)
+            );
             // metallum_ios_find_surface_view and metallum_ios_get_view_metal_layer
             // only exist in the iOS build of the dylib (guarded by #if os(iOS)
             // in Swift). Register them only on iOS so the macOS build does not
@@ -708,6 +776,19 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderWaitForFence;
     private static final MethodHandle MTLBlitCommandEncoderUpdateFence;
     private static final MethodHandle MTLBlitCommandEncoderWaitForFence;
+    private static final @Nullable MethodHandle MTLCommandBufferMakeComputeCommandEncoder;
+    private static final @Nullable MethodHandle MTLComputeCommandEncoderSetComputePipelineState;
+    private static final @Nullable MethodHandle MTLComputeCommandEncoderSetBuffer;
+    private static final @Nullable MethodHandle MTLComputeCommandEncoderSetTexture;
+    private static final @Nullable MethodHandle MTLComputeCommandEncoderSetSamplerState;
+    private static final @Nullable MethodHandle MTLComputeCommandEncoderDispatchThreadgroups;
+    private static final @Nullable MethodHandle MTLComputeCommandEncoderDispatchThreadgroupsIndirect;
+    private static final @Nullable MethodHandle MTLComputeCommandEncoderUpdateFence;
+    private static final @Nullable MethodHandle MTLComputeCommandEncoderWaitForFence;
+    private static final @Nullable MethodHandle MTLDeviceMakeComputePipelineState;
+    private static final @Nullable MethodHandle MTLComputePipelineStateMaxTotalThreadsPerThreadgroup;
+    private static final @Nullable MethodHandle MTLBlitCommandEncoderGenerateMipmaps;
+    private static final @Nullable MethodHandle createSamplerV2;
     private static final MethodHandle initPipelines;
     private static final MethodHandle metalfxSupportsSpatial;
     private static final MethodHandle metalfxSupportsTemporal;
@@ -2184,6 +2265,233 @@ public final class MetalNativeBridge {
             return (MemorySegment) getBufferContents.invokeExact(segment(buffer));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_get_buffer_contents", throwable);
+        }
+    }
+
+    // --- Generic compute / mipmap / compare-sampler ABI (Iris backend B0) ---
+
+    /** True when the loaded dylib exports the generic compute encoder ABI. */
+    public static boolean supportsComputeAbi() {
+        return MTLCommandBufferMakeComputeCommandEncoder != null
+                && MTLComputeCommandEncoderSetComputePipelineState != null
+                && MTLComputeCommandEncoderSetBuffer != null
+                && MTLComputeCommandEncoderSetTexture != null
+                && MTLComputeCommandEncoderDispatchThreadgroups != null
+                && MTLComputeCommandEncoderUpdateFence != null
+                && MTLComputeCommandEncoderWaitForFence != null
+                && MTLDeviceMakeComputePipelineState != null;
+    }
+
+    /** True when the loaded dylib exports blit mipmap generation. */
+    public static boolean supportsGenerateMipmaps() {
+        return MTLBlitCommandEncoderGenerateMipmaps != null;
+    }
+
+    /** True when the loaded dylib exports the compare-function sampler ABI. */
+    public static boolean supportsSamplerCompare() {
+        return createSamplerV2 != null;
+    }
+
+    private static MethodHandle requireComputeHandle(final @Nullable MethodHandle handle, final String symbol) {
+        if (handle == null) {
+            throw new IllegalStateException(
+                    "Loaded native bridge does not export " + symbol
+                            + "; rebuild libmetallum.dylib (gradle buildMacNative) before using compute"
+            );
+        }
+        return handle;
+    }
+
+    public static MemorySegment MTLCommandBuffer_makeComputeCommandEncoder(final MemorySegment commandBuffer) {
+        try {
+            return (MemorySegment) requireComputeHandle(
+                    MTLCommandBufferMakeComputeCommandEncoder,
+                    "metallum_MTLCommandBuffer_makeComputeCommandEncoder"
+            ).invokeExact(segment(commandBuffer));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLCommandBuffer_makeComputeCommandEncoder", throwable);
+        }
+    }
+
+    public static void MTLComputeCommandEncoder_setComputePipelineState(final MemorySegment encoder, final MemorySegment pipelineState) {
+        try {
+            requireComputeHandle(
+                    MTLComputeCommandEncoderSetComputePipelineState,
+                    "metallum_MTLComputeCommandEncoder_setComputePipelineState"
+            ).invokeExact(segment(encoder), segment(pipelineState));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLComputeCommandEncoder_setComputePipelineState", throwable);
+        }
+    }
+
+    public static void MTLComputeCommandEncoder_setBuffer(final MemorySegment encoder, final MemorySegment buffer, final long offset, final int index) {
+        try {
+            requireComputeHandle(
+                    MTLComputeCommandEncoderSetBuffer,
+                    "metallum_MTLComputeCommandEncoder_setBuffer"
+            ).invokeExact(segment(encoder), segment(buffer), offset, index);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLComputeCommandEncoder_setBuffer", throwable);
+        }
+    }
+
+    public static void MTLComputeCommandEncoder_setTexture(final MemorySegment encoder, final MemorySegment texture, final int index) {
+        try {
+            requireComputeHandle(
+                    MTLComputeCommandEncoderSetTexture,
+                    "metallum_MTLComputeCommandEncoder_setTexture"
+            ).invokeExact(segment(encoder), segment(texture), index);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLComputeCommandEncoder_setTexture", throwable);
+        }
+    }
+
+    public static void MTLComputeCommandEncoder_setSamplerState(final MemorySegment encoder, final MemorySegment sampler, final int index) {
+        try {
+            requireComputeHandle(
+                    MTLComputeCommandEncoderSetSamplerState,
+                    "metallum_MTLComputeCommandEncoder_setSamplerState"
+            ).invokeExact(segment(encoder), segment(sampler), index);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLComputeCommandEncoder_setSamplerState", throwable);
+        }
+    }
+
+    public static void MTLComputeCommandEncoder_dispatchThreadgroups(
+            final MemorySegment encoder,
+            final int groupsX,
+            final int groupsY,
+            final int groupsZ,
+            final int threadsPerGroupX,
+            final int threadsPerGroupY,
+            final int threadsPerGroupZ
+    ) {
+        try {
+            requireComputeHandle(
+                    MTLComputeCommandEncoderDispatchThreadgroups,
+                    "metallum_MTLComputeCommandEncoder_dispatchThreadgroups"
+            ).invokeExact(segment(encoder), groupsX, groupsY, groupsZ, threadsPerGroupX, threadsPerGroupY, threadsPerGroupZ);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLComputeCommandEncoder_dispatchThreadgroups", throwable);
+        }
+    }
+
+    public static void MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
+            final MemorySegment encoder,
+            final MemorySegment indirectBuffer,
+            final long indirectOffset,
+            final int threadsPerGroupX,
+            final int threadsPerGroupY,
+            final int threadsPerGroupZ
+    ) {
+        try {
+            requireComputeHandle(
+                    MTLComputeCommandEncoderDispatchThreadgroupsIndirect,
+                    "metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect"
+            ).invokeExact(segment(encoder), segment(indirectBuffer), indirectOffset, threadsPerGroupX, threadsPerGroupY, threadsPerGroupZ);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect", throwable);
+        }
+    }
+
+    public static void MTLComputeCommandEncoder_updateFence(final MemorySegment encoder, final MemorySegment fence) {
+        try {
+            requireComputeHandle(
+                    MTLComputeCommandEncoderUpdateFence,
+                    "metallum_MTLComputeCommandEncoder_updateFence"
+            ).invokeExact(segment(encoder), segment(fence));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLComputeCommandEncoder_updateFence", throwable);
+        }
+    }
+
+    public static void MTLComputeCommandEncoder_waitForFence(final MemorySegment encoder, final MemorySegment fence) {
+        try {
+            requireComputeHandle(
+                    MTLComputeCommandEncoderWaitForFence,
+                    "metallum_MTLComputeCommandEncoder_waitForFence"
+            ).invokeExact(segment(encoder), segment(fence));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLComputeCommandEncoder_waitForFence", throwable);
+        }
+    }
+
+    public static MemorySegment MTLDevice_makeComputePipelineState(final MemorySegment device, final MemorySegment function) {
+        try {
+            return (MemorySegment) requireComputeHandle(
+                    MTLDeviceMakeComputePipelineState,
+                    "metallum_MTLDevice_makeComputePipelineState"
+            ).invokeExact(segment(device), segment(function));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLDevice_makeComputePipelineState", throwable);
+        }
+    }
+
+    public static int MTLComputePipelineState_maxTotalThreadsPerThreadgroup(final MemorySegment pipelineState) {
+        try {
+            return (int) requireComputeHandle(
+                    MTLComputePipelineStateMaxTotalThreadsPerThreadgroup,
+                    "metallum_MTLComputePipelineState_maxTotalThreadsPerThreadgroup"
+            ).invokeExact(segment(pipelineState));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLComputePipelineState_maxTotalThreadsPerThreadgroup", throwable);
+        }
+    }
+
+    public static void MTLBlitCommandEncoder_generateMipmaps(final MemorySegment encoder, final MemorySegment texture) {
+        try {
+            requireComputeHandle(
+                    MTLBlitCommandEncoderGenerateMipmaps,
+                    "metallum_MTLBlitCommandEncoder_generateMipmaps"
+            ).invokeExact(segment(encoder), segment(texture));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLBlitCommandEncoder_generateMipmaps", throwable);
+        }
+    }
+
+    /**
+     * Sampler creation with an optional depth-compare function. Pass
+     * {@code compareFunction = -1} for an ordinary sampler; otherwise the
+     * {@link com.metallum.client.metal.render.mtl.MTLCompareFunction} value.
+     * Falls back to the v1 ABI when the dylib predates the extension and no
+     * compare function was requested.
+     */
+    public static MemorySegment metallum_create_sampler_v2(
+            final MemorySegment device,
+            final MTLSamplerAddressMode addressModeU,
+            final MTLSamplerAddressMode addressModeV,
+            final MTLSamplerMinMagFilter minFilter,
+            final MTLSamplerMinMagFilter magFilter,
+            final MTLSamplerMipFilter mipFilter,
+            final int maxAnisotropy,
+            final double lodMaxClamp,
+            final int compareFunction
+    ) {
+        if (createSamplerV2 == null) {
+            if (compareFunction >= 0) {
+                throw new IllegalStateException(
+                        "Loaded native bridge does not export metallum_create_sampler_v2; "
+                                + "rebuild libmetallum.dylib before creating compare samplers"
+                );
+            }
+            return metallum_create_sampler(
+                    device, addressModeU, addressModeV, minFilter, magFilter, mipFilter, maxAnisotropy, lodMaxClamp
+            );
+        }
+        try {
+            return (MemorySegment) createSamplerV2.invokeExact(
+                    segment(device),
+                    addressModeU.value,
+                    addressModeV.value,
+                    minFilter.value,
+                    magFilter.value,
+                    mipFilter.value,
+                    maxAnisotropy,
+                    lodMaxClamp,
+                    compareFunction
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_create_sampler_v2", throwable);
         }
     }
 
