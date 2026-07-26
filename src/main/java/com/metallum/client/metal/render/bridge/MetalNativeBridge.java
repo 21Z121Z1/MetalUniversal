@@ -191,6 +191,40 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS
                     )
             );
+            metalfxSetReactiveTuning = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_set_reactive_tuning",
+                    FunctionDescriptor.ofVoid(
+                            ValueLayout.JAVA_FLOAT,
+                            ValueLayout.JAVA_FLOAT,
+                            ValueLayout.JAVA_FLOAT,
+                            ValueLayout.JAVA_FLOAT,
+                            ValueLayout.JAVA_FLOAT,
+                            ValueLayout.JAVA_FLOAT,
+                            ValueLayout.JAVA_FLOAT
+                    )
+            );
+            metalfxSupportsHandOverlay = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_supports_hand_overlay",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
+            );
+            metalfxEncodeHandOverlay = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_encode_hand_overlay",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            FLOAT,
+                            ValueLayout.ADDRESS
+                    )
+            );
             metalfxEncodeV2 = optionalDowncall(lookup, "metallum_metalfx_encode_v2", FunctionDescriptor.of(
                     INT,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
@@ -216,6 +250,7 @@ public final class MetalNativeBridge {
                     INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, ValueLayout.ADDRESS
             ));
             metalfxShutdown = downcall(lookup, "metallum_metalfx_shutdown", FunctionDescriptor.ofVoid());
+            metalfxReleaseScalers = downcall(lookup, "metallum_metalfx_release_scalers", FunctionDescriptor.ofVoid());
             metalfxStopFrameGeneration = downcall(lookup, "metallum_metalfx_stop_frame_generation", FunctionDescriptor.ofVoid());
             metalfxFrameGenerationEncode = downcallWithoutCritical(
                     lookup,
@@ -225,7 +260,7 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                             INT, INT,
-                            FLOAT, FLOAT, FLOAT, FLOAT, FLOAT, FLOAT,
+                            FLOAT, FLOAT, FLOAT, FLOAT, FLOAT, FLOAT, FLOAT,
                             INT, ValueLayout.ADDRESS
                     )
             );
@@ -476,10 +511,20 @@ public final class MetalNativeBridge {
             );
             configureLayer = downcall(lookup, "metallum_configure_layer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, DOUBLE, DOUBLE, INT));
             releaseObject = downcall(lookup, "metallum_release_object", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+            setTransferFence = downcall(lookup, "metallum_set_transfer_fence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             getBufferContents = downcall(lookup, "metallum_get_buffer_contents", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             createFence = downcall(lookup, "metallum_create_fence", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLRenderCommandEncoderUpdateFence = downcall(lookup, "MTLRenderCommandEncoder_updateFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             MTLRenderCommandEncoderWaitForFence = downcallWithoutCritical(lookup, "MTLRenderCommandEncoder_waitForFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
+            MTLRenderCommandEncoderSetDepthStoreAction = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthStoreAction", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT));
+            setDeferredDepthStore = downcall(lookup, "metallum_set_deferred_depth_store", FunctionDescriptor.ofVoid(INT));
+            metal4Supported = downcall(lookup, "metallum_metal4_supported", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
+            setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
+            residencySetEnable = downcall(lookup, "metallum_residency_set_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            // The archive open path performs disk IO inside the native call;
+            // avoid the critical-linker fast path like other IO-adjacent calls.
+            psoArchiveOpen = downcallWithoutCritical(lookup, "metallum_pso_archive_open", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            psoArchiveFlush = downcallWithoutCritical(lookup, "metallum_pso_archive_flush", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             MTLBlitCommandEncoderUpdateFence = downcall(lookup, "MTLBlitCommandEncoder_updateFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLBlitCommandEncoderWaitForFence = downcallWithoutCritical(lookup, "MTLBlitCommandEncoder_waitForFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             // Generic compute / mipmap / compare-sampler ABI (Iris backend B0).
@@ -768,12 +813,20 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderPipelineDescriptorSetColorAttachmentBlendState;
     private static final MethodHandle MTLRenderPipelineDescriptorSetBlendState;
     private static final MethodHandle MTLDeviceMakeRenderPipelineState;
+    private static final MethodHandle setTransferFence;
     private static final MethodHandle configureLayer;
     private static final MethodHandle releaseObject;
     private static final MethodHandle getBufferContents;
     private static final MethodHandle createFence;
     private static final MethodHandle MTLRenderCommandEncoderUpdateFence;
     private static final MethodHandle MTLRenderCommandEncoderWaitForFence;
+    private static final MethodHandle MTLRenderCommandEncoderSetDepthStoreAction;
+    private static final MethodHandle setDeferredDepthStore;
+    private static final MethodHandle metal4Supported;
+    private static final MethodHandle setMetal4CompilerEnabled;
+    private static final MethodHandle residencySetEnable;
+    private static final MethodHandle psoArchiveOpen;
+    private static final MethodHandle psoArchiveFlush;
     private static final MethodHandle MTLBlitCommandEncoderUpdateFence;
     private static final MethodHandle MTLBlitCommandEncoderWaitForFence;
     private static final @Nullable MethodHandle MTLCommandBufferMakeComputeCommandEncoder;
@@ -802,11 +855,18 @@ public final class MetalNativeBridge {
     @Nullable
     private static final MethodHandle metalfxApplyCutoutReactive;
     @Nullable
+    private static final MethodHandle metalfxSetReactiveTuning;
+    @Nullable
+    private static final MethodHandle metalfxSupportsHandOverlay;
+    @Nullable
+    private static final MethodHandle metalfxEncodeHandOverlay;
+    @Nullable
     private static final MethodHandle metalfxEncodeV2;
     private static final MethodHandle metalfxEncode;
     private static final MethodHandle metalfxTransparencyMask;
     private static final MethodHandle metalfxCopy;
     private static final MethodHandle metalfxShutdown;
+    private static final MethodHandle metalfxReleaseScalers;
     private static final MethodHandle metalfxStopFrameGeneration;
     private static final MethodHandle metalfxFrameGenerationEncode;
     private static final MethodHandle iosFindSurfaceView; // null on macOS
@@ -1005,6 +1065,33 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static void metallum_metalfx_set_reactive_tuning(
+            final float cutoutEdgeWeight,
+            final float cutoutInteriorWeight,
+            final float depthEdgeCap,
+            final float transparencyValue,
+            final float skyFarPlaneMotion,
+            final float disocclusionReactiveCap,
+            final float mergeDepthDilation
+    ) {
+        if (metalfxSetReactiveTuning == null) {
+            return;
+        }
+        try {
+            metalfxSetReactiveTuning.invokeExact(
+                    cutoutEdgeWeight,
+                    cutoutInteriorWeight,
+                    depthEdgeCap,
+                    transparencyValue,
+                    skyFarPlaneMotion,
+                    disocclusionReactiveCap,
+                    mergeDepthDilation
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_set_reactive_tuning", throwable);
+        }
+    }
+
     public static boolean metallum_metalfx_apply_cutout_reactive(
             final MemorySegment commandBuffer,
             final MemorySegment cutoutCoverage,
@@ -1029,6 +1116,48 @@ public final class MetalNativeBridge {
             ) != 0;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metalfx_apply_cutout_reactive", throwable);
+        }
+    }
+
+    public static boolean metallum_metalfx_supports_hand_overlay(final MemorySegment device) {
+        if (metalfxSupportsHandOverlay == null || metalfxEncodeHandOverlay == null) {
+            return false;
+        }
+        try {
+            return (int) metalfxSupportsHandOverlay.invokeExact(segment(device)) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_supports_hand_overlay", throwable);
+        }
+    }
+
+    public static boolean metallum_metalfx_encode_hand_overlay(
+            final MemorySegment commandBuffer,
+            final MemorySegment handDepth,
+            final MemorySegment objectMotion,
+            final MemorySegment objectValidity,
+            final MemorySegment reactive,
+            final int inputWidth,
+            final int inputHeight,
+            final float reactiveBoost,
+            final MemorySegment fence
+    ) {
+        if (metalfxEncodeHandOverlay == null) {
+            return false;
+        }
+        try {
+            return (int) metalfxEncodeHandOverlay.invokeExact(
+                    segment(commandBuffer),
+                    segment(handDepth),
+                    segment(objectMotion),
+                    segment(objectValidity),
+                    segment(reactive),
+                    inputWidth,
+                    inputHeight,
+                    reactiveBoost,
+                    segment(fence)
+            ) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_encode_hand_overlay", throwable);
         }
     }
 
@@ -1158,6 +1287,7 @@ public final class MetalNativeBridge {
             final float nearPlane,
             final float farPlane,
             final float aspectRatio,
+            final float sourceDeltaSeconds,
             final boolean reset,
             final MemorySegment fence
     ) {
@@ -1167,6 +1297,7 @@ public final class MetalNativeBridge {
                     segment(sceneColor), segment(uiColor), segment(depth), segment(motion),
                     inputWidth, inputHeight,
                     jitterX, jitterY, fieldOfView, nearPlane, farPlane, aspectRatio,
+                    sourceDeltaSeconds,
                     reset ? 1 : 0, segment(fence)
             ) != 0;
         } catch (Throwable throwable) {
@@ -1212,6 +1343,18 @@ public final class MetalNativeBridge {
             metalfxShutdown.invokeExact();
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metalfx_shutdown", throwable);
+        }
+    }
+
+    /**
+     * Drops the dimension-keyed MetalFX scalers and their depth history without
+     * tearing down the compute pipelines or the frame-generation presenter.
+     */
+    public static void metallum_metalfx_release_scalers() {
+        try {
+            metalfxReleaseScalers.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_release_scalers", throwable);
         }
     }
 
@@ -2220,6 +2363,20 @@ public final class MetalNativeBridge {
         }
     }
 
+    /**
+     * Publishes the split-fence transfer fence to the native side (Swift
+     * retains it), or clears it with {@link MemorySegment#NULL} before the
+     * Java owner releases the fence. Non-null enables the split-fence path
+     * for natively encoded blits (frame-generation input copies).
+     */
+    public static void metallum_set_transfer_fence(final MemorySegment fence) {
+        try {
+            setTransferFence.invokeExact(segment(fence));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_transfer_fence", throwable);
+        }
+    }
+
     public static MemorySegment metallum_create_fence(final MemorySegment device) {
         try {
             return (MemorySegment) createFence.invokeExact(segment(device));
@@ -2233,6 +2390,79 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderUpdateFence.invokeExact(segment(encoder), segment(fence), stages);
         } catch (Throwable throwable) {
             throw bridgeFailure("MTLRenderCommandEncoder_updateFence", throwable);
+        }
+    }
+
+    public static void MTLRenderCommandEncoder_setDepthStoreAction(final MemorySegment encoder, final int store) {
+        try {
+            MTLRenderCommandEncoderSetDepthStoreAction.invokeExact(segment(encoder), store);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderCommandEncoder_setDepthStoreAction", throwable);
+        }
+    }
+
+    public static void metallum_set_deferred_depth_store(final int enabled) {
+        try {
+            setDeferredDepthStore.invokeExact(enabled);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_deferred_depth_store", throwable);
+        }
+    }
+
+    /**
+     * Non-zero when this device and this dylib's SDK both support Metal 4.
+     * Answers the run-time half of the Metal 4 capability gate; the requested
+     * half is the {@code metallum.opt.metal4} system property. Both must hold
+     * before any {@code MTL4*} path is used.
+     */
+    public static int metallum_metal4_supported(final MemorySegment device) {
+        try {
+            return (int) metal4Supported.invokeExact(segment(device));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metal4_supported", throwable);
+        }
+    }
+
+    /**
+     * Creates a residency set and attaches it to {@code queue}, after which
+     * natively created buffers and textures are tracked in it. Non-zero on
+     * success; 0 means the OS is too old or the set could not be created, and
+     * residency stays automatic.
+     */
+    public static int metallum_residency_set_enable(final MemorySegment device, final MemorySegment queue) {
+        try {
+            return (int) residencySetEnable.invokeExact(segment(device), segment(queue));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_residency_set_enable", throwable);
+        }
+    }
+
+    /**
+     * Enables MTL4Compiler-backed render pipeline creation on the native side.
+     * Must be called before the first pipeline is built, and only with 1 when
+     * {@link #metallum_metal4_supported} already said yes.
+     */
+    public static void metallum_set_metal4_compiler_enabled(final int enabled) {
+        try {
+            setMetal4CompilerEnabled.invokeExact(enabled);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_metal4_compiler_enabled", throwable);
+        }
+    }
+
+    public static int metallum_pso_archive_open(final MemorySegment device, final String path) {
+        try (Arena arena = Arena.ofConfined()) {
+            return (int) psoArchiveOpen.invokeExact(segment(device), toCString(arena, path));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_pso_archive_open", throwable);
+        }
+    }
+
+    public static int metallum_pso_archive_flush(final String path) {
+        try (Arena arena = Arena.ofConfined()) {
+            return (int) psoArchiveFlush.invokeExact(toCString(arena, path));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_pso_archive_flush", throwable);
         }
     }
 

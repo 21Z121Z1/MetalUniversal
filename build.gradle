@@ -47,18 +47,13 @@ tasks.test {
 // rather than only the Gradle process.
 tasks.withType(JavaExec).configureEach {
 	if (name == "runClient") {
-		[
-			"metallum.metalfx.mode",
-			"metallum.metalfx.scale",
-			"metallum.metalfx.debug",
-			"metallum.metalfx.reactiveMask",
-			"metallum.metalfx.frameGeneration",
-			"metallum.validation.enabled",
-			"metallum.validation.output"
-		].each { propertyName ->
-			def value = System.getProperty(propertyName)
-			if (value != null) {
-				systemProperty(propertyName, value)
+		// Forward every metallum.* property so launch-arg knobs (MetalFX mode,
+		// reactive-policy tuning, validation switches) reach the client JVM
+		// without needing to grow an allowlist per knob.
+		System.properties.each { key, value ->
+			def propertyName = key.toString()
+			if (propertyName.startsWith("metallum.")) {
+				systemProperty(propertyName, value.toString())
 			}
 		}
 		def validationWorld = System.getProperty("metallum.validation.world")
@@ -87,6 +82,7 @@ tasks.register("buildMacNative", Exec) {
 	workingDir project.projectDir
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
 		"src/main/native/MetallumNative.swift"
 	)
 	outputs.file("src/main/resources/natives/macos/libmetallum.dylib")
@@ -106,10 +102,13 @@ tasks.register("buildMacNative", Exec) {
 		"-framework", "QuartzCore",
 		"-o", "src/main/resources/natives/macos/libmetallum.dylib",
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
 		"src/main/native/MetallumNative.swift"
 }
 
 def metalMrtSmokeBinary = file("${buildDir}/metal-tests/MetalMRTSmokeTest")
+def metal4PipelineSmokeBinary = file("${buildDir}/metal-tests/Metal4PipelineSmokeTest")
+def metal4PipelinePathBinary = file("${buildDir}/metal-tests/Metal4PipelinePathTest")
 def metalFrameGenerationLifecycleTestBinary = file("${buildDir}/metal-tests/MetalFrameGenerationLifecycleTest")
 def metalFrameGenerationPresentationValidationBinary = file("${buildDir}/metal-tests/MetalFrameGenerationPresentationValidation")
 def metalFxOffscreenValidationBinary = file("${buildDir}/metal-tests/MetalFXOffscreenValidation")
@@ -138,6 +137,96 @@ tasks.register("metalMrtSmokeTest", Exec) {
 	}
 	dependsOn "compileMetalMrtSmokeTest"
 	commandLine metalMrtSmokeBinary.absolutePath
+}
+
+// Metal 4 migration M2 step 0. Built for the same macosx14.0 deployment target
+// as everything else on purpose: the point is to prove the
+// @available(macOS 26.0, iOS 26.0, *) dual-path strategy compiles and runs
+// without raising build.gradle's target. Skips itself (exit 0) on a host that
+// does not support Metal 4.
+tasks.register("compileMetal4PipelineSmokeTest", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	workingDir project.projectDir
+	inputs.files("src/test/native/Metal4PipelineSmokeTest.swift")
+	outputs.file(metal4PipelineSmokeBinary)
+	doFirst {
+		metal4PipelineSmokeBinary.parentFile.mkdirs()
+	}
+	commandLine "swiftc",
+		"-O",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", metal4PipelineSmokeBinary.absolutePath,
+		"src/test/native/Metal4PipelineSmokeTest.swift"
+}
+
+tasks.register("metal4PipelineSmokeTest", Exec) {
+	group = "verification"
+	description = "Checks that MTL4Compiler pipeline states bind to a Metal 3 render encoder (migration spec M2 step 0)."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "compileMetal4PipelineSmokeTest"
+	// Metal 4 gives no driver-side hazard tracking and validates pipeline/pass
+	// agreement only under the debug layer; without it an illegal combination
+	// can appear to work.
+	environment "MTL_DEBUG_LAYER", "1"
+	commandLine metal4PipelineSmokeBinary.absolutePath
+}
+
+// Metal 4 migration M1 + M2b at the L2 level: links the shipping native module
+// so the real exports (capability gate, shader function registration, pipeline
+// creation) are what gets tested.
+tasks.register("compileMetal4PipelinePathTest", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	workingDir project.projectDir
+	// Source set mirrors buildMacNative, so this test links what ships.
+	inputs.files(
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/Metal4PipelinePathTest.swift"
+	)
+	outputs.file(metal4PipelinePathBinary)
+	doFirst {
+		metal4PipelinePathBinary.parentFile.mkdirs()
+	}
+	// -whole-module-optimization is required, not just a speed knob:
+	// MetallumInterface.swift takes the address of MetallumNative.swift's @_cdecl
+	// functions as @convention(c), which emits a thunk carrying the same C symbol
+	// in each file's object. One object file per module (as buildMacNative does)
+	// is what keeps those from colliding at link time.
+	commandLine "swiftc",
+		"-O",
+		"-whole-module-optimization",
+		"-module-name", "metallum_native",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "AppKit",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-framework", "QuartzCore",
+		"-o", metal4PipelinePathBinary.absolutePath,
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/Metal4PipelinePathTest.swift"
+}
+
+tasks.register("metal4PipelinePathTest", Exec) {
+	group = "verification"
+	description = "Checks the shipping Metal 4 pipeline path renders identically to Metal 3 and falls back cleanly (migration spec M1/M2b)."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "compileMetal4PipelinePathTest"
+	environment "MTL_DEBUG_LAYER", "1"
+	commandLine metal4PipelinePathBinary.absolutePath
 }
 
 tasks.register("compileMetalFrameGenerationLifecycleTest", Exec) {
@@ -364,6 +453,10 @@ tasks.named("check") {
 	dependsOn "metalComputeBackendIntegrationTest"
 	dependsOn "metalIrisTargetsIntegrationTest"
 	dependsOn "metalFxOffscreenValidation"
+	dependsOn "metalMrtSmokeTest"
+	// Windowed CAMetalDisplayLink pacing/resize/shutdown acceptance. Requires
+	// a WindowServer session; headless CI should exclude it with -x.
+	dependsOn "metalFrameGenerationPresentationValidation"
 }
 
 tasks.register("minecraftMetalFxClientValidation") {
@@ -390,11 +483,132 @@ if (gradle.startParameter.taskNames.any {
 				file("${buildDir}/metal-validation/minecraft-client-current").absolutePath
 		systemProperty "metallum.metalfx.mode", "TEMPORAL"
 		systemProperty "metallum.metalfx.debug", "true"
-		systemProperty "metallum.metalfx.frameGeneration", "false"
+		// Frame generation stays off by default: the readback captures are the
+		// deterministic attachment gate, and an asynchronous presenter would race
+		// them. The attended 13.4 visual/pacing QA run turns it on explicitly with
+		//   -Dmetallum.metalfx.frameGeneration=true
+		//   -Dmetallum.metalfx.objectMotionProducer=true
+		// (the second one opens the OBJECT_MOTION_PRODUCER_CONNECTED gate without
+		// changing what ships).
+		systemProperty "metallum.metalfx.frameGeneration",
+				System.getProperty("metallum.metalfx.frameGeneration", "false")
+		systemProperty "metallum.metalfx.objectMotionProducer",
+				System.getProperty("metallum.metalfx.objectMotionProducer", "false")
+		// Forward backend kill-switch overrides (-Dmetallum.opt.*) from the
+		// Gradle invocation to the client JVM for toggle validation runs.
+		System.properties.each { key, value ->
+			if (key.toString().startsWith("metallum.opt.")) {
+				systemProperty key.toString(), value.toString()
+			}
+		}
 		args "--quickPlaySingleplayer",
-				System.getProperty("metallum.validation.world", "New World")
+				System.getProperty("metallum.validation.world", "New World"),
+				// Pin the window (and with it the framebuffer) size: macOS
+				// window management can zoom/tile the client window, and a
+				// different framebuffer size makes golden captures
+				// incomparable across runs.
+				"--width", "854",
+				"--height", "480"
 		environment "MTL_DEBUG_LAYER", "1"
 		environment "MTL_SHADER_VALIDATION", "0"
+	}
+}
+
+// P2-1 golden-frame regression tooling. minecraftMetalFxClientValidation
+// already dumps every captured pass plane as raw bytes
+// (frame-*/<plane>.bin); goldenFrameRecord snapshots the latest run as the
+// baseline, and goldenFrameCompare byte-compares a later run against it.
+// Workflow:
+//   ./gradlew minecraftMetalFxClientValidation && ./gradlew goldenFrameRecord
+//   <make a change>
+//   ./gradlew minecraftMetalFxClientValidation && ./gradlew goldenFrameCompare
+// Any byte difference fails the compare; -PgoldenTolerate=plane1,plane2
+// downgrades named planes (e.g. temporal-output) to logged-only.
+
+def goldenBaselineDir = file("${buildDir}/metal-validation/golden-baseline")
+def goldenCurrentDir = file("${buildDir}/metal-validation/minecraft-client-current")
+
+tasks.register("goldenFrameRecord", Sync) {
+	group = "verification"
+	description = "Snapshots the latest minecraftMetalFxClientValidation captures as the golden baseline."
+	from goldenCurrentDir
+	into goldenBaselineDir
+	doFirst {
+		if (!goldenCurrentDir.directory) {
+			throw new GradleException("No captures at ${goldenCurrentDir}; run minecraftMetalFxClientValidation first")
+		}
+	}
+}
+
+tasks.register("goldenFrameCompare") {
+	group = "verification"
+	description = "Byte-compares the latest validation captures against the recorded golden baseline."
+	doLast {
+		if (!goldenBaselineDir.directory) {
+			throw new GradleException("No golden baseline at ${goldenBaselineDir}; run goldenFrameRecord first")
+		}
+		if (!goldenCurrentDir.directory) {
+			throw new GradleException("No captures at ${goldenCurrentDir}; run minecraftMetalFxClientValidation first")
+		}
+		Set tolerated = (findProperty("goldenTolerate") ?: "").toString()
+				.split(",").findAll { !it.isEmpty() } as Set
+		def failures = []
+		int compared = 0
+		def frameDirs = goldenBaselineDir.listFiles()
+				.findAll { it.directory && it.name.startsWith("frame-") }
+				.sort { it.name }
+		frameDirs.each { frameDir ->
+			frameDir.listFiles().findAll { it.name.endsWith(".bin") }.sort { it.name }.each { baseFile ->
+				def rel = "${frameDir.name}/${baseFile.name}"
+				def plane = baseFile.name - ".bin"
+				def curFile = new File(goldenCurrentDir, rel)
+				compared++
+				if (!curFile.file) {
+					failures << "${rel}: missing in current run".toString()
+					return
+				}
+				byte[] a = baseFile.bytes
+				byte[] b = curFile.bytes
+				if (java.util.Arrays.equals(a, b)) {
+					return
+				}
+				String msg
+				if (a.length != b.length) {
+					msg = "${rel}: size ${a.length} vs ${b.length}"
+				} else {
+					int diffs = 0
+					int first = -1
+					int maxDelta = 0
+					for (int i = 0; i < a.length; i++) {
+						if (a[i] != b[i]) {
+							diffs++
+							if (first < 0) first = i
+							int delta = Math.abs((a[i] & 0xFF) - (b[i] & 0xFF))
+							if (delta > maxDelta) maxDelta = delta
+						}
+					}
+					msg = String.format(
+							"%s: %d differing bytes (%.3f%%), first at byte %d, max byte delta %d",
+							rel, diffs, 100.0d * diffs / a.length, first, maxDelta)
+				}
+				if (tolerated.contains(plane)) {
+					logger.lifecycle("TOLERATED ${msg}")
+				} else {
+					failures << msg
+				}
+			}
+		}
+		// A run that silently produced fewer frames must not pass by omission.
+		def baselineFrames = frameDirs.collect { it.name } as Set
+		goldenCurrentDir.listFiles()
+				.findAll { it.directory && it.name.startsWith("frame-") }
+				.each { if (!baselineFrames.contains(it.name)) failures << "${it.name}: not present in baseline".toString() }
+		logger.lifecycle("Golden frame compare: ${compared} planes vs ${goldenBaselineDir.name}")
+		if (!failures.isEmpty()) {
+			failures.each { logger.error("GOLDEN DIFF ${it}") }
+			throw new GradleException("Golden frame regression: ${failures.size()} plane(s) differ")
+		}
+		logger.lifecycle("Golden frame compare: PASS (byte-identical)")
 	}
 }
 
@@ -453,6 +667,7 @@ tasks.register("buildIOSNative", Exec) {
 			"-framework", "QuartzCore",
 			"-framework", "UIKit",
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
+			"src/main/native/MetallumInterface.swift",
 			"src/main/native/MetallumNative.swift"
 	}
 }

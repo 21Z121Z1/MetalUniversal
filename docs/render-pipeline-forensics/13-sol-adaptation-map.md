@@ -1,5 +1,7 @@
 # Sol 适配接入点地图
 
+> **2026-07-26 live-source correction**：本文为旧 presenter 时期的 forensic 快照。文中 `afterMinimumDuration`、`maximumFramesPerSecond` 采样、PresentThread 自行 `nextDrawable()` 的描述已不适用——当前实现基于 `CAMetalDisplayLink`，present 在 `needsUpdate` 回调内同步提交，显式 source-frame 状态机管理 drop/failure/shutdown，真实窗口 timeline 验收已通过（见 `../metalfx-frame-generation.md` 与仓库上级 `MinecraftMetal_MetalFX_Audit_2026-07-26.md` 第 17 节）。保留原文仅作历史证据链。
+
 > **2026-07-26 status:** 本文是规划/适配地图，不是当前实现状态。已经完成的 MRT、普通实体纵切、三层验证与剩余 producer 缺口见最终验收报告；gate 仍关闭。
 
 本文件是后续实现模型的边界说明，不是实现方案补丁。每个目标都把当前事实、缺失输入、最小接入符号和验证门槛分开。`recommended_symbols` 只表示应先检查的现有边界，不表示已经修改。

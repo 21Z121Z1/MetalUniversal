@@ -1,12 +1,58 @@
 # MetalFX Frame Generation
 
-Status: presenter and validation infrastructure implemented; production gate
-closed.
+Status: presenter, object-motion producer and validation infrastructure
+implemented; production gate closed pending the attended 13.4 visual/pacing QA.
 
 Frame interpolation is a macOS 26+ path based on
 `MTLFXFrameInterpolator`. The code is present and automatically testable, but
 Minecraft cannot enable it while
 `OBJECT_MOTION_PRODUCER_CONNECTED == false`.
+
+To run the gate open — this is what the attended QA does, and it does not change
+what ships:
+
+```
+./gradlew minecraftMetalFxClientValidation \
+    -Dmetallum.metalfx.objectMotionProducer=true \
+    -Dmetallum.metalfx.frameGeneration=true
+```
+
+`metallum.metalfx.objectMotionProducer` opens the compile-time gate;
+`metallum.metalfx.frameGeneration` remains the runtime kill switch and stays the
+supported way to turn the feature off after the constant is eventually flipped.
+
+## Object-motion coverage
+
+Object motion is produced per draw by splitting an entity's geometry out of the
+batched feature-renderer draw and replaying it through
+`metallum:core/entity_motion` (`MetalEntityMotionCapture`,
+`MetalEntityMotionPipeline`). Two Minecraft 26.2 pipeline families reach it:
+`core/entity` (entity models) and `core/item` (dropped items, item frames, held
+items). Both share `DefaultVertexFormat.ENTITY` and the same
+`ProjMat * ModelViewMat * Position` clip transform, so one reduced shader
+replays both.
+
+The root object-to-world transform is rebuilt by `MetalEntityObjectPose`, which
+mirrors each renderer's transform order. Covered today:
+
+| Category | Transform reproduced |
+| --- | --- |
+| Living entities | `T(pos) * R_y(180 - bodyRot)` |
+| Dropped items | `T(pos) * T_y(bob) * R_y(spin)` |
+| Minecarts (new behavior) | `T(renderPos) * R_y(yRot) * R_z(-xRot) * T_y(0.375)` + hurt shake |
+| Minecarts (old behavior) | rail-sampled position and orientation, then `T_y(0.375) * R_y(180 - yaw) * R_z(-xRot)` + hurt shake |
+| Boats | `T(pos) * T_y(0.375) * R_y(180 - yRot)` + hurt shake + bubble tilt |
+| Arrows and tridents | `T(pos) * R_y(yRot - 90) * R_z(xRot)` |
+| Everything else | translation only |
+
+Constant factors are deliberately omitted because they cancel exactly in the
+`previous * inverse(current)` delta: the `(-1, -1, 1)` model flip, per-entity
+seed jitter, the item cluster's deterministic copy offsets, and the item's
+`-boundingBox.minY + 1/16` lift. `MetalEntityObjectPoseTest` asserts the lift
+cancellation rather than assuming it.
+
+Limb, hand and other in-model animation is not covered by a root transform and
+relies on disocclusion rejection, as before.
 
 ## Source-frame lifecycle
 
@@ -151,12 +197,42 @@ Resize and world/history reset similarly invalidate source history. The GUI is
 not independently interpolated; the presenter receives the pre-GUI scene and
 the composed UI texture with the UI-composited contract.
 
+## Present-mode policy
+
+`CAMetalDisplayLink` only schedules updates on the display's refresh boundary, so
+the presenter is a vsync-on loop by construction and every pacing measurement was
+taken that way. Minecraft can switch the surface to `MAILBOX` at any time from the
+video settings, which drops `displaySyncEnabled`.
+
+Frame generation therefore suspends — through the same mechanism as an open GUI —
+whenever `MetalSurface.configure` reports the immediate present mode, and resumes
+when VSync comes back. As a backstop the presenter also owns
+`displaySyncEnabled` and `allowsNextDrawableTimeout` for its whole lifetime:
+`metallum_configure_layer` defers both to the presenter instead of writing them
+from the render thread, the presenter restates them from inside the display-link
+callback after a present (the apply-after-present rule), and `shutdown()` hands
+the layer back in the mode the game asked for. Before this, a resize silently
+reset `allowsNextDrawableTimeout` to false, which is exactly the setting that
+keeps a hidden or minimized window from blocking shutdown forever.
+
 ## Known limits
 
-- Production Frame Generation remains disabled because object-motion coverage
-  is incomplete.
-- Block entities, first-person hand/item, procedural/vertex animation and
-  several translucent categories do not yet have reliable object motion.
+- Production Frame Generation remains disabled pending the attended visual and
+  pacing QA in the audit's 13.4 matrix, not for lack of an object-motion
+  producer.
+- Falling blocks and block entities render through `core/block` and would need a
+  second motion pipeline family; they currently reach the interpolator with
+  translation-only or no object motion.
+- Display entities, item frames, paintings, armour stands and end crystals get
+  translation only; their non-translation motion is left to disocclusion
+  rejection.
+- First-person hand/item uses the zero-motion + validity kernel rather than an
+  object transform.
+- The generated/real pair is spaced by exactly one display refresh, because each
+  `needsUpdate` claims at most one step. When the source frame rate falls below
+  half the refresh rate the pair arrives as a burst followed by a gap; the
+  present diagnostics ring (`METALLUM_METALFX_PRESENT_DIAGNOSTICS=1`) is the way
+  to quantify that before trusting the gate at low source frame rates.
 - The automated presentation test validates the display-link submission and
   ownership timeline on the current display. It does not establish human
   smoothness, scanout tearing, VRR behavior or display migration.

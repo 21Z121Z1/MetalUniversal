@@ -1,5 +1,7 @@
 # 已知画面伪影候选根因图
 
+> **2026-07-26 live-source correction**：本文为旧 presenter 时期的 forensic 快照。文中 `afterMinimumDuration`、`maximumFramesPerSecond` 采样、PresentThread 自行 `nextDrawable()` 的描述已不适用——当前实现基于 `CAMetalDisplayLink`，present 在 `needsUpdate` 回调内同步提交，显式 source-frame 状态机管理 drop/failure/shutdown，真实窗口 timeline 验收已通过（见 `../metalfx-frame-generation.md` 与仓库上级 `MinecraftMetal_MetalFX_Audit_2026-07-26.md` 第 17 节）。保留原文仅作历史证据链。
+
 > **2026-07-26 status:** 本文是风险假设地图，不是当前缺陷清单。offscreen difference、Minecraft attachment capture 已建立；尚未覆盖的 attended 画面项见最终验收报告。
 
 本文不修复任何问题。它把“历史运行中确实出现的现象”和“从当前代码可推导的候选原因”分开。除非写明 `confirmed artifact`，候选都需要 Sol 做控制变量视觉验证。

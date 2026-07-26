@@ -38,14 +38,137 @@ private struct PipelineVariantKey: Hashable {
     let writeColor: Bool
 }
 
+private struct SamplerKey: Hashable {
+    let deviceAddress: UInt
+    let addressModeU: UInt
+    let addressModeV: UInt
+    let minFilter: UInt
+    let magFilter: UInt
+    let mipFilter: UInt
+    let maxAnisotropy: Int
+    let lodMaxClampBits: UInt32
+}
+
 private enum NativeState {
     static var debugLabelsEnabled = false
+    // When true, makeRenderCommandEncoder_v2 leaves the depth attachment with
+    // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
+    // before endEncoding. Toggled once at device init from
+    // metallum_set_deferred_depth_store; must match the Java flag exactly.
+    static var deferredDepthStore = false
+    // Split-fence mode (metallum.opt.splitFence): non-nil while the Java
+    // encoder runs a separate transfer fence for blit work. The only Swift
+    // encoder on the transfer chain is the frame-generation input copy blit;
+    // every other native encoder stays on the render fence it receives as a
+    // parameter. Set at device init, cleared before the fence is released.
+    static var transferFence: MTLFence?
     static var depthStencilStates: [DepthStencilKey: MTLDepthStencilState] = [:]
+    static var samplerStates: [SamplerKey: MTLSamplerState] = [:]
+    // Disk-backed PSO cache: descriptors compiled through
+    // metallum_MTLDevice_makeRenderPipelineState look up this archive first
+    // and harvest into it after a successful compile. Serialized to disk via
+    // metallum_pso_archive_flush. The lock guards harvest/serialize because
+    // pipeline creation may move off the render thread later.
+    static var binaryArchive: MTLBinaryArchive?
+    static let binaryArchiveLock = NSLock()
+    // True when the archive was loaded from an existing file. Re-serializing
+    // an archive that contains loaded entries fails on current macOS
+    // ("expecting 'fragment' stage in pipeline no. N", entry number varies),
+    // so a loaded archive is used strictly read-only: PSO creation still hits
+    // it via descriptor.binaryArchives, but harvest and flush are skipped.
+    // Fresh archives (first launch or after deletion) harvest and serialize
+    // normally.
+    static var binaryArchiveReadOnly = false
+    // Metal 4 (migration spec M2). Enabled from Java once the capability gate
+    // and metallum.opt.metal4Compiler both hold; false means every PSO takes
+    // the Metal 3 path below, unchanged.
+    static var metal4CompilerEnabled = false
+    // MTL4LibraryFunctionDescriptor requires the MTLLibrary a function came
+    // from, and MTLFunction does not expose it, so the association is kept
+    // beside it. Weak keys: the entry disappears when the function is released,
+    // so a library is held exactly as long as some function of it is alive.
+    static let functionLibraries = NSMapTable<AnyObject, AnyObject>.weakToStrongObjects()
+    static let functionLibrariesLock = NSLock()
+    // Typed as AnyObject? deliberately: MTL4Compiler and
+    // MTL4PipelineDataSetSerializer are macOS 26 / iOS 26 symbols and cannot
+    // appear in the signature of an unversioned type, and putting @available on
+    // all of NativeState is not an option. Stored erased, recovered with `as?`
+    // inside an #available block.
+    static var metal4CompilerStorage: AnyObject?
+    static var metal4Serializer: AnyObject?
+    // MTL4Archive loaded from the previous launch, fed to pipeline creation as
+    // MTL4CompilerTaskOptions.lookupArchives. Erased for the same reason as the
+    // compiler above.
+    static var metal4LookupArchive: AnyObject?
+    static let metal4CompilerLock = NSLock()
+    // Residency set (migration spec M3), enabled by metallum.opt.residencySet.
+    // MTLResidencySet is macOS 15 / iOS 18 and needs no Metal 4, so the table of
+    // "what the GPU may touch" is built on the existing Metal 3 queue first;
+    // under Metal 4 residency becomes mandatory and this is already wired.
+    // Erased as AnyObject? for the same versioning reason as the compiler.
+    // MTLResidencySet is NOT thread safe: every addAllocation / removeAllocation
+    // / commit must hold residencyLock. This project has the render thread, the
+    // frame-generation present thread and the async precompile thread all able to
+    // create and destroy resources, so the lock is not optional.
+    static var residencySetStorage: AnyObject?
+    static let residencyLock = NSLock()
+    static var residencyDirty = false
+    static var residencyRequested = false
+    // One-shot logging so a run can tell "the Metal 4 pipeline path worked" from
+    // "every pipeline silently fell back to Metal 3" — the two are otherwise
+    // indistinguishable, since falling back is by design never an error. Racing
+    // on these only ever costs a duplicate log line.
+    static var metal4PipelineLogged = false
+    static var metal4PipelineFallbackLogged = false
+
+    static func logMetal4PipelineFallback(_ reason: String) {
+        guard !metal4PipelineFallbackLogged else { return }
+        metal4PipelineFallbackLogged = true
+        NSLog("[metallum] Metal 4 pipeline path unavailable, using Metal 3: %@", reason)
+    }
+
+    static func register(function: MTLFunction, library: MTLLibrary) {
+        functionLibrariesLock.lock()
+        functionLibraries.setObject(library, forKey: function as AnyObject)
+        functionLibrariesLock.unlock()
+    }
+
+    static func library(for function: MTLFunction) -> MTLLibrary? {
+        functionLibrariesLock.lock()
+        defer { functionLibrariesLock.unlock() }
+        return functionLibraries.object(forKey: function as AnyObject) as? MTLLibrary
+    }
+
+    /// Process-wide compiler, built on first use. Nil means Metal 4 pipeline
+    /// creation is unavailable and callers must fall back to the Metal 3 path.
+    @available(macOS 26.0, iOS 26.0, *)
+    static func metal4Compiler(_ device: MTLDevice) -> MTL4Compiler? {
+        metal4CompilerLock.lock()
+        defer { metal4CompilerLock.unlock() }
+        if let existing = metal4CompilerStorage as? MTL4Compiler { return existing }
+        let descriptor = MTL4CompilerDescriptor()
+        descriptor.label = "metallum-compiler"
+        if let serializer = metal4Serializer as? MTL4PipelineDataSetSerializer {
+            descriptor.pipelineDataSetSerializer = serializer
+        }
+        guard let compiler = try? device.makeCompiler(descriptor: descriptor) else {
+            NSLog("[metallum] MTL4Compiler creation failed; Metal 4 pipeline path disabled")
+            return nil
+        }
+        metal4CompilerStorage = compiler
+        return compiler
+    }
     static var clearPipelines: [PipelineVariantKey: MTLRenderPipelineState] = [:]
     static var presentPipeline: MTLRenderPipelineState!
     static var presentNearestSampler: MTLSamplerState!
     static var presentLinearSampler: MTLSamplerState!
     static var copyPipelines: [Int: MTLRenderPipelineState] = [:]
+    #if os(macOS)
+    // Present mode the game last asked for, so stopping the frame-generation
+    // presenter can hand the layer back in the state Minecraft expects instead
+    // of the vsync-on state frame generation requires.
+    static var immediatePresentModeRequested = false
+    #endif
     #if os(macOS) && canImport(MetalFX)
     static var metalFxScalers: [String: AnyObject] = [:]
     static var metalFxPreviousDepthTextures: [String: MTLTexture] = [:]
@@ -57,10 +180,33 @@ private enum NativeState {
     static var motionClearPipeline: MTLComputePipelineState?
     static var transparencyMaskPipeline: MTLComputePipelineState?
     static var cutoutReactivePipeline: MTLComputePipelineState?
+    static var handOverlayPipeline: MTLComputePipelineState?
     static var metalFxFailureKeys: Set<String> = []
     static var frameGenerationLogged = false
+    // Most recent temporal scaler from the v2 encode path. The frame
+    // interpolator links against it (descriptor.scaler) so MetalFX can share
+    // internal resources between upscaling and interpolation (WWDC25).
+    static var lastTemporalScalerForInterpolation: AnyObject?
     @available(macOS 26.0, *)
     static var frameGenerationPresenter: MetalFrameGenerationPresenter?
+    // Reactive-policy tuning, set once from Java before the first frame.
+    // Order: (cutoutEdgeWeight, cutoutInteriorWeight, depthEdgeCap,
+    // transparencyValue). Defaults mirror MetalFxConfig defaults so a missing
+    // Java call keeps the shipped policy.
+    static var reactiveTuning = SIMD4<Float>(0.35, 0.0, 0.5, 0.9)
+    // Sky (cleared reversed-Z far plane) reconstructs camera-rotation motion
+    // at a far-plane depth instead of being fully reactive+disoccluded every
+    // frame. 1.0 = on (default), 0.0 = legacy sky suppression.
+    static var skyFarPlaneMotion: Float = 1.0
+    // Reactive value written for a disoccluded pixel. FSR2 guidance is that
+    // 1.0 never produces good results; a hard 1.0 here is what kept
+    // foliage/sky silhouettes strobing, because sub-pixel jitter re-flags them
+    // as disoccluded on alternating frames.
+    static var disocclusionReactiveCap: Float = 0.85
+    // 3x3 depth dilation on the reprojected sample. Without it a silhouette
+    // that jitters sub-pixel reads the far side of the edge every other frame
+    // and is called a disocclusion. 1.0 = on (default), 0.0 = legacy probe.
+    static var mergeDepthDilation: Float = 1.0
     #endif
 }
 
@@ -93,9 +239,19 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let nearPlane: Float
         let farPlane: Float
         let aspectRatio: Float
+        // Render-timeline interval between this source frame and the previous
+        // one, measured by the game at scene-frame start. 0 or non-finite
+        // means "unknown"; the presenter then falls back to enqueue spacing.
+        let sourceDelta: Float
         let reset: Bool
     }
 
+    // Value carrier for one display-link update. It is only ever passed down
+    // the synchronous callback -> present call chain; the drawable must never
+    // be retained past the delegate callback. WindowServer drops presents that
+    // are committed after metalDisplayLink(_:needsUpdate:) returns
+    // (drawable.presentedTime == 0), so deferring the drawable to another
+    // thread or a later run-loop pass silently blanks every frame.
     private struct DisplayUpdate {
         let updateID: UInt64
         let drawable: CAMetalDrawable
@@ -168,7 +324,6 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var lastPresentedIndex: Int?
     private var lastPresentedTimestamp: CFTimeInterval?
     private var displayLink: CAMetalDisplayLink?
-    private var pendingDisplayUpdate: DisplayUpdate?
     private var currentFrame: PendingFrame?
     private var currentLifecycle: MetalFrameGenerationLifecycle?
     private var activePreviousIndex: Int?
@@ -188,6 +343,11 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var stopping = false
     private var workerExited = false
     private var worker: Thread?
+    // Set when the render thread reconfigures the surface. CAMetalLayer
+    // properties may only be changed after a present, so the presenter restates
+    // the ones it owns from inside the display-link callback instead of letting
+    // the render thread race the present it is about to commit.
+    private var pendingLayerPolicyRefresh = false
 
     init?(
         device: MTLDevice,
@@ -229,6 +389,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         // Let the present thread time out and fall back to the rendered frame
         // instead of blocking shutdown or the next resize forever.
         layer.allowsNextDrawableTimeout = true
+        // CAMetalDisplayLink only schedules updates on the display's refresh
+        // boundary, so the presenter is a vsync-on loop by construction. Java
+        // gates frame generation off in the immediate present mode, but a
+        // surface reconfigure lands on the render thread and can arrive before
+        // that gate takes effect for the frame already in flight.
+        layer.displaySyncEnabled = true
         presentQueue.label = "MetalFX Frame Generation Present"
         readyEvent.label = "MetalFX Frame Generation Ready"
         super.init()
@@ -277,6 +443,18 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         descriptor.inputHeight = depth.height
         descriptor.outputWidth = sceneColor.width
         descriptor.outputHeight = sceneColor.height
+        // Link the active temporal scaler so MetalFX shares internal state
+        // between upscaling and interpolation (WWDC25 guidance). If linking
+        // is rejected on this device/SDK, fall back to a standalone
+        // interpolator rather than failing frame generation entirely.
+        if let linked = NativeState.lastTemporalScalerForInterpolation
+                as? (any MTLFXFrameInterpolatableScaler) {
+            descriptor.scaler = linked
+            if let interpolator = descriptor.makeFrameInterpolator(device: device) {
+                return interpolator
+            }
+            descriptor.scaler = nil
+        }
         return descriptor.makeFrameInterpolator(device: device)
     }
 
@@ -492,10 +670,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         nearPlane: Float,
         farPlane: Float,
         aspectRatio: Float,
+        sourceDeltaSeconds: Float = 0.0,
         reset: Bool,
         globalFence: MTLFence?
     ) -> Int32 {
-        _ = globalFence
         guard sceneColor.width > 0, sceneColor.height > 0,
               depth.width > 0, depth.height > 0,
               sceneColor.width == uiColor.width, sceneColor.height == uiColor.height,
@@ -544,6 +722,19 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             return 0
         }
         blit.label = "Frame Generation Input Copies"
+        // The copy sources (scene/ui/depth/motion) are untracked render
+        // outputs of earlier encoders in this command buffer; the global
+        // fence chain is the only ordering guarantee.
+        if let globalFence {
+            blit.waitForFence(globalFence)
+        }
+        // Split-fence mode: this blit also joins the transfer chain so the
+        // write-after-write edge to the next frame's input copy (and to any
+        // Java-side blit touching these textures) survives without the
+        // render fence detour.
+        if let transferFence = NativeState.transferFence {
+            blit.waitForFence(transferFence)
+        }
         blit.copy(
             from: sceneColor,
             sourceSlice: 0,
@@ -584,6 +775,16 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             sliceCount: 1,
             levelCount: 1
         )
+        // Later encoders in the game command buffer wait on this fence; the
+        // present-queue consumer is ordered by the shared event instead.
+        // Split-fence mode: signal the transfer chain instead — blits are
+        // transfer-chain producers there, and the render chain must not gain
+        // a false edge on this copy.
+        if let transferFence = NativeState.transferFence {
+            blit.updateFence(transferFence)
+        } else if let globalFence {
+            blit.updateFence(globalFence)
+        }
         blit.endEncoding()
         commandBuffer.encodeSignalEvent(readyEvent, value: eventValue)
 
@@ -600,6 +801,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             nearPlane: nearPlane,
             farPlane: farPlane,
             aspectRatio: aspectRatio,
+            sourceDelta: sourceDeltaSeconds,
             reset: reset
         )
 
@@ -694,6 +896,45 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     }
 
     func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
+        // The drawable's present must be committed before this callback
+        // returns; WindowServer reports presentedTime == 0 for drawables whose
+        // present is committed from a later run-loop pass, even on the same
+        // thread. All work selection and the full encode/commit therefore run
+        // synchronously here.
+        if let work = claimPresentationWork(update) {
+            present(work)
+        }
+        applyLayerPolicyIfNeeded()
+    }
+
+    /// Marks the presenter-owned CAMetalLayer properties as needing to be
+    /// restated. Called from the render thread on every surface reconfigure;
+    /// the work itself happens after the next present.
+    func requestLayerPolicyRefresh() {
+        condition.lock()
+        pendingLayerPolicyRefresh = true
+        condition.unlock()
+    }
+
+    /// Restates the layer properties the presenter depends on. A resize routes
+    /// through `metallum_configure_layer`, which would otherwise leave
+    /// `allowsNextDrawableTimeout` off — the presenter would then block forever
+    /// on a hidden or minimized window — and could drop vsync underneath a
+    /// display link that only ever schedules on the refresh boundary.
+    private func applyLayerPolicyIfNeeded() {
+        condition.lock()
+        let refresh = pendingLayerPolicyRefresh
+        pendingLayerPolicyRefresh = false
+        condition.unlock()
+        guard refresh else {
+            return
+        }
+        layer.maximumDrawableCount = 3
+        layer.allowsNextDrawableTimeout = true
+        layer.displaySyncEnabled = true
+    }
+
+    private func claimPresentationWork(_ update: CAMetalDisplayLink.Update) -> PresentationWork? {
         let targetTimestamp = update.targetTimestamp
         let targetPresentationTimestamp = update.targetPresentationTimestamp
         condition.lock()
@@ -703,51 +944,14 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         guard !stopping,
               targetTimestamp.isFinite, targetTimestamp > 0.0,
               targetPresentationTimestamp.isFinite, targetPresentationTimestamp > 0.0 else {
-            return
+            return nil
         }
         let updateID = nextDisplayUpdateID
         nextDisplayUpdateID += 1
-        if let superseded = pendingDisplayUpdate {
-            droppedDisplayUpdates += 1
-            appendDiagnosticLocked(
-                sourceFrameID: currentFrame?.sourceFrameID ?? 0,
-                frameKind: "unassigned",
-                update: superseded,
-                outcome: "dropped:superseded"
-            )
-        }
-        pendingDisplayUpdate = DisplayUpdate(
-            updateID: updateID,
-            drawable: update.drawable,
-            targetTimestamp: targetTimestamp,
-            targetPresentationTimestamp: targetPresentationTimestamp
-        )
-        condition.signal()
-    }
-
-    private func nextPresentationWork() -> PresentationWork? {
-        condition.lock()
-        defer {
-            condition.unlock()
-        }
-        guard !stopping else {
-            return nil
-        }
 
         let now = CACurrentMediaTime()
         expireRealPresentationLocked(now: now)
         expireDisplayUpdateStarvationLocked(now: now)
-        if let update = pendingDisplayUpdate, update.targetTimestamp <= now {
-            pendingDisplayUpdate = nil
-            droppedDisplayUpdates += 1
-            presentationDeadlineMisses += 1
-            appendDiagnosticLocked(
-                sourceFrameID: currentFrame?.sourceFrameID ?? 0,
-                frameKind: "unassigned",
-                update: update,
-                outcome: "dropped:stale-deadline"
-            )
-        }
 
         guard let frame = currentFrame, var lifecycle = currentLifecycle else {
             return nil
@@ -762,7 +966,16 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                     || !interpolatorEncodeHistoryValid
                     || !displayHistoryValid
             activeDeltaTime = {
-                guard !activeShouldResetHistory, let previousTimestamp = lastPresentedTimestamp else {
+                guard !activeShouldResetHistory else {
+                    return 1.0 / 60.0
+                }
+                // Prefer the game-provided render-timeline interval; the
+                // enqueue spacing below is only a proxy that inherits CPU
+                // scheduling jitter from the encode path.
+                if frame.sourceDelta.isFinite && frame.sourceDelta > 0.0 {
+                    return min(max(frame.sourceDelta, 1.0 / 240.0), 0.25)
+                }
+                guard let previousTimestamp = lastPresentedTimestamp else {
                     return 1.0 / 60.0
                 }
                 let delta = frame.timestamp - previousTimestamp
@@ -774,15 +987,18 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             currentLifecycle = lifecycle
         }
 
-        guard let step = lifecycle.nextPresentationStep,
-              let update = pendingDisplayUpdate else {
+        guard let step = lifecycle.nextPresentationStep else {
             return nil
         }
-        pendingDisplayUpdate = nil
         let previousIndex = activePreviousIndex ?? frame.index
         return PresentationWork(
             frame: frame,
-            update: update,
+            update: DisplayUpdate(
+                updateID: updateID,
+                drawable: update.drawable,
+                targetTimestamp: targetTimestamp,
+                targetPresentationTimestamp: targetPresentationTimestamp
+            ),
             step: step,
             previousIndex: previousIndex,
             shouldResetHistory: activeShouldResetHistory,
@@ -804,15 +1020,17 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             return
         }
 
+        // Presentation happens synchronously inside the display-link callback.
+        // This loop only services that callback's run loop and expires sources
+        // that stopped receiving display updates (hidden window, display sleep)
+        // or whose presented callback never arrived.
         let runLoop = RunLoop.current
         while true {
-            if let work = nextPresentationWork() {
-                present(work)
-                continue
-            }
             condition.lock()
-            let shouldStop = stopping
-            let canExit = shouldStop && outstandingFrames == 0
+            let now = CACurrentMediaTime()
+            expireRealPresentationLocked(now: now)
+            expireDisplayUpdateStarvationLocked(now: now)
+            let canExit = stopping && outstandingFrames == 0
             condition.unlock()
             if canExit {
                 break
@@ -1098,15 +1316,6 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
 
     private func cancelAndDrain(reason: String) {
         condition.lock()
-        if let update = pendingDisplayUpdate {
-            appendDiagnosticLocked(
-                sourceFrameID: currentFrame?.sourceFrameID ?? 0,
-                frameKind: "unassigned",
-                update: update,
-                outcome: "cancelled:\(reason)"
-            )
-            pendingDisplayUpdate = nil
-        }
         cancelCurrentSourceLocked(reason: reason)
         condition.broadcast()
         while outstandingFrames > 0 {
@@ -1246,18 +1455,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     func shutdown() {
         condition.lock()
         if !stopping {
-            // The callback checks `stopping` before retaining a drawable. From
-            // this point forward, no new DisplayUpdate is accepted.
+            // The callback checks `stopping` before claiming work, so no new
+            // presentation is committed from this point forward.
             stopping = true
-            if let update = pendingDisplayUpdate {
-                appendDiagnosticLocked(
-                    sourceFrameID: currentFrame?.sourceFrameID ?? 0,
-                    frameKind: "unassigned",
-                    update: update,
-                    outcome: "cancelled:shutdown"
-                )
-                pendingDisplayUpdate = nil
-            }
             cancelCurrentSourceLocked(reason: "shutdown")
             condition.broadcast()
         }
@@ -1269,6 +1469,11 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let diagnosticSnapshot = shouldDumpDiagnostics ? diagnostics : []
         condition.unlock()
         worker = nil
+        // The worker has exited and no further present can be committed, so the
+        // apply-after-present rule is satisfied and the layer can be handed back
+        // to the ordinary present path in the state the game asked for.
+        layer.allowsNextDrawableTimeout = false
+        layer.displaySyncEnabled = !NativeState.immediatePresentModeRequested
         if shouldDumpDiagnostics {
             dumpDiagnosticsIfEnabled(diagnosticSnapshot)
         }
@@ -1604,6 +1809,7 @@ private func ensureClearColorDepthPipeline(_ device: MTLDevice, _ colorFormat: M
 private struct TransparencyMaskUniforms {
     var viewport: SIMD4<UInt32>
     var flags: SIMD4<UInt32>
+    var params: SIMD4<Float>
 }
 
 private func transparencyMaskMslSource() -> String {
@@ -1614,13 +1820,18 @@ private func transparencyMaskMslSource() -> String {
     struct TransparencyMaskUniforms {
       uint4 viewport;
       uint4 flags;
+      float4 params;  // x = transparency reactive value
     };
 
     inline float targetActivity(texture2d<float, access::read> texture, uint2 pixel) {
       if (pixel.x >= texture.get_width() || pixel.y >= texture.get_height()) return 0.0;
       float4 value = texture.read(pixel);
       float coverage = max(value.a, max(value.r, max(value.g, value.b)));
-      return coverage > 0.001 ? 1.0 : 0.0;
+      // FSR2 guidance: write the compositing strength, not a binary presence
+      // bit, so faint content (thin rain streaks, cloud wisps) only mildly
+      // biases toward the current frame while solid water/glass stays
+      // protected at the full configured value.
+      return coverage > 0.001 ? clamp(coverage, 0.0, 1.0) : 0.0;
     }
 
     kernel void metallum_transparency_mask(
@@ -1637,12 +1848,15 @@ private func transparencyMaskMslSource() -> String {
       if (pixel.x >= width || pixel.y >= height) return;
 
       uint flags = u.flags.x;
+      // Transparency layers lack depth/motion and need a current-frame bias,
+      // but full suppression (1.0) reintroduces shimmer; FSR2 guidance caps
+      // reactive values around 0.9.
       float reactive = 0.0;
-      if ((flags & 1u) != 0u) reactive = max(reactive, targetActivity(translucentTexture, pixel));
-      if ((flags & 2u) != 0u) reactive = max(reactive, targetActivity(itemEntityTexture, pixel));
-      if ((flags & 4u) != 0u) reactive = max(reactive, targetActivity(particlesTexture, pixel));
-      if ((flags & 8u) != 0u) reactive = max(reactive, targetActivity(weatherTexture, pixel));
-      if ((flags & 16u) != 0u) reactive = max(reactive, targetActivity(cloudsTexture, pixel));
+      if ((flags & 1u) != 0u) reactive = max(reactive, targetActivity(translucentTexture, pixel) * u.params.x);
+      if ((flags & 2u) != 0u) reactive = max(reactive, targetActivity(itemEntityTexture, pixel) * u.params.x);
+      if ((flags & 4u) != 0u) reactive = max(reactive, targetActivity(particlesTexture, pixel) * u.params.x);
+      if ((flags & 8u) != 0u) reactive = max(reactive, targetActivity(weatherTexture, pixel) * u.params.x);
+      if ((flags & 16u) != 0u) reactive = max(reactive, targetActivity(cloudsTexture, pixel) * u.params.x);
       reactiveTexture.write(half4(half(reactive), half(0.0), half(0.0), half(0.0)), pixel);
     }
     """
@@ -1674,10 +1888,8 @@ private func cutoutReactiveDilationMslSource() -> String {
     using namespace metal;
 
     struct CutoutReactiveUniforms {
-      uint width;
-      uint height;
-      uint radius;
-      uint reserved;
+      uint4 dims;      // x = width, y = height, z = radius, w = unused
+      float4 weights;  // x = edge-band weight, y = interior weight
     };
 
     kernel void metallum_cutout_reactive_dilate(
@@ -1685,24 +1897,42 @@ private func cutoutReactiveDilationMslSource() -> String {
       texture2d<half, access::read_write> reactiveTexture [[texture(1)]],
       constant CutoutReactiveUniforms& u [[buffer(0)]],
       uint2 pixel [[thread_position_in_grid]]) {
-      if (pixel.x >= u.width || pixel.y >= u.height) return;
+      if (pixel.x >= u.dims.x || pixel.y >= u.dims.y) return;
 
-      float reactive = float(reactiveTexture.read(pixel).r);
-      int radius = int(min(u.radius, 3u));
+      // Radius floors at 1: the edge band needs at least one neighbor to
+      // detect a coverage transition, and it must span the jitter/upscale
+      // reconstruction footprint on both sides of the alpha-test boundary.
+      int radius = int(clamp(u.dims.z, 1u, 3u));
+      float coverageMin = 1.0;
+      float coverageMax = 0.0;
       for (int y = -radius; y <= radius; ++y) {
         for (int x = -radius; x <= radius; ++x) {
           int2 samplePosition = int2(pixel) + int2(x, y);
           if (samplePosition.x < 0 || samplePosition.y < 0
-              || samplePosition.x >= int(u.width)
-              || samplePosition.y >= int(u.height)) {
+              || samplePosition.x >= int(u.dims.x)
+              || samplePosition.y >= int(u.dims.y)) {
             continue;
           }
-          reactive = max(
-            reactive,
-            clamp(cutoutCoverage.read(uint2(samplePosition)).r, 0.0, 1.0)
-          );
+          float coverage = clamp(cutoutCoverage.read(uint2(samplePosition)).r, 0.0, 1.0);
+          coverageMin = min(coverageMin, coverage);
+          coverageMax = max(coverageMax, coverage);
         }
       }
+
+      // Interior (window fully covered): history stays valid, accumulation
+      // is what resolves jittered subpixel coverage — keep reactivity low.
+      // Edge band (window mixed): the alpha-test decision can flip with
+      // jitter, and history can smear a leaf into the hole during motion —
+      // bias to the current frame, but far below full suppression
+      // (FSR2 guidance: reactive near 1.0 never produces good results).
+      float contribution = 0.0;
+      if (coverageMax >= 0.5) {
+        contribution = coverageMin < 0.5 ? u.weights.x : u.weights.y;
+      }
+      float reactive = max(
+        float(reactiveTexture.read(pixel).r),
+        clamp(contribution, 0.0, 1.0)
+      );
       reactiveTexture.write(
         half4(half(clamp(reactive, 0.0, 1.0)), half(0.0), half(0.0), half(0.0)),
         pixel
@@ -1731,12 +1961,88 @@ private func ensureCutoutReactivePipeline(_ device: MTLDevice) -> MTLComputePipe
     }
 }
 
+private func handOverlayMslSource() -> String {
+    """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct HandOverlayUniforms {
+      uint width;
+      uint height;
+      float reactiveBoost;
+      float reserved;
+    };
+
+    kernel void metallum_hand_overlay_motion(
+      texture2d<float, access::read> handDepthTexture [[texture(0)]],
+      texture2d<half, access::write> objectMotionTexture [[texture(1)]],
+      texture2d<half, access::write> objectValidityTexture [[texture(2)]],
+      texture2d<half, access::read_write> reactiveTexture [[texture(3)]],
+      constant HandOverlayUniforms& u [[buffer(0)]],
+      uint2 pixel [[thread_position_in_grid]]) {
+      if (pixel.x >= u.width || pixel.y >= u.height) return;
+
+      // Vanilla clears the reversed-Z depth buffer (to 0.0) right before the
+      // first-person hand pass, so at upscale time any covered depth pixel is
+      // camera-locked first-person content: hand, held item, and screen
+      // effects. Their correct screen-space motion under camera movement is
+      // zero; camera reprojection through the world depth behind them would
+      // smear them during rotation. The residual swing/bob animation is
+      // handled with a moderate reactive boost instead of motion vectors.
+      float depth = handDepthTexture.read(pixel).r;
+      if (!(isfinite(depth) && depth > 0.0000001)) return;
+
+      objectMotionTexture.write(half4(half(0.0)), pixel);
+      objectValidityTexture.write(
+        half4(half(1.0), half(0.0), half(0.0), half(0.0)),
+        pixel
+      );
+      float reactive = float(reactiveTexture.read(pixel).r);
+      reactiveTexture.write(
+        half4(
+          half(clamp(max(reactive, u.reactiveBoost), 0.0, 1.0)),
+          half(0.0), half(0.0), half(0.0)
+        ),
+        pixel
+      );
+    }
+    """
+}
+
+private struct HandOverlayUniforms {
+    var width: UInt32
+    var height: UInt32
+    var reactiveBoost: Float
+    var reserved: Float
+}
+
+private func ensureHandOverlayPipeline(_ device: MTLDevice) -> MTLComputePipelineState? {
+    if let pipeline = NativeState.handOverlayPipeline {
+        return pipeline
+    }
+    do {
+        let library = try device.makeLibrary(source: handOverlayMslSource(), options: nil)
+        guard let function = library.makeFunction(name: "metallum_hand_overlay_motion") else {
+            NSLog("[Metallum] hand overlay motion function missing")
+            return nil
+        }
+        function.label = "Hand Overlay Motion"
+        let pipeline = try device.makeComputePipelineState(function: function)
+        NativeState.handOverlayPipeline = pipeline
+        return pipeline
+    } catch {
+        NSLog("[Metallum] Failed to build hand overlay motion pipeline: %@", String(describing: error))
+        return nil
+    }
+}
+
 private struct MotionUniforms {
     var currentViewProjection: simd_float4x4
     var inverseCurrentViewProjection: simd_float4x4
     var previousViewProjection: simd_float4x4
     var viewport: SIMD4<Float>
     var flags: SIMD4<UInt32>
+    var params: SIMD4<Float>
 }
 
 private func motionReconstructionMslSource() -> String {
@@ -1750,6 +2056,7 @@ private func motionReconstructionMslSource() -> String {
       float4x4 previousViewProjection;
       float4 viewport;
       uint4 flags;
+      float4 params;  // x = depth-edge reactive cap
     };
 
     inline bool metallum_valid_depth(float depth) {
@@ -1761,7 +2068,8 @@ private func motionReconstructionMslSource() -> String {
       uint2 pixel,
       uint width,
       uint height,
-      float depth
+      float depth,
+      float cap
     ) {
       bool centerValid = metallum_valid_depth(depth);
       float gradient = 0.0;
@@ -1789,7 +2097,10 @@ private func motionReconstructionMslSource() -> String {
         }
       }
 
-      return validityBoundary ? 1.0 : clamp(gradient * 4.0, 0.0, 1.0);
+      // Depth boundaries have valid depth and correct camera motion on the
+      // covered side; they need a history bias against edge smear, not full
+      // suppression. The cap keeps accumulation alive on foliage silhouettes.
+      return validityBoundary ? cap : min(cap, clamp(gradient * 4.0, 0.0, 1.0));
     }
 
     kernel void metallum_motion_reconstruction(
@@ -1804,6 +2115,13 @@ private func motionReconstructionMslSource() -> String {
 
       float depth = depthTexture.read(pixel).r;
       bool validDepth = metallum_valid_depth(depth);
+      if (!validDepth && u.flags.y != 0u
+          && isfinite(depth) && depth >= 0.0 && depth <= 0.00001) {
+        // Cleared reversed-Z far plane (sky): reconstruct at a far-plane
+        // depth so camera rotation produces correct flow (see the v2 kernel).
+        depth = 0.00002;
+        validDepth = true;
+      }
       float2 uv = (float2(pixel) + 0.5) / float2(width, height);
       float2 motion = float2(0.0);
       float reactive = u.flags.x != 0u ? float(reactiveTexture.read(pixel).r) : 0.0;
@@ -1839,7 +2157,7 @@ private func motionReconstructionMslSource() -> String {
       // Run this for both sides of a depth boundary. The cleared side is
       // invalid for reconstruction but still needs history rejection when a
       // cutout pixel can move into it.
-      reactive = max(reactive, metallum_depth_edge_reactive(depthTexture, pixel, width, height, depth));
+      reactive = max(reactive, metallum_depth_edge_reactive(depthTexture, pixel, width, height, depth, u.params.x));
 
       if (!isfinite(motion.x) || !isfinite(motion.y)) {
         motion = float2(0.0);
@@ -1891,6 +2209,7 @@ private func motionCameraV2MslSource() -> String {
       float4x4 previousViewProjection;
       float4 viewport;
       uint4 flags;
+      float4 params;  // x = depth-edge reactive cap
     };
 
     inline bool validDepth(float depth) {
@@ -1902,7 +2221,8 @@ private func motionCameraV2MslSource() -> String {
       uint2 pixel,
       uint width,
       uint height,
-      float depth
+      float depth,
+      float cap
     ) {
       bool centerValid = validDepth(depth);
       float gradient = 0.0;
@@ -1922,7 +2242,10 @@ private func motionCameraV2MslSource() -> String {
           }
         }
       }
-      return validityBoundary ? 1.0 : clamp(gradient * 4.0, 0.0, 1.0);
+      // Depth boundaries have valid depth and correct camera motion on the
+      // covered side; they need a history bias against edge smear, not full
+      // suppression. The cap keeps accumulation alive on foliage silhouettes.
+      return validityBoundary ? cap : min(cap, clamp(gradient * 4.0, 0.0, 1.0));
     }
 
     kernel void metallum_motion_camera_v2(
@@ -1940,7 +2263,18 @@ private func motionCameraV2MslSource() -> String {
       float2 motion = float2(0.0);
       float reactive = u.flags.x != 0u ? float(reactiveTexture.read(pixel).r) : 0.0;
       float disocclusion = 0.0;
-      if (!validDepth(depth)) {
+      bool reconstruct = validDepth(depth);
+      if (!reconstruct && u.flags.y != 0u
+          && isfinite(depth) && depth >= 0.0 && depth <= 0.00001) {
+        // Cleared reversed-Z far plane: the sky. Reconstruct at a far-plane
+        // depth so camera rotation produces correct flow and the sky keeps
+        // temporal accumulation on both sides of geometry silhouettes;
+        // translation is negligible at the far plane. Without this the sky
+        // is fully reactive every frame and silhouettes against it strobe.
+        depth = 0.00002;
+        reconstruct = true;
+      }
+      if (!reconstruct) {
         disocclusion = 1.0;
         reactive = 1.0;
       } else {
@@ -1973,7 +2307,7 @@ private func motionCameraV2MslSource() -> String {
         }
       }
 
-      reactive = max(reactive, depthBoundary(depthTexture, pixel, width, height, depth));
+      reactive = max(reactive, depthBoundary(depthTexture, pixel, width, height, depth, u.params.x));
       if (!isfinite(motion.x) || !isfinite(motion.y)) {
         motion = float2(0.0);
         disocclusion = 1.0;
@@ -1993,6 +2327,8 @@ private func motionMergeV2MslSource() -> String {
 
     struct MergeUniforms {
       uint4 viewport;
+      uint4 flags;   // x = sky far-plane motion, y = reprojection depth dilation
+      float4 params; // x = disocclusion reactive cap
     };
 
     inline bool validDepth(float depth) {
@@ -2025,6 +2361,14 @@ private func motionMergeV2MslSource() -> String {
       float disocclusion = disocclusionTexture.read(pixel).r;
       if (u.viewport.z != 0u) {
         float currentDepth = currentDepthTexture.read(pixel).r;
+        // Far-plane substitution mirrors the camera pass: cleared reversed-Z
+        // sky participates in reprojection so sky-onto-sky is valid history
+        // instead of a permanent per-frame disocclusion.
+        bool skyCurrent = u.flags.x != 0u && isfinite(currentDepth)
+            && currentDepth >= 0.0 && currentDepth <= 0.00001;
+        if (skyCurrent) {
+          currentDepth = 0.00002;
+        }
         float2 previousPixel = float2(pixel) + 0.5
             + selected * float2(u.viewport.xy) * 0.5;
         if (!validDepth(currentDepth)
@@ -2035,17 +2379,63 @@ private func motionMergeV2MslSource() -> String {
           disocclusion = 1.0;
         } else {
           uint2 samplePixel = uint2(previousPixel);
-          float previousDepth = previousDepthTexture.read(samplePixel).r;
-          float threshold = max(0.0025, abs(currentDepth) * 0.01);
-          bool wasOccluded = u.viewport.w != 0u
-              ? previousDepth > currentDepth + threshold
-              : previousDepth < currentDepth - threshold;
-          if (!validDepth(previousDepth) || wasOccluded) {
+          // Depth dilation. A silhouette that jitters sub-pixel puts the
+          // nearest-neighbour probe on the far side of the edge on alternating
+          // frames, and leaf-vs-sky always clears the threshold below, so the
+          // whole foliage/sky border was re-flagged as disoccluded every other
+          // frame. Take the neighbourhood sample closest to the current depth
+          // instead; radius 0 reproduces the legacy single probe exactly.
+          int radius = u.flags.y != 0u ? 1 : 0;
+          float previousDepth = 0.0;
+          bool skyPrevious = false;
+          float bestDelta = -1.0;
+          for (int dy = -radius; dy <= radius; dy++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+              int2 probe = int2(samplePixel) + int2(dx, dy);
+              if (probe.x < 0 || probe.y < 0
+                  || probe.x >= int(u.viewport.x) || probe.y >= int(u.viewport.y)) {
+                continue;
+              }
+              float probeDepth = previousDepthTexture.read(uint2(probe)).r;
+              bool probeSky = u.flags.x != 0u && isfinite(probeDepth)
+                  && probeDepth >= 0.0 && probeDepth <= 0.00001;
+              if (probeSky) {
+                probeDepth = 0.00002;
+              }
+              float delta = isfinite(probeDepth)
+                  ? abs(probeDepth - currentDepth)
+                  : 1.0e30;
+              if (bestDelta < 0.0 || delta < bestDelta) {
+                bestDelta = delta;
+                previousDepth = probeDepth;
+                skyPrevious = probeSky;
+              }
+            }
+          }
+          if (skyPrevious && !skyCurrent) {
+            // Geometry reprojecting onto previous-frame sky, with nothing
+            // closer in the neighbourhood: newly revealed, and the
+            // sky-colored history is invalid for it.
             disocclusion = 1.0;
+          } else {
+            float threshold = max(0.0025, abs(currentDepth) * 0.01);
+            bool wasOccluded = u.viewport.w != 0u
+                ? previousDepth > currentDepth + threshold
+                : previousDepth < currentDepth - threshold;
+            if (!validDepth(previousDepth) || wasOccluded) {
+              disocclusion = 1.0;
+            }
           }
         }
       }
-      if (!isfinite(disocclusion) || disocclusion > 0.5) reactive = 1.0;
+      // FSR2 guidance: a reactive value at or near 1.0 never produces good
+      // results. A disoccluded pixel has no usable history, but writing full
+      // suppression is exactly what made jittered silhouettes strobe, so bias
+      // strongly toward the current frame while leaving the accumulator a
+      // share. Same policy as the CUTOUT edge band and the transparency mask.
+      if (!isfinite(disocclusion) || disocclusion > 0.5) {
+        reactive = max(reactive, u.params.x);
+      }
       if (!all(isfinite(selected)) || any(abs(selected) > float2(32.0))) {
         selected = float2(0.0);
         reactive = 1.0;
@@ -2168,6 +2558,42 @@ public func metallum_metalfx_supports_motion_v2(_ device: MTLDevice) -> Int32 {
     return 0
 }
 
+@_cdecl("metallum_metalfx_set_reactive_tuning")
+public func metallum_metalfx_set_reactive_tuning(
+    _ cutoutEdgeWeight: Float,
+    _ cutoutInteriorWeight: Float,
+    _ depthEdgeCap: Float,
+    _ transparencyValue: Float,
+    _ skyFarPlaneMotion: Float,
+    _ disocclusionReactiveCap: Float,
+    _ mergeDepthDilation: Float
+) {
+    #if os(macOS) && canImport(MetalFX)
+    func clamped(_ value: Float, _ fallback: Float) -> Float {
+        value.isFinite ? min(max(value, 0.0), 1.0) : fallback
+    }
+    NativeState.reactiveTuning = SIMD4<Float>(
+        clamped(cutoutEdgeWeight, 0.35),
+        clamped(cutoutInteriorWeight, 0.0),
+        clamped(depthEdgeCap, 0.5),
+        clamped(transparencyValue, 0.9)
+    )
+    NativeState.skyFarPlaneMotion = skyFarPlaneMotion.isFinite && skyFarPlaneMotion > 0.5 ? 1.0 : 0.0
+    NativeState.disocclusionReactiveCap = clamped(disocclusionReactiveCap, 0.85)
+    NativeState.mergeDepthDilation = mergeDepthDilation.isFinite && mergeDepthDilation > 0.5 ? 1.0 : 0.0
+    NSLog(
+        "[Metallum] MetalFX reactive tuning: cutoutEdge=%.3f cutoutInterior=%.3f depthEdgeCap=%.3f transparency=%.3f skyFarPlaneMotion=%.0f disocclusionCap=%.3f depthDilation=%.0f",
+        NativeState.reactiveTuning.x,
+        NativeState.reactiveTuning.y,
+        NativeState.reactiveTuning.z,
+        NativeState.reactiveTuning.w,
+        NativeState.skyFarPlaneMotion,
+        NativeState.disocclusionReactiveCap,
+        NativeState.mergeDepthDilation
+    )
+    #endif
+}
+
 @_cdecl("metallum_metalfx_supports_cutout_reactive")
 public func metallum_metalfx_supports_cutout_reactive(_ device: MTLDevice) -> Int32 {
     #if os(macOS) && canImport(MetalFX)
@@ -2211,16 +2637,28 @@ public func metallum_metalfx_apply_cutout_reactive(
             if let fence {
                 encoder.waitForFence(fence)
             }
-            var uniforms = SIMD4<UInt32>(
-                UInt32(inputWidth),
-                UInt32(inputHeight),
-                UInt32(radius),
-                0
+            struct CutoutReactiveUniforms {
+                var dims: SIMD4<UInt32>
+                var weights: SIMD4<Float>
+            }
+            var uniforms = CutoutReactiveUniforms(
+                dims: SIMD4<UInt32>(
+                    UInt32(inputWidth),
+                    UInt32(inputHeight),
+                    UInt32(radius),
+                    0
+                ),
+                weights: SIMD4<Float>(
+                    NativeState.reactiveTuning.x,
+                    NativeState.reactiveTuning.y,
+                    0.0,
+                    0.0
+                )
             )
             encoder.setComputePipelineState(pipeline)
             encoder.setBytes(
                 &uniforms,
-                length: MemoryLayout<SIMD4<UInt32>>.stride,
+                length: MemoryLayout<CutoutReactiveUniforms>.stride,
                 index: 0
             )
             encoder.setTexture(cutoutCoverageTexture, index: 0)
@@ -2247,6 +2685,93 @@ public func metallum_metalfx_apply_cutout_reactive(
     }
     #endif
     return 0
+}
+
+@_cdecl("metallum_metalfx_supports_hand_overlay")
+public func metallum_metalfx_supports_hand_overlay(_ device: MTLDevice) -> Int32 {
+    #if os(macOS) && canImport(MetalFX)
+    return ensureHandOverlayPipeline(device) != nil ? 1 : 0
+    #else
+    return 0
+    #endif
+}
+
+@_cdecl("metallum_metalfx_encode_hand_overlay")
+public func metallum_metalfx_encode_hand_overlay(
+    _ commandBuffer: MTLCommandBuffer,
+    _ handDepthTexture: MTLTexture,
+    _ objectMotionTexture: MTLTexture,
+    _ objectValidityTexture: MTLTexture,
+    _ reactiveTexture: MTLTexture,
+    _ inputWidth: Int32,
+    _ inputHeight: Int32,
+    _ reactiveBoost: Float,
+    _ fence: MTLFence?
+) -> Int32 {
+    #if os(macOS) && canImport(MetalFX)
+    return autoreleasepool {
+        guard inputWidth > 0, inputHeight > 0,
+              handDepthTexture.width == Int(inputWidth),
+              handDepthTexture.height == Int(inputHeight),
+              objectMotionTexture.width == Int(inputWidth),
+              objectMotionTexture.height == Int(inputHeight),
+              objectValidityTexture.width == Int(inputWidth),
+              objectValidityTexture.height == Int(inputHeight),
+              reactiveTexture.width == Int(inputWidth),
+              reactiveTexture.height == Int(inputHeight),
+              objectMotionTexture.pixelFormat == .rg16Float,
+              objectValidityTexture.pixelFormat == .r8Unorm,
+              reactiveTexture.pixelFormat == .r8Unorm,
+              let pipeline = ensureHandOverlayPipeline(commandBuffer.device),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            logMetalFxFailureOnce(
+                "hand-overlay",
+                "invalid hand overlay resources or missing pipeline"
+            )
+            return 0
+        }
+        encoder.label = "MetalFX Hand Overlay Motion"
+        if let fence {
+            encoder.waitForFence(fence)
+        }
+        var uniforms = HandOverlayUniforms(
+            width: UInt32(inputWidth),
+            height: UInt32(inputHeight),
+            reactiveBoost: reactiveBoost,
+            reserved: 0.0
+        )
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBytes(
+            &uniforms,
+            length: MemoryLayout<HandOverlayUniforms>.stride,
+            index: 0
+        )
+        encoder.setTexture(handDepthTexture, index: 0)
+        encoder.setTexture(objectMotionTexture, index: 1)
+        encoder.setTexture(objectValidityTexture, index: 2)
+        encoder.setTexture(reactiveTexture, index: 3)
+        let threadWidth = max(1, min(pipeline.threadExecutionWidth, 64))
+        let threadHeight = max(
+            1,
+            min(8, pipeline.maxTotalThreadsPerThreadgroup / threadWidth)
+        )
+        encoder.dispatchThreads(
+            MTLSize(width: Int(inputWidth), height: Int(inputHeight), depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: threadWidth,
+                height: threadHeight,
+                depth: 1
+            )
+        )
+        if let fence {
+            encoder.updateFence(fence)
+        }
+        encoder.endEncoding()
+        return 1
+    }
+    #else
+    return 0
+    #endif
 }
 
 @_cdecl("metallum_metalfx_clear_motion_inputs")
@@ -2328,7 +2853,8 @@ public func metallum_metalfx_mark_transparency(
             if cloudsTexture != nil { flags |= 1 << 4 }
             var uniforms = TransparencyMaskUniforms(
                 viewport: SIMD4<UInt32>(UInt32(inputWidth), UInt32(inputHeight), 0, 0),
-                flags: SIMD4<UInt32>(flags, 0, 0, 0)
+                flags: SIMD4<UInt32>(flags, 0, 0, 0),
+                params: SIMD4<Float>(NativeState.reactiveTuning.w, 0.0, 0.0, 0.0)
             )
 
             encoder.setComputePipelineState(pipeline)
@@ -2384,104 +2910,19 @@ public func metallum_metalfx_encode(
             let key = metalFxScalerKey(device, temporal, colorTexture, outputTexture)
             let scalerObject: AnyObject?
             if temporal {
-                if let cached = NativeState.metalFxScalers[key] {
-                    scalerObject = cached
-                } else {
-                    let descriptor = MTLFXTemporalScalerDescriptor()
-                    descriptor.colorTextureFormat = colorTexture.pixelFormat
-                    descriptor.depthTextureFormat = depthTexture!.pixelFormat
-                    descriptor.motionTextureFormat = motionTexture!.pixelFormat
-                    descriptor.outputTextureFormat = outputTexture.pixelFormat
-                    descriptor.inputWidth = colorTexture.width
-                    descriptor.inputHeight = colorTexture.height
-                    descriptor.outputWidth = outputTexture.width
-                    descriptor.outputHeight = outputTexture.height
-                    // Minecraft's render target is already SDR-tonemapped.
-                    // MetalFX auto exposure is intended for HDR content and
-                    // can make a static sky oscillate as temporal history is
-                    // updated.
-                    descriptor.isAutoExposureEnabled = false
-                    descriptor.requiresSynchronousInitialization = true
-                    if #available(macOS 14.4, *), reactiveTexture != nil {
-                        descriptor.isReactiveMaskTextureEnabled = true
-                        descriptor.reactiveMaskTextureFormat = reactiveTexture!.pixelFormat
-                    }
-                    guard let scaler = descriptor.makeTemporalScaler(device: device) else {
-                        logMetalFxFailureOnce(
-                            "temporal-create",
-                            "descriptor rejected color=\(colorTexture.pixelFormat.rawValue) depth=\(depthTexture!.pixelFormat.rawValue) motion=\(motionTexture!.pixelFormat.rawValue) output=\(outputTexture.pixelFormat.rawValue) input=\(colorTexture.width)x\(colorTexture.height) output=\(outputTexture.width)x\(outputTexture.height)"
-                        )
-                        return 0
-                    }
-                    scalerObject = scaler as AnyObject
-                    NativeState.metalFxScalers[key] = scaler as AnyObject
-                }
-                guard let scaler = scalerObject as? any MTLFXTemporalScaler,
-                      let depthTexture,
-                      let motionTexture,
-                      let reactiveTexture else {
-                    logMetalFxFailureOnce("temporal-cast", "cached scaler did not conform to MTLFXTemporalScaler")
-                    return 0
-                }
-
-                if let currentViewProjection, let inverseCurrentViewProjection, let previousViewProjection {
-                    guard let pipeline = ensureMotionPipeline(device),
-                          let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                        logMetalFxFailureOnce("motion-encode", "could not create motion reconstruction pipeline or encoder")
-                        return 0
-                    }
-                    if let fence {
-                        encoder.waitForFence(fence)
-                    }
-                    var uniforms = MotionUniforms(
-                        currentViewProjection: makeMatrix(currentViewProjection),
-                        inverseCurrentViewProjection: makeMatrix(inverseCurrentViewProjection),
-                        previousViewProjection: makeMatrix(previousViewProjection),
-                        viewport: SIMD4<Float>(Float(inputWidth), Float(inputHeight), 1.0 / Float(max(inputWidth, 1)), 1.0 / Float(max(inputHeight, 1))),
-                        flags: SIMD4<UInt32>(preserveReactiveMask != 0 ? 1 : 0, 0, 0, 0)
-                    )
-                    encoder.setComputePipelineState(pipeline)
-                    encoder.setBytes(&uniforms, length: MemoryLayout<MotionUniforms>.stride, index: 0)
-                    encoder.setTexture(depthTexture, index: 0)
-                    encoder.setTexture(motionTexture, index: 1)
-                    encoder.setTexture(reactiveTexture, index: 2)
-                    // See the transparency mask pass above: cap the reported
-                    // width so validation instrumentation cannot create an
-                    // illegal threadgroup.
-                    let threadWidth = max(1, min(pipeline.threadExecutionWidth, 64))
-                    let threadHeight = max(1, min(8, pipeline.maxTotalThreadsPerThreadgroup / threadWidth))
-                    encoder.dispatchThreads(
-                        MTLSize(width: Int(inputWidth), height: Int(inputHeight), depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: threadWidth, height: threadHeight, depth: 1)
-                    )
-                    if let fence {
-                        encoder.updateFence(fence)
-                    }
-                    encoder.endEncoding()
-                }
-
-                scaler.colorTexture = colorTexture
-                scaler.depthTexture = depthTexture
-                scaler.motionTexture = motionTexture
-                scaler.outputTexture = outputTexture
-                scaler.inputContentWidth = Int(inputWidth)
-                scaler.inputContentHeight = Int(inputHeight)
-                scaler.jitterOffsetX = jitterX
-                scaler.jitterOffsetY = jitterY
-                // Motion is emitted as NDC delta; convert to input-resolution
-                // pixels using the half-resolution NDC range.
-                scaler.motionVectorScaleX = Float(inputWidth) * 0.5
-                scaler.motionVectorScaleY = Float(inputHeight) * 0.5
-                scaler.reset = reset != 0
-                scaler.isDepthReversed = depthReversed != 0
-                if #available(macOS 14.4, *) {
-                    scaler.reactiveMaskTexture = reactiveTexture
-                }
-                scaler.fence = fence
-                commandBuffer.pushDebugGroup("MetalFX Temporal Upscale")
-                scaler.encode(commandBuffer: commandBuffer)
-                commandBuffer.popDebugGroup()
-                return 1
+                // Temporal upscaling lives in metallum_metalfx_encode_v2, which
+                // owns the camera/object motion merge, the disocclusion signal
+                // and the previous-depth history. The removed path here also
+                // carried a latent cache hazard: it enabled the reactive mask
+                // on the descriptor only when a reactive texture was supplied,
+                // while metalFxScalerKey encodes neither that flag nor the
+                // depth/motion formats, so one nil-reactive call could cache a
+                // non-reactive scaler under the key the reactive path reuses.
+                logMetalFxFailureOnce(
+                    "temporal-v1-removed",
+                    "metallum_metalfx_encode is spatial-only; temporal upscaling must use metallum_metalfx_encode_v2"
+                )
+                return 0
             } else {
                 if let cached = NativeState.metalFxScalers[key] {
                     scalerObject = cached
@@ -2493,7 +2934,13 @@ public func metallum_metalfx_encode(
                     descriptor.inputHeight = colorTexture.height
                     descriptor.outputWidth = outputTexture.width
                     descriptor.outputHeight = outputTexture.height
-                    descriptor.colorProcessingMode = .linear
+                    // Minecraft's scene target is a plain (non-_srgb) UNORM
+                    // texture holding already-tonemapped, gamma-encoded values,
+                    // and the layer is .bgra8Unorm, so Metal performs no
+                    // decode on read. Declaring .linear would make the spatial
+                    // scaler interpolate gamma values as if they were linear
+                    // and halo high-contrast edges.
+                    descriptor.colorProcessingMode = .perceptual
                     guard let scaler = descriptor.makeSpatialScaler(device: device) else {
                         logMetalFxFailureOnce(
                             "spatial-create",
@@ -2641,6 +3088,7 @@ public func metallum_metalfx_encode_v2(
                 logMetalFxFailureOnce("temporal-v2-cast", "cached scaler or camera compute encoder unavailable")
                 return 0
             }
+            NativeState.lastTemporalScalerForInterpolation = scalerObject
             cameraEncoder.label = "MetalFX Camera Motion Reconstruction"
             if let fence {
                 cameraEncoder.waitForFence(fence)
@@ -2653,7 +3101,13 @@ public func metallum_metalfx_encode_v2(
                     Float(inputWidth), Float(inputHeight),
                     1.0 / Float(max(inputWidth, 1)), 1.0 / Float(max(inputHeight, 1))
                 ),
-                flags: SIMD4<UInt32>(preserveReactiveMask != 0 ? 1 : 0, 0, 0, 0)
+                flags: SIMD4<UInt32>(
+                    preserveReactiveMask != 0 ? 1 : 0,
+                    NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
+                    0,
+                    0
+                ),
+                params: SIMD4<Float>(NativeState.reactiveTuning.z, 0.0, 0.0, 0.0)
             )
             cameraEncoder.setComputePipelineState(pipelines.camera)
             cameraEncoder.setBytes(&motionUniforms, length: MemoryLayout<MotionUniforms>.stride, index: 0)
@@ -2680,14 +3134,28 @@ public func metallum_metalfx_encode_v2(
             if let fence {
                 mergeEncoder.waitForFence(fence)
             }
-            var mergeUniforms = SIMD4<UInt32>(
-                UInt32(inputWidth),
-                UInt32(inputHeight),
-                previousDepthIsValid ? 1 : 0,
-                depthReversed != 0 ? 1 : 0
+            struct MergeUniforms {
+                var viewport: SIMD4<UInt32>
+                var flags: SIMD4<UInt32>
+                var params: SIMD4<Float>
+            }
+            var mergeUniforms = MergeUniforms(
+                viewport: SIMD4<UInt32>(
+                    UInt32(inputWidth),
+                    UInt32(inputHeight),
+                    previousDepthIsValid ? 1 : 0,
+                    depthReversed != 0 ? 1 : 0
+                ),
+                flags: SIMD4<UInt32>(
+                    NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
+                    NativeState.mergeDepthDilation > 0.5 ? 1 : 0,
+                    0,
+                    0
+                ),
+                params: SIMD4<Float>(NativeState.disocclusionReactiveCap, 0.0, 0.0, 0.0)
             )
             mergeEncoder.setComputePipelineState(pipelines.merge)
-            mergeEncoder.setBytes(&mergeUniforms, length: MemoryLayout<SIMD4<UInt32>>.stride, index: 0)
+            mergeEncoder.setBytes(&mergeUniforms, length: MemoryLayout<MergeUniforms>.stride, index: 0)
             mergeEncoder.setTexture(cameraMotionTexture, index: 0)
             mergeEncoder.setTexture(objectMotionTexture, index: 1)
             mergeEncoder.setTexture(objectValidityTexture, index: 2)
@@ -2776,6 +3244,7 @@ public func metallum_metalfx_frame_generation_encode(
     _ nearPlane: Float,
     _ farPlane: Float,
     _ aspectRatio: Float,
+    _ sourceDeltaSeconds: Float,
     _ reset: Int32,
     _ globalFence: MTLFence?
 ) -> Int32 {
@@ -2817,6 +3286,7 @@ public func metallum_metalfx_frame_generation_encode(
                 nearPlane: nearPlane,
                 farPlane: farPlane,
                 aspectRatio: aspectRatio,
+                sourceDeltaSeconds: sourceDeltaSeconds,
                 reset: reset != 0,
                 globalFence: globalFence
             )
@@ -2994,6 +3464,33 @@ public func metallum_encode_texture_copy(
     }
 }
 
+/// Releases every MetalFX object whose cache identity depends on the current
+/// render/display dimensions.
+///
+/// `metalFxScalerKey` encodes both the input and the output size, so without
+/// this each resize strands a fully initialized `MTLFXTemporalScaler` — plus
+/// its previous-depth history texture — in the cache for the rest of the
+/// session. Because the descriptors also set
+/// `requiresSynchronousInitialization`, a drag-resize pays that initialization
+/// on the render thread once per intermediate size and never reclaims any of
+/// it. The compute pipelines and the frame-generation presenter are dimension
+/// independent and deliberately survive.
+@_cdecl("metallum_metalfx_release_scalers")
+public func metallum_metalfx_release_scalers() {
+    #if os(macOS) && canImport(MetalFX)
+    NativeState.metalFxScalers.removeAll()
+    // The presenter links this scaler into freshly built interpolators through
+    // MTLFXFrameInterpolatorDescriptor.scaler, so a stale entry would be sized
+    // for the previous surface. The next v2 encode republishes it before the
+    // presenter rebuilds its interpolator.
+    NativeState.lastTemporalScalerForInterpolation = nil
+    NativeState.metalFxHistoryLock.lock()
+    NativeState.metalFxPreviousDepthTextures.removeAll()
+    NativeState.metalFxPreviousDepthValid.removeAll()
+    NativeState.metalFxHistoryLock.unlock()
+    #endif
+}
+
 @_cdecl("metallum_metalfx_shutdown")
 public func metallum_metalfx_shutdown() {
     #if os(macOS) && canImport(MetalFX)
@@ -3001,11 +3498,7 @@ public func metallum_metalfx_shutdown() {
         NativeState.frameGenerationPresenter?.shutdown()
     NativeState.frameGenerationPresenter = nil
     }
-    NativeState.metalFxScalers.removeAll()
-    NativeState.metalFxHistoryLock.lock()
-    NativeState.metalFxPreviousDepthTextures.removeAll()
-    NativeState.metalFxPreviousDepthValid.removeAll()
-    NativeState.metalFxHistoryLock.unlock()
+    metallum_metalfx_release_scalers()
     NativeState.motionPipeline = nil
     NativeState.motionV2Pipeline = nil
     NativeState.motionMergePipeline = nil
@@ -3350,6 +3843,21 @@ public func metallum_MTLDevice_maxMemoryAllocationSize(_ device: MTLDevice) -> U
     #endif
 }
 
+/// 1 when both the SDK this dylib was built against and the running device
+/// support Metal 4. Both capability gates (compile-time #available, run-time
+/// supportsFamily) are collected here so Java only sees a single answer; the
+/// Metal 4 kill switches on the Java side AND this must both be true before any
+/// MTL4 path is taken. Metal 4 exists only on macOS 26 / iOS 26, while
+/// build.gradle still targets macosx14.0 / ios14.0, so MTLGPUFamily.metal4 must
+/// stay inside #available.
+@_cdecl("metallum_metal4_supported")
+public func metallum_metal4_supported(_ device: MTLDevice) -> Int32 {
+    if #available(macOS 26.0, iOS 26.0, *) {
+        return device.supportsFamily(.metal4) ? 1 : 0
+    }
+    return 0
+}
+
 @_cdecl("metallum_MTLDevice_makeCommandQueue")
 public func metallum_MTLDevice_makeCommandQueue(_ device: MTLDevice) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
@@ -3375,6 +3883,7 @@ public func metallum_MTLCommandQueue_makeCommandBuffer(
 
 @_cdecl("metallum_MTLCommandBuffer_commit")
 public func metallum_MTLCommandBuffer_commit(_ commandBuffer: MTLCommandBuffer) {
+    residencyFlushBeforeSubmit()
     commandBuffer.commit()
 }
 
@@ -3389,6 +3898,7 @@ public func metallum_MTLCommandBuffer_commitWithSignal(_ commandBuffer: MTLComma
     commandBuffer.addCompletedHandler { _ in
         semaphore.signal()
     }
+    residencyFlushBeforeSubmit()
     commandBuffer.commit()
 }
 
@@ -3559,7 +4069,11 @@ public func metallum_create_buffer(
     _ options: MTLResourceOptions
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        retainedPointer(device.makeBuffer(length: length, options: options))
+        guard let buffer = device.makeBuffer(length: length, options: options) else {
+            return nil
+        }
+        residencyTrackCreated(buffer)
+        return retainedPointer(buffer)
     }
 }
 
@@ -3605,6 +4119,7 @@ public func metallum_create_texture_2d(
             return nil
         }
         texture.label = stringFromOptionalCString(labelPtr)
+        residencyTrackCreated(texture)
         return retainedPointer(texture)
     }
 }
@@ -3694,16 +4209,41 @@ public func metallum_create_sampler(
     _ lodMaxClamp: Double
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
+        let clampedAnisotropy = max(Int(maxAnisotropy), 1)
+        let clamp: Float = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
+        // Sampler states are immutable device objects with a hard device
+        // limit; identical descriptors share one cached instance. Ownership
+        // protocol is unchanged: every call returns +1 (passRetained) and the
+        // Java close() releases exactly once; the cache keeps its own strong
+        // reference for the process lifetime. Render thread only, like
+        // depthStencilStates.
+        let key = SamplerKey(
+            deviceAddress: objectAddress(device),
+            addressModeU: addressModeU.rawValue,
+            addressModeV: addressModeV.rawValue,
+            minFilter: minFilter.rawValue,
+            magFilter: magFilter.rawValue,
+            mipFilter: mipFilter.rawValue,
+            maxAnisotropy: clampedAnisotropy,
+            lodMaxClampBits: clamp.bitPattern
+        )
+        if let cached = NativeState.samplerStates[key] {
+            return Unmanaged.passRetained(cached).toOpaque()
+        }
         let descriptor = MTLSamplerDescriptor()
         descriptor.minFilter = minFilter
         descriptor.magFilter = magFilter
         descriptor.mipFilter = mipFilter
         descriptor.sAddressMode = addressModeU
         descriptor.tAddressMode = addressModeV
-        descriptor.maxAnisotropy = max(Int(maxAnisotropy), 1)
+        descriptor.maxAnisotropy = clampedAnisotropy
         descriptor.lodMinClamp = 0.0
-        descriptor.lodMaxClamp = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
-        return retainedPointer(device.makeSamplerState(descriptor: descriptor))
+        descriptor.lodMaxClamp = clamp
+        guard let state = device.makeSamplerState(descriptor: descriptor) else {
+            return nil
+        }
+        NativeState.samplerStates[key] = state
+        return Unmanaged.passRetained(state).toOpaque()
     }
 }
 
@@ -3852,12 +4392,18 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
                 renderPass.depthAttachment.texture = depthTexture
                 renderPass.depthAttachment.loadAction = clearDepthEnabled != 0 ? .clear : .load
                 renderPass.depthAttachment.clearDepth = clearDepth
-                renderPass.depthAttachment.storeAction = .store
+                // Deferred mode: the Java encoder owns the store decision and
+                // must call metallum_MTLRenderCommandEncoder_setDepthStoreAction
+                // before endEncoding (Metal requires resolving .unknown).
+                renderPass.depthAttachment.storeAction = NativeState.deferredDepthStore ? .unknown : .store
             }
             if stencilFormat != .invalid || depthFormat == .stencil8 {
                 renderPass.stencilAttachment.texture = depthTexture
                 renderPass.stencilAttachment.loadAction = .dontCare
-                renderPass.stencilAttachment.storeAction = .store
+                // Every pass loads stencil as .dontCare, so no pass can ever
+                // observe a stored stencil value: storing it is provably dead
+                // bandwidth. Revisit if stencil load semantics ever change.
+                renderPass.stencilAttachment.storeAction = .dontCare
             }
         }
 
@@ -4273,8 +4819,24 @@ public func metallum_configure_layer(_ layer: CAMetalLayer, _ width: Double, _ h
     // the drawable appear to alternate during resize or focus changes.
     layer.presentsWithTransaction = false
     #if os(macOS)
-    layer.allowsNextDrawableTimeout = false
-    layer.displaySyncEnabled = immediatePresentMode == 0
+    NativeState.immediatePresentModeRequested = immediatePresentMode != 0
+    var presenterOwnsLayerPolicy = false
+    #if canImport(MetalFX)
+    if #available(macOS 26.0, *), let presenter = NativeState.frameGenerationPresenter {
+        // While the frame-generation presenter owns the layer it also owns
+        // allowsNextDrawableTimeout and displaySyncEnabled: writing them from the
+        // render thread here races the present the display link is committing,
+        // and this function historically undid the presenter's own timeout
+        // setting on every resize. Defer to the presenter, which restates them
+        // after its next present.
+        presenter.requestLayerPolicyRefresh()
+        presenterOwnsLayerPolicy = true
+    }
+    #endif
+    if !presenterOwnsLayerPolicy {
+        layer.allowsNextDrawableTimeout = false
+        layer.displaySyncEnabled = immediatePresentMode == 0
+    }
     #elseif os(iOS)
     // iOS: use allowsNextDrawableTimeout = true to prevent silent frame
     // drops when all drawables are in-flight. The host UIView owns the
@@ -4346,12 +4908,24 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             vertexCount: 3
         )
 
+        // Without this update the next frame's first writer of the sampled
+        // texture has no GPU edge to this read: fence waits only order
+        // against encoders that signaled the fence, and cross-command-buffer
+        // WAR hazards on untracked resources are otherwise unordered.
+        if let globalFence {
+            encoder.updateFence(globalFence, after: .fragment)
+        }
         encoder.endEncoding()
         commandBuffer.present(drawable)
         #if os(iOS)
         CATransaction.flush()
         #endif
     }
+}
+
+@_cdecl("metallum_set_transfer_fence")
+public func metallum_set_transfer_fence(_ fence: MTLFence?) {
+    NativeState.transferFence = fence
 }
 
 @_cdecl("metallum_create_fence")
@@ -4569,10 +5143,41 @@ public func metallum_create_sampler_v2(
     }
 }
 
+/// Resolves a depth attachment that was created with storeAction=.unknown
+/// (deferred store mode). Only legal on encoders whose descriptor deferred
+/// the decision; the Java side tracks that invariant.
+@_cdecl("metallum_MTLRenderCommandEncoder_setDepthStoreAction")
+public func metallum_MTLRenderCommandEncoder_setDepthStoreAction(
+    _ encoder: MTLRenderCommandEncoder,
+    _ store: Int32
+) {
+    encoder.setDepthStoreAction(store != 0 ? .store : .dontCare)
+}
+
+@_cdecl("metallum_set_deferred_depth_store")
+public func metallum_set_deferred_depth_store(_ enabled: Int32) {
+    NativeState.deferredDepthStore = enabled != 0
+}
+
+/// Routes render pipeline creation through MTL4Compiler (migration spec M2).
+/// Java only calls this with 1 when the capability gate and
+/// metallum.opt.metal4Compiler both hold; 0 (the default) leaves every PSO on
+/// the Metal 3 path.
+@_cdecl("metallum_set_metal4_compiler_enabled")
+public func metallum_set_metal4_compiler_enabled(_ enabled: Int32) {
+    NativeState.metal4CompilerEnabled = enabled != 0
+}
+
 @_cdecl("metallum_release_object")
 public func metallum_release_object(_ obj: UnsafeMutableRawPointer?) {
     autoreleasepool {
         guard let obj else { return }
+        // Residency bookkeeping happens here rather than at destruction-queue
+        // enqueue time: this is the point the Java side has already deferred past
+        // every submit that could still be reading the resource (S1 made the
+        // queue depth in-flight+1), so the set never loses an allocation the GPU
+        // is still using.
+        residencyTrackReleased(obj)
         Unmanaged<AnyObject>.fromOpaque(obj).release()
     }
 }
@@ -4640,6 +5245,12 @@ public func metallum_create_shader_function(
                 NSLog("[metallum] Failed to resolve MSL entry point '%s'", entryPtr)
                 return nil
             }
+            // Metal 4 needs the library back when it builds a pipeline from this
+            // function (MTL4LibraryFunctionDescriptor), and MTLFunction does not
+            // carry it. Registering unconditionally keeps the Metal 3 and Metal 4
+            // paths from disagreeing when the switch is flipped mid-session; the
+            // table is weak-keyed, so the cost is one entry per live function.
+            NativeState.register(function: function, library: library)
             return retainedPointer(function)
         } catch {
             NSLog("[metallum] Failed to compile MSL: %@", String(describing: error))
@@ -4782,6 +5393,316 @@ public func metallum_MTLRenderPipelineDescriptor_setBlendState(
     }
 }
 
+private func descriptorHasLiveColorWrite(_ descriptor: MTLRenderPipelineDescriptor) -> Bool {
+    for index in 0..<8 {
+        guard let attachment = descriptor.colorAttachments[index] else { continue }
+        if attachment.pixelFormat != .invalid && !attachment.writeMask.isEmpty {
+            return true
+        }
+    }
+    return false
+}
+
+// MARK: - Residency set (migration spec M3)
+
+/// Adds a freshly created resource to the residency set, if one is active.
+/// Memoryless textures are excluded: they have no backing allocation, so adding
+/// them is invalid.
+@available(macOS 15.0, iOS 18.0, *)
+private func residencyAdd(_ resource: MTLResource) {
+    NativeState.residencyLock.lock()
+    defer { NativeState.residencyLock.unlock() }
+    guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
+    if let texture = resource as? MTLTexture, texture.storageMode == .memoryless {
+        return
+    }
+    set.addAllocation(resource)
+    NativeState.residencyDirty = true
+}
+
+/// Drops a resource from the residency set. Called from the release path, which
+/// the Java destruction queue already defers past the frames still in flight.
+@available(macOS 15.0, iOS 18.0, *)
+private func residencyRemove(_ resource: MTLResource) {
+    NativeState.residencyLock.lock()
+    defer { NativeState.residencyLock.unlock() }
+    guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
+    set.removeAllocation(resource)
+    NativeState.residencyDirty = true
+}
+
+/// Publishes pending additions and removals. commit() is expensive, so it runs
+/// at most once per submit — this is the one performance trap of residency sets.
+/// requestResidency() is persistent and only needs the first commit.
+@available(macOS 15.0, iOS 18.0, *)
+private func residencyCommitIfDirty() {
+    NativeState.residencyLock.lock()
+    defer { NativeState.residencyLock.unlock() }
+    guard NativeState.residencyDirty,
+          let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
+    set.commit()
+    NativeState.residencyDirty = false
+    if !NativeState.residencyRequested {
+        set.requestResidency()
+        NativeState.residencyRequested = true
+    }
+}
+
+/// Version-erased entry points so the call sites stay free of #available noise.
+private func residencyTrackCreated(_ resource: MTLResource?) {
+    guard let resource, NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *) {
+        residencyAdd(resource)
+    }
+}
+
+/// Takes the raw pointer rather than the object: this runs for every native
+/// object release, and with no residency set active it must cost one nil check
+/// and nothing else — materializing an AnyObject here would add an ARC
+/// retain/release per release on a per-frame-hot path.
+private func residencyTrackReleased(_ pointer: UnsafeMutableRawPointer) {
+    guard NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *) {
+        guard let resource = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLResource else {
+            return
+        }
+        residencyRemove(resource)
+    }
+}
+
+private func residencyFlushBeforeSubmit() {
+    guard NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *) {
+        residencyCommitIfDirty()
+    }
+}
+
+/// Creates the residency set and attaches it to `queue`, plus the layer's own
+/// read-only set when a layer is available (it tracks drawables automatically,
+/// so nothing is ever added to it by hand). Returns 1 on success.
+@_cdecl("metallum_residency_set_enable")
+public func metallum_residency_set_enable(_ device: MTLDevice, _ queue: MTLCommandQueue) -> Int32 {
+    return autoreleasepool {
+        guard #available(macOS 15.0, iOS 18.0, *) else { return 0 }
+        NativeState.residencyLock.lock()
+        defer { NativeState.residencyLock.unlock() }
+        if NativeState.residencySetStorage != nil { return 1 }
+        let descriptor = MTLResidencySetDescriptor()
+        descriptor.label = "metallum-residency"
+        descriptor.initialCapacity = 1024
+        guard let set = try? device.makeResidencySet(descriptor: descriptor) else {
+            NSLog("[metallum] residency set creation failed; staying on automatic residency")
+            return 0
+        }
+        NativeState.residencySetStorage = set
+        NativeState.residencyDirty = false
+        NativeState.residencyRequested = false
+        queue.addResidencySet(set)
+        NSLog("[metallum] residency set attached to the main command queue")
+        return 1
+    }
+}
+
+/// Reports how much the residency set currently pins: the number of tracked
+/// allocations and their total size in bytes. Returns 0 when no set is active.
+/// This is the measurement M3 is accepted against (resident footprint must not
+/// move materially versus automatic residency), and it is how a run can tell an
+/// empty set from a populated one.
+@_cdecl("metallum_residency_set_stats")
+public func metallum_residency_set_stats(
+    _ outAllocations: UnsafeMutablePointer<UInt32>?,
+    _ outBytes: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    return autoreleasepool {
+        guard #available(macOS 15.0, iOS 18.0, *) else { return 0 }
+        NativeState.residencyLock.lock()
+        defer { NativeState.residencyLock.unlock() }
+        guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return 0 }
+        outAllocations?.pointee = UInt32(set.allAllocations.count)
+        outBytes?.pointee = UInt64(set.allocatedSize)
+        return 1
+    }
+}
+
+/// The Metal 4 pipeline data set lives beside the Metal 3 binary archive rather
+/// than in it. Java passes one path and its ABI does not change; the two caches
+/// are simply different formats written by different APIs
+/// (MTLBinaryArchive.serialize vs MTL4PipelineDataSetSerializer), so sharing one
+/// file would mean each launch that flips metallum.opt.metal4Compiler discards
+/// the other mode's cache. Separate files keep both warm.
+private func metal4ArchiveURL(forBinaryArchivePath path: String) -> URL {
+    URL(fileURLWithPath: path).deletingPathExtension().appendingPathExtension("mtl4archive")
+}
+
+/// Translates the Metal 3 pipeline descriptor the Java side has already filled
+/// in into its Metal 4 equivalent, or nil when the translation cannot be made
+/// (in which case the caller keeps the Metal 3 path).
+///
+/// Two fields deliberately have no counterpart: depth/stencil attachment
+/// formats do not exist on MTL4RenderPipelineDescriptor at all — the render pass
+/// supplies them — so the depth dimension of the variant matrix disappears here.
+/// binaryArchives has no counterpart either; MTL4 uses
+/// MTL4CompilerTaskOptions.lookupArchives instead.
+@available(macOS 26.0, iOS 26.0, *)
+private func makeMetal4Descriptor(_ src: MTLRenderPipelineDescriptor) -> MTL4RenderPipelineDescriptor? {
+    guard let vertexFunction = src.vertexFunction,
+          let vertexLibrary = NativeState.library(for: vertexFunction) else {
+        return nil
+    }
+    let dst = MTL4RenderPipelineDescriptor()
+    dst.label = src.label
+    let vfd = MTL4LibraryFunctionDescriptor()
+    vfd.library = vertexLibrary
+    vfd.name = vertexFunction.name
+    dst.vertexFunctionDescriptor = vfd
+    if let fragmentFunction = src.fragmentFunction,
+       let fragmentLibrary = NativeState.library(for: fragmentFunction) {
+        let ffd = MTL4LibraryFunctionDescriptor()
+        ffd.library = fragmentLibrary
+        ffd.name = fragmentFunction.name
+        dst.fragmentFunctionDescriptor = ffd
+    } else if src.fragmentFunction != nil {
+        // A fragment function whose library is not in the side table: give up on
+        // the Metal 4 path rather than compile a pipeline missing a stage.
+        return nil
+    }
+    dst.vertexDescriptor = src.vertexDescriptor
+    dst.rasterSampleCount = src.rasterSampleCount
+    dst.inputPrimitiveTopology = src.inputPrimitiveTopology
+    dst.alphaToCoverageState = src.isAlphaToCoverageEnabled ? .enabled : .disabled
+    dst.alphaToOneState = src.isAlphaToOneEnabled ? .enabled : .disabled
+    dst.isRasterizationEnabled = src.isRasterizationEnabled
+    dst.maxVertexAmplificationCount = src.maxVertexAmplificationCount
+    for index in 0..<8 {
+        guard let s = src.colorAttachments[index], let d = dst.colorAttachments[index] else { continue }
+        d.pixelFormat = s.pixelFormat
+        d.writeMask = s.writeMask
+        d.blendingState = s.isBlendingEnabled ? .enabled : .disabled
+        if s.isBlendingEnabled {
+            d.sourceRGBBlendFactor = s.sourceRGBBlendFactor
+            d.destinationRGBBlendFactor = s.destinationRGBBlendFactor
+            d.rgbBlendOperation = s.rgbBlendOperation
+            d.sourceAlphaBlendFactor = s.sourceAlphaBlendFactor
+            d.destinationAlphaBlendFactor = s.destinationAlphaBlendFactor
+            d.alphaBlendOperation = s.alphaBlendOperation
+        }
+    }
+    return dst
+}
+
+/// Opens (or creates) the on-disk PSO binary archive. Existing file is loaded
+/// so previously harvested pipelines skip the Metal compiler; a corrupt file
+/// is deleted and replaced with an empty archive.
+@_cdecl("metallum_pso_archive_open")
+public func metallum_pso_archive_open(
+    _ device: MTLDevice,
+    _ pathPtr: UnsafePointer<CChar>?
+) -> Int32 {
+    return autoreleasepool {
+        guard let pathPtr else { return 0 }
+        // Metal 4 path (migration spec M2c). MTL4PipelineDataSetSerializer has no
+        // equivalent of MTLBinaryArchive's "an archive loaded from disk can never
+        // be re-serialized" defect, so there is no read-only mode here: every
+        // flush writes, including the ones triggered by resource reloads.
+        if NativeState.metal4CompilerEnabled, #available(macOS 26.0, iOS 26.0, *) {
+            let url = metal4ArchiveURL(forBinaryArchivePath: String(cString: pathPtr))
+            let device = device
+            NativeState.metal4CompilerLock.lock()
+            let serializerDescriptor = MTL4PipelineDataSetSerializerDescriptor()
+            // .captureBinaries, not .captureDescriptors: the configuration is an
+            // options mask that selects which serializer method is usable, and
+            // serializeAsArchiveAndFlush(url:) needs binaries. With
+            // .captureDescriptors only, the flush throws (nilError) and the
+            // pipeline cache silently never lands — .captureDescriptors pairs with
+            // serializeAsPipelinesScript(), which is for offline metal-tt builds.
+            serializerDescriptor.configuration = .captureBinaries
+            NativeState.metal4Serializer = device.makePipelineDataSetSerializer(descriptor: serializerDescriptor)
+            // The serializer is only collected through the compiler it was
+            // attached to at creation. Drop any compiler built before this point
+            // so it is rebuilt with the serializer; otherwise a single pipeline
+            // created ahead of the archive opening would silently disable
+            // archiving for the whole session.
+            NativeState.metal4CompilerStorage = nil
+            // Previous launch's archive, if any, becomes the compiler lookup set.
+            // Absent or unreadable simply means a cold start.
+            if FileManager.default.fileExists(atPath: url.path) {
+                if let archive = try? device.makeArchive(url: url) {
+                    NativeState.metal4LookupArchive = archive
+                } else {
+                    NSLog("[metallum] Metal 4 pipeline archive unreadable, rebuilding")
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
+            let loaded = NativeState.metal4LookupArchive != nil
+            NativeState.metal4CompilerLock.unlock()
+            NSLog("[metallum] Metal 4 pipeline data set opened (lookup archive: %@)", loaded ? "yes" : "cold")
+            return 1
+        }
+        let url = URL(fileURLWithPath: String(cString: pathPtr))
+        let descriptor = MTLBinaryArchiveDescriptor()
+        let loadedFromDisk = FileManager.default.fileExists(atPath: url.path)
+        if loadedFromDisk {
+            descriptor.url = url
+        }
+        do {
+            NativeState.binaryArchive = try device.makeBinaryArchive(descriptor: descriptor)
+            NativeState.binaryArchiveReadOnly = loadedFromDisk
+            if loadedFromDisk {
+                NSLog("[metallum] PSO binary archive loaded (read-only lookup mode)")
+            }
+            return 1
+        } catch {
+            NSLog("[metallum] PSO binary archive open failed, rebuilding: %@", String(describing: error))
+            try? FileManager.default.removeItem(at: url)
+            descriptor.url = nil
+            NativeState.binaryArchive = try? device.makeBinaryArchive(descriptor: descriptor)
+            NativeState.binaryArchiveReadOnly = false
+            return NativeState.binaryArchive != nil ? 1 : 0
+        }
+    }
+}
+
+@_cdecl("metallum_pso_archive_flush")
+public func metallum_pso_archive_flush(_ pathPtr: UnsafePointer<CChar>?) -> Int32 {
+    return autoreleasepool {
+        guard let pathPtr else { return 0 }
+        if #available(macOS 26.0, iOS 26.0, *),
+           let serializer = NativeState.metal4Serializer as? MTL4PipelineDataSetSerializer {
+            let url = metal4ArchiveURL(forBinaryArchivePath: String(cString: pathPtr))
+            NativeState.metal4CompilerLock.lock()
+            defer { NativeState.metal4CompilerLock.unlock() }
+            do {
+                try serializer.serializeAsArchiveAndFlush(url: url)
+                return 1
+            } catch {
+                NSLog("[metallum] Metal 4 pipeline data set flush failed: %@", String(describing: error))
+                return 0
+            }
+        }
+        guard let archive = NativeState.binaryArchive else { return 0 }
+        if NativeState.binaryArchiveReadOnly {
+            // Loaded archives cannot be re-serialized on current macOS; the
+            // on-disk file from the launch that built it stays authoritative.
+            return 1
+        }
+        NativeState.binaryArchiveLock.lock()
+        defer { NativeState.binaryArchiveLock.unlock() }
+        do {
+            try archive.serialize(to: URL(fileURLWithPath: String(cString: pathPtr)))
+            return 1
+        } catch {
+            // Known failure mode: the AOT pack step can reject individual
+            // harvested pipelines (e.g. "expecting 'fragment' stage in
+            // pipeline no. N"). Serialization is all-or-nothing, so disable
+            // the archive for the rest of the session instead of failing the
+            // same way on every later flush (resource reloads flush too).
+            NSLog("[metallum] PSO binary archive flush failed; disabling archive for this session: %@", String(describing: error))
+            NativeState.binaryArchive = nil
+            return 0
+        }
+    }
+}
+
 @_cdecl("metallum_MTLDevice_makeRenderPipelineState")
 public func metallum_MTLDevice_makeRenderPipelineState(
     _ device: MTLDevice,
@@ -4806,8 +5727,65 @@ public func metallum_MTLDevice_makeRenderPipelineState(
                 return nil
             }
         #endif
+        // Metal 4 path (migration spec M2b). MTL4Compiler returns an ordinary
+        // MTLRenderPipelineState that binds to the existing Metal 3 encoders
+        // (proved by metal4PipelineSmokeTest), so this needs no encoder changes.
+        // Any failure — no compiler, an untranslatable descriptor, a compile
+        // error — falls through to the unchanged Metal 3 path below.
+        if NativeState.metal4CompilerEnabled, #available(macOS 26.0, iOS 26.0, *) {
+            if let compiler = NativeState.metal4Compiler(device),
+               let metal4Descriptor = makeMetal4Descriptor(descriptor) {
+                do {
+                    // lookupArchives is Metal 4's replacement for
+                    // descriptor.binaryArchives: last launch's compiled pipelines
+                    // are found here instead of being recompiled. The serializer
+                    // attached to the compiler collects this launch's, and
+                    // metallum_pso_archive_flush writes them back.
+                    let state: MTLRenderPipelineState
+                    if let archive = NativeState.metal4LookupArchive as? MTL4Archive {
+                        let options = MTL4CompilerTaskOptions()
+                        options.lookupArchives = [archive]
+                        state = try compiler.makeRenderPipelineState(
+                            descriptor: metal4Descriptor,
+                            compilerTaskOptions: options
+                        )
+                    } else {
+                        state = try compiler.makeRenderPipelineState(descriptor: metal4Descriptor)
+                    }
+                    if !NativeState.metal4PipelineLogged {
+                        NativeState.metal4PipelineLogged = true
+                        NSLog("[metallum] Metal 4 pipeline path engaged (MTL4Compiler)")
+                    }
+                    return retainedPointer(state)
+                } catch {
+                    NativeState.logMetal4PipelineFallback(
+                        "MTL4Compiler rejected the descriptor: \(String(describing: error))"
+                    )
+                }
+            } else {
+                NativeState.logMetal4PipelineFallback("no compiler, or descriptor not translatable")
+            }
+        }
+        if let archive = NativeState.binaryArchive {
+            descriptor.binaryArchives = [archive]
+        }
         do {
-            return retainedPointer(try device.makeRenderPipelineState(descriptor: descriptor))
+            let state = try device.makeRenderPipelineState(descriptor: descriptor)
+            // Harvest for the next launch; failure only means this PSO is
+            // not archived, never a pipeline creation failure. Serialize()
+            // rejects entries whose fragment stage the AOT packer stripped
+            // ("expecting 'fragment' stage in pipeline no. N"), and one bad
+            // entry poisons the whole archive, so only harvest pipelines
+            // with a fragment function and at least one live color write.
+            if let archive = NativeState.binaryArchive,
+               !NativeState.binaryArchiveReadOnly,
+               descriptor.fragmentFunction != nil,
+               descriptorHasLiveColorWrite(descriptor) {
+                NativeState.binaryArchiveLock.lock()
+                try? archive.addRenderPipelineFunctions(descriptor: descriptor)
+                NativeState.binaryArchiveLock.unlock()
+            }
+            return retainedPointer(state)
         } catch {
             NSLog("[metallum] Failed to create render pipeline state: %@", String(describing: error))
             return nil

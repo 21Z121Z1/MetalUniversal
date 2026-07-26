@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.mojang.blaze3d.GpuFormat;
@@ -26,6 +27,10 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -40,12 +45,83 @@ final class MetalDevice implements GpuDeviceBackend {
     private final MetalCommandEncoder commandEncoder;
     private final DeviceInfo deviceInfo;
     public final MTLCommandQueue commandQueue;
-    private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new IdentityHashMap<>();
-    private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new HashMap<>();
-    private final Map<MslFunctionKey, MemorySegment> functionCache = new HashMap<>();
+    // ConcurrentHashMap gives identity semantics here only because
+    // RenderPipeline never overrides equals/hashCode; RENDER_PIPELINE_IDENTITY_EQUALS
+    // verifies that at class load and disables async precompile otherwise.
+    private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new ConcurrentHashMap<>();
+    private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new ConcurrentHashMap<>();
+    private final Map<MslFunctionKey, MemorySegment> functionCache = new ConcurrentHashMap<>();
     private final Map<Long, Deque<MemorySegment>> bufferPool = new HashMap<>();
     private static final int MAX_POOLED_BUFFERS_PER_SIZE = 16;
     private ShaderSource activeShaderSource;
+    private int pendingExtraTextureUsage;
+    private static final boolean PSO_ARCHIVE =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.psoArchive", "true"));
+    @Nullable
+    private String psoArchivePath;
+    private static final boolean ASYNC_PRECOMPILE =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.asyncPrecompile", "false"));
+    /**
+     * Master kill switch for every Metal 4 path (migration spec M1, appendix C).
+     * Metal 4 code is a parallel branch: the Metal 3 path stays byte-for-byte
+     * intact and is what runs whenever this is false, whenever the device or SDK
+     * lacks Metal 4, or whenever a sub-switch is off.
+     */
+    private static final boolean METAL4_REQUESTED =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "false"));
+    /**
+     * Routes render pipeline creation through MTL4Compiler (spec M2). Depends on
+     * the master switch; on its own it does nothing.
+     */
+    private static final boolean METAL4_COMPILER =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"));
+    /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
+    private final boolean metal4Available;
+    /**
+     * Explicit residency tracking (spec M3). MTLResidencySet is macOS 15 / iOS 18
+     * and needs no Metal 4, so this switch is independent of the master one: the
+     * table gets built and measured on the existing Metal 3 queue, and M7 only
+     * has to connect it.
+     */
+    private static final boolean RESIDENCY_SET =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.residencySet", "false"));
+    private static final boolean RENDER_PIPELINE_IDENTITY_EQUALS = renderPipelineUsesIdentityEquals();
+    /**
+     * Serializes the whole GLSL→SPIR-V→MSL→PSO chain across threads: the
+     * thread-safety of GlslCompiler, SPIRV-Cross contexts and the Swift-side
+     * depth-stencil/archive caches is unverified, so exactly one thread may
+     * be inside the chain at a time. Lock order is always
+     * COMPILE_CHAIN_LOCK → map bins (never taken inside a computeIfAbsent
+     * mapping function), matching {@link #clearPipelineCache()}. Package
+     * visible for MetalCompiledRenderPipeline's lazy variant builds.
+     */
+    static final Object COMPILE_CHAIN_LOCK = new Object();
+    /**
+     * Bumped under COMPILE_CHAIN_LOCK by {@link #clearPipelineCache()};
+     * background precompile tasks captured under an older generation carry a
+     * stale ShaderSource and must abandon instead of repopulating the map.
+     */
+    private volatile int pipelineCacheGeneration;
+    @Nullable
+    private final ExecutorService prewarmExecutor;
+
+    /** Vanilla marker result for a precompile that was queued, not run. */
+    private record PendingCompiledPipeline() implements CompiledRenderPipeline {
+        @Override
+        public boolean isValid() {
+            return true;
+        }
+    }
+
+    private static final CompiledRenderPipeline PENDING_PRECOMPILE = new PendingCompiledPipeline();
+
+    private static boolean renderPipelineUsesIdentityEquals() {
+        try {
+            return RenderPipeline.class.getMethod("equals", Object.class).getDeclaringClass() == Object.class;
+        } catch (ReflectiveOperationException e) {
+            return false;
+        }
+    }
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -62,7 +138,58 @@ final class MetalDevice implements GpuDeviceBackend {
         this.cocoaView = cocoaView;
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
+        // Before metallum_init_pipelines and before any texture or buffer exists:
+        // resources created earlier would never enter the set.
+        if (RESIDENCY_SET && !this.commandQueue.enableResidencySet(metalDeviceHandle)) {
+            Metallum.LOGGER.warn("[metallum] residency set unavailable; residency stays automatic");
+        }
         MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
+        // Must agree with MetalCommandEncoder.DEFERRED_DEPTH_STORE before the
+        // first render encoder: the native side only sets storeAction=.unknown
+        // (which Java must then resolve before endEncoding) when enabled.
+        MetalNativeBridge.metallum_set_deferred_depth_store(
+                MetalCommandEncoder.DEFERRED_DEPTH_STORE ? 1 : 0
+        );
+        // Metal 4 capability gate. Queried once here so every Metal 4 sub-switch
+        // can just AND against it; the native side folds the compile-time
+        // #available check into the same answer.
+        this.metal4Available = METAL4_REQUESTED
+                && MetalNativeBridge.metallum_metal4_supported(metalDeviceHandle) != 0;
+        boolean metal4Compiler = this.metal4Available && METAL4_COMPILER;
+        MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4Compiler ? 1 : 0);
+        Metallum.LOGGER.info(
+                "[Metallum] Metal 4: requested={} available={} compiler={}",
+                METAL4_REQUESTED,
+                this.metal4Available,
+                metal4Compiler
+        );
+        if (PSO_ARCHIVE) {
+            try {
+                java.nio.file.Path cacheDir = net.fabricmc.loader.api.FabricLoader.getInstance()
+                        .getGameDir().resolve("metallum-cache");
+                java.nio.file.Files.createDirectories(cacheDir);
+                String archivePath = cacheDir.resolve("pso.binaryarchive").toString();
+                if (MetalNativeBridge.metallum_pso_archive_open(metalDeviceHandle, archivePath) != 0) {
+                    this.psoArchivePath = archivePath;
+                } else {
+                    Metallum.LOGGER.warn("[metallum] PSO binary archive unavailable; pipelines compile uncached");
+                }
+            } catch (Exception e) {
+                Metallum.LOGGER.warn("[metallum] PSO binary archive setup failed; pipelines compile uncached", e);
+            }
+        }
+        if (ASYNC_PRECOMPILE && !RENDER_PIPELINE_IDENTITY_EQUALS) {
+            Metallum.LOGGER.warn(
+                    "[metallum] RenderPipeline overrides equals/hashCode; async precompile disabled"
+            );
+        }
+        this.prewarmExecutor = ASYNC_PRECOMPILE && RENDER_PIPELINE_IDENTITY_EQUALS
+                ? Executors.newSingleThreadExecutor(runnable -> {
+                    Thread thread = new Thread(runnable, "metallum-pso-prewarm");
+                    thread.setDaemon(true);
+                    return thread;
+                })
+                : null;
         this.commandEncoder = new MetalCommandEncoder(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
         MetalFxManager.initialize(this);
@@ -113,7 +240,28 @@ final class MetalDevice implements GpuDeviceBackend {
             final int depthOrLayers,
             final int mipLevels
     ) {
-        return new MetalGpuTexture(this, usage, label == null ? "" : label, format, width, height, depthOrLayers, mipLevels);
+        return new MetalGpuTexture(
+                this, usage | this.pendingExtraTextureUsage, label == null ? "" : label,
+                format, width, height, depthOrLayers, mipLevels
+        );
+    }
+
+    /**
+     * Runs {@code runnable} with every texture this device creates carrying
+     * {@code extraUsage} in addition to its declared usage. Used to route
+     * backend-only usage bits (e.g. {@link MetalGpuTexture#USAGE_SHADER_WRITE}
+     * for MetalFX output targets) through vanilla creation paths such as
+     * {@code TextureTarget} that cannot forward custom flags. Render thread
+     * only.
+     */
+    void withExtraTextureUsage(final int extraUsage, final Runnable runnable) {
+        int previous = this.pendingExtraTextureUsage;
+        this.pendingExtraTextureUsage = previous | extraUsage;
+        try {
+            runnable.run();
+        } finally {
+            this.pendingExtraTextureUsage = previous;
+        }
     }
 
     @Override
@@ -158,31 +306,120 @@ final class MetalDevice implements GpuDeviceBackend {
         if (shaderSource != null) {
             this.activeShaderSource = shaderSource;
         }
-        return this.compiledPipelines.computeIfAbsent(pipeline, p -> {
-            MetalCompiledRenderPipeline override = IrisMetalPipelineOverrides.tryCompile(this, p, effectiveSource);
-            return override != null ? override : MetalCrossShaderCompiler.compile(this, p, effectiveSource);
-        });
+        MetalCompiledRenderPipeline existing = this.compiledPipelines.get(pipeline);
+        if (existing != null) {
+            return existing;
+        }
+        if (this.prewarmExecutor != null) {
+            int generation = this.pipelineCacheGeneration;
+            this.prewarmExecutor.execute(() -> {
+                try {
+                    this.compileInBackground(pipeline, effectiveSource, generation);
+                } catch (Throwable t) {
+                    // First real use on the render thread recompiles and
+                    // surfaces the error with vanilla's own handling.
+                    Metallum.LOGGER.warn("[metallum] background precompile failed for {}", pipeline.getLocation(), t);
+                }
+            });
+            return PENDING_PRECOMPILE;
+        }
+        synchronized (COMPILE_CHAIN_LOCK) {
+            return this.compiledPipelines.computeIfAbsent(pipeline, p -> compileWithIrisOverride(p, effectiveSource));
+        }
+    }
+
+    /**
+     * The single funnel every compile path goes through, so the Iris terrain
+     * override is consulted on the render thread and on the prewarm thread
+     * alike. Missing the background path would let prewarm win the cache race
+     * with a native PSO and silently disable the override.
+     */
+    private MetalCompiledRenderPipeline compileWithIrisOverride(
+            final RenderPipeline pipeline, final ShaderSource source
+    ) {
+        MetalCompiledRenderPipeline override = IrisMetalPipelineOverrides.tryCompile(this, pipeline, source);
+        return override != null ? override : MetalCrossShaderCompiler.compile(this, pipeline, source);
+    }
+
+    /** True when the background prewarm thread exists (async precompile on). */
+    boolean asyncPrewarmEnabled() {
+        return this.prewarmExecutor != null;
+    }
+
+    /**
+     * Queues work on the prewarm thread; silently dropped once the executor
+     * is shut down (device close), when the render thread finishes the work
+     * on demand instead.
+     */
+    void submitPrewarmTask(final Runnable task) {
+        if (this.prewarmExecutor != null) {
+            try {
+                this.prewarmExecutor.execute(task);
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            }
+        }
+    }
+
+    private void compileInBackground(final RenderPipeline pipeline, final ShaderSource source, final int generation) {
+        if (this.compiledPipelines.containsKey(pipeline)) {
+            return;
+        }
+        synchronized (COMPILE_CHAIN_LOCK) {
+            // The volatile generation write happens under this lock, so this
+            // read also orders us after every render-thread write (shader
+            // source swap, MetalFX LOD bias) that preceded the last clear.
+            if (generation != this.pipelineCacheGeneration) {
+                return;
+            }
+            this.compiledPipelines.computeIfAbsent(pipeline, p -> compileWithIrisOverride(p, source));
+        }
     }
 
     @Override
     public void clearPipelineCache() {
         this.waitForSubmittedGpuWork();
-        this.compiledPipelines.values().forEach(MetalCompiledRenderPipeline::close);
-        this.compiledPipelines.clear();
-        this.shaderCache.values().forEach(IntermediaryShaderModule::close);
-        this.shaderCache.clear();
-        for (MemorySegment function : this.functionCache.values()) {
-            if (!MetalNativeBridge.isNullHandle(function)) {
-                MetalNativeBridge.metallum_release_object(function);
+        synchronized (COMPILE_CHAIN_LOCK) {
+            this.pipelineCacheGeneration++;
+            this.compiledPipelines.values().forEach(MetalCompiledRenderPipeline::close);
+            this.compiledPipelines.clear();
+            this.shaderCache.values().forEach(IntermediaryShaderModule::close);
+            this.shaderCache.clear();
+            for (MemorySegment function : this.functionCache.values()) {
+                if (!MetalNativeBridge.isNullHandle(function)) {
+                    MetalNativeBridge.metallum_release_object(function);
+                }
+            }
+            this.functionCache.clear();
+        }
+        MetalMslDiskCache.logSessionStats();
+        // Persist harvested pipelines so the next launch (or the rebuild
+        // following this cache clear) hits the on-disk archive.
+        if (this.psoArchivePath != null) {
+            try {
+                MetalNativeBridge.metallum_pso_archive_flush(this.psoArchivePath);
+            } catch (Exception e) {
+                Metallum.LOGGER.warn("[metallum] PSO binary archive flush failed", e);
             }
         }
-        this.functionCache.clear();
     }
 
     @Override
     public void close() {
         this.waitForSubmittedGpuWork();
         this.commandEncoder.close();
+        if (this.prewarmExecutor != null) {
+            // Stop background compiles before tearing down the caches they
+            // populate; a straggler past the 5s bail-out still serializes
+            // against clearPipelineCache via COMPILE_CHAIN_LOCK.
+            this.prewarmExecutor.shutdownNow();
+            try {
+                if (!this.prewarmExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    Metallum.LOGGER.warn("[metallum] PSO prewarm thread still busy at shutdown");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         this.clearPipelineCache();
         this.drainBufferPool();
         if (!MetalNativeBridge.isNullHandle(this.cocoaView)) {
@@ -261,10 +498,16 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {
-        return this.compiledPipelines.computeIfAbsent(pipeline, p -> {
-            MetalCompiledRenderPipeline override = IrisMetalPipelineOverrides.tryCompile(this, p, this.activeShaderSource);
-            return override != null ? override : MetalCrossShaderCompiler.compile(this, p, this.activeShaderSource);
-        });
+        // Lock-free on the hot path; a miss takes the chain lock, so a first
+        // use may wait out whatever the prewarm thread is currently building.
+        MetalCompiledRenderPipeline existing = this.compiledPipelines.get(pipeline);
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (COMPILE_CHAIN_LOCK) {
+            return this.compiledPipelines.computeIfAbsent(
+                    pipeline, p -> compileWithIrisOverride(p, this.activeShaderSource));
+        }
     }
 
     IntermediaryShaderModule getOrCompileShader(final Identifier id, final ShaderType type, final ShaderDefines defines, final ShaderSource shaderSource) {
@@ -283,7 +526,7 @@ final class MetalDevice implements GpuDeviceBackend {
         });
     }
 
-    private static String prepareShaderSource(final String source, final ShaderDefines defines) {
+    static String prepareShaderSource(final String source, final ShaderDefines defines) {
         String stripped = BLOCK_COMMENTS.matcher(source).replaceAll("");
         stripped = LINE_COMMENTS.matcher(stripped).replaceAll("").stripLeading();
         return GlslPreprocessor.injectDefines(stripped, defines);

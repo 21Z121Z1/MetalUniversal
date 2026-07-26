@@ -1,11 +1,18 @@
 # MetalFX Validation
 
-Use the JDK 25 toolchain required by Minecraft 26.2:
+Use the JDK 25 toolchain required by Minecraft 26.2 (any JDK 25 works; on this
+machine Homebrew provides one):
 
 ```sh
-JAVA_HOME=/tmp/metallum-jdk25/jdk-25.0.3+9/Contents/Home \
+JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home \
 ./gradlew clean test buildMacNative build --no-daemon
 ```
+
+`./gradlew check` additionally runs the native acceptance suite: lifecycle
+state-machine tests, the MRT smoke test, the Java→FFM→Swift MRT backend
+integration test, the offscreen temporal-semantics validation, and the windowed
+`CAMetalDisplayLink` presentation validation (requires a WindowServer session;
+exclude with `-x metalFrameGenerationPresentationValidation` on headless CI).
 
 Run the spectator test world at 0.67 scale:
 
@@ -61,8 +68,11 @@ the scene target dimensions and MetalFX descriptor are created with the Metal
 device and `GameRenderer`; applying a setting cannot safely mutate those
 resources in the middle of a frame. Explicit JVM properties remain the highest
 priority override for automated validation. The transparent reactive option
-does not remove the always-on depth-edge rejection used for alpha-cutout leaves
-and grass.
+does not remove the always-on depth-edge rejection, and alpha-cutout terrain
+(leaves, grass and every other non-translucent discard pass material)
+additionally writes exact post-discard coverage through the Sodium MRT
+producer, which is dilated by the current jitter/upscale footprint and
+max-merged into the reactive mask.
 
 Repeat with `-Dmetallum.metalfx.scale=0.5`. A successful run should log the
 configured phase count, all available transparency targets, and a line of the
@@ -102,7 +112,34 @@ The current log wording uses the equivalent screen-space convention
 `motion=previousScreen-currentScreen`: X is previous minus current in Metal's
 top-left screen coordinates, and Y is current minus previous because Metal
 clip-space Y points up. The reactive pass also rejects the cleared-depth side
-of 3x3 boundaries, which is required for alpha-cutout leaves and grass.
+of 3x3 boundaries; alpha-cutout leaves and grass no longer depend on that
+heuristic alone, because the Sodium CUTOUT MRT producer contributes their
+exact post-discard coverage to the reactive mask.
+
+## Automated client validation determinism
+
+`minecraftMetalFxClientValidation` performs ten frame-exact GPU readbacks. To
+keep them deterministic on a loaded machine:
+
+- the run directory's `run/config/sodium-options.json` sets
+  `chunk_build_defer_mode` to `ZERO_FRAMES`, and the validation client requests
+  `SodiumWorldRenderer.scheduleRebuildForBlockArea(..., important=true)` after
+  every scene block mutation, so occlusion-wall and CUTOUT scene changes are
+  meshed synchronously on the frame that changes them;
+- 40 warm-up frames (50 ms each) run before the scripted timeline so initial
+  section compilation and the controlled entity's render section settle;
+- the revealed-entity capture is taken on the wall-removal frame itself
+  (frame 46), because the reveal's disocclusion transient only exists on the
+  first frame the wall is gone;
+- frames 74 and 82 capture controlled `OAK_LEAVES` (persistent) and
+  `SHORT_GRASS`-on-`GRASS_BLOCK` scenes through the real Sodium CUTOUT draw
+  path; every replaced `BlockState` is saved and restored, the grass camera
+  pitches down 15 degrees deterministically, and the player pose is restored
+  at exit so repeated runs do not drift the saved test world.
+
+The acceptance for the CUTOUT frames requires more than 32 exact-coverage
+pixels, every covered pixel present in the final reactive mask, and nonzero
+dilation outside exact coverage whenever the jitter/scale radius is nonzero.
 
 The run entered `New World` and remained alive for more than one minute. A
 system screenshot attempt was unavailable because this macOS session denies

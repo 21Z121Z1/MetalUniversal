@@ -264,7 +264,12 @@ pack 着色——**全部未验证**。接手第一件事就是进世界看 `com
 非覆盖管线一律返回 null 走原逻辑 —— 所以对 Metal 4 线是**加法**,不改变既有绑定语义。
 合并后请重跑 `metalIrisShaderTranslationTest` 与 `metalMrtBackendIntegrationTest` 验证。
 
-### 4.4.1 首次合并尝试的结果(2026-07-27,已 abort,树是干净的)
+### 4.4.1 合并已完成(2026-07-27)
+
+**结果:5 个文件冲突全部解决,合并已提交,回归全绿。**下面保留逐文件解法作为记录;
+`MetalCommandEncoder` 那条的答案由 Metal 4 线给出(见本节末尾)。
+
+原始记录(首次尝试时曾 abort 过一次):
 
 `git merge wip/uncommitted-snapshot-2026-07-27` 实跑过一次,**5 个文件冲突,已 `--abort`**。
 下面是逐个的解法,照做即可;三个是机械的,一个必须由 Metal 4 线的人拍板。
@@ -291,6 +296,34 @@ pack 着色——**全部未验证**。接手第一件事就是进世界看 `com
 **本线在同步层的实际持仓**:`MetalCommandEncoder` 的 compute 编码器 fence 语义(B0 引入,
 `metalComputeBackendIntegrationTest` 里 render→compute→render / compute→compute / indirect args
 三条有序性用例在守它)。合完必须重跑这个 task,它是判定同步语义没坏的唯一自动化证据。
+
+**`MetalCommandEncoder` 的答案(Metal 4 线给出,2026-07-27)**:
+
+> compute 编码器归 **render fence**——即调用方作为参数传进来的那个 fence,不是 transfer fence。
+> 依据是 `NativeState.transferFence` 的不变量注释:split-fence 模式下**唯一**在 transfer 链上的
+> Swift 编码器是 frame-generation 的输入 copy blit,其余 native 编码器一律留在传入的 render fence 上。
+> 旁证:7 处 `makeComputeCommandEncoder`(:2550/:2647/:2716/:2764/:2876/:3093/:3135)正好对应
+> `NativeState` 里的 7 条 MetalFX compute 管线;规格 M6 依赖表「compute 写 → render 读」那一行,
+> Metal 3 现状记的就是「全量 wait/update 传入 fence」。
+
+据此的最终解法(**不是**我原先那个「保守地两条链都上」——那个会让 M7e 迁移时把这条链
+误翻成两对屏障):`computeCommandEncoder()` 只 `waitForFence(fence)`,`endEncoder()` 里
+compute 分支只 `updateFence(fence)`,两种模式下都一样,不碰 `transferFence`。
+代码里的注释写明了这条依据,以及它对应 M6 表的 dispatch→fragment 生产者/消费者对。
+
+**该线自陈的边界(照录)**:没有逐个复核那 7 个调用点是否有哪一处直接摸了
+`NativeState.transferFence`——注释声明的是不变量,不等于逐点验证。要钉死需要 grep 这 7 处的
+fence 参数来源。**本线没做这个复核**;它只影响 Swift 侧 MetalFX 通道,不影响 Java 侧
+compute 编码器的 fence 归属(本次改动只动了 Java 侧)。
+
+**合并后回归(全绿)**:`metalComputeBackendIntegrationTest`(守 compute fence 语义的三条
+有序性用例)/ `metalMrtBackendIntegrationTest` / `metalIrisTargetsIntegrationTest` /
+`metalIrisShaderTranslationTest` / `test`。
+
+**合并带来的一处本线必须知道的结构变化**:`MetalDevice` 现在有 async prewarm 线程,
+编译走三条路径(render 线程按需、prewarm 后台、precompile)。三条都已收敛到新的
+`compileWithIrisOverride(pipeline, source)` 单一漏斗——**漏掉后台那条会让预热抢先把原生 PSO
+写进缓存,覆盖静默失效**。以后再改编译路径,保持这个漏斗是唯一入口。
 
 ## 5. 风险与预案
 

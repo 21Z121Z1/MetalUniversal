@@ -55,6 +55,17 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final MTLPixelFormat[] colorFormats;
     private final Map<PipelineSignature, MemorySegment> pipelineStates;
     private final MemorySegment withoutDepthPipeline;
+    // Lazy-variant support (S9C, active only with metallum.opt.asyncPrecompile):
+    // the constructor builds the two signatures the game actually starts with
+    // and the rest are built on the prewarm thread or on first demand, all
+    // under MetalDevice.COMPILE_CHAIN_LOCK.
+    private final boolean lazyVariants;
+    private final MetalDevice device;
+    private final RenderPipeline info;
+    private final MemorySegment vertexFunction;
+    private final MemorySegment fragmentFunction;
+    /** Guarded by MetalDevice.COMPILE_CHAIN_LOCK (close runs inside clearPipelineCache). */
+    private boolean closed;
 
     private record PipelineSignature(List<MTLPixelFormat> colorFormats, MTLPixelFormat depthFormat,
                                      MTLPixelFormat stencilFormat, int sampleCount) {
@@ -124,36 +135,89 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             this.colorFormats[index] = target == null ? MTLPixelFormat.Invalid : MTLPixelFormat.from(target.format());
         }
 
-        MemorySegment vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
-        MemorySegment fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
+        this.device = device;
+        this.info = info;
+        this.lazyVariants = device.asyncPrewarmEnabled();
+        this.vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
+        this.fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
 
-        Map<PipelineSignature, MemorySegment> states = new HashMap<>();
+        List<DepthStencilFormats> eagerFormats = this.lazyVariants ? eagerDepthStencilFormats() : supportedDepthStencilFormats();
+        Map<PipelineSignature, MemorySegment> states = new java.util.concurrent.ConcurrentHashMap<>();
         try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(info, this.firstAvailableVertexBufferSlot)) {
-            for (DepthStencilFormats formats : supportedDepthStencilFormats()) {
+            for (DepthStencilFormats formats : eagerFormats) {
                 MemorySegment pipeline = createPipeline(
                         device,
                         info,
-                        vertexFunction,
-                        fragmentFunction,
+                        this.vertexFunction,
+                        this.fragmentFunction,
                         vertexDescriptor,
                         this.colorFormats,
                         formats.depthFormat(),
                         formats.stencilFormat()
                 );
                 if (!MetalNativeBridge.isNullHandle(pipeline)) {
-                    states.put(new PipelineSignature(
-                            List.copyOf(Arrays.asList(this.colorFormats)),
-                            formats.depthFormat(),
-                            formats.stencilFormat(),
-                            1
-                    ), pipeline);
+                    states.put(this.signatureFor(formats.depthFormat(), formats.stencilFormat()), pipeline);
                 }
             }
         }
-        this.pipelineStates = Map.copyOf(states);
-        this.withoutDepthPipeline = this.pipelineStates.get(
-                new PipelineSignature(List.copyOf(Arrays.asList(this.colorFormats)), MTLPixelFormat.Invalid, MTLPixelFormat.Invalid, 1)
-        );
+        this.pipelineStates = states;
+        this.withoutDepthPipeline = states.get(this.signatureFor(MTLPixelFormat.Invalid, MTLPixelFormat.Invalid));
+        if (this.lazyVariants) {
+            for (DepthStencilFormats formats : supportedDepthStencilFormats()) {
+                if (!eagerFormats.contains(formats)) {
+                    device.submitPrewarmTask(() -> {
+                        try {
+                            this.buildVariantLocked(formats.depthFormat(), formats.stencilFormat());
+                        } catch (Throwable t) {
+                            com.metallum.Metallum.LOGGER.warn(
+                                    "[metallum] background pipeline variant build failed for {}", info.getLocation(), t
+                            );
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    private PipelineSignature signatureFor(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
+        return new PipelineSignature(List.copyOf(Arrays.asList(this.colorFormats)), depthFormat, stencilFormat, 1);
+    }
+
+    /**
+     * Builds one depth/stencil variant under the compile-chain lock and
+     * publishes it. Returns the variant, or {@code null} when it could not
+     * be built or this pipeline was already closed.
+     */
+    @Nullable
+    private MemorySegment buildVariantLocked(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
+        synchronized (MetalDevice.COMPILE_CHAIN_LOCK) {
+            if (this.closed) {
+                return null;
+            }
+            PipelineSignature signature = this.signatureFor(depthFormat, stencilFormat);
+            MemorySegment existing = this.pipelineStates.get(signature);
+            if (existing != null) {
+                return existing;
+            }
+            MemorySegment pipeline;
+            try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(this.info, this.firstAvailableVertexBufferSlot)) {
+                pipeline = createPipeline(
+                        this.device,
+                        this.info,
+                        this.vertexFunction,
+                        this.fragmentFunction,
+                        vertexDescriptor,
+                        this.colorFormats,
+                        depthFormat,
+                        stencilFormat
+                );
+            }
+            if (MetalNativeBridge.isNullHandle(pipeline)) {
+                return null;
+            }
+            this.pipelineStates.put(signature, pipeline);
+            return pipeline;
+        }
     }
 
     private record DepthStencilFormats(MTLPixelFormat depthFormat, MTLPixelFormat stencilFormat) {
@@ -167,6 +231,18 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 new DepthStencilFormats(MTLPixelFormat.Depth24Unorm_Stencil8, MTLPixelFormat.Depth24Unorm_Stencil8),
                 new DepthStencilFormats(MTLPixelFormat.Depth32Float_Stencil8, MTLPixelFormat.Depth32Float_Stencil8),
                 new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Stencil8)
+        );
+    }
+
+    /**
+     * The two signatures every session starts with: depthless (UI, isValid)
+     * and the Depth32Float main framebuffer. Everything else is built lazily
+     * in lazy-variant mode.
+     */
+    private static List<DepthStencilFormats> eagerDepthStencilFormats() {
+        return List.of(
+                new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Invalid),
+                new DepthStencilFormats(MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid)
         );
     }
 
@@ -260,15 +336,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     MemorySegment getNativePipeline(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
-        PipelineSignature signature = new PipelineSignature(
-                List.copyOf(Arrays.asList(this.colorFormats)),
-                depthFormat,
-                stencilFormat,
-                1
-        );
-        MemorySegment pipeline = this.pipelineStates.get(signature);
+        MemorySegment pipeline = this.pipelineStates.get(this.signatureFor(depthFormat, stencilFormat));
+        if (pipeline == null && this.lazyVariants) {
+            // First demand beat the prewarm thread to this variant; build it
+            // now (bounded by one PSO compile, may wait out the prewarm
+            // thread's current item).
+            pipeline = this.buildVariantLocked(depthFormat, stencilFormat);
+        }
         if (pipeline == null || MetalNativeBridge.isNullHandle(pipeline)) {
-            throw new IllegalStateException("No cached Metal pipeline for attachment signature " + signature);
+            throw new IllegalStateException("No cached Metal pipeline for attachment signature "
+                    + this.signatureFor(depthFormat, stencilFormat));
         }
         return pipeline;
     }
@@ -343,6 +420,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     @Override
     public void close() {
+        // Runs under MetalDevice.COMPILE_CHAIN_LOCK (clearPipelineCache);
+        // pending lazy-variant tasks observe the flag and abandon.
+        this.closed = true;
         Set<MemorySegment> uniqueStates = new HashSet<>(this.pipelineStates.values());
         for (MemorySegment state : uniqueStates) {
             if (!MetalNativeBridge.isNullHandle(state)) {

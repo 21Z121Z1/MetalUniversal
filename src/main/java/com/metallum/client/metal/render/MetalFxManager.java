@@ -37,9 +37,11 @@ import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /** Owns the per-device MetalFX resources and the frame-level history contract. */
@@ -48,19 +50,57 @@ public final class MetalFxManager {
     public static final int USAGE_SHADER_WRITE = 1 << 5;
     private static final double SCENE_CUT_DISTANCE = 32.0;
     private static final float FOV_SCENE_CUT_DEGREES = 5.0F;
-    // The current Minecraft/Sodium renderers do not expose previous object
-    // transforms or a motion MRT writer. Keep frame generation disabled until
-    // that producer is connected; an all-zero validity attachment is not a
-    // valid substitute for object motion.
+    // Ordinary entities, dropped items, minecarts, boats and arrows now carry a
+    // reconstructed root object transform (MetalEntityObjectPose) through a
+    // split motion draw. Falling blocks and display entities still ride the
+    // core/block path and reach the interpolator with translation-only or no
+    // object motion, so the shipped default stays off until the attended
+    // visual QA in the audit's 13.4 matrix has signed the gate off.
     private static final boolean OBJECT_MOTION_PRODUCER_CONNECTED = false;
+    // QA escape hatch for that matrix: it enables frame generation without
+    // changing what ships, and is the switch the acceptance run flips.
+    private static final boolean OBJECT_MOTION_PRODUCER_OVERRIDE =
+            Boolean.getBoolean("metallum.metalfx.objectMotionProducer");
     private static final Vector4f UI_CLEAR = new Vector4f(0.0F);
     private static MetalFxManager active;
+    // CAMetalDisplayLink is a vsync-on-only present loop, and every pacing
+    // acceptance run measured it with displaySyncEnabled true. Minecraft can
+    // switch the surface to MAILBOX at any time from the video settings, so the
+    // present mode is tracked here and frame generation suspends while it is
+    // immediate instead of presenting off the refresh boundary.
+    private static volatile boolean immediatePresentMode;
 
     private final MetalDevice device;
     private final MetalFxConfig config;
     private final MetalFxConfig.Mode effectiveMode;
+    // Reactive weight for first-person overlay pixels: zero motion handles
+    // camera movement exactly; the residual swing/bob animation relies on a
+    // moderate history bias instead of per-vertex motion.
+    private static final float HAND_OVERLAY_REACTIVE_BOOST = 0.35F;
+    // Validation thresholds for the CUTOUT reactive policy (see
+    // docs/cutout-shimmer-remediation-2026-07-27.md). Interior CUTOUT pixels
+    // may only carry residual reactivity (depth gradients read ~0-0.06
+    // there); 48/255 ≈ 0.19 leaves margin while catching any interior flood.
+    // The edge band must reach at least 72/255 ≈ 0.28 (< default edge weight
+    // 0.35 and < depth-edge cap 0.5).
+    private static final int INTERIOR_REACTIVE_MAX = 48;
+    private static final int EDGE_REACTIVE_MIN = 72;
+    // Object-motion acceptance thresholds (item_spin / vehicle_turn). These
+    // scenarios hold the object at a fixed world position under a static
+    // camera, so the only motion in frame is the object's own rotation and the
+    // single-mean model does not apply: a Y-spin moves points on opposite
+    // sides of the axis in opposite directions, leaving a mean near zero —
+    // exactly what a regression that emitted no object motion at all would
+    // also produce. The peak-to-peak spread separates the two, and requiring
+    // it to dominate the mean is what confirms the rotation rather than a
+    // stray translation.
+    private static final int OBJECT_MIN_VALID_PIXELS = 2_000;
+    private static final double OBJECT_MIN_MOTION_SPREAD = 0.004;
+    private static final double OBJECT_SPIN_TO_MEAN_RATIO = 2.0;
+    private static final double OBJECT_MAX_MOTION = 0.5;
     private final boolean motionPipelineV2Available;
     private final boolean cutoutReactivePipelineAvailable;
+    private final boolean handOverlayPipelineAvailable;
     private final int phaseCount;
     private int phase;
     private boolean historyReset = true;
@@ -83,7 +123,10 @@ public final class MetalFxManager {
     private boolean sceneFrame;
     private boolean frameUsesUpscaledTarget;
     private boolean frameGenerationEnabled;
-    private boolean frameGenerationSuspendedForGui;
+    // Set while a recoverable condition (an open GUI, an immediate present mode)
+    // holds frame generation off. Unlike runtimeDisabled this is reversible and
+    // beginFrameInternal re-enables the presenter once every gate clears.
+    private boolean frameGenerationSuspended;
     private boolean runtimeDisabled;
     private boolean warnedInvalidFrame;
     private boolean previousCameraPositionValid;
@@ -100,14 +143,55 @@ public final class MetalFxManager {
     private boolean motionInputsPrepared;
     private boolean loggedTransparencyTargets;
     private boolean loggedCutoutReactive;
+    private boolean loggedHandOverlay;
     private boolean frameResetForPresent = true;
     private float frameFieldOfView = 70.0F;
     private float frameFarPlane = 1000.0F;
+    // Frame interpolation wants the interval between the two source frames it
+    // interpolates between, anchored on the render timeline. Scene-frame start
+    // is a far more stable anchor than the native encode-enqueue wall clock.
+    private long lastSceneFrameStartNanos;
+    private float sceneFrameDeltaSeconds;
     @Nullable
     private ValidationFrame validationFrame;
     private int validationCapturesPending;
     private int validationCapturesCompleted;
     private int validationCaptureFailures;
+    // Temporal-flicker measurement series (static-camera hold): consecutive
+    // upscaled-output frames are folded into per-pixel |delta luma|
+    // histograms, split by the CUTOUT coverage mask captured on the first
+    // series frame. See docs/cutout-shimmer-remediation-2026-07-27.md §8.
+    @Nullable
+    private FlickerRequest flickerRequest;
+    private boolean flickerCapturePending;
+    private final Set<String> flickerCompletedScenarios = new HashSet<>();
+    private int flickerFramesAccumulated;
+    private int flickerDisplayWidth;
+    private int flickerDisplayHeight;
+    @Nullable
+    private boolean[] flickerMask;
+    private int flickerMaskPixels;
+    // Sky-edge subset of the mask: CUTOUT coverage *and* cleared far-plane
+    // depth in the same render neighbourhood, i.e. the foliage/sky silhouette
+    // band. Reported alongside the mask so a scene with no sky in view is
+    // visible as skyPixels=0 instead of silently measuring nothing.
+    @Nullable
+    private boolean[] flickerSkyEdgeMask;
+    private int flickerSkyEdgePixels;
+    private int flickerSkyPixels;
+    // Open sky with no CUTOUT coverage anywhere near it. Under a static camera
+    // with frozen time, clouds off and no weather, this region is perfectly
+    // static geometry-free content: any delta here is the temporal pipeline's
+    // own instability on the sky itself, isolated from any silhouette.
+    @Nullable
+    private boolean[] flickerSkyInteriorMask;
+    private int flickerSkyInteriorPixels;
+    @Nullable
+    private byte[] flickerPreviousLuma;
+    private final long[] flickerMaskedHistogram = new long[256];
+    private final long[] flickerControlHistogram = new long[256];
+    private final long[] flickerSkyEdgeHistogram = new long[256];
+    private final long[] flickerSkyInteriorHistogram = new long[256];
     @Nullable
     private String lastLoggedResetReason;
     @Nullable
@@ -142,24 +226,39 @@ public final class MetalFxManager {
     private MetalFxManager(final MetalDevice device) {
         this.device = device;
         this.config = MetalFxConfig.load();
+        MetalNativeBridge.metallum_metalfx_set_reactive_tuning(
+                this.config.cutoutReactiveEdgeWeight,
+                this.config.cutoutReactiveInteriorWeight,
+                this.config.depthEdgeReactiveCap,
+                this.config.transparencyReactiveValue,
+                this.config.skyFarPlaneMotion ? 1.0F : 0.0F,
+                this.config.disocclusionReactiveCap,
+                this.config.mergeDepthDilation ? 1.0F : 0.0F
+        );
         this.motionPipelineV2Available = MetalNativeBridge.metallum_metalfx_supports_motion_v2(device.metalDeviceHandle());
         this.cutoutReactivePipelineAvailable =
                 MetalNativeBridge.metallum_metalfx_supports_cutout_reactive(device.metalDeviceHandle());
+        this.handOverlayPipelineAvailable =
+                MetalNativeBridge.metallum_metalfx_supports_hand_overlay(device.metalDeviceHandle());
         this.effectiveMode = chooseMode(device, this.config);
         this.phaseCount = MetalFxConfig.phaseCount(this.config.scale);
         this.frameGenerationEnabled = this.config.frameGeneration
                 && this.effectiveMode == MetalFxConfig.Mode.TEMPORAL
-                && OBJECT_MOTION_PRODUCER_CONNECTED
+                && objectMotionProducerConnected()
                 && MetalNativeBridge.metallum_metalfx_supports_frame_generation(device.metalDeviceHandle());
         if (this.config.frameGeneration && !this.frameGenerationEnabled) {
             Metallum.LOGGER.warn("MetalFX frame generation disabled: complete object-motion producer is not connected");
         }
         if (this.effectiveMode != MetalFxConfig.Mode.OFF) {
             Metallum.LOGGER.info(
-                    "MetalFX configured: requested={}, effective={}, scale={}, phases={}, motionPipelineV2={}, cutoutReactive={}, objectMotionProducer={}, frameGeneration={}",
+                    "MetalFX configured: requested={}, effective={}, scale={}, phases={}, motionPipelineV2={}, cutoutReactive={}, objectMotionProducer={}, frameGeneration={}, reactiveTuning=(edge={}, interior={}, depthCap={}, transparency={}, skyFarPlaneMotion={}, disocclusionCap={}, depthDilation={})",
                     this.config.requestedMode, this.effectiveMode, this.config.scale, this.phaseCount,
                     this.motionPipelineV2Available, this.cutoutReactivePipelineAvailable,
-                    OBJECT_MOTION_PRODUCER_CONNECTED, this.frameGenerationEnabled
+                    objectMotionProducerConnected(), this.frameGenerationEnabled,
+                    this.config.cutoutReactiveEdgeWeight, this.config.cutoutReactiveInteriorWeight,
+                    this.config.depthEdgeReactiveCap, this.config.transparencyReactiveValue,
+                    this.config.skyFarPlaneMotion, this.config.disocclusionReactiveCap,
+                    this.config.mergeDepthDilation
             );
         }
     }
@@ -168,6 +267,20 @@ public final class MetalFxManager {
         if (active == null) {
             active = new MetalFxManager(device);
         }
+    }
+
+    private static boolean objectMotionProducerConnected() {
+        return OBJECT_MOTION_PRODUCER_CONNECTED || OBJECT_MOTION_PRODUCER_OVERRIDE;
+    }
+
+    /**
+     * Records the present mode the surface was last configured with. The
+     * surface can be reconfigured at any time — a video-settings VSync toggle
+     * or a resize both go through it — so this is the only place frame
+     * generation can learn that it no longer presents on the refresh boundary.
+     */
+    public static void observePresentMode(final boolean immediate) {
+        immediatePresentMode = immediate;
     }
 
     public static int sceneWidth(final int displayWidth) {
@@ -201,6 +314,28 @@ public final class MetalFxManager {
         if (manager != null) {
             manager.beginFrameInternal();
         }
+    }
+
+    /**
+     * Negative texture LOD bias for material sampling while the scene renders
+     * below display resolution. Follows the Game Porting Toolkit formula
+     * {@code log2(renderRes / displayRes) - 1.0}; without it, mipmapped
+     * textures (the block atlas) select mips for the low render resolution
+     * and the upscaled image looks soft. Applied by the shader cross compiler
+     * to plain fragment sample calls; single-mip textures are unaffected by
+     * construction, so GUI/text sampling stays exact.
+     */
+    public static float shaderSampleLodBias() {
+        MetalFxManager manager = active;
+        if (manager == null || manager.effectiveMode == MetalFxConfig.Mode.OFF
+                || manager.runtimeDisabled) {
+            return 0.0F;
+        }
+        float scale = manager.config.scale;
+        if (!(scale > 0.0F) || scale >= 1.0F) {
+            return 0.0F;
+        }
+        return (float) (Math.log(scale) / Math.log(2.0)) - 1.0F;
     }
 
     public static Matrix4f prepareSceneProjection(
@@ -288,6 +423,37 @@ public final class MetalFxManager {
                     previousEntityZ
             );
         }
+    }
+
+    public static void setFlickerCaptureFrame(
+            final int frame,
+            final String scenario,
+            final boolean first,
+            final boolean last
+    ) {
+        MetalFxManager manager = active;
+        if (manager != null) {
+            manager.flickerRequest = new FlickerRequest(frame, scenario, first, last);
+            if (first) {
+                // Pin the Halton phase to the start of the sequence so the
+                // series samples the same jitter offsets in every run. Without
+                // this the phase at the series start depends on how many
+                // frames warm-up and terrain settling happened to render,
+                // which moves the metric run to run. Called from the timeline
+                // tick on the render thread, before this frame's encode.
+                manager.phase = 0;
+            }
+        }
+    }
+
+    public static boolean flickerSeriesPending() {
+        MetalFxManager manager = active;
+        return manager != null && manager.flickerCapturePending;
+    }
+
+    public static boolean flickerMetricCompleted(final String scenario) {
+        MetalFxManager manager = active;
+        return manager != null && manager.flickerCompletedScenarios.contains(scenario);
     }
 
     public static int validationCapturesPending() {
@@ -438,10 +604,10 @@ public final class MetalFxManager {
     }
 
     private void beginFrameInternal() {
-        if (frameGenerationSuspendedForGui && !runtimeDisabled && !hasActiveGui()) {
-            frameGenerationSuspendedForGui = false;
+        if (frameGenerationSuspended && !runtimeDisabled && !hasActiveGui() && !immediatePresentMode) {
+            frameGenerationSuspended = false;
             frameGenerationEnabled = true;
-            resetHistoryInternal("GUI closed; frame generation resumed");
+            resetHistoryInternal("frame generation resumed; suspend condition cleared");
         }
         this.sceneFrame = false;
         this.reactiveMaskPrepared = false;
@@ -462,11 +628,7 @@ public final class MetalFxManager {
         long generation = entityGenerations.computeIfAbsent(entity, ignored -> nextEntityGeneration++);
         long objectId = uuid.getMostSignificantBits() ^ Long.rotateLeft(uuid.getLeastSignificantBits(), 1);
         MetalMotionStateStore.ObjectKey key = new MetalMotionStateStore.ObjectKey(objectId, generation);
-        Matrix4f currentObject = new Matrix4f().translation(
-                (float) state.x,
-                (float) state.y,
-                (float) state.z
-        );
+        Matrix4f currentObject = MetalEntityObjectPose.compose(state);
         Matrix4f previousObject = motionStateStore.previous(key);
         motionStateStore.observe(key, currentObject);
         MetalEntityMotionCapture.attachState(
@@ -560,7 +722,7 @@ public final class MetalFxManager {
                     executeInfo.baseVertex(),
                     0
             );
-            MetalEntityMotionCapture.recordMotionDrawEncoded();
+            MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
         }
     }
 
@@ -641,6 +803,11 @@ public final class MetalFxManager {
         }
         warnedInvalidFrame = false;
         this.sceneFrame = true;
+        long sceneFrameStartNanos = System.nanoTime();
+        this.sceneFrameDeltaSeconds = lastSceneFrameStartNanos > 0
+                ? (float) ((sceneFrameStartNanos - lastSceneFrameStartNanos) / 1_000_000_000.0)
+                : 0.0F;
+        this.lastSceneFrameStartNanos = sceneFrameStartNanos;
 
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL) {
             MetalFxMath.pixelJitter(this.pixelJitter, phase, phaseCount);
@@ -735,6 +902,35 @@ public final class MetalFxManager {
                 );
             }
         }
+        if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && sceneFrame
+                && handOverlayPipelineAvailable && motionInputsPrepared
+                && objectMotionTexture != null && objectValidityTexture != null
+                && reactiveTexture != null
+                && renderer.mainRenderTarget().getDepthTexture() instanceof MetalGpuTexture handDepth
+                && handDepth.getWidth(0) == renderWidth
+                && handDepth.getHeight(0) == renderHeight) {
+            // Vanilla clears the reversed-Z depth buffer right before the
+            // first-person pass, so at this point it contains only hand,
+            // held-item, and screen-effect coverage. Those pixels are
+            // camera-locked: stamp zero object motion with full validity so
+            // the merge pass does not apply world reprojection to them.
+            boolean handEncoded = encoder.encodeHandOverlayMotion(
+                    handDepth,
+                    objectMotionTexture,
+                    objectValidityTexture,
+                    reactiveTexture,
+                    renderWidth,
+                    renderHeight,
+                    HAND_OVERLAY_REACTIVE_BOOST
+            );
+            if (config.debug && handEncoded && !loggedHandOverlay) {
+                loggedHandOverlay = true;
+                Metallum.LOGGER.info(
+                        "MetalFX first-person overlay motion prepared: zero-motion validity plus reactive boost {}",
+                        HAND_OVERLAY_REACTIVE_BOOST
+                );
+            }
+        }
         boolean encoded = false;
         boolean historyTransactionEncoded = false;
         if (sceneFrame && renderer.mainRenderTarget().getColorTexture() != null) {
@@ -800,6 +996,7 @@ public final class MetalFxManager {
             historyTransactionEncoded = encoded && effectiveMode == MetalFxConfig.Mode.TEMPORAL;
             if (historyTransactionEncoded && depth != null) {
                 captureValidationFrameIfRequested(color, depth, output);
+                captureFlickerFrameIfRequested(output, depth);
             }
         }
 
@@ -958,6 +1155,318 @@ public final class MetalFxManager {
         return new ValidationReadback(name, texture, buffer, bytes);
     }
 
+    private void captureFlickerFrameIfRequested(
+            final MetalGpuTexture temporalOutput,
+            final MetalGpuTexture depth
+    ) {
+        FlickerRequest requested = this.flickerRequest;
+        this.flickerRequest = null;
+        if (requested == null || cutoutReactiveTexture == null
+                || flickerCompletedScenarios.contains(requested.scenario)) {
+            return;
+        }
+        this.flickerCapturePending = true;
+        ValidationReadback outputReadback = validationReadback("flicker-output", temporalOutput);
+        ValidationReadback coverageReadback = requested.first
+                ? validationReadback("flicker-coverage", cutoutReactiveTexture)
+                : null;
+        // The sky class comes from the same cleared far-plane test the motion
+        // kernels use, so the mask and the shader agree on what "sky" means.
+        ValidationReadback depthReadback = requested.first
+                ? validationReadback("flicker-depth", depth)
+                : null;
+        if (coverageReadback != null) {
+            device.commandEncoder().copyTextureToBuffer(
+                    coverageReadback.texture, coverageReadback.buffer, 0L, () -> { }, 0);
+        }
+        if (depthReadback != null) {
+            device.commandEncoder().copyTextureToBuffer(
+                    depthReadback.texture, depthReadback.buffer, 0L, () -> { }, 0);
+        }
+        device.commandEncoder().copyTextureToBuffer(
+                outputReadback.texture,
+                outputReadback.buffer,
+                0L,
+                () -> finishFlickerCapture(requested, outputReadback, coverageReadback, depthReadback),
+                0
+        );
+    }
+
+    private void finishFlickerCapture(
+            final FlickerRequest requested,
+            final ValidationReadback outputReadback,
+            @Nullable final ValidationReadback coverageReadback,
+            @Nullable final ValidationReadback depthReadback
+    ) {
+        try {
+            byte[] output = readbackBytes(outputReadback);
+            int width = outputReadback.texture.getWidth(0);
+            int height = outputReadback.texture.getHeight(0);
+            if (requested.first) {
+                byte[] coverage = readbackBytes(coverageReadback);
+                byte[] depth = depthReadback == null ? null : readbackBytes(depthReadback);
+                beginFlickerSeries(width, height, coverage, depth);
+            }
+            accumulateFlickerFrame(output, width, height);
+            // Requests already in flight when the series closes must not
+            // rewrite the metric: the JSON is final on the first close.
+            if (requested.last && flickerCompletedScenarios.add(requested.scenario)) {
+                writeFlickerMetrics(requested.scenario);
+            }
+        } catch (IOException | RuntimeException exception) {
+            Metallum.LOGGER.error(
+                    "MetalFX flicker capture failed for frame {} ({})",
+                    requested.frame,
+                    requested.scenario,
+                    exception
+            );
+            // Fail open: the timeline still finishes and the missing JSON (or
+            // this log line) makes the failed measurement obvious in A/B runs.
+            this.flickerCompletedScenarios.add(requested.scenario);
+        } finally {
+            outputReadback.buffer.close();
+            if (coverageReadback != null) {
+                coverageReadback.buffer.close();
+            }
+            if (depthReadback != null) {
+                depthReadback.buffer.close();
+            }
+            this.flickerCapturePending = false;
+        }
+    }
+
+    private static byte[] readbackBytes(final ValidationReadback readback) {
+        ByteBuffer source = readback.buffer.currentStorage()
+                .limit(readback.byteCount)
+                .slice()
+                .order(ByteOrder.nativeOrder());
+        byte[] bytes = new byte[readback.byteCount];
+        source.get(bytes);
+        return bytes;
+    }
+
+    private void beginFlickerSeries(
+            final int width,
+            final int height,
+            final byte[] coverage,
+            @Nullable final byte[] depth
+    ) {
+        this.flickerDisplayWidth = width;
+        this.flickerDisplayHeight = height;
+        this.flickerFramesAccumulated = 0;
+        this.flickerPreviousLuma = null;
+        java.util.Arrays.fill(this.flickerMaskedHistogram, 0L);
+        java.util.Arrays.fill(this.flickerControlHistogram, 0L);
+        java.util.Arrays.fill(this.flickerSkyEdgeHistogram, 0L);
+        java.util.Arrays.fill(this.flickerSkyInteriorHistogram, 0L);
+        // Reversed-Z: the cleared far plane is zero, so an untouched depth
+        // pixel is sky. Same threshold as validDepth() in the motion kernels.
+        boolean[] sky = null;
+        int skyPixels = 0;
+        if (depth != null && depth.length >= renderWidth * renderHeight * 4) {
+            ByteBuffer depthValues = ByteBuffer.wrap(depth).order(ByteOrder.nativeOrder());
+            sky = new boolean[renderWidth * renderHeight];
+            for (int pixel = 0; pixel < renderWidth * renderHeight; pixel++) {
+                float value = depthValues.getFloat(pixel * 4);
+                if (Float.isFinite(value) && value >= 0.0F && value <= 0.00001F) {
+                    sky[pixel] = true;
+                    skyPixels++;
+                }
+            }
+        }
+        // Display pixel -> render pixel (integer scale), masked when any
+        // CUTOUT coverage exists in the 3x3 render neighborhood: this covers
+        // the upscale footprint plus the reactive edge band. The sky-edge
+        // submask additionally requires sky in the same neighborhood.
+        // The sky-interior submask is the complement: sky with no CUTOUT
+        // coverage within a wider radius, so no silhouette contaminates it.
+        boolean[] mask = new boolean[width * height];
+        boolean[] skyEdge = new boolean[width * height];
+        boolean[] skyInterior = new boolean[width * height];
+        int maskPixels = 0;
+        int skyEdgePixels = 0;
+        int skyInteriorPixels = 0;
+        for (int y = 0; y < height; y++) {
+            int renderY = Math.min(renderHeight - 1, y * renderHeight / height);
+            for (int x = 0; x < width; x++) {
+                int renderX = Math.min(renderWidth - 1, x * renderWidth / width);
+                boolean skyNear = sky != null
+                        && hasSkyNeighbor(sky, renderX, renderY, renderWidth, renderHeight, 1);
+                if (hasCutoutCoverageNeighbor(coverage, renderX, renderY, renderWidth, renderHeight, 1)) {
+                    mask[y * width + x] = true;
+                    maskPixels++;
+                    if (skyNear) {
+                        skyEdge[y * width + x] = true;
+                        skyEdgePixels++;
+                    }
+                } else if (skyNear && sky[renderY * renderWidth + renderX]
+                        && !hasCutoutCoverageNeighbor(
+                                coverage, renderX, renderY, renderWidth, renderHeight, 3)) {
+                    skyInterior[y * width + x] = true;
+                    skyInteriorPixels++;
+                }
+            }
+        }
+        this.flickerMask = mask;
+        this.flickerMaskPixels = maskPixels;
+        this.flickerSkyEdgeMask = skyEdge;
+        this.flickerSkyEdgePixels = skyEdgePixels;
+        this.flickerSkyPixels = skyPixels;
+        this.flickerSkyInteriorMask = skyInterior;
+        this.flickerSkyInteriorPixels = skyInteriorPixels;
+    }
+
+    private static boolean hasSkyNeighbor(
+            final boolean[] sky,
+            final int x,
+            final int y,
+            final int width,
+            final int height,
+            final int radius
+    ) {
+        for (int dy = -radius; dy <= radius; dy++) {
+            int sampleY = y + dy;
+            if (sampleY < 0 || sampleY >= height) {
+                continue;
+            }
+            for (int dx = -radius; dx <= radius; dx++) {
+                int sampleX = x + dx;
+                if (sampleX < 0 || sampleX >= width) {
+                    continue;
+                }
+                if (sky[sampleY * width + sampleX]) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private void accumulateFlickerFrame(final byte[] rgba, final int width, final int height) {
+        boolean[] mask = this.flickerMask;
+        boolean[] skyEdge = this.flickerSkyEdgeMask;
+        boolean[] skyInterior = this.flickerSkyInteriorMask;
+        if (mask == null || width != flickerDisplayWidth || height != flickerDisplayHeight
+                || rgba.length < width * height * 4) {
+            throw new IllegalStateException("Flicker capture dimensions changed mid-series");
+        }
+        byte[] luma = new byte[width * height];
+        for (int pixel = 0; pixel < width * height; pixel++) {
+            int r = Byte.toUnsignedInt(rgba[pixel * 4]);
+            int g = Byte.toUnsignedInt(rgba[pixel * 4 + 1]);
+            int b = Byte.toUnsignedInt(rgba[pixel * 4 + 2]);
+            // Integer Rec.709 luma; a channel-order swap would affect both A/B
+            // runs identically and cancel out of the comparison.
+            luma[pixel] = (byte) ((54 * r + 183 * g + 19 * b) >> 8);
+        }
+        byte[] previous = this.flickerPreviousLuma;
+        if (previous != null) {
+            for (int pixel = 0; pixel < width * height; pixel++) {
+                int delta = Math.abs(
+                        Byte.toUnsignedInt(luma[pixel]) - Byte.toUnsignedInt(previous[pixel]));
+                if (mask[pixel]) {
+                    flickerMaskedHistogram[delta]++;
+                    // Sky-edge is a subset of the mask, not a fourth class:
+                    // maskedMeanDelta stays comparable with earlier A/B runs.
+                    if (skyEdge != null && skyEdge[pixel]) {
+                        flickerSkyEdgeHistogram[delta]++;
+                    }
+                } else {
+                    flickerControlHistogram[delta]++;
+                    if (skyInterior != null && skyInterior[pixel]) {
+                        flickerSkyInteriorHistogram[delta]++;
+                    }
+                }
+            }
+        }
+        this.flickerPreviousLuma = luma;
+        this.flickerFramesAccumulated++;
+    }
+
+    private void writeFlickerMetrics(final String scenario) throws IOException {
+        Path root = Path.of(System.getProperty(
+                "metallum.validation.output",
+                "build/metal-validation/minecraft-client-current"
+        )).toAbsolutePath().normalize();
+        Files.createDirectories(root);
+        double maskedMean = histogramMean(flickerMaskedHistogram);
+        int maskedP95 = histogramPercentile(flickerMaskedHistogram, 0.95);
+        double controlMean = histogramMean(flickerControlHistogram);
+        int controlP95 = histogramPercentile(flickerControlHistogram, 0.95);
+        double skyEdgeMean = histogramMean(flickerSkyEdgeHistogram);
+        int skyEdgeP95 = histogramPercentile(flickerSkyEdgeHistogram, 0.95);
+        double skyInteriorMean = histogramMean(flickerSkyInteriorHistogram);
+        int skyInteriorP95 = histogramPercentile(flickerSkyInteriorHistogram, 0.95);
+        String json = String.format(
+                java.util.Locale.ROOT,
+                """
+                {
+                  "scenario": "%s",
+                  "frames": %d,
+                  "displayWidth": %d,
+                  "displayHeight": %d,
+                  "maskPixels": %d,
+                  "maskedMeanDelta": %.6f,
+                  "maskedP95Delta": %d,
+                  "controlMeanDelta": %.6f,
+                  "controlP95Delta": %d,
+                  "skyPixels": %d,
+                  "skyEdgePixels": %d,
+                  "skyEdgeMeanDelta": %.6f,
+                  "skyEdgeP95Delta": %d,
+                  "skyInteriorPixels": %d,
+                  "skyInteriorMeanDelta": %.6f,
+                  "skyInteriorP95Delta": %d
+                }
+                """,
+                scenario, flickerFramesAccumulated, flickerDisplayWidth, flickerDisplayHeight,
+                flickerMaskPixels, maskedMean, maskedP95, controlMean, controlP95,
+                flickerSkyPixels, flickerSkyEdgePixels, skyEdgeMean, skyEdgeP95,
+                flickerSkyInteriorPixels, skyInteriorMean, skyInteriorP95
+        );
+        Files.writeString(root.resolve("flicker-" + scenario + ".json"), json, StandardCharsets.UTF_8);
+        Metallum.LOGGER.info(
+                "MetalFX flicker metric: scenario={} frames={} maskPixels={} maskedMeanDelta={} maskedP95={} controlMeanDelta={} controlP95={} skyPixels={} skyEdgePixels={} skyEdgeMeanDelta={} skyEdgeP95={} skyInteriorPixels={} skyInteriorMeanDelta={} skyInteriorP95={}",
+                scenario, flickerFramesAccumulated, flickerMaskPixels,
+                String.format(java.util.Locale.ROOT, "%.4f", maskedMean), maskedP95,
+                String.format(java.util.Locale.ROOT, "%.4f", controlMean), controlP95,
+                flickerSkyPixels, flickerSkyEdgePixels,
+                String.format(java.util.Locale.ROOT, "%.4f", skyEdgeMean), skyEdgeP95,
+                flickerSkyInteriorPixels,
+                String.format(java.util.Locale.ROOT, "%.4f", skyInteriorMean), skyInteriorP95
+        );
+    }
+
+    /** Mean of an empty histogram is 0, not NaN: the JSON must stay parseable. */
+    private static double histogramMean(final long[] histogram) {
+        long total = 0L;
+        long weighted = 0L;
+        for (int value = 0; value < histogram.length; value++) {
+            total += histogram[value];
+            weighted += histogram[value] * value;
+        }
+        return total == 0L ? 0.0 : (double) weighted / total;
+    }
+
+    private static int histogramPercentile(final long[] histogram, final double percentile) {
+        long total = 0L;
+        for (long count : histogram) {
+            total += count;
+        }
+        if (total == 0L) {
+            return 0;
+        }
+        long threshold = (long) Math.ceil(total * percentile);
+        long cumulative = 0L;
+        for (int value = 0; value < histogram.length; value++) {
+            cumulative += histogram[value];
+            if (cumulative >= threshold) {
+                return value;
+            }
+        }
+        return histogram.length - 1;
+    }
+
     private void finishValidationCapture(
             final Path root,
             final ValidationFrame requested,
@@ -997,7 +1506,8 @@ public final class MetalFxManager {
                     bytesByName.get("reactive"),
                     submittedCurrent,
                     submittedPrevious,
-                    submittedCutoutRadius
+                    submittedCutoutRadius,
+                    producerDiagnostics
             );
             Files.writeString(
                     frameDirectory.resolve("metrics.json"),
@@ -1007,9 +1517,10 @@ public final class MetalFxManager {
             Metallum.LOGGER.info(
                     "Minecraft validation GPU readback frame={} scenario={} validPixels={} "
                             + "depthValidPixels={} disocclusionPixels={} objectDisocclusionPixels={} "
-                            + "cutoutCoveragePixels={} coveredCutoutReactivePixels={} "
-                            + "dilatedCutoutReactivePixels={} cutoutRadius={} "
-                            + "motionMean=({}, {}) expected=({}, {}) error={} producer={}",
+                            + "cutoutCoveragePixels={} cutoutInteriorPixels={} "
+                            + "cutoutInteriorViolations={} cutoutEdgeBandReactivePixels={} cutoutRadius={} "
+                            + "motionMean=({}, {}) expected=({}, {}) error={} "
+                            + "motionSpread=({}, {}) maxAbsMotion={} producer={}",
                     requested.frame,
                     requested.scenario,
                     metrics.validPixels,
@@ -1017,14 +1528,18 @@ public final class MetalFxManager {
                     metrics.disocclusionPixels,
                     metrics.objectDisocclusionPixels,
                     metrics.cutoutCoveragePixels,
-                    metrics.coveredCutoutReactivePixels,
-                    metrics.dilatedCutoutReactivePixels,
+                    metrics.cutoutInteriorPixels,
+                    metrics.cutoutInteriorViolations,
+                    metrics.cutoutEdgeBandReactivePixels,
                     metrics.cutoutRadius,
                     metrics.meanX,
                     metrics.meanY,
                     metrics.expectedX,
                     metrics.expectedY,
                     metrics.error,
+                    metrics.motionSpreadX,
+                    metrics.motionSpreadY,
+                    metrics.maxAbsMotion,
                     producerDiagnostics
             );
             this.validationCapturesCompleted++;
@@ -1058,7 +1573,8 @@ public final class MetalFxManager {
             final byte[] reactive,
             final Matrix4f submittedCurrent,
             final Matrix4f submittedPrevious,
-            final int cutoutRadius
+            final int cutoutRadius,
+            final MetalEntityMotionCapture.Diagnostics producerDiagnostics
     ) {
         int pixelCount = renderWidth * renderHeight;
         if (depth == null || depth.length != pixelCount * Float.BYTES
@@ -1076,6 +1592,16 @@ public final class MetalFxManager {
         double sumX = 0.0;
         double sumY = 0.0;
         int validPixels = 0;
+        // Peak-to-peak extent of the object-motion field over the silhouette.
+        // A rigid translation projects to a near-uniform field, so its spread
+        // stays near zero; a rotation about the object's own axis moves points
+        // by an amount proportional to their offset from that axis, so the
+        // spread is what actually carries the rotation. See the item_spin case
+        // in the pass switch below.
+        double minMotionX = Double.POSITIVE_INFINITY;
+        double maxMotionX = Double.NEGATIVE_INFINITY;
+        double minMotionY = Double.POSITIVE_INFINITY;
+        double maxMotionY = Double.NEGATIVE_INFINITY;
         ByteBuffer motion = ByteBuffer.wrap(objectMotion).order(ByteOrder.nativeOrder());
         for (int pixel = 0; pixel < pixelCount; pixel++) {
             if (Byte.toUnsignedInt(validity[pixel]) < 128) {
@@ -1087,8 +1613,24 @@ public final class MetalFxManager {
                 sumX += x;
                 sumY += y;
                 validPixels++;
+                minMotionX = Math.min(minMotionX, x);
+                maxMotionX = Math.max(maxMotionX, x);
+                minMotionY = Math.min(minMotionY, y);
+                maxMotionY = Math.max(maxMotionY, y);
             }
         }
+        double motionSpreadX = validPixels == 0 ? Double.NaN : maxMotionX - minMotionX;
+        double motionSpreadY = validPixels == 0 ? Double.NaN : maxMotionY - minMotionY;
+        double motionSpread = validPixels == 0
+                ? Double.NaN
+                : Math.max(motionSpreadX, motionSpreadY);
+        double maxAbsMotion = validPixels == 0 ? Double.NaN : Math.max(
+                Math.max(Math.abs(minMotionX), Math.abs(maxMotionX)),
+                Math.max(Math.abs(minMotionY), Math.abs(maxMotionY))
+        );
+        int itemMotionDraws = producerDiagnostics == null
+                ? 0
+                : producerDiagnostics.itemMotionDrawsEncoded();
 
         Vector4f currentClip = new Vector4f(
                 (float) requested.currentEntityX,
@@ -1130,63 +1672,138 @@ public final class MetalFxManager {
             }
         }
         boolean depthContractPassed = depthValidPixels > 0 && disocclusionPixels < pixelCount;
+        // Policy invariants (docs/cutout-shimmer-remediation-2026-07-27.md):
+        // interior CUTOUT pixels must KEEP temporal accumulation (low
+        // reactive) while the edge band still carries a protective bias.
+        // Interior = every in-bounds neighbor within the submitted dilation
+        // radius is covered, mirroring the kernel's window classification.
         int cutoutCoveragePixels = 0;
-        int coveredCutoutReactivePixels = 0;
-        int dilatedCutoutReactivePixels = 0;
+        int cutoutInteriorPixels = 0;
+        int cutoutInteriorViolations = 0;
+        int cutoutEdgeBandReactivePixels = 0;
+        int effectiveRadius = Math.clamp(cutoutRadius, 1, 3);
         for (int pixel = 0; pixel < pixelCount; pixel++) {
             boolean covered = Byte.toUnsignedInt(cutoutCoverage[pixel]) >= 128;
-            boolean markedReactive = Byte.toUnsignedInt(reactive[pixel]) >= 128;
+            int reactiveValue = Byte.toUnsignedInt(reactive[pixel]);
+            int x = pixel % renderWidth;
+            int y = pixel / renderWidth;
             if (covered) {
                 cutoutCoveragePixels++;
-                if (markedReactive) {
-                    coveredCutoutReactivePixels++;
+                if (allCutoutNeighborsCovered(cutoutCoverage, x, y, renderWidth, renderHeight, effectiveRadius)) {
+                    cutoutInteriorPixels++;
+                    // Disoccluded pixels are legitimately fully reactive for
+                    // one frame (the capture frames sit a few frames after a
+                    // scripted scene mutation); the invariant targets the
+                    // standing policy, so those transients are excluded.
+                    if (reactiveValue > INTERIOR_REACTIVE_MAX
+                            && Byte.toUnsignedInt(disocclusion[pixel]) < 128) {
+                        cutoutInteriorViolations++;
+                    }
+                } else if (reactiveValue >= EDGE_REACTIVE_MIN) {
+                    cutoutEdgeBandReactivePixels++;
                 }
-            } else if (markedReactive && hasCutoutCoverageNeighbor(
-                    cutoutCoverage,
-                    pixel % renderWidth,
-                    pixel / renderWidth,
-                    renderWidth,
-                    renderHeight,
-                    cutoutRadius
-            )) {
-                dilatedCutoutReactivePixels++;
+            } else if (reactiveValue >= EDGE_REACTIVE_MIN && hasCutoutCoverageNeighbor(
+                    cutoutCoverage, x, y, renderWidth, renderHeight, effectiveRadius)) {
+                cutoutEdgeBandReactivePixels++;
             }
         }
         boolean passed = switch (requested.scenario) {
             case "occluded_entity" -> depthContractPassed && validPixels < 2_500;
+            // The 3x3 occlusion wall two blocks ahead spans the whole
+            // viewport, so a frame-exact removal legitimately disoccludes
+            // every pixel; requiring disocclusionPixels < pixelCount here
+            // (depthContractPassed) only passed while the prioritized rebuild
+            // raced and landed a frame late with a partial reveal.
             case "revealed_entity" -> validPixels > 2_000
-                    && depthContractPassed
+                    && depthValidPixels > 0
                     && objectDisocclusionPixels > 1_000
                     && Double.isFinite(error)
                     && error <= 0.03;
             case "scene_reset" -> depthContractPassed
                     && validPixels == 0
                     && objectDisocclusionPixels == 0;
+            // A dropped item spinning in place. itemMotionDrawsEncoded is the
+            // core/item subset of motionDrawsEncoded: asserting it is non-zero
+            // is what catches a future regression that drops the core/item
+            // vertex-shader family back out of the motion pipeline, which would
+            // otherwise show up only as a silently unvalidated path.
+            case "item_spin" -> depthContractPassed
+                    && validPixels > OBJECT_MIN_VALID_PIXELS
+                    && itemMotionDraws > 0
+                    && Double.isFinite(motionSpread)
+                    && motionSpread >= OBJECT_MIN_MOTION_SPREAD
+                    && motionSpread >= OBJECT_SPIN_TO_MEAN_RATIO * Math.hypot(meanX, meanY)
+                    && maxAbsMotion <= OBJECT_MAX_MOTION;
+            // A boat turning on the spot. Same rotational envelope, but the
+            // vehicle renders through core/entity, so no core/item assertion.
+            case "vehicle_turn" -> depthContractPassed
+                    && validPixels > OBJECT_MIN_VALID_PIXELS
+                    && Double.isFinite(motionSpread)
+                    && motionSpread >= OBJECT_MIN_MOTION_SPREAD
+                    && motionSpread >= OBJECT_SPIN_TO_MEAN_RATIO * Math.hypot(meanX, meanY)
+                    && maxAbsMotion <= OBJECT_MAX_MOTION;
             case "cutout_leaves", "cutout_grass" -> depthContractPassed
                     && cutoutCoveragePixels > 32
-                    && coveredCutoutReactivePixels == cutoutCoveragePixels
-                    && (cutoutRadius == 0 || dilatedCutoutReactivePixels > 0);
+                    && cutoutInteriorPixels > 0
+                    && cutoutInteriorViolations == 0
+                    && cutoutEdgeBandReactivePixels > 0;
             default -> depthContractPassed
                     && validPixels > 0
                     && Double.isFinite(error)
                     && error <= 0.03;
         };
+        if (Boolean.getBoolean("metallum.validation.lenient")) {
+            // A/B baseline runs with the legacy reactive policy record the
+            // same metrics but must not abort the timeline.
+            passed = true;
+        }
         return new MotionMetrics(
                 validPixels,
                 depthValidPixels,
                 disocclusionPixels,
                 objectDisocclusionPixels,
                 cutoutCoveragePixels,
-                coveredCutoutReactivePixels,
-                dilatedCutoutReactivePixels,
+                cutoutInteriorPixels,
+                cutoutInteriorViolations,
+                cutoutEdgeBandReactivePixels,
                 cutoutRadius,
                 meanX,
                 meanY,
                 expectedX,
                 expectedY,
                 error,
+                motionSpreadX,
+                motionSpreadY,
+                maxAbsMotion,
+                itemMotionDraws,
                 passed
         );
+    }
+
+    private static boolean allCutoutNeighborsCovered(
+            final byte[] coverage,
+            final int x,
+            final int y,
+            final int width,
+            final int height,
+            final int radius
+    ) {
+        for (int offsetY = -radius; offsetY <= radius; offsetY++) {
+            int sampleY = y + offsetY;
+            if (sampleY < 0 || sampleY >= height) {
+                continue;
+            }
+            for (int offsetX = -radius; offsetX <= radius; offsetX++) {
+                int sampleX = x + offsetX;
+                if (sampleX < 0 || sampleX >= width) {
+                    continue;
+                }
+                if (Byte.toUnsignedInt(coverage[sampleY * width + sampleX]) < 128) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static boolean hasCutoutCoverageNeighbor(
@@ -1223,6 +1840,15 @@ public final class MetalFxManager {
     ) {
     }
 
+    /** One frame of the static-camera flicker series (§8 of the remediation doc). */
+    private record FlickerRequest(
+            int frame,
+            String scenario,
+            boolean first,
+            boolean last
+    ) {
+    }
+
     private record ValidationFrame(
             int frame,
             String scenario,
@@ -1234,9 +1860,17 @@ public final class MetalFxManager {
             double previousEntityZ
     ) {
         private boolean shouldCapture() {
+            // Frame 46 is the occlusion-wall removal frame: with prioritized
+            // synchronous section rebuilds the reveal happens on exactly this
+            // frame, and its one-frame disocclusion transient is the signal
+            // being validated.
+            // 164 and 176 are the object-motion acceptance captures, placed 8
+            // frames after their scenario starts so temporal history has
+            // settled; see MetalValidationClient's OBJECT_SCENE_FRAME block.
             return frame == 6 || frame == 12 || frame == 22 || frame == 32
-                    || frame == 42 || frame == 47 || frame == 54 || frame == 62
-                    || frame == 74 || frame == 82;
+                    || frame == 42 || frame == 46 || frame == 54 || frame == 62
+                    || frame == 74 || frame == 82
+                    || frame == 164 || frame == 176;
         }
     }
 
@@ -1246,14 +1880,19 @@ public final class MetalFxManager {
             int disocclusionPixels,
             int objectDisocclusionPixels,
             int cutoutCoveragePixels,
-            int coveredCutoutReactivePixels,
-            int dilatedCutoutReactivePixels,
+            int cutoutInteriorPixels,
+            int cutoutInteriorViolations,
+            int cutoutEdgeBandReactivePixels,
             int cutoutRadius,
             double meanX,
             double meanY,
             double expectedX,
             double expectedY,
             double error,
+            double motionSpreadX,
+            double motionSpreadY,
+            double maxAbsMotion,
+            int itemMotionDraws,
             boolean passed
     ) {
         private String toJson(
@@ -1274,13 +1913,17 @@ public final class MetalFxManager {
                       "disocclusionPixels": %d,
                       "objectDisocclusionPixels": %d,
                       "cutoutCoveragePixels": %d,
-                      "coveredCutoutReactivePixels": %d,
-                      "dilatedCutoutReactivePixels": %d,
+                      "cutoutInteriorPixels": %d,
+                      "cutoutInteriorViolations": %d,
+                      "cutoutEdgeBandReactivePixels": %d,
                       "cutoutReactiveRadius": %d,
                       "meanObjectMotionNdc": [%.9f, %.9f],
                       "expectedObjectMotionNdc": [%.9f, %.9f],
                       "error": %.9f,
                       "tolerance": 0.03,
+                      "objectMotionSpreadNdc": [%.9f, %.9f],
+                      "maxAbsObjectMotionNdc": %.9f,
+                      "itemMotionDrawsEncoded": %d,
                       "historyResetExpected": %s,
                       "passed": %s,
                       "capturePoint": "after temporal encode, before present",
@@ -1296,14 +1939,19 @@ public final class MetalFxManager {
                     disocclusionPixels,
                     objectDisocclusionPixels,
                     cutoutCoveragePixels,
-                    coveredCutoutReactivePixels,
-                    dilatedCutoutReactivePixels,
+                    cutoutInteriorPixels,
+                    cutoutInteriorViolations,
+                    cutoutEdgeBandReactivePixels,
                     cutoutRadius,
                     meanX,
                     meanY,
                     expectedX,
                     expectedY,
                     error,
+                    motionSpreadX,
+                    motionSpreadY,
+                    maxAbsMotion,
+                    itemMotionDraws,
                     requested.scenario.equals("scene_reset"),
                     passed
             );
@@ -1381,13 +2029,22 @@ public final class MetalFxManager {
         this.renderHeight = targetRenderHeight;
         if (uiTarget == null || uiTarget.width != width || uiTarget.height != height) {
             if (uiTarget != null) uiTarget.destroyBuffers();
-            uiTarget = new TextureTarget("MetalFX Native Resolution UI", width, height, true, GpuFormat.RGBA8_UNORM);
+            // Upscaler/frame-generation output targets are the only vanilla
+            // TextureTargets that need MTLTextureUsage.ShaderWrite (MetalFX
+            // writes them from compute). Route the backend-only usage bit
+            // through the creation scope so every other color target keeps
+            // lossless bandwidth compression.
+            device.withExtraTextureUsage(MetalGpuTexture.USAGE_SHADER_WRITE, () ->
+                    uiTarget = new TextureTarget("MetalFX Native Resolution UI", width, height, true, GpuFormat.RGBA8_UNORM)
+            );
             dimensionsChanged = true;
         }
         if (frameGenerationEnabled) {
             if (sceneOutputTarget == null || sceneOutputTarget.width != width || sceneOutputTarget.height != height) {
                 if (sceneOutputTarget != null) sceneOutputTarget.destroyBuffers();
-                sceneOutputTarget = new TextureTarget("MetalFX Scene Output", width, height, false, GpuFormat.RGBA8_UNORM);
+                device.withExtraTextureUsage(MetalGpuTexture.USAGE_SHADER_WRITE, () ->
+                        sceneOutputTarget = new TextureTarget("MetalFX Scene Output", width, height, false, GpuFormat.RGBA8_UNORM)
+                );
                 dimensionsChanged = true;
             }
         } else if (sceneOutputTarget != null) {
@@ -1397,6 +2054,14 @@ public final class MetalFxManager {
         }
         dimensionsChanged |= ensureAuxiliaryTextures();
         if (dimensionsChanged) {
+            // The native scaler cache is keyed by input/output dimensions, so
+            // the entries for the previous size are unreachable from here on.
+            // Dropping them keeps a drag-resize from stranding one fully
+            // initialized MTLFXTemporalScaler (plus its depth history) per
+            // intermediate size for the rest of the session. The next encode
+            // rebuilds the scaler for the new size, which the history reset
+            // below already accounts for.
+            MetalNativeBridge.metallum_metalfx_release_scalers();
             resetHistoryInternal("display or render size changed");
         }
     }
@@ -1446,12 +2111,16 @@ public final class MetalFxManager {
         disocclusionTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
                 "MetalFX Disocclusion R8", usage, GpuFormat.R8_UNORM, renderWidth, renderHeight, 1, 1
         );
-        // Cleared through clearColorTexture (deferred-clear materialization
-        // attaches it as a color target), so RenderTarget usage is required —
-        // Metal API validation aborts otherwise.
+        // The reactive mask is pre-cleared through a render-pass load action
+        // before producers max-merge into it, so it must be a render target.
         reactiveTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
-                "MetalFX Reactive R8", usage | GpuTexture.USAGE_RENDER_ATTACHMENT,
-                GpuFormat.R8_UNORM, renderWidth, renderHeight, 1, 1
+                "MetalFX Reactive R8",
+                usage | GpuTexture.USAGE_RENDER_ATTACHMENT,
+                GpuFormat.R8_UNORM,
+                renderWidth,
+                renderHeight,
+                1,
+                1
         );
         cutoutReactiveTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
                 "MetalFX CUTOUT Coverage R8",
@@ -1605,7 +2274,15 @@ public final class MetalFxManager {
         // owns pending drawables, which produces whole-window flashes and GUI
         // ghosting. Stop it at the transition and use the single-present path.
         if (frameGenerationEnabled && hasActiveGui()) {
-            suspendFrameGenerationForGuiInternal();
+            suspendFrameGenerationInternal("a GUI screen or overlay is active");
+        }
+        // The presenter drives presents from CAMetalDisplayLink, which only
+        // schedules updates on the refresh boundary. With vsync off the layer
+        // no longer honours that boundary, so the generated/real pair loses the
+        // spacing every pacing acceptance run measured; fall back to the
+        // single-present path until VSync is on again.
+        if (frameGenerationEnabled && immediatePresentMode) {
+            suspendFrameGenerationInternal("the surface presents in immediate mode (VSync off)");
         }
         if (!frameGenerationEnabled || runtimeDisabled || !frameUsesUpscaledTarget
                 || sceneOutputTarget == null || uiTarget == null
@@ -1630,6 +2307,7 @@ public final class MetalFxManager {
                 0.05F,
                 frameFarPlane,
                 displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
+                sceneFrameDeltaSeconds,
                 frameResetForPresent
         );
     }
@@ -1639,17 +2317,17 @@ public final class MetalFxManager {
         return minecraft.gui.screen() != null || minecraft.gui.overlay() != null;
     }
 
-    private void suspendFrameGenerationForGuiInternal() {
+    private void suspendFrameGenerationInternal(final String reason) {
         if (!frameGenerationEnabled) {
             return;
         }
         frameGenerationEnabled = false;
-        frameGenerationSuspendedForGui = true;
+        frameGenerationSuspended = true;
         // Keep sceneOutputTarget alive until this frame is submitted. The
         // current frame may already contain an encoded MetalFX write to it.
         MetalNativeBridge.metallum_metalfx_stop_frame_generation();
         if (config.debug) {
-            Metallum.LOGGER.info("MetalFX frame generation paused while GUI screen or overlay is active");
+            Metallum.LOGGER.info("MetalFX frame generation paused while {}", reason);
         }
     }
 
@@ -1666,6 +2344,7 @@ public final class MetalFxManager {
             float nearPlane,
             float farPlane,
             float aspectRatio,
+            float deltaSeconds,
             boolean reset
     ) {
     }

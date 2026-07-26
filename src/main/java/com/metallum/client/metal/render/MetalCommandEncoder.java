@@ -29,15 +29,34 @@ import java.util.OptionalDouble;
 @Environment(EnvType.CLIENT)
 final class MetalCommandEncoder implements CommandEncoderBackend {
     public static final int MAX_SUBMITS_IN_FLIGHT = 3;
+    // Depth MAX_SUBMITS_IN_FLIGHT+1: an action queued during submit N runs at
+    // submit N+3, whose semaphore wait has just confirmed submit N (the last
+    // possible GPU consumer of the queued resource) completed. A depth of 3
+    // would run it at N+2 with only N-1 confirmed, racing pooled reuse and
+    // readback callbacks against in-flight GPU work.
+    static final boolean DEFERRED_DEPTH_STORE =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.deferredStore", "true"));
+    private static final boolean BLIT_BATCH =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.blitBatch", "true"));
     private final MetalDevice device;
     private long currentSubmitIndex = MAX_SUBMITS_IN_FLIGHT;
     private final InFlight[] inFlight = new InFlight[MAX_SUBMITS_IN_FLIGHT];
     private final MemorySegment[] submitSemaphores = new MemorySegment[MAX_SUBMITS_IN_FLIGHT];
-    private final MetalDestructionQueue destroyQueue = new MetalDestructionQueue(MAX_SUBMITS_IN_FLIGHT);
+    private final MetalDestructionQueue destroyQueue = new MetalDestructionQueue(MAX_SUBMITS_IN_FLIGHT + 1);
     private final MetalTransientMemory transientMemory;
     private final Map<MetalGpuTexture, Vector4fc> pendingColorClears = new IdentityHashMap<>();
     private final Map<MetalGpuTexture, Double> pendingDepthClears = new IdentityHashMap<>();
+    /**
+     * S10 split-fence mode: blit (transfer) work signals its own fence so
+     * render encoders can begin vertex work waiting only on transfers, and
+     * defer waiting on prior render output until the fragment stage — the
+     * TBDR overlap the single-fence chain serializes away. Default off; the
+     * off path is byte-identical to the pre-split encoder.
+     */
+    static final boolean SPLIT_FENCE =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.splitFence", "false"));
     private final MemorySegment fence;
+    private final MemorySegment transferFence;
     private final float[] currentViewProjectionBuffer = new float[16];
     private final float[] inverseViewProjectionBuffer = new float[16];
     private final float[] previousViewProjectionBuffer = new float[16];
@@ -49,6 +68,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MTLCommandEncoder currentEncoder;
     private MemorySegment[] renderColorAttachments = new MemorySegment[0];
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
+    // Bumped every time a fresh native encoder is installed. MetalRenderPass
+    // compares generations to know its cached dirty-state no longer matches a
+    // rebuilt encoder (a new MTLRenderCommandEncoder starts with no state).
+    private long encoderGeneration;
+    @Nullable
+    private MetalGpuTexture renderDepthTexture;
+    private boolean renderEncoderDeferredStore;
     private final Long2ObjectOpenHashMap<java.util.ArrayDeque<MemorySegment>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
     private final List<SubmitCallback> currentSubmitCallbacks = new ArrayList<>();
 
@@ -58,6 +84,16 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         fence = MetalNativeBridge.metallum_create_fence(device.metalDeviceHandle());
         if (MetalNativeBridge.isNullHandle(fence)) {
             throw new IllegalStateException("Failed to allocate MTLFence");
+        }
+        if (SPLIT_FENCE) {
+            transferFence = MetalNativeBridge.metallum_create_fence(device.metalDeviceHandle());
+            if (MetalNativeBridge.isNullHandle(transferFence)) {
+                throw new IllegalStateException("Failed to allocate transfer MTLFence");
+            }
+            // Native-side blits (FG input copies) must join the same chain.
+            MetalNativeBridge.metallum_set_transfer_fence(transferFence);
+        } else {
+            transferFence = MemorySegment.NULL;
         }
         for (int slot = 0; slot < MAX_SUBMITS_IN_FLIGHT; slot++) {
             submitSemaphores[slot] = MetalNativeBridge.metallum_create_semaphore();
@@ -77,28 +113,100 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     MTLBlitCommandEncoder blitCommandEncoder() {
+        // Consecutive CPU-source uploads (writeToBuffer/writeToTexture/
+        // copyToBuffer/copyBufferToTexture) share one blit encoder and one
+        // fence wait/update pair. Ops that read GPU-written textures
+        // (copyTextureToBuffer/copyTextureToTexture) call endEncoder() first
+        // so they never join a batch whose ordering they would depend on.
+        if (BLIT_BATCH && currentEncoder instanceof MTLBlitCommandEncoder blit) {
+            return blit;
+        }
         endEncoder();
         MTLBlitCommandEncoder encoder = commandBuffer().makeBlitCommandEncoder();
         encoder.waitForFence(fence);
+        if (SPLIT_FENCE) {
+            // Transfer-chain ordering (WAW/upload sequencing between blits)
+            // no longer flows through the render fence.
+            encoder.waitForFence(transferFence);
+        }
+        encoderGeneration++;
         currentEncoder = encoder;
         return encoder;
     }
 
+    /**
+     * Compute encoders stay on the <b>render</b> fence, in both modes.
+     *
+     * <p>The split only moves the blit/upload chain onto {@code transferFence};
+     * per {@code NativeState.transferFence}'s invariant, the sole encoder on
+     * that chain is the frame-generation input-copy blit, and every other
+     * encoder keeps the render fence. The M6 dependency table's
+     * "compute writes &rarr; render reads" row records the same thing for
+     * Metal 3 (full wait/update on the passed fence), and it is what the
+     * Metal 4 migration translates into the dispatch&rarr;fragment barrier
+     * pair — so putting compute on both chains here would mistranslate later.
+     *
+     * <p>Guarded by {@code metalComputeBackendIntegrationTest}'s
+     * render&rarr;compute&rarr;render / compute&rarr;compute / indirect-args
+     * ordering cases.
+     */
     MTLComputeCommandEncoder computeCommandEncoder() {
         endEncoder();
         MTLComputeCommandEncoder encoder = commandBuffer().makeComputeCommandEncoder();
         encoder.waitForFence(fence);
+        encoderGeneration++;
         currentEncoder = encoder;
         return encoder;
     }
 
+    long encoderGeneration() {
+        return encoderGeneration;
+    }
+
+    /**
+     * Render-encoder fence waits. Split mode narrows by dependency type per
+     * the S10 table: uploads gate vertex fetch, while prior render output is
+     * only consumed from the fragment stage (sampling, attachment loads,
+     * depth test), letting this pass's tiling overlap the previous pass's
+     * fragment work.
+     */
+    private void waitRenderFences(final MTLRenderCommandEncoder encoder) {
+        if (SPLIT_FENCE) {
+            encoder.waitForFence(transferFence, MTLRenderStages.Vertex);
+            encoder.waitForFence(fence, MTLRenderStages.Fragment);
+        } else {
+            encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
+        }
+    }
+
     void endEncoder() {
+        endEncoder(false);
+    }
+
+    private void endEncoder(final boolean incomingClearsSameDepth) {
         if (currentEncoder != null) {
             if (currentEncoder instanceof MTLRenderCommandEncoder renderEncoder) {
-                renderEncoder.updateFence(fence, MTLRenderStages.VertexAndFragment);
+                if (renderEncoderDeferredStore) {
+                    // The descriptor used storeAction=.unknown, so the store
+                    // decision is owed before endEncoding. The depth contents
+                    // are dead when a clear is already pending for the texture
+                    // (any later reader goes through flushPendingClear) or the
+                    // pass breaking this encoder clears the same attachment.
+                    boolean deadDepth = incomingClearsSameDepth
+                            || (renderDepthTexture != null && pendingDepthClears.containsKey(renderDepthTexture));
+                    renderEncoder.setDepthStoreAction(!deadDepth);
+                }
+                // Signal timing is identical either way (the fence fires
+                // after the last listed stage); the split form documents the
+                // consumer contract: prior render output gates fragment work.
+                renderEncoder.updateFence(
+                        fence,
+                        SPLIT_FENCE ? MTLRenderStages.Fragment : MTLRenderStages.VertexAndFragment
+                );
             } else if (currentEncoder instanceof MTLBlitCommandEncoder blitEncoder) {
-                blitEncoder.updateFence(fence);
+                blitEncoder.updateFence(SPLIT_FENCE ? transferFence : fence);
             } else if (currentEncoder instanceof MTLComputeCommandEncoder computeEncoder) {
+                // Render fence in both modes; see computeCommandEncoder().
                 computeEncoder.updateFence(fence);
             }
             currentEncoder.endEncoding();
@@ -106,6 +214,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
         renderColorAttachments = new MemorySegment[0];
         renderDepthAttachment = MemorySegment.NULL;
+        renderDepthTexture = null;
+        renderEncoderDeferredStore = false;
     }
 
     /**
@@ -246,7 +356,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return (MTLRenderCommandEncoder) currentEncoder;
         }
 
-        endEncoder();
+        // The incoming pass clearing the same depth attachment proves the
+        // outgoing encoder's depth store is dead bandwidth.
+        boolean incomingClearsSameDepth = clearDepthEnabled
+                && renderDepthTexture != null
+                && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment);
+        endEncoder(incomingClearsSameDepth);
         MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoderV2(
                 colorAttachments,
                 depthAttachment,
@@ -257,10 +372,15 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 clearDepthEnabled ? 1 : 0,
                 clearDepthValue
         );
-        encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
+        waitRenderFences(encoder);
+        encoderGeneration++;
         currentEncoder = encoder;
         renderColorAttachments = colorAttachments;
         renderDepthAttachment = depthAttachment;
+        renderDepthTexture = depthTextureView == null ? null : (MetalGpuTexture) depthTextureView.texture();
+        renderEncoderDeferredStore = DEFERRED_DEPTH_STORE
+                && renderDepthTexture != null
+                && renderDepthTexture.mtlDepthPixelFormat() != MTLPixelFormat.Invalid;
         return encoder;
     }
 
@@ -427,7 +547,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
     }
 
-    void presentTextureToDrawable(final MemorySegment drawable, final GpuTextureView textureView) {
+    void presentTextureToDrawable(final MemorySegment layer, final GpuTextureView textureView) {
         MetalGpuTexture source = (MetalGpuTexture) textureView.texture();
         MetalFxManager.FrameGenerationInput frameInput = MetalFxManager.frameGenerationInput(source);
         if (frameInput != null) {
@@ -441,7 +561,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             boolean queued = MetalNativeBridge.metallum_metalfx_frame_generation_encode(
                     frameCommandBuffer.nativeHandle(),
                     device.metalDeviceHandle(),
-                    drawable,
+                    layer,
                     frameInput.sceneColor().nativeHandle(),
                     frameInput.uiColor().nativeHandle(),
                     frameInput.depth().nativeHandle(),
@@ -454,6 +574,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     frameInput.nearPlane(),
                     frameInput.farPlane(),
                     frameInput.aspectRatio(),
+                    frameInput.deltaSeconds(),
                     frameInput.reset(),
                     fence
             );
@@ -466,7 +587,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         submitRenderPass();
         endEncoder();
         MTLCommandBuffer commandBuffer = commandBuffer();
-        commandBuffer.encodePresentTextureToDrawable(drawable, source.nativeHandle(), fence);
+        commandBuffer.encodePresentTextureToDrawable(layer, source.nativeHandle(), fence);
     }
 
     boolean clearMotionInputs(
@@ -655,6 +776,37 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         );
     }
 
+    boolean encodeHandOverlayMotion(
+            final MetalGpuTexture handDepth,
+            final MetalGpuTexture objectMotion,
+            final MetalGpuTexture objectValidity,
+            final MetalGpuTexture reactive,
+            final int inputWidth,
+            final int inputHeight,
+            final float reactiveBoost
+    ) {
+        flushPendingClear(handDepth);
+        flushPendingClear(objectMotion);
+        flushPendingClear(objectValidity);
+        flushPendingClear(reactive);
+        submitRenderPass();
+        endEncoder();
+        objectMotion.markContentsDirty();
+        objectValidity.markContentsDirty();
+        reactive.markContentsDirty();
+        return MetalNativeBridge.metallum_metalfx_encode_hand_overlay(
+                commandBuffer().nativeHandle(),
+                handDepth.nativeHandle(),
+                objectMotion.nativeHandle(),
+                objectValidity.nativeHandle(),
+                reactive.nativeHandle(),
+                inputWidth,
+                inputHeight,
+                reactiveBoost,
+                fence
+        );
+    }
+
     boolean encodeTextureCopy(final MetalGpuTexture source, final MetalGpuTexture destination, final boolean linear) {
         flushPendingClear(source);
         submitRenderPass();
@@ -753,7 +905,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 destination.offset(),
                 length
         );
-        endEncoder();
     }
 
     private void orphanWrite(final MetalGpuBuffer buffer, final long offset, final ByteBuffer data) {
@@ -805,7 +956,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 target.offset(),
                 source.length()
         );
-        endEncoder();
     }
 
     @Override
@@ -847,7 +997,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 rowBytes,
                 bytesPerImage
         );
-        endEncoder();
     }
 
     @Override
@@ -886,7 +1035,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 rowBytes,
                 rowBytes * sourceHeight
         );
-        endEncoder();
     }
 
     @Override
@@ -907,6 +1055,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int height
     ) {
         MetalGpuTexture texture = (MetalGpuTexture) source;
+        // Reads a GPU-written texture: never join an upload batch (see
+        // blitCommandEncoder) — a fresh encoder's fence wait covers all prior
+        // encoders including the one that produced the source.
+        endEncoder();
         flushPendingClear(texture);
         MetalGpuBuffer buffer = (MetalGpuBuffer) destination;
         int bytesPerPixel = texture.pixelSize();
@@ -946,6 +1098,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     ) {
         MetalGpuTexture srcTexture = (MetalGpuTexture) source;
         MetalGpuTexture dstTexture = (MetalGpuTexture) destination;
+        // Reads a GPU-written texture: never join an upload batch (see
+        // blitCommandEncoder).
+        endEncoder();
         flushPendingClear(srcTexture);
         flushPendingClearForWrite(dstTexture);
         dstTexture.markContentsDirty();
@@ -974,11 +1129,23 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     boolean awaitSubmitCompletion(final long submitIndex, final long timeoutMs) {
+        long target = submitIndex;
         if (submitIndex == currentSubmitIndex) {
-            throw new IllegalStateException("Cannot wait on a fence for the current submit");
+            if (commandBuffer != null) {
+                // GL fence semantics (glClientWaitSync with the flush bit):
+                // waiting on a fence whose commands were never flushed must
+                // flush them, not fail. Sodium's staging buffer relies on
+                // this when its ring wraps within a single frame of uploads.
+                submit();
+            } else {
+                // Nothing has been encoded into this submit; the fence
+                // covers work already handed to the GPU, and the in-order
+                // queue makes the previous submit the completion witness.
+                target = submitIndex - 1;
+            }
         }
         for (InFlight f : inFlight) {
-            if (f != null && f.index == submitIndex) {
+            if (f != null && f.index == target) {
                 return awaitInFlightCompletion(f, timeoutMs);
             }
         }
@@ -1023,6 +1190,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
         transientMemory.close();
         device.queueResourceRelease(fence);
+        if (SPLIT_FENCE) {
+            // Drop Swift's retained reference before the Java owner releases.
+            MetalNativeBridge.metallum_set_transfer_fence(MemorySegment.NULL);
+            device.queueResourceRelease(transferFence);
+        }
         destroyQueue.close();
         for (java.util.ArrayDeque<MemorySegment> bucket : dynamicBackingPool.values()) {
             for (MemorySegment handle : bucket) {
@@ -1081,7 +1253,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 depthClear != null ? 1 : 0,
                 depthClear != null ? depthClear : 1.0
         );
-        encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
+        waitRenderFences(encoder);
+        encoderGeneration++;
         currentEncoder = encoder;
         texture.recordMaterializedClear(colorClear, depthClear);
     }

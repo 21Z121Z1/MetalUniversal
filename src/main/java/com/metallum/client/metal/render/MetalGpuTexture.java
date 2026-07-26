@@ -16,6 +16,13 @@ import java.lang.foreign.MemorySegment;
 @Environment(EnvType.CLIENT)
 final class MetalGpuTexture extends GpuTexture {
     static final int USAGE_SHADER_WRITE = 1 << 5;
+    // Minimal usage flags keep Apple GPU lossless bandwidth compression alive:
+    // MTLTextureUsage.ShaderWrite disables it on pre-M5 GPUs, so it is only
+    // set for textures that explicitly request USAGE_SHADER_WRITE (MetalFX
+    // outputs and compute-written aux textures), never blanket-applied to
+    // every color render target.
+    private static final boolean MINIMAL_USAGE =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.minimalTextureUsage", "true"));
     private final MetalDevice device;
     private final MTLPixelFormat mtlPixelFormat;
     private boolean closed;
@@ -141,10 +148,15 @@ final class MetalGpuTexture extends GpuTexture {
         if ((usage & GpuTexture.USAGE_RENDER_ATTACHMENT) != 0) {
             result |= MTLTextureUsage.RenderTarget.value;
             result |= MTLTextureUsage.ShaderRead.value;
-            // Color render targets are also used as MetalFX output targets.
-            // Depth attachments must not receive ShaderWrite, because Metal
-            // does not permit storage writes to every depth format.
-            if (!this.mtlPixelFormat.hasStencil() && this.mtlPixelFormat != MTLPixelFormat.Depth16Unorm
+            // Legacy path (kill switch only): blanket ShaderWrite on color
+            // attachments because MetalFX outputs used to rely on it. The
+            // minimal-usage path instead requires MetalFX output targets to
+            // carry USAGE_SHADER_WRITE explicitly (MetalDevice
+            // withExtraTextureUsage scope around their creation). Depth
+            // attachments must not receive ShaderWrite, because Metal does
+            // not permit storage writes to every depth format.
+            if (!MINIMAL_USAGE
+                    && !this.mtlPixelFormat.hasStencil() && this.mtlPixelFormat != MTLPixelFormat.Depth16Unorm
                     && this.mtlPixelFormat != MTLPixelFormat.Depth32Float) {
                 result |= MTLTextureUsage.ShaderWrite.value;
             }

@@ -60,6 +60,7 @@ final class MetalRenderPass implements RenderPassBackend {
     private boolean scissorDirty = true;
     private boolean vertexBuffersDirty = true;
     private boolean pipelineDirty = true;
+    private long boundEncoderGeneration = -1L;
 
     MetalRenderPass(
             final MetalDevice device,
@@ -417,6 +418,16 @@ final class MetalRenderPass implements RenderPassBackend {
         );
         clearColors = null;
         clearDepthEnabled = false;
+        long generation = commandEncoder.encoderGeneration();
+        if (generation != boundEncoderGeneration) {
+            // A rebuilt native encoder starts with no state; force a full
+            // rebind. The pipelineDirty branch of bindDrawState also refills
+            // dirtyDescriptorMask with the pipeline's full resource mask.
+            boundEncoderGeneration = generation;
+            pipelineDirty = true;
+            scissorDirty = true;
+            vertexBuffersDirty = true;
+        }
         return encoder;
     }
 

@@ -70,7 +70,7 @@ private func check(_ condition: @autoclosure () -> Bool, _ message: String) thro
 
 private func checkNear(_ actual: Float, _ expected: Float, _ tolerance: Float, _ label: String) throws {
     try check(actual.isFinite && abs(actual - expected) <= tolerance,
-              "(label): expected (expected), got (actual)")
+              "\(label): expected \(expected), got \(actual)")
 }
 
 private func makeTexture(
@@ -89,7 +89,7 @@ private func makeTexture(
     descriptor.storageMode = .shared
     descriptor.usage = [.renderTarget, .shaderRead]
     guard let texture = device.makeTexture(descriptor: descriptor) else {
-        try fail("could not allocate (label)")
+        try fail("could not allocate \(label)")
     }
     texture.label = label
     return texture
@@ -103,7 +103,7 @@ private func makePipeline(
 ) throws -> MTLRenderPipelineState {
     guard let vertex = library.makeFunction(name: "mrt_smoke_vs"),
           let fragment = library.makeFunction(name: fragmentName) else {
-        try fail("missing MSL entry point for (fragmentName)")
+        try fail("missing MSL entry point for \(fragmentName)")
     }
     let descriptor = MTLRenderPipelineDescriptor()
     descriptor.vertexFunction = vertex
@@ -116,7 +116,7 @@ private func makePipeline(
     do {
         return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
-        try fail("could not create (fragmentName) pipeline: (error)")
+        try fail("could not create \(fragmentName) pipeline: \(error)")
     }
 }
 
@@ -128,7 +128,7 @@ private func render(
     label: String
 ) throws {
     guard let commandBuffer = queue.makeCommandBuffer() else {
-        try fail("could not allocate (label) command buffer")
+        try fail("could not allocate \(label) command buffer")
     }
     commandBuffer.label = label
     let descriptor = MTLRenderPassDescriptor()
@@ -140,7 +140,7 @@ private func render(
             continue
         }
         guard let attachment = descriptor.colorAttachments[index] else {
-            try fail("Metal did not provide a color attachment descriptor for slot (index)")
+            try fail("Metal did not provide a color attachment descriptor for slot \(index)")
         }
         attachment.texture = texture
         if let clearColor = clearColors[index] {
@@ -152,7 +152,7 @@ private func render(
         attachment.storeAction = .store
     }
     guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
-        try fail("could not create (label) render encoder")
+        try fail("could not create \(label) render encoder")
     }
     encoder.label = label
     let width = attachments.compactMap { $0?.width }.first ?? 0
@@ -171,7 +171,7 @@ private func render(
     commandBuffer.commit()
     commandBuffer.waitUntilCompleted()
     try check(commandBuffer.status == .completed,
-              "(label) failed: (String(describing: commandBuffer.error))")
+              "\(label) failed: \(String(describing: commandBuffer.error))")
 }
 
 private func readRGBA8(_ texture: MTLTexture) -> [UInt8] {
@@ -206,7 +206,7 @@ private func runSmokeTest() throws {
     do {
         library = try device.makeLibrary(source: shaderSource, options: nil)
     } catch {
-        try fail("could not compile MRT smoke MSL: (error)")
+        try fail("could not compile MRT smoke MSL: \(error)")
     }
 
     let width = 8
@@ -235,7 +235,7 @@ private func runSmokeTest() throws {
 
     let rgba = readRGBA8(color0)
     try check(rgba[0] == 64 && rgba[1] == 128 && rgba[2] == 191 && rgba[3] == 255,
-              "RGBA8 readback mismatch: (rgba)")
+              "RGBA8 readback mismatch: \(rgba)")
     let (motionX, motionY) = readRG16Float(motion)
     try checkNear(motionX, -0.25, 0.01, "RG16_FLOAT X")
     try checkNear(motionY, 0.50, 0.01, "RG16_FLOAT Y")
@@ -262,7 +262,7 @@ private func runSmokeTest() throws {
     )
     let nullRGBA = readRGBA8(nullColor)
     try check(nullRGBA[0] == 191 && nullRGBA[1] == 64 && nullRGBA[2] == 128 && nullRGBA[3] == 255,
-              "null-slot RGBA8 readback mismatch: (nullRGBA)")
+              "null-slot RGBA8 readback mismatch: \(nullRGBA)")
     try checkNear(readR8(nullValidity), 0.25, 0.01, "null-slot R8 validity")
 
     print("MRT smoke passed: full slots [RGBA8, RG16_FLOAT, R8_UNORM], preserved null slot [RGBA8, unused, R8_UNORM]")
@@ -271,6 +271,6 @@ private func runSmokeTest() throws {
 do {
     try runSmokeTest()
 } catch {
-    fputs("MRT smoke failed: (error)\n", stderr)
+    fputs("MRT smoke failed: \(error)\n", stderr)
     exit(1)
 }
