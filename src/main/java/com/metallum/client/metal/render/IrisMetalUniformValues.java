@@ -127,22 +127,37 @@ final class IrisMetalUniformValues implements AutoCloseable {
      * the pass before the first {@link #updateFrame} still binds real values.
      */
     @Nullable
-    GpuBufferSlice slice(final MetalDevice device, final IrisMetalPipelineOverrides.TerrainKind kind) {
+    GpuBufferSlice slice(final IrisMetalPipelineOverrides.TerrainKind kind) {
         if (this.closed) {
             return null;
         }
         for (Block block : this.blocks) {
-            if (block.kind != kind) {
-                continue;
+            if (block.kind == kind && block.buffer != null) {
+                return block.buffer.slice();
             }
-            boolean fresh = block.buffer == null;
-            block.allocate(device);
-            if (fresh) {
-                upload(block, sampleFrame());
-            }
-            return block.buffer.slice();
         }
         return null;
+    }
+
+    /**
+     * Allocates and fills every registered block. Must run outside any encoder
+     * — see {@link IrisMetalPipelineOverrides#updateFrame()}.
+     */
+    void prewarm(final MetalDevice device) {
+        if (this.closed || this.blocks.isEmpty()) {
+            return;
+        }
+        Frame frame = null;
+        for (Block block : this.blocks) {
+            if (block.buffer != null) {
+                continue;
+            }
+            block.allocate(device);
+            if (frame == null) {
+                frame = sampleFrame();
+            }
+            upload(block, frame);
+        }
     }
 
     /**

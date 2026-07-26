@@ -49,6 +49,7 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -71,6 +72,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 @EnabledOnOs(OS.MAC)
 final class MetalIrisSodiumTerrainTest {
     private MetalDevice device;
+    /** Cleared per pack; the pre-prewarm guard is only meaningful once. */
+    private boolean prewarmed;
     private final List<String> notes = new ArrayList<>();
 
     @BeforeEach
@@ -131,6 +134,7 @@ final class MetalIrisSodiumTerrainTest {
             ShaderPack pack = loadPack(packName, shaders);
             ProgramSet set = pack.getProgramSet(new NamespacedId("minecraft", "overworld"));
 
+            this.prewarmed = false;
             IrisMetalPipelineOverrides.Instance instance =
                     IrisMetalPipelineOverrides.activate(set, new Object2ObjectOpenHashMap<>());
             try {
@@ -206,6 +210,24 @@ final class MetalIrisSodiumTerrainTest {
             final MetalCompiledRenderPipeline compiled
     ) {
         Map<String, MetalRenderPass.TextureViewAndSampler> boundBySodium = Map.of();
+
+        // Regression guard for handoff §6 iteration 5: before prewarm, the
+        // draw-path resolvers must be pure lookups. Allocating or uploading
+        // there would end the live render encoder and crash the next binding
+        // write, which is exactly how the first in-world run died. Only
+        // meaningful before the first prewarm, hence once per pack.
+        if (!this.prewarmed) {
+            assertNull(IrisMetalPipelineOverrides.fallbackTexture(device, compiled, "noisetex", boundBySodium),
+                    packName + " " + kind + ": fallbackTexture allocated on the draw path before prewarm");
+            assertNull(IrisMetalPipelineOverrides.fallbackUniform(
+                            device, compiled, MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                    packName + " " + kind + ": fallbackUniform allocated on the draw path before prewarm");
+            this.prewarmed = true;
+        }
+
+        // Everything the draw path needs is created here, off the encoder.
+        IrisMetalPipelineOverrides.updateFrame();
+
         for (MetalCompiledRenderPipeline.ResourceBinding binding : compiled.resources()) {
             if (SODIUM_SUPPLIED_RESOURCES.contains(binding.name())) {
                 continue;

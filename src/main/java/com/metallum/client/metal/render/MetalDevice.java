@@ -204,7 +204,22 @@ final class MetalDevice implements GpuDeviceBackend {
                 : null;
         this.commandEncoder = new MetalCommandEncoder(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
+        current = this;
         MetalFxManager.initialize(this);
+    }
+
+    /**
+     * The live Metal device, or {@code null} before creation / after close.
+     *
+     * <p>{@code RenderSystem.getDevice()} hands back a {@code GpuDevice}, which
+     * this class does not implement (it is a {@code GpuDeviceBackend}), so there
+     * is otherwise no way for code outside the render-pass call chain to reach
+     * the device. Needed by callers that must allocate GPU resources at a point
+     * where no encoder is running — see
+     * {@link IrisMetalPipelineOverrides#updateFrame()}.
+     */
+    static @Nullable MetalDevice current() {
+        return current;
     }
 
     @Override
@@ -415,8 +430,13 @@ final class MetalDevice implements GpuDeviceBackend {
         }
     }
 
+    private static volatile @Nullable MetalDevice current;
+
     @Override
     public void close() {
+        if (current == this) {
+            current = null;
+        }
         this.waitForSubmittedGpuWork();
         this.commandEncoder.close();
         if (this.prewarmExecutor != null) {

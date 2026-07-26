@@ -120,9 +120,16 @@ final class IrisMetalPipelineOverrides {
     /** Per-frame uniform refresh; driven by {@link MetalWorldRenderingPipeline#beginLevelRendering()}. */
     static void updateFrame() {
         Instance instance = active;
-        if (instance != null) {
-            instance.uniformValues.updateFrame();
+        if (instance == null) {
+            return;
         }
+        // Every GPU resource the draw path may need is created and uploaded
+        // HERE, not on demand in pushDescriptor. Allocating or uploading while
+        // a render encoder is live ends that encoder (writeToTexture /
+        // writeToBuffer / clearDepthTexture all open a blit encoder), and the
+        // caller then writes into a closed handle — see handoff §6 iteration 5.
+        instance.prewarm(MetalDevice.current());
+        instance.uniformValues.updateFrame();
     }
 
     /**
@@ -442,7 +449,12 @@ final class IrisMetalPipelineOverrides {
             if (alias != null) {
                 return alias;
             }
-            IrisMetalPlaceholderTextures textures = placeholders(device);
+            IrisMetalPlaceholderTextures textures = this.placeholders;
+            if (textures == null) {
+                // Not prewarmed yet: creating them now would kill the live
+                // encoder. Fall through to the normal missing-resource error.
+                return null;
+            }
             boolean shadow = isShadowSampler(this.compiledKinds.get(pipeline), name);
             if (this.reportedPlaceholders.add(name)) {
                 Metallum.LOGGER.info(
@@ -466,13 +478,19 @@ final class IrisMetalPipelineOverrides {
             return false;
         }
 
-        private IrisMetalPlaceholderTextures placeholders(final MetalDevice device) {
-            IrisMetalPlaceholderTextures existing = this.placeholders;
-            if (existing == null) {
-                existing = new IrisMetalPlaceholderTextures(device);
-                this.placeholders = existing;
+        /**
+         * Creates everything the draw path will need. Must run outside any
+         * encoder; {@link #updateFrame()} calls it from
+         * {@code beginLevelRendering}.
+         */
+        private void prewarm(final @Nullable MetalDevice device) {
+            if (this.closed || device == null) {
+                return;
             }
-            return existing;
+            if (this.placeholders == null) {
+                this.placeholders = new IrisMetalPlaceholderTextures(device);
+            }
+            this.uniformValues.prewarm(device);
         }
 
         private @Nullable GpuBufferSlice resolveUniform(
@@ -482,7 +500,7 @@ final class IrisMetalPipelineOverrides {
                 return null;
             }
             TerrainKind kind = this.compiledKinds.get(pipeline);
-            return kind == null ? null : this.uniformValues.slice(device, kind);
+            return kind == null ? null : this.uniformValues.slice(kind);
         }
 
         /** Offline-gate hook: the bytes last written for a kind's uniform block. */

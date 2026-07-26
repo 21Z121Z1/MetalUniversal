@@ -383,6 +383,41 @@ java.lang.IllegalStateException: MTLRenderCommandEncoder is closed
 **判定**:S7 **未通过**(崩溃),但缺口 2「Sodium 几何走 Iris shader」的关键未知项已经消除
 ——覆盖确实会被命中并用于绘制。剩下的是这个生命周期 bug,不是设计问题。
 
+### 迭代 6 — 惰性分配已移出绘制路径,编码器崩溃消失(2026-07-27)
+
+按迭代 5 的四步做完:
+1. `MetalDevice.current()` 静态当前设备引用(构造器记、`close()` 清)。这是唯一缺口——
+   `RenderSystem.getDevice()` 返回 `GpuDevice`,而 `MetalDevice` 实现的是 `GpuDeviceBackend`,
+   此前没有任何途径在渲染调用链之外拿到设备。
+2. `IrisMetalPipelineOverrides.updateFrame()` 里做 `prewarm(MetalDevice.current())`:
+   placeholder 纹理创建 + uniform buffer 分配与首次上传,全部在 `beginLevelRendering`
+   (编码器之外)完成。
+3. `resolveTexture` / `resolveUniform` / `IrisMetalUniformValues.slice` 变成**纯查表**:
+   没预热就返回 null,由调用方抛原有的缺资源异常,绝不在绘制期分配。
+4. 离线门加防回归断言:预热前调 `fallbackTexture`/`fallbackUniform` 必须返回 null
+   且不创建资源(每个 pack 断言一次——预热后这条自然不再成立)。
+
+**第二次 S7 冒烟结果**:
+```
+compiling terrain override CUTOUT for sodium:pipeline/cutout_terrain
+pack sampler 'shadowtex0'  → 1x1 shadow placeholder
+pack sampler 'shadowcolor0'→ 1x1 colour placeholder
+pack sampler 'shadowtex1'  → 1x1 shadow placeholder
+pack sampler 'noisetex'    → 1x1 colour placeholder
+compiling terrain override SOLID  for sodium:pipeline/solid_terrain
+terrain TRANSLUCENT writes DRAWBUFFERS [0,1] ... staying native   ← 预期,待 S6b
+```
+- **solid + cutout 两个覆盖都编译并绑定成功**;
+- **无 `Missing sampler` / `Missing uniform` / `Missing texel buffer`**;
+- **无 `MTLRenderCommandEncoder is closed`,本次运行未产生 crash-report**
+  (最新的 crash-report 时间戳是上一轮 06:31,不是本轮 06:38);
+- 无 `CapturedRenderingState still holds identity matrices` 告警 → S4 的矩阵**不是**单位阵。
+
+**仍未完成的判读**:没有截图对照 vanilla,也没有观察到持续渲染(本轮进程在我这侧的
+等待窗口结束时已退出,退出原因未确证——日志干净收尾于 TRANSLUCENT 那条 WARN,
+既无崩溃栈也无 `Stopping!`)。所以**「画面出现 pack 着色」这一条仍未验证**,
+S7 判定维持未通过。下一轮:重跑并在世界里停留 90s,截图与 vanilla 对照。
+
 ## 5. 风险与预案
 
 | 风险 | 信号 | 预案 |
