@@ -40,9 +40,18 @@ public abstract class IrisBootstrapCompatMixin {
         }
     }
 
+    /**
+     * With the semantic layer active this must NOT be cancelled: the whole
+     * point of B2-1 is that Iris parses a real pack, so
+     * {@code IrisMetalPipelineOverrides} can translate its
+     * {@code gbuffers_terrain} programs. Pack loading itself is CPU-side
+     * (zip/properties/preprocessor); the only GL it reaches is
+     * {@code StandardMacros}, which {@link GlStateManagerCompatMixin} and
+     * {@link IrisRenderSystemCompatMixin} answer with pinned constants.
+     */
     @Inject(method = "loadShaderpack", at = @At("HEAD"), cancellable = true)
     private static void metallum$keepPackUnloaded(final CallbackInfo ci) {
-        if (MetalIrisCompat.holdIrisDormant()) {
+        if (MetalIrisCompat.holdIrisDormant() && !MetalIrisCompat.semanticLayerEnabled()) {
             ci.cancel();
         }
     }

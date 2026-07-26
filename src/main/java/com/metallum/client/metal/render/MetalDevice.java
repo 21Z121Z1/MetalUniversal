@@ -158,7 +158,10 @@ final class MetalDevice implements GpuDeviceBackend {
         if (shaderSource != null) {
             this.activeShaderSource = shaderSource;
         }
-        return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, effectiveSource));
+        return this.compiledPipelines.computeIfAbsent(pipeline, p -> {
+            MetalCompiledRenderPipeline override = IrisMetalPipelineOverrides.tryCompile(this, p, effectiveSource);
+            return override != null ? override : MetalCrossShaderCompiler.compile(this, p, effectiveSource);
+        });
     }
 
     @Override
@@ -258,7 +261,10 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {
-        return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, this.activeShaderSource));
+        return this.compiledPipelines.computeIfAbsent(pipeline, p -> {
+            MetalCompiledRenderPipeline override = IrisMetalPipelineOverrides.tryCompile(this, p, this.activeShaderSource);
+            return override != null ? override : MetalCrossShaderCompiler.compile(this, p, this.activeShaderSource);
+        });
     }
 
     IntermediaryShaderModule getOrCompileShader(final Identifier id, final ShaderType type, final ShaderDefines defines, final ShaderSource shaderSource) {

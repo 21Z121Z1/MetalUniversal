@@ -82,7 +82,7 @@ final class MetalIrisShaderCompiler {
     private static final Pattern UNIFORM_STATEMENT_PATTERN = Pattern.compile("(?m)^[ \\t]*uniform\\b([^;{}]*);");
     private static final Pattern OPAQUE_TYPE_PATTERN = Pattern.compile("[iu]?(sampler|image|texture)\\w*|atomic_uint");
     private static final Set<String> PRECISION_QUALIFIERS = Set.of("lowp", "mediump", "highp");
-    private static final String UNIFORM_BLOCK_NAME = "MetallumIrisUniforms";
+    static final String UNIFORM_BLOCK_NAME = "MetallumIrisUniforms";
     /**
      * Identifiers that are legal in GL-dialect GLSL but collide with keywords
      * further down the chain, seen in real packs: {@code sampler} is a
@@ -318,10 +318,35 @@ final class MetalIrisShaderCompiler {
 
     static WrappedGlsl wrapLooseUniforms(final String glsl) {
         String src = renameHostileIdentifiers(stripComments(glsl));
+        LooseExtraction extraction = extractLooseUniforms(src);
+        List<LooseUniform> deduped = dedupeByName(List.of(extraction.uniforms()));
+        if (deduped.isEmpty()) {
+            return new WrappedGlsl(src, List.of());
+        }
+        String out = insertUniformBlock(extraction.body(), renderUniformBlock(deduped));
+        return new WrappedGlsl(out, deduped.stream().map(LooseUniform::name).toList());
+    }
+
+    /** One loose default-block uniform declarator, initializer already dropped. */
+    private record LooseUniform(String type, String name, String arraySuffix) {
+        String glslDeclaration() {
+            return type + " " + name + arraySuffix;
+        }
+    }
+
+    private record LooseExtraction(String body, List<LooseUniform> uniforms) {
+    }
+
+    /**
+     * Removes every non-opaque loose uniform statement from {@code src}
+     * (already comment-stripped and hostile-renamed), reporting the removed
+     * declarators in source order. Opaque (sampler/image) uniforms stay in
+     * the body.
+     */
+    private static LooseExtraction extractLooseUniforms(final String src) {
         Matcher matcher = UNIFORM_STATEMENT_PATTERN.matcher(src);
         StringBuilder body = new StringBuilder(src.length());
-        List<String> members = new ArrayList<>();
-        Set<String> memberNames = new LinkedHashSet<>();
+        List<LooseUniform> uniforms = new ArrayList<>();
         int last = 0;
         while (matcher.find()) {
             String statement = matcher.group(1).trim();
@@ -335,39 +360,54 @@ final class MetalIrisShaderCompiler {
             }
             String type = tokens.get(typeIndex);
             if (OPAQUE_TYPE_PATTERN.matcher(type).matches()) {
-                continue; // samplers/images stay loose; shaderc auto-binds them
+                continue; // samplers/images stay loose; binding assignment happens downstream
             }
             int declaratorsStart = statement.indexOf(type) + type.length();
             String declarators = statement.substring(declaratorsStart);
             body.append(src, last, matcher.start());
             last = matcher.end();
             for (String declarator : splitTopLevel(declarators)) {
-                String member = parseDeclarator(type, declarator);
-                if (member == null) {
+                LooseUniform uniform = parseLooseDeclarator(type, declarator);
+                if (uniform == null) {
                     throw new IllegalStateException("Cannot parse uniform declarator '" + declarator + "' (type " + type + ")");
                 }
-                String memberName = member.substring(member.indexOf(' ') + 1).replaceAll("\\[.*", "");
-                if (memberNames.add(memberName)) {
-                    members.add(member);
+                uniforms.add(uniform);
+            }
+        }
+        body.append(src, last, src.length());
+        return new LooseExtraction(body.toString(), uniforms);
+    }
+
+    /** First declaration wins; later same-name declarations must agree on type and arrayness. */
+    private static List<LooseUniform> dedupeByName(final List<List<LooseUniform>> stageUniformLists) {
+        Map<String, LooseUniform> byName = new java.util.LinkedHashMap<>();
+        for (List<LooseUniform> stage : stageUniformLists) {
+            for (LooseUniform uniform : stage) {
+                LooseUniform previous = byName.putIfAbsent(uniform.name(), uniform);
+                if (previous != null
+                        && (!previous.type().equals(uniform.type()) || !previous.arraySuffix().equals(uniform.arraySuffix()))) {
+                    throw new IllegalStateException(
+                            "Uniform '" + uniform.name() + "' declared as " + previous.glslDeclaration()
+                                    + " and " + uniform.glslDeclaration() + " across stages"
+                    );
                 }
             }
         }
-        if (members.isEmpty()) {
-            return new WrappedGlsl(src, List.of());
-        }
-        body.append(src, last, src.length());
+        return List.copyOf(byName.values());
+    }
 
+    private static String renderUniformBlock(final List<LooseUniform> members) {
         StringBuilder block = new StringBuilder("layout(std140) uniform " + UNIFORM_BLOCK_NAME + " {\n");
-        for (String member : members) {
-            block.append("    ").append(member).append(";\n");
+        for (LooseUniform member : members) {
+            block.append("    ").append(member.glslDeclaration()).append(";\n");
         }
         block.append("};\n");
+        return block.toString();
+    }
 
-        String rewritten = body.toString();
-        int insertAt = directivePreludeEnd(rewritten);
-        String out = rewritten.substring(0, insertAt) + block + rewritten.substring(insertAt);
-        List<String> names = new ArrayList<>(memberNames);
-        return new WrappedGlsl(out, List.copyOf(names));
+    private static String insertUniformBlock(final String body, final String block) {
+        int insertAt = directivePreludeEnd(body);
+        return body.substring(0, insertAt) + block + body.substring(insertAt);
     }
 
     /** First few whitespace-separated identifiers of a declaration head. */
@@ -400,15 +440,15 @@ final class MetalIrisShaderCompiler {
         return parts;
     }
 
-    /** {@code name[expr] = init} -> {@code "type name[expr]"}; initializers dropped. */
+    /** {@code name[expr] = init} -> ({@code type}, {@code name}, {@code [expr]}); initializers dropped. */
     @Nullable
-    private static String parseDeclarator(final String type, final String declarator) {
+    private static LooseUniform parseLooseDeclarator(final String type, final String declarator) {
         Matcher m = Pattern.compile("^\\s*([A-Za-z_]\\w*)\\s*((?:\\[[^\\]]*\\]\\s*)*)").matcher(declarator);
         if (!m.find() || m.group(1).isEmpty()) {
             return null;
         }
         String arrays = m.group(2).replaceAll("\\s+", "");
-        return type + " " + m.group(1) + arrays;
+        return new LooseUniform(type, m.group(1), arrays);
     }
 
     /** Index just past the leading run of blank / preprocessor-directive lines. */
@@ -572,6 +612,344 @@ final class MetalIrisShaderCompiler {
     private static void checkSpvc(final String name, final StageKind kind, final int result, final String stage) {
         if (result != Spvc.SPVC_SUCCESS) {
             throw new TranslationException(name, PHASE_SPIRV_TO_MSL, kind, stage + " -> " + result);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // B2-1: paired-stage linking for the stock pipeline compile chain
+    // ------------------------------------------------------------------
+    //
+    // The B2-2 matrix above compiles each stage in isolation (device-library
+    // proof). Executable PSOs instead go through the *stock* chain
+    // (vanilla GlslCompiler -> IntermediaryShaderModule.rebind -> Spvc ->
+    // MetalCompiledRenderPipeline), which pairs varyings by name and assigns
+    // bindings from the RenderPipeline's BindGroupLayout. This lane therefore
+    // stops at GLSL and reports the metadata the synthetic RenderPipeline
+    // needs: the unified std140 uniform block (one identical text in both
+    // stages — per-stage blocks would alias the same binding with different
+    // layouts), the sampler/UBO names for the bind-group layout, and the
+    // pack's DRAWBUFFERS mapping for the MRT color-target list.
+
+    static final String PHASE_LINK = "pair-link";
+
+    /** std140 member of the unified {@code MetallumIrisUniforms} block. */
+    record UniformMember(String type, String name, int arrayCount, int offset, int byteSize) {
+    }
+
+    record SamplerDecl(String name, String glslType) {
+    }
+
+    record GlslProgram(
+            String name,
+            String vertexPatched,
+            String fragmentPatched,
+            String vertexGlsl,
+            String fragmentGlsl,
+            List<UniformMember> uniformLayout,
+            int uniformBlockSize,
+            List<SamplerDecl> samplers,
+            List<String> uniformBlockNames,
+            int[] drawBuffers
+    ) {
+        boolean hasUniformBlock() {
+            return !uniformLayout.isEmpty();
+        }
+    }
+
+    /**
+     * Sodium terrain family. Patch arguments mirror Iris's own
+     * {@code ShaderCreator.create} bytecode: {@code patchSodium(name, vsh,
+     * gsh, tcs, tes, fsh, alphaTest, textureMap, false)}.
+     */
+    static GlslProgram translateSodiumTerrain(
+            final String name,
+            final ProgramSource source,
+            final AlphaTest alpha,
+            final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap
+    ) {
+        rejectUnsupportedStages(
+                name,
+                source.getGeometrySource().orElse(null),
+                source.getTessControlSource().orElse(null),
+                source.getTessEvalSource().orElse(null)
+        );
+        String vertex = source.getVertexSource().orElseThrow(
+                () -> new TranslationException(name, PHASE_PATCH, StageKind.VERTEX, "missing vertex source"));
+        String fragment = source.getFragmentSource().orElseThrow(
+                () -> new TranslationException(name, PHASE_PATCH, StageKind.FRAGMENT, "missing fragment source"));
+        Map<PatchShaderType, String> patched;
+        try {
+            patched = TransformPatcher.patchSodium(name, vertex, null, null, null, fragment, alpha, textureMap, false);
+        } catch (Throwable t) {
+            throw new TranslationException(name, PHASE_PATCH, null, String.valueOf(t.getMessage()), t);
+        }
+        String patchedVertex = patched.get(PatchShaderType.VERTEX);
+        String patchedFragment = patched.get(PatchShaderType.FRAGMENT);
+        if (patchedVertex == null || patchedFragment == null) {
+            throw new TranslationException(
+                    name, PHASE_PATCH, null,
+                    "patchSodium returned stages " + patched.keySet() + " (need VERTEX+FRAGMENT)"
+            );
+        }
+        return linkPatchedPair(name, patchedVertex, patchedFragment, source.getDirectives().getDrawBuffers());
+    }
+
+    static GlslProgram linkPatchedPair(
+            final String name,
+            final String patchedVertex,
+            final String patchedFragment,
+            final int[] drawBuffers
+    ) {
+        try {
+            String vertexSrc = renameHostileIdentifiers(stripComments(patchedVertex));
+            String fragmentSrc = renameHostileIdentifiers(stripComments(patchedFragment));
+            LooseExtraction vertexLoose = extractLooseUniforms(vertexSrc);
+            LooseExtraction fragmentLoose = extractLooseUniforms(fragmentSrc);
+            List<LooseUniform> unified = dedupeByName(List.of(vertexLoose.uniforms(), fragmentLoose.uniforms()));
+
+            List<UniformMember> layout = computeStd140Layout(name, unified);
+            String vertexOut = vertexLoose.body();
+            String fragmentOut = fragmentLoose.body();
+            if (!layout.isEmpty()) {
+                String block = renderUniformBlock(unified);
+                vertexOut = insertUniformBlock(vertexOut, block);
+                fragmentOut = insertUniformBlock(fragmentOut, block);
+            }
+
+            Map<String, String> samplers = new java.util.LinkedHashMap<>();
+            collectSamplerDecls(vertexOut, samplers);
+            collectSamplerDecls(fragmentOut, samplers);
+            List<SamplerDecl> samplerList = samplers.entrySet().stream()
+                    .map(e -> new SamplerDecl(e.getKey(), e.getValue()))
+                    .toList();
+
+            Set<String> blockNames = new LinkedHashSet<>();
+            collectUniformBlockNames(vertexOut, blockNames);
+            collectUniformBlockNames(fragmentOut, blockNames);
+
+            int blockSize = layout.isEmpty()
+                    ? 0
+                    : alignUp(layout.getLast().offset() + layout.getLast().byteSize(), 16);
+            return new GlslProgram(
+                    name,
+                    patchedVertex,
+                    patchedFragment,
+                    vertexOut,
+                    fragmentOut,
+                    layout,
+                    blockSize,
+                    samplerList,
+                    List.copyOf(blockNames),
+                    drawBuffers.clone()
+            );
+        } catch (TranslationException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new TranslationException(name, PHASE_LINK, null, String.valueOf(e.getMessage()), e);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // std140 layout for the unified block
+    // ------------------------------------------------------------------
+
+    private record Std140Type(int alignment, int byteSize) {
+    }
+
+    private static final Map<String, Std140Type> STD140_TYPES = Map.ofEntries(
+            Map.entry("float", new Std140Type(4, 4)),
+            Map.entry("int", new Std140Type(4, 4)),
+            Map.entry("uint", new Std140Type(4, 4)),
+            Map.entry("bool", new Std140Type(4, 4)),
+            Map.entry("vec2", new Std140Type(8, 8)),
+            Map.entry("ivec2", new Std140Type(8, 8)),
+            Map.entry("uvec2", new Std140Type(8, 8)),
+            Map.entry("bvec2", new Std140Type(8, 8)),
+            Map.entry("vec3", new Std140Type(16, 12)),
+            Map.entry("ivec3", new Std140Type(16, 12)),
+            Map.entry("uvec3", new Std140Type(16, 12)),
+            Map.entry("bvec3", new Std140Type(16, 12)),
+            Map.entry("vec4", new Std140Type(16, 16)),
+            Map.entry("ivec4", new Std140Type(16, 16)),
+            Map.entry("uvec4", new Std140Type(16, 16)),
+            Map.entry("bvec4", new Std140Type(16, 16)),
+            // std140 matrix columns are padded to vec4 stride.
+            Map.entry("mat2", new Std140Type(16, 32)),
+            Map.entry("mat3", new Std140Type(16, 48)),
+            Map.entry("mat4", new Std140Type(16, 64))
+    );
+
+    /**
+     * Deterministic std140 layout of the unified block. Offsets are verified
+     * against SPIR-V reflection by the offline test — any divergence between
+     * this table and glslang's layout is a test failure, not a silent skew.
+     */
+    private static List<UniformMember> computeStd140Layout(final String name, final List<LooseUniform> members) {
+        List<UniformMember> layout = new ArrayList<>(members.size());
+        int cursor = 0;
+        for (LooseUniform member : members) {
+            Std140Type type = STD140_TYPES.get(member.type());
+            if (type == null) {
+                throw new TranslationException(
+                        name, PHASE_LINK, null,
+                        "uniform '" + member.name() + "' has type '" + member.type() + "' with no std140 rule (extend STD140_TYPES)"
+                );
+            }
+            int arrayCount = parseArrayCount(name, member);
+            int alignment;
+            int byteSize;
+            if (arrayCount > 0) {
+                int stride = alignUp(type.byteSize(), 16);
+                alignment = 16;
+                byteSize = stride * arrayCount;
+            } else {
+                alignment = type.alignment();
+                byteSize = type.byteSize();
+            }
+            int offset = alignUp(cursor, alignment);
+            layout.add(new UniformMember(member.type(), member.name(), arrayCount, offset, byteSize));
+            cursor = offset + byteSize;
+        }
+        return List.copyOf(layout);
+    }
+
+    /** 0 for scalars; a positive literal count for {@code [N]} declarators. */
+    private static int parseArrayCount(final String name, final LooseUniform member) {
+        String suffix = member.arraySuffix();
+        if (suffix.isEmpty()) {
+            return 0;
+        }
+        Matcher m = Pattern.compile("^\\[(\\d+)\\]$").matcher(suffix);
+        if (!m.matches()) {
+            throw new TranslationException(
+                    name, PHASE_LINK, null,
+                    "uniform '" + member.name() + "' array suffix '" + suffix + "' is not a single literal size"
+            );
+        }
+        return Integer.parseInt(m.group(1));
+    }
+
+    private static int alignUp(final int value, final int alignment) {
+        return (value + alignment - 1) / alignment * alignment;
+    }
+
+    // ------------------------------------------------------------------
+    // Resource enumeration for the synthetic BindGroupLayout
+    // ------------------------------------------------------------------
+
+    private static void collectSamplerDecls(final String source, final Map<String, String> out) {
+        Matcher matcher = UNIFORM_STATEMENT_PATTERN.matcher(source);
+        while (matcher.find()) {
+            String statement = matcher.group(1).trim();
+            List<String> tokens = leadingTokens(statement);
+            int typeIndex = 0;
+            while (typeIndex < tokens.size() && PRECISION_QUALIFIERS.contains(tokens.get(typeIndex))) {
+                typeIndex++;
+            }
+            if (typeIndex >= tokens.size()) {
+                continue;
+            }
+            String type = tokens.get(typeIndex);
+            if (!OPAQUE_TYPE_PATTERN.matcher(type).matches()) {
+                continue;
+            }
+            int declaratorsStart = statement.indexOf(type) + type.length();
+            for (String declarator : splitTopLevel(statement.substring(declaratorsStart))) {
+                LooseUniform decl = parseLooseDeclarator(type, declarator);
+                if (decl == null) {
+                    continue;
+                }
+                String previous = out.putIfAbsent(decl.name(), type);
+                if (previous != null && !previous.equals(type)) {
+                    throw new IllegalStateException(
+                            "Sampler '" + decl.name() + "' declared as " + previous + " and " + type + " across stages"
+                    );
+                }
+            }
+        }
+    }
+
+    private static final Pattern UNIFORM_BLOCK_PATTERN =
+            Pattern.compile("(?m)^[ \\t]*(?:layout\\s*\\([^)]*\\)\\s*)?uniform\\s+([A-Za-z_]\\w*)\\s*\\{");
+
+    private static void collectUniformBlockNames(final String source, final Set<String> out) {
+        Matcher matcher = UNIFORM_BLOCK_PATTERN.matcher(source);
+        while (matcher.find()) {
+            out.add(matcher.group(1));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // std140 ground-truth reflection (test verification aid)
+    // ------------------------------------------------------------------
+
+    record ReflectedUniformBlock(Map<String, Integer> memberOffsets, long declaredSize) {
+    }
+
+    /**
+     * Compiles {@code wrappedGlsl} through the shaderc lane and reflects the
+     * actual member offsets glslang assigned to {@code blockName}. Used by the
+     * offline test to prove {@link #computeStd140Layout} matches the compiled
+     * truth — a divergence is a test failure, never a silent skew at runtime.
+     */
+    static @Nullable ReflectedUniformBlock reflectUniformBlock(
+            final String name,
+            final StageKind kind,
+            final String wrappedGlsl,
+            final String blockName
+    ) {
+        SpirvResult spirv = glslToSpirv(name, kind, wrappedGlsl);
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer spirvWords = spirv.spirv().asIntBuffer();
+            int wordCount = spirvWords.remaining();
+
+            PointerBuffer pContext = stack.mallocPointer(1);
+            checkSpvc(name, kind, Spvc.spvc_context_create(pContext), "spvc_context_create");
+            long context = pContext.get(0);
+            try {
+                PointerBuffer pIr = stack.mallocPointer(1);
+                checkSpvc(name, kind, Spvc.spvc_context_parse_spirv(context, spirvWords, wordCount, pIr), "spvc_context_parse_spirv");
+                PointerBuffer pCompiler = stack.mallocPointer(1);
+                checkSpvc(name, kind, Spvc.spvc_context_create_compiler(
+                        context, Spvc.SPVC_BACKEND_MSL, pIr.get(0), Spvc.SPVC_CAPTURE_MODE_COPY, pCompiler
+                ), "spvc_context_create_compiler");
+                long compiler = pCompiler.get(0);
+
+                PointerBuffer pResources = stack.mallocPointer(1);
+                checkSpvc(name, kind, Spvc.spvc_compiler_create_shader_resources(compiler, pResources), "spvc_compiler_create_shader_resources");
+                PointerBuffer pList = stack.mallocPointer(1);
+                PointerBuffer pCount = stack.mallocPointer(1);
+                checkSpvc(name, kind, Spvc.spvc_resources_get_resource_list_for_type(
+                        pResources.get(0), Spvc.SPVC_RESOURCE_TYPE_UNIFORM_BUFFER, pList, pCount
+                ), "spvc_resources_get_resource_list_for_type");
+                org.lwjgl.util.spvc.SpvcReflectedResource.Buffer list =
+                        org.lwjgl.util.spvc.SpvcReflectedResource.create(pList.get(0), (int) pCount.get(0));
+                for (org.lwjgl.util.spvc.SpvcReflectedResource resource : list) {
+                    if (!blockName.equals(resource.nameString())) {
+                        continue;
+                    }
+                    int baseTypeId = resource.base_type_id();
+                    long typeHandle = Spvc.spvc_compiler_get_type_handle(compiler, baseTypeId);
+                    int memberCount = Spvc.spvc_type_get_num_member_types(typeHandle);
+                    Map<String, Integer> offsets = new java.util.LinkedHashMap<>(memberCount);
+                    for (int index = 0; index < memberCount; index++) {
+                        String memberName = Spvc.spvc_compiler_get_member_name(compiler, baseTypeId, index);
+                        IntBuffer pOffset = stack.mallocInt(1);
+                        checkSpvc(name, kind, Spvc.spvc_compiler_type_struct_member_offset(
+                                compiler, typeHandle, index, pOffset
+                        ), "spvc_compiler_type_struct_member_offset");
+                        offsets.put(memberName, pOffset.get(0));
+                    }
+                    PointerBuffer pSize = stack.mallocPointer(1);
+                    checkSpvc(name, kind, Spvc.spvc_compiler_get_declared_struct_size(
+                            compiler, typeHandle, pSize
+                    ), "spvc_compiler_get_declared_struct_size");
+                    return new ReflectedUniformBlock(offsets, pSize.get(0));
+                }
+                return null;
+            } finally {
+                Spvc.spvc_context_destroy(context);
+            }
         }
     }
 }

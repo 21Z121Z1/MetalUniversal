@@ -24,9 +24,59 @@ import net.fabricmc.api.Environment;
  */
 @Environment(EnvType.CLIENT)
 public final class MetalIrisCompat {
+    /**
+     * Switch for the Iris-on-Metal semantic layer (B2-1 onwards).
+     *
+     * <p><b>Currently opt-in and NOT yet usable in game.</b> The pack-loading
+     * and pipeline-override lines are in place and the offline gate proves
+     * every terrain program compiles to a valid PSO, but nothing supplies the
+     * generated {@code MetallumIrisUniforms} block or the pack's samplers to
+     * the sodium terrain pass yet (handoff steps S4 and S6). Enabling this with
+     * a pack selected therefore fails at the first terrain draw with
+     * {@code Missing uniform MetallumIrisUniforms}. It defaults to off so the
+     * client keeps the shipped dormant-coexistence behaviour; flip the default
+     * to {@code "true"} when S4 and S6 land.</p>
+     *
+     * <p>{@code -Dmetallum.iris.semantic=true} opts in;
+     * {@code -Dmetallum.iris.semantic=false} is the kill switch once the
+     * default flips.</p>
+     */
+    private static final boolean SEMANTIC_LAYER =
+            "true".equalsIgnoreCase(System.getProperty("metallum.iris.semantic", "false"));
+
     private static volatile boolean announced;
+    private static volatile boolean semanticAnnounced;
 
     private MetalIrisCompat() {
+    }
+
+    /**
+     * True when the semantic layer owns the Iris seams: the live device is
+     * Metal and the kill switch is not set.
+     *
+     * <p>Where {@link #holdIrisDormant()} means "cancel this GL-flavoured Iris
+     * entry point", this means "let Iris run and serve it ourselves". The two
+     * are used together: a shim that must stay cancelled even with the semantic
+     * layer active tests {@code holdIrisDormant()} alone; a shim that the
+     * semantic layer takes over tests {@code holdIrisDormant() &&
+     * !semanticLayerEnabled()}.</p>
+     */
+    public static boolean semanticLayerEnabled() {
+        if (!SEMANTIC_LAYER) {
+            return false;
+        }
+        if (!holdIrisDormant()) {
+            return false;
+        }
+        if (!semanticAnnounced) {
+            semanticAnnounced = true;
+            Metallum.LOGGER.info(
+                    "Iris-on-Metal semantic layer active: shader packs load for real and sodium terrain"
+                            + " draws through the pack's gbuffers_terrain programs"
+                            + " (disable with -Dmetallum.iris.semantic=false)"
+            );
+        }
+        return true;
     }
 
     /** True when the live GpuDevice is the Metal backend. */

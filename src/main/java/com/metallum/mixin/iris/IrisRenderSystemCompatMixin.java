@@ -33,4 +33,20 @@ public abstract class IrisRenderSystemCompatMixin {
             cir.setReturnValue(false);
         }
     }
+
+    /**
+     * {@code StandardMacros} enumerates GL extensions with
+     * {@code getStringi(GL_EXTENSIONS, i)}. {@link GlStateManagerCompatMixin}
+     * already reports {@code GL_NUM_EXTENSIONS == 0}, so the loop never runs;
+     * this is a defensive stub so that any other caller gets an empty name
+     * rather than a raw {@code glGetStringi} on a device with no GL context.
+     */
+    @Inject(method = "getStringi", at = @At("HEAD"), cancellable = true)
+    private static void metallum$noGlExtensionStrings(
+            final int name, final int index, final CallbackInfoReturnable<String> cir
+    ) {
+        if (MetalIrisCompat.holdIrisDormant()) {
+            cir.setReturnValue("");
+        }
+    }
 }

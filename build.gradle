@@ -347,6 +347,7 @@ tasks.register("metalIrisShaderTranslationTest", Test) {
 	useJUnitPlatform()
 	filter {
 		includeTestsMatching "com.metallum.client.metal.render.MetalIrisShaderTranslationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisSodiumTerrainTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	systemProperty "metallum.iris.shaderpack.dir", "${projectDir}/run/shaderpacks"

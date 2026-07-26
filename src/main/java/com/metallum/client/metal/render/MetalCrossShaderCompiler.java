@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
@@ -27,6 +28,7 @@ import org.lwjgl.util.spvc.SpvcReflectedResource;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -34,8 +36,10 @@ import java.util.regex.Pattern;
 final class MetalCrossShaderCompiler {
     private static final Set<String> BUILT_IN_UNIFORMS = Set.of("Projection", "Lighting", "Fog", "Globals");
     private static final int MSL_VERSION_4_0 = 0x040000;
-    private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
-    private static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
+    static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
+    static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
+    /** 未连接 varying 的一次性告警去重（pipeline+变量名）。 */
+    private static final Set<String> UNLINKED_VARYING_REPORTS = ConcurrentHashMap.newKeySet();
     private static final Pattern EXPLICIT_FRAGMENT_OUTPUT_PATTERN = Pattern.compile(
             "\\blayout\\s*\\(\\s*location\\s*=\\s*(\\d+)[^)]*\\)\\s*"
                     + "(?:(?:flat|smooth|noperspective|centroid|sample|invariant|precise)\\s+)*"
@@ -81,6 +85,7 @@ final class MetalCrossShaderCompiler {
             addToBindGroup(layoutEntries, vertexSpirv, pipeline);
             addToBindGroup(layoutEntries, fragmentSpirv, pipeline);
             List<String> vertexOutputs = extractVariableNames(vertexSpirv.outputs());
+            VaryingLayout varyings = relocateVertexOutputs(vertexSpirv);
 
             vertexSpirv.rebind(tolerateUnprovidedInputs(MetalPipelineSupport.vertexAttributeNames(pipeline), vertexSpirv.inputs()), layoutEntries);
             MslShader vertexMsl = spirvToMsl(
@@ -91,6 +96,7 @@ final class MetalCrossShaderCompiler {
             );
 
             fragmentSpirv.rebind(tolerateUnprovidedInputs(vertexOutputs, fragmentSpirv.inputs()), layoutEntries);
+            relocateFragmentInputs(pipeline, fragmentSpirv, varyings);
             String fragmentSource = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);
             MslShader fragmentMsl = spirvToMsl(
                     fragmentSpirv.spirv(),
@@ -207,12 +213,177 @@ final class MetalCrossShaderCompiler {
         return names;
     }
 
-    private static String extractEntryPoint(final String msl, final Pattern pattern, final String fallback) {
+    /**
+     * varying 的 location 分配结果：名字 → 起始 location，外加下一个空闲 location。
+     * 由 vertex 输出侧算出，fragment 输入侧照此对齐。
+     */
+    private static final class VaryingLayout {
+        private final Map<String, Integer> baseLocations = new LinkedHashMap<>();
+        private int nextFree;
+    }
+
+    /**
+     * 按 location 槽位宽度重排 vertex 输出。
+     *
+     * <p><b>根因</b>：库存链在给 stage 接口变量分配 location 时是“一个变量一个 location”，
+     * 不计类型占用的槽数。原版着色器的 varying 只有标量/向量，这没有区别；但光影包会声明
+     * 矩阵 varying（Potato 的 {@code out mat2 coord} / {@code flat out mat4x3 colorPalette}），
+     * 矩阵按列各占一个 location（mat4x3 占 4 个、mat2 占 2 个），数组按元素同理。于是
+     * {@code colorPalette} 拿到 location 0 却实际占用 0..3，紧随其后的变量就落进它的区间，
+     * SPIRV-Cross 产出的 MSL 里出现重复的 {@code [[user(locnN)]]}，MTLLibrary 编译直接失败
+     * （"duplicated user-defined name 'locnN'"）。{@link IntermediaryShaderModule#rebind}
+     * 只改写 inputs，不触碰 outputs，因此 vertex 输出必须由我们自己重排。
+     *
+     * <p>做法：按当前 location 升序遍历（保持库存链的相对顺序，结果稳定可复现），逐个分配
+     * 起始 location 并按该变量的实际槽数推进游标。location 编号对外没有契约，只要 vertex
+     * 输出与 fragment 输入两侧一致即可，因此可以自由紧密重排。
+     */
+    private static VaryingLayout relocateVertexOutputs(final IntermediaryShaderModule vertex)
+            throws ShaderCompileException {
+        VaryingLayout layout = new VaryingLayout();
+        List<SpvVariable> outputs = vertex.outputs();
+        if (outputs.isEmpty()) {
+            return layout;
+        }
+        Map<String, Integer> spans = varyingLocationSpans(vertex.spirv(), Spvc.SPVC_RESOURCE_TYPE_STAGE_OUTPUT);
+        IntBuffer words = vertex.spirv().asIntBuffer();
+        for (SpvVariable output : sortByCurrentLocation(words, outputs)) {
+            Integer base = layout.baseLocations.get(output.name());
+            if (base == null) {
+                base = layout.nextFree;
+                layout.baseLocations.put(output.name(), base);
+                layout.nextFree += spans.getOrDefault(output.name(), 1);
+            }
+            words.put(output.locationOffset(), base);
+        }
+        return layout;
+    }
+
+    /**
+     * 把 fragment 输入的 location 对齐到 {@link #relocateVertexOutputs} 给出的同名起始
+     * location。必须在 {@code fragment.rebind(...)} 之后调用——rebind 会按“一个名字一个
+     * location”重编 fragment 输入，正是这一步引入了与多槽位 varying 的重叠。
+     *
+     * <p>没有同名 vertex 输出的 fragment 输入（未连接的 varying，读到的是未定义值）排在
+     * vertex 输出区之后，保证不与已分配区间重叠，并按 pipeline+变量名去重告警一次。
+     */
+    private static void relocateFragmentInputs(
+            final RenderPipeline pipeline,
+            final IntermediaryShaderModule fragment,
+            final VaryingLayout layout
+    ) throws ShaderCompileException {
+        List<SpvVariable> inputs = fragment.inputs();
+        if (inputs.isEmpty()) {
+            return;
+        }
+        Map<String, Integer> spans = varyingLocationSpans(fragment.spirv(), Spvc.SPVC_RESOURCE_TYPE_STAGE_INPUT);
+        IntBuffer words = fragment.spirv().asIntBuffer();
+        for (SpvVariable input : sortByCurrentLocation(words, inputs)) {
+            Integer base = layout.baseLocations.get(input.name());
+            if (base == null) {
+                base = layout.nextFree;
+                layout.baseLocations.put(input.name(), base);
+                layout.nextFree += spans.getOrDefault(input.name(), 1);
+                if (UNLINKED_VARYING_REPORTS.add(pipeline.getLocation() + "/" + input.name())) {
+                    Metallum.LOGGER.warn(
+                            "[Metallum] Fragment input '{}' of pipeline {} has no matching vertex output; "
+                                    + "assigned location {} (reads undefined values)",
+                            input.name(), pipeline.getLocation(), base
+                    );
+                }
+            }
+            words.put(input.locationOffset(), base);
+        }
+    }
+
+    /**
+     * 按变量当前的 Location 装饰值升序排列。{@link SpvVariable#locationOffset()} 是该装饰
+     * 字面量在 SPIR-V 字流中的字下标；先把排序键取出来再排，避免排序过程中读到被改写的值。
+     */
+    private static List<SpvVariable> sortByCurrentLocation(final IntBuffer words, final List<SpvVariable> variables) {
+        Map<SpvVariable, Integer> keys = new IdentityHashMap<>(variables.size());
+        for (SpvVariable variable : variables) {
+            keys.put(variable, words.get(variable.locationOffset()));
+        }
+        List<SpvVariable> sorted = new ArrayList<>(variables);
+        sorted.sort(Comparator.comparingInt(keys::get));
+        return sorted;
+    }
+
+    /**
+     * 反射一个 SPIR-V 模块的 stage 输入/输出，算出每个变量占用的 location 槽数。
+     *
+     * <p>规则（GLSL/SPIR-V location 分配）：向量与标量占 1 个槽，但 64 位类型（double/int64）
+     * 超过 2 个分量时占 2 个；矩阵按列数倍增；数组按元素总数倍增。
+     */
+    private static Map<String, Integer> varyingLocationSpans(final ByteBuffer spirvBytes, final int resourceType)
+            throws ShaderCompileException {
+        Map<String, Integer> spans = new LinkedHashMap<>();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer spirvWords = spirvBytes.asIntBuffer();
+            PointerBuffer pContext = stack.mallocPointer(1);
+            checkSpvc(Spvc.spvc_context_create(pContext), "spvc_context_create");
+            long context = pContext.get(0);
+            try {
+                PointerBuffer pIr = stack.mallocPointer(1);
+                checkSpvc(
+                        Spvc.spvc_context_parse_spirv(context, spirvWords, spirvWords.remaining(), pIr),
+                        "spvc_context_parse_spirv"
+                );
+                PointerBuffer pCompiler = stack.mallocPointer(1);
+                checkSpvc(
+                        Spvc.spvc_context_create_compiler(
+                                context, Spvc.SPVC_BACKEND_NONE, pIr.get(0), Spvc.SPVC_CAPTURE_MODE_COPY, pCompiler
+                        ),
+                        "spvc_context_create_compiler"
+                );
+                long compiler = pCompiler.get(0);
+
+                PointerBuffer pResources = stack.mallocPointer(1);
+                checkSpvc(
+                        Spvc.spvc_compiler_create_shader_resources(compiler, pResources),
+                        "spvc_compiler_create_shader_resources"
+                );
+                PointerBuffer pList = stack.mallocPointer(1);
+                PointerBuffer pCount = stack.mallocPointer(1);
+                checkSpvc(
+                        Spvc.spvc_resources_get_resource_list_for_type(pResources.get(0), resourceType, pList, pCount),
+                        "spvc_resources_get_resource_list_for_type"
+                );
+                SpvcReflectedResource.Buffer list = SpvcReflectedResource.create(pList.get(0), (int) pCount.get(0));
+                for (SpvcReflectedResource resource : list) {
+                    long type = Spvc.spvc_compiler_get_type_handle(compiler, resource.type_id());
+                    spans.put(resource.nameString(), locationSpan(type));
+                }
+                return spans;
+            } finally {
+                Spvc.spvc_context_destroy(context);
+            }
+        }
+    }
+
+    private static int locationSpan(final long type) {
+        int basetype = Spvc.spvc_type_get_basetype(type);
+        int components = Spvc.spvc_type_get_vector_size(type);
+        boolean wide = basetype == Spvc.SPVC_BASETYPE_FP64
+                || basetype == Spvc.SPVC_BASETYPE_INT64
+                || basetype == Spvc.SPVC_BASETYPE_UINT64;
+        int perColumn = wide && components > 2 ? 2 : 1;
+        int span = perColumn * Math.max(1, Spvc.spvc_type_get_columns(type));
+        int dimensions = Spvc.spvc_type_get_num_array_dimensions(type);
+        for (int index = 0; index < dimensions; index++) {
+            // 长度为 0 表示 runtime array / spec-constant 长度，varying 上不会出现；保守按 1 计。
+            span *= Math.max(1, Spvc.spvc_type_get_array_dimension(type, index));
+        }
+        return span;
+    }
+
+    static String extractEntryPoint(final String msl, final Pattern pattern, final String fallback) {
         Matcher matcher = pattern.matcher(msl);
         return matcher.find() ? matcher.group(1) : fallback;
     }
 
-    private static List<MetalCompiledRenderPipeline.ResourceBinding> buildResourceBindings(
+    static List<MetalCompiledRenderPipeline.ResourceBinding> buildResourceBindings(
             final List<VulkanBindGroupLayout.Entry> entries,
             final MslShader vertexMsl,
             final MslShader fragmentMsl
@@ -262,7 +433,7 @@ final class MetalCrossShaderCompiler {
         return mask;
     }
 
-    private static Map<String, GpuFormat> vertexAttributeFormats(final RenderPipeline pipeline) {
+    static Map<String, GpuFormat> vertexAttributeFormats(final RenderPipeline pipeline) {
         Map<String, GpuFormat> formats = new LinkedHashMap<>();
         for (VertexFormat binding : pipeline.getVertexFormatBindings()) {
             if (binding != null) {
@@ -325,7 +496,7 @@ final class MetalCrossShaderCompiler {
         }
     }
 
-    private static Map<String, Integer> explicitFragmentOutputLocations(@Nullable final String source)
+    static Map<String, Integer> explicitFragmentOutputLocations(@Nullable final String source)
             throws ShaderCompileException {
         if (source == null || source.isBlank()) {
             return Map.of();
@@ -401,7 +572,7 @@ final class MetalCrossShaderCompiler {
         return Set.copyOf(activeLocations);
     }
 
-    private static void validateFragmentOutputSignature(
+    static void validateFragmentOutputSignature(
             final RenderPipeline pipeline,
             final Set<Integer> shaderLocations
     ) throws ShaderCompileException {
@@ -420,7 +591,7 @@ final class MetalCrossShaderCompiler {
         }
     }
 
-    private static MslShader spirvToMsl(
+    static MslShader spirvToMsl(
             final ByteBuffer spirvBytes,
             final int pushConstantBinding,
             final Map<String, GpuFormat> attributeFormats,
