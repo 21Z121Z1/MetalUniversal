@@ -5685,6 +5685,138 @@ private func descriptorHasLiveColorWrite(_ descriptor: MTLRenderPipelineDescript
     return false
 }
 
+// MARK: - Bump allocator (migration spec M5)
+
+/// Per-frame linear allocator that replaces set*Bytes, which Metal 4 removed
+/// entirely. Uniforms are copied into a shared-storage buffer and bound by GPU
+/// address through an argument table (`setAddress(_:index:)`) instead of being
+/// handed to an encoder.
+///
+/// Sizing is measured, not guessed. The seven remaining set*Bytes sites push:
+///   ClearUniforms 48 B (the only vertex one, and the only one that can repeat
+///   many times per frame — once per clear), CutoutReactiveUniforms 32 B,
+///   HandOverlayUniforms 16 B, SIMD2<UInt32> 8 B, TransparencyMaskUniforms 48 B,
+///   MergeUniforms 48 B, and MotionUniforms 240 B, the largest (three 4x4
+///   matrices plus three vectors).
+/// Every one of those has an alignment requirement of at most 16 B, so the 16 B
+/// default below covers them; `allocate` still takes an alignment so a future
+/// uniform with a stricter requirement cannot silently be under-aligned.
+///
+/// Metal 3's 4 KB set*Bytes ceiling does not apply here. That is a side effect,
+/// not an invitation: the uniform-caching invariants from S11 still hold.
+@available(macOS 26.0, iOS 26.0, *)
+final class Metal4BumpAllocator {
+    private let buffer: MTLBuffer
+    private let capacity: Int
+    private var cursor: Int = 0
+    private let base: UnsafeMutableRawPointer
+
+    init?(device: MTLDevice, capacity: Int, label: String) {
+        guard let buffer = device.makeBuffer(length: capacity, options: [.storageModeShared]) else {
+            return nil
+        }
+        buffer.label = label
+        self.buffer = buffer
+        self.capacity = capacity
+        self.base = buffer.contents()
+        // The GPU reads this by address, so it has to be resident: Metal 4 does no
+        // automatic residency and an address into a non-resident buffer is a read
+        // of unmapped memory.
+        residencyTrackCreated(buffer)
+    }
+
+    var backing: MTLBuffer { buffer }
+
+    /// High-water mark since the last reset, for diagnostics and capacity tuning.
+    private(set) var peakUsage: Int = 0
+
+    /// Called at frame start, and only for the allocator belonging to a frame that
+    /// is no longer in flight — the ring is what guarantees that. Resetting an
+    /// allocator whose frame the GPU is still reading would let the next frame
+    /// overwrite live uniform data.
+    func reset() {
+        cursor = 0
+    }
+
+    /// Copies `length` bytes in and returns the GPU address to bind. Nil means the
+    /// allocator is full for this frame; the caller must fall back to the Metal 3
+    /// path rather than skip the binding.
+    func allocate(bytes: UnsafeRawPointer, length: Int, alignment: Int = 16) -> MTLGPUAddress? {
+        let effectiveAlignment = max(16, alignment)
+        let aligned = (cursor + effectiveAlignment - 1) & ~(effectiveAlignment - 1)
+        guard aligned + length <= capacity else { return nil }
+        base.advanced(by: aligned).copyMemory(from: bytes, byteCount: length)
+        cursor = aligned + length
+        peakUsage = max(peakUsage, cursor)
+        return buffer.gpuAddress + UInt64(aligned)
+    }
+}
+
+/// One bump allocator per in-flight frame, rotated at frame start.
+///
+/// The depth is MAX_SUBMITS_IN_FLIGHT + 1 = 4, matching the destruction queue
+/// depth S1 established, and for the same reason: an allocator may only be reset
+/// once every submit that could still be reading it has completed. A single
+/// shared allocator would overwrite uniforms the GPU is still fetching, and the
+/// symptom would be intermittently wrong uniform values rather than a crash.
+@available(macOS 26.0, iOS 26.0, *)
+final class Metal4BumpAllocatorRing {
+    /// MetalCommandEncoder.MAX_SUBMITS_IN_FLIGHT (3) + 1.
+    static let depth = 4
+    /// 240 B largest uniform, and the clear path can allocate once per clear; 64 KiB
+    /// leaves room for ~270 largest-case allocations per frame, far above any
+    /// observed frame, at a total cost of 256 KiB across the ring. Overflow is
+    /// handled (fall back and log) rather than fatal, so this is a comfort margin
+    /// and not a correctness bound.
+    static let capacityPerFrame = 64 * 1024
+
+    private var allocators: [Metal4BumpAllocator] = []
+    private var frameIndex = 0
+    private var overflowLogged = false
+
+    init?(device: MTLDevice) {
+        for index in 0..<Self.depth {
+            guard let allocator = Metal4BumpAllocator(
+                device: device,
+                capacity: Self.capacityPerFrame,
+                label: "metallum-uniform-bump-\(index)"
+            ) else {
+                return nil
+            }
+            allocators.append(allocator)
+        }
+    }
+
+    /// Rotates to the next frame's allocator and clears it. Call once per frame,
+    /// before any allocation for that frame.
+    func beginFrame() -> Metal4BumpAllocator {
+        let allocator = allocators[frameIndex % allocators.count]
+        frameIndex += 1
+        allocator.reset()
+        return allocator
+    }
+
+    var current: Metal4BumpAllocator {
+        allocators[(frameIndex + allocators.count - 1) % allocators.count]
+    }
+
+    /// Reports the first overflow only. A silent nil would drop a uniform binding
+    /// and render with stale values, so the fall-back has to be visible.
+    func logOverflowOnce(_ length: Int) {
+        guard !overflowLogged else { return }
+        overflowLogged = true
+        NSLog(
+            "[metallum] uniform bump allocator full (needed %ld B of %ld B); falling back to the Metal 3 path",
+            length,
+            Self.capacityPerFrame
+        )
+    }
+
+    var peakUsage: Int {
+        allocators.reduce(0) { max($0, $1.peakUsage) }
+    }
+}
+
 // MARK: - Residency set (migration spec M3)
 
 /// Adds a freshly created resource to the residency set, if one is active.

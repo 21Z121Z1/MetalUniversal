@@ -117,6 +117,36 @@ fragment float4 path_copy_fs(CopyOut in [[stage_in]],
 }
 """
 
+/// Reads a uniform by GPU address out of an argument table, which is how every
+/// former set*Bytes site will supply its uniform under Metal 4.
+private let bumpShaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+
+struct BumpOut {
+    float4 position [[position]];
+};
+
+struct BumpUniforms {
+    float4 color;
+};
+
+vertex BumpOut bump_vs(uint vertexID [[vertex_id]]) {
+    const float2 positions[3] = {
+        float2(-1.0, -1.0),
+        float2( 3.0, -1.0),
+        float2(-1.0,  3.0)
+    };
+    BumpOut output;
+    output.position = float4(positions[vertexID], 0.0, 1.0);
+    return output;
+}
+
+fragment float4 bump_fs(constant BumpUniforms& u [[buffer(0)]]) {
+    return u.color;
+}
+"""
+
 private func fail(_ message: String) throws -> Never {
     throw PathFailure.message(message)
 }
@@ -489,6 +519,141 @@ private func runPresentPathTest(device: MTLDevice) throws {
     try presentPathTest(device: device)
 }
 
+/// M5: the bump allocator that replaces set*Bytes.
+///
+/// Metal 4 removed set*Bytes outright, so uniforms have to be copied into a
+/// buffer and bound by GPU address. The properties that matter are that the
+/// address the allocator returns really is where the bytes landed, that a second
+/// allocation in the same frame does not overlap the first, that overflow is
+/// reported rather than silently dropping a binding, and that reset reuses the
+/// space. Only a GPU read can confirm the first one, which is why this draws
+/// with the uniform instead of just inspecting the pointer arithmetic.
+@available(macOS 26.0, *)
+private func bumpAllocatorTest(device: MTLDevice) throws {
+    guard let ring = Metal4BumpAllocatorRing(device: device) else {
+        try fail("could not create the bump allocator ring")
+    }
+    let allocator = ring.beginFrame()
+
+    // A first allocation of an odd length, so the second one is only correctly
+    // placed if alignment is actually applied.
+    var filler: UInt8 = 0xAB
+    guard allocator.allocate(bytes: &filler, length: 1) != nil else {
+        try fail("the first bump allocation failed")
+    }
+
+    var color = SIMD4<Float>(0.25, 0.50, 0.75, 1.0)
+    guard let uniformAddress = withUnsafeBytes(of: &color, { bytes in
+        allocator.allocate(bytes: bytes.baseAddress!, length: bytes.count)
+    }) else {
+        try fail("the uniform bump allocation failed")
+    }
+    try check(uniformAddress % 16 == 0,
+              "bump allocation is not 16-byte aligned: offset \(uniformAddress % 16)")
+    try check(uniformAddress > allocator.backing.gpuAddress,
+              "the uniform was placed on top of the preceding allocation")
+
+    // Largest real uniform is MotionUniforms at 240 B; confirm one frame can hold
+    // a realistic number of them, then that overflow is refused rather than
+    // wrapping or overwriting.
+    var chunk = [UInt8](repeating: 0, count: 240)
+    var accepted = 0
+    while chunk.withUnsafeBytes({ allocator.allocate(bytes: $0.baseAddress!, length: 240) }) != nil {
+        accepted += 1
+        if accepted > 4096 { break }
+    }
+    try check(accepted >= 200,
+              "only \(accepted) largest-case uniforms fit in one frame; capacity is too small")
+    var overflow: UInt8 = 0
+    try check(allocator.allocate(bytes: &overflow, length: Metal4BumpAllocatorRing.capacityPerFrame) == nil,
+              "an allocation larger than the whole arena was accepted")
+    ring.logOverflowOnce(Metal4BumpAllocatorRing.capacityPerFrame)
+
+    // reset() must make the space available again, which is what the ring relies on.
+    let recycled = ring.beginFrame()
+    guard let recycledAddress = withUnsafeBytes(of: &color, { bytes in
+        recycled.allocate(bytes: bytes.baseAddress!, length: bytes.count)
+    }) else {
+        try fail("allocation after a ring rotation failed")
+    }
+    try check(recycledAddress == recycled.backing.gpuAddress,
+              "a rotated allocator did not start from the beginning of its arena")
+
+    // Now the part only the GPU can answer: is the uniform actually readable at
+    // the address the allocator handed back?
+    let library = try device.makeLibrary(source: bumpShaderSource, options: nil)
+    guard let vertexFunction = library.makeFunction(name: "bump_vs"),
+          let fragmentFunction = library.makeFunction(name: "bump_fs") else {
+        try fail("missing bump MSL entry points")
+    }
+    let pipelineDescriptor = MTLRenderPipelineDescriptor()
+    pipelineDescriptor.vertexFunction = vertexFunction
+    pipelineDescriptor.fragmentFunction = fragmentFunction
+    pipelineDescriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
+    let pipeline = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    let target = try makeTarget(device: device, label: "bump allocator target")
+
+    guard let queue = device.makeMTL4CommandQueue(),
+          let commandBuffer = device.makeCommandBuffer(),
+          let commandAllocator = device.makeCommandAllocator(),
+          let completionEvent = device.makeSharedEvent() else {
+        try fail("could not create the Metal 4 objects for the bump test")
+    }
+    // The arena is registered with the global residency set when it is created,
+    // but that set is attached to the Metal 3 queue; this queue needs its own.
+    let residencyDescriptor = MTLResidencySetDescriptor()
+    residencyDescriptor.initialCapacity = 4
+    let residencySet = try device.makeResidencySet(descriptor: residencyDescriptor)
+    residencySet.addAllocations([recycled.backing, target])
+    residencySet.commit()
+    residencySet.requestResidency()
+    queue.addResidencySet(residencySet)
+
+    let argumentTableDescriptor = MTL4ArgumentTableDescriptor()
+    argumentTableDescriptor.maxBufferBindCount = 1
+    argumentTableDescriptor.initializeBindings = true
+    let argumentTable = try device.makeArgumentTable(descriptor: argumentTableDescriptor)
+
+    commandAllocator.reset()
+    commandBuffer.beginCommandBuffer(allocator: commandAllocator)
+    let passDescriptor = MTL4RenderPassDescriptor()
+    passDescriptor.colorAttachments[0].texture = target
+    passDescriptor.colorAttachments[0].loadAction = .dontCare
+    passDescriptor.colorAttachments[0].storeAction = .store
+    passDescriptor.renderTargetWidth = 8
+    passDescriptor.renderTargetHeight = 8
+    guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
+        commandBuffer.endCommandBuffer()
+        try fail("could not create the render encoder for the bump test")
+    }
+    // This is the set*Bytes replacement in one line.
+    argumentTable.setAddress(recycledAddress, index: 0)
+    encoder.setArgumentTable(argumentTable, stages: .fragment)
+    encoder.setRenderPipelineState(pipeline)
+    encoder.setViewport(MTLViewport(originX: 0, originY: 0, width: 8, height: 8, znear: 0, zfar: 1))
+    encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+    encoder.endEncoding()
+    commandBuffer.endCommandBuffer()
+    queue.commit([commandBuffer])
+    queue.signalEvent(completionEvent, value: 1)
+    try check(completionEvent.wait(untilSignaledValue: 1, timeoutMS: 5000),
+              "the bump-allocator draw did not complete within 5s")
+
+    var readback = [UInt8](repeating: 0, count: 4)
+    target.getBytes(&readback, bytesPerRow: 4, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
+    try check(readback == [64, 128, 191, 255],
+              "the GPU did not read the bump-allocated uniform: \(readback)")
+    print("Metal 4 bump allocator: \(accepted) largest-case (240 B) uniforms fit per frame, alignment and overflow behave, ring rotation recycles, and the GPU reads the uniform at the returned address")
+}
+
+private func runBumpAllocatorTest(device: MTLDevice) throws {
+    guard #available(macOS 26.0, *) else {
+        print("bump allocator test skipped: needs macOS 26")
+        return
+    }
+    try bumpAllocatorTest(device: device)
+}
+
 private func runPathTest() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
         try fail("MTLCreateSystemDefaultDevice returned nil")
@@ -631,6 +796,9 @@ private func runPathTest() throws {
 
     // (6) M4: the frame-generation present path's Metal 4 object graph.
     try runPresentPathTest(device: device)
+
+    // (7) M5: the bump allocator that replaces set*Bytes.
+    try runBumpAllocatorTest(device: device)
 
     print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, an unregistered library falls back cleanly, the pipeline data set archive flushes on both a cold and a warm launch, and the residency set tracks native allocations")
 }
