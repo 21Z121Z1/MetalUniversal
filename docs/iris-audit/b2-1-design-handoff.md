@@ -264,6 +264,34 @@ pack 着色——**全部未验证**。接手第一件事就是进世界看 `com
 非覆盖管线一律返回 null 走原逻辑 —— 所以对 Metal 4 线是**加法**,不改变既有绑定语义。
 合并后请重跑 `metalIrisShaderTranslationTest` 与 `metalMrtBackendIntegrationTest` 验证。
 
+### 4.4.1 首次合并尝试的结果(2026-07-27,已 abort,树是干净的)
+
+`git merge wip/uncommitted-snapshot-2026-07-27` 实跑过一次,**5 个文件冲突,已 `--abort`**。
+下面是逐个的解法,照做即可;三个是机械的,一个必须由 Metal 4 线的人拍板。
+
+| 文件 | 冲突内容 | 解法 |
+|---|---|---|
+| `MetalFxManager.java`(1 处) | 同一段 `createTexture("MetalFX Reactive R8", ...)`,只是注释措辞与换行不同,**代码等价** | **取 theirs**。MetalFX 是他们的线 |
+| `MetalDevice.java`(2 处) | HEAD 把覆盖查询塞进 `computeIfAbsent`;theirs 重构成 async prewarm + `COMPILE_CHAIN_LOCK` + `PENDING_PRECOMPILE` | **取 theirs 的结构,把覆盖查询搬进去**:在 `synchronized (COMPILE_CHAIN_LOCK)` 里的 `computeIfAbsent` lambda 内,以及 `compileInBackground` 里,都改成先问 `IrisMetalPipelineOverrides.tryCompile(this, p, effectiveSource)`,非 null 就用它。**两处都要改**,漏掉后台那条会导致预热出来的是原生 PSO |
+| `MetalCrossShaderCompiler.java`(1 处) | 纯相邻插入:HEAD 把 `vertexAttributeFormats` 放宽到包级;theirs 在它前面加了 `vertexFormatSignature`/`bindGroupSignature`(MSL 磁盘缓存的 key) | **两边都留**。注意最终 `vertexAttributeFormats` 要保持**包级可见**(`static`,不是 `private static`) |
+| `MetallumNative.swift`(1 处) | HEAD 是 B0 的 compute/mipmap/compare-sampler ABI 段;theirs 在同一位置加 M4 相关导出 | **两边都留**,顺序无所谓,都是独立的 `@_cdecl` |
+| `MetalCommandEncoder.java`(2 处) | **语义冲突,不要自己猜** | 见下 |
+
+**`MetalCommandEncoder` 为什么不能机械合**:
+- HEAD 侧是本线 B0 的**单 MTLFence 链**:`computeCommandEncoder()` 里 `encoder.waitForFence(fence)`,
+  `endEncoder()` 里 render/blit/**compute** 三种编码器都 `updateFence(fence)`。
+- theirs 侧是 S10 的**拆分 fence**:`SPLIT_FENCE` 时 `transferFence` 管上传→顶点抓取、
+  `fence` 管前一趟 render 输出→fragment 消费(`waitRenderFences` 按 `MTLRenderStages` 收窄),
+  且 blit 改成 `updateFence(SPLIT_FENCE ? transferFence : fence)`,**compute 分支在冲突块里消失了**。
+- 需要回答的问题只有一个:**拆分 fence 模型下,compute 编码器 wait/update 哪一条 fence?**
+  这是 Metal 4 线的设计决定,不是可以从代码推出来的。答错的后果正是协议警告的那种:
+  编译通过、跑得动、同步语义已经坏了,而且很难在事后定位。
+- 建议:让 Metal 4 线的会话给出这一条的答案(或直接由他们做这个文件的合并),其余四个文件本线可以自己合。
+
+**本线在同步层的实际持仓**:`MetalCommandEncoder` 的 compute 编码器 fence 语义(B0 引入,
+`metalComputeBackendIntegrationTest` 里 render→compute→render / compute→compute / indirect args
+三条有序性用例在守它)。合完必须重跑这个 task,它是判定同步语义没坏的唯一自动化证据。
+
 ## 5. 风险与预案
 
 | 风险 | 信号 | 预案 |
