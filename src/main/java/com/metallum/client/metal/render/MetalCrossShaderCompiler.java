@@ -72,7 +72,7 @@ public final class MetalCrossShaderCompiler {
         try {
             spirvBytes = ShaderBridge.glslangCompile(glslSource, stage, ShaderBridge.SPV_ENV_VULKAN_1_0);
         } catch (RuntimeException e) {
-            throw new ShaderCompileException("Failed to compile GLSL to SPIR-V for shader: " + name + ": " + e.getMessage(), e);
+            throw new ShaderCompileException("Failed to compile GLSL to SPIR-V for shader: " + name + ": " + e.getMessage());
         }
         if (spirvBytes == null || spirvBytes.length < 20) {
             throw new ShaderCompileException("glslang produced empty/invalid SPIR-V for shader: " + name);
@@ -329,7 +329,7 @@ public final class MetalCrossShaderCompiler {
                     true    // flipVertexY
             );
         } catch (RuntimeException e) {
-            throw new ShaderCompileException("SPIRV-Cross failed to compile SPIR-V to MSL: " + e.getMessage(), e);
+            throw new ShaderCompileException("SPIRV-Cross failed to compile SPIR-V to MSL: " + e.getMessage());
         }
         if (mslSource == null || mslSource.isBlank()) {
             throw new ShaderCompileException("SPIRV-Cross produced empty MSL source");
