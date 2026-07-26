@@ -7,7 +7,9 @@ import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.BlendFunction;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
+import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.platform.CompareOp;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.ShaderType;
@@ -59,6 +61,7 @@ final class MetalMrtBackendIntegrationTest {
             """;
 
     private final Map<String, String> fragmentShaders = new HashMap<>();
+    private final Map<String, String> vertexShaders = new HashMap<>();
     private MetalDevice device;
     private MetalCommandEncoder encoder;
 
@@ -66,9 +69,12 @@ final class MetalMrtBackendIntegrationTest {
     void createDevice() {
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice), "MTLCreateSystemDefaultDevice returned null");
-        ShaderSource source = (identifier, type) -> type == ShaderType.VERTEX
-                ? VERTEX_SHADER
-                : fragmentShaders.get(identifier.getPath().substring(identifier.getPath().lastIndexOf('/') + 1));
+        ShaderSource source = (identifier, type) -> {
+            String name = identifier.getPath().substring(identifier.getPath().lastIndexOf('/') + 1);
+            return type == ShaderType.VERTEX
+                    ? vertexShaders.getOrDefault(name, VERTEX_SHADER)
+                    : fragmentShaders.get(name);
+        };
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),
@@ -92,6 +98,163 @@ final class MetalMrtBackendIntegrationTest {
     void oneAndTwoAttachmentReadback() {
         runRgbaAttachmentCount(1);
         runRgbaAttachmentCount(2);
+    }
+
+    @Test
+    void fourAttachmentReadback() {
+        runRgbaAttachmentCount(4);
+    }
+
+    @Test
+    void nonContiguousDrawBufferMappingPreservesLocations() {
+        // Iris "/* DRAWBUFFERS:025 */" semantics: logical outputs land on
+        // non-adjacent attachment slots; the unused slots must stay inert.
+        String shaderName = "mrt_non_contiguous";
+        fragmentShaders.put(shaderName, """
+                #version 450
+                layout(location=0) out vec4 first;
+                layout(location=2) out vec4 second;
+                layout(location=5) out vec4 third;
+                void main() {
+                    first = vec4(0.25, 0.0, 0.0, 1.0);
+                    second = vec4(0.0, 0.5, 0.0, 1.0);
+                    third = vec4(0.0, 0.0, 0.75, 1.0);
+                }
+                """);
+        List<GpuFormat> formats = new ArrayList<>();
+        formats.add(GpuFormat.RGBA8_UNORM);
+        formats.add(null);
+        formats.add(GpuFormat.RGBA8_UNORM);
+        formats.add(null);
+        formats.add(null);
+        formats.add(GpuFormat.RGBA8_UNORM);
+        RenderPipeline pipeline = pipeline(shaderName, formats, null, ColorTargetState.WRITE_ALL);
+        List<MetalGpuTexture> textures = createTextures(formats, "non-contiguous");
+        render(pipeline, textures, null);
+        assertByteNear(readback(textures.get(0)).get(0), 64, "slot 0 red");
+        assertByteNear(readback(textures.get(2)).get(1), 128, "slot 2 green");
+        assertByteNear(readback(textures.get(5)).get(2), 191, "slot 5 blue");
+        closeTextures(textures);
+    }
+
+    @Test
+    void depthPlusMrtWritesColorAndDepth() {
+        String shaderName = "mrt_depth_combo";
+        vertexShaders.put("mrt_depth_vertex", """
+                #version 450
+                void main() {
+                    vec2 positions[3] = vec2[](
+                        vec2(-1.0, -1.0),
+                        vec2( 3.0, -1.0),
+                        vec2(-1.0,  3.0)
+                    );
+                    gl_Position = vec4(positions[gl_VertexIndex], 0.25, 1.0);
+                }
+                """);
+        fragmentShaders.put(shaderName, """
+                #version 450
+                layout(location=0) out vec4 color;
+                layout(location=1) out vec2 motion;
+                void main() {
+                    color = vec4(0.5, 0.25, 0.75, 1.0);
+                    motion = vec2(0.125, -0.5);
+                }
+                """);
+        List<GpuFormat> formats = List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RG16_FLOAT);
+        RenderPipeline.Builder builder = RenderPipeline.builder()
+                .withLocation("metallum_test/" + shaderName)
+                .withVertexShader("metallum_test/mrt_depth_vertex")
+                .withFragmentShader("metallum_test/" + shaderName)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withCull(false)
+                .withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS, true));
+        for (int index = 0; index < formats.size(); index++) {
+            builder.withColorTargetState(index, new ColorTargetState(
+                    Optional.empty(), formats.get(index), ColorTargetState.WRITE_ALL));
+        }
+        RenderPipeline pipeline = builder.build();
+
+        List<MetalGpuTexture> textures = createTextures(formats, "depth-mrt");
+        try (MetalGpuTexture depthTexture = (MetalGpuTexture) device.createTexture(
+                "depth-mrt-depth",
+                com.mojang.blaze3d.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
+                        | com.mojang.blaze3d.textures.GpuTexture.USAGE_COPY_SRC,
+                GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 1)) {
+            RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "depth+MRT integration");
+            List<MetalGpuTextureView> views = new ArrayList<>();
+            for (int index = 0; index < textures.size(); index++) {
+                MetalGpuTextureView view = new MetalGpuTextureView(textures.get(index), 0, 1);
+                views.add(view);
+                descriptor.withColorAttachment(view, Optional.of(new Vector4f(0.0F, 0.0F, 0.0F, 1.0F)));
+            }
+            MetalGpuTextureView depthView = new MetalGpuTextureView(depthTexture, 0, 1);
+            views.add(depthView);
+            descriptor.withDepthAttachment(depthView, java.util.OptionalDouble.of(0.75));
+            descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+            MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+            pass.setPipeline(pipeline);
+            pass.draw(3, 1, 0, 0);
+            encoder.submitRenderPass();
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+
+            assertByteNear(readback(textures.get(0)).get(0), 128, "depth+MRT color red");
+            ByteBuffer motion = readback(textures.get(1)).order(ByteOrder.nativeOrder());
+            assertEquals(0.125F, Float.float16ToFloat(motion.getShort(0)), 0.01F);
+            ByteBuffer depthData = readback(depthTexture).order(ByteOrder.nativeOrder());
+            assertEquals(0.25F, depthData.getFloat(0), 0.001F, "depth attachment must hold the written z");
+            for (MetalGpuTextureView view : views) {
+                view.close();
+            }
+        }
+        closeTextures(textures);
+    }
+
+    @Test
+    void resizeRecreatePathProducesFreshContent() {
+        // Framebuffer-resize semantics: after destroying targets and creating
+        // differently-sized replacements, rendering must land in the new
+        // textures with the new extent and never reuse stale storage.
+        String shaderName = "mrt_resize";
+        fragmentShaders.put(shaderName, """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(0.25, 0.5, 0.75, 1.0); }
+                """);
+        List<GpuFormat> formats = List.of(GpuFormat.RGBA8_UNORM);
+        RenderPipeline pipeline = pipeline(shaderName, formats, null, ColorTargetState.WRITE_ALL);
+        List<MetalGpuTexture> original = createTextures(formats, "resize-before");
+        render(pipeline, original, null);
+        assertByteNear(readback(original.get(0)).get(0), 64, "pre-resize content");
+        closeTextures(original);
+
+        int resizedWidth = WIDTH / 2;
+        int resizedHeight = HEIGHT * 2;
+        try (MetalGpuTexture resized = (MetalGpuTexture) device.createTexture(
+                "resize-after-0", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, resizedWidth, resizedHeight, 1, 1)) {
+            RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "resize integration");
+            try (MetalGpuTextureView view = new MetalGpuTextureView(resized, 0, 1)) {
+                descriptor.withColorAttachment(view, Optional.of(new Vector4f(0.0F)));
+                descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, resizedWidth, resizedHeight));
+                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+                pass.setPipeline(pipeline);
+                pass.draw(3, 1, 0, 0);
+                encoder.submitRenderPass();
+                encoder.submit();
+                device.waitForSubmittedGpuWork();
+            }
+            int size = resizedWidth * resizedHeight * resized.pixelSize();
+            try (MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
+                    () -> "resize readback", GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST, size)) {
+                encoder.copyTextureToBuffer(resized, buffer, 0L, () -> {
+                }, 0);
+                encoder.submit();
+                device.waitForSubmittedGpuWork();
+                ByteBuffer data = buffer.currentStorage().limit(size).slice().order(ByteOrder.nativeOrder());
+                assertByteNear(data.get(0), 64, "post-resize first pixel red");
+                assertByteNear(data.get(size - 4), 64, "post-resize last pixel red");
+            }
+        }
     }
 
     @Test
