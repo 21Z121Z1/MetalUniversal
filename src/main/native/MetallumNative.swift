@@ -1850,12 +1850,13 @@ public func metallum_fx_create_spatial_scaler(
             descriptor.outputHeight = outputHeight
             descriptor.colorTextureFormat = colorFormat
             descriptor.outputTextureFormat = outputFormat
-            // MTLFXSpatialScalerColorProcessingMode:
-            //   .colorOnly — no depth/motion input (used for non-temporal upscaling)
-            //   .depthAndColor — fuses depth for higher quality (requires depth texture)
-            // We default to .colorOnly so the scaler works for any color-only
+            // MTLFXSpatialScalerColorProcessingMode (macOS 26 SDK):
+            //   .perceptual — input/output use a perceptual color space (sRGB)
+            //   .linear     — input/output use a linear color space in [0,1]
+            //   .hdr        — input/output use an HDR color space beyond [0,1]
+            // We default to .perceptual so the scaler works for any color-only
             // present path; the depth-aware variant is exposed separately.
-            descriptor.colorProcessingMode = .colorOnly
+            descriptor.colorProcessingMode = .perceptual
             guard let scaler = try? descriptor.makeSpatialScaler(device: device) else {
                 NSLog("[metallum-fx] Failed to create MTLFXSpatialScaler (%dx%d -> %dx%d)",
                       inputWidth, inputHeight, outputWidth, outputHeight)
@@ -1889,7 +1890,7 @@ public func metallum_fx_spatial_scaler_encode(
             _ = jitterOffsetX
             _ = jitterOffsetY
             _ = mipScale
-            scaler.encode(into: commandBuffer)
+            scaler.encodeToCommandBuffer(commandBuffer)
         }
     }
 }
@@ -1928,7 +1929,7 @@ public func metallum_fx_create_temporal_scaler(
             descriptor.outputHeight = outputHeight
             descriptor.colorTextureFormat = colorFormat
             descriptor.outputTextureFormat = outputFormat
-            descriptor.motionVectorTextureFormat = motionVectorFormat
+            descriptor.motionTextureFormat = motionVectorFormat
             descriptor.depthTextureFormat = depthFormat
             descriptor.temporalAAEnabled = true
             guard let scaler = try? descriptor.makeTemporalScaler(device: device) else {
@@ -1962,7 +1963,7 @@ public func metallum_fx_temporal_scaler_encode(
             scaler.colorTexture = sourceColor
             // previousColorTexture / jitterOffsetX / jitterOffsetY were removed
             // from the MTLFXTemporalScaler protocol in the macOS 26 SDK.
-            if let motionVectors { scaler.motionVectorTexture = motionVectors }
+            if let motionVectors { scaler.motionTexture = motionVectors }
             if let depth { scaler.depthTexture = depth }
             scaler.outputTexture = destination
             scaler.motionVectorScaleX = motionVectorScaleX
@@ -1971,7 +1972,7 @@ public func metallum_fx_temporal_scaler_encode(
             _ = prevColor
             _ = jitterOffsetX
             _ = jitterOffsetY
-            scaler.encode(into: commandBuffer)
+            scaler.encodeToCommandBuffer(commandBuffer)
         }
     }
 }
@@ -2031,13 +2032,13 @@ public func metallum_fx_frame_interpolator_encode(
            let interpolator = interpolator as? MTLFXFrameInterpolator {
             interpolator.colorTexture = sourceColor
             // previousColorTexture was removed from the protocol in macOS 26 SDK.
-            interpolator.motionVectorTexture = motionVectors
+            interpolator.motionTexture = motionVectors
             interpolator.outputTexture = destination
             interpolator.motionVectorScaleX = motionVectorScaleX
             interpolator.motionVectorScaleY = motionVectorScaleY
             interpolator.reset = reset != 0
             _ = previousColor
-            interpolator.encode(into: commandBuffer)
+            interpolator.encodeToCommandBuffer(commandBuffer)
         }
     }
 }
