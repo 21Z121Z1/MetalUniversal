@@ -105,8 +105,18 @@ public final class MetalFxManager {
     // rotateY term from MetalEntityObjectPose.droppedItem collapses the field
     // to that uniform translation and takes spreadX to ~0, which this floor
     // catches. The boat's yaw is also a Y rotation and measures 0.061.
+    //
+    // The floor is sized from the measured entity-motion error envelope rather
+    // than from the observed values directly: object motion runs 30-55% off the
+    // analytic magnitude (partial-tick and limb-depth broadening, see
+    // docs/metalfx-frame-generation.md), so the lowest spread seen across runs
+    // (0.023) has to stay above the floor even after a 55% deflation, i.e.
+    // above 0.0104. 0.008 clears that with margin while still sitting an order
+    // of magnitude above the regression case: a translation-only field has no
+    // horizontal component to spread at all, so dropping the rotation takes
+    // spreadX to ~0.001 or below rather than merely reducing it.
     private static final int OBJECT_MIN_VALID_PIXELS = 2_000;
-    private static final double OBJECT_MIN_SPIN_SPREAD_X = 0.012;
+    private static final double OBJECT_MIN_SPIN_SPREAD_X = 0.008;
     private static final double OBJECT_MAX_MOTION = 0.5;
     private final boolean motionPipelineV2Available;
     private final boolean cutoutReactivePipelineAvailable;
