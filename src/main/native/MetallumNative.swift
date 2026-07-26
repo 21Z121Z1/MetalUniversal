@@ -250,6 +250,11 @@ final class Metal4PresentPath {
     private let argumentTable: MTL4ArgumentTable
     private let residencySet: MTLResidencySet
     private var frameIndex = 0
+    /// True between beginFrame() and the close that submit() or abandonFrame()
+    /// performs. The command buffer is reusable, so leaving it open across frames
+    /// would make the next beginCommandBuffer illegal; this makes closing
+    /// idempotent so every exit path can close unconditionally.
+    private var isRecording = false
 
     init?(device: MTLDevice, layer: CAMetalLayer) {
         let queueDescriptor = MTL4CommandQueueDescriptor()
@@ -314,13 +319,14 @@ final class Metal4PresentPath {
         frameIndex += 1
         allocator.reset()
         commandBuffer.beginCommandBuffer(allocator: allocator)
+        isRecording = true
         return commandBuffer
     }
 
-    /// Queue-level, not command-buffer-level: Metal 4 moved event waits off the
-    /// command buffer. Must be called before commit.
-    func waitForReady(event: MTLSharedEvent, value: UInt64) {
-        queue.waitForEvent(event, value: value)
+    private func endRecording() {
+        guard isRecording else { return }
+        commandBuffer.endCommandBuffer()
+        isRecording = false
     }
 
     /// The full-screen copy, with the texture and sampler routed through the
@@ -363,32 +369,51 @@ final class Metal4PresentPath {
         return true
     }
 
-    /// Closes the command buffer and presents. The four steps are ordered and the
-    /// order is not interchangeable: waitForDrawable before commit,
-    /// signalDrawable after it, then the drawable's own present. This is an
-    /// ordinary present because CAMetalDisplayLink owns the drawable's scheduling,
-    /// which makes targeted present illegal here, and it is synchronous so the
-    /// commit still lands inside the needsUpdate callback — a present committed in
-    /// a later run-loop pass reports presentedTime == 0.
+    /// Closes the command buffer and presents.
+    ///
+    /// The readyEvent wait lives here, deliberately, and taking it is the whole
+    /// reason this method owns it rather than exposing a separate wait call.
+    /// Metal 3 recorded the wait *into* the command buffer
+    /// (encodeWaitForEvent), so dropping an unsubmitted buffer dropped the wait
+    /// with it — which is what lets present(_:) return from four places after
+    /// encoding. Metal 4's queue.waitForEvent is a queue-timeline operation that
+    /// takes effect when called: issued before those early returns it would leave
+    /// an orphan wait that nothing ever satisfies (the deadline-miss return is hit
+    /// in normal operation), and every later commit would queue behind it — a
+    /// permanently wedged present queue with the display-link callback blocked in
+    /// commit. Issuing it here means it is only ever reached once the frame is
+    /// certain to be committed. Queue operations take effect in call order, so
+    /// waiting immediately before commit on the same thread is equivalent.
+    ///
+    /// The four present steps are ordered and not interchangeable: waitForDrawable
+    /// before commit, signalDrawable after it, then the drawable's own present.
+    /// It is an ordinary present because CAMetalDisplayLink owns the drawable's
+    /// scheduling, which makes targeted present illegal here, and it is
+    /// synchronous so the commit still lands inside the needsUpdate callback — a
+    /// present committed in a later run-loop pass reports presentedTime == 0.
     func submit(
         drawable: CAMetalDrawable,
+        readyEvent: MTLSharedEvent,
+        eventValue: UInt64,
         onCompleted: @escaping (Error?) -> Void
     ) {
-        commandBuffer.endCommandBuffer()
+        endRecording()
         let options = MTL4CommitOptions()
         // MTL4CommandBufferFeedback has no status, only error: succeeded is
         // error == nil.
         options.addFeedbackHandler { feedback in onCompleted(feedback.error) }
+        queue.waitForEvent(readyEvent, value: eventValue)
         queue.waitForDrawable(drawable)
         queue.commit([commandBuffer], options: options)
         queue.signalDrawable(drawable)
         drawable.present()
     }
 
-    /// Abandons a frame that failed during encoding, so the reusable command
-    /// buffer is not left open across frames.
+    /// Abandons a frame that will not be submitted, so the reusable command buffer
+    /// is not left open across frames. Idempotent, so every early return can call
+    /// it without tracking whether an earlier one already did.
     func abandonFrame() {
-        commandBuffer.endCommandBuffer()
+        endRecording()
     }
 }
 
@@ -1451,11 +1476,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     ///
     /// Two orderings differ from Metal 3 and both matter:
     ///   - the event wait is a queue operation, not a command-buffer one, so it is
-    ///     issued only once the frame is certain to be committed. Issuing it
-    ///     earlier would leave a wait on the queue timeline for a frame that the
-    ///     deadline check went on to drop.
+    ///     issued inside submit() rather than up front. Every early return below
+    ///     happens before any wait has been placed on the queue timeline; see
+    ///     Metal4PresentPath.submit for what issuing it early would wedge.
     ///   - the command buffer is reusable and must be closed on every path out of
-    ///     here, which is what abandonFrame() is for.
+    ///     here, which is what abandonFrame() is for. All four early returns call
+    ///     it, and it is idempotent.
     @available(macOS 26.0, *)
     private func presentMetal4(
         _ work: PresentationWork,
@@ -1574,9 +1600,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
 
         // The main Metal 3 queue signals readyEvent; this Metal 4 queue waits on
         // it. Shared events cross the Metal 3 / Metal 4 boundary, which is what
-        // makes this pilot possible without touching the main queue at all.
-        path.waitForReady(event: readyEvent, value: eventValue)
-        path.submit(drawable: drawable) { [weak self] error in
+        // makes this pilot possible without touching the main queue at all. The
+        // wait is issued inside submit(), past every path that can still abandon
+        // the frame — see its documentation for why that placement is load-bearing.
+        path.submit(drawable: drawable, readyEvent: readyEvent, eventValue: eventValue) { [weak self] error in
             // MTL4CommandBufferFeedback carries no status, so error == nil is the
             // only success signal. Routing into the same handler as Metal 3 keeps
             // the failure path — which advances readyEvent so the present thread

@@ -410,9 +410,16 @@ private func presentPathTest(device: MTLDevice) throws {
         print("Metal 4 present path: constructed and encoded, but this host vended no drawable, so submit was not exercised")
         return
     }
+    // submit() now owns the readyEvent wait, so it needs an event and a value.
+    // Pre-signalling it to the value being waited on keeps this test independent
+    // of a producer queue while still going through the real wait.
+    guard let readyEvent = device.makeSharedEvent() else {
+        try fail("could not create the ready event")
+    }
+    readyEvent.signaledValue = 7
     let completed = DispatchSemaphore(value: 0)
     var submitError: Error?
-    path.submit(drawable: drawable) { error in
+    path.submit(drawable: drawable, readyEvent: readyEvent, eventValue: 7) { error in
         submitError = error
         completed.signal()
     }
@@ -425,7 +432,53 @@ private func presentPathTest(device: MTLDevice) throws {
     destination.getBytes(&readback, bytesPerRow: 4, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
     try check(readback == [64, 128, 191, 255],
               "present-path copy readback mismatch: \(readback)")
-    print("Metal 4 present path: queue, allocator ring, argument table, residency set, MTL4 interpolator, copy encode and the commit/present handshake all functional")
+
+    // An abandoned frame must not wedge the queue. This is the regression test for
+    // the one failure mode that would be invisible until it deadlocked: Metal 4's
+    // queue.waitForEvent takes effect when called, not when the command buffer is
+    // committed, so issuing it before the deadline check — which fires in normal
+    // operation — would leave a wait nothing ever satisfies, and every later
+    // commit would queue behind it forever. Here a frame is encoded and abandoned
+    // exactly as the deadline path does, abandonFrame is called twice to confirm it
+    // is idempotent, and then a real frame must still complete.
+    let abandoned = path.beginFrame()
+    try check(path.encodeCopy(
+        commandBuffer: abandoned,
+        source: source,
+        destination: destination,
+        pipeline: copyPipeline,
+        sampler: copySampler,
+        label: "present path abandoned copy"
+    ), "encodeCopy failed on the frame that is about to be abandoned")
+    path.abandonFrame()
+    path.abandonFrame()
+
+    guard let secondDrawable = layer.nextDrawable() else {
+        print("Metal 4 present path: abandon path exercised, but no second drawable was vended")
+        return
+    }
+    let secondCommandBuffer = path.beginFrame()
+    try check(path.encodeCopy(
+        commandBuffer: secondCommandBuffer,
+        source: source,
+        destination: destination,
+        pipeline: copyPipeline,
+        sampler: copySampler,
+        label: "present path post-abandon copy"
+    ), "encodeCopy failed after an abandoned frame")
+    let secondCompleted = DispatchSemaphore(value: 0)
+    var secondError: Error?
+    readyEvent.signaledValue = 8
+    path.submit(drawable: secondDrawable, readyEvent: readyEvent, eventValue: 8) { error in
+        secondError = error
+        secondCompleted.signal()
+    }
+    try check(secondCompleted.wait(timeout: .now() + .seconds(5)) == .success,
+              "the queue is wedged: no completion within 5s after a frame was abandoned")
+    try check(secondError == nil,
+              "the post-abandon submit failed: \(String(describing: secondError))")
+
+    print("Metal 4 present path: queue, allocator ring, argument table, residency set, MTL4 interpolator, copy encode and the commit/present handshake all functional, and an abandoned frame leaves the queue usable")
 }
 
 private func runPresentPathTest(device: MTLDevice) throws {
