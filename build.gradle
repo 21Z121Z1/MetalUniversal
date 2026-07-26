@@ -101,6 +101,12 @@ tasks.register("buildIOSNative", Exec) {
 		// check against the SDK (always present in modern Xcode); at runtime,
 		// `MTLFXSpatialScaler.supportsDevice` returns false on chips/OS
 		// versions that lack MetalFX, so the JVM falls back gracefully.
+		//
+		// NOTE: Xcode 26's swiftc driver no longer accepts `-weak_framework`
+		// directly (it rejects it with "unknown argument"). The flag must be
+		// forwarded to the linker (ld) via `-Xlinker`, which is the canonical
+		// way to pass link-time options through swiftc and is stable across
+		// Xcode versions. ld understands `-weak_framework <name>` natively.
 		commandLine "swiftc",
 			"-O",
 			"-whole-module-optimization",
@@ -110,7 +116,8 @@ tasks.register("buildIOSNative", Exec) {
 			"-sdk", iosSdkPath,
 			"-framework", "Foundation",
 			"-framework", "Metal",
-			"-weak_framework", "MetalFX",
+			"-Xlinker", "-weak_framework",
+			"-Xlinker", "MetalFX",
 			"-framework", "QuartzCore",
 			"-framework", "UIKit",
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
