@@ -433,6 +433,59 @@ gradle 日志里也没有捕到任何原生错误文本(既无 Metal API validat
 
 **S7 判定:未通过**(崩溃已消失,但持续渲染与画面均未证实)。
 
+### 迭代 7 — 只读调研发现的 GL 地雷与 reload 真 bug(2026-07-27)
+
+**① `PipelineManager.resetTextureState` 是裸 GL(已修)**。`destroyPipeline` 的 lambda 里
+`for i in 0..15: GlStateManager._activeTexture(33984+i); _bindTexture(0)`。MC 26.2 的
+`_activeTexture` 在请求单元 ≠ 缓存值时**真的调 `GL33C.glActiveTexture`**;缓存初值 0,
+所以 `i=0` 被静默吸收,**`i>=1` 每次都是无上下文的实 GL 调用**。
+至今没炸只是因为循环体遍历 `pipelinesPerDimension`,首次进世界时为空。
+**退世界 / 切维度 / F3+R / 关光影,只要之前存在过一个 pipeline 就会执行到。**
+修:新增 `IrisPipelineManagerCompatMixin`(`resetTextureState` HEAD cancel),已进 mixins.json。
+取消是安全的——它的目的就是把 GL 纹理单元恢复到已知状态,Metal 上没有这种状态,
+绑定都在 `MetalRenderPass` 里逐 pass 重建。
+
+**② MetalFX TEMPORAL 会静默绕过 Iris 对 CUTOUT 的覆盖(已加 warn-once,未解决)**。
+`ShaderChunkRendererMetalFxMixin` 在 `compileProgram` HEAD 直接返回
+`metallum:pipeline/terrain_cutout_reactive`——命名空间不含 "sodium",
+`isSodiumPipeline` 判 false,`tryCompile` 返回 null 且**一行日志都不打**。
+BSL 的 CUTOUT(`[0]`,本该生效)在 TEMPORAL 下会退回 metallum 自己的 shader。
+`MetalFxConfig` 默认 OFF 所以现在不踩,**阶段二一开就爆**。已加一次性 warn;
+真正的重叠解决属阶段二。
+
+**③ reload 生命周期两个真 bug(已修)**:
+- `Instance.close()` 的 `clearPipelineCache()` 被 `this.device != null` 门住,而 `device`
+  只在 `compileOverride` **成功**时赋值 → 某 pack 期间一个覆盖都没编译成功就永远不清缓存。
+  sodium 的 `ShaderChunkRenderer.programs` 是 `private static final Map`,跨 JVM 不变,
+  于是原生 PSO 一直留着换不掉。复合效应:`pipelineCacheGeneration` 只在 `clearPipelineCache()`
+  里递增,那道防后台编译串代的保护一起失效。修:回落到 `MetalDevice.current()`,无条件清。
+- `activate()` 不关前一个 Instance → 泄漏 uniform buffer + placeholder 纹理。
+  修:`activate()` 开头先 `deactivate()`(幂等)。
+
+**④ 另两条(已修)**:`compileOverride` 补 `closed` 检查(后台 prewarm 线程的编译任务可能
+跨越一次 deactivate/activate);`prewarm` 加一次性 INFO
+`draw-path resources prewarmed for generation N`——**没有它,「Iris 的 LevelRenderer 钩子
+在 Metal 上没生效」和「资源确实缺失」两种完全不同的根因会表现为同一条 `Missing sampler`**。
+
+**⑤ 更正一条此前的判断**:05:55 那轮没有 `compiling terrain override` **不是 `discriminate`
+判错**,只是客户端停在标题画面没进世界(sodium 的 `compileProgram` 只在地形真要画时才被调)。
+`discriminate` 经字节码交叉验证与 Iris 生产逻辑逐条等价。
+
+**未做,留给下一轮(按风险序)**:
+- S6b 不是槽位顺序问题而是**硬互斥**:`validateFragmentOutputSignature` 要求 fragment 输出
+  location 集合与非 null color target 下标集合**完全相等**,coverage 与 Iris 扩展附件
+  **不可能共存于同一 pass**;且布局对 generation 冻结而 `usesCutoutReactiveTerrain()` 逐帧可变
+  → **任何「按帧动态决定布局」的方案必然某帧撞闸崩溃,互斥必须是 per-generation 静态决策**。
+  另:`extendedKindMask` 应在 `Instance` 构造函数末尾就定死(否则 asyncPrecompile 可能在进世界前
+  用旧标志编出原生 PSO 并永久留存);扩展槽错序 100% 静默(格式全是 RGBA8_UNORM,三道闸都不响),
+  必须加防错序自检;改附件布局后必须 `rm -rf run/metallum-cache/msl`(MSL 磁盘缓存的 key
+  不含 colorTargetStates,会跳过第一道闸)。**§4.3 那份配方对 `db[0] != 0` 是错的**
+  (Potato TRANSLUCENT=`[3,4]`,slot0 也是 colortex 而非主帧缓冲)。
+  推荐方案不需要动 `MetalRenderPass.java` → 对 Metal 4 线零新增冲突面,**刻意保持**。
+- 性能审计 P1 已过时:按管线 fragment-stage 等待**已在树里**(`SPLIT_FENCE` + `waitRenderFences`),
+  默认关,不需实现只需验证+打开;但它是**无条件收窄而非按管线反射**,composite 链里若有 pass
+  在**顶点阶段**采样上一 pass 输出,split 模式下会欠同步——打开前必须补对抗用例。
+
 ## 5. 风险与预案
 
 | 风险 | 信号 | 预案 |

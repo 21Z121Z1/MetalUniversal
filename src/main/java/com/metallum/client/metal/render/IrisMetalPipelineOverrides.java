@@ -104,6 +104,9 @@ final class IrisMetalPipelineOverrides {
             final ProgramSet programSet,
             final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap
     ) {
+        // Idempotent: a reload activates without anyone having deactivated, and
+        // the previous instance owns GPU buffers and placeholder textures.
+        deactivate();
         Instance instance = new Instance(GENERATIONS.incrementAndGet(), programSet, textureMap);
         active = instance;
         return instance;
@@ -285,7 +288,23 @@ final class IrisMetalPipelineOverrides {
                 final RenderPipeline pipeline,
                 final @Nullable ShaderSource fallbackSource
         ) {
+            if (this.closed) {
+                return null;
+            }
             if (!isSodiumPipeline(pipeline)) {
+                // MetalFX TEMPORAL replaces sodium's cutout program with its own
+                // reactive pipeline, whose namespace is "metallum" — so it never
+                // reaches the override and the pack's CUTOUT program is silently
+                // bypassed. Harmless while MetalFX is off; phase 2 has to resolve
+                // the overlap rather than let it fail quietly.
+                if (pipeline.getLocation().getPath().contains("cutout_reactive")
+                        && this.reportedPlaceholders.add("<metalfx-cutout-bypass>")) {
+                    Metallum.LOGGER.warn(
+                            "[metallum-iris] {} replaced sodium's cutout terrain pipeline;"
+                                    + " the pack's CUTOUT program is bypassed for as long as MetalFX owns it",
+                            pipeline.getLocation()
+                    );
+                }
                 return null;
             }
             TerrainKind kind = discriminate(pipeline);
@@ -489,6 +508,13 @@ final class IrisMetalPipelineOverrides {
             }
             if (this.placeholders == null) {
                 this.placeholders = new IrisMetalPlaceholderTextures(device);
+                // Proves beginLevelRendering -> updateFrame actually runs. Without
+                // it, a missing Iris LevelRenderer hook and a genuinely absent
+                // resource both surface as "Missing sampler" — same symptom,
+                // completely different cause.
+                Metallum.LOGGER.info(
+                        "[metallum-iris] draw-path resources prewarmed for generation {}", this.generation
+                );
             }
             this.uniformValues.prewarm(device);
         }
@@ -517,10 +543,18 @@ final class IrisMetalPipelineOverrides {
             // objects, which outlive this instance; without dropping the cache a
             // pack reload (or turning shaders off) would keep drawing terrain
             // with the previous pack's PSOs.
-            if (this.device != null) {
-                this.device.clearPipelineCache();
-                this.device = null;
+            // Must NOT be conditional on having compiled something: an instance
+            // whose overrides all failed still has to invalidate whatever native
+            // PSOs were built in its place (sodium's program map is a private
+            // static that never turns over, so a stale PSO would survive for the
+            // life of the JVM), and clearPipelineCache is also what advances
+            // pipelineCacheGeneration — the guard that stops an in-flight
+            // background compile from landing in the next generation's cache.
+            MetalDevice device = this.device != null ? this.device : MetalDevice.current();
+            if (device != null) {
+                device.clearPipelineCache();
             }
+            this.device = null;
             this.uniformValues.close();
             if (this.placeholders != null) {
                 this.placeholders.close();

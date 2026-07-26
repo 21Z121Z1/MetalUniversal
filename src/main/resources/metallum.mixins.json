@@ -28,6 +28,7 @@
     "sodium.SodiumPreferredGraphicsApiMixin",
     "iris.IrisBootstrapCompatMixin",
     "iris.IrisPipelineFactoryMixin",
+    "iris.IrisPipelineManagerCompatMixin",
     "iris.IrisRenderSystemCompatMixin",
     "iris.IrisGlDebugCompatMixin",
     "iris.IrisSamplersCompatMixin",
