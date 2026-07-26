@@ -19,6 +19,12 @@ dependencies {
 	
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	implementation "maven.modrinth:sodium:${project.sodium_version}"
+	// Iris ships as an unobfuscated MC 26.2 mod (no refmap); a plain
+	// implementation dependency puts it on the dev classpath where the
+	// Fabric loader discovers and loads it as a mod. The metallum iris.*
+	// compat mixins (gated on the mod being present) keep it dormant on
+	// the Metal backend until the Iris-on-Metal semantic layer lands.
+	implementation "maven.modrinth:iris:${project.iris_version}"
 	testImplementation "org.junit.jupiter:junit-jupiter:5.12.2"
 	testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.12.2"
 }

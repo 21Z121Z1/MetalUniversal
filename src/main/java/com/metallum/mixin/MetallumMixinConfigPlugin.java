@@ -40,6 +40,13 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
         }
+        if (mixinClassName.contains(".mixin.iris.")) {
+            // Iris-dormancy compat shims: only meaningful when Iris is present
+            // and the default (Metal-first) backend selection is active. The
+            // injected handlers additionally check the LIVE backend at runtime
+            // so a Vulkan/GL fallback leaves Iris untouched.
+            return FabricLoader.getInstance().isModLoaded("iris") && this.isDefaultGraphicsApi;
+        }
         return PREFERRED_GRAPHICS_API_MIXIN.equals(mixinClassName) || this.isDefaultGraphicsApi;
     }
 

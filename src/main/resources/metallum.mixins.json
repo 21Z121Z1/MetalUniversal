@@ -22,7 +22,13 @@
     "sodium.DrawContextMixin",
     "sodium.ShaderChunkRendererMetalFxMixin",
     "sodium.DefaultChunkRendererMetalFxMixin",
-    "sodium.SodiumPreferredGraphicsApiMixin"
+    "sodium.SodiumPreferredGraphicsApiMixin",
+    "iris.IrisBootstrapCompatMixin",
+    "iris.IrisRenderSystemCompatMixin",
+    "iris.IrisGlDebugCompatMixin",
+    "iris.IrisSamplersCompatMixin",
+    "iris.IrisVanillaPipelineCompatMixin",
+    "iris.GlStateManagerCompatMixin"
   ],
   "injectors": {
     "defaultRequire": 1

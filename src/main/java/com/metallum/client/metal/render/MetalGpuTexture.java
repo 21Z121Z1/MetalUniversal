@@ -155,4 +155,24 @@ final class MetalGpuTexture extends GpuTexture {
         return result == 0L ? MTLTextureUsage.ShaderRead.value : result;
     }
 
+    // --- Iris dormancy support -------------------------------------------
+    //
+    // Iris mixes a virtual `int iris$getGlId()` into GpuTexture whose default
+    // body throws for non-GL textures, and its AbstractTexture hook calls it
+    // for EVERY texture the game creates (fonts first). This name-matched
+    // override shadows the mixin-added method at runtime and hands Iris a
+    // stable synthetic id so its texture-tracking maps stay consistent while
+    // it is dormant on Metal. Plain Java: no Iris compile dependency needed —
+    // the descriptor `()I` and name are what the JVM dispatches on. Harmless
+    // when Iris is absent (just an unused method).
+    private static final java.util.concurrent.atomic.AtomicInteger IRIS_SYNTHETIC_ID =
+            new java.util.concurrent.atomic.AtomicInteger(1);
+    private int irisSyntheticGlId;
+
+    public int iris$getGlId() {
+        if (irisSyntheticGlId == 0) {
+            irisSyntheticGlId = IRIS_SYNTHETIC_ID.getAndIncrement();
+        }
+        return irisSyntheticGlId;
+    }
 }

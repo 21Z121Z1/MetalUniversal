@@ -1446,8 +1446,12 @@ public final class MetalFxManager {
         disocclusionTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
                 "MetalFX Disocclusion R8", usage, GpuFormat.R8_UNORM, renderWidth, renderHeight, 1, 1
         );
+        // Cleared through clearColorTexture (deferred-clear materialization
+        // attaches it as a color target), so RenderTarget usage is required —
+        // Metal API validation aborts otherwise.
         reactiveTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
-                "MetalFX Reactive R8", usage, GpuFormat.R8_UNORM, renderWidth, renderHeight, 1, 1
+                "MetalFX Reactive R8", usage | GpuTexture.USAGE_RENDER_ATTACHMENT,
+                GpuFormat.R8_UNORM, renderWidth, renderHeight, 1, 1
         );
         cutoutReactiveTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
                 "MetalFX CUTOUT Coverage R8",
