@@ -521,6 +521,28 @@ MetalFX 验证跑时 Iris 是休眠的),只能手动驱动。任何 `-D` 覆盖�
 命名空间顶替 sodium 的 cutout 地形程序,于是**包的 CUTOUT 程序被绕过**(有一次性 warn)。
 要看包的 cutout 着色,用 `-Dmetallum.metalfx.mode=OFF`。
 
+### 迭代 9 — reload 生命周期:自动化覆盖已补,GUI 矩阵仍欠(2026-07-27)
+
+阶段一缺口 3(reload/开关光影生命周期)此前**一条验证都没有**。现在补了
+`MetalIrisSodiumTerrainTest.reloadLifecycleReleasesAndReactivates`,覆盖
+activate → updateFrame → 重复 activate → deactivate 全程,断言:
+- 重复 `activate` 会退休旧 Instance 而不是把它的 GPU 资源丢掉不管(泄漏 bug);
+- generation 递增、注册表发布的是新实例;
+- **退休/停用后的 Instance 不再服务绘制路径**(`uniformStaging` 返回 null)。
+
+这三条各自对应一个曾经在树里活着、且没有任何门能抓到的 bug(见迭代 7 ③)。
+
+**仍然欠的是 GUI 矩阵**,而且我这侧驱动不了(需要真实鼠标/键盘输入):
+进世界 → 退到标题(**这一步才会触发 `PipelineManager.resetTextureState`,即迭代 7 ① 修的那颗雷**)
+→ 再进世界(**必须重新编译而不是命中旧缓存**,验的是迭代 7 ③ 的 `clearPipelineCache`)
+→ 按 K 关光影再开 → 进下界(切维度)→ 换 pack。
+
+用 `./gradlew runClientAll -Pworld="New World"` 起,然后照上面顺序手动走一遍。
+判据:全程无崩溃;第二次进世界应重新出现 `compiling terrain override ...`
+(**如果没有重新出现,说明缓存没清干净,是真 bug 不是噪声**);
+每次 activate 应出现新的 `semantic pipeline generation N online` 且 N 递增;
+每次都应出现 `draw-path resources prewarmed for generation N`。
+
 ## 5. 风险与预案
 
 | 风险 | 信号 | 预案 |

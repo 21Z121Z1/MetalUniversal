@@ -50,6 +50,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -99,6 +101,59 @@ final class MetalIrisSodiumTerrainTest {
         MetalFxManager.close();
         if (device != null) {
             device.close();
+        }
+    }
+
+    /**
+     * Reload lifecycle. Every one of these assertions covers a bug that was
+     * live in the tree and that no gate would have caught:
+     *
+     * <ul>
+     *   <li>{@code activate} used to leave the previous instance open, leaking
+     *       its uniform buffers and placeholder textures on every pack reload;</li>
+     *   <li>{@code close} only dropped the pipeline cache when an override had
+     *       actually compiled, so a pack whose overrides all failed left native
+     *       PSOs cached forever — sodium's program map is a private static that
+     *       never turns over — and, because the cache clear is also what bumps
+     *       {@code pipelineCacheGeneration}, it silently disabled the guard that
+     *       stops an in-flight background compile from landing in the next
+     *       generation;</li>
+     *   <li>a deactivated instance must stop answering draw-path lookups.</li>
+     * </ul>
+     */
+    @Test
+    void reloadLifecycleReleasesAndReactivates() throws IOException {
+        List<Path> packs = discoverPacks();
+        assertFalse(packs.isEmpty(), "No shader pack fixtures found");
+        Iris.testing = true;
+        WorldRenderingSettings.INSTANCE.setVertexFormat(FormatAnalyzer.createFormat(true, true, true, true));
+
+        Path packZip = packs.getFirst();
+        try (FileSystem fs = FileSystems.newFileSystem(packZip)) {
+            ProgramSet set = loadPack(packZip.getFileName().toString(), fs.getPath("/shaders"))
+                    .getProgramSet(new NamespacedId("minecraft", "overworld"));
+
+            IrisMetalPipelineOverrides.Instance first =
+                    IrisMetalPipelineOverrides.activate(set, new Object2ObjectOpenHashMap<>());
+            assertSame(first, IrisMetalPipelineOverrides.active(), "activate did not publish the instance");
+            IrisMetalPipelineOverrides.updateFrame();
+
+            // Reactivating without an explicit deactivate must retire the old
+            // instance rather than orphan its GPU resources.
+            IrisMetalPipelineOverrides.Instance second =
+                    IrisMetalPipelineOverrides.activate(set, new Object2ObjectOpenHashMap<>());
+            assertNotSame(first, second, "reload reused the previous instance");
+            assertTrue(second.generation() > first.generation(), "generation did not advance across reload");
+            assertSame(second, IrisMetalPipelineOverrides.active(), "reload did not publish the new instance");
+
+            // A retired instance must not keep serving the draw path.
+            assertNull(first.uniformStaging(TerrainKind.SOLID),
+                    "the retired instance still holds its uniform block");
+
+            IrisMetalPipelineOverrides.deactivate();
+            assertNull(IrisMetalPipelineOverrides.active(), "deactivate left the registry active");
+            assertNull(second.uniformStaging(TerrainKind.SOLID),
+                    "deactivate did not release the uniform block");
         }
     }
 
