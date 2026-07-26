@@ -1,5 +1,7 @@
 package com.metallum.mixin.render;
 
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.metallum.client.metal.render.MetalEntityMotionCapture;
 import com.metallum.client.metal.render.MetalMotionHooks;
 import net.minecraft.client.renderer.block.BlockAndTintGetter;
@@ -11,7 +13,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.state.BlockState;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Redirect;
 
 /**
  * Makes the moving-block motion sample current while a falling block's vertices
@@ -24,14 +25,21 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  * the span during which {@code Group.getVertexBuilder} and {@code getOrAddDraw}
  * run — the two points where a draw is split out and bound to this sample.</p>
  *
- * <p>A redirect is used rather than paired injections because the sample must be
- * cleared even if tesselation throws; a HEAD/RETURN pair around a call cannot
- * express that, and a leaked sample would attach this block's motion to whatever
- * geometry is built next.</p>
+ * <p>The call is wrapped rather than bracketed with paired injections because the
+ * sample must be cleared even if tesselation throws; a HEAD/RETURN pair around a
+ * call cannot express that, and a leaked sample would attach this block's motion
+ * to whatever geometry is built next.</p>
+ *
+ * <p>It is a MixinExtras {@code @WrapOperation} and not a {@code @Redirect}
+ * because {@code fabric-renderer-api-v1} redirects this same {@code tesselateBlock}
+ * invoke (its {@code MovingBlockFeatureRendererMixin}). {@code @Redirect} is
+ * exclusive: whichever mod wins, the other is skipped and then fails its own
+ * injection check, which aborts game init outright. {@code @WrapOperation} is
+ * designed to compose, so both wrappers apply.</p>
  */
 @Mixin(MovingBlockFeatureRenderer.class)
 public abstract class MovingBlockFeatureRendererMetalFxMixin {
-    @Redirect(method = "buildGroup", at = @At(value = "INVOKE", target = MetalMotionHooks.TESSELATE_BLOCK_TARGET))
+    @WrapOperation(method = "buildGroup", at = @At(value = "INVOKE", target = MetalMotionHooks.TESSELATE_BLOCK_TARGET))
     private void metallum$bracketMovingBlockTesselation(
             final ModelBlockRenderer blockRenderer,
             final BlockQuadOutput output,
@@ -42,13 +50,14 @@ public abstract class MovingBlockFeatureRendererMetalFxMixin {
             final BlockPos pos,
             final BlockState blockState,
             final BlockStateModel model,
-            final long seed
+            final long seed,
+            final Operation<Void> original
     ) {
         // The level argument is the submit's MovingBlockRenderState, which is the
         // key the submit constructor recorded the owner under.
         MetalEntityMotionCapture.beginMovingBlockBuild(level);
         try {
-            blockRenderer.tesselateBlock(output, x, y, z, level, pos, blockState, model, seed);
+            original.call(blockRenderer, output, x, y, z, level, pos, blockState, model, seed);
         } finally {
             MetalEntityMotionCapture.endModelBuild();
         }
