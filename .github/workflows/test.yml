@@ -59,8 +59,14 @@ jobs:
             spirv-cross
           echo "--- tool versions ---"
           glslangValidator --version | head -n 3
-          spirv-cross --version | head -n 2
+          # spirv-cross has no --version flag (prints usage & exits non-zero);
+          # use --revision (build info) instead, tolerate missing.
+          spirv-cross --revision 2>&1 | head -n 3 || true
           which spirv-opt && spirv-opt --version | head -n 1 || true
+          # Sanity: all three CLI tools must be on PATH for the test suite.
+          command -v glslangValidator
+          command -v spirv-cross
+          command -v spirv-opt || echo "(spirv-opt optional, not on PATH)"
 
       - name: checkout Iris 26.2 (reference source for test traceability)
         # The test suite bakes Iris 26.2 source references into run_tests.py
@@ -97,14 +103,22 @@ jobs:
       - name: upload Iris 26.2 reference manifest (always)
         if: always()
         run: |
-          set -euo pipefail
-          {
-            echo "## Iris 26.2 reference"
-            echo
-            echo '```'
-            git -C iris-26.2 log -1 --format='%H %s%n%n%b'
-            echo '```'
-          } > iris-26.2-manifest.md
+          # Defensive: if the Iris checkout step was skipped (e.g. toolchain
+          # step failed earlier), emit a placeholder manifest instead of
+          # failing this always-on step.
+          if [ -d iris-26.2/.git ]; then
+            {
+              echo "## Iris 26.2 reference"
+              echo
+              echo '```'
+              git -C iris-26.2 log -1 --format='%H %s%n%n%b'
+              echo '```'
+            } > iris-26.2-manifest.md
+          else
+            echo "## Iris 26.2 reference" > iris-26.2-manifest.md
+            echo "" >> iris-26.2-manifest.md
+            echo "_iris-26.2 checkout was not available in this run._" >> iris-26.2-manifest.md
+          fi
 
       - name: upload Iris reference manifest
         if: always()
