@@ -311,6 +311,52 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 	environment "MTL_SHADER_VALIDATION", "1"
 }
 
+// Iris embeds its shader-translation stack (glsl-transformer, jcpp, antlr)
+// as Fabric nested jars; the plain JUnit classpath never sees them. Extract
+// them from the resolved Iris jar so headless tests use the exact binaries
+// Iris ships.
+tasks.register("extractIrisNestedJars", Copy) {
+	from({
+		def irisJar = configurations.compileClasspath.files.find {
+			it.name.startsWith("iris-") && it.name.endsWith(".jar")
+		}
+		irisJar != null ? zipTree(irisJar) : []
+	}) {
+		include "META-INF/jars/*.jar"
+	}
+	eachFile { it.path = it.name }
+	includeEmptyDirs = false
+	into layout.buildDirectory.dir("iris-nested-jars")
+}
+
+def irisNestedJars = fileTree("${buildDir}/iris-nested-jars") { include "*.jar" }
+irisNestedJars.builtBy("extractIrisNestedJars")
+dependencies {
+	testRuntimeOnly irisNestedJars
+}
+
+tasks.register("metalIrisShaderTranslationTest", Test) {
+	group = "verification"
+	description = "Translates every program of the local shader-pack fixtures (run/shaderpacks/*.zip) through the production GLSL->SPIR-V->MSL chain and compiles the MSL on the device. Standalone: needs non-redistributable pack fixtures, so it is not part of 'check'."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisShaderTranslationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	systemProperty "metallum.iris.shaderpack.dir", "${projectDir}/run/shaderpacks"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	testLogging {
+		showStandardStreams = true
+	}
+}
+
 tasks.named("check") {
 	dependsOn "metalFrameGenerationLifecycleTest"
 	dependsOn "metalMrtBackendIntegrationTest"

@@ -53,6 +53,7 @@ jar 审计裁定:Iris 26.2 是 **GL 渲染器**(自建 FBO/program、~200 裸 GL
 - **B0 底座(先行,与 Iris 解耦)**:补齐 Metal 后端通用能力——compute pipeline/dispatch(含 indirect)、SSBO(usage+绑定种类+Spvc 反射)、storage image、compare sampler、blit generateMipmaps、MRT 验证矩阵补全(4-attach/非连续/depth+MRT/resize)——全部走 Java→FFM→Swift 真实链路 + GPU 内容级测试。**无论集成走到哪一步,这些都是必要且可独立验收的。**
 - **B1 框架层**:`com.metallum.client.iris.*` 实现 Iris 语义等价物:IrisMetalFramebuffer(drawBuffers 映射→RenderPassDescriptor)、IrisMetalRenderTargets + BufferFlipper(main/alt ping-pong、flip 快照、resize/reload 复位)、depthtex/shadowtex 管理、CompositeRenderer 骨架(pass 序列+mipmap+compute 钩子)、IrisMetalProgram(pack GLSL→GlslCompiler→Spvc→PSO,uniform location 语义映射)。每项配内容级 GPU 测试(不依赖 Iris 在场)。
 - **B2 接入**:Sodium 0.9.0→0.9.1(先全量回归 metallum 现有 mixin/L1-L3)+ 引入 Iris 依赖;**兼容垫片**让 Iris 在 Metal 上先按「不支持后端」安全停用(等价其 vulkan 分支,游戏可启动可进世界);随后逐步放行:替换 `IrisRenderSystem`/`GlStateManager` 缝合面到 B1 框架、以 `MetalDevice` 管线覆盖钩子等价 `GlDevice.getOrCompilePipeline` 机制、shadow/composite/final 逐段点亮。第一版收敛到单一测试光影包全链路正确。
+  - 状态 2026-07-27:垫片+共存已达成(B7/C 冒烟);**B2-2 转译前端已完成并全绿**——`MetalIrisShaderCompiler`(TransformPatcher→std140 收拢→shaderc→Spvc→真机 MTLLibrary)对 BSL/Potato 主世界 96/96 stage 通过(`metalIrisShaderTranslationTest`,validation §L2)。残余=PSO 链接期(varying 按名配对、uniform 供给、绑定表、DRAWBUFFERS 落位)→ 属 B2-1/B2-3。
 - **B3 全链路验收**:`minecraftIrisClientValidation`(自制确定性光影包 + 定帧 readback 断言)。
 
 > 诚实边界:B2 的「逐步放行」是长周期工程;每个会话末在验收报告中如实区分「已完成/已验证/未验证/未完成」,阶段一硬门槛(§2.9)未全绿即判「不通过」。

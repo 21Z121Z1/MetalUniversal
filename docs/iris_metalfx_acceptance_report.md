@@ -21,6 +21,8 @@
 | 同步/barrier 语义 | encoder-fence 链有序性测试(render→compute→render、compute→compute、indirect args);GL barrier bit 映射表见 architecture §2.4 |
 | Sodium 0.9.1 升级 | L1+单测+**真实客户端冒烟 A**:Metal 后端进世界渲染 ~4 分钟无渲染异常(SIGTERM 收尾;唯一异常为已知离线鉴权 401 噪声) |
 | Iris 1.11.2 引入+休眠垫片 | **冒烟 B7 通过**(2026-07-27):Metal 后端 + Sodium 0.9.1 + Iris 共存,28s 进世界,90s 持续渲染存活,0 崩溃标记。休眠面=7 处取消(onRenderSystemInit/duringRenderSystemInit/loadShaderpack/IrisRenderSystem.initRenderer+supportsSSBO/GLDebug×4/IrisSamplers.initRenderer/VanillaRenderingPipeline.beginLevelRendering)+ `_getInteger` 常量假接 + `iris$getGlId` 合成 id 覆写。迭代过程与三个 `<clinit>`/纹理钩子陷阱见 validation 文档 |
+| **B2-2 转译前端:真实光影包全程序转译矩阵** | `metalIrisShaderTranslationTest` **96/96 stage 全过**(2026-07-27):BSL 10.1.3(24 程序 52 stage,含 shadowcomp compute)+ Potato(22 程序 44 stage),链路=Iris ShaderPack 装载器→TransformPatcher→`MetalIrisShaderCompiler`(loose-uniform std140 收拢+敌意标识符重命名)→shaderc→SPIRV-Cross MSL→**真机 MTLLibrary 编译**。矩阵与迭代记录见 validation §L2 |
+| pack 安装+启用共存 | **冒烟 C 通过**(2026-07-27):BSL 入 shaderpacks + iris.properties 启用,Metal 29s 进世界、90s 存活、0 崩溃、dormant 正常、哨兵健康 |
 
 ### 仅完成接口/静态代码、未运行验证
 
@@ -32,8 +34,8 @@
 1. **Iris composite/final pass 执行**:未实现(Iris 在 Metal 上处于休眠模式,自身 GL 渲染链未被语义层替换)。
 2. **Sodium 世界几何走 Iris shader**:未实现(同上;当前世界几何走 metallum 原生管线)。
 3. **shader pack reload / 开关光影生命周期**:Iris 层未点亮,无从验证(后端层 resize/rebuild 有 L2 覆盖)。
-4. **≥1 光影包真实 Minecraft 运行验证**:未达成(BSL/Potato 已预取,自制确定性验证包未编写)。
-5. Iris 风格 shader 转译(DRAWBUFFERS 多输出、shadow sampler、uniform 集的 pack GLSL→MSL)专项测试未编写(通用 MRT/输出位置校验已有)。
+4. **≥1 光影包真实 Minecraft 运行验证(渲染语义)**:未达成——冒烟 C 只证明 pack 安装/启用下的共存,不是光影效果渲染;自制确定性验证包未编写。
+5. ~~Iris 风格 shader 转译专项测试未编写~~ → **已完成并全绿**(2026-07-27,`metalIrisShaderTranslationTest` 96/96,见上表)。残余边界(转译≠执行):stage 间 varying location 按名配对与显式注入、uniform 值供给、采样器绑定表、DRAWBUFFERS→MRT 落位,均属 B2-3 PSO 链接/执行期工作。
 
 ### 环境限制(非实现问题)
 
@@ -45,7 +47,7 @@
 
 ### 结论
 
-阶段一硬门槛 12 项中 8 项达成、4 项未达成(上表)。**判定:不通过。** 按任务书纪律,阶段二不启动;后续工作聚焦 B2 缝合面(见下一步清单)。
+阶段一硬门槛 12 项中 8 项达成、4 项未达成(上表;2026-07-27 增量:转译专项从缺口清单移除并全绿,但硬门槛四缺口——composite/final 执行、Sodium 几何走 Iris shader、光影渲染语义的真实运行验证、Iris 层生命周期——不变)。**判定:不通过。** 按任务书纪律,阶段二不启动;后续工作聚焦 B2 缝合面(见下一步清单)。
 
 ---
 
@@ -67,13 +69,14 @@ a3e9cf9 docs: audit + feature matrix + implementation plan
 e41414d iris-b0: compute/SSBO/image/mipmap/compare-sampler backend (10/10)
 a801057 iris-b0: MRT validation matrix gaps (14/14)
 3535788 iris-b1: ping-pong/depthtex/shadow framework (6/6)
-(进行中) iris-b2: Sodium 0.9.1 + Iris dep + dormancy shims + smokes
+69f75cb iris-b2: Sodium 0.9.1 + Iris dep + dormancy shims + smokes A/B7
+(本提交) iris-b2-2: real-pack translation front-end (96/96) + smoke C + perf audit
 ```
 
 ## 下一步(优先级序)
 
-1. **B2-1 世界几何**:`MetalDevice` 管线覆盖钩子(等价 `GlDevice.getOrCompilePipeline` mixin 机制)+ Iris `ShaderMap/IrisPipelines` 查表接通,先让 gbuffers_terrain 单程序点亮(Sodium terrain solid)。
-2. **B2-2 pack 装载**:Iris pack 解析结果(ProgramSource)→ GlslCompiler→Spvc→PSO 编译路径 + `metalIrisShaderTranslationTest`(DRAWBUFFERS/shadow sampler/uniform 集)。
-3. **B2-3 composite/final**:`CompositeRenderer` 语义(IrisMetalCompositeRenderer 骨架已在 plan §2.4)挂到 `IrisMetalRenderTargets`,自制确定性验证包 + `minecraftIrisClientValidation` L3 任务。
-4. **B2-4 生命周期**:reload/开关光影/维度切换在 Iris 层的资源重建。
+1. **B2-1 世界几何**:`MetalDevice` 管线覆盖钩子(等价 `GlDevice.getOrCompilePipeline` mixin 机制)+ Iris `ShaderMap/IrisPipelines` 查表接通,先让 gbuffers_terrain 单程序点亮(Sodium terrain solid;转译前端已就绪,缺 PSO 链接期:varying 按名配对+显式 location、uniform 供给、绑定表)。
+2. **B2-3 composite/final**:`CompositeRenderer` 语义挂到 `IrisMetalRenderTargets`(转译产物→PSO→全屏 pass 执行),自制确定性验证包 + `minecraftIrisClientValidation` L3 任务;同步落地性能审计 §1.1 的按管线 fragment-stage fence 精化(composite 链的前置性能项)。
+3. **B2-4 生命周期**:reload/开关光影/维度切换在 Iris 层的资源重建。
+4. 性能:先落 `metal_performance_audit.md` §5 计数器,再按测量结果实施 §1.2(blit encoder 合并)/§2.2(draw 循环去字符串键)。
 5. (阶段一通过后)阶段二按 plan §3:插入点验证 → TemporalSceneProvider → 低分辨率 → jitter/motion → FG 前置。

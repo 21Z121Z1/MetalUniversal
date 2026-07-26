@@ -54,3 +54,11 @@ JAVA_HOME=$JDK25 ./gradlew clean test buildMacNative metalMrtBackendIntegrationT
 01:25 主实现(MetalFX temporal/reactive/FG/pacing;Metal System Trace 在 /tmp)→ 02:35 存根 → 10:13 只读 forensics(docs/render-pipeline-forensics)→ 11:58 Computer Use:真实 Launcher 隔离实例 `~/Library/Application Support/minecraft/instances/MetalUniversal-26.2`(Sodium 0.9.0+metallum,Java25 runtime,TEMPORAL 67%)→ 12:56 动机=语义完整 motion+MRT+display timeline,被本地代理 503 连环打断(presenter 改造中断于 NSObject/delegate 适配)→ 15:26(**项目目录外**:`~/.codex/sessions/2026/07/26/rollout-2026-07-26T15-26-02-*.jsonl`)完成 MRT E2E/presentation/offscreen/客户端 harness(17:31 8/8 PASS),CUTOUT 修复做到一半按用户要求停手写交接。
 - Iris 相关:全部 rollout 仅 1 处 "iris" 命中(某 fabric.mod.json 的 breaks `iris<=1.10.8`)——**无任何 Iris 实现尝试**。
 - 用户全局 minecraft 目录有既有 OptiFine/BSL 资产,历史会话刻意用隔离实例避免触碰——沿用该纪律。
+
+## 光影包 fixture 与转译矩阵任务(2026-07-27 起)
+
+- fixture 位置:`run/shaderpacks/*.zip`(gitignored,**不入库**——BSL 等主流包许可证不允许再分发)。当前:`bsl-shaders.zip`(BSL v10.1.3 by Capt Tatsu,Modrinth)、`potato-shaders.zip`(Potato,最小复杂度)。选型:BSL=主流中等复杂度主验证目标;Potato=最小点亮目标。缺失时从 Modrinth 重新下载放入即可。
+- 任务:`./gradlew metalIrisShaderTranslationTest`(独立任务,不在 check;覆盖目录可用 `-Dmetallum.iris.shaderpack.dir=...`)。矩阵输出 `build/reports/metallum/iris_shader_translation.md`;失败程序的中间产物(patched/wrapped GLSL、MSL、失败源)dump 到 `build/reports/metallum/translation-dumps/`。
+- 无头 shadow 三件套(仅测试 classpath,src/test/java/net/irisshaders/…):`Iris`/`StandardMacros`/`IrisRenderSystem`——绕开 FabricLoader/GL 依赖;能力答案按 Metal 后端真实支持度填(tessellation=false)。扩展原则:新 NoSuchMethodError 先做字节码扫描再最小补面。
+- Iris 嵌套 jar(glsl-transformer/jcpp/antlr)由 `extractIrisNestedJars` 任务从 iris jar 解出挂 testRuntimeOnly,保证与 Iris 内嵌二进制一致。
+- 冒烟 C(pack 安装+启用共存):`config/iris.properties` 置 `shaderPack=bsl-shaders.zip`+`enableShaders=true` 后按冒烟纪律跑 runClient(哨兵复位+删 latest.log);预期 dormant 标记 + 进世界 + 0 崩溃。
