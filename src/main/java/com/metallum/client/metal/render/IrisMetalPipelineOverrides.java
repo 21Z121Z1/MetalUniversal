@@ -81,6 +81,12 @@ final class IrisMetalPipelineOverrides {
      */
     private static volatile boolean extendedTerrainTargets;
 
+    /**
+     * Declares that the sodium terrain pass carries the pack's extra DRAWBUFFERS
+     * attachments. Only read when an {@link Instance} is constructed — flipping
+     * it afterwards does not affect the live generation, by design (see
+     * {@link Instance#extendedKinds}). Deactivate and reactivate to change it.
+     */
     static void setExtendedTerrainTargets(final boolean supported) {
         extendedTerrainTargets = supported;
     }
@@ -208,6 +214,19 @@ final class IrisMetalPipelineOverrides {
         private final Map<MetalCompiledRenderPipeline, TerrainKind> compiledKinds =
                 java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
         private final IrisMetalUniformValues uniformValues;
+        /**
+         * Which kinds may use their full DRAWBUFFERS layout, frozen at
+         * construction.
+         *
+         * <p>Reading the mutable static at compile time is a race: with async
+         * precompile on, the prewarm thread can build a sodium terrain pipeline
+         * <i>before</i> the world loads and the flag flips. That native PSO then
+         * lives in the pipeline cache for the rest of the generation while the
+         * terrain pass is being given extra attachments — the PSO is selected by
+         * attachment signature, so the lookup misses and the draw dies. The
+         * decision has to be per-generation and immutable, never per-compile.</p>
+         */
+        private final Set<TerrainKind> extendedKinds;
         private final Set<String> reportedPlaceholders = java.util.concurrent.ConcurrentHashMap.newKeySet();
         private @Nullable IrisMetalPlaceholderTextures placeholders;
         /** The device the overrides were compiled on; needed to drop them again on teardown. */
@@ -222,6 +241,9 @@ final class IrisMetalPipelineOverrides {
         ) {
             this.generation = generation;
             this.uniformValues = new IrisMetalUniformValues(programSet.getPackDirectives().getSunPathRotation());
+            this.extendedKinds = extendedTerrainTargets
+                    ? EnumSet.allOf(TerrainKind.class)
+                    : EnumSet.noneOf(TerrainKind.class);
             for (TerrainKind kind : TerrainKind.values()) {
                 ProgramSource source = resolveSource(programSet, kind.shaderKey.getProgram());
                 if (source == null) {
@@ -313,7 +335,7 @@ final class IrisMetalPipelineOverrides {
                 return null;
             }
             int[] drawBuffers = drawBuffersFor(kind);
-            if (drawBuffers.length > 1 && !extendedTerrainTargets) {
+            if (drawBuffers.length > 1 && !this.extendedKinds.contains(kind)) {
                 // The compiled PSO is looked up by the render pass's attachment
                 // signature, so a multi-target program can only be used once the
                 // sodium terrain pass actually carries those extra attachments

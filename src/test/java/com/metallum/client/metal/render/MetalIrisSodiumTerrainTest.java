@@ -150,6 +150,15 @@ final class MetalIrisSodiumTerrainTest {
             assertNull(first.uniformStaging(TerrainKind.SOLID),
                     "the retired instance still holds its uniform block");
 
+            // The extended-target decision is frozen per generation: flipping the
+            // flag mid-life must not change the live instance. Reading it at
+            // compile time instead would race the async prewarm thread, which can
+            // build a terrain pipeline before the world loads.
+            IrisMetalPipelineOverrides.setExtendedTerrainTargets(true);
+            assertSame(second, IrisMetalPipelineOverrides.active(),
+                    "flipping the extended-target flag disturbed the live instance");
+            IrisMetalPipelineOverrides.setExtendedTerrainTargets(false);
+
             IrisMetalPipelineOverrides.deactivate();
             assertNull(IrisMetalPipelineOverrides.active(), "deactivate left the registry active");
             assertNull(second.uniformStaging(TerrainKind.SOLID),

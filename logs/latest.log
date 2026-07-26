@@ -1,5 +1,5 @@
-[07:13:27] [Test worker/INFO]: [Metallum] Metal 4: requested=false available=false compiler=false present=false
-[07:13:27] [Test worker/WARN]: [metallum] PSO binary archive setup failed; pipelines compile uncached
+[07:32:46] [Test worker/INFO]: [Metallum] Metal 4: requested=false available=false compiler=false present=false
+[07:32:46] [Test worker/WARN]: [metallum] PSO binary archive setup failed; pipelines compile uncached
 java.lang.IllegalStateException: invoked too early?
 	at net.fabricmc.loader.impl.FabricLoaderImpl.getGameDir(FabricLoaderImpl.java:161)
 	at com.metallum.client.metal.render.MetalDevice.<init>(MetalDevice.java:181)
@@ -95,12 +95,12 @@ java.lang.IllegalStateException: invoked too early?
 	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:72)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
-[07:13:28] [Test worker/WARN]: Unable to resolve shader pack option menu element "FOG_DISTANCE_LOD" defined in shaders.properties
-[07:13:28] [Test worker/INFO]: Profile: HIGH (+0 options changed by user)
-[07:13:30] [Test worker/WARN]: Unable to resolve shader pack option menu element "chromaOffsetScale" defined in shaders.properties
-[07:13:30] [Test worker/INFO]: Profile: Custom (+0 options changed by user)
-[07:13:32] [Test worker/INFO]: [Metallum] Metal 4: requested=false available=false compiler=false present=false
-[07:13:32] [Test worker/WARN]: [metallum] PSO binary archive setup failed; pipelines compile uncached
+[07:32:47] [Test worker/WARN]: Unable to resolve shader pack option menu element "FOG_DISTANCE_LOD" defined in shaders.properties
+[07:32:47] [Test worker/INFO]: Profile: HIGH (+0 options changed by user)
+[07:32:49] [Test worker/WARN]: Unable to resolve shader pack option menu element "chromaOffsetScale" defined in shaders.properties
+[07:32:49] [Test worker/INFO]: Profile: Custom (+0 options changed by user)
+[07:32:51] [Test worker/INFO]: [Metallum] Metal 4: requested=false available=false compiler=false present=false
+[07:32:51] [Test worker/WARN]: [metallum] PSO binary archive setup failed; pipelines compile uncached
 java.lang.IllegalStateException: invoked too early?
 	at net.fabricmc.loader.impl.FabricLoaderImpl.getGameDir(FabricLoaderImpl.java:161)
 	at com.metallum.client.metal.render.MetalDevice.<init>(MetalDevice.java:181)
@@ -196,19 +196,19 @@ java.lang.IllegalStateException: invoked too early?
 	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:72)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
-[07:13:32] [Test worker/WARN]: Unable to resolve shader pack option menu element "FOG_DISTANCE_LOD" defined in shaders.properties
-[07:13:32] [Test worker/INFO]: Profile: HIGH (+0 options changed by user)
-[07:13:32] [Test worker/INFO]: [metallum-iris] translated sodium terrain SOLID from pack program gbuffers_terrain (drawBuffers=[0])
-[07:13:32] [Test worker/INFO]: [metallum-iris] translated sodium terrain CUTOUT from pack program gbuffers_terrain (drawBuffers=[0])
-[07:13:32] [Test worker/INFO]: [metallum-iris] translated sodium terrain TRANSLUCENT from pack program gbuffers_water (drawBuffers=[0, 1])
-[07:13:32] [Test worker/INFO]: [metallum-iris] draw-path resources prewarmed for generation 1
-[07:13:32] [Test worker/WARN]: [metallum-iris] could not sample frame state for the pack uniform block; falling back to neutral values
+[07:32:51] [Test worker/WARN]: Unable to resolve shader pack option menu element "FOG_DISTANCE_LOD" defined in shaders.properties
+[07:32:51] [Test worker/INFO]: Profile: HIGH (+0 options changed by user)
+[07:32:51] [Test worker/INFO]: [metallum-iris] translated sodium terrain SOLID from pack program gbuffers_terrain (drawBuffers=[0])
+[07:32:51] [Test worker/INFO]: [metallum-iris] translated sodium terrain CUTOUT from pack program gbuffers_terrain (drawBuffers=[0])
+[07:32:51] [Test worker/INFO]: [metallum-iris] translated sodium terrain TRANSLUCENT from pack program gbuffers_water (drawBuffers=[0, 1])
+[07:32:51] [Test worker/INFO]: [metallum-iris] draw-path resources prewarmed for generation 1
+[07:32:51] [Test worker/WARN]: [metallum-iris] could not sample frame state for the pack uniform block; falling back to neutral values
 java.lang.NullPointerException: Cannot read field "level" because "minecraft" is null
 	at com.metallum.client.metal.render.IrisMetalUniformValues.sampleLiveFrame(IrisMetalUniformValues.java:294)
 	at com.metallum.client.metal.render.IrisMetalUniformValues.sampleFrame(IrisMetalUniformValues.java:265)
 	at com.metallum.client.metal.render.IrisMetalUniformValues.prewarm(IrisMetalUniformValues.java:157)
-	at com.metallum.client.metal.render.IrisMetalPipelineOverrides$Instance.prewarm(IrisMetalPipelineOverrides.java:519)
-	at com.metallum.client.metal.render.IrisMetalPipelineOverrides.updateFrame(IrisMetalPipelineOverrides.java:134)
+	at com.metallum.client.metal.render.IrisMetalPipelineOverrides$Instance.prewarm(IrisMetalPipelineOverrides.java:541)
+	at com.metallum.client.metal.render.IrisMetalPipelineOverrides.updateFrame(IrisMetalPipelineOverrides.java:140)
 	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.reloadLifecycleReleasesAndReactivates(MetalIrisSodiumTerrainTest.java:139)
 	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:104)
 	at java.base/java.lang.reflect.Method.invoke(Method.java:565)
@@ -297,11 +297,11 @@ java.lang.NullPointerException: Cannot read field "level" because "minecraft" is
 	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:72)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
-[07:13:32] [Test worker/INFO]: [metallum-iris] translated sodium terrain SOLID from pack program gbuffers_terrain (drawBuffers=[0])
-[07:13:32] [Test worker/INFO]: [metallum-iris] translated sodium terrain CUTOUT from pack program gbuffers_terrain (drawBuffers=[0])
-[07:13:32] [Test worker/INFO]: [metallum-iris] translated sodium terrain TRANSLUCENT from pack program gbuffers_water (drawBuffers=[0, 1])
-[07:13:32] [Test worker/INFO]: [Metallum] Metal 4: requested=false available=false compiler=false present=false
-[07:13:32] [Test worker/WARN]: [metallum] PSO binary archive setup failed; pipelines compile uncached
+[07:32:51] [Test worker/INFO]: [metallum-iris] translated sodium terrain SOLID from pack program gbuffers_terrain (drawBuffers=[0])
+[07:32:51] [Test worker/INFO]: [metallum-iris] translated sodium terrain CUTOUT from pack program gbuffers_terrain (drawBuffers=[0])
+[07:32:51] [Test worker/INFO]: [metallum-iris] translated sodium terrain TRANSLUCENT from pack program gbuffers_water (drawBuffers=[0, 1])
+[07:32:51] [Test worker/INFO]: [Metallum] Metal 4: requested=false available=false compiler=false present=false
+[07:32:51] [Test worker/WARN]: [metallum] PSO binary archive setup failed; pipelines compile uncached
 java.lang.IllegalStateException: invoked too early?
 	at net.fabricmc.loader.impl.FabricLoaderImpl.getGameDir(FabricLoaderImpl.java:161)
 	at com.metallum.client.metal.render.MetalDevice.<init>(MetalDevice.java:181)
@@ -397,23 +397,23 @@ java.lang.IllegalStateException: invoked too early?
 	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:72)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
-[07:13:32] [Test worker/WARN]: Unable to resolve shader pack option menu element "FOG_DISTANCE_LOD" defined in shaders.properties
-[07:13:32] [Test worker/INFO]: Profile: HIGH (+0 options changed by user)
-[07:13:33] [Test worker/INFO]: [metallum-iris] translated sodium terrain SOLID from pack program gbuffers_terrain (drawBuffers=[0])
-[07:13:33] [Test worker/INFO]: [metallum-iris] translated sodium terrain CUTOUT from pack program gbuffers_terrain (drawBuffers=[0])
-[07:13:33] [Test worker/INFO]: [metallum-iris] translated sodium terrain TRANSLUCENT from pack program gbuffers_water (drawBuffers=[0, 1])
-[07:13:33] [Test worker/INFO]: [metallum-iris] compiling terrain override SOLID for sodium:test_chunk_shader_solid via metallum:iris/gen3/sodium_terrain_solid
-[07:13:33] [Test worker/WARN]: [metallum] MSL disk cache unavailable; translating uncached
+[07:32:51] [Test worker/WARN]: Unable to resolve shader pack option menu element "FOG_DISTANCE_LOD" defined in shaders.properties
+[07:32:51] [Test worker/INFO]: Profile: HIGH (+0 options changed by user)
+[07:32:51] [Test worker/INFO]: [metallum-iris] translated sodium terrain SOLID from pack program gbuffers_terrain (drawBuffers=[0])
+[07:32:51] [Test worker/INFO]: [metallum-iris] translated sodium terrain CUTOUT from pack program gbuffers_terrain (drawBuffers=[0])
+[07:32:51] [Test worker/INFO]: [metallum-iris] translated sodium terrain TRANSLUCENT from pack program gbuffers_water (drawBuffers=[0, 1])
+[07:32:52] [Test worker/INFO]: [metallum-iris] compiling terrain override SOLID for sodium:test_chunk_shader_solid via metallum:iris/gen3/sodium_terrain_solid
+[07:32:52] [Test worker/WARN]: [metallum] MSL disk cache unavailable; translating uncached
 java.lang.IllegalStateException: invoked too early?
 	at net.fabricmc.loader.impl.FabricLoaderImpl.getGameDir(FabricLoaderImpl.java:161)
 	at com.metallum.client.metal.render.MetalMslDiskCache.resolveDirectory(MetalMslDiskCache.java:93)
 	at com.metallum.client.metal.render.MetalMslDiskCache.instance(MetalMslDiskCache.java:74)
 	at com.metallum.client.metal.render.MetalCrossShaderCompiler.compile(MetalCrossShaderCompiler.java:80)
-	at com.metallum.client.metal.render.IrisMetalPipelineOverrides$Instance.compileOverride(IrisMetalPipelineOverrides.java:356)
-	at com.metallum.client.metal.render.IrisMetalPipelineOverrides.tryCompile(IrisMetalPipelineOverrides.java:193)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.compileToDevice(MetalIrisSodiumTerrainTest.java:228)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.runPack(MetalIrisSodiumTerrainTest.java:206)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.terrainProgramsCompileToDevicePipelines(MetalIrisSodiumTerrainTest.java:177)
+	at com.metallum.client.metal.render.IrisMetalPipelineOverrides$Instance.compileOverride(IrisMetalPipelineOverrides.java:378)
+	at com.metallum.client.metal.render.IrisMetalPipelineOverrides.tryCompile(IrisMetalPipelineOverrides.java:199)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.compileToDevice(MetalIrisSodiumTerrainTest.java:237)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.runPack(MetalIrisSodiumTerrainTest.java:215)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.terrainProgramsCompileToDevicePipelines(MetalIrisSodiumTerrainTest.java:186)
 	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:104)
 	at java.base/java.lang.reflect.Method.invoke(Method.java:565)
 	at org.junit.platform.commons.util.ReflectionUtils.invokeMethod(ReflectionUtils.java:775)
@@ -501,18 +501,18 @@ java.lang.IllegalStateException: invoked too early?
 	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:72)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
-[07:13:33] [Test worker/INFO]: [metallum-iris] draw-path resources prewarmed for generation 3
-[07:13:33] [Test worker/WARN]: [metallum-iris] could not sample frame state for the pack uniform block; falling back to neutral values
+[07:32:52] [Test worker/INFO]: [metallum-iris] draw-path resources prewarmed for generation 3
+[07:32:52] [Test worker/WARN]: [metallum-iris] could not sample frame state for the pack uniform block; falling back to neutral values
 java.lang.NullPointerException: Cannot read field "level" because "minecraft" is null
 	at com.metallum.client.metal.render.IrisMetalUniformValues.sampleLiveFrame(IrisMetalUniformValues.java:294)
 	at com.metallum.client.metal.render.IrisMetalUniformValues.sampleFrame(IrisMetalUniformValues.java:265)
 	at com.metallum.client.metal.render.IrisMetalUniformValues.prewarm(IrisMetalUniformValues.java:157)
-	at com.metallum.client.metal.render.IrisMetalPipelineOverrides$Instance.prewarm(IrisMetalPipelineOverrides.java:519)
-	at com.metallum.client.metal.render.IrisMetalPipelineOverrides.updateFrame(IrisMetalPipelineOverrides.java:134)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.verifyUniformSupply(MetalIrisSodiumTerrainTest.java:284)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.compileToDevice(MetalIrisSodiumTerrainTest.java:241)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.runPack(MetalIrisSodiumTerrainTest.java:206)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.terrainProgramsCompileToDevicePipelines(MetalIrisSodiumTerrainTest.java:177)
+	at com.metallum.client.metal.render.IrisMetalPipelineOverrides$Instance.prewarm(IrisMetalPipelineOverrides.java:541)
+	at com.metallum.client.metal.render.IrisMetalPipelineOverrides.updateFrame(IrisMetalPipelineOverrides.java:140)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.verifyUniformSupply(MetalIrisSodiumTerrainTest.java:293)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.compileToDevice(MetalIrisSodiumTerrainTest.java:250)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.runPack(MetalIrisSodiumTerrainTest.java:215)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.terrainProgramsCompileToDevicePipelines(MetalIrisSodiumTerrainTest.java:186)
 	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:104)
 	at java.base/java.lang.reflect.Method.invoke(Method.java:565)
 	at org.junit.platform.commons.util.ReflectionUtils.invokeMethod(ReflectionUtils.java:775)
@@ -600,35 +600,35 @@ java.lang.NullPointerException: Cannot read field "level" because "minecraft" is
 	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:72)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'shadowtex0' has no source in B2-1; bound a 1x1 shadow placeholder
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'shadowcolor0' has no source in B2-1; bound a 1x1 colour placeholder
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'shadowtex1' has no source in B2-1; bound a 1x1 shadow placeholder
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'gtexture' has no source in B2-1; bound a 1x1 colour placeholder
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'noisetex' has no source in B2-1; bound a 1x1 colour placeholder
-[07:13:33] [Test worker/INFO]: [metallum-iris] compiling terrain override CUTOUT for sodium:test_chunk_shader_cutout via metallum:iris/gen3/sodium_terrain_cutout
-[07:13:33] [Test worker/INFO]: [metallum-iris] compiling terrain override TRANSLUCENT for sodium:test_chunk_shader_translucent via metallum:iris/gen3/sodium_terrain_translucent
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'depthtex1' has no source in B2-1; bound a 1x1 colour placeholder
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'gaux2' has no source in B2-1; bound a 1x1 colour placeholder
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'gaux1' has no source in B2-1; bound a 1x1 colour placeholder
-[07:13:33] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 3 misses (220 ms translating)
-[07:13:33] [Test worker/WARN]: Unable to resolve shader pack option menu element "chromaOffsetScale" defined in shaders.properties
-[07:13:33] [Test worker/INFO]: Profile: Custom (+0 options changed by user)
-[07:13:33] [Test worker/INFO]: [metallum-iris] translated sodium terrain SOLID from pack program gbuffers_terrain (drawBuffers=[0, 2])
-[07:13:33] [Test worker/INFO]: [metallum-iris] translated sodium terrain CUTOUT from pack program gbuffers_terrain (drawBuffers=[0, 2])
-[07:13:33] [Test worker/INFO]: [metallum-iris] translated sodium terrain TRANSLUCENT from pack program gbuffers_water (drawBuffers=[3, 4])
-[07:13:33] [Test worker/INFO]: [metallum-iris] compiling terrain override SOLID for sodium:test_chunk_shader_solid via metallum:iris/gen4/sodium_terrain_solid
-[07:13:33] [Test worker/INFO]: [metallum-iris] draw-path resources prewarmed for generation 4
-[07:13:33] [Test worker/WARN]: [metallum-iris] could not sample frame state for the pack uniform block; falling back to neutral values
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'shadowtex0' has no source in B2-1; bound a 1x1 shadow placeholder
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'shadowcolor0' has no source in B2-1; bound a 1x1 colour placeholder
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'shadowtex1' has no source in B2-1; bound a 1x1 shadow placeholder
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'gtexture' has no source in B2-1; bound a 1x1 colour placeholder
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'noisetex' has no source in B2-1; bound a 1x1 colour placeholder
+[07:32:52] [Test worker/INFO]: [metallum-iris] compiling terrain override CUTOUT for sodium:test_chunk_shader_cutout via metallum:iris/gen3/sodium_terrain_cutout
+[07:32:52] [Test worker/INFO]: [metallum-iris] compiling terrain override TRANSLUCENT for sodium:test_chunk_shader_translucent via metallum:iris/gen3/sodium_terrain_translucent
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'depthtex1' has no source in B2-1; bound a 1x1 colour placeholder
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'gaux2' has no source in B2-1; bound a 1x1 colour placeholder
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'gaux1' has no source in B2-1; bound a 1x1 colour placeholder
+[07:32:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 3 misses (218 ms translating)
+[07:32:52] [Test worker/WARN]: Unable to resolve shader pack option menu element "chromaOffsetScale" defined in shaders.properties
+[07:32:52] [Test worker/INFO]: Profile: Custom (+0 options changed by user)
+[07:32:52] [Test worker/INFO]: [metallum-iris] translated sodium terrain SOLID from pack program gbuffers_terrain (drawBuffers=[0, 2])
+[07:32:52] [Test worker/INFO]: [metallum-iris] translated sodium terrain CUTOUT from pack program gbuffers_terrain (drawBuffers=[0, 2])
+[07:32:52] [Test worker/INFO]: [metallum-iris] translated sodium terrain TRANSLUCENT from pack program gbuffers_water (drawBuffers=[3, 4])
+[07:32:52] [Test worker/INFO]: [metallum-iris] compiling terrain override SOLID for sodium:test_chunk_shader_solid via metallum:iris/gen4/sodium_terrain_solid
+[07:32:52] [Test worker/INFO]: [metallum-iris] draw-path resources prewarmed for generation 4
+[07:32:52] [Test worker/WARN]: [metallum-iris] could not sample frame state for the pack uniform block; falling back to neutral values
 java.lang.NullPointerException: Cannot read field "level" because "minecraft" is null
 	at com.metallum.client.metal.render.IrisMetalUniformValues.sampleLiveFrame(IrisMetalUniformValues.java:294)
 	at com.metallum.client.metal.render.IrisMetalUniformValues.sampleFrame(IrisMetalUniformValues.java:265)
 	at com.metallum.client.metal.render.IrisMetalUniformValues.prewarm(IrisMetalUniformValues.java:157)
-	at com.metallum.client.metal.render.IrisMetalPipelineOverrides$Instance.prewarm(IrisMetalPipelineOverrides.java:519)
-	at com.metallum.client.metal.render.IrisMetalPipelineOverrides.updateFrame(IrisMetalPipelineOverrides.java:134)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.verifyUniformSupply(MetalIrisSodiumTerrainTest.java:284)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.compileToDevice(MetalIrisSodiumTerrainTest.java:241)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.runPack(MetalIrisSodiumTerrainTest.java:206)
-	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.terrainProgramsCompileToDevicePipelines(MetalIrisSodiumTerrainTest.java:177)
+	at com.metallum.client.metal.render.IrisMetalPipelineOverrides$Instance.prewarm(IrisMetalPipelineOverrides.java:541)
+	at com.metallum.client.metal.render.IrisMetalPipelineOverrides.updateFrame(IrisMetalPipelineOverrides.java:140)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.verifyUniformSupply(MetalIrisSodiumTerrainTest.java:293)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.compileToDevice(MetalIrisSodiumTerrainTest.java:250)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.runPack(MetalIrisSodiumTerrainTest.java:215)
+	at com.metallum.client.metal.render.MetalIrisSodiumTerrainTest.terrainProgramsCompileToDevicePipelines(MetalIrisSodiumTerrainTest.java:186)
 	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:104)
 	at java.base/java.lang.reflect.Method.invoke(Method.java:565)
 	at org.junit.platform.commons.util.ReflectionUtils.invokeMethod(ReflectionUtils.java:775)
@@ -716,10 +716,10 @@ java.lang.NullPointerException: Cannot read field "level" because "minecraft" is
 	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:72)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'noisetex' has no source in B2-1; bound a 1x1 colour placeholder
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'gtexture' has no source in B2-1; bound a 1x1 colour placeholder
-[07:13:33] [Test worker/INFO]: [metallum-iris] pack sampler 'lightmap' has no source in B2-1; bound a 1x1 colour placeholder
-[07:13:33] [Test worker/INFO]: [metallum-iris] compiling terrain override CUTOUT for sodium:test_chunk_shader_cutout via metallum:iris/gen4/sodium_terrain_cutout
-[07:13:33] [Test worker/INFO]: [metallum-iris] compiling terrain override TRANSLUCENT for sodium:test_chunk_shader_translucent via metallum:iris/gen4/sodium_terrain_translucent
-[07:13:34] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 6 misses (394 ms translating)
-[07:13:34] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 6 misses (394 ms translating)
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'noisetex' has no source in B2-1; bound a 1x1 colour placeholder
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'gtexture' has no source in B2-1; bound a 1x1 colour placeholder
+[07:32:52] [Test worker/INFO]: [metallum-iris] pack sampler 'lightmap' has no source in B2-1; bound a 1x1 colour placeholder
+[07:32:52] [Test worker/INFO]: [metallum-iris] compiling terrain override CUTOUT for sodium:test_chunk_shader_cutout via metallum:iris/gen4/sodium_terrain_cutout
+[07:32:52] [Test worker/INFO]: [metallum-iris] compiling terrain override TRANSLUCENT for sodium:test_chunk_shader_translucent via metallum:iris/gen4/sodium_terrain_translucent
+[07:32:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 6 misses (394 ms translating)
+[07:32:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 6 misses (394 ms translating)

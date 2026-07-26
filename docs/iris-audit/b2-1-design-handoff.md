@@ -543,6 +543,44 @@ activate → updateFrame → 重复 activate → deactivate 全程,断言:
 每次 activate 应出现新的 `semantic pipeline generation N online` 且 N 递增;
 每次都应出现 `draw-path resources prewarmed for generation N`。
 
+### 迭代 10 — S6b 的 R1(prewarm 竞态)已修,槽位顺序仍未动
+
+S6b 的第一个必须修的东西**不是槽位顺序**,是决策时机。
+
+**竞态**:`compileOverride` 原本每次编译都读可变静态 `extendedTerrainTargets`。开着
+async precompile 时,prewarm 线程可能在**世界加载之前**就把 sodium 地形管线编出来,
+那时标志还是 false → 产出原生 PSO 并留在管线缓存里;之后标志翻成 true、地形 pass 开始
+带扩展附件,而 PSO 是**按附件签名查表**的 → 查不到 → 绘制崩。
+
+**修**:决策**冻结在 `Instance` 构造期**——新增 `Instance.extendedKinds`(`EnumSet`),
+构造函数里按当时的静态标志一次性算定,`compileOverride` 只读它。
+`setExtendedTerrainTargets` 的语义随之收窄为「只在下一个 Instance 构造时生效」,
+javadoc 已写明;要改必须 deactivate + reactivate。
+回归断言加在 `reloadLifecycleReleasesAndReactivates` 里:活跃期翻转标志不得扰动当前实例。
+
+**S6b 仍未做的部分**(按简报,顺序不要颠倒):
+1. **硬互斥**:`validateFragmentOutputSignature` 要求 fragment 输出 location 集合与
+   非 null color target 下标集合**完全相等** → MetalFX cutout coverage 与 Iris 扩展附件
+   **不可能共存于同一 pass**;且布局对 generation 冻结而 `usesCutoutReactiveTerrain()`
+   逐帧可变 → **任何"按帧动态决定布局"的方案必然某帧撞闸**。互斥必须是 per-generation
+   静态决策(与本次 R1 同一个道理,同一处解决)。
+2. **防错序自检**:`EXTENDED_TARGET_FORMAT` 把所有扩展目标钉死 RGBA8_UNORM,主帧缓冲
+   也是 → 格式数组逐字节相同,**三道闸一道都不会响**,扩展槽之间错序 100% 静默。
+   必须显式比对 `db` 与 `syntheticPipelines.get(kind)` 的 target 数,不等直接抛。
+3. **调试纪律**:`MetalMslDiskCache.key` 不含 colorTargetStates → 缓存命中会**跳过闸 1**。
+   改附件布局后必须 `rm -rf run/metallum-cache/msl`,否则冷跑热跑报错完全不同。
+4. §4.3 那份配方对 `db[0] != 0` 是错的(Potato TRANSLUCENT=`[3,4]`,slot0 也是 colortex
+   而非主帧缓冲),重写时别照抄。
+5. 推荐方案**不需要动 `MetalRenderPass.java`** → 对 Metal 4 线零新增冲突面,**刻意保持**。
+
+### 跨会话:MetalFX×Iris 互斥面的 warn 归属
+
+「TEMPORAL 开启时 Iris 对 CUTOUT 的覆盖被静默绕过」那条 **warn-once 已由本线实现**
+(`IrisMetalPipelineOverrides.compileOverride`,迭代 7 ②),
+触发条件是非 sodium 命名空间且 location path 含 `cutout_reactive`。
+**`cutout-shimmer` 线不要再加第二条**,否则同一现象会打两遍且措辞不一致。
+真正的重叠解决(让两者共存或明确择一)属阶段二,不在本线范围。
+
 ## 5. 风险与预案
 
 | 风险 | 信号 | 预案 |
