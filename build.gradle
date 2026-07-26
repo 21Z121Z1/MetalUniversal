@@ -1,0 +1,608 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+	id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+loom {
+	accessWidenerPath = file("src/main/resources/metallum.accesswidener")
+}
+
+repositories {
+	maven { url "https://api.modrinth.com/maven" }
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "maven.modrinth:sodium:${project.sodium_version}"
+	testImplementation "org.junit.jupiter:junit-jupiter:5.12.2"
+	testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.12.2"
+}
+
+tasks.test {
+	useJUnitPlatform()
+	exclude "**/MetalMrtBackendIntegrationTest.class"
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		jvmArgs "--enable-native-access=ALL-UNNAMED"
+		environment "MTL_DEBUG_LAYER", "1"
+		environment "MTL_SHADER_VALIDATION", "1"
+	}
+}
+
+// Gradle system properties do not automatically reach Loom's forked
+// runClient JVM. Forward the optional MetalFX properties so a command such as
+// `./gradlew runClient -Dmetallum.metalfx.mode=SPATIAL` configures Minecraft,
+// rather than only the Gradle process.
+tasks.withType(JavaExec).configureEach {
+	if (name == "runClient") {
+		[
+			"metallum.metalfx.mode",
+			"metallum.metalfx.scale",
+			"metallum.metalfx.debug",
+			"metallum.metalfx.reactiveMask",
+			"metallum.metalfx.frameGeneration",
+			"metallum.validation.enabled",
+			"metallum.validation.output"
+		].each { propertyName ->
+			def value = System.getProperty(propertyName)
+			if (value != null) {
+				systemProperty(propertyName, value)
+			}
+		}
+		def validationWorld = System.getProperty("metallum.validation.world")
+		def dedicatedValidation = gradle.startParameter.taskNames.any {
+			it == "minecraftMetalFxClientValidation" || it.endsWith(":minecraftMetalFxClientValidation")
+		}
+		if (!dedicatedValidation && validationWorld != null && !validationWorld.isBlank()) {
+			args "--quickPlaySingleplayer", validationWorld
+		}
+	}
+}
+
+processResources {
+	inputs.property "version", project.version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": inputs.properties.version
+	}
+}
+
+tasks.register("buildMacNative", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+
+	workingDir project.projectDir
+	inputs.files(
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumNative.swift"
+	)
+	outputs.file("src/main/resources/natives/macos/libmetallum.dylib")
+	doFirst {
+		file("src/main/resources/natives/macos").mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-whole-module-optimization",
+		"-emit-library",
+		"-module-name", "metallum_native",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-framework", "QuartzCore",
+		"-o", "src/main/resources/natives/macos/libmetallum.dylib",
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumNative.swift"
+}
+
+def metalMrtSmokeBinary = file("${buildDir}/metal-tests/MetalMRTSmokeTest")
+def metalFrameGenerationLifecycleTestBinary = file("${buildDir}/metal-tests/MetalFrameGenerationLifecycleTest")
+def metalFrameGenerationPresentationValidationBinary = file("${buildDir}/metal-tests/MetalFrameGenerationPresentationValidation")
+def metalFxOffscreenValidationBinary = file("${buildDir}/metal-tests/MetalFXOffscreenValidation")
+def metalFxOffscreenValidationOutput = file("${buildDir}/metal-validation/offscreen-current")
+
+tasks.register("compileMetalMrtSmokeTest", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	workingDir project.projectDir
+	doFirst {
+		metalMrtSmokeBinary.parentFile.mkdirs()
+	}
+	commandLine "swiftc",
+		"-O",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", metalMrtSmokeBinary.absolutePath,
+		"src/test/native/MetalMRTSmokeTest.swift"
+}
+
+tasks.register("metalMrtSmokeTest", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "compileMetalMrtSmokeTest"
+	commandLine metalMrtSmokeBinary.absolutePath
+}
+
+tasks.register("compileMetalFrameGenerationLifecycleTest", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	workingDir project.projectDir
+	doFirst {
+		metalFrameGenerationLifecycleTestBinary.parentFile.mkdirs()
+	}
+	commandLine "swiftc",
+		"-O",
+		"-target", "arm64-apple-macosx14.0",
+		"-o", metalFrameGenerationLifecycleTestBinary.absolutePath,
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/test/native/MetalFrameGenerationLifecycleTest.swift"
+}
+
+tasks.register("metalFrameGenerationLifecycleTest", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "compileMetalFrameGenerationLifecycleTest"
+	commandLine metalFrameGenerationLifecycleTestBinary.absolutePath
+}
+
+tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	workingDir project.projectDir
+	inputs.files(
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
+	)
+	outputs.file(metalFrameGenerationPresentationValidationBinary)
+	doFirst {
+		metalFrameGenerationPresentationValidationBinary.parentFile.mkdirs()
+	}
+	commandLine "swiftc",
+		"-O",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "AppKit",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-framework", "QuartzCore",
+		"-o", metalFrameGenerationPresentationValidationBinary.absolutePath,
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
+}
+
+tasks.register("metalFrameGenerationPresentationValidation", Exec) {
+	group = "verification"
+	description = "Runs an automatic visible-window CAMetalDisplayLink pacing, resize and shutdown validation."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "compileMetalFrameGenerationPresentationValidation"
+	doFirst {
+		delete file("${buildDir}/metal-validation/presentation-current")
+	}
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+	commandLine metalFrameGenerationPresentationValidationBinary.absolutePath,
+			file("${buildDir}/metal-validation/presentation-current").absolutePath
+}
+
+tasks.register("compileMetalFxOffscreenValidation", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	workingDir project.projectDir
+	inputs.files(
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/MetalFXOffscreenValidation.swift"
+	)
+	outputs.file(metalFxOffscreenValidationBinary)
+	doFirst {
+		metalFxOffscreenValidationBinary.parentFile.mkdirs()
+	}
+	commandLine "swiftc",
+		"-O",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-framework", "QuartzCore",
+		"-framework", "CoreGraphics",
+		"-framework", "ImageIO",
+		"-framework", "UniformTypeIdentifiers",
+		"-o", metalFxOffscreenValidationBinary.absolutePath,
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/MetalFXOffscreenValidation.swift"
+}
+
+tasks.register("metalFxOffscreenValidation", Exec) {
+	group = "verification"
+	description = "Runs windowless MRT, motion, Temporal Scaler and Frame Interpolator GPU readback validation."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "compileMetalFxOffscreenValidation"
+	doFirst {
+		delete metalFxOffscreenValidationOutput
+	}
+	environment "MTL_DEBUG_LAYER", "1"
+	// MTL_SHADER_VALIDATION currently makes Apple's private MetalFX kernels
+	// dispatch 32x32 (1024) threads on this 832-thread AGX device and aborts
+	// inside the framework. Project-owned MRT pipelines remain covered by GPU
+	// Validation in metalMrtBackendIntegrationTest.
+	environment "MTL_SHADER_VALIDATION", "0"
+	commandLine metalFxOffscreenValidationBinary.absolutePath, metalFxOffscreenValidationOutput.absolutePath
+}
+
+tasks.register("metalMrtBackendIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS Java RenderPass -> FFM -> Swift indexed MRT GPU readback integration suite."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+}
+
+tasks.named("check") {
+	dependsOn "metalFrameGenerationLifecycleTest"
+	dependsOn "metalMrtBackendIntegrationTest"
+	dependsOn "metalFxOffscreenValidation"
+}
+
+tasks.register("minecraftMetalFxClientValidation") {
+	group = "verification"
+	description = "Runs the deterministic Minecraft client MetalFX attachment readback validation and exits automatically."
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		dependsOn "runClient"
+	} else {
+		doLast {
+			logger.lifecycle("minecraftMetalFxClientValidation SKIPPED: macOS Metal is required")
+		}
+	}
+}
+
+if (gradle.startParameter.taskNames.any {
+	it == "minecraftMetalFxClientValidation" || it.endsWith(":minecraftMetalFxClientValidation")
+}) {
+	tasks.named("runClient") {
+		doFirst {
+			delete file("${buildDir}/metal-validation/minecraft-client-current")
+		}
+		systemProperty "metallum.validation.enabled", "true"
+		systemProperty "metallum.validation.output",
+				file("${buildDir}/metal-validation/minecraft-client-current").absolutePath
+		systemProperty "metallum.metalfx.mode", "TEMPORAL"
+		systemProperty "metallum.metalfx.debug", "true"
+		systemProperty "metallum.metalfx.frameGeneration", "false"
+		args "--quickPlaySingleplayer",
+				System.getProperty("metallum.validation.world", "New World")
+		environment "MTL_DEBUG_LAYER", "1"
+		environment "MTL_SHADER_VALIDATION", "0"
+	}
+}
+
+// Builds the Metallum native bridge as a dylib targeting iOS arm64. The
+// resulting artifact must be embedded in the iOS app bundle's Frameworks
+// directory and signed with the app's signing identity; iOS forbids loading
+// unsigned dylibs from writable tmp directories at runtime, so the produced
+// file is consumed by PojavLauncher's packaging step rather than extracted
+// from the jar at runtime.
+//
+// Requires Xcode with an iOS toolchain. Skipped automatically if the host
+// is not macOS or if the iOS SDK is unavailable.
+//
+// Note: swiftc's `-sdk` flag does NOT resolve SDK names through xcrun the
+// way `-target` does; passing the literal "iphoneos" makes swiftc look for
+// a *directory* named "iphoneos" and fail with "no such sysroot directory".
+// We must resolve the full SDK path ourselves via xcrun and pass that.
+
+def iosSdkPath = {
+	if (!org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		return null
+	}
+	def out = new ByteArrayOutputStream()
+	def err = new ByteArrayOutputStream()
+	def proc = ["xcrun", "--sdk", "iphoneos", "--show-sdk-path"].execute()
+	proc.waitForProcessOutput(out, err)
+	def path = out.toString().trim()
+	def errStr = err.toString().trim()
+	if (proc.exitValue() == 0 && errStr.empty && !path.empty
+		&& path.contains("iPhoneOS") && new File(path).isDirectory()) {
+		return path
+	}
+	return null
+}()
+
+tasks.register("buildIOSNative", Exec) {
+	onlyIf { iosSdkPath != null }
+
+	workingDir project.projectDir
+	doFirst {
+		file("src/main/resources/natives/ios").mkdirs()
+	}
+
+	// The dylib is built with `-static`-style linking of the Swift stdlib so it
+	// can be loaded directly via dlopen on a jailbroken/signable device.
+	if (iosSdkPath != null) {
+		commandLine "swiftc",
+			"-O",
+			"-whole-module-optimization",
+			"-emit-library",
+			"-module-name", "metallum_native",
+			"-target", "arm64-apple-ios14.0",
+			"-sdk", iosSdkPath,
+			"-framework", "Foundation",
+			"-framework", "Metal",
+			"-framework", "QuartzCore",
+			"-framework", "UIKit",
+			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
+			"src/main/native/MetallumNative.swift"
+	}
+}
+
+// Builds a full-featured libspvc.dylib (SPIRV-Cross C API with MSL backend)
+// for iOS arm64. This is required because Amethyst's bundled libMoltenVK.dylib
+// statically links SPIRV-Cross with only the Vulkan backend — LWJGL's spvc
+// bindings pick up MoltenVK's stripped symbols via dlsym(RTLD_DEFAULT),
+// causing spvc_context_create_compiler(SPVC_BACKEND_MSL) to fail with -4
+// "Invalid backend".
+//
+// We build SPIRV-Cross from source with SPIRV_CROSS_C_API=ON and
+// SPIRV_CROSS_ENABLE_MSL=ON, then bundle the resulting libspvc.dylib in the
+// jar. At runtime, MetalCrossShaderCompiler extracts it and sets
+// Configuration.SPVC_LIBRARY_NAME so LWJGL uses our full version instead of
+// MoltenVK's stripped one.
+tasks.register("buildIOSSpvc") {
+	onlyIf { iosSdkPath != null }
+
+	def spvcSourceDir = file("${buildDir}/spirv-cross-src")
+	def spvcBuildDir = file("${buildDir}/spirv-cross-build")
+	def spvcOutput = file("src/main/resources/natives/ios/libspvc.dylib")
+	def spvcTag = "vulkan-sdk-1.3.290.0"
+
+	inputs.property "tag", spvcTag
+	outputs.file spvcOutput
+
+	doLast {
+		file("src/main/resources/natives/ios").mkdirs()
+		if (spvcOutput.exists()) {
+			logger.lifecycle("[buildIOSSpvc] libspvc.dylib already exists, skipping build")
+			return
+		}
+
+		// Helper: run a command and throw on failure
+		def runCmd = { List<String> cmd, File workDir = null ->
+			logger.lifecycle("[buildIOSSpvc] Running: " + cmd.join(" "))
+			// Groovy list literals are ArrayList<Object>; ProcessBuilder needs List<String>
+			def strCmd = new ArrayList<String>(cmd.size())
+			for (String s : cmd) strCmd.add(s)
+			def pb = new ProcessBuilder(strCmd)
+			if (workDir != null) pb.directory(workDir)
+			pb.redirectErrorStream(true)
+			def proc = pb.start()
+			proc.inputStream.eachLine { line -> logger.lifecycle("[buildIOSSpvc] " + line) }
+			def exitCode = proc.waitFor()
+			if (exitCode != 0) {
+				throw new GradleException("Command failed (exit " + exitCode + "): " + cmd.join(" "))
+			}
+		}
+
+		// 1. Clone SPIRV-Cross (shallow, specific tag)
+		if (!spvcSourceDir.exists()) {
+			runCmd(["git", "clone", "--depth", "1", "--branch", spvcTag,
+				"https://github.com/KhronosGroup/SPIRV-Cross.git", spvcSourceDir.absolutePath])
+		}
+
+		// 2. CMake configure + build (use built-in iOS support, no toolchain file)
+		spvcBuildDir.mkdirs()
+		// SPIRV-Cross option names (see CMakeLists.txt for vulkan-sdk-1.3.290.0):
+		//   SPIRV_CROSS_SHARED  - builds the C API as a single shared library (libspirv-cross-c-shared.dylib)
+		//   SPIRV_CROSS_STATIC  - static libs (off, we only want shared)
+		//   SPIRV_CROSS_CLI     - CLI binary, requires HLSL/GLSL/MSL/CPP/REFLECT/UTIL; turn off so we can trim backends
+		//   SPIRV_CROSS_ENABLE_TESTS - tests (off)
+		// The shared lib target is `spirv-cross-c-shared`; the dylib carries VERSION/SOVERSION symlinks.
+		runCmd(["cmake",
+			"-G", "Unix Makefiles",
+			"-DCMAKE_SYSTEM_NAME=iOS",
+			"-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0",
+			"-DCMAKE_OSX_ARCHITECTURES=arm64",
+			"-DCMAKE_MAKE_PROGRAM=/usr/bin/make",
+			"-DSPIRV_CROSS_SHARED=ON",
+			"-DSPIRV_CROSS_STATIC=OFF",
+			"-DSPIRV_CROSS_CLI=OFF",
+			"-DSPIRV_CROSS_ENABLE_TESTS=OFF",
+			"-DSPIRV_CROSS_ENABLE_C_API=ON",
+			"-DSPIRV_CROSS_ENABLE_MSL=ON",
+			"-DSPIRV_CROSS_ENABLE_GLSL=ON",
+			"-DSPIRV_CROSS_ENABLE_HLSL=OFF",
+			"-DSPIRV_CROSS_ENABLE_CPP=OFF",
+			"-DSPIRV_CROSS_ENABLE_REFLECT=OFF",
+			"-DSPIRV_CROSS_ENABLE_UTIL=OFF",
+			"-DCMAKE_BUILD_TYPE=Release",
+			spvcSourceDir.absolutePath], spvcBuildDir)
+		runCmd(["cmake", "--build", ".", "--config", "Release", "-j", "4"], spvcBuildDir)
+
+		// 3. Locate built dylib. The shared target is `spirv-cross-c-shared`, so the
+		// file is `libspirv-cross-c-shared.dylib` (with versioned symlinks). Resolve
+		// the real file via canonical path to avoid copying a symlink.
+		def candidates = [
+			"${spvcBuildDir}/libspirv-cross-c-shared.dylib",
+			"${spvcBuildDir}/Release/libspirv-cross-c-shared.dylib",
+			"${spvcBuildDir}/src/libspirv-cross-c-shared.dylib"
+		]
+		def builtLib = null
+		for (String p : candidates) {
+			def f = file(p)
+			if (f.exists()) {
+				builtLib = f
+				break
+			}
+		}
+		if (builtLib == null) {
+			// Fall back to a directory scan for the real (non-symlink) dylib.
+			def found = []
+			spvcBuildDir.eachFileRecurse { f ->
+				if (f.isFile() && f.name.startsWith("libspirv-cross-c-shared") && f.name.endsWith(".dylib")) {
+					found << f
+				}
+			}
+			if (found.size() > 0) {
+				// Prefer the shortest name (the unversioned symlink target resolved to a file)
+				builtLib = found.sort { it.name.length() }[0]
+			}
+		}
+		if (builtLib == null) {
+			throw new GradleException("libspirv-cross-c-shared.dylib not found in build output: ${spvcBuildDir}")
+		}
+		spvcOutput.parentFile.mkdirs()
+		builtLib.withInputStream { ins ->
+			spvcOutput.withOutputStream { outs -> outs << ins }
+		}
+		logger.lifecycle("[buildIOSSpvc] Built libspvc.dylib -> ${spvcOutput}")
+
+		// 4. Verify MSL backend is actually compiled in. The C API's
+		//    spvc_context_create_compiler switch has `case SPVC_BACKEND_MSL:`
+		//    wrapped in `#if SPIRV_CROSS_C_API_MSL`. If the macro wasn't defined
+		//    at build time (e.g. SPIRV_CROSS_ENABLE_MSL didn't propagate), the
+		//    case is absent and runtime calls fail with -4 "Invalid backend".
+		//    When MSL is enabled, the dylib contains CompilerMSL symbols and
+		//    the "spvc_compiler_msl_*" C API entry points.
+		try {
+			def out = new ByteArrayOutputStream()
+			def proc = ["nm", "-gU", builtLib.absolutePath].execute()
+			proc.waitForProcessOutput(out, null)
+			def nmOutput = out.toString()
+			def hasMslSymbols = nmOutput.contains("CompilerMSL") || nmOutput.contains("spvc_compiler_msl")
+			logger.lifecycle("[buildIOSSpvc] MSL backend symbols present: ${hasMslSymbols}")
+			if (!hasMslSymbols) {
+				throw new GradleException(
+						"[buildIOSSpvc] FATAL: libspvc.dylib was built WITHOUT MSL backend support. " +
+						"spvc_context_create_compiler(SPVC_BACKEND_MSL) will fail at runtime with -4. " +
+						"Check that SPIRV_CROSS_ENABLE_MSL=ON propagated to the spirv-cross-c-shared target. " +
+						"nm output excerpt: " + nmOutput.substring(0, Math.min(nmOutput.length(), 500))
+				)
+			}
+		} catch (IOException ignored) {
+			logger.lifecycle("[buildIOSSpvc] nm not available, skipping MSL symbol verification")
+		}
+
+		// 5. Verify the dylib targets iOS (not macOS). CMake with
+		//    CMAKE_SYSTEM_NAME=iOS should produce a Mach-O with LC_BUILD_VERSION
+		//    platform=ios. If CMake silently fell back to the host (macOS), the
+		//    dylib would be a macOS arm64 binary that iOS refuses to load
+		//    (dlopen fails with "no suitable image found") or, worse, loads via
+		//    the simulator path on Apple Silicon Macs.
+		//    `lipo -info` shows architecture; `otool -l` shows the LC_BUILD_VERSION
+		//    load command whose `platform` field distinguishes iOS (2) from macOS (1).
+		try {
+			def lipoOut = new ByteArrayOutputStream()
+			def lipoProc = ["lipo", "-info", builtLib.absolutePath].execute()
+			lipoProc.waitForProcessOutput(lipoOut, null)
+			logger.lifecycle("[buildIOSSpvc] Architecture: " + lipoOut.toString().trim())
+
+			def otoolOut = new ByteArrayOutputStream()
+			def otoolProc = ["otool", "-l", builtLib.absolutePath].execute()
+			otoolProc.waitForProcessOutput(otoolOut, null)
+			def otoolOutput = otoolOut.toString()
+			// LC_BUILD_VERSION or LC_VERSION_MIN_IPHONEOS indicates iOS targeting
+			def isIOS = otoolOutput.contains("LC_VERSION_MIN_IPHONEOS") ||
+					(otoolOutput.contains("LC_BUILD_VERSION") && otoolOutput.contains("platform 2"))
+			def isMacOS = otoolOutput.contains("LC_VERSION_MIN_MACOSX") ||
+					(otoolOutput.contains("LC_BUILD_VERSION") && otoolOutput.contains("platform 1"))
+			logger.lifecycle("[buildIOSSpvc] LC_BUILD_VERSION platform: " +
+					(isIOS ? "iOS" : isMacOS ? "macOS" : "unknown"))
+			if (!isIOS) {
+				throw new GradleException(
+						"[buildIOSSpvc] FATAL: libspvc.dylib was built for macOS, not iOS. " +
+						"CMAKE_SYSTEM_NAME=iOS did not take effect — the dylib cannot be loaded on iOS devices. " +
+						"Ensure the iOS SDK is installed (xcrun --sdk iphoneos --show-sdk-path) and " +
+						"CMake picks it up. otool output excerpt: " +
+						otoolOutput.substring(0, Math.min(otoolOutput.length(), 800))
+				)
+			}
+		} catch (IOException ignored) {
+			logger.lifecycle("[buildIOSSpvc] lipo/otool not available, skipping platform verification")
+		}
+	}
+}
+
+tasks.named("processResources") {
+	dependsOn(tasks.named("buildMacNative"))
+	// The iOS native is only built on a macOS host with the iOS SDK installed.
+	// It is optional: if the toolchain is missing the task is skipped and the
+	// iOS dylib is simply not packaged in the jar.
+	dependsOn(tasks.named("buildIOSNative"))
+	dependsOn(tasks.named("buildIOSSpvc"))
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+java {
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+// sourcesJar (created above by `java { withSourcesJar() }`) also scans
+// src/main/resources, so it must declare an explicit dependency on the native
+// build tasks that write into that directory. Without this, Gradle 9 fails
+// with "uses this output of task ':buildIOSSpvc' without declaring an explicit
+// dependency". Must be placed AFTER `java { withSourcesJar() }` because the
+// task is created by that block.
+tasks.named("sourcesJar") {
+	dependsOn(tasks.named("buildMacNative"))
+	dependsOn(tasks.named("buildIOSNative"))
+	dependsOn(tasks.named("buildIOSSpvc"))
+}
+
+jar {
+	inputs.property "projectName", project.name
+
+	from("LICENSE") {
+		rename { "${it}_${project.name}"}
+	}
+}
+
+// configure the maven publication
+publishing {
+	publications {
+		create("mavenJava", MavenPublication) {
+			from components.java
+		}
+	}
+
+	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
+	repositories {
+		// Add repositories to publish to here.
+		// Notice: This block does NOT have the same function as the block in the top level.
+		// The repositories here will be used for publishing your artifact, not for
+		// retrieving dependencies.
+	}
+}
