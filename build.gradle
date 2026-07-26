@@ -289,6 +289,28 @@ tasks.register("metalFrameGenerationPresentationValidation", Exec) {
 			file("${buildDir}/metal-validation/presentation-current").absolutePath
 }
 
+// Metal 4 migration M4 acceptance: the same visible-window pacing, resize and
+// shutdown validation, with the frame-generation present thread on a Metal 4
+// queue. Compare its report against the Metal 3 run of
+// metalFrameGenerationPresentationValidation: presentedTime must stay non-zero
+// (the CAMetalDisplayLink contract) and deadline misses must not increase.
+tasks.register("metal4PresentValidation", Exec) {
+	group = "verification"
+	description = "Runs the frame-generation presentation validation with the Metal 4 present path enabled (migration spec M4)."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "compileMetalFrameGenerationPresentationValidation"
+	doFirst {
+		delete file("${buildDir}/metal-validation/presentation-metal4")
+	}
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+	environment "METALLUM_VALIDATE_METAL4_PRESENT", "1"
+	commandLine metalFrameGenerationPresentationValidationBinary.absolutePath,
+			file("${buildDir}/metal-validation/presentation-metal4").absolutePath
+}
+
 tasks.register("compileMetalFxOffscreenValidation", Exec) {
 	onlyIf {
 		org.gradle.internal.os.OperatingSystem.current().isMacOsX()

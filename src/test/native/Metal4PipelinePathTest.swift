@@ -22,6 +22,8 @@
 
 import Foundation
 import Metal
+import MetalFX
+import QuartzCore
 
 private enum PathFailure: Error, CustomStringConvertible {
     case message(String)
@@ -84,6 +86,34 @@ vertex VertexOut mtl4_unregistered_vs(uint vertexID [[vertex_id]]) {
 
 fragment float4 mtl4_unregistered_fs() {
     return float4(0.25, 0.50, 0.75, 1.0);
+}
+"""
+
+/// Same shape as the presenter's full-screen copy: one texture and one sampler at
+/// index 0, which under Metal 4 arrive through the argument table.
+private let copyShaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+
+struct CopyOut {
+    float4 position [[position]];
+};
+
+vertex CopyOut path_copy_vs(uint vertexID [[vertex_id]]) {
+    const float2 positions[3] = {
+        float2(-1.0, -1.0),
+        float2( 3.0, -1.0),
+        float2(-1.0,  3.0)
+    };
+    CopyOut output;
+    output.position = float4(positions[vertexID], 0.0, 1.0);
+    return output;
+}
+
+fragment float4 path_copy_fs(CopyOut in [[stage_in]],
+                             texture2d<float> source [[texture(0)]],
+                             sampler sourceSampler [[sampler(0)]]) {
+    return source.sample(sourceSampler, in.position.xy / float2(8.0, 8.0));
 }
 """
 
@@ -276,6 +306,136 @@ private func runResidencyTest(device: MTLDevice, queue: MTLCommandQueue) throws 
     try residencyTest(device: device, queue: queue)
 }
 
+/// M4: exercises the shipping Metal4PresentPath object graph headlessly.
+///
+/// The full acceptance for M4 is the visible-window pacing run
+/// (metal4PresentValidation), which needs a WindowServer-composited window. What
+/// can be checked without one is everything up to the drawable: that the MTL4
+/// queue, reusable command buffer, allocator ring, argument table and residency
+/// set all build, that the MTL4 frame interpolator factory actually works on this
+/// device (if it returned nil the present path would silently stay on Metal 3
+/// forever), and that a copy encodes and renders correctly through the real
+/// encodeCopy with the presenter's own Metal 3 copy pipeline.
+@available(macOS 26.0, *)
+private func presentPathTest(device: MTLDevice) throws {
+    let layer = CAMetalLayer()
+    layer.device = device
+    layer.pixelFormat = .bgra8Unorm
+    layer.drawableSize = CGSize(width: 8, height: 8)
+
+    guard let path = Metal4PresentPath(device: device, layer: layer) else {
+        try fail("Metal4PresentPath could not be constructed")
+    }
+
+    // The MTL4 interpolator factory is the one piece MetalFX could refuse
+    // outright, which would make the present path fall back forever. A local
+    // compiler is used rather than the shipping shared one, which is file-private.
+    let compilerDescriptor = MTL4CompilerDescriptor()
+    compilerDescriptor.label = "present-path-test-compiler"
+    let compiler = try device.makeCompiler(descriptor: compilerDescriptor)
+    let interpolatorDescriptor = MTLFXFrameInterpolatorDescriptor()
+    interpolatorDescriptor.colorTextureFormat = .rgba16Float
+    interpolatorDescriptor.outputTextureFormat = .rgba16Float
+    interpolatorDescriptor.depthTextureFormat = .depth32Float
+    interpolatorDescriptor.motionTextureFormat = .rg16Float
+    interpolatorDescriptor.uiTextureFormat = .rgba16Float
+    interpolatorDescriptor.inputWidth = 64
+    interpolatorDescriptor.inputHeight = 64
+    interpolatorDescriptor.outputWidth = 64
+    interpolatorDescriptor.outputHeight = 64
+    let interpolator: (any MTL4FXFrameInterpolator)? =
+        interpolatorDescriptor.makeFrameInterpolator(device: device, compiler: compiler)
+    try check(interpolator != nil,
+              "MTLFXFrameInterpolatorDescriptor.makeFrameInterpolator(device:compiler:) returned nil; "
+              + "the Metal 4 present path would fall back to Metal 3 permanently")
+
+    // Same shape as the presenter's copy pipeline (full-screen triangle, one
+    // texture and one sampler at index 0); buildPresentPipeline itself is
+    // file-private to MetallumNative.swift so it cannot be called from here.
+    let copyLibrary = try device.makeLibrary(source: copyShaderSource, options: nil)
+    guard let copyVertex = copyLibrary.makeFunction(name: "path_copy_vs"),
+          let copyFragment = copyLibrary.makeFunction(name: "path_copy_fs") else {
+        try fail("missing copy MSL entry points")
+    }
+    let copyPipelineDescriptor = MTLRenderPipelineDescriptor()
+    copyPipelineDescriptor.vertexFunction = copyVertex
+    copyPipelineDescriptor.fragmentFunction = copyFragment
+    copyPipelineDescriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
+    let copyPipeline = try device.makeRenderPipelineState(descriptor: copyPipelineDescriptor)
+    let samplerDescriptor = MTLSamplerDescriptor()
+    samplerDescriptor.minFilter = .nearest
+    samplerDescriptor.magFilter = .nearest
+    guard let copySampler = device.makeSamplerState(descriptor: samplerDescriptor) else {
+        try fail("could not create the copy sampler")
+    }
+
+    let sourceDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .rgba8Unorm, width: 8, height: 8, mipmapped: false
+    )
+    sourceDescriptor.storageMode = .shared
+    sourceDescriptor.usage = [.shaderRead]
+    guard let source = device.makeTexture(descriptor: sourceDescriptor) else {
+        try fail("could not allocate the present-path source texture")
+    }
+    var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
+    for index in 0..<(8 * 8) {
+        pixels[index * 4 + 0] = 64
+        pixels[index * 4 + 1] = 128
+        pixels[index * 4 + 2] = 191
+        pixels[index * 4 + 3] = 255
+    }
+    source.replace(region: MTLRegionMake2D(0, 0, 8, 8), mipmapLevel: 0, withBytes: &pixels, bytesPerRow: 8 * 4)
+    let destination = try makeTarget(device: device, label: "metal4 present path destination")
+
+    // Both textures must be resident: Metal 4 does no automatic residency, so a
+    // missing adopt() is exactly the bug this checks for.
+    path.adopt(textures: [source, destination])
+
+    let commandBuffer = path.beginFrame()
+    try check(path.encodeCopy(
+        commandBuffer: commandBuffer,
+        source: source,
+        destination: destination,
+        pipeline: copyPipeline,
+        sampler: copySampler,
+        label: "present path test copy"
+    ), "Metal4PresentPath.encodeCopy failed")
+
+    // submit() performs the four-step drawable handshake, so it needs a drawable.
+    // A detached layer can still vend one; if this host refuses, the encode is
+    // abandoned cleanly and the pixel check is skipped rather than reported as a
+    // failure of the code under test.
+    guard let drawable = layer.nextDrawable() else {
+        path.abandonFrame()
+        print("Metal 4 present path: constructed and encoded, but this host vended no drawable, so submit was not exercised")
+        return
+    }
+    let completed = DispatchSemaphore(value: 0)
+    var submitError: Error?
+    path.submit(drawable: drawable) { error in
+        submitError = error
+        completed.signal()
+    }
+    try check(completed.wait(timeout: .now() + .seconds(5)) == .success,
+              "the Metal 4 present-path submit did not report completion within 5s")
+    try check(submitError == nil,
+              "the Metal 4 present-path submit failed: \(String(describing: submitError))")
+
+    var readback = [UInt8](repeating: 0, count: 4)
+    destination.getBytes(&readback, bytesPerRow: 4, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
+    try check(readback == [64, 128, 191, 255],
+              "present-path copy readback mismatch: \(readback)")
+    print("Metal 4 present path: queue, allocator ring, argument table, residency set, MTL4 interpolator, copy encode and the commit/present handshake all functional")
+}
+
+private func runPresentPathTest(device: MTLDevice) throws {
+    guard #available(macOS 26.0, *) else {
+        print("Metal 4 present path test skipped: needs macOS 26")
+        return
+    }
+    try presentPathTest(device: device)
+}
+
 private func runPathTest() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
         try fail("MTLCreateSystemDefaultDevice returned nil")
@@ -415,6 +575,9 @@ private func runPathTest() throws {
     // adding one is invalid), that a submit publishes pending changes, and that
     // releasing a resource removes it again.
     try runResidencyTest(device: device, queue: queue)
+
+    // (6) M4: the frame-generation present path's Metal 4 object graph.
+    try runPresentPathTest(device: device)
 
     print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, an unregistered library falls back cleanly, the pipeline data set archive flushes on both a cold and a warm launch, and the residency set tracks native allocations")
 }

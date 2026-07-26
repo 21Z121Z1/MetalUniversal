@@ -392,6 +392,15 @@ private struct PresentationValidationMain {
             let output = CommandLine.arguments.count > 1
                 ? URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
                 : URL(fileURLWithPath: "build/metal-validation/presentation-current", isDirectory: true)
+            // Metal 4 migration M4: opt in to the MTL4 present path so this same
+            // harness measures both branches. In the game this switch comes from
+            // metallum.opt.metal4Present via Java; here it is an env var because
+            // the harness builds the presenter directly. Unset means the Metal 3
+            // path, i.e. the default behaviour of this task is unchanged.
+            if ProcessInfo.processInfo.environment["METALLUM_VALIDATE_METAL4_PRESENT"] == "1" {
+                metallum_set_metal4_present_enabled(1)
+                print("MetalFrameGenerationPresentationValidation: Metal 4 present path requested")
+            }
             do {
                 let runner = try ValidationRunner(outputDirectory: output)
                 runner.run()
