@@ -160,6 +160,25 @@ public final class MetalEntityMotionCapture {
         beginBuild(submit, true);
     }
 
+    /**
+     * Moving blocks are keyed by their {@code MovingBlockRenderState} rather than
+     * by the submit record.
+     *
+     * <p>{@code MovingBlockFeatureRenderer.buildGroup} inlines its per-submit work
+     * in the loop body, so the submit itself is only a local there. The render
+     * state is reachable at both ends — it is a constructor argument of the submit
+     * and the level argument of the {@code tesselateBlock} call — and one falling
+     * block owns one render state, so it identifies the same thing.</p>
+     *
+     * <p>The owner is retained rather than consumed, because a single block model
+     * can tesselate into the solid, cutout and translucent render types and a
+     * future caller may bracket each separately. {@link #beginFrame()} clears the
+     * map every frame, so retaining cannot leak across frames.</p>
+     */
+    public static void beginMovingBlockBuild(final Object renderState) {
+        beginBuild(renderState, true);
+    }
+
     private static void beginBuild(final Object submit, final boolean retainOwner) {
         Sample sample = retainOwner ? SUBMITS.get(submit) : SUBMITS.remove(submit);
         if (sample == null) {
