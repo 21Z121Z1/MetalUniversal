@@ -332,6 +332,57 @@ compute 编码器的 fence 归属(本次改动只动了 Java 侧)。
 `compileWithIrisOverride(pipeline, source)` 单一漏斗——**漏掉后台那条会让预热抢先把原生 PSO
 写进缓存,覆盖静默失效**。以后再改编译路径,保持这个漏斗是唯一入口。
 
+### 迭代 5 — S7 冒烟:覆盖**命中了**,然后崩在惰性分配(2026-07-27,进世界)
+
+用 `./gradlew runClient -Dmetallum.validation.world="New World"`(build.gradle 已有
+`--quickPlaySingleplayer` 钩子)直接进世界。**这是第一次真正走到地形绘制。**
+
+**证实的部分(此前全是编译期推断)**:
+```
+[metallum-iris] semantic pipeline generation 1 online ...
+[metallum-iris] compiling terrain override CUTOUT for sodium:pipeline/cutout_terrain
+                via metallum:iris/gen1/sodium_terrain_cutout      ← tryCompile 命中!
+[metallum-iris] pack sampler 'shadowtex0' has no source in B2-1;
+                bound a 1x1 shadow placeholder                     ← S6a fallback 运行期执行!
+```
+所以 `Instance.discriminate` 判定正确、`MetalDevice` 的编译漏斗正确、S6a 的 fallback 真的
+被调到了。**「运行期零次执行」这个状态已经结束。**
+
+**然后崩了**:
+```
+java.lang.IllegalStateException: MTLRenderCommandEncoder is closed
+  at MTLRenderCommandEncoder.setTextureAndSampler
+  at MetalRenderPass.pushDescriptor(:644)
+  at MetalRenderPass.bindDrawState(:570)
+  at MetalRenderPass.drawIndexedIndirect(:252)
+  at sodium VKIndirectDrawBatch.draw → DefaultChunkRenderer.render
+```
+
+**根因(设计错误,不是笔误)**:`pushDescriptor` 在**渲染编码器活跃期间**做惰性资源分配。
+两条路径都有这个问题:
+- `Instance.placeholders(device)` → `new IrisMetalPlaceholderTextures(device)` →
+  `createTexture` ×2 + `writeToTexture` + `clearDepthTexture`;
+- `IrisMetalUniformValues.slice(device, kind)` → 首次调用会 `allocate()` 再 `upload()` →
+  `createCommandEncoder().writeToBuffer`。
+
+`writeToTexture`/`writeToBuffer`/`clearDepthTexture` 都会 `endEncoder()` 去开 blit 编码器,
+于是 `pushDescriptor` 正在写的那个 render 编码器被关掉,下一句 `setTextureAndSampler` 就抛。
+**惰性分配放在绘制路径上,在这个后端里等于自毁编码器。**
+
+**正确修法(下一轮第一件事)**:把所有资源创建与上传移出绘制路径,`pushDescriptor` 只允许
+查表,查不到就返回 null 走原有异常。具体:
+1. 给 `MetalDevice` 加一个静态「当前设备」引用(构造器里记,`close()` 里清)——目前没有
+   任何途径从 `RenderSystem.getDevice()`(返回 `GpuDevice`)拿到 `MetalDevice`,这是唯一缺口。
+2. `IrisMetalPipelineOverrides.updateFrame()` 用它,在 `beginLevelRendering()` 里(**编码器
+   之外**)完成:`placeholders(device)` 预创建 + `uniformValues` 的 buffer 分配与上传。
+3. `resolveTexture`/`resolveUniform` 改成纯查表:placeholders 为 null 就返回 null(告警一次),
+   `IrisMetalUniformValues.slice` 去掉 `allocate()`/`upload()` 调用。
+4. 回归里加一条守卫:`MetalIrisSodiumTerrainTest` 断言 `resolveTexture`/`resolveUniform`
+   在未预热时返回 null 而**不**创建资源(否则这个 bug 会悄悄回来)。
+
+**判定**:S7 **未通过**(崩溃),但缺口 2「Sodium 几何走 Iris shader」的关键未知项已经消除
+——覆盖确实会被命中并用于绘制。剩下的是这个生命周期 bug,不是设计问题。
+
 ## 5. 风险与预案
 
 | 风险 | 信号 | 预案 |
