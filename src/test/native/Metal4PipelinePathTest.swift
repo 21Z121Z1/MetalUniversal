@@ -654,6 +654,136 @@ private func runBumpAllocatorTest(device: MTLDevice) throws {
     try bumpAllocatorTest(device: device)
 }
 
+/// M7g + M7h: the CPU completion wait, and every copy shape the tree actually
+/// uses, on an MTL4ComputeCommandEncoder.
+///
+/// MTLBlitCommandEncoder is gone in Metal 4 and its work folds into the compute
+/// encoder under renamed labels. The spec's translation table lists three copy
+/// shapes; the tree uses four, and the two it omits (texture to texture with an
+/// origin and size, and texture to buffer) are exercised here so M7a's rewiring
+/// is mechanical rather than exploratory.
+///
+/// The copies deliberately chain — buffer to texture, texture to texture, texture
+/// to buffer — with an explicit barrier between each. Metal 4 has no hazard
+/// tracking, so without those barriers this would read stale data; the chain
+/// therefore also demonstrates the same-encoder barrier form that M7e needs.
+@available(macOS 26.0, *)
+private func copyAndWaitTest(device: MTLDevice) throws {
+    guard let queue = device.makeMTL4CommandQueue(),
+          let commandBuffer = device.makeCommandBuffer(),
+          let commandAllocator = device.makeCommandAllocator(),
+          let event = device.makeSharedEvent() else {
+        try fail("could not create the Metal 4 objects for the copy test")
+    }
+
+    // M7g: a value that is never signalled must time out, not hang. Checking the
+    // negative case first, because a wait helper that always returns 1 would make
+    // every positive assertion below meaningless.
+    let timeoutStart = Date()
+    try check(event.wait(untilSignaledValue: 999, timeoutMS: 200) == false,
+              "waiting for an unsignalled value reported success")
+    try check(Date().timeIntervalSince(timeoutStart) < 5.0,
+              "the timeout path took far longer than the timeout requested")
+
+    let bytesPerRow = 4 * 4
+    let pixelCount = 4 * 4
+    guard let sourceBuffer = device.makeBuffer(length: bytesPerRow * 4, options: [.storageModeShared]),
+          let destinationBuffer = device.makeBuffer(length: bytesPerRow * 4, options: [.storageModeShared]),
+          let scratchBuffer = device.makeBuffer(length: bytesPerRow * 4, options: [.storageModeShared]) else {
+        try fail("could not allocate the copy buffers")
+    }
+    // Distinct per-pixel values, so a copy that silently moves nothing or moves
+    // the wrong region is visible in the readback.
+    let source = sourceBuffer.contents().bindMemory(to: UInt8.self, capacity: bytesPerRow * 4)
+    for index in 0..<(pixelCount * 4) {
+        source[index] = UInt8(index % 251)
+    }
+
+    let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .rgba8Unorm, width: 4, height: 4, mipmapped: false
+    )
+    textureDescriptor.storageMode = .private
+    textureDescriptor.usage = [.shaderRead, .shaderWrite]
+    guard let textureA = device.makeTexture(descriptor: textureDescriptor),
+          let textureB = device.makeTexture(descriptor: textureDescriptor) else {
+        try fail("could not allocate the copy textures")
+    }
+
+    let residencyDescriptor = MTLResidencySetDescriptor()
+    residencyDescriptor.initialCapacity = 8
+    let residencySet = try device.makeResidencySet(descriptor: residencyDescriptor)
+    residencySet.addAllocations([sourceBuffer, destinationBuffer, scratchBuffer, textureA, textureB])
+    residencySet.commit()
+    residencySet.requestResidency()
+    queue.addResidencySet(residencySet)
+
+    commandAllocator.reset()
+    commandBuffer.beginCommandBuffer(allocator: commandAllocator)
+    guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+        commandBuffer.endCommandBuffer()
+        try fail("could not create the MTL4 compute command encoder")
+    }
+
+    // 1. buffer -> buffer. Metal 3: copy(from:sourceOffset:to:destinationOffset:size:)
+    encoder.copy(
+        sourceBuffer: sourceBuffer, sourceOffset: 0,
+        destinationBuffer: scratchBuffer, destinationOffset: 0,
+        size: bytesPerRow * 4
+    )
+    encoder.barrier(afterEncoderStages: .blit, beforeEncoderStages: .blit, visibilityOptions: .device)
+
+    // 2. buffer -> texture. Metal 3 used from:/to:; Metal 4 names both ends.
+    encoder.copy(
+        sourceBuffer: scratchBuffer, sourceOffset: 0,
+        sourceBytesPerRow: bytesPerRow, sourceBytesPerImage: bytesPerRow * 4,
+        sourceSize: MTLSize(width: 4, height: 4, depth: 1),
+        destinationTexture: textureA, destinationSlice: 0, destinationLevel: 0,
+        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+    )
+    encoder.barrier(afterEncoderStages: .blit, beforeEncoderStages: .blit, visibilityOptions: .device)
+
+    // 3. texture -> texture with an origin and size. NOT in the spec's table.
+    encoder.copy(
+        sourceTexture: textureA, sourceSlice: 0, sourceLevel: 0,
+        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+        sourceSize: MTLSize(width: 4, height: 4, depth: 1),
+        destinationTexture: textureB, destinationSlice: 0, destinationLevel: 0,
+        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+    )
+    encoder.barrier(afterEncoderStages: .blit, beforeEncoderStages: .blit, visibilityOptions: .device)
+
+    // 4. texture -> buffer. Also NOT in the spec's table.
+    encoder.copy(
+        sourceTexture: textureB, sourceSlice: 0, sourceLevel: 0,
+        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+        sourceSize: MTLSize(width: 4, height: 4, depth: 1),
+        destinationBuffer: destinationBuffer, destinationOffset: 0,
+        destinationBytesPerRow: bytesPerRow, destinationBytesPerImage: bytesPerRow * 4
+    )
+    encoder.endEncoding()
+    commandBuffer.endCommandBuffer()
+    queue.commit([commandBuffer])
+
+    // M7g positive case: this is how the shipping helper waits.
+    try check(metal4WaitForCompletion(queue: queue, event: event, value: 1, timeoutMs: 5000) == 1,
+              "metal4WaitForCompletion did not observe completion within 5s")
+
+    let result = destinationBuffer.contents().bindMemory(to: UInt8.self, capacity: bytesPerRow * 4)
+    for index in 0..<(pixelCount * 4) {
+        try check(result[index] == UInt8(index % 251),
+                  "copy chain corrupted byte \(index): expected \(index % 251), got \(result[index])")
+    }
+    print("Metal 4 copy/wait: all four copy shapes in use (buffer-buffer, buffer-texture, texture-texture with region, texture-buffer) round-trip through an MTL4 compute encoder, and the completion wait handles both timeout and success")
+}
+
+private func runCopyAndWaitTest(device: MTLDevice) throws {
+    guard #available(macOS 26.0, *) else {
+        print("copy/wait test skipped: needs macOS 26")
+        return
+    }
+    try copyAndWaitTest(device: device)
+}
+
 private func runPathTest() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
         try fail("MTLCreateSystemDefaultDevice returned nil")
@@ -799,6 +929,9 @@ private func runPathTest() throws {
 
     // (7) M5: the bump allocator that replaces set*Bytes.
     try runBumpAllocatorTest(device: device)
+
+    // (8) M7g/M7h: the completion wait, and every copy shape on a compute encoder.
+    try runCopyAndWaitTest(device: device)
 
     print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, an unregistered library falls back cleanly, the pipeline data set archive flushes on both a cold and a warm launch, and the residency set tracks native allocations")
 }

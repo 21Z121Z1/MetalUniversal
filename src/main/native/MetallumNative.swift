@@ -5685,6 +5685,32 @@ private func descriptorHasLiveColorWrite(_ descriptor: MTLRenderPipelineDescript
     return false
 }
 
+// MARK: - CPU wait for GPU completion (migration spec M7g)
+
+/// Metal 4 replacement for MTLCommandBuffer.waitUntilCompleted, which neither
+/// MTL4CommandQueue nor MTL4CommandBuffer has.
+///
+/// The queue signals `event` to `value` after everything already committed, so
+/// waiting for that value is waiting for those submits. Returns 1 when the value
+/// was reached, 0 on timeout — the same contract as the Metal 3 export, whose
+/// caller (Encoder.awaitSubmitCompletion) implements glClientWaitSync semantics
+/// and must be able to distinguish a timeout from completion. The GL semantics
+/// and the implicit flush that S10 corrected live on the Java side and are not
+/// touched here; only the waiting mechanism changes.
+///
+/// Each submit needs its own increasing value, paired one-to-one with the
+/// existing submitIndex, or a later wait would be satisfied by an earlier submit.
+@available(macOS 26.0, iOS 26.0, *)
+func metal4WaitForCompletion(
+    queue: MTL4CommandQueue,
+    event: MTLSharedEvent,
+    value: UInt64,
+    timeoutMs: UInt64
+) -> Int32 {
+    queue.signalEvent(event, value: value)
+    return event.wait(untilSignaledValue: value, timeoutMS: timeoutMs) ? 1 : 0
+}
+
 // MARK: - Bump allocator (migration spec M5)
 
 /// Per-frame linear allocator that replaces set*Bytes, which Metal 4 removed
