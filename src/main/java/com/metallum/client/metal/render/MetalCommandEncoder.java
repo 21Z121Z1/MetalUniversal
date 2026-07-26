@@ -263,7 +263,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 presentTexture = device.metalFxPipeline().maybeEncode(
                         commandBuffer.nativeHandle(),
                         source.nativeHandle(),
-                        source.getWidth(), source.getHeight(),
+                        source.getWidth(0), source.getHeight(0),
                         outputWidth, outputHeight
                 );
             } catch (Throwable t) {

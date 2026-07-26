@@ -1,7 +1,7 @@
 package com.metallum.client.metal.fx;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.StringWidget;
@@ -66,9 +66,8 @@ public final class MetalFxOptionsScreen extends Screen {
         column.addChild(new StringWidget(CONTENT_WIDTH, SPACING, Component.empty(), this.font));
 
         // Spatial upscaling mode (OFF / QUALITY / BALANCED / PERFORMANCE / ULTRA_PERFORMANCE)
-        CycleButton<MetalFxConfig.SpatialMode> spatialButton = CycleButton.<MetalFxConfig.SpatialMode>builder(MetalFxOptionsScreen::spatialModeLabel)
+        CycleButton<MetalFxConfig.SpatialMode> spatialButton = CycleButton.<MetalFxConfig.SpatialMode>builder(MetalFxOptionsScreen::spatialModeLabel, cfg.spatialMode())
                 .withValues(MetalFxConfig.SpatialMode.values())
-                .withInitialValue(cfg.spatialMode())
                 .create(Component.translatable("metallum.fx.options.spatial"),
                         (button, mode) -> cfg.setSpatialMode(mode));
         spatialButton.setWidth(CONTENT_WIDTH);
@@ -76,16 +75,18 @@ public final class MetalFxOptionsScreen extends Screen {
 
         // Frame interpolation mode (OFF / AUTO / FORCE_BLEND)
         CycleButton<MetalFxConfig.FrameInterpolationMode> interpButton =
-                CycleButton.<MetalFxConfig.FrameInterpolationMode>builder(MetalFxOptionsScreen::interpModeLabel)
+                CycleButton.<MetalFxConfig.FrameInterpolationMode>builder(MetalFxOptionsScreen::interpModeLabel, cfg.interpolationMode())
                         .withValues(MetalFxConfig.FrameInterpolationMode.values())
-                        .withInitialValue(cfg.interpolationMode())
                         .create(Component.translatable("metallum.fx.options.frame_interpolation"),
                                 (button, mode) -> cfg.setInterpolationMode(mode));
         interpButton.setWidth(CONTENT_WIDTH);
         column.addChild(interpButton);
 
-        // FXAA after upscale (on / off) — guarded behind spatial support
-        CycleButton<Boolean> fxaaButton = CycleButton.onOff(cfg.fxaaAfterUpscale())
+        // FXAA after upscale (on / off) — guarded behind spatial support.
+        // CycleButton.onOffBuilder(boolean) returns a Builder<Boolean> with
+        // the initial value preset and ON/OFF labels — this is the 26.2
+        // replacement for the removed CycleButton.onOff(boolean) factory.
+        CycleButton<Boolean> fxaaButton = CycleButton.onOffBuilder(cfg.fxaaAfterUpscale())
                 .create(Component.translatable("metallum.fx.options.fxaa"),
                         (button, enabled) -> cfg.setFxaaAfterUpscale(enabled));
         fxaaButton.setWidth(CONTENT_WIDTH);
@@ -109,19 +110,19 @@ public final class MetalFxOptionsScreen extends Screen {
 
     private void onDone(Button button) {
         MetalFxConfig.save();
-        Minecraft.getInstance().setScreen(this.parent);
+        Minecraft.getInstance().setScreenAndShow(this.parent);
     }
 
     @Override
     public void onClose() {
         MetalFxConfig.save();
-        Minecraft.getInstance().setScreen(this.parent);
+        Minecraft.getInstance().setScreenAndShow(this.parent);
     }
 
     @Override
-    public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        super.render(graphics, mouseX, mouseY, partialTick);
-        graphics.drawCenteredString(this.font, this.title, this.width / 2, 16, 0xFFFFFF);
+    public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
+        super.extractRenderState(graphics, mouseX, mouseY, partialTick);
+        graphics.centeredText(this.font, this.title, this.width / 2, 16, 0xFFFFFF);
     }
 
     /**

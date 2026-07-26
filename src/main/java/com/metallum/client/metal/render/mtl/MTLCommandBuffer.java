@@ -14,6 +14,10 @@ public final class MTLCommandBuffer {
         this.handle = handle;
     }
 
+    private MemorySegment handle() {
+        return this.handle;
+    }
+
     public MTLBlitCommandEncoder makeBlitCommandEncoder() {
         MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeBlitCommandEncoder(handle());
         if (MetalNativeBridge.isNullHandle(encoder)) {

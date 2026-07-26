@@ -3,6 +3,7 @@ package com.metallum.mixin.render;
 import com.metallum.client.metal.fx.MetalFxConfig;
 import com.metallum.client.metal.fx.MetalFxOptionsScreen;
 import com.mojang.blaze3d.platform.InputConstants;
+import com.mojang.blaze3d.platform.Window;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
 import org.lwjgl.glfw.GLFW;
@@ -35,7 +36,7 @@ public abstract class MinecraftKeybindMixin {
     @Inject(method = "tick", at = @At("TAIL"))
     private void metallum$pollF8Keybind(CallbackInfo ci) {
         Minecraft self = (Minecraft) (Object) this;
-        long window = self.getWindow().getWindow();
+        Window window = self.getWindow();
         boolean f8Down = InputConstants.isKeyDown(window, GLFW.GLFW_KEY_F8);
         if (!f8Down || this.metallum$f8WasDown) {
             this.metallum$f8WasDown = f8Down;
@@ -48,7 +49,7 @@ public abstract class MinecraftKeybindMixin {
             return;
         }
 
-        Screen current = self.screen;
+        Screen current = self.gui.screen();
         // Don't open recursively if the user is already on the MetalFX screen.
         if (current instanceof MetalFxOptionsScreen) {
             return;
@@ -57,7 +58,7 @@ public abstract class MinecraftKeybindMixin {
         // Reload persisted config so the freshly-opened screen reflects any
         // out-of-band edits (e.g. config file tweaks on iOS via Files app).
         MetalFxConfig.reload();
-        self.setScreen(new MetalFxOptionsScreen(current));
+        self.setScreenAndShow(new MetalFxOptionsScreen(current));
     }
 
     private static boolean metallum$isMetalBackend() {

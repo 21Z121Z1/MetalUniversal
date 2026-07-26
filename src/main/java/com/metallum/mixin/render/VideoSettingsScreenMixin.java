@@ -49,7 +49,7 @@ public abstract class VideoSettingsScreenMixin extends Screen {
 
         this.addRenderableWidget(Button.builder(
                 Component.translatable("metallum.fx.button.open"),
-                button -> Minecraft.getInstance().setScreen(new MetalFxOptionsScreen((Screen) (Object) this))
+                button -> Minecraft.getInstance().setScreenAndShow(new MetalFxOptionsScreen((Screen) (Object) this))
         ).bounds(x, y, buttonWidth, buttonHeight).build());
     }
 

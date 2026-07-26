@@ -4,13 +4,14 @@ import com.metallum.client.metal.fx.MetalFxConfig;
 import com.metallum.client.metal.fx.MetalFxOptionsScreen;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * Injects a "MetalFX Settings..." button into Sodium's video settings
@@ -69,8 +70,8 @@ public abstract class SodiumVideoSettingsScreenMixin extends Screen {
                 && mouseY >= y && mouseY <= y + BUTTON_HEIGHT;
     }
 
-    @Inject(method = "render", at = @At("TAIL"), remap = false)
-    private void metallum$renderMetalFxButton(GuiGraphics graphics, int mouseX, int mouseY, float delta, CallbackInfo ci) {
+    @Inject(method = "extractRenderState", at = @At("TAIL"), remap = false)
+    private void metallum$renderMetalFxButton(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta, CallbackInfo ci) {
         if (!metallum$isMetalBackend()) {
             return;
         }
@@ -89,11 +90,11 @@ public abstract class SodiumVideoSettingsScreenMixin extends Screen {
         graphics.fill(x, y + BUTTON_HEIGHT - 1, x + BUTTON_WIDTH, y + BUTTON_HEIGHT, borderColor);
         graphics.fill(x, y, x + 1, y + BUTTON_HEIGHT, borderColor);
         graphics.fill(x + BUTTON_WIDTH - 1, y, x + BUTTON_WIDTH, y + BUTTON_HEIGHT, borderColor);
-        graphics.drawCenteredString(this.font, label, x + BUTTON_WIDTH / 2, y + (BUTTON_HEIGHT - 8) / 2, 0xFF000000);
+        graphics.centeredText(this.font, label, x + BUTTON_WIDTH / 2, y + (BUTTON_HEIGHT - 8) / 2, 0xFF000000);
     }
 
     @Inject(method = "mouseClicked", at = @At("HEAD"), cancellable = true, remap = false)
-    private void metallum$onMouseClicked(double mouseX, double mouseY, int button, CallbackInfo ci) {
+    private void metallum$onMouseClicked(double mouseX, double mouseY, int button, CallbackInfoReturnable<Boolean> cir) {
         if (!metallum$isMetalBackend()) {
             return;
         }
@@ -104,7 +105,7 @@ public abstract class SodiumVideoSettingsScreenMixin extends Screen {
             return;
         }
         MetalFxConfig.reload();
-        Minecraft.getInstance().setScreen(new MetalFxOptionsScreen((Screen) (Object) this));
-        ci.setReturnValue(true);
+        Minecraft.getInstance().setScreenAndShow(new MetalFxOptionsScreen((Screen) (Object) this));
+        cir.setReturnValue(true);
     }
 }

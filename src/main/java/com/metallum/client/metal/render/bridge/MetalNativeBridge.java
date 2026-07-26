@@ -393,34 +393,34 @@ public final class MetalNativeBridge {
             // symbols, we treat them as unsupported by leaving the handle
             // null and the wrapper returns the "unsupported" sentinel.
             fxSupportsSpatialScaler = lookup.find("metallum_fx_supports_spatial_scaler")
-                    .map(h -> downcall(h, "metallum_fx_supports_spatial_scaler", FunctionDescriptor.of(INT, ValueLayout.ADDRESS)))
+                    .map(h -> downcall(h, FunctionDescriptor.of(INT, ValueLayout.ADDRESS)))
                     .orElse(null);
             fxSupportsTemporalScaler = lookup.find("metallum_fx_supports_temporal_scaler")
-                    .map(h -> downcall(h, "metallum_fx_supports_temporal_scaler", FunctionDescriptor.of(INT, ValueLayout.ADDRESS)))
+                    .map(h -> downcall(h, FunctionDescriptor.of(INT, ValueLayout.ADDRESS)))
                     .orElse(null);
             fxSupportsFrameInterpolation = lookup.find("metallum_fx_supports_frame_interpolation")
-                    .map(h -> downcall(h, "metallum_fx_supports_frame_interpolation", FunctionDescriptor.of(INT, ValueLayout.ADDRESS)))
+                    .map(h -> downcall(h, FunctionDescriptor.of(INT, ValueLayout.ADDRESS)))
                     .orElse(null);
             fxCreateSpatialScaler = lookup.find("metallum_fx_create_spatial_scaler")
-                    .map(h -> downcall(h, "metallum_fx_create_spatial_scaler",
+                    .map(h -> downcall(h,
                             FunctionDescriptor.of(ValueLayout.ADDRESS,
                                     ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG)))
                     .orElse(null);
             fxSpatialScalerEncode = lookup.find("metallum_fx_spatial_scaler_encode")
-                    .map(h -> downcall(h, "metallum_fx_spatial_scaler_encode",
+                    .map(h -> downcall(h,
                             FunctionDescriptor.ofVoid(
                                     ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                                     ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                                     FLOAT, FLOAT, FLOAT)))
                     .orElse(null);
             fxCreateTemporalScaler = lookup.find("metallum_fx_create_temporal_scaler")
-                    .map(h -> downcall(h, "metallum_fx_create_temporal_scaler",
+                    .map(h -> downcall(h,
                             FunctionDescriptor.of(ValueLayout.ADDRESS,
                                     ValueLayout.ADDRESS, LONG, LONG, LONG, LONG,
                                     LONG, LONG, LONG, LONG)))
                     .orElse(null);
             fxTemporalScalerEncode = lookup.find("metallum_fx_temporal_scaler_encode")
-                    .map(h -> downcall(h, "metallum_fx_temporal_scaler_encode",
+                    .map(h -> downcall(h,
                             FunctionDescriptor.ofVoid(
                                     ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                                     ValueLayout.ADDRESS, ValueLayout.ADDRESS,
@@ -429,12 +429,12 @@ public final class MetalNativeBridge {
                                     FLOAT, FLOAT, FLOAT, FLOAT, INT)))
                     .orElse(null);
             fxCreateFrameInterpolator = lookup.find("metallum_fx_create_frame_interpolator")
-                    .map(h -> downcall(h, "metallum_fx_create_frame_interpolator",
+                    .map(h -> downcall(h,
                             FunctionDescriptor.of(ValueLayout.ADDRESS,
                                     ValueLayout.ADDRESS, LONG, LONG, LONG)))
                     .orElse(null);
             fxFrameInterpolatorEncode = lookup.find("metallum_fx_frame_interpolator_encode")
-                    .map(h -> downcall(h, "metallum_fx_frame_interpolator_encode",
+                    .map(h -> downcall(h,
                             FunctionDescriptor.ofVoid(
                                     ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                                     ValueLayout.ADDRESS, ValueLayout.ADDRESS,
@@ -442,7 +442,7 @@ public final class MetalNativeBridge {
                                     FLOAT, FLOAT, INT)))
                     .orElse(null);
             fxEncodeFrameBlend = lookup.find("metallum_fx_encode_frame_blend")
-                    .map(h -> downcall(h, "metallum_fx_encode_frame_blend",
+                    .map(h -> downcall(h,
                             FunctionDescriptor.of(INT,
                                     ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)))
