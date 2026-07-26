@@ -189,10 +189,16 @@ final class IrisMetalPipelineOverrides {
         private final Map<TerrainKind, RenderPipeline> syntheticPipelines = new EnumMap<>(TerrainKind.class);
         private final Map<Identifier, String> generatedGlsl = new HashMap<>();
         private final Set<TerrainKind> reportedFailures = EnumSet.noneOf(TerrainKind.class);
-        /** Compiled override -> kind, so draw-time fallbacks know whose block to bind. */
-        private final Map<MetalCompiledRenderPipeline, TerrainKind> compiledKinds = new java.util.IdentityHashMap<>();
+        /**
+         * Compiled override -> kind, so draw-time fallbacks know whose block to
+         * bind. Concurrent because {@code MetalDevice} gained a background
+         * prewarm thread: overrides may now be compiled off the render thread
+         * while a draw is reading this map.
+         */
+        private final Map<MetalCompiledRenderPipeline, TerrainKind> compiledKinds =
+                java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
         private final IrisMetalUniformValues uniformValues;
-        private final Set<String> reportedPlaceholders = new java.util.HashSet<>();
+        private final Set<String> reportedPlaceholders = java.util.concurrent.ConcurrentHashMap.newKeySet();
         private @Nullable IrisMetalPlaceholderTextures placeholders;
         /** The device the overrides were compiled on; needed to drop them again on teardown. */
         private @Nullable MetalDevice device;

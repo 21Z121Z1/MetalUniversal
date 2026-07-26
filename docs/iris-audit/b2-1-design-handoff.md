@@ -61,7 +61,7 @@ MetalDevice.computeIfAbsent(sodiumPipeline) ─→ IrisMetalPipelineOverrides.tr
 ```
 
 关闭/回退:`MetalWorldRenderingPipeline.destroy()` → 注册表清空 + `MetalDevice.clearPipelineCache()`(下次编译回落原生)+ WorldRenderingSettings.setVertexFormat(ChunkMeshFormats.COMPACT)。
-总开关:`-Dmetallum.iris.semantic`。**当前默认 `false`(关)**,`=true` 才开;S4+S6 落地并冒烟通过后把默认改成 `true`,届时 `=false` 即回到纯休眠(冒烟 C 行为)。理由见 §4.1 末尾。
+总开关:`-Dmetallum.iris.semantic`,**默认 `true`**;`=false` 回到纯休眠(冒烟 C 行为)。
 
 ## 4. 实施步骤 ledger
 
@@ -69,7 +69,7 @@ MetalDevice.computeIfAbsent(sodiumPipeline) ─→ IrisMetalPipelineOverrides.tr
 - [x] **S2 注册表+合成管线**(`IrisMetalPipelineOverrides` 新类):`activate(device, programSet, textureMap)`(翻译 3 kind,失败记日志并跳过该 kind)/`deactivate()`/`tryCompile(device, RenderPipeline)`(§2.2 判定;懒构建合成管线,XHFP VertexFormat 来自 WorldRenderingSettings;colorTargets 按 §1 显示语义;BindGroupLayout=枚举出的资源;合成 ShaderSource 闭包返回 GLSL)→ `MetalCrossShaderCompiler.compile`。**MetalDevice 两处 computeIfAbsent lambda 前置查询**。
 - [x] **S3 离线 GPU 测试**(`MetalIrisSodiumTerrainTest` 新测试,归入 `metalIrisShaderTranslationTest` 同套件 task):真机 device;BSL+Potato;对 solid/cutout/translucent:S1 翻译→S2 合成→库存链编译→断言 isValid() + 资源表含 MetallumIrisUniforms/gtexture(名字以 dump 为准);失败 dump 到 build/reports/metallum/sodium-terrain-dumps/。**首跑即 ground truth 采集**(patched GLSL 的属性名/uniform 名/输出布局落盘)。
 - [x] **S4 uniform 供给**(已落地,见 §4.1;实现与本条规格的差异在 §4.2 顶部说明)(`IrisMetalUniformValues` 新类):按 S1 布局填 std140 buffer(transient 环);首版实值:gbufferModelView(+Inverse/Prev)、gbufferProjection(+Inverse/Prev)、cameraPosition(+prev)、frameTimeCounter/worldTime/worldDay、viewWidth/viewHeight、near/far、fogColor/skyColor/fogDensity 近似、sunAngle/shadowAngle/sunPosition/moonPosition/shadowLightPosition/upPosition、eyeAltitude、isEyeInWater=0、rainStrength、screenBrightness、ambientLight 类缺省;**未覆盖名置零并每名一次日志**。矩阵源用 Iris `CapturedRenderingState`(其填充 mixin 在 Metal 上活跃)+ 天体公式按 CelestialUniforms 语义(sunPathRotation=programSet 值)。
-- [x] **S5 唤醒 mixin 组**(已落地,见 §4.1 实际实现;默认关,`-Dmetallum.iris.semantic=true` 开):
+- [x] **S5 唤醒 mixin 组**(已落地,见 §4.1;语义层默认**开**,`-Dmetallum.iris.semantic=false` 为 kill switch):
   - `IrisBootstrapCompatMixin.loadShaderpack`:`holdIrisDormant()` → 改为 `holdIrisDormant() && !MetalIrisCompat.semanticLayerEnabled()` 时取消。
   - 新 `IrisPipelineFactoryMixin`(target `Iris.createPipeline` HEAD):semantic 启用且 currentPack 存在 → 返回 `new MetalWorldRenderingPipeline(...)`。
   - `GlStateManagerCompatMixin`:加 `_getString` 假接(VENDOR="Apple", RENDERER="Metallum Metal", VERSION="4.6.0 Metallum", GLSL="4.60");`_getInteger` 加 `GL_NUM_EXTENSIONS(33309)→0`。
@@ -84,7 +84,7 @@ MetalDevice.computeIfAbsent(sodiumPipeline) ─→ IrisMetalPipelineOverrides.tr
 - 2026-07-27: **S1/S2/S3 完成**。`metalIrisShaderTranslationTest --tests MetalIrisSodiumTerrainTest` 绿:BSL+Potato × solid/cutout/translucent 共 6 个组合全部创建出有效 PSO(`isValid()==true`),资源表含 `MetallumIrisUniforms`。回归:`test`、`metalMrtBackendIntegrationTest`、`metalComputeBackendIntegrationTest`、`metalIrisTargetsIntegrationTest` 全绿(共享编译链改动见 §6 迭代 1)。
   实测产物(供 S4/S6 参照):BSL SOLID drawBuffers=[0] / 48 个 uniform / 800B 块 / samplers=[u_SectionTimeInfo,gtexture,noisetex,shadowtex0,shadowtex1,shadowcolor0];BSL TRANSLUCENT drawBuffers=[0,1] / 55 uniform / 1024B / 另加 gaux1,gaux2,depthtex1;Potato 三种 kind 均 28 uniform / 656B / samplers=[u_SectionTimeInfo,noisetex,gtexture,lightmap],SOLID+CUTOUT drawBuffers=[0,2]、TRANSLUCENT drawBuffers=[3,4]。
 - 2026-07-27: **S5 完成(代码落地,未冒烟)**。唤醒线见 §4.1 表。`compileTestJava` 通过;`metalIrisShaderTranslationTest --rerun-tasks` 全绿(B2-2 矩阵 + B2-1 terrain 6/6)。
-  **语义层默认关**(`-Dmetallum.iris.semantic=true` 才开),因为 S4/S6 未做,开了会在首次地形绘制抛`Missing uniform MetallumIrisUniforms`。下一步严格按 §4.2(S4)→ §4.3 S6a → 冒烟(S7)→ 把默认改成 true。
+  ~~语义层默认关~~ **(此条已过期:`abe5ba8` 起默认开,S4/S6a 均已落地。)**
   (该条已被下一条更新)**当时未验证项**:游戏内 pack 解析、`Iris.createPipeline` 重定向、`MetalWorldRenderingPipeline` 的 WorldRenderingSettings 置位、XHFP mesh 重建、任何真实渲染。
 - 2026-07-27: **S4 + S6a 完成,语义层默认改为开**(`-Dmetallum.iris.semantic=false` 为 kill switch)。
   新增 `IrisMetalUniformValues`(按 std140 布局逐名填块,懒分配 GPU buffer,采样失败降级为中性帧)、
@@ -104,7 +104,7 @@ MetalDevice.computeIfAbsent(sodiumPipeline) ─→ IrisMetalPipelineOverrides.tr
 
 | 文件 | 改动 |
 |---|---|
-| `MetalIrisCompat` | 新增 `semanticLayerEnabled()`:`SEMANTIC_LAYER && holdIrisDormant()`。`SEMANTIC_LAYER` 由 `-Dmetallum.iris.semantic` 控制,**当前默认 `false`(见下方“为什么默认关”)**。 |
+| `MetalIrisCompat` | 新增 `semanticLayerEnabled()`:`SEMANTIC_LAYER && holdIrisDormant()`。`SEMANTIC_LAYER` 由 `-Dmetallum.iris.semantic` 控制,**默认 `true`**(`=false` 是 kill switch)。 |
 | `IrisBootstrapCompatMixin` | `loadShaderpack` 的取消条件改为 `holdIrisDormant() && !semanticLayerEnabled()`。`onRenderSystemInit`/`duringRenderSystemInit` **保持无条件取消**(它们是真 GL)。 |
 | `GlStateManagerCompatMixin` | `_getInteger` 加 `GL_NUM_EXTENSIONS(33309) → 0`;新增 `_getString` 注入:`GL_VENDOR(7936)="Metallum"`、`GL_RENDERER(7937)="Metallum Metal"`、`GL_VERSION(7938)`/`GL_SHADING_LANGUAGE_VERSION(35724)="4.6.0"`,其余 `""`。字节码确认 StandardMacros 只用这几个。`"4.6.0"` 经 Iris 的 `SEMVER_PATTERN`(`(?<major>\d+)\.(?<minor>\d+)\.*(?<bugfix>\d*)(.*)`)得 `MC_GL_VERSION=460`/`MC_GLSL_VERSION=460`,与离线 shadow 一致;vendor/renderer 都不匹配 Iris 的任何已知硬件子串 → 落 `MC_GL_VENDOR_OTHER`/`MC_GL_RENDERER_OTHER`(**故意的**:不让包在 Metal 上走厂商特化分支)。 |
 | `IrisRenderSystemCompatMixin` | 新增 `getStringi` 注入返回 `""`(防御性;NUM_EXTENSIONS=0 时不会被调)。 |
@@ -112,8 +112,15 @@ MetalDevice.computeIfAbsent(sodiumPipeline) ─→ IrisMetalPipelineOverrides.tr
 | `IrisPipelineFactoryMixin`(新) | `Iris.createPipeline` HEAD;semantic 开且 `Iris.getCurrentPack()` 非空 → 返回 `new MetalWorldRenderingPipeline(pack.getProgramSet(dimensionId))`;抛异常 → 记日志并返回 `new VanillaRenderingPipeline()`(**绝不放行让 IrisRenderingPipeline 的 GL 构造器跑**)。已加进 `metallum.mixins.json` 的 client 列表。 |
 | `IrisMetalPipelineOverrides` | 新增静态开关 `extendedTerrainTargets`:DRAWBUFFERS 长度 >1 且未置位时 `compileOverride` 返回 null(每 kind 告警一次)。原因见 §2.8:PSO 按 pass 附件签名查表,pass 没有那些附件时编出来也绑不上。离线测试里置 `true` 以覆盖全部 kind。 |
 
-**为什么默认关**:S4(uniform 供给)与 S6(pass 资源预置)尚未实现。合成管线的 BindGroupLayout 声明了 `MetallumIrisUniforms` 和包的采样器,而 `MetalRenderPass.pushDescriptor` 对缺失名字直接抛
-`Missing uniform MetallumIrisUniforms` / `Missing sampler <name>`。所以现在打开 `-Dmetallum.iris.semantic=true` 并启用光影包,**第一次地形绘制就会崩**。S4+S6 落地并冒烟通过后,把 `MetalIrisCompat.SEMANTIC_LAYER` 的默认值改成 `"true"`(一行),并把该 javadoc 段落删掉。
+**语义层默认已开**(`abe5ba8` 起)。S4 与 S6a 均已落地:`MetallumIrisUniforms` 由
+`IrisMetalUniformValues` 每帧填充,包声明但 sodium 未绑的采样器/uniform 由
+`MetalRenderPass.pushDescriptor` 的 fallback 接管,`Missing uniform MetallumIrisUniforms`
+这条失败路径已不存在。
+
+> **但这两项目前只有编译期证据。** 真机日志(05:55,BSL HIGH)止于
+> `semantic pipeline generation 1 online`,**`compiling terrain override` 一行都没有**
+> → `tryCompile` 从未命中 → 地形从未用覆盖管线绘制 → **S4 的填充、S6a 的 fallback、
+> placeholder 纹理,运行期执行次数为 0**。S7 冒烟(进世界)是唯一能改变这个判断的事。
 
 ---
 

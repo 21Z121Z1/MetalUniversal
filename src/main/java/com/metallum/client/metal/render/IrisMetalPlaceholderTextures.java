@@ -55,9 +55,9 @@ final class IrisMetalPlaceholderTextures implements AutoCloseable {
                 device, AddressMode.REPEAT, AddressMode.REPEAT,
                 FilterMode.NEAREST, FilterMode.NEAREST, 1, OptionalDouble.empty()
         );
-        // LESS_EQUAL against a cleared (1.0) depth texture makes every shadow
-        // lookup return "lit", i.e. no spurious shadowing while the shadow pass
-        // does not run.
+        // LESS_EQUAL against the far plane (the clear below) makes every
+        // shadow lookup return "lit", i.e. no spurious shadowing while the
+        // shadow pass does not run.
         this.shadowSampler = new MetalGpuSampler(
                 device, AddressMode.CLAMP_TO_EDGE, AddressMode.CLAMP_TO_EDGE,
                 FilterMode.NEAREST, FilterMode.NEAREST, 1, OptionalDouble.empty(),
@@ -67,6 +67,14 @@ final class IrisMetalPlaceholderTextures implements AutoCloseable {
         ByteBuffer white = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
         white.putInt(0, 0xFFFFFFFF);
         device.createCommandEncoder().writeToTexture(this.color, white, 0, 0, 0, 0, 1, 1);
+        // Load-bearing: a freshly created Metal texture's contents are
+        // undefined (0 in practice). At depth 0 a LESS_EQUAL sample_compare
+        // returns 0 for every ref > 0, i.e. everything reads as *shadowed* —
+        // the exact opposite of the intent, and invisible to the offline gate,
+        // which only checks that a binding resolves. Clearing to the far plane
+        // is what makes every shadow lookup return "lit" while no shadow pass
+        // runs.
+        device.createCommandEncoder().clearDepthTexture(this.depth, 1.0);
     }
 
     MetalRenderPass.TextureViewAndSampler color() {
