@@ -32,6 +32,11 @@ public final class MetalEntityMotionCapture {
             int executesTransferred,
             int executesConsumed,
             int motionDrawsEncoded,
+            // Subset of motionDrawsEncoded that came from the core/item family.
+            // Dropped items, item frames and held items are the only source, so a
+            // scene with dropped items in view and a zero here means the item
+            // motion path is not reaching the interpolator.
+            int itemMotionDrawsEncoded,
             @Nullable String lastMotionDrawSkip,
             @Nullable String lastVertexShader
     ) {
@@ -78,6 +83,7 @@ public final class MetalEntityMotionCapture {
     private static int executesTransferred;
     private static int executesConsumed;
     private static int motionDrawsEncoded;
+    private static int itemMotionDrawsEncoded;
     private static @Nullable String lastMotionDrawSkip;
     private static @Nullable String lastVertexShader;
 
@@ -100,6 +106,7 @@ public final class MetalEntityMotionCapture {
         executesTransferred = 0;
         executesConsumed = 0;
         motionDrawsEncoded = 0;
+        itemMotionDrawsEncoded = 0;
         lastMotionDrawSkip = null;
         lastVertexShader = null;
     }
@@ -134,7 +141,20 @@ public final class MetalEntityMotionCapture {
     }
 
     public static void beginModelBuild(final Object submit) {
-        Sample sample = SUBMITS.remove(submit);
+        beginBuild(submit, false);
+    }
+
+    /**
+     * {@code ItemFeatureRenderer.buildGroup} walks its submit list twice — main
+     * geometry first, then the enchantment foil — so the owning entity has to
+     * survive the first pass. {@link #beginFrame()} bounds the map instead.
+     */
+    public static void beginItemBuild(final Object submit) {
+        beginBuild(submit, true);
+    }
+
+    private static void beginBuild(final Object submit, final boolean retainOwner) {
+        Sample sample = retainOwner ? SUBMITS.get(submit) : SUBMITS.remove(submit);
         if (sample == null) {
             MODEL_BUILD.remove();
         } else {
@@ -153,7 +173,7 @@ public final class MetalEntityMotionCapture {
             return false;
         }
         lastVertexShader = pipeline.getVertexShader().toString();
-        boolean matched = "core/entity".equals(pipeline.getVertexShader().getPath());
+        boolean matched = MetalEntityMotionPipeline.isSplittableVertexShader(pipeline);
         if (matched) {
             splitChecksMatched++;
         }
@@ -199,13 +219,17 @@ public final class MetalEntityMotionCapture {
                 executesTransferred,
                 executesConsumed,
                 motionDrawsEncoded,
+                itemMotionDrawsEncoded,
                 lastMotionDrawSkip,
                 lastVertexShader
         );
     }
 
-    static void recordMotionDrawEncoded() {
+    static void recordMotionDrawEncoded(final RenderPipeline source) {
         motionDrawsEncoded++;
+        if (source != null && "core/item".equals(source.getVertexShader().getPath())) {
+            itemMotionDrawsEncoded++;
+        }
         lastMotionDrawSkip = null;
     }
 

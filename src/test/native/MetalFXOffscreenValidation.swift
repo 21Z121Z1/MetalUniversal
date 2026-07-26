@@ -1030,16 +1030,36 @@ private func runScenario(
             validityBytes.contains(0) && validityBytes.contains(where: { $0 > 127 }),
             "alpha-test case did not preserve invalid holes and valid object pixels"
         )
+        // Post-remediation policy (docs/cutout-shimmer-remediation-2026-07-27.md):
+        // CUTOUT coverage no longer floods the reactive mask. Interior pixels
+        // have depth and motion and must accumulate normally, so the old
+        // "every coverage pixel > 0.5" invariant is exactly what was removed.
+        // What must hold now: the silhouette band still carries reactivity,
+        // and nothing in the coverage region reaches full suppression — FSR2
+        // guidance is that a reactive value at or near 1.0 never helps.
+        var edgeBandReactivePixels = 0
+        var fullSuppressionPixels = 0
         for pixel in validityBytes.indices where validityBytes[pixel] > 127 {
-            try require(
-                reactiveBytes[pixel] > 127,
-                "CUTOUT coverage pixel \(pixel) was not preserved in the reactive mask"
-            )
+            if reactiveBytes[pixel] >= 72 {
+                edgeBandReactivePixels += 1
+            }
+            // 224/255 sits above the 0.85 disocclusion cap (217) and below 1.0.
+            if reactiveBytes[pixel] > 224 {
+                fullSuppressionPixels += 1
+            }
         }
-        let coveragePixels = validityBytes.count { $0 > 127 }
-        let reactivePixels = reactiveBytes.count { $0 > 127 }
         try require(
-            reactivePixels > coveragePixels,
+            edgeBandReactivePixels > 0,
+            "CUTOUT coverage produced no reactive silhouette band"
+        )
+        try require(
+            fullSuppressionPixels == 0,
+            "CUTOUT coverage still writes full reactive suppression"
+                + " (\(fullSuppressionPixels) pixels above 224/255)"
+        )
+        let reactivePixels = reactiveBytes.count { $0 > 0 }
+        try require(
+            reactivePixels > edgeBandReactivePixels,
             "CUTOUT reactive mask did not expand across the jitter/upscale footprint"
         )
     }

@@ -63,9 +63,25 @@ final class MetalFxMath {
         );
     }
 
+    /**
+     * Offsets the raster so the sampled position inside each pixel matches the
+     * {@code pixelJitter} that is reported to {@code jitterOffsetX/Y}.
+     *
+     * <p>The reference convention (Apple's MetalFX sample, FSR2's
+     * {@code translate(jitter) * proj}, and the porting skill) is
+     * {@code clip.xy += clipJitter * clip.w}. Folding that into the
+     * projection's third column is only equivalent when {@code w == +z_view},
+     * which holds for D3D left-handed projections — that is where the
+     * widespread {@code proj[2][0] += ...} idiom comes from. Minecraft's JOML
+     * perspective is right handed ({@code m23 == -1}, so {@code w == -z_view}),
+     * which flips the sign of the column edit. Subtracting restores the
+     * reference offset: with pixel jitter {@code (0.25, -0.5)} the raster now
+     * moves {@code (+0.25, -0.5)} screen pixels (x right, y down), matching the
+     * value handed to MetalFX instead of negating it.
+     */
     static void applyProjectionJitter(final Matrix4f projection, final Vector2f clipJitter) {
-        projection.m20(projection.m20() + clipJitter.x);
-        projection.m21(projection.m21() + clipJitter.y);
+        projection.m20(projection.m20() - clipJitter.x);
+        projection.m21(projection.m21() - clipJitter.y);
     }
 
     /**

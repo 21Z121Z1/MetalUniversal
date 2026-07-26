@@ -35,12 +35,25 @@ private final class ValidationRunner {
         self.queue = queue
         self.outputDirectory = outputDirectory
         self.app = NSApplication.shared
+        // WindowServer silently drops presents for occluded layers, reporting
+        // presentedTime == 0 for the whole run. Center the window on the main
+        // screen and float it so back-to-back CI runs and unrelated desktop
+        // windows cannot occlude the validation surface.
+        let screenFrame = NSScreen.main?.visibleFrame
+                ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        let contentRect = NSRect(
+            x: screenFrame.midX - 160,
+            y: screenFrame.midY - 120,
+            width: 320,
+            height: 240
+        )
         self.window = NSWindow(
-            contentRect: NSRect(x: 80, y: 80, width: 320, height: 240),
+            contentRect: contentRect,
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
+        self.window.level = .floating
         self.layer = CAMetalLayer()
 
         try FileManager.default.createDirectory(
@@ -62,6 +75,7 @@ private final class ValidationRunner {
     func run() {
         app.setActivationPolicy(.regular)
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
         app.activate()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -247,6 +261,7 @@ private final class ValidationRunner {
                 nearPlane: 0.05,
                 farPlane: 1000.0,
                 aspectRatio: Float(width) / Float(height),
+                sourceDeltaSeconds: 1.0 / 60.0,
                 reset: sourceIndex == 0 || measuredFrame == 5,
                 globalFence: nil
             )

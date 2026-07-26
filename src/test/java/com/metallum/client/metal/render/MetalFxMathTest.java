@@ -26,6 +26,45 @@ final class MetalFxMathTest {
         assertEquals(0.002F, clip.y, 1.0E-7F);
     }
 
+    /**
+     * Closes the "projection jitter sign" item the MetalFX audit (6.5) left
+     * open. The raster offset the jittered projection actually produces must
+     * equal the pixel jitter handed to {@code jitterOffsetX/Y}; a right-handed
+     * projection ({@code m23 == -1}) inverts the naive third-column edit, so
+     * this pins the corrected direction against a real Minecraft-shaped
+     * perspective rather than against an identity matrix.
+     */
+    @Test
+    void projectionJitterMovesTheRasterByTheReportedPixelJitter() {
+        int renderWidth = 1000;
+        int renderHeight = 500;
+        Vector2f pixelJitter = new Vector2f(0.25F, -0.5F);
+
+        Matrix4f projection = new Matrix4f().setPerspective(
+                (float) Math.toRadians(70.0),
+                (float) renderWidth / renderHeight,
+                0.05F,
+                1000.0F
+        );
+        assertEquals(-1.0F, projection.m23(), 1.0E-6F, "Minecraft's projection is right handed");
+
+        Vector4f viewPosition = new Vector4f(1.0F, 1.0F, -10.0F, 1.0F);
+        Vector4f unjittered = new Vector4f(viewPosition).mul(projection);
+
+        Matrix4f jittered = new Matrix4f(projection);
+        MetalFxMath.applyProjectionJitter(
+                jittered,
+                MetalFxMath.clipJitter(pixelJitter, renderWidth, renderHeight)
+        );
+        Vector4f offset = new Vector4f(viewPosition).mul(jittered);
+
+        float ndcDeltaX = offset.x / offset.w - unjittered.x / unjittered.w;
+        float ndcDeltaY = offset.y / offset.w - unjittered.y / unjittered.w;
+        // Screen space: +x right, +y down, so the NDC Y delta is negated.
+        assertEquals(pixelJitter.x, ndcDeltaX * renderWidth * 0.5F, 1.0E-4F);
+        assertEquals(pixelJitter.y, -ndcDeltaY * renderHeight * 0.5F, 1.0E-4F);
+    }
+
     @Test
     void cutoutReactiveRadiusCoversJitterAndUpscaleFootprint() {
         assertEquals(0, MetalFxMath.cutoutReactiveRadius(1.0F, new Vector2f()));

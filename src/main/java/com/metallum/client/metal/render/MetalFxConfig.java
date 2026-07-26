@@ -69,19 +69,43 @@ final class MetalFxConfig {
     final boolean debug;
     final boolean transparencyReactiveMask;
     final boolean frameGeneration;
+    // Reactive-policy tuning (launch-argument knobs, not persisted). See
+    // docs/cutout-shimmer-remediation-2026-07-27.md; 1.0 across the board
+    // restores the pre-remediation full-suppression policy.
+    final float cutoutReactiveEdgeWeight;
+    final float cutoutReactiveInteriorWeight;
+    final float depthEdgeReactiveCap;
+    final float transparencyReactiveValue;
+    final boolean skyFarPlaneMotion;
+    final float disocclusionReactiveCap;
+    final boolean mergeDepthDilation;
 
     private MetalFxConfig(
             final Mode requestedMode,
             final float scale,
             final boolean debug,
             final boolean transparencyReactiveMask,
-            final boolean frameGeneration
+            final boolean frameGeneration,
+            final float cutoutReactiveEdgeWeight,
+            final float cutoutReactiveInteriorWeight,
+            final float depthEdgeReactiveCap,
+            final float transparencyReactiveValue,
+            final boolean skyFarPlaneMotion,
+            final float disocclusionReactiveCap,
+            final boolean mergeDepthDilation
     ) {
         this.requestedMode = requestedMode;
         this.scale = scale;
         this.debug = debug;
         this.transparencyReactiveMask = transparencyReactiveMask;
         this.frameGeneration = frameGeneration;
+        this.cutoutReactiveEdgeWeight = cutoutReactiveEdgeWeight;
+        this.cutoutReactiveInteriorWeight = cutoutReactiveInteriorWeight;
+        this.depthEdgeReactiveCap = depthEdgeReactiveCap;
+        this.transparencyReactiveValue = transparencyReactiveValue;
+        this.skyFarPlaneMotion = skyFarPlaneMotion;
+        this.disocclusionReactiveCap = disocclusionReactiveCap;
+        this.mergeDepthDilation = mergeDepthDilation;
     }
 
     static MetalFxConfig load() {
@@ -95,7 +119,33 @@ final class MetalFxConfig {
         boolean frameGeneration = parseBoolean(
                 System.getProperty(FRAME_GENERATION_PROPERTY), defaults.frameGeneration
         );
-        return new MetalFxConfig(mode, scale, debug, transparencyReactiveMask, frameGeneration);
+        float cutoutReactiveEdgeWeight = parseUnitFloat(
+                System.getProperty("metallum.metalfx.cutoutReactiveEdgeWeight"), 0.35F
+        );
+        float cutoutReactiveInteriorWeight = parseUnitFloat(
+                System.getProperty("metallum.metalfx.cutoutReactiveInteriorWeight"), 0.0F
+        );
+        float depthEdgeReactiveCap = parseUnitFloat(
+                System.getProperty("metallum.metalfx.depthEdgeReactiveCap"), 0.5F
+        );
+        float transparencyReactiveValue = parseUnitFloat(
+                System.getProperty("metallum.metalfx.transparencyReactiveValue"), 0.9F
+        );
+        boolean skyFarPlaneMotion = parseBoolean(
+                System.getProperty("metallum.metalfx.skyFarPlaneMotion"), true
+        );
+        float disocclusionReactiveCap = parseUnitFloat(
+                System.getProperty("metallum.metalfx.disocclusionReactiveCap"), 0.85F
+        );
+        boolean mergeDepthDilation = parseBoolean(
+                System.getProperty("metallum.metalfx.mergeDepthDilation"), true
+        );
+        return new MetalFxConfig(
+                mode, scale, debug, transparencyReactiveMask, frameGeneration,
+                cutoutReactiveEdgeWeight, cutoutReactiveInteriorWeight,
+                depthEdgeReactiveCap, transparencyReactiveValue,
+                skyFarPlaneMotion, disocclusionReactiveCap, mergeDepthDilation
+        );
     }
 
     static Mode configuredModeForSodium() {
@@ -206,6 +256,18 @@ final class MetalFxConfig {
         if (value == null) return fallback;
         if ("true".equalsIgnoreCase(value.trim())) return true;
         if ("false".equalsIgnoreCase(value.trim())) return false;
+        return fallback;
+    }
+
+    static float parseUnitFloat(final String value, final float fallback) {
+        if (value == null) return fallback;
+        try {
+            float parsed = Float.parseFloat(value.trim());
+            if (Float.isFinite(parsed)) {
+                return Math.clamp(parsed, 0.0F, 1.0F);
+            }
+        } catch (NumberFormatException ignored) {
+        }
         return fallback;
     }
 

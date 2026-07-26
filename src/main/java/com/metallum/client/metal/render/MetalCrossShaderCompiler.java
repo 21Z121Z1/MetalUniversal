@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
@@ -69,6 +70,46 @@ final class MetalCrossShaderCompiler {
 
     static MetalCompiledRenderPipeline compile(final MetalDevice device, final RenderPipeline pipeline, final ShaderSource shaderSource) {
         try {
+            // S8: disk-cache the translated five-tuple. The raw sources are
+            // fetched again inside getOrCompileShader on a miss; that double
+            // fetch is string work in the microsecond range and cheaper than
+            // threading prepared sources through the vanilla-shaped chain.
+            MetalMslDiskCache diskCache = MetalMslDiskCache.instance();
+            String cacheKey = null;
+            if (diskCache != null) {
+                String rawVertex = shaderSource.get(pipeline.getVertexShader(), ShaderType.VERTEX);
+                String rawFragment = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);
+                if (rawVertex != null && rawFragment != null) {
+                    cacheKey = MetalMslDiskCache.key(
+                            MetalDevice.prepareShaderSource(rawVertex, pipeline.getShaderDefines()),
+                            MetalDevice.prepareShaderSource(rawFragment, pipeline.getShaderDefines()),
+                            // explicitFragmentOutputLocations parses the raw
+                            // (comment-carrying) text, not the prepared one.
+                            rawFragment,
+                            vertexFormatSignature(pipeline),
+                            bindGroupSignature(pipeline),
+                            Integer.toHexString(Float.floatToIntBits(MetalFxManager.shaderSampleLodBias())),
+                            MetalMslDiskCache.CACHE_SALT
+                    );
+                    MetalMslDiskCache.Entry cached = diskCache.load(cacheKey);
+                    if (cached != null) {
+                        MetalMslDiskCache.recordHit();
+                        if (device.isDebuggingEnabled()) {
+                            Metallum.LOGGER.info("[metallum] MSL cache hit for {}", pipeline.getLocation());
+                        }
+                        return new MetalCompiledRenderPipeline(
+                                device,
+                                pipeline,
+                                cached.vertexMsl(),
+                                cached.fragmentMsl(),
+                                cached.vertexEntryPoint(),
+                                cached.fragmentEntryPoint(),
+                                cached.resources()
+                        );
+                    }
+                }
+            }
+            long translateStart = System.nanoTime();
             IntermediaryShaderModule vertexSpirv = device.getOrCompileShader(pipeline.getVertexShader(), ShaderType.VERTEX, pipeline.getShaderDefines(), shaderSource);
             IntermediaryShaderModule fragmentSpirv = device.getOrCompileShader(pipeline.getFragmentShader(), ShaderType.FRAGMENT, pipeline.getShaderDefines(), shaderSource);
             if (vertexSpirv == IntermediaryShaderModule.INVALID || fragmentSpirv == IntermediaryShaderModule.INVALID) {
@@ -99,21 +140,31 @@ final class MetalCrossShaderCompiler {
                     explicitFragmentOutputLocations(fragmentSource)
             );
             validateFragmentOutputSignature(pipeline, fragmentMsl.stageOutputLocations());
+            String fragmentMslSource = applySampleLodBias(
+                    fragmentMsl.source(),
+                    MetalFxManager.shaderSampleLodBias()
+            );
 
             String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
-            String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
+            String fragmentEntryPoint = extractEntryPoint(fragmentMslSource, FRAGMENT_ENTRY_PATTERN, "main0");
             if ("1".equals(System.getenv("METALLUM_MRT_ABI_DEBUG"))) {
                 System.err.printf(
                         "[Metallum] MRT diagnostic for %s fragment entry %s:%n%s%n",
-                        pipeline.getLocation(), fragmentEntryPoint, fragmentMsl.source()
+                        pipeline.getLocation(), fragmentEntryPoint, fragmentMslSource
                 );
             }
             List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(layoutEntries, vertexMsl, fragmentMsl);
+            MetalMslDiskCache.recordMiss(System.nanoTime() - translateStart);
+            if (cacheKey != null) {
+                diskCache.store(cacheKey, new MetalMslDiskCache.Entry(
+                        vertexMsl.source(), fragmentMslSource, vertexEntryPoint, fragmentEntryPoint, resources
+                ));
+            }
             return new MetalCompiledRenderPipeline(
                     device,
                     pipeline,
                     vertexMsl.source(),
-                    fragmentMsl.source(),
+                    fragmentMslSource,
                     vertexEntryPoint,
                     fragmentEntryPoint,
                     resources
@@ -121,6 +172,65 @@ final class MetalCrossShaderCompiler {
         } catch (ShaderCompileException e) {
             throw new IllegalStateException("Failed to compile Metal cross shader for pipeline " + pipeline.getLocation(), e);
         }
+    }
+
+    /**
+     * Rewrites plain fragment {@code .sample(sampler, coords)} calls to
+     * {@code .sample(sampler, coords, bias(b))} so mipmapped material
+     * textures keep display-resolution sharpness while the scene renders at
+     * MetalFX input resolution. Calls that already carry an LOD option
+     * ({@code level}, {@code bias}, {@code gradient2d}, {@code min_lod_clamp})
+     * or extra arguments such as an offset are left untouched, because Metal
+     * requires sample options to precede the offset argument and forbids
+     * combining explicit LOD with bias. Textures without mip chains (GUI,
+     * font, lightmap) are unaffected by LOD bias by construction.
+     */
+    static String applySampleLodBias(final String mslSource, final float lodBias) {
+        if (lodBias == 0.0F || !Float.isFinite(lodBias)) {
+            return mslSource;
+        }
+        String marker = ".sample(";
+        StringBuilder patched = new StringBuilder(mslSource.length() + 256);
+        String biasText = String.format(Locale.ROOT, ", bias(%sf)", lodBias);
+        int cursor = 0;
+        while (true) {
+            int start = mslSource.indexOf(marker, cursor);
+            if (start < 0) {
+                patched.append(mslSource, cursor, mslSource.length());
+                break;
+            }
+            int argsStart = start + marker.length();
+            int depth = 1;
+            int topLevelCommas = 0;
+            boolean hasLodOption = false;
+            int index = argsStart;
+            while (index < mslSource.length() && depth > 0) {
+                char character = mslSource.charAt(index);
+                if (character == '(') {
+                    depth++;
+                } else if (character == ')') {
+                    depth--;
+                } else if (character == ',' && depth == 1) {
+                    topLevelCommas++;
+                }
+                index++;
+            }
+            int close = index - 1;
+            if (depth != 0) {
+                patched.append(mslSource, cursor, mslSource.length());
+                break;
+            }
+            String args = mslSource.substring(argsStart, close);
+            hasLodOption = args.contains("level(") || args.contains("bias(")
+                    || args.contains("gradient2d(") || args.contains("min_lod_clamp(");
+            patched.append(mslSource, cursor, close);
+            if (topLevelCommas == 1 && !hasLodOption) {
+                patched.append(biasText);
+            }
+            patched.append(')');
+            cursor = close + 1;
+        }
+        return patched.toString();
     }
 
     private static void addToBindGroup(
@@ -260,6 +370,32 @@ final class MetalCrossShaderCompiler {
         }
 
         return mask;
+    }
+
+    /**
+     * Cache-key segment covering everything the vertex-input side feeds the
+     * translation: {@code rebind} assigns SPIR-V locations by position in
+     * {@link MetalPipelineSupport#vertexAttributeNames}, so the <b>ordered</b>
+     * name list (not just the name→format map) is part of the input.
+     */
+    private static String vertexFormatSignature(final RenderPipeline pipeline) {
+        Map<String, GpuFormat> formats = vertexAttributeFormats(pipeline);
+        StringBuilder signature = new StringBuilder();
+        for (String name : MetalPipelineSupport.vertexAttributeNames(pipeline)) {
+            GpuFormat format = formats.get(name);
+            signature.append(name).append(':').append(format == null ? "-" : format.name()).append(';');
+        }
+        return signature.toString();
+    }
+
+    /**
+     * Cache-key segment for {@code addToBindGroup} inputs that come from the
+     * pipeline rather than the GLSL text: UTB detection and texel formats
+     * are looked up in the flattened bind group layouts.
+     */
+    private static String bindGroupSignature(final RenderPipeline pipeline) {
+        return BindGroupLayout.flattenUniforms(pipeline.getBindGroupLayouts())
+                + "|" + BindGroupLayout.flattenSamplers(pipeline.getBindGroupLayouts());
     }
 
     private static Map<String, GpuFormat> vertexAttributeFormats(final RenderPipeline pipeline) {

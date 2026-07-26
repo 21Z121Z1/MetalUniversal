@@ -30,8 +30,23 @@ final class MetalEntityMotionPipeline {
     private MetalEntityMotionPipeline() {
     }
 
+    /**
+     * Ordinary entity models and item models are two separate Minecraft 26.2
+     * pipeline families with the same {@code DefaultVertexFormat.ENTITY} layout
+     * and the same {@code ProjMat * ModelViewMat * Position} clip transform, so
+     * one reduced motion shader replays both. Dropped items, item frames and
+     * held items only reach the interpolator through {@code core/item}.
+     */
+    static boolean isSplittableVertexShader(final RenderPipeline source) {
+        if (source == null) {
+            return false;
+        }
+        String vertexShader = source.getVertexShader().getPath();
+        return "core/entity".equals(vertexShader) || "core/item".equals(vertexShader);
+    }
+
     static boolean supports(final RenderPipeline source) {
-        if (source == null || !"core/entity".equals(source.getVertexShader().getPath())) {
+        if (!isSplittableVertexShader(source)) {
             return false;
         }
         ColorTargetState sourceTarget = source.getColorTargetState();

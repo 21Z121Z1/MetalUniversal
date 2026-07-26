@@ -418,3 +418,80 @@ Frame Generation gate: CLOSED
 OBJECT_MOTION_PRODUCER_CONNECTED: false
 Overall status: PARTIAL ACCEPTANCE; DO NOT CLAIM FULL COMPLETION
 ```
+
+## Addendum (2026-07-26, later): Sodium CUTOUT reactive repair accepted
+
+The Temporal flicker repair for alpha-tested Sodium terrain (leaves and grass)
+described in `docs/handoffs/metalfx-cutout-reactive-handoff-2026-07-26.md` was
+completed and validated after this report's main body was written.
+
+Offscreen evidence (synthetic, no window, no screenshot):
+
+- `metalFxOffscreenValidation` passes all eight scenarios with Metal API
+  Validation enabled. The `alpha_test` scenario feeds synthetic exact
+  post-discard coverage through the radius-1 dilation, exports
+  `cutout_coverage`, and asserts covered ⊆ reactive, dilation outside exact
+  coverage, and `preserveReactiveMask=true`.
+
+Real Minecraft renderer evidence (integrated client, fixed spectator world,
+GPU readback before present, no screenshots or attended input):
+
+- `minecraftMetalFxClientValidation` passes 10/10 captures
+  (`expectedGpuCaptures=10`, `failedGpuCaptures=0`, `status=passed`) with
+  Metal API Validation enabled and zero validation assertions.
+- Both Sodium mixins inject; the run logs
+  `MetalFX CUTOUT reactive coverage prepared from Sodium terrain MRT: radius=2`,
+  which requires the redirected MRT render pass, the custom
+  `block_layer_cutout_reactive` fragment shader and the native dilation merge
+  to all be live.
+- Frame 74 `cutout_leaves` (controlled persistent `OAK_LEAVES` wall):
+  265,225 exact-coverage pixels, all 265,225 present in the final reactive
+  mask, 29,948 dilated reactive pixels outside exact coverage at radius 2.
+- Frame 82 `cutout_grass` (controlled `SHORT_GRASS` on `GRASS_BLOCK`, camera
+  pitched down 15°): 274,954 exact-coverage pixels, all 274,954 present in the
+  reactive mask, 35,370 dilated pixels at radius 2.
+- The revealed-entity capture moved from frame 47 to the wall-removal frame 46
+  and now shows a full one-frame reveal (4,336 valid pixels, 4,323
+  object-region disocclusion pixels, error 0). Determinism changes for the
+  client run are documented in `docs/metalfx-validation.md`.
+
+Defects found and fixed during this acceptance:
+
+- `MetalFX Reactive R8` was pre-cleared through a render-pass load action
+  without `USAGE_RENDER_ATTACHMENT`; Metal API validation aborted the client.
+  The texture is now created as a render target.
+- The eight-capture client timeline raced asynchronous Sodium section
+  rebuilds; the run configuration now uses `chunk_build_defer_mode=ZERO_FRAMES`
+  with prioritized `important` rebuild requests after every controlled scene
+  block change, plus 40 warm-up frames before the scripted timeline.
+
+Deployment state:
+
+- JAR `build/libs/metallum-1.0.1.jar` (SHA-256
+  `1ab7b8ace951b450cf09ee35ff3853be7a7851cd2325528703d87365ee299f42`) embeds
+  macOS dylib SHA-256
+  `e130d9d2ef02dd62122d215ed86e55ebcbd61ace81fb4454d7b3404f941a8fde`, byte
+  identical to the freshly built
+  `build/resources/main/natives/macos/libmetallum.dylib` from the same
+  `./gradlew build`. (swiftc output is not byte-reproducible across builds;
+  the native source is unchanged since the validated client run.)
+- The JAR was copied into the experience profile instance
+  `MinecraftMetal-Current-2026-07-26/mods/`. A client restart is required for
+  the new build and for any MetalFX option change.
+- The launcher profile `minecraftmetal-current-20260726` still forces
+  `-Dmetallum.metalfx.mode/scale/reactiveMask/debug`; trimming its `javaArgs`
+  to only `-Xms2G -Xmx6G -Dmetallum.metalfx.frameGeneration=false` is pending
+  the user's own edit (out-of-repo launcher configuration). Until then the
+  in-game MetalFX controls remain locked by design. The instance's persistent
+  `config/metallum-metalfx.properties` already carries
+  `mode=TEMPORAL, scalePercent=67, transparencyReactiveMask=true,
+  frameGeneration=false`, so removing the forced properties preserves the
+  current experience while unlocking the UI.
+
+This addendum does not change the main gate:
+
+```text
+Frame Generation gate: CLOSED
+OBJECT_MOTION_PRODUCER_CONNECTED: false
+Overall status: PARTIAL ACCEPTANCE; CUTOUT reactive repair ACCEPTED
+```

@@ -32,6 +32,10 @@ public final class MetalCutoutReactivePipeline {
     private static final ColorTargetState COVERAGE_TARGET =
             new ColorTargetState(Optional.empty(), GpuFormat.R8_UNORM, ColorTargetState.WRITE_RED);
     private static final Map<VertexFormat, RenderPipeline> CACHE = new IdentityHashMap<>();
+    // Launch-arg escape hatch: -Dmetallum.metalfx.stableCutoutAlpha=false
+    // restores the exact pre-remediation sampling for A/B comparisons.
+    private static final boolean STABLE_ALPHA =
+            !"false".equalsIgnoreCase(System.getProperty("metallum.metalfx.stableCutoutAlpha", "true"));
     private static final ThreadLocal<Boolean> ACTIVE_CUTOUT_PASS =
             ThreadLocal.withInitial(() -> false);
 
@@ -65,7 +69,7 @@ public final class MetalCutoutReactivePipeline {
     }
 
     private static RenderPipeline build(final VertexFormat vertexFormat) {
-        return RenderPipeline.builder()
+        var builder = RenderPipeline.builder()
                 .withBindGroupLayout(ShaderChunkRenderer.BIND_GROUP)
                 .withLocation(Identifier.fromNamespaceAndPath(
                         "metallum",
@@ -84,7 +88,10 @@ public final class MetalCutoutReactivePipeline {
                 .withColorTargetState(1, COVERAGE_TARGET)
                 .withShaderDefine("USE_VERTEX_COMPRESSION")
                 .withShaderDefine("USE_FOG")
-                .withShaderDefine("ALPHA_CUTOUT", 0.5F)
-                .build();
+                .withShaderDefine("ALPHA_CUTOUT", 0.5F);
+        if (STABLE_ALPHA) {
+            builder = builder.withShaderDefine("METALLUM_STABLE_ALPHA");
+        }
+        return builder.build();
     }
 }
