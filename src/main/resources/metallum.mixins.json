@@ -7,9 +7,12 @@
   ],
   "client": [
     "render.PreferredGraphicsApiMixin",
+    "render.VideoSettingsScreenMixin",
+    "render.MinecraftKeybindMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
-    "sodium.SodiumPreferredGraphicsApiMixin"
+    "sodium.SodiumPreferredGraphicsApiMixin",
+    "sodium.SodiumVideoSettingsScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1

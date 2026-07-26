@@ -1,0 +1,29 @@
+{
+  "metallum.fx.button.open": "MetalFX 设置...",
+  "metallum.fx.button.open.tooltip": "配置 MetalFX 空间超分与帧插值。按 F8 可随时打开。",
+
+  "metallum.fx.options.title": "MetalFX 设置",
+  "metallum.fx.options.header": "Apple MetalFX 超分与帧插值",
+
+  "metallum.fx.options.spatial": "空间超分",
+  "metallum.fx.options.frame_interpolation": "帧插值",
+  "metallum.fx.options.fxaa": "超分后应用 FXAA",
+
+  "metallum.fx.spatial.off": "关闭",
+  "metallum.fx.spatial.quality": "质量 (77%)",
+  "metallum.fx.spatial.balanced": "平衡 (67%)",
+  "metallum.fx.spatial.performance": "性能 (56%)",
+  "metallum.fx.spatial.ultra_performance": "极致性能 (33%)",
+
+  "metallum.fx.interp.off": "关闭",
+  "metallum.fx.interp.auto": "自动 (硬件或混合)",
+  "metallum.fx.interp.force_blend": "强制混合 (50/50)",
+
+  "metallum.fx.capability.device": "设备：%s",
+  "metallum.fx.capability.spatial": "空间超分：%s",
+  "metallum.fx.capability.interpolation": "帧插值：%s",
+  "metallum.fx.capability.supported": "支持",
+  "metallum.fx.capability.not_supported": "不支持",
+  "metallum.fx.capability.unknown_device": "未知",
+  "metallum.fx.capability.blint_hint": "硬件插值需要 M3+ / A17 Pro+ 芯片。已启用混合回退。"
+}

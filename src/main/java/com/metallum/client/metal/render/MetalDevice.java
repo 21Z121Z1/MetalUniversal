@@ -2,6 +2,8 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
+import com.metallum.client.metal.fx.MetalFxConfig;
+import com.metallum.client.metal.fx.MetalFxPipeline;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
@@ -38,6 +40,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private final GpuDebugOptions debugOptions;
     private final MetalCommandEncoder commandEncoder;
     private final DeviceInfo deviceInfo;
+    private final MetalFxPipeline metalFxPipeline;
     public final MTLCommandQueue commandQueue;
     private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new IdentityHashMap<>();
     private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new HashMap<>();
@@ -64,6 +67,24 @@ final class MetalDevice implements GpuDeviceBackend {
         MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
         this.commandEncoder = new MetalCommandEncoder(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
+        // Query MetalFX device capabilities and load persisted user settings.
+        // Both are no-ops on devices without MetalFX; the pipeline gracefully
+        // degrades to the legacy present path.
+        MetalFxConfig.reload();
+        MetalFxConfig.get().queryDeviceCapabilities(this.metalDeviceHandle);
+        this.metalFxPipeline = new MetalFxPipeline(this.metalDeviceHandle);
+    }
+
+    /**
+     * @return the per-device MetalFX pipeline used by the present path to
+     * optionally upscale / interpolate frames. Returns a non-null instance
+     * even when MetalFX is disabled — the caller checks
+     * {@link com.metallum.client.metal.fx.MetalFxConfig#isSpatialUpscalingActive()}
+     * / {@link com.metallum.client.metal.fx.MetalFxConfig#isFrameInterpolationActive()}
+     * before encoding.
+     */
+    public MetalFxPipeline metalFxPipeline() {
+        return this.metalFxPipeline;
     }
 
     @Override
@@ -181,6 +202,10 @@ final class MetalDevice implements GpuDeviceBackend {
         this.clearPipelineCache();
         this.drainBufferPool();
         try {
+            this.metalFxPipeline.close();
+        } catch (Throwable ignored) {
+        }
+        try {
             MetalNativeBridge.metallum_NSView_clearLayer(this.cocoaView);
         } catch (Throwable ignored) {
         }
@@ -203,7 +228,7 @@ final class MetalDevice implements GpuDeviceBackend {
         return this.deviceInfo;
     }
 
-    MemorySegment metalDeviceHandle() {
+    public MemorySegment metalDeviceHandle() {
         return this.metalDeviceHandle;
     }
 

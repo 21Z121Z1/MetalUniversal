@@ -17,6 +17,20 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
+    /**
+     * Mixins that should always be applied on macOS, regardless of which
+     * graphics backend the user has selected in options.txt. These are
+     * UI-layer mixins whose runtime behaviour is gated by a backend check
+     * (e.g. {@code "Metal".equals(device.getDeviceInfo().backendName())}),
+     * so applying them when Metal isn't active is harmless — the injected
+     * button simply isn't rendered.
+     */
+    private static final Set<String> ALWAYS_APPLY_ON_MACOS = Set.of(
+            "com.metallum.mixin.render.PreferredGraphicsApiMixin",
+            "com.metallum.mixin.render.VideoSettingsScreenMixin",
+            "com.metallum.mixin.render.MinecraftKeybindMixin"
+    );
+
     private boolean isMacOs;
     private boolean isDefaultGraphicsApi;
 
@@ -40,7 +54,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
         }
-        return PREFERRED_GRAPHICS_API_MIXIN.equals(mixinClassName) || this.isDefaultGraphicsApi;
+        return ALWAYS_APPLY_ON_MACOS.contains(mixinClassName) || this.isDefaultGraphicsApi;
     }
 
     @Override

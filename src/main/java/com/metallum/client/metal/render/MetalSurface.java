@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.fx.MetalFxConfig;
 import com.mojang.blaze3d.systems.CommandEncoderBackend;
 import com.mojang.blaze3d.systems.GpuSurface;
 import com.mojang.blaze3d.systems.GpuSurfaceBackend;
@@ -59,7 +60,7 @@ final class MetalSurface implements GpuSurfaceBackend {
             throw new IllegalArgumentException("Metal surface requires MetalCommandEncoder");
         }
 
-        metalEncoder.presentTextureToDrawable(metalLayer, textureView);
+        metalEncoder.presentTextureToDrawable(metalLayer, textureView, outputWidth(), outputHeight());
         this.pendingPresentEncoder = metalEncoder;
     }
 
@@ -75,5 +76,13 @@ final class MetalSurface implements GpuSurfaceBackend {
     @Override
     public @NonNull Collection<GpuSurface.PresentMode> supportedPresentModes() {
         return SUPPORTED_PRESENT_MODES;
+    }
+
+    private int outputWidth() {
+        return configuration == null ? 0 : configuration.width();
+    }
+
+    private int outputHeight() {
+        return configuration == null ? 0 : configuration.height();
     }
 }

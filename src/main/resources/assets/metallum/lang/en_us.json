@@ -1,0 +1,29 @@
+{
+  "metallum.fx.button.open": "MetalFX Settings...",
+  "metallum.fx.button.open.tooltip": "Configure MetalFX spatial upscaling and frame interpolation. Press F8 to open from anywhere.",
+
+  "metallum.fx.options.title": "MetalFX Settings",
+  "metallum.fx.options.header": "Apple MetalFX Upscaling & Frame Interpolation",
+
+  "metallum.fx.options.spatial": "Spatial Upscaling",
+  "metallum.fx.options.frame_interpolation": "Frame Interpolation",
+  "metallum.fx.options.fxaa": "FXAA After Upscale",
+
+  "metallum.fx.spatial.off": "Off",
+  "metallum.fx.spatial.quality": "Quality (77%)",
+  "metallum.fx.spatial.balanced": "Balanced (67%)",
+  "metallum.fx.spatial.performance": "Performance (56%)",
+  "metallum.fx.spatial.ultra_performance": "Ultra Performance (33%)",
+
+  "metallum.fx.interp.off": "Off",
+  "metallum.fx.interp.auto": "Auto (Hardware or Blend)",
+  "metallum.fx.interp.force_blend": "Force Blend (50/50)",
+
+  "metallum.fx.capability.device": "Device: %s",
+  "metallum.fx.capability.spatial": "Spatial Scaler: %s",
+  "metallum.fx.capability.interpolation": "Frame Interpolator: %s",
+  "metallum.fx.capability.supported": "Supported",
+  "metallum.fx.capability.not_supported": "Not Supported",
+  "metallum.fx.capability.unknown_device": "Unknown",
+  "metallum.fx.capability.blint_hint": "Hardware interpolation requires M3+ / A17 Pro+. Blend fallback is active."
+}

@@ -47,6 +47,7 @@ tasks.register("buildMacNative", Exec) {
 		"-target", "arm64-apple-macosx14.0",
 		"-framework", "Foundation",
 		"-framework", "Metal",
+		"-framework", "MetalFX",
 		"-framework", "QuartzCore",
 		"-o", "src/main/resources/natives/macos/libmetallum.dylib",
 		"src/main/native/MetallumNative.swift"
@@ -95,6 +96,11 @@ tasks.register("buildIOSNative", Exec) {
 	// The dylib is built with `-static`-style linking of the Swift stdlib so it
 	// can be loaded directly via dlopen on a jailbroken/signable device.
 	if (iosSdkPath != null) {
+		// MetalFX is weak-linked so the dylib still loads on iOS 14/15 where
+		// the framework is absent. `canImport(MetalFX)` is a compile-time
+		// check against the SDK (always present in modern Xcode); at runtime,
+		// `MTLFXSpatialScaler.supportsDevice` returns false on chips/OS
+		// versions that lack MetalFX, so the JVM falls back gracefully.
 		commandLine "swiftc",
 			"-O",
 			"-whole-module-optimization",
@@ -104,6 +110,7 @@ tasks.register("buildIOSNative", Exec) {
 			"-sdk", iosSdkPath,
 			"-framework", "Foundation",
 			"-framework", "Metal",
+			"-weak_framework", "MetalFX",
 			"-framework", "QuartzCore",
 			"-framework", "UIKit",
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",

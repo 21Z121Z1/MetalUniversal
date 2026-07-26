@@ -385,6 +385,68 @@ public final class MetalNativeBridge {
             } else {
                 iosGetViewMetalLayer = null;
             }
+
+            // MetalFX entry points. The native dylib always exports these
+            // symbols (real implementations when MetalFX is available,
+            // stubs that return 0/null otherwise), so we look them up
+            // unconditionally. If a future dylib build is missing the
+            // symbols, we treat them as unsupported by leaving the handle
+            // null and the wrapper returns the "unsupported" sentinel.
+            fxSupportsSpatialScaler = lookup.find("metallum_fx_supports_spatial_scaler")
+                    .map(h -> downcall(h, "metallum_fx_supports_spatial_scaler", FunctionDescriptor.of(INT, ValueLayout.ADDRESS)))
+                    .orElse(null);
+            fxSupportsTemporalScaler = lookup.find("metallum_fx_supports_temporal_scaler")
+                    .map(h -> downcall(h, "metallum_fx_supports_temporal_scaler", FunctionDescriptor.of(INT, ValueLayout.ADDRESS)))
+                    .orElse(null);
+            fxSupportsFrameInterpolation = lookup.find("metallum_fx_supports_frame_interpolation")
+                    .map(h -> downcall(h, "metallum_fx_supports_frame_interpolation", FunctionDescriptor.of(INT, ValueLayout.ADDRESS)))
+                    .orElse(null);
+            fxCreateSpatialScaler = lookup.find("metallum_fx_create_spatial_scaler")
+                    .map(h -> downcall(h, "metallum_fx_create_spatial_scaler",
+                            FunctionDescriptor.of(ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG)))
+                    .orElse(null);
+            fxSpatialScalerEncode = lookup.find("metallum_fx_spatial_scaler_encode")
+                    .map(h -> downcall(h, "metallum_fx_spatial_scaler_encode",
+                            FunctionDescriptor.ofVoid(
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    FLOAT, FLOAT, FLOAT)))
+                    .orElse(null);
+            fxCreateTemporalScaler = lookup.find("metallum_fx_create_temporal_scaler")
+                    .map(h -> downcall(h, "metallum_fx_create_temporal_scaler",
+                            FunctionDescriptor.of(ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS, LONG, LONG, LONG, LONG,
+                                    LONG, LONG, LONG, LONG)))
+                    .orElse(null);
+            fxTemporalScalerEncode = lookup.find("metallum_fx_temporal_scaler_encode")
+                    .map(h -> downcall(h, "metallum_fx_temporal_scaler_encode",
+                            FunctionDescriptor.ofVoid(
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS,
+                                    FLOAT, FLOAT, FLOAT, FLOAT, INT)))
+                    .orElse(null);
+            fxCreateFrameInterpolator = lookup.find("metallum_fx_create_frame_interpolator")
+                    .map(h -> downcall(h, "metallum_fx_create_frame_interpolator",
+                            FunctionDescriptor.of(ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS, LONG, LONG, LONG)))
+                    .orElse(null);
+            fxFrameInterpolatorEncode = lookup.find("metallum_fx_frame_interpolator_encode")
+                    .map(h -> downcall(h, "metallum_fx_frame_interpolator_encode",
+                            FunctionDescriptor.ofVoid(
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    FLOAT, FLOAT, INT)))
+                    .orElse(null);
+            fxEncodeFrameBlend = lookup.find("metallum_fx_encode_frame_blend")
+                    .map(h -> downcall(h, "metallum_fx_encode_frame_blend",
+                            FunctionDescriptor.of(INT,
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)))
+                    .orElse(null);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to load Metal native bridge", e);
         }
@@ -593,9 +655,27 @@ public final class MetalNativeBridge {
     private static final MethodHandle iosFindSurfaceView; // null on macOS
     private static final MethodHandle iosGetViewMetalLayer; // null on macOS
 
+    // MetalFX method handles. Each is null when the native dylib does not
+    // export the corresponding symbol (older build without MetalFX support),
+    // in which case the wrapper methods report unsupported / return null.
+    private static final MethodHandle fxSupportsSpatialScaler;
+    private static final MethodHandle fxSupportsTemporalScaler;
+    private static final MethodHandle fxSupportsFrameInterpolation;
+    private static final MethodHandle fxCreateSpatialScaler;
+    private static final MethodHandle fxSpatialScalerEncode;
+    private static final MethodHandle fxCreateTemporalScaler;
+    private static final MethodHandle fxTemporalScalerEncode;
+    private static final MethodHandle fxCreateFrameInterpolator;
+    private static final MethodHandle fxFrameInterpolatorEncode;
+    private static final MethodHandle fxEncodeFrameBlend;
+
 
     private static MethodHandle downcall(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
         return LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor, Linker.Option.critical(false));
+    }
+
+    private static MethodHandle downcall(final MemorySegment symbol, final FunctionDescriptor descriptor) {
+        return LINKER.downcallHandle(symbol, descriptor, Linker.Option.critical(false));
     }
 
     private static MethodHandle downcallWithoutCritical(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
@@ -1605,5 +1685,132 @@ public final class MetalNativeBridge {
 
     private static RuntimeException bridgeFailure(final String symbol, final Throwable throwable) {
         return new IllegalStateException("Native bridge call failed: " + symbol, throwable);
+    }
+
+    // =========================================================================
+    // MetalFX — spatial upscaling & frame interpolation
+    // =========================================================================
+
+    public static boolean metallum_fx_supports_spatial_scaler(final MemorySegment device) {
+        if (fxSupportsSpatialScaler == null) return false;
+        try {
+            return (int) fxSupportsSpatialScaler.invokeExact(segment(device)) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fx_supports_spatial_scaler", throwable);
+        }
+    }
+
+    public static boolean metallum_fx_supports_temporal_scaler(final MemorySegment device) {
+        if (fxSupportsTemporalScaler == null) return false;
+        try {
+            return (int) fxSupportsTemporalScaler.invokeExact(segment(device)) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fx_supports_temporal_scaler", throwable);
+        }
+    }
+
+    public static boolean metallum_fx_supports_frame_interpolation(final MemorySegment device) {
+        if (fxSupportsFrameInterpolation == null) return false;
+        try {
+            return (int) fxSupportsFrameInterpolation.invokeExact(segment(device)) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fx_supports_frame_interpolation", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_fx_create_spatial_scaler(
+            final MemorySegment device,
+            final long inputWidth, final long inputHeight,
+            final long outputWidth, final long outputHeight,
+            final long colorFormat, final long outputFormat
+    ) {
+        if (fxCreateSpatialScaler == null) return MemorySegment.NULL;
+        try {
+            return (MemorySegment) fxCreateSpatialScaler.invokeExact(
+                    segment(device), inputWidth, inputHeight, outputWidth, outputHeight,
+                    colorFormat, outputFormat);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fx_create_spatial_scaler", throwable);
+        }
+    }
+
+    public static void metallum_fx_spatial_scaler_encode(
+            final MemorySegment scaler,
+            final MemorySegment commandBuffer,
+            final MemorySegment sourceTexture,
+            final MemorySegment destinationTexture,
+            final float jitterOffsetX, final float jitterOffsetY, final float mipScale
+    ) {
+        if (fxSpatialScalerEncode == null) return;
+        try {
+            fxSpatialScalerEncode.invokeExact(
+                    segment(scaler), segment(commandBuffer),
+                    segment(sourceTexture), segment(destinationTexture),
+                    jitterOffsetX, jitterOffsetY, mipScale);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fx_spatial_scaler_encode", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_fx_create_frame_interpolator(
+            final MemorySegment device,
+            final long outputWidth, final long outputHeight,
+            final long colorFormat
+    ) {
+        if (fxCreateFrameInterpolator == null) return MemorySegment.NULL;
+        try {
+            return (MemorySegment) fxCreateFrameInterpolator.invokeExact(
+                    segment(device), outputWidth, outputHeight, colorFormat);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fx_create_frame_interpolator", throwable);
+        }
+    }
+
+    public static void metallum_fx_frame_interpolator_encode(
+            final MemorySegment interpolator,
+            final MemorySegment commandBuffer,
+            final MemorySegment sourceColor,
+            final MemorySegment previousColor,
+            final MemorySegment motionVectors,
+            final MemorySegment destination,
+            final float motionVectorScaleX, final float motionVectorScaleY,
+            final int reset
+    ) {
+        if (fxFrameInterpolatorEncode == null) return;
+        try {
+            fxFrameInterpolatorEncode.invokeExact(
+                    segment(interpolator), segment(commandBuffer),
+                    segment(sourceColor), segment(previousColor),
+                    segment(motionVectors), segment(destination),
+                    motionVectorScaleX, motionVectorScaleY, reset);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fx_frame_interpolator_encode", throwable);
+        }
+    }
+
+    /**
+     * Encodes a 50/50 lerp between {@code sourceTexture} and
+     * {@code previousTexture} into {@code destinationTexture}. Used as a
+     * fallback when {@code MTLFXFrameInterpolator} is not supported by the
+     * device (e.g. M1/M2 on macOS, A14–A16 on iOS).
+     *
+     * @return {@code true} if the blend was encoded successfully
+     */
+    public static boolean metallum_fx_encode_frame_blend(
+            final MemorySegment device,
+            final MemorySegment commandBuffer,
+            final MemorySegment sourceTexture,
+            final MemorySegment previousTexture,
+            final MemorySegment destinationTexture
+    ) {
+        if (fxEncodeFrameBlend == null) return false;
+        try {
+            return (int) fxEncodeFrameBlend.invokeExact(
+                    segment(device), segment(commandBuffer),
+                    segment(sourceTexture), segment(previousTexture),
+                    segment(destinationTexture)) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fx_encode_frame_blend", throwable);
+        }
     }
 }
