@@ -239,6 +239,31 @@ MetalDevice.computeIfAbsent(sodiumPipeline) ─→ IrisMetalPipelineOverrides.tr
 在地形绘制时被命中、`MetallumIrisUniforms`/采样器 fallback 是否真的喂上、画面是否出现
 pack 着色——**全部未验证**。接手第一件事就是进世界看 `compiling terrain override` 日志。
 
+## 4.4 与集成分支对齐(高频集成协议)
+
+集成分支 = `MetalUniversal-master` 的 `wip/uncommitted-snapshot-2026-07-27`(fbff4d7+)。
+**本仓库无 remote,集成纯本地,不 push。** 遇到 `index.lock` 是别的会话在操作,等几秒重试,**不要 rm 锁**。
+
+`iris-on-metal` 与集成分支的共同祖先是 `ea2dfd4`(两线都从这里分出)。截至 `9538341`,
+**双方都改过的文件(= 真实冲突面,10 个)**:
+
+| 文件 | 本线改了什么 | 冲突风险 |
+|---|---|---|
+| `MetalRenderPass.java` | `pushDescriptor` 缺名 fallback(S6a) | **高·语义级**——这就是协议警告里的「绑定 45 处」;Metal 4 迁移线也在改绑定路径。git 可能不报冲突但运行期绑定语义会坏 |
+| `MetalCrossShaderCompiler.java` | varying 按槽宽重排 + 若干成员放宽到包级可见 | 中——改的是编译期 location 分配,与同步层无关 |
+| `MetalDevice.java` | 两处 `computeIfAbsent` 前置查询覆盖注册表 | 低 |
+| `metallum.mixins.json` | 新增 `iris.IrisPipelineFactoryMixin` | 低·纯追加 |
+| `build.gradle` | 测试 task 加一条 `includeTestsMatching` | 低·纯追加 |
+| `MetalFxManager.java` / `MetallumNative.swift` / `MetalNativeBridge.java` / `MetalCommandEncoder.java` / `MetalGpuTexture.java` | **本线未改**(记忆里的老风险,现已不成立) | 无 |
+
+**本线迄今没有动过同步层**:没碰 fence 链、barrier、encoder 边界。唯一沾边的是
+`MetalRenderPass.pushDescriptor` 的**资源解析**(不是同步),但它与 Metal 4 迁移线的绑定改造
+落在同一函数区域,合并时必须逐行看,不能信 git 的「无冲突」。
+
+**合并前必须知道**:本线的 fallback 只在 `IrisMetalPipelineOverrides.active() != null` 时生效,
+非覆盖管线一律返回 null 走原逻辑 —— 所以对 Metal 4 线是**加法**,不改变既有绑定语义。
+合并后请重跑 `metalIrisShaderTranslationTest` 与 `metalMrtBackendIntegrationTest` 验证。
+
 ## 5. 风险与预案
 
 | 风险 | 信号 | 预案 |
