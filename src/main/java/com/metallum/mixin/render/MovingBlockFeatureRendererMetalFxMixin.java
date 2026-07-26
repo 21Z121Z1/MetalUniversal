@@ -39,7 +39,10 @@ import org.spongepowered.asm.mixin.injection.At;
  */
 @Mixin(MovingBlockFeatureRenderer.class)
 public abstract class MovingBlockFeatureRendererMetalFxMixin {
-    @WrapOperation(method = "buildGroup", at = @At(value = "INVOKE", target = MetalMotionHooks.TESSELATE_BLOCK_TARGET))
+    @WrapOperation(
+            method = MetalMotionHooks.BUILD_GROUP_METHOD,
+            at = @At(value = "INVOKE", target = MetalMotionHooks.TESSELATE_BLOCK_TARGET)
+    )
     private void metallum$bracketMovingBlockTesselation(
             final ModelBlockRenderer blockRenderer,
             final BlockQuadOutput output,
