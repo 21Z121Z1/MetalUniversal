@@ -2,6 +2,7 @@ package com.metallum.mixin.iris;
 
 import com.metallum.client.metal.iris.MetalIrisBridge;
 import net.irisshaders.iris.gl.IrisRenderSystem;
+import org.lwjgl.opengl.GL;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -31,9 +32,15 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * <p>This mixin handles both:
  * <ul>
  *   <li>{@code supportsSSBO()} is redirected to return {@code false} on
- *       non-GL backends. This allows {@code <clinit>} to complete safely:
- *       {@code SamplerLimits} sets {@code maxShaderStorageUnits = 0} and
- *       {@code emptyArray} is allocated with a valid size.</li>
+ *       non-GL backends <b>or when no GL context is current</b>. The latter
+ *       check is critical: during early boot, {@code isNonGlBackend()} may
+ *       return {@code false} (the device is a temporary {@code GlDevice}
+ *       created before Metal takes over), but no GL context is current on
+ *       the thread that triggered {@code IrisRenderSystem.<clinit>}. Without
+ *       the defensive {@code GL.getCapabilities()} probe, the mixin would
+ *       let the original method body run and crash with
+ *       {@code IllegalStateException}, causing
+ *       {@code ExceptionInInitializerError}.</li>
  *   <li>{@code initRenderer()} is canceled at HEAD on non-GL backends,
  *       preventing the five {@code GL.getCapabilities()} reads and GL
  *       resource allocation in the method body.</li>
@@ -61,6 +68,19 @@ public class MixinIrisRenderSystem {
     @Inject(method = "supportsSSBO", at = @At("HEAD"), cancellable = true, remap = false)
     private static void metallum$redirectSupportsSSBOOnNonGl(CallbackInfoReturnable<Boolean> cir) {
         if (MetalIrisBridge.isNonGlBackend()) {
+            cir.setReturnValue(false);
+            return;
+        }
+        // Defensive: isNonGlBackend() can return false during early boot when
+        // the device is a GlDevice but no GL context is current on this thread
+        // yet (e.g. IrisRenderSystem.<clinit> fires before the GL context is
+        // made current). GL.getCapabilities() would throw
+        // IllegalStateException("No GLCapabilities instance set for the current
+        // thread"), causing ExceptionInInitializerError. Probe safely and
+        // short-circuit to false — we can't support SSBO without GL caps.
+        try {
+            GL.getCapabilities();
+        } catch (Throwable t) {
             cir.setReturnValue(false);
         }
     }
