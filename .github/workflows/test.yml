@@ -1,0 +1,143 @@
+# Strict GLSL→SPIR-V→MSL conversion tests for the Iris-on-Metal bridge.
+#
+# Runs the Python suite at tests/glsl-spirv-msl/run_tests.py, which faithfully
+# ports MetalIrisBridge.ensureSpirvCompatible and exercises the same toolchain
+# options (glslangValidator -V --auto-map-bindings + spirv-cross --msl with the
+# MSL options matching MetalCrossShaderCompiler.spirvToMsl) that MetalUniversal
+# uses at runtime via Mojang's GlslCompiler + LWJGL spvc.
+#
+# Each test case is traced back to specific Iris 26.2 source locations
+# (see the docstring in run_tests.py for the full reference table).
+
+name: test
+run-name: ${{ github.ref_name }} (glsl→spir-v→msl)
+
+on:
+  push:
+    branches:
+      - metal_iris-beta
+      - main
+  pull_request:
+    branches:
+      - metal_iris-beta
+      - main
+  workflow_dispatch:
+
+# Let AI agents (via AI_CI_TOKEN) read run status and logs without elevated
+# repo permissions. The token is configured as a repository Actions Secret by
+# the maintainer; it is NEVER checked into the repo.
+permissions:
+  contents: read
+  actions: read
+  checks: read
+
+jobs:
+  glsl-spirv-msl:
+    name: GLSL→SPIR-V→MSL strict tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: checkout MetalUniversal
+        uses: actions/checkout@v6
+        with:
+          # We need history depth 1 only; the test suite does not inspect git.
+          fetch-depth: 1
+
+      - name: setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: install toolchain (glslang, spirv-tools, spirv-cross)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            glslang-tools \
+            spirv-tools \
+            spirv-cross
+          echo "--- tool versions ---"
+          glslangValidator --version | head -n 3
+          spirv-cross --version | head -n 2
+          which spirv-opt && spirv-opt --version | head -n 1 || true
+
+      - name: checkout Iris 26.2 (reference source for test traceability)
+        # The test suite bakes Iris 26.2 source references into run_tests.py
+        # docstrings/assertions, so the Iris checkout is NOT required for the
+        # tests to run. It is fetched here so reviewers can diff test cases
+        # against the referenced Iris source in CI artifacts.
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 26.2 \
+            https://github.com/IrisShaders/Iris.git iris-26.2
+          echo "--- Iris 26.2 HEAD ---"
+          git -C iris-26.2 log -1 --format='%H %s'
+
+      - name: run GLSL→SPIR-V→MSL strict tests
+        run: |
+          set -euo pipefail
+          python3 tests/glsl-spirv-msl/run_tests.py | tee tests/glsl-spirv-msl/test-output.log
+          # Defensive: fail the step if the suite reported failure but somehow
+          # returned exit 0 (it shouldn't — main() returns 1 on failure).
+          if grep -q "失败用例:" tests/glsl-spirv-msl/test-output.log; then
+            echo "Test suite reported failing cases" >&2
+            exit 1
+          fi
+
+      - name: upload test log (always)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: glsl-spirv-msl-test-log
+          path: tests/glsl-spirv-msl/test-output.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: upload Iris 26.2 reference manifest (always)
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## Iris 26.2 reference"
+            echo
+            echo '```'
+            git -C iris-26.2 log -1 --format='%H %s%n%n%b'
+            echo '```'
+          } > iris-26.2-manifest.md
+
+      - name: upload Iris reference manifest
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: iris-26.2-reference-manifest
+          path: iris-26.2-manifest.md
+          if-no-files-found: warn
+          retention-days: 30
+
+  # AI-monitorable summary job. AI agents (or any maintainer) can query this
+  # workflow's status via:
+  #     gh run list --workflow=test.yml --limit 5
+  #     gh run view <run-id> --log
+  # using a PAT configured as the repository Actions Secret AI_CI_TOKEN.
+  # The job itself performs no privileged operation; the secret only needs to
+  # exist on the *caller* side (the AI agent's gh CLI), not in this workflow.
+  ci-status-summary:
+    name: CI status summary
+    runs-on: ubuntu-latest
+    needs: glsl-spirv-msl
+    if: always()
+    steps:
+      - name: emit status summary
+        run: |
+          echo "### GLSL→SPIR-V→MSL test workflow summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Workflow: \`test.yml\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Run: ${{ github.run_id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Ref: ${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- glsl-spirv-msl job result: **${{ needs.glsl-spirv-msl.result }}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "AI agents may query this run with:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "gh run view ${{ github.run_id }} --repo ${{ github.repository }} --log" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
