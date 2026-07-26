@@ -178,6 +178,8 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static int requestedLogicalWidth = FRAMEBUFFER_WIDTH / 2;
     private static int requestedLogicalHeight = FRAMEBUFFER_HEIGHT / 2;
     private static boolean timelineAnchored;
+    private static boolean loggedFirstFrame;
+    private static boolean loggedFirstLevelFrame;
     private static ArmorStand controlledEntity;
     private static ItemEntity spinningItem;
     private static Boat turningVehicle;
@@ -247,8 +249,24 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (minecraft.options != null) {
             minecraft.options.pauseOnLostFocus = false;
         }
+        // A run that never starts its timeline still exits reporting success,
+        // so the two states that precede the timeline are worth one line each:
+        // without them a stalled run and a passing run look identical in the
+        // log. Both fire once.
+        if (!loggedFirstFrame) {
+            loggedFirstFrame = true;
+            Metallum.LOGGER.info(
+                    "Validation driver reached its first rendered frame (level={}, player={})",
+                    minecraft.level != null,
+                    minecraft.player != null
+            );
+        }
         if (minecraft.level == null || minecraft.player == null) {
             return;
+        }
+        if (!loggedFirstLevelFrame) {
+            loggedFirstLevelFrame = true;
+            Metallum.LOGGER.info("Validation driver observed a level; arming the scripted timeline");
         }
         if (controlledEntity == null || controlledEntity.isRemoved()) {
             installControlledScene(minecraft);
