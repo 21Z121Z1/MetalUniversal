@@ -1890,7 +1890,7 @@ public func metallum_fx_spatial_scaler_encode(
             _ = jitterOffsetX
             _ = jitterOffsetY
             _ = mipScale
-            scaler.encodeToCommandBuffer(commandBuffer)
+            scaler.encode(commandBuffer: commandBuffer)
         }
     }
 }
@@ -1931,7 +1931,8 @@ public func metallum_fx_create_temporal_scaler(
             descriptor.outputTextureFormat = outputFormat
             descriptor.motionTextureFormat = motionVectorFormat
             descriptor.depthTextureFormat = depthFormat
-            descriptor.temporalAAEnabled = true
+            // temporalAAEnabled was removed from MTLFXTemporalScalerDescriptor
+            // in the macOS 26 SDK; temporal AA is now always implicit.
             guard let scaler = try? descriptor.makeTemporalScaler(device: device) else {
                 NSLog("[metallum-fx] Failed to create MTLFXTemporalScaler")
                 return nil
@@ -1961,18 +1962,19 @@ public func metallum_fx_temporal_scaler_encode(
     return autoreleasepool {
         if #available(macOS 13.0, iOS 16.0, *), let scaler = scaler as? MTLFXTemporalScaler {
             scaler.colorTexture = sourceColor
-            // previousColorTexture / jitterOffsetX / jitterOffsetY were removed
-            // from the MTLFXTemporalScaler protocol in the macOS 26 SDK.
+            // MTLFXTemporalScaler manages its own history internally, so there
+            // is no previousColorTexture property to set. jitterOffsetX/Y and
+            // reset are still present in the macOS 26 SDK.
             if let motionVectors { scaler.motionTexture = motionVectors }
             if let depth { scaler.depthTexture = depth }
             scaler.outputTexture = destination
+            scaler.jitterOffsetX = jitterOffsetX
+            scaler.jitterOffsetY = jitterOffsetY
             scaler.motionVectorScaleX = motionVectorScaleX
             scaler.motionVectorScaleY = motionVectorScaleY
             scaler.reset = reset != 0
             _ = prevColor
-            _ = jitterOffsetX
-            _ = jitterOffsetY
-            scaler.encodeToCommandBuffer(commandBuffer)
+            scaler.encode(commandBuffer: commandBuffer)
         }
     }
 }
@@ -2031,14 +2033,15 @@ public func metallum_fx_frame_interpolator_encode(
         if #available(macOS 26.0, iOS 26.0, *),
            let interpolator = interpolator as? MTLFXFrameInterpolator {
             interpolator.colorTexture = sourceColor
-            // previousColorTexture was removed from the protocol in macOS 26 SDK.
+            // MTLFXFrameInterpolator uses prevColorTexture (renamed from
+            // previousColorTexture) and shouldResetHistory (renamed from reset).
+            interpolator.prevColorTexture = previousColor
             interpolator.motionTexture = motionVectors
             interpolator.outputTexture = destination
             interpolator.motionVectorScaleX = motionVectorScaleX
             interpolator.motionVectorScaleY = motionVectorScaleY
-            interpolator.reset = reset != 0
-            _ = previousColor
-            interpolator.encodeToCommandBuffer(commandBuffer)
+            interpolator.shouldResetHistory = reset != 0
+            interpolator.encode(commandBuffer: commandBuffer)
         }
     }
 }
