@@ -67,7 +67,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * Sets up the render-target half of Iris geometry passes:
  * <ul>
  *   <li>A persistent gbuffer MRT pool ({@link #ensureGbufferTargets}) of
- *       {@value #GBUFFER_MRT_COUNT} RGBA8 color attachments (colortex0–3) plus
+ *       {@value #GBUFFER_MRT_COUNT} RGBA16F color attachments (colortex0–3) plus
  *       a depth32Float attachment, recreated on screen-size change.</li>
  *   <li>A persistent shadow-map depth target ({@link #ensureShadowTarget}) at
  *       {@value #SHADOW_MAP_SIZE}×{@value #SHADOW_MAP_SIZE}.</li>
@@ -327,7 +327,7 @@ public final class MetalIrisRenderer {
      * descriptor's {@code [[attribute(N)]]} mapping matches the vertex
      * buffers vanilla will bind via {@code setVertexBuffer}.
      *
-     * <p>The pipeline is created with {@value #GBUFFER_MRT_COUNT} RGBA8 color
+     * <p>The pipeline is created with {@value #GBUFFER_MRT_COUNT} RGBA16F color
      * attachments (matching the gbuffer MRT pool) and a Depth32Float depth
      * attachment, so M5c's render-target redirect routes output into the
      * correct gbuffer textures.
@@ -359,7 +359,7 @@ public final class MetalIrisRenderer {
             return null;
         }
         final MTLPixelFormat[] colorFormats = new MTLPixelFormat[GBUFFER_MRT_COUNT];
-        Arrays.fill(colorFormats, MTLPixelFormat.RGBA8Unorm);
+        Arrays.fill(colorFormats, MTLPixelFormat.RGBA16Float);
         try {
             final MetalIrisPipeline pipeline = getOrCreatePipelineMulti(
                     device, name, msl.vertex().source(), msl.fragment().source(),
@@ -414,15 +414,33 @@ public final class MetalIrisRenderer {
     // ---- Gbuffer MRT target pool (M4h) ----
 
     /**
-     * Persistent gbuffer MRT color attachments (M4h). colortex0–3 as RGBA8,
-     * matching the Iris default gbuffer layout. Recreated on screen-size
-     * change. Used both as render targets (during gbuffers passes) and as
-     * sampler inputs (during composite/deferred passes).
+     * Persistent gbuffer MRT color attachments (M4h). colortex0–3 as RGBA16F,
+     * to preserve HDR and signed data (normals, lightmap) for composite passes.
+     * Recreated on screen-size change. Used both as render targets (during
+     * gbuffers passes) and as sampler inputs (during composite/deferred passes).
      */
     private static GpuTexture[] gbufferColorTextures = null;
     private static MetalGpuTextureView[] gbufferColorViews = null;
     private static GpuTexture gbufferDepthTexture = null;
     private static MetalGpuTextureView gbufferDepthView = null;
+    /**
+     * Snapshot of {@link #gbufferDepthTexture} taken before translucent
+     * geometry is drawn (M5g-8). Bound as the {@code depthtex1} sampler —
+     * shaderpacks sample it to read the pre-translucent depth (e.g. for
+     * underwater effects that must not be occluded by transparent geometry).
+     * Populated by {@link #copyPreTranslucentDepth} via a blit copy.
+     */
+    private static GpuTexture gbufferDepthNoTranslucentsTexture = null;
+    private static MetalGpuTextureView gbufferDepthNoTranslucentsView = null;
+    /**
+     * Snapshot of {@link #gbufferDepthTexture} taken before the hand is drawn
+     * (M5g-8). Bound as the {@code depthtex2} sampler — shaderpacks sample it
+     * to read the pre-hand depth (e.g. so the hand does not occlude the scene
+     * in depth-based effects). Populated by {@link #copyPreHandDepth} via a
+     * blit copy.
+     */
+    private static GpuTexture gbufferDepthNoHandTexture = null;
+    private static MetalGpuTextureView gbufferDepthNoHandView = null;
     private static int gbufferTargetWidth = 0;
     private static int gbufferTargetHeight = 0;
 
@@ -1073,7 +1091,7 @@ public final class MetalIrisRenderer {
     /**
      * Ensures the gbuffer MRT target pool exists and matches the given
      * dimensions, recreating the textures if the size changed. Creates
-     * {@link #GBUFFER_MRT_COUNT} RGBA8 color attachments (colortex0–3) plus a
+     * {@link #GBUFFER_MRT_COUNT} RGBA16F color attachments (colortex0–3) plus a
      * depth32Float depth attachment, each with render-attachment + shader-read
      * usage and a view.
      */
@@ -1088,13 +1106,26 @@ public final class MetalIrisRenderer {
         for (int i = 0; i < GBUFFER_MRT_COUNT; i++) {
             gbufferColorTextures[i] = device.createTexture(
                     "iris_gbuffer_colortex" + i, usage,
-                    GpuFormat.RGBA8_UNORM, width, height, 1, 1);
+                    GpuFormat.RGBA16_FLOAT, width, height, 1, 1);
             gbufferColorViews[i] = (MetalGpuTextureView) device.createTextureView(gbufferColorTextures[i]);
         }
         gbufferDepthTexture = device.createTexture(
                 "iris_gbuffer_depth", usage,
                 GpuFormat.D32_FLOAT, width, height, 1, 1);
         gbufferDepthView = (MetalGpuTextureView) device.createTextureView(gbufferDepthTexture);
+        // M5g-8: depthtex1/depthtex2 are independent depth snapshots (same
+        // D32_FLOAT format as the main depth), blit-copied from
+        // gbufferDepthTexture at the right points in the frame so shaderpacks
+        // sampling depthtex1 (pre-translucent) / depthtex2 (pre-hand) read the
+        // correct snapshot instead of the live depth buffer.
+        gbufferDepthNoTranslucentsTexture = device.createTexture(
+                "iris_gbuffer_depth_no_translucents", usage,
+                GpuFormat.D32_FLOAT, width, height, 1, 1);
+        gbufferDepthNoTranslucentsView = (MetalGpuTextureView) device.createTextureView(gbufferDepthNoTranslucentsTexture);
+        gbufferDepthNoHandTexture = device.createTexture(
+                "iris_gbuffer_depth_no_hand", usage,
+                GpuFormat.D32_FLOAT, width, height, 1, 1);
+        gbufferDepthNoHandView = (MetalGpuTextureView) device.createTextureView(gbufferDepthNoHandTexture);
         gbufferTargetWidth = width;
         gbufferTargetHeight = height;
     }
@@ -1119,6 +1150,35 @@ public final class MetalIrisRenderer {
             }
             gbufferDepthTexture = null;
         }
+        // M5g-8: release the depthtex1/depthtex2 snapshot textures + views.
+        if (gbufferDepthNoTranslucentsView != null) {
+            try {
+                gbufferDepthNoTranslucentsView.close();
+            } catch (Exception ignored) {
+            }
+            gbufferDepthNoTranslucentsView = null;
+        }
+        if (gbufferDepthNoTranslucentsTexture != null) {
+            try {
+                gbufferDepthNoTranslucentsTexture.close();
+            } catch (Exception ignored) {
+            }
+            gbufferDepthNoTranslucentsTexture = null;
+        }
+        if (gbufferDepthNoHandView != null) {
+            try {
+                gbufferDepthNoHandView.close();
+            } catch (Exception ignored) {
+            }
+            gbufferDepthNoHandView = null;
+        }
+        if (gbufferDepthNoHandTexture != null) {
+            try {
+                gbufferDepthNoHandTexture.close();
+            } catch (Exception ignored) {
+            }
+            gbufferDepthNoHandTexture = null;
+        }
         gbufferColorViews = null;
         gbufferColorTextures = null;
         gbufferTargetWidth = 0;
@@ -1141,6 +1201,83 @@ public final class MetalIrisRenderer {
      */
     static MetalGpuTextureView getGbufferDepthView() {
         return gbufferDepthView;
+    }
+
+    // ---- Pre-translucent / pre-hand depth snapshots (M5g-8) ----
+
+    /**
+     * Copies the current gbuffer depth buffer ({@link #gbufferDepthTexture},
+     * which at this point contains only opaque geometry) into the
+     * {@code depthtex1} snapshot texture ({@link #gbufferDepthNoTranslucentsTexture}).
+     *
+     * <p>Must be called <b>before</b> translucent geometry is drawn — the
+     * {@link com.metallum.client.metal.iris.MetalIrisRenderingPipeline#beginTranslucents}
+     * hook is the correct call site. After this copy, shaderpacks sampling
+     * {@code depthtex1} read the pre-translucent depth (matching Iris's
+     * {@code RenderTargets.getDepthTextureNoTranslucents()}), so effects like
+     * underwater fog are not incorrectly occluded by transparent geometry.
+     *
+     * <p>Safe to call when the gbuffer pool is not yet initialized — the method
+     * returns silently in that case.
+     */
+    public static void copyPreTranslucentDepth() {
+        copyDepthSnapshot(gbufferDepthTexture, gbufferDepthNoTranslucentsTexture,
+                gbufferTargetWidth, gbufferTargetHeight, "pre-translucent (depthtex1)");
+    }
+
+    /**
+     * Copies the current gbuffer depth buffer ({@link #gbufferDepthTexture},
+     * which at this point contains opaque + translucent geometry but not the
+     * hand) into the {@code depthtex2} snapshot texture
+     * ({@link #gbufferDepthNoHandTexture}).
+     *
+     * <p>Must be called <b>before</b> the hand is drawn — the
+     * {@link com.metallum.client.metal.iris.MetalIrisRenderingPipeline#beginHand}
+     * hook is the correct call site. After this copy, shaderpacks sampling
+     * {@code depthtex2} read the pre-hand depth (matching Iris's
+     * {@code RenderTargets.getDepthTextureNoHand()}), so the hand does not
+     * occlude the scene in depth-based effects.
+     *
+     * <p>Safe to call when the gbuffer pool is not yet initialized — the method
+     * returns silently in that case.
+     */
+    public static void copyPreHandDepth() {
+        copyDepthSnapshot(gbufferDepthTexture, gbufferDepthNoHandTexture,
+                gbufferTargetWidth, gbufferTargetHeight, "pre-hand (depthtex2)");
+    }
+
+    /**
+     * Blits the full gbuffer depth from {@code source} into {@code destination}
+     * using a {@link MetalCommandEncoder#copyTextureToTexture} blit pass. Both
+     * textures are D32_FLOAT at the gbuffer target size. The blit ends its own
+     * encoder before returning so the next render pass starts clean.
+     */
+    private static void copyDepthSnapshot(
+            final GpuTexture source,
+            final GpuTexture destination,
+            final int width,
+            final int height,
+            final String label
+    ) {
+        if (source == null || destination == null || width <= 0 || height <= 0) {
+            return;
+        }
+        final MetalDevice device = getMetalDevice();
+        if (device == null) {
+            return;
+        }
+        try {
+            final MetalCommandEncoder encoder = device.createCommandEncoder();
+            encoder.copyTextureToTexture(
+                    source, destination,
+                    0, // mipLevel
+                    0, 0, // destX, destY
+                    0, 0, // sourceX, sourceY
+                    width, height);
+            LOGGER.debug("[MetalUniversal] M5g-8: copied {} depth snapshot ({}x{})", label, width, height);
+        } catch (Throwable t) {
+            LOGGER.warn("[MetalUniversal] M5g-8: failed to copy {} depth snapshot: {}", label, t.toString());
+        }
     }
 
     // ---- Shadow map target (M4h) ----
@@ -1422,7 +1559,7 @@ public final class MetalIrisRenderer {
         }
 
         MTLPixelFormat[] colorFormats = new MTLPixelFormat[GBUFFER_MRT_COUNT];
-        Arrays.fill(colorFormats, MTLPixelFormat.RGBA8Unorm);
+        Arrays.fill(colorFormats, MTLPixelFormat.RGBA16Float);
 
         MetalIrisPipeline pipeline;
         try {
@@ -1629,9 +1766,12 @@ public final class MetalIrisRenderer {
      *   <tr><td>{@code colortex4}–{@code colortex7}</td>
      *       <td>composite read-set views [0–3]</td></tr>
      *   <tr><td>{@code gcolor}</td><td>gbuffer color view [0] (alias)</td></tr>
-     *   <tr><td>{@code depthtex0}, {@code gdepthtex}, {@code depthtex1},
-     *           {@code depthtex2}</td>
-     *       <td>gbuffer depth view</td></tr>
+     *   <tr><td>{@code depthtex0}, {@code gdepthtex}</td>
+     *       <td>gbuffer depth view (live depth — includes translucent + hand)</td></tr>
+     *   <tr><td>{@code depthtex1}</td>
+     *       <td>gbuffer depth-no-translucents view (pre-translucent snapshot, M5g-8)</td></tr>
+     *   <tr><td>{@code depthtex2}</td>
+     *       <td>gbuffer depth-no-hand view (pre-hand snapshot, M5g-8)</td></tr>
      *   <tr><td>{@code shadowtex0}, {@code shadowtex1}, {@code shadow},
      *           {@code watershadow}</td>
      *       <td>shadow-map depth view</td></tr>
@@ -1674,8 +1814,23 @@ public final class MetalIrisRenderer {
             final MetalGpuTextureView[] gbufferViews = gbufferColorViews;
             return gbufferViews != null && gbufferViews.length > 0 ? gbufferViews[0] : null;
         }
-        // depthtex0/1/2, gdepthtex → gbuffer depth view
-        if (name.startsWith("depthtex") || "gdepthtex".equals(name)) {
+        // depthtex0/1/2, gdepthtex → gbuffer depth views (M5g-8).
+        //   depthtex0 / gdepthtex: live depth (includes translucent + hand geometry)
+        //   depthtex1: snapshot taken before translucent geometry (no translucents)
+        //   depthtex2: snapshot taken before hand geometry (no hand)
+        // Mirrors Iris's IrisSamplers.addWorldDepthSamplers / addCompositeSamplers
+        // which bind three distinct RenderTargets depth textures.
+        if (name.startsWith("depthtex")) {
+            final int idx = parseIndexSuffix(name, "depthtex");
+            if (idx == 1) {
+                return gbufferDepthNoTranslucentsView;
+            }
+            if (idx == 2) {
+                return gbufferDepthNoHandView;
+            }
+            return gbufferDepthView;
+        }
+        if ("gdepthtex".equals(name)) {
             return gbufferDepthView;
         }
         // shadowtex0/1, shadow, watershadow → shadow-map depth view

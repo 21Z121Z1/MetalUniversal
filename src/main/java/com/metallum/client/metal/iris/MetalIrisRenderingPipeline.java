@@ -461,37 +461,64 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
 
     @Override
     public void renderShadows(LevelRendererAccessor worldRenderer, Camera camera, CameraRenderState renderState) {
-        // M5g-4: Render the shadow pass — create a shadow render command
-        // encoder targeting the shadow-map depth texture (clearing it to far),
-        // so the shadow map is in a valid state for composite/deferred passes
-        // to sample via shadowtex0/shadowtex1 (already wired in
-        // MetalIrisRenderer.getIrisRenderTargetTexture).
+        // M5g-4: Shadow pass.
         //
-        // Full chunk/entity shadow rendering (frustum culling, Sodium chunk
-        // iteration, entity dispatch) requires a ShadowRenderer equivalent
-        // and is a future milestone. This beta scaffolding ensures the shadow
-        // map exists and is cleared each frame so composite passes that sample
-        // shadowtex0/shadowtex1 read a valid (cleared) texture instead of
-        // unbound garbage.
+        // CURRENT BEHAVIOUR (this method):
+        //   Only CLEARS the shadow-map depth texture to far (1.0). No scene
+        //   geometry is rendered into the shadow map. This ensures the
+        //   shadowtex0 / shadowtex1 samplers (already wired in
+        //   MetalIrisRenderer.getIrisRenderTargetTexture) return valid, cleared
+        //   data instead of unbound garbage, so composite/deferred passes that
+        //   sample the shadow map don't read undefined memory. Without this
+        //   clear, shadowtex0/1 would contain stale data from the previous
+        //   frame or uninitialized texture memory.
+        //
+        // WHAT A FULL IMPLEMENTATION NEEDS (future milestone — not done here):
+        //   1. Shadow camera setup — build an orthographic projection centered
+        //      on the sun/moon direction (Iris's ShadowMatrices), sized to the
+        //      shaderpack's shadow render distance.
+        //   2. Frustum culling against the shadow camera's frustum (separate
+        //      from the main view frustum) so only shadow-visible chunks are
+        //      rendered.
+        //   3. Iterate visible terrain chunks (Sodium chunk mesh iteration) and
+        //      issue shadow_solid / shadow_cutout draws via the shadow encoder,
+        //      binding shadow-camera MVP uniforms.
+        //   4. Dispatch entity/block-entity shadow draws (shadow_entities /
+        //      shadow_block_entities programs) for shadow-visible entities.
+        //   5. Optionally render shadowcolor0/1 if the shaderpack writes color
+        //      in the shadow fragment shader.
+        //
+        // REFERENCE: Iris's GL implementation lives in
+        //   /workspace/Iris/common/src/main/java/net/irisshaders/iris/shadows/ShadowRenderer.java
+        // which performs the above steps via OpenGL. A Metal equivalent would
+        //   reuse MetalIrisRenderer.beginShadowPass (which creates the encoder
+        //   + clears the shadow map, as below) and issue draws through the
+        //   returned MTLRenderCommandEncoder before endShadowPass().
+        //
+        // This beta scaffolding intentionally stops at the clear step — full
+        // shadow geometry rendering is a large effort (shadow camera, Sodium
+        // integration, entity dispatch) tracked separately.
         final MetalIrisBridge.ShaderPair shadowMsl = getCompiledShader("shadow");
         if (shadowMsl == null || shadowMsl.vertex() == null || shadowMsl.fragment() == null) {
             return;
         }
         try {
+            // beginShadowPass creates the shadow render command encoder with
+            // the shadow program's pipeline bound and the shadow-map depth
+            // texture cleared to far (1.0). The returned encoder is ready for
+            // shadow-camera draws, but this stub issues none — see the comment
+            // above for what a full implementation would add here.
             final com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder shadowEnc =
                     MetalIrisRenderer.beginShadowPass(
                             "shadow",
                             shadowMsl.vertex().source(),
                             shadowMsl.fragment().source());
             if (shadowEnc != null) {
-                // The shadow pass encoder is now active with the shadow
-                // pipeline bound and the shadow map cleared. A full
-                // implementation would iterate shadow-camera-visible chunks
-                // and entities here, issuing draws via shadowEnc. The encoder
-                // lifecycle is managed by MetalCommandEncoder (ended when the
-                // next encoder is created or the command buffer is submitted).
+                // No geometry is drawn — the shadow map is left cleared.
+                // Full shadow geometry rendering (chunk + entity dispatch via
+                // shadowEnc) is a future milestone; see ShadowRenderer.java.
                 MetalIrisRenderer.endShadowPass();
-                LOGGER.debug("[MetalUniversal] M5g: shadow pass completed (shadow map cleared)");
+                LOGGER.debug("[MetalUniversal] M5g: shadow pass completed (shadow map cleared, no geometry rendered)");
             }
         } catch (Throwable t) {
             LOGGER.warn("[MetalUniversal] M5g: shadow pass failed: {}", t.toString());
@@ -587,6 +614,13 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
 
     @Override
     public void beginHand() {
+        // M5g-8: Snapshot the current gbuffer depth into depthtex2 BEFORE the
+        // hand is drawn. At this point the depth buffer contains the scene
+        // (opaque + translucent + entities) but not the hand, so shaderpacks
+        // sampling depthtex2 read the pre-hand depth (matching Iris's
+        // RenderTargets.getDepthTextureNoHand()). Must run before setPhase so
+        // the copy happens while the previous phase's draws are still flushed.
+        MetalIrisRenderer.copyPreHandDepth();
         // M5g-5: Switch to the hand gbuffers program so hand geometry renders
         // through the Iris gbuffers_hand pipeline (falling back to
         // gbuffers_terrain if the shaderpack has no gbuffers_hand, per
@@ -598,6 +632,14 @@ public class MetalIrisRenderingPipeline implements WorldRenderingPipeline {
 
     @Override
     public void beginTranslucents() {
+        // M5g-8: Snapshot the current gbuffer depth into depthtex1 BEFORE
+        // translucent geometry is drawn. At this point the depth buffer
+        // contains only opaque geometry, so shaderpacks sampling depthtex1
+        // read the pre-translucent depth (matching Iris's
+        // RenderTargets.getDepthTextureNoTranslucents()). Must run before
+        // setPhase so the copy happens while the opaque-phase draws are still
+        // flushed.
+        MetalIrisRenderer.copyPreTranslucentDepth();
         // M5g-5: Switch to the translucent gbuffers program (gbuffers_water,
         // falling back to gbuffers_translucent → gbuffers_terrain) so
         // translucent geometry renders through the Iris gbuffers_water

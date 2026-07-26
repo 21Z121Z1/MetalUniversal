@@ -3,6 +3,9 @@ package com.metallum.client.metal.render;
 import com.metallum.client.metal.iris.MetalIrisBridge;
 import com.metallum.client.metal.iris.MetalIrisBridge.LooseUniformLayout;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.mtl.MTLBlendFactor;
+import com.metallum.client.metal.render.mtl.MTLBlendOperation;
+import com.metallum.client.metal.render.mtl.MTLColorWriteMask;
 import com.metallum.client.metal.render.mtl.MTLCompareFunction;
 import com.metallum.client.metal.render.mtl.MTLCullMode;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
@@ -206,6 +209,18 @@ final class MetalIrisPipeline implements AutoCloseable {
      */
     @Nullable
     private final LooseUniformLayout looseUniformLayout;
+    /**
+     * Whether standard alpha blending is enabled on attachment 0 for this
+     * pipeline (M5g-9). {@code true} for translucent gbuffers stages
+     * ({@code gbuffers_water}, {@code gbuffers_translucent},
+     * {@code gbuffers_hand}, {@code gbuffers_entities}, {@code gbuffers_block},
+     * {@code gbuffers_beacon}, {@code gbuffers_spidereyes}) so translucent
+     * geometry composites correctly; {@code false} for opaque gbuffers and all
+     * composite/deferred/final passes (Iris disables blend there). Determined
+     * from the program name at construction time via
+     * {@link #isTranslucentGbuffersProgram}.
+     */
+    private final boolean enableBlending;
     private boolean closed;
 
     /**
@@ -308,15 +323,30 @@ final class MetalIrisPipeline implements AutoCloseable {
         // case the iris_LooseUniforms UBO slot falls back to the zeroed
         // scratch buffer.
         this.looseUniformLayout = MetalIrisRenderer.getRegisteredLooseUniformLayout(name);
+        // M5g-9: enable standard alpha blending on attachment 0 for translucent
+        // gbuffers stages (gbuffers_water, gbuffers_hand, ...) so translucent
+        // geometry composites correctly. Opaque gbuffers and composite/deferred/
+        // final passes keep blending disabled (Iris disables blend there).
+        this.enableBlending = isTranslucentGbuffersProgram(name);
 
         this.pipelineWithDepth = hasDepth
-                ? createPipelineState(device, vertexFn, fragmentFn, colorFormats, MTLPixelFormat.Depth32Float, vertexFormats, this.firstAvailableVertexBufferSlot)
+                ? createPipelineState(device, vertexFn, fragmentFn, colorFormats, MTLPixelFormat.Depth32Float, vertexFormats, this.firstAvailableVertexBufferSlot, this.enableBlending)
                 : MemorySegment.NULL;
-        this.pipelineWithoutDepth = createPipelineState(device, vertexFn, fragmentFn, colorFormats, MTLPixelFormat.Invalid, vertexFormats, this.firstAvailableVertexBufferSlot);
+        this.pipelineWithoutDepth = createPipelineState(device, vertexFn, fragmentFn, colorFormats, MTLPixelFormat.Invalid, vertexFormats, this.firstAvailableVertexBufferSlot, this.enableBlending);
 
+        // Depth test + write for stages that have a depth attachment
+        // (gbuffers terrain/entities, shadow map). Matches OpenGL's GL_LEQUAL
+        // (the standard depth function for opaque geometry, and what Iris
+        // gbuffers stages inherit from vanilla RenderPipelines via
+        // MixinGlCommandEncoder) with depth writes enabled so the depth
+        // buffer is actually populated for later stages (composite/deferred
+        // sample depthtex0, the shadow pass produces a shadow map).
+        // Stages without a depth attachment (composite/deferred/final pass
+        // hasDepth=false) get NULL here — matching Iris's COMPOSITE_PIPELINE
+        // which uses CompareOp.ALWAYS_PASS with no depth attachment.
         this.depthStencilState = hasDepth
                 ? MetalNativeBridge.MTLDevice_makeDepthStencilState(
-                        device.metalDeviceHandle(), MTLCompareFunction.Always, 0)
+                        device.metalDeviceHandle(), MTLCompareFunction.LessEqual, 1)
                 : MemorySegment.NULL;
 
         LOGGER.info("[MetalUniversal] MetalIrisPipeline '{}' created (colorAttachments={}, hasDepth={}, vertexBuffers={}, bindings={})",
@@ -330,7 +360,8 @@ final class MetalIrisPipeline implements AutoCloseable {
             final MTLPixelFormat[] colorFormats,
             final MTLPixelFormat depthFormat,
             final VertexFormat[] vertexFormats,
-            final int firstMetalVertexBufferSlot
+            final int firstMetalVertexBufferSlot,
+            final boolean enableBlending
     ) {
         try (MTLRenderPipelineDescriptor desc = new MTLRenderPipelineDescriptor()) {
             desc.setCompiledFunctions(vertexFn, fragmentFn);
@@ -345,7 +376,28 @@ final class MetalIrisPipeline implements AutoCloseable {
             // (sets colorAttachments[0].pixelFormat, depthAttachmentPixelFormat,
             // stencilAttachmentPixelFormat in one native call).
             desc.setAttachmentFormats(colorFormats[0], depthFormat, MTLPixelFormat.Invalid);
-            desc.disableBlendingForAttachment(0);
+            // M5g-9: attachment 0 blend state. For translucent gbuffers stages
+            // (gbuffers_water, gbuffers_hand, ...) enable standard alpha
+            // blending (src*SrcAlpha + dst*OneMinusSrcAlpha) so translucent
+            // geometry composites correctly over the gbuffer. For opaque
+            // gbuffers and all composite/deferred/final passes blending stays
+            // disabled (Iris explicitly disables blend there — see
+            // CompositeRenderer/FinalPassRenderer). Only attachment 0 is
+            // blended; colortex1..N-1 always write without blend (gbuffer
+            // normals/specular/lightmap are replace-write).
+            if (enableBlending) {
+                desc.setBlendState(
+                        MTLBlendFactor.SourceAlpha,
+                        MTLBlendFactor.OneMinusSourceAlpha,
+                        MTLBlendOperation.Add,
+                        MTLBlendFactor.One,
+                        MTLBlendFactor.OneMinusSourceAlpha,
+                        MTLBlendOperation.Add,
+                        MTLColorWriteMask.All.value
+                );
+            } else {
+                desc.disableBlendingForAttachment(0);
+            }
             // Additional color attachments (MRT) for colortex1..N-1.
             for (int i = 1; i < colorFormats.length; i++) {
                 desc.setColorAttachmentFormat(i, colorFormats[i]);
@@ -359,6 +411,29 @@ final class MetalIrisPipeline implements AutoCloseable {
             }
             return pipeline;
         }
+    }
+
+    /**
+     * Returns whether the given Iris program name corresponds to a translucent
+     * gbuffers stage that requires standard alpha blending on attachment 0
+     * (M5g-9). Matches Iris's {@code RenderPassInfo} / {@code ProgramGroup}
+     * classification of which gbuffers stages inherit vanilla's translucent
+     * blend function. Opaque gbuffers stages ({@code gbuffers_terrain},
+     * {@code gbuffers_cutout}, {@code gbuffers_cutout_mipped},
+     * {@code gbuffers_skybasic}) and all composite/deferred/final/shadow
+     * passes return {@code false}.
+     */
+    private static boolean isTranslucentGbuffersProgram(final String name) {
+        if (name == null) {
+            return false;
+        }
+        return name.equals("gbuffers_water")
+                || name.equals("gbuffers_translucent")
+                || name.equals("gbuffers_hand")
+                || name.equals("gbuffers_entities")
+                || name.equals("gbuffers_block")
+                || name.equals("gbuffers_beacon")
+                || name.equals("gbuffers_spidereyes");
     }
 
     /**

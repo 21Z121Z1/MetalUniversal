@@ -28,7 +28,7 @@ MetalCrossShaderCompiler 依赖 Minecraft classpath (Fabric Loom) + LWJGL spvc
 
 MetalUniversal 在 spirvToMsl() 中设置的 MSL 选项（MetalCrossShaderCompiler.java:388-407）：
     SPVC_COMPILER_OPTION_MSL_PLATFORM               = SPVC_MSL_PLATFORM_MACOS
-    SPVC_COMPILER_OPTION_MSL_VERSION                = 0x040000   # 即 (4<<16)；见下方说明
+    SPVC_COMPILER_OPTION_MSL_VERSION                = 31000      # MSL 3.1（major*10000+minor*1000+patch）
     SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING = true
     SPVC_COMPILER_OPTION_MSL_TEXTURE_BUFFER_NATIVE     = true
     SPVC_COMPILER_OPTION_FLIP_VERTEX_Y                  = true
@@ -38,12 +38,15 @@ MetalUniversal 在 spirvToMsl() 中设置的 MSL 选项（MetalCrossShaderCompil
     --msl-texture-buffer-native
     --flip-vert-y
     平台 macOS 为默认（--msl-ios 才切换到 iOS）
-    --msl-version 30000
+    --msl-version 31000
 
-MSL 版本说明：MetalUniversal 源码常量 MSL_VERSION_4_0 = 0x040000 = (4<<16)，这是
-非标准的版本编码；SPIRV-Cross 标准编码为 MMmmpp（major*10000+minor*100+patch），
-目前公开 MSL 最高为 3.x。本套件使用 --msl-version 30000 (MSL 3.0) 作为 CLI 支持
-的最高标准版本，以匹配 MetalUniversal "使用最新 MSL" 的意图；该差异在测试报告中标注。
+MSL 版本说明：MetalUniversal 源码常量 MSL_VERSION_3_1 = 31000（MSL 3.1），
+采用 SPIRV-Cross 标准编码 major*10000+minor*1000+patch。MSL 3.1 对应 macOS 14+
+（Metal 3.0+），原生支持图像原子操作（imageAtomicAdd/Min/Max/Exchange 等），通过
+metal::atomic_fetch_add_explicit 等 API 实现。MSL 3.0 下 SPIRV-Cross 对图像原子
+操作会生成回退代码或失败，故升级至 3.1。本套件 CLI 使用 --msl-version 31000 与源码
+一致（已验证 spirv-cross CLI 接受 31000）。
+（历史注记：源码曾误用 0x040000=262144 的非标准编码，后修复为 30000，再升级为 31000。）
 
 预处理移植
 ----------
@@ -250,7 +253,7 @@ def ensure_spirv_compatible(glsl: str) -> str:
 # 见文件头注释中的选项映射说明。
 _SPIRV_CROSS_MSL_OPTS = [
     "--msl",
-    "--msl-version", "30000",        # MSL 3.0（对应 MetalUniversal 0x040000 的"最新"意图）
+    "--msl-version", "31000",        # MSL 3.1（原生图像原子操作支持，对应 MetalUniversal MSL_VERSION_3_1=31000）
     "--msl-decoration-binding",       # SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING=true
     "--msl-texture-buffer-native",    # SPVC_COMPILER_OPTION_MSL_TEXTURE_BUFFER_NATIVE=true
     "--flip-vert-y",                  # SPVC_COMPILER_OPTION_FLIP_VERTEX_Y=true；macOS 默认平台

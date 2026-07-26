@@ -560,7 +560,7 @@ final class MetalRenderPass implements RenderPassBackend {
                 enc.setDepthBias(depthBiasConstant, depthBiasScaleFactor, 0.0f);
             }
 
-            enc.setFrontFacingWinding(MTLWinding.Clockwise);
+            enc.setFrontFacingWinding(MTLWinding.CounterClockwise);
             enc.setCullMode(cullMode);
             enc.setTriangleFillMode(fillMode);
 

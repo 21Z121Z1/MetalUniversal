@@ -33,7 +33,9 @@ import java.util.regex.Pattern;
 @Environment(EnvType.CLIENT)
 public final class MetalCrossShaderCompiler {
     private static final Set<String> BUILT_IN_UNIFORMS = Set.of("Projection", "Lighting", "Fog", "Globals");
-    private static final int MSL_VERSION_4_0 = 0x040000;
+    // MSL 3.1（macOS 14+ / Metal 3.0+）原生支持图像原子操作（imageAtomicAdd/Min/Max/Exchange 等），
+    // 通过 metal::atomic_fetch_add_explicit 等 API 实现。MSL 3.0 下 SPIRV-Cross 会生成回退代码或失败。
+    private static final int MSL_VERSION_3_1 = 31000;
     private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     private static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
 
@@ -390,7 +392,7 @@ public final class MetalCrossShaderCompiler {
                         "spvc_compiler_options_set_uint(MSL_PLATFORM)"
                 );
                 checkSpvc(
-                        Spvc.spvc_compiler_options_set_uint(options, Spvc.SPVC_COMPILER_OPTION_MSL_VERSION, MSL_VERSION_4_0),
+                        Spvc.spvc_compiler_options_set_uint(options, Spvc.SPVC_COMPILER_OPTION_MSL_VERSION, MSL_VERSION_3_1),
                         "spvc_compiler_options_set_uint(MSL_VERSION)"
                 );
                 checkSpvc(
