@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalEntityMotionCapture;
+import com.metallum.client.metal.render.MetalMotionHooks;
 import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.client.renderer.block.BlockQuadOutput;
 import net.minecraft.client.renderer.block.ModelBlockRenderer;
@@ -30,18 +31,7 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  */
 @Mixin(MovingBlockFeatureRenderer.class)
 public abstract class MovingBlockFeatureRendererMetalFxMixin {
-    @Redirect(
-            method = "buildGroup",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lnet/minecraft/client/renderer/block/ModelBlockRenderer;tesselateBlock("
-                            + "Lnet/minecraft/client/renderer/block/BlockQuadOutput;FFF"
-                            + "Lnet/minecraft/client/renderer/block/BlockAndTintGetter;"
-                            + "Lnet/minecraft/core/BlockPos;"
-                            + "Lnet/minecraft/world/level/block/state/BlockState;"
-                            + "Lnet/minecraft/client/renderer/block/dispatch/BlockStateModel;J)V"
-            )
-    )
+    @Redirect(method = "buildGroup", at = @At(value = "INVOKE", target = MetalMotionHooks.TESSELATE_BLOCK_TARGET))
     private void metallum$bracketMovingBlockTesselation(
             final ModelBlockRenderer blockRenderer,
             final BlockQuadOutput output,
