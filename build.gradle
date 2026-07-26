@@ -74,6 +74,7 @@ tasks.register("buildMacNative", Exec) {
 	workingDir project.projectDir
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
 		"src/main/native/MetallumNative.swift"
 	)
 	outputs.file("src/main/resources/natives/macos/libmetallum.dylib")
@@ -93,11 +94,13 @@ tasks.register("buildMacNative", Exec) {
 		"-framework", "QuartzCore",
 		"-o", "src/main/resources/natives/macos/libmetallum.dylib",
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
 		"src/main/native/MetallumNative.swift"
 }
 
 def metalMrtSmokeBinary = file("${buildDir}/metal-tests/MetalMRTSmokeTest")
 def metal4PipelineSmokeBinary = file("${buildDir}/metal-tests/Metal4PipelineSmokeTest")
+def metal4PipelinePathBinary = file("${buildDir}/metal-tests/Metal4PipelinePathTest")
 def metalFrameGenerationLifecycleTestBinary = file("${buildDir}/metal-tests/MetalFrameGenerationLifecycleTest")
 def metalFrameGenerationPresentationValidationBinary = file("${buildDir}/metal-tests/MetalFrameGenerationPresentationValidation")
 def metalFxOffscreenValidationBinary = file("${buildDir}/metal-tests/MetalFXOffscreenValidation")
@@ -159,7 +162,56 @@ tasks.register("metal4PipelineSmokeTest", Exec) {
 		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
 	}
 	dependsOn "compileMetal4PipelineSmokeTest"
+	// Metal 4 gives no driver-side hazard tracking and validates pipeline/pass
+	// agreement only under the debug layer; without it an illegal combination
+	// can appear to work.
+	environment "MTL_DEBUG_LAYER", "1"
 	commandLine metal4PipelineSmokeBinary.absolutePath
+}
+
+// Metal 4 migration M1 + M2b at the L2 level: links the shipping native module
+// so the real exports (capability gate, shader function registration, pipeline
+// creation) are what gets tested.
+tasks.register("compileMetal4PipelinePathTest", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	workingDir project.projectDir
+	inputs.files(
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/Metal4PipelinePathTest.swift"
+	)
+	outputs.file(metal4PipelinePathBinary)
+	doFirst {
+		metal4PipelinePathBinary.parentFile.mkdirs()
+	}
+	// Same source set as buildMacNative, so this test links what ships.
+	commandLine "swiftc",
+		"-O",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "AppKit",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-framework", "QuartzCore",
+		"-o", metal4PipelinePathBinary.absolutePath,
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/Metal4PipelinePathTest.swift"
+}
+
+tasks.register("metal4PipelinePathTest", Exec) {
+	group = "verification"
+	description = "Checks the shipping Metal 4 pipeline path renders identically to Metal 3 and falls back cleanly (migration spec M1/M2b)."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "compileMetal4PipelinePathTest"
+	environment "MTL_DEBUG_LAYER", "1"
+	commandLine metal4PipelinePathBinary.absolutePath
 }
 
 tasks.register("compileMetalFrameGenerationLifecycleTest", Exec) {
@@ -515,6 +567,7 @@ tasks.register("buildIOSNative", Exec) {
 			"-framework", "QuartzCore",
 			"-framework", "UIKit",
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
+			"src/main/native/MetallumInterface.swift",
 			"src/main/native/MetallumNative.swift"
 	}
 }

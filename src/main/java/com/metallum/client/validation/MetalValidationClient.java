@@ -13,7 +13,12 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.decoration.ArmorStand;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.vehicle.boat.Boat;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.VineBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -67,6 +72,35 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final int SKY_FLICKER_START_FRAME = 128;
     private static final int SKY_FLICKER_END_FRAME = 151;
     private static final float SKY_SCENE_PITCH = -50.0F;
+    // Object-motion acceptance frames. MetalEntityObjectPose reconstructs root
+    // transforms for dropped items and vehicles, but the scripted room holds
+    // only an ArmorStand, so the core/item path had no automated proof. These
+    // frames are appended strictly after the cutout flicker series' last frame
+    // (SKY_FLICKER_END_FRAME) rather than inserted into it: frames 90..151
+    // belong to the shimmer-remediation thread
+    // (docs/cutout-shimmer-remediation-2026-07-27.md §8/§14) and nothing at or
+    // below 155 changes behaviour here.
+    private static final int OBJECT_SCENE_FRAME = 156;
+    private static final int ITEM_CAPTURE_FRAME = 164;
+    private static final int VEHICLE_TURN_FRAME = 168;
+    private static final int VEHICLE_CAPTURE_FRAME = 176;
+    private static final int OBJECT_SERIES_END_FRAME = 180;
+    // Item spin is driven by ageInTicks, which the renderer builds as
+    // `tickCount + partialTick`. partialTick is wall-clock and cannot be
+    // pinned from here, so the commanded per-frame step is made large enough
+    // to dominate it: 5 ticks is 0.25 rad of spin per frame against at most
+    // 1 tick (0.05 rad) of jitter, leaving the true delta inside [0.20, 0.30].
+    private static final int ITEM_SPIN_TICKS_PER_FRAME = 5;
+    // The boat's yaw is read through getYRot(partialTick), which lerps
+    // yRotO -> yRot; pinning old == new makes that lerp exact, so the vehicle
+    // scenario carries no wall-clock term at all.
+    private static final float VEHICLE_TURN_DEGREES_PER_FRAME = 6.0F;
+    private static final int ITEM_ENTITY_ID = -2_147_000_002;
+    private static final int VEHICLE_ENTITY_ID = -2_147_000_003;
+    private static final UUID ITEM_ENTITY_UUID =
+            UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf02");
+    private static final UUID VEHICLE_ENTITY_UUID =
+            UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf03");
     // Pinned FRAMEBUFFER size. All metric thresholds and golden baselines
     // are calibrated at this capture size (the 2x-backing framebuffer of the
     // 854x480 logical window the Gradle task requests via --width/--height).
@@ -80,6 +114,8 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static int requestedLogicalHeight = FRAMEBUFFER_HEIGHT / 2;
     private static boolean timelineAnchored;
     private static ArmorStand controlledEntity;
+    private static ItemEntity spinningItem;
+    private static Boat turningVehicle;
     private static Vec3 cameraOrigin;
     private static float cameraYaw;
     private static float cameraPitch;
@@ -221,6 +257,13 @@ public final class MetalValidationClient implements ClientModInitializer {
             installCutoutGrassScene(minecraft);
         } else if (frame == SKY_SCENE_FRAME) {
             installCutoutSkyScene(minecraft);
+        } else if (frame == OBJECT_SCENE_FRAME) {
+            installObjectMotionScene(minecraft);
+        } else if (frame == VEHICLE_TURN_FRAME) {
+            // Swapping which object is in view is a large one-frame jump for
+            // both; the capture sits 8 frames later, and the reset keeps that
+            // transient out of the accumulated history the capture reads.
+            MetalFxManager.resetHistory("automated validation vehicle scenario");
         }
 
         ScenarioPose pose = scenarioPoseFor(frame);
@@ -252,21 +295,22 @@ public final class MetalValidationClient implements ClientModInitializer {
         }
         previousEntityPosition = entityPosition;
         frame++;
-        if (frame >= SKY_FLICKER_END_FRAME + 3
+        if (frame >= OBJECT_SERIES_END_FRAME
                 && MetalFxManager.validationCapturesPending() == 0
                 && !MetalFxManager.flickerSeriesPending()
                 && MetalFxManager.flickerMetricCompleted("cutout_grass_hold")
                 && MetalFxManager.flickerMetricCompleted("cutout_sky_hold")) {
             int completed = MetalFxManager.validationCapturesCompleted();
             int failures = MetalFxManager.validationCaptureFailures();
-            if (completed != 10 || failures != 0) {
+            if (completed != 12 || failures != 0) {
                 removeOcclusionWall(minecraft);
                 removeCutoutScene(minecraft);
+                removeObjectMotionScene();
                 applyPlayerPose(minecraft, cameraOrigin, cameraYaw, cameraPitch);
                 finishRunState("failed", completed, failures);
                 throw new IllegalStateException(
                         "Automated Minecraft GPU validation failed: completed="
-                                + completed + "/10, failures=" + failures
+                                + completed + "/12, failures=" + failures
                 );
             }
             finishAndStop(minecraft, completed, failures);
@@ -332,7 +376,20 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (timelineFrame < SKY_FLICKER_START_FRAME) {
             return new ScenarioPose("cutout_sky", 0.80, 0.40);
         }
-        return new ScenarioPose("cutout_sky_hold", 0.80, 0.40);
+        // Bounding what used to be the open-ended tail. Every frame the
+        // shimmer thread owns still resolves to cutout_sky_hold, so this is an
+        // append rather than an edit of their range.
+        if (timelineFrame < OBJECT_SCENE_FRAME) {
+            return new ScenarioPose("cutout_sky_hold", 0.80, 0.40);
+        }
+        // Object-motion scenarios. The camera offset is held at the value the
+        // sky hold ends on so the camera never translates across the
+        // transition: the only motion these frames contain is the object's own
+        // rotation, which is what makes the spin separable from translation.
+        if (timelineFrame < VEHICLE_TURN_FRAME) {
+            return new ScenarioPose("item_spin", 0.80, 0.40);
+        }
+        return new ScenarioPose("vehicle_turn", 0.80, 0.40);
     }
 
     /**
@@ -367,7 +424,9 @@ public final class MetalValidationClient implements ClientModInitializer {
     /** Frames whose handler mutates terrain and needs the section builder idle. */
     private static boolean isSceneMutationFrame(final int timelineFrame) {
         return timelineFrame == 38 || timelineFrame == 46 || timelineFrame == 66
-                || timelineFrame == 75 || timelineFrame == SKY_SCENE_FRAME;
+                || timelineFrame == 75 || timelineFrame == SKY_SCENE_FRAME
+                // Restores the sky scene's opened ceiling, so it re-meshes terrain.
+                || timelineFrame == OBJECT_SCENE_FRAME;
     }
 
     private static boolean terrainSettled() {
@@ -418,7 +477,77 @@ public final class MetalValidationClient implements ClientModInitializer {
         controlledEntity.yBodyRotO = 0.0F;
         controlledEntity.yHeadRot = 0.0F;
         controlledEntity.yHeadRotO = 0.0F;
+        if (isObjectMotionScenario(pose.scenario())) {
+            // The ArmorStand would otherwise contribute a second silhouette of
+            // zero-motion object pixels, and the spread metric is taken over
+            // every valid pixel. Parking it behind the camera leaves the object
+            // under test as the only source of object motion in frame.
+            Vec3 parked = cameraOrigin.add(horizontalLook(cameraYaw).scale(-4.0));
+            controlledEntity.setOldPosAndRot(parked, 0.0F, 0.0F);
+            controlledEntity.setPos(parked);
+            return driveObjectMotionEntities(pose.scenario());
+        }
         return entityPosition;
+    }
+
+    private static boolean isObjectMotionScenario(final String scenario) {
+        return "item_spin".equals(scenario) || "vehicle_turn".equals(scenario);
+    }
+
+    /**
+     * Drives the dropped item and the vehicle for one object-motion frame and
+     * returns the position of whichever is on screen.
+     *
+     * <p>The returned position is what the capture reports as the validated
+     * entity centre, so it has to be the object actually producing the motion
+     * pixels — and it has to be in front of the camera, because the readback
+     * rejects a centre outside the valid clip half-space.</p>
+     *
+     * <p>Only one object is ever in view: the other is parked behind the
+     * camera, where it is frustum-culled and contributes no pixels. Both are
+     * held at a fixed world position throughout, so the object motion the
+     * capture measures is purely rotational.</p>
+     */
+    private static Vec3 driveObjectMotionEntities(final String scenario) {
+        boolean itemScenario = "item_spin".equals(scenario);
+        Vec3 look = horizontalLook(cameraYaw);
+        Vec3 right = horizontalRight(cameraYaw);
+        Vec3 parked = cameraOrigin.add(look.scale(-4.0));
+        // Close enough that the silhouette covers a few thousand pixels at the
+        // pinned capture size, and lifted to roughly eye height so the level
+        // camera frames it.
+        Vec3 itemHome = cameraOrigin.add(look.scale(1.5)).add(right.scale(0.40)).add(0.0, 1.3, 0.0);
+        Vec3 vehicleHome = cameraOrigin.add(look.scale(3.0)).add(right.scale(0.40)).add(0.0, 0.9, 0.0);
+        Vec3 itemPosition = itemScenario ? itemHome : parked;
+        Vec3 vehiclePosition = itemScenario ? parked : vehicleHome;
+
+        if (spinningItem != null) {
+            // The spin phase is a pure function of the timeline frame index.
+            // bobOffs is randomised per ItemEntity and cannot be assigned (it
+            // is final), but it enters getSpin as a constant additive phase and
+            // therefore cancels exactly in the frame-to-frame rotation delta
+            // the interpolator consumes.
+            spinningItem.tickCount = Math.max(0, frame - OBJECT_SCENE_FRAME) * ITEM_SPIN_TICKS_PER_FRAME;
+            spinningItem.setDeltaMovement(Vec3.ZERO);
+            spinningItem.setOldPosAndRot(itemPosition, 0.0F, 0.0F);
+            spinningItem.setPos(itemPosition);
+        }
+        if (turningVehicle != null) {
+            float yaw = itemScenario
+                    ? 0.0F
+                    : (frame - VEHICLE_TURN_FRAME) * VEHICLE_TURN_DEGREES_PER_FRAME;
+            turningVehicle.setDeltaMovement(Vec3.ZERO);
+            // old == new on every lerped rotation channel: getYRot(partialTick)
+            // then returns the commanded yaw exactly, so the vehicle's rendered
+            // pose carries no wall-clock term.
+            turningVehicle.setOldPosAndRot(vehiclePosition, yaw, 0.0F);
+            turningVehicle.setPos(vehiclePosition);
+            turningVehicle.setYRot(yaw);
+            turningVehicle.yRotO = yaw;
+            turningVehicle.setXRot(0.0F);
+            turningVehicle.xRotO = 0.0F;
+        }
+        return itemScenario ? itemPosition : vehiclePosition;
     }
 
     /**
@@ -781,6 +910,71 @@ public final class MetalValidationClient implements ClientModInitializer {
         );
     }
 
+    /**
+     * Installs the object-motion scene: re-seals the room the sky scene opened
+     * and spawns the two objects whose root transforms MetalEntityObjectPose
+     * reconstructs.
+     *
+     * <p>Both entities are added client-side only, exactly like the controlled
+     * ArmorStand, and they come into existence at
+     * {@link #OBJECT_SCENE_FRAME} — after every golden capture and well past
+     * the frame &lt; 90 window {@code appendFrameState} records. That temporal
+     * scoping is what keeps the item's deliberately varying rotation from
+     * reaching any frame whose bytes are compared across runs.</p>
+     *
+     * <p>The item is a block item rather than a flat one: a block model keeps a
+     * solid silhouette at every spin phase, where a flat item turns edge-on
+     * twice per revolution and would collapse the measured pixel count at an
+     * unpredictable phase (bobOffs is random per entity).</p>
+     */
+    private static void installObjectMotionScene(final Minecraft minecraft) {
+        // The sky scene opened the ceiling; restoring it re-seals the room so
+        // these frames are backed by stone rather than sky.
+        removeCutoutScene(minecraft);
+
+        Vec3 parked = cameraOrigin.add(horizontalLook(cameraYaw).scale(-4.0));
+        ItemEntity item = new ItemEntity(
+                minecraft.level,
+                parked.x, parked.y, parked.z,
+                new ItemStack(Blocks.STONE.asItem())
+        );
+        item.setId(ITEM_ENTITY_ID);
+        item.setUUID(ITEM_ENTITY_UUID);
+        item.setNoGravity(true);
+        item.setDeltaMovement(Vec3.ZERO);
+        minecraft.level.addEntity(item);
+        spinningItem = item;
+
+        Boat boat = new Boat(EntityTypes.OAK_BOAT, minecraft.level, () -> Items.OAK_BOAT);
+        boat.setId(VEHICLE_ENTITY_ID);
+        boat.setUUID(VEHICLE_ENTITY_UUID);
+        boat.setNoGravity(true);
+        boat.setDeltaMovement(Vec3.ZERO);
+        boat.setPos(parked);
+        minecraft.level.addEntity(boat);
+        turningVehicle = boat;
+
+        // The re-seal plus two new silhouettes disocclude most of the frame;
+        // the captures sit 8 frames later so history is settled by then.
+        MetalFxManager.resetHistory("automated validation object motion scene");
+        Metallum.LOGGER.info(
+                "Installed object-motion scene: item id={} vehicle id={}",
+                ITEM_ENTITY_ID,
+                VEHICLE_ENTITY_ID
+        );
+    }
+
+    private static void removeObjectMotionScene() {
+        if (spinningItem != null) {
+            spinningItem.discard();
+            spinningItem = null;
+        }
+        if (turningVehicle != null) {
+            turningVehicle.discard();
+            turningVehicle = null;
+        }
+    }
+
     private static void placeCutoutSceneBlock(
             final Minecraft minecraft,
             final BlockPos pos,
@@ -840,10 +1034,11 @@ public final class MetalValidationClient implements ClientModInitializer {
         Metallum.LOGGER.info(
                 "Automated Minecraft MetalFX validation passed {}/{} GPU captures; stopping client",
                 completed,
-                10
+                12
         );
         removeOcclusionWall(minecraft);
         removeCutoutScene(minecraft);
+        removeObjectMotionScene();
         // Return the player to the anchor pose so repeated validation runs do
         // not accumulate camera drift in the saved test world. The client-side
         // pose alone is not enough: the integrated server holds the copy that
@@ -889,7 +1084,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "usedComputerUse": false,
                       "controlledFrames": 90,
                       "controlledEntity": "armor_stand",
-                      "expectedGpuCaptures": 10,
+                      "expectedGpuCaptures": 12,
                       "completedGpuCaptures": %d,
                       "failedGpuCaptures": %d,
                       "status": "%s"

@@ -85,6 +85,19 @@ public final class MetalFxManager {
     // 0.35 and < depth-edge cap 0.5).
     private static final int INTERIOR_REACTIVE_MAX = 48;
     private static final int EDGE_REACTIVE_MIN = 72;
+    // Object-motion acceptance thresholds (item_spin / vehicle_turn). These
+    // scenarios hold the object at a fixed world position under a static
+    // camera, so the only motion in frame is the object's own rotation and the
+    // single-mean model does not apply: a Y-spin moves points on opposite
+    // sides of the axis in opposite directions, leaving a mean near zero —
+    // exactly what a regression that emitted no object motion at all would
+    // also produce. The peak-to-peak spread separates the two, and requiring
+    // it to dominate the mean is what confirms the rotation rather than a
+    // stray translation.
+    private static final int OBJECT_MIN_VALID_PIXELS = 2_000;
+    private static final double OBJECT_MIN_MOTION_SPREAD = 0.004;
+    private static final double OBJECT_SPIN_TO_MEAN_RATIO = 2.0;
+    private static final double OBJECT_MAX_MOTION = 0.5;
     private final boolean motionPipelineV2Available;
     private final boolean cutoutReactivePipelineAvailable;
     private final boolean handOverlayPipelineAvailable;
@@ -166,11 +179,19 @@ public final class MetalFxManager {
     private boolean[] flickerSkyEdgeMask;
     private int flickerSkyEdgePixels;
     private int flickerSkyPixels;
+    // Open sky with no CUTOUT coverage anywhere near it. Under a static camera
+    // with frozen time, clouds off and no weather, this region is perfectly
+    // static geometry-free content: any delta here is the temporal pipeline's
+    // own instability on the sky itself, isolated from any silhouette.
+    @Nullable
+    private boolean[] flickerSkyInteriorMask;
+    private int flickerSkyInteriorPixels;
     @Nullable
     private byte[] flickerPreviousLuma;
     private final long[] flickerMaskedHistogram = new long[256];
     private final long[] flickerControlHistogram = new long[256];
     private final long[] flickerSkyEdgeHistogram = new long[256];
+    private final long[] flickerSkyInteriorHistogram = new long[256];
     @Nullable
     private String lastLoggedResetReason;
     @Nullable
@@ -1237,6 +1258,7 @@ public final class MetalFxManager {
         java.util.Arrays.fill(this.flickerMaskedHistogram, 0L);
         java.util.Arrays.fill(this.flickerControlHistogram, 0L);
         java.util.Arrays.fill(this.flickerSkyEdgeHistogram, 0L);
+        java.util.Arrays.fill(this.flickerSkyInteriorHistogram, 0L);
         // Reversed-Z: the cleared far plane is zero, so an untouched depth
         // pixel is sky. Same threshold as validDepth() in the motion kernels.
         boolean[] sky = null;
@@ -1256,21 +1278,32 @@ public final class MetalFxManager {
         // CUTOUT coverage exists in the 3x3 render neighborhood: this covers
         // the upscale footprint plus the reactive edge band. The sky-edge
         // submask additionally requires sky in the same neighborhood.
+        // The sky-interior submask is the complement: sky with no CUTOUT
+        // coverage within a wider radius, so no silhouette contaminates it.
         boolean[] mask = new boolean[width * height];
         boolean[] skyEdge = new boolean[width * height];
+        boolean[] skyInterior = new boolean[width * height];
         int maskPixels = 0;
         int skyEdgePixels = 0;
+        int skyInteriorPixels = 0;
         for (int y = 0; y < height; y++) {
             int renderY = Math.min(renderHeight - 1, y * renderHeight / height);
             for (int x = 0; x < width; x++) {
                 int renderX = Math.min(renderWidth - 1, x * renderWidth / width);
+                boolean skyNear = sky != null
+                        && hasSkyNeighbor(sky, renderX, renderY, renderWidth, renderHeight, 1);
                 if (hasCutoutCoverageNeighbor(coverage, renderX, renderY, renderWidth, renderHeight, 1)) {
                     mask[y * width + x] = true;
                     maskPixels++;
-                    if (sky != null && hasSkyNeighbor(sky, renderX, renderY, renderWidth, renderHeight, 1)) {
+                    if (skyNear) {
                         skyEdge[y * width + x] = true;
                         skyEdgePixels++;
                     }
+                } else if (skyNear && sky[renderY * renderWidth + renderX]
+                        && !hasCutoutCoverageNeighbor(
+                                coverage, renderX, renderY, renderWidth, renderHeight, 3)) {
+                    skyInterior[y * width + x] = true;
+                    skyInteriorPixels++;
                 }
             }
         }
@@ -1279,6 +1312,8 @@ public final class MetalFxManager {
         this.flickerSkyEdgeMask = skyEdge;
         this.flickerSkyEdgePixels = skyEdgePixels;
         this.flickerSkyPixels = skyPixels;
+        this.flickerSkyInteriorMask = skyInterior;
+        this.flickerSkyInteriorPixels = skyInteriorPixels;
     }
 
     private static boolean hasSkyNeighbor(
@@ -1310,6 +1345,7 @@ public final class MetalFxManager {
     private void accumulateFlickerFrame(final byte[] rgba, final int width, final int height) {
         boolean[] mask = this.flickerMask;
         boolean[] skyEdge = this.flickerSkyEdgeMask;
+        boolean[] skyInterior = this.flickerSkyInteriorMask;
         if (mask == null || width != flickerDisplayWidth || height != flickerDisplayHeight
                 || rgba.length < width * height * 4) {
             throw new IllegalStateException("Flicker capture dimensions changed mid-series");
@@ -1337,6 +1373,9 @@ public final class MetalFxManager {
                     }
                 } else {
                     flickerControlHistogram[delta]++;
+                    if (skyInterior != null && skyInterior[pixel]) {
+                        flickerSkyInteriorHistogram[delta]++;
+                    }
                 }
             }
         }
@@ -1356,6 +1395,8 @@ public final class MetalFxManager {
         int controlP95 = histogramPercentile(flickerControlHistogram, 0.95);
         double skyEdgeMean = histogramMean(flickerSkyEdgeHistogram);
         int skyEdgeP95 = histogramPercentile(flickerSkyEdgeHistogram, 0.95);
+        double skyInteriorMean = histogramMean(flickerSkyInteriorHistogram);
+        int skyInteriorP95 = histogramPercentile(flickerSkyInteriorHistogram, 0.95);
         String json = String.format(
                 java.util.Locale.ROOT,
                 """
@@ -1372,21 +1413,27 @@ public final class MetalFxManager {
                   "skyPixels": %d,
                   "skyEdgePixels": %d,
                   "skyEdgeMeanDelta": %.6f,
-                  "skyEdgeP95Delta": %d
+                  "skyEdgeP95Delta": %d,
+                  "skyInteriorPixels": %d,
+                  "skyInteriorMeanDelta": %.6f,
+                  "skyInteriorP95Delta": %d
                 }
                 """,
                 scenario, flickerFramesAccumulated, flickerDisplayWidth, flickerDisplayHeight,
                 flickerMaskPixels, maskedMean, maskedP95, controlMean, controlP95,
-                flickerSkyPixels, flickerSkyEdgePixels, skyEdgeMean, skyEdgeP95
+                flickerSkyPixels, flickerSkyEdgePixels, skyEdgeMean, skyEdgeP95,
+                flickerSkyInteriorPixels, skyInteriorMean, skyInteriorP95
         );
         Files.writeString(root.resolve("flicker-" + scenario + ".json"), json, StandardCharsets.UTF_8);
         Metallum.LOGGER.info(
-                "MetalFX flicker metric: scenario={} frames={} maskPixels={} maskedMeanDelta={} maskedP95={} controlMeanDelta={} controlP95={} skyPixels={} skyEdgePixels={} skyEdgeMeanDelta={} skyEdgeP95={}",
+                "MetalFX flicker metric: scenario={} frames={} maskPixels={} maskedMeanDelta={} maskedP95={} controlMeanDelta={} controlP95={} skyPixels={} skyEdgePixels={} skyEdgeMeanDelta={} skyEdgeP95={} skyInteriorPixels={} skyInteriorMeanDelta={} skyInteriorP95={}",
                 scenario, flickerFramesAccumulated, flickerMaskPixels,
                 String.format(java.util.Locale.ROOT, "%.4f", maskedMean), maskedP95,
                 String.format(java.util.Locale.ROOT, "%.4f", controlMean), controlP95,
                 flickerSkyPixels, flickerSkyEdgePixels,
-                String.format(java.util.Locale.ROOT, "%.4f", skyEdgeMean), skyEdgeP95
+                String.format(java.util.Locale.ROOT, "%.4f", skyEdgeMean), skyEdgeP95,
+                flickerSkyInteriorPixels,
+                String.format(java.util.Locale.ROOT, "%.4f", skyInteriorMean), skyInteriorP95
         );
     }
 
@@ -1459,7 +1506,8 @@ public final class MetalFxManager {
                     bytesByName.get("reactive"),
                     submittedCurrent,
                     submittedPrevious,
-                    submittedCutoutRadius
+                    submittedCutoutRadius,
+                    producerDiagnostics
             );
             Files.writeString(
                     frameDirectory.resolve("metrics.json"),
@@ -1471,7 +1519,8 @@ public final class MetalFxManager {
                             + "depthValidPixels={} disocclusionPixels={} objectDisocclusionPixels={} "
                             + "cutoutCoveragePixels={} cutoutInteriorPixels={} "
                             + "cutoutInteriorViolations={} cutoutEdgeBandReactivePixels={} cutoutRadius={} "
-                            + "motionMean=({}, {}) expected=({}, {}) error={} producer={}",
+                            + "motionMean=({}, {}) expected=({}, {}) error={} "
+                            + "motionSpread=({}, {}) maxAbsMotion={} producer={}",
                     requested.frame,
                     requested.scenario,
                     metrics.validPixels,
@@ -1488,6 +1537,9 @@ public final class MetalFxManager {
                     metrics.expectedX,
                     metrics.expectedY,
                     metrics.error,
+                    metrics.motionSpreadX,
+                    metrics.motionSpreadY,
+                    metrics.maxAbsMotion,
                     producerDiagnostics
             );
             this.validationCapturesCompleted++;
@@ -1521,7 +1573,8 @@ public final class MetalFxManager {
             final byte[] reactive,
             final Matrix4f submittedCurrent,
             final Matrix4f submittedPrevious,
-            final int cutoutRadius
+            final int cutoutRadius,
+            final MetalEntityMotionCapture.Diagnostics producerDiagnostics
     ) {
         int pixelCount = renderWidth * renderHeight;
         if (depth == null || depth.length != pixelCount * Float.BYTES
@@ -1539,6 +1592,16 @@ public final class MetalFxManager {
         double sumX = 0.0;
         double sumY = 0.0;
         int validPixels = 0;
+        // Peak-to-peak extent of the object-motion field over the silhouette.
+        // A rigid translation projects to a near-uniform field, so its spread
+        // stays near zero; a rotation about the object's own axis moves points
+        // by an amount proportional to their offset from that axis, so the
+        // spread is what actually carries the rotation. See the item_spin case
+        // in the pass switch below.
+        double minMotionX = Double.POSITIVE_INFINITY;
+        double maxMotionX = Double.NEGATIVE_INFINITY;
+        double minMotionY = Double.POSITIVE_INFINITY;
+        double maxMotionY = Double.NEGATIVE_INFINITY;
         ByteBuffer motion = ByteBuffer.wrap(objectMotion).order(ByteOrder.nativeOrder());
         for (int pixel = 0; pixel < pixelCount; pixel++) {
             if (Byte.toUnsignedInt(validity[pixel]) < 128) {
@@ -1550,8 +1613,24 @@ public final class MetalFxManager {
                 sumX += x;
                 sumY += y;
                 validPixels++;
+                minMotionX = Math.min(minMotionX, x);
+                maxMotionX = Math.max(maxMotionX, x);
+                minMotionY = Math.min(minMotionY, y);
+                maxMotionY = Math.max(maxMotionY, y);
             }
         }
+        double motionSpreadX = validPixels == 0 ? Double.NaN : maxMotionX - minMotionX;
+        double motionSpreadY = validPixels == 0 ? Double.NaN : maxMotionY - minMotionY;
+        double motionSpread = validPixels == 0
+                ? Double.NaN
+                : Math.max(motionSpreadX, motionSpreadY);
+        double maxAbsMotion = validPixels == 0 ? Double.NaN : Math.max(
+                Math.max(Math.abs(minMotionX), Math.abs(maxMotionX)),
+                Math.max(Math.abs(minMotionY), Math.abs(maxMotionY))
+        );
+        int itemMotionDraws = producerDiagnostics == null
+                ? 0
+                : producerDiagnostics.itemMotionDrawsEncoded();
 
         Vector4f currentClip = new Vector4f(
                 (float) requested.currentEntityX,
@@ -1643,6 +1722,26 @@ public final class MetalFxManager {
             case "scene_reset" -> depthContractPassed
                     && validPixels == 0
                     && objectDisocclusionPixels == 0;
+            // A dropped item spinning in place. itemMotionDrawsEncoded is the
+            // core/item subset of motionDrawsEncoded: asserting it is non-zero
+            // is what catches a future regression that drops the core/item
+            // vertex-shader family back out of the motion pipeline, which would
+            // otherwise show up only as a silently unvalidated path.
+            case "item_spin" -> depthContractPassed
+                    && validPixels > OBJECT_MIN_VALID_PIXELS
+                    && itemMotionDraws > 0
+                    && Double.isFinite(motionSpread)
+                    && motionSpread >= OBJECT_MIN_MOTION_SPREAD
+                    && motionSpread >= OBJECT_SPIN_TO_MEAN_RATIO * Math.hypot(meanX, meanY)
+                    && maxAbsMotion <= OBJECT_MAX_MOTION;
+            // A boat turning on the spot. Same rotational envelope, but the
+            // vehicle renders through core/entity, so no core/item assertion.
+            case "vehicle_turn" -> depthContractPassed
+                    && validPixels > OBJECT_MIN_VALID_PIXELS
+                    && Double.isFinite(motionSpread)
+                    && motionSpread >= OBJECT_MIN_MOTION_SPREAD
+                    && motionSpread >= OBJECT_SPIN_TO_MEAN_RATIO * Math.hypot(meanX, meanY)
+                    && maxAbsMotion <= OBJECT_MAX_MOTION;
             case "cutout_leaves", "cutout_grass" -> depthContractPassed
                     && cutoutCoveragePixels > 32
                     && cutoutInteriorPixels > 0
@@ -1673,6 +1772,10 @@ public final class MetalFxManager {
                 expectedX,
                 expectedY,
                 error,
+                motionSpreadX,
+                motionSpreadY,
+                maxAbsMotion,
+                itemMotionDraws,
                 passed
         );
     }
@@ -1761,9 +1864,13 @@ public final class MetalFxManager {
             // synchronous section rebuilds the reveal happens on exactly this
             // frame, and its one-frame disocclusion transient is the signal
             // being validated.
+            // 164 and 176 are the object-motion acceptance captures, placed 8
+            // frames after their scenario starts so temporal history has
+            // settled; see MetalValidationClient's OBJECT_SCENE_FRAME block.
             return frame == 6 || frame == 12 || frame == 22 || frame == 32
                     || frame == 42 || frame == 46 || frame == 54 || frame == 62
-                    || frame == 74 || frame == 82;
+                    || frame == 74 || frame == 82
+                    || frame == 164 || frame == 176;
         }
     }
 
@@ -1782,6 +1889,10 @@ public final class MetalFxManager {
             double expectedX,
             double expectedY,
             double error,
+            double motionSpreadX,
+            double motionSpreadY,
+            double maxAbsMotion,
+            int itemMotionDraws,
             boolean passed
     ) {
         private String toJson(
@@ -1810,6 +1921,9 @@ public final class MetalFxManager {
                       "expectedObjectMotionNdc": [%.9f, %.9f],
                       "error": %.9f,
                       "tolerance": 0.03,
+                      "objectMotionSpreadNdc": [%.9f, %.9f],
+                      "maxAbsObjectMotionNdc": %.9f,
+                      "itemMotionDrawsEncoded": %d,
                       "historyResetExpected": %s,
                       "passed": %s,
                       "capturePoint": "after temporal encode, before present",
@@ -1834,6 +1948,10 @@ public final class MetalFxManager {
                     expectedX,
                     expectedY,
                     error,
+                    motionSpreadX,
+                    motionSpreadY,
+                    maxAbsMotion,
+                    itemMotionDraws,
                     requested.scenario.equals("scene_reset"),
                     passed
             );

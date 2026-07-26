@@ -271,12 +271,17 @@ final class FrameGraphCompiler {
                 SemanticResource resource = usage.getKey();
                 FramePass.Access access = usage.getValue();
                 String writer = lastWriter.get(resource);
+                boolean orderedAgainstWriter = false;
                 if (access.reads() && writer != null) {
                     result.add(new CompiledFrameGraph.Barrier(writer, pass.name(), resource,
                             CompiledFrameGraph.Hazard.READ_AFTER_WRITE));
+                    orderedAgainstWriter = true;
                 }
                 if (access.writes()) {
-                    if (writer != null) {
+                    // A read-modify-write pass is already ordered against the
+                    // previous writer by the read-after-write edge; one barrier
+                    // is what the backend inserts either way.
+                    if (writer != null && !orderedAgainstWriter) {
                         result.add(new CompiledFrameGraph.Barrier(writer, pass.name(), resource,
                                 CompiledFrameGraph.Hazard.WRITE_AFTER_WRITE));
                     }

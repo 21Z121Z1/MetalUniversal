@@ -69,6 +69,12 @@ final class MetalDevice implements GpuDeviceBackend {
      */
     private static final boolean METAL4_REQUESTED =
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "false"));
+    /**
+     * Routes render pipeline creation through MTL4Compiler (spec M2). Depends on
+     * the master switch; on its own it does nothing.
+     */
+    private static final boolean METAL4_COMPILER =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"));
     /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
     private final boolean metal4Available;
     private static final boolean RENDER_PIPELINE_IDENTITY_EQUALS = renderPipelineUsesIdentityEquals();
@@ -136,10 +142,13 @@ final class MetalDevice implements GpuDeviceBackend {
         // #available check into the same answer.
         this.metal4Available = METAL4_REQUESTED
                 && MetalNativeBridge.metallum_metal4_supported(metalDeviceHandle) != 0;
+        boolean metal4Compiler = this.metal4Available && METAL4_COMPILER;
+        MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4Compiler ? 1 : 0);
         Metallum.LOGGER.info(
-                "[Metallum] Metal 4: requested={} available={}",
+                "[Metallum] Metal 4: requested={} available={} compiler={}",
                 METAL4_REQUESTED,
-                this.metal4Available
+                this.metal4Available,
+                metal4Compiler
         );
         if (PSO_ARCHIVE) {
             try {

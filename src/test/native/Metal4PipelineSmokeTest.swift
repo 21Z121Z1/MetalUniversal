@@ -83,12 +83,36 @@ private func makeTarget(device: MTLDevice, width: Int, height: Int, label: Strin
     return texture
 }
 
+private func makeDepthTarget(device: MTLDevice, width: Int, height: Int, label: String) throws -> MTLTexture {
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .depth32Float,
+        width: width,
+        height: height,
+        mipmapped: false
+    )
+    descriptor.storageMode = .private
+    descriptor.usage = [.renderTarget]
+    guard let texture = device.makeTexture(descriptor: descriptor) else {
+        try fail("could not allocate \(label)")
+    }
+    texture.label = label
+    return texture
+}
+
 /// Draws the full-screen triangle with `pipeline` on a plain Metal 3 encoder.
 /// Nothing in here is Metal 4 — that is the whole point of the test.
+///
+/// `depth` is nil for a colour-only pass. Passing one exercises the property the
+/// variant collapse depends on: an MTL4-built pipeline carries no depth/stencil
+/// attachment format (the field does not exist on
+/// MTL4RenderPipelineDescriptor), so one pipeline has to be legal in passes with
+/// and without depth. Metal 3 would need a separate variant per depth format.
 private func renderOnMetal3(
     queue: MTLCommandQueue,
     pipeline: MTLRenderPipelineState,
     target: MTLTexture,
+    depth: MTLTexture? = nil,
+    depthStencilState: MTLDepthStencilState? = nil,
     label: String
 ) throws {
     guard let commandBuffer = queue.makeCommandBuffer() else {
@@ -103,6 +127,12 @@ private func renderOnMetal3(
     attachment.loadAction = .clear
     attachment.clearColor = MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0)
     attachment.storeAction = .store
+    if let depth {
+        descriptor.depthAttachment.texture = depth
+        descriptor.depthAttachment.loadAction = .clear
+        descriptor.depthAttachment.clearDepth = 1.0
+        descriptor.depthAttachment.storeAction = .dontCare
+    }
     guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
         try fail("could not create \(label) render encoder")
     }
@@ -115,6 +145,9 @@ private func renderOnMetal3(
         znear: 0.0,
         zfar: 1.0
     ))
+    if let depthStencilState {
+        encoder.setDepthStencilState(depthStencilState)
+    }
     encoder.setRenderPipelineState(pipeline)
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     encoder.endEncoding()
@@ -216,7 +249,35 @@ private func runMetal4SmokeTest(device: MTLDevice, queue: MTLCommandQueue, libra
     )
     try checkSmokePixel(specializedTarget, "specialized MTL4 PSO")
 
-    print("Metal 4 PSO smoke passed: MTL4Compiler and specialized-from-unspecialized pipeline states both draw correctly on a Metal 3 render encoder")
+    // (3) depth independence. The Metal 3 build of this project keeps six PSO
+    // variants that differ *only* in depth/stencil attachment format, because a
+    // Metal 3 pipeline must declare formats matching its render pass.
+    // MTL4RenderPipelineDescriptor has no such fields, so a single Metal 4
+    // pipeline should be legal in a pass with any depth configuration — which is
+    // what lets the variant matrix collapse (spec M2c). Verified rather than
+    // assumed: the same `pipeline` object built above with no depth information
+    // at all is used in a pass that has a Depth32Float attachment and an active
+    // depth-stencil state. MTL_DEBUG_LAYER is on for this task, so an illegal
+    // combination surfaces instead of silently working.
+    let depthStencilDescriptor = MTLDepthStencilDescriptor()
+    depthStencilDescriptor.depthCompareFunction = .lessEqual
+    depthStencilDescriptor.isDepthWriteEnabled = true
+    guard let depthStencilState = device.makeDepthStencilState(descriptor: depthStencilDescriptor) else {
+        try fail("could not create the depth-stencil state")
+    }
+    let depthTarget = try makeDepthTarget(device: device, width: 8, height: 8, label: "metal4 smoke depth")
+    let withDepthTarget = try makeTarget(device: device, width: 8, height: 8, label: "metal4 smoke with depth")
+    try renderOnMetal3(
+        queue: queue,
+        pipeline: pipeline,
+        target: withDepthTarget,
+        depth: depthTarget,
+        depthStencilState: depthStencilState,
+        label: "MTL4Compiler PSO in a pass with a depth attachment"
+    )
+    try checkSmokePixel(withDepthTarget, "MTL4 PSO with depth attachment")
+
+    print("Metal 4 PSO smoke passed: MTL4Compiler and specialized-from-unspecialized pipeline states both draw correctly on a Metal 3 render encoder, and one MTL4 pipeline is valid both with and without a depth attachment")
 }
 
 private func runSmokeTest() throws {

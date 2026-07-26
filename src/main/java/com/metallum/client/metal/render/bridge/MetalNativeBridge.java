@@ -519,6 +519,7 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderSetDepthStoreAction = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthStoreAction", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT));
             setDeferredDepthStore = downcall(lookup, "metallum_set_deferred_depth_store", FunctionDescriptor.ofVoid(INT));
             metal4Supported = downcall(lookup, "metallum_metal4_supported", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
+            setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
             // The archive open path performs disk IO inside the native call;
             // avoid the critical-linker fast path like other IO-adjacent calls.
             psoArchiveOpen = downcallWithoutCritical(lookup, "metallum_pso_archive_open", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -753,6 +754,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderSetDepthStoreAction;
     private static final MethodHandle setDeferredDepthStore;
     private static final MethodHandle metal4Supported;
+    private static final MethodHandle setMetal4CompilerEnabled;
     private static final MethodHandle psoArchiveOpen;
     private static final MethodHandle psoArchiveFlush;
     private static final MethodHandle MTLBlitCommandEncoderUpdateFence;
@@ -2335,6 +2337,19 @@ public final class MetalNativeBridge {
             return (int) metal4Supported.invokeExact(segment(device));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metal4_supported", throwable);
+        }
+    }
+
+    /**
+     * Enables MTL4Compiler-backed render pipeline creation on the native side.
+     * Must be called before the first pipeline is built, and only with 1 when
+     * {@link #metallum_metal4_supported} already said yes.
+     */
+    public static void metallum_set_metal4_compiler_enabled(final int enabled) {
+        try {
+            setMetal4CompilerEnabled.invokeExact(enabled);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_metal4_compiler_enabled", throwable);
         }
     }
 

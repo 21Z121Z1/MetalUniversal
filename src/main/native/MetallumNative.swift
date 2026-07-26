@@ -79,6 +79,72 @@ private enum NativeState {
     // Fresh archives (first launch or after deletion) harvest and serialize
     // normally.
     static var binaryArchiveReadOnly = false
+    // Metal 4 (migration spec M2). Enabled from Java once the capability gate
+    // and metallum.opt.metal4Compiler both hold; false means every PSO takes
+    // the Metal 3 path below, unchanged.
+    static var metal4CompilerEnabled = false
+    // MTL4LibraryFunctionDescriptor requires the MTLLibrary a function came
+    // from, and MTLFunction does not expose it, so the association is kept
+    // beside it. Weak keys: the entry disappears when the function is released,
+    // so a library is held exactly as long as some function of it is alive.
+    static let functionLibraries = NSMapTable<AnyObject, AnyObject>.weakToStrongObjects()
+    static let functionLibrariesLock = NSLock()
+    // Typed as AnyObject? deliberately: MTL4Compiler and
+    // MTL4PipelineDataSetSerializer are macOS 26 / iOS 26 symbols and cannot
+    // appear in the signature of an unversioned type, and putting @available on
+    // all of NativeState is not an option. Stored erased, recovered with `as?`
+    // inside an #available block.
+    static var metal4CompilerStorage: AnyObject?
+    static var metal4Serializer: AnyObject?
+    // MTL4Archive loaded from the previous launch, fed to pipeline creation as
+    // MTL4CompilerTaskOptions.lookupArchives. Erased for the same reason as the
+    // compiler above.
+    static var metal4LookupArchive: AnyObject?
+    static let metal4CompilerLock = NSLock()
+    // One-shot logging so a run can tell "the Metal 4 pipeline path worked" from
+    // "every pipeline silently fell back to Metal 3" — the two are otherwise
+    // indistinguishable, since falling back is by design never an error. Racing
+    // on these only ever costs a duplicate log line.
+    static var metal4PipelineLogged = false
+    static var metal4PipelineFallbackLogged = false
+
+    static func logMetal4PipelineFallback(_ reason: String) {
+        guard !metal4PipelineFallbackLogged else { return }
+        metal4PipelineFallbackLogged = true
+        NSLog("[metallum] Metal 4 pipeline path unavailable, using Metal 3: %@", reason)
+    }
+
+    static func register(function: MTLFunction, library: MTLLibrary) {
+        functionLibrariesLock.lock()
+        functionLibraries.setObject(library, forKey: function as AnyObject)
+        functionLibrariesLock.unlock()
+    }
+
+    static func library(for function: MTLFunction) -> MTLLibrary? {
+        functionLibrariesLock.lock()
+        defer { functionLibrariesLock.unlock() }
+        return functionLibraries.object(forKey: function as AnyObject) as? MTLLibrary
+    }
+
+    /// Process-wide compiler, built on first use. Nil means Metal 4 pipeline
+    /// creation is unavailable and callers must fall back to the Metal 3 path.
+    @available(macOS 26.0, iOS 26.0, *)
+    static func metal4Compiler(_ device: MTLDevice) -> MTL4Compiler? {
+        metal4CompilerLock.lock()
+        defer { metal4CompilerLock.unlock() }
+        if let existing = metal4CompilerStorage as? MTL4Compiler { return existing }
+        let descriptor = MTL4CompilerDescriptor()
+        descriptor.label = "metallum-compiler"
+        if let serializer = metal4Serializer as? MTL4PipelineDataSetSerializer {
+            descriptor.pipelineDataSetSerializer = serializer
+        }
+        guard let compiler = try? device.makeCompiler(descriptor: descriptor) else {
+            NSLog("[metallum] MTL4Compiler creation failed; Metal 4 pipeline path disabled")
+            return nil
+        }
+        metal4CompilerStorage = compiler
+        return compiler
+    }
     static var clearPipelines: [PipelineVariantKey: MTLRenderPipelineState] = [:]
     static var presentPipeline: MTLRenderPipelineState!
     static var presentNearestSampler: MTLSamplerState!
@@ -4899,6 +4965,15 @@ public func metallum_set_deferred_depth_store(_ enabled: Int32) {
     NativeState.deferredDepthStore = enabled != 0
 }
 
+/// Routes render pipeline creation through MTL4Compiler (migration spec M2).
+/// Java only calls this with 1 when the capability gate and
+/// metallum.opt.metal4Compiler both hold; 0 (the default) leaves every PSO on
+/// the Metal 3 path.
+@_cdecl("metallum_set_metal4_compiler_enabled")
+public func metallum_set_metal4_compiler_enabled(_ enabled: Int32) {
+    NativeState.metal4CompilerEnabled = enabled != 0
+}
+
 @_cdecl("metallum_release_object")
 public func metallum_release_object(_ obj: UnsafeMutableRawPointer?) {
     autoreleasepool {
@@ -4970,6 +5045,12 @@ public func metallum_create_shader_function(
                 NSLog("[metallum] Failed to resolve MSL entry point '%s'", entryPtr)
                 return nil
             }
+            // Metal 4 needs the library back when it builds a pipeline from this
+            // function (MTL4LibraryFunctionDescriptor), and MTLFunction does not
+            // carry it. Registering unconditionally keeps the Metal 3 and Metal 4
+            // paths from disagreeing when the switch is flipped mid-session; the
+            // table is weak-keyed, so the cost is one entry per live function.
+            NativeState.register(function: function, library: library)
             return retainedPointer(function)
         } catch {
             NSLog("[metallum] Failed to compile MSL: %@", String(describing: error))
@@ -5122,6 +5203,72 @@ private func descriptorHasLiveColorWrite(_ descriptor: MTLRenderPipelineDescript
     return false
 }
 
+/// The Metal 4 pipeline data set lives beside the Metal 3 binary archive rather
+/// than in it. Java passes one path and its ABI does not change; the two caches
+/// are simply different formats written by different APIs
+/// (MTLBinaryArchive.serialize vs MTL4PipelineDataSetSerializer), so sharing one
+/// file would mean each launch that flips metallum.opt.metal4Compiler discards
+/// the other mode's cache. Separate files keep both warm.
+private func metal4ArchiveURL(forBinaryArchivePath path: String) -> URL {
+    URL(fileURLWithPath: path).deletingPathExtension().appendingPathExtension("mtl4archive")
+}
+
+/// Translates the Metal 3 pipeline descriptor the Java side has already filled
+/// in into its Metal 4 equivalent, or nil when the translation cannot be made
+/// (in which case the caller keeps the Metal 3 path).
+///
+/// Two fields deliberately have no counterpart: depth/stencil attachment
+/// formats do not exist on MTL4RenderPipelineDescriptor at all — the render pass
+/// supplies them — so the depth dimension of the variant matrix disappears here.
+/// binaryArchives has no counterpart either; MTL4 uses
+/// MTL4CompilerTaskOptions.lookupArchives instead.
+@available(macOS 26.0, iOS 26.0, *)
+private func makeMetal4Descriptor(_ src: MTLRenderPipelineDescriptor) -> MTL4RenderPipelineDescriptor? {
+    guard let vertexFunction = src.vertexFunction,
+          let vertexLibrary = NativeState.library(for: vertexFunction) else {
+        return nil
+    }
+    let dst = MTL4RenderPipelineDescriptor()
+    dst.label = src.label
+    let vfd = MTL4LibraryFunctionDescriptor()
+    vfd.library = vertexLibrary
+    vfd.name = vertexFunction.name
+    dst.vertexFunctionDescriptor = vfd
+    if let fragmentFunction = src.fragmentFunction,
+       let fragmentLibrary = NativeState.library(for: fragmentFunction) {
+        let ffd = MTL4LibraryFunctionDescriptor()
+        ffd.library = fragmentLibrary
+        ffd.name = fragmentFunction.name
+        dst.fragmentFunctionDescriptor = ffd
+    } else if src.fragmentFunction != nil {
+        // A fragment function whose library is not in the side table: give up on
+        // the Metal 4 path rather than compile a pipeline missing a stage.
+        return nil
+    }
+    dst.vertexDescriptor = src.vertexDescriptor
+    dst.rasterSampleCount = src.rasterSampleCount
+    dst.inputPrimitiveTopology = src.inputPrimitiveTopology
+    dst.alphaToCoverageState = src.isAlphaToCoverageEnabled ? .enabled : .disabled
+    dst.alphaToOneState = src.isAlphaToOneEnabled ? .enabled : .disabled
+    dst.isRasterizationEnabled = src.isRasterizationEnabled
+    dst.maxVertexAmplificationCount = src.maxVertexAmplificationCount
+    for index in 0..<8 {
+        guard let s = src.colorAttachments[index], let d = dst.colorAttachments[index] else { continue }
+        d.pixelFormat = s.pixelFormat
+        d.writeMask = s.writeMask
+        d.blendingState = s.isBlendingEnabled ? .enabled : .disabled
+        if s.isBlendingEnabled {
+            d.sourceRGBBlendFactor = s.sourceRGBBlendFactor
+            d.destinationRGBBlendFactor = s.destinationRGBBlendFactor
+            d.rgbBlendOperation = s.rgbBlendOperation
+            d.sourceAlphaBlendFactor = s.sourceAlphaBlendFactor
+            d.destinationAlphaBlendFactor = s.destinationAlphaBlendFactor
+            d.alphaBlendOperation = s.alphaBlendOperation
+        }
+    }
+    return dst
+}
+
 /// Opens (or creates) the on-disk PSO binary archive. Existing file is loaded
 /// so previously harvested pipelines skip the Metal compiler; a corrupt file
 /// is deleted and replaced with an empty archive.
@@ -5132,6 +5279,32 @@ public func metallum_pso_archive_open(
 ) -> Int32 {
     return autoreleasepool {
         guard let pathPtr else { return 0 }
+        // Metal 4 path (migration spec M2c). MTL4PipelineDataSetSerializer has no
+        // equivalent of MTLBinaryArchive's "an archive loaded from disk can never
+        // be re-serialized" defect, so there is no read-only mode here: every
+        // flush writes, including the ones triggered by resource reloads.
+        if NativeState.metal4CompilerEnabled, #available(macOS 26.0, iOS 26.0, *) {
+            let url = metal4ArchiveURL(forBinaryArchivePath: String(cString: pathPtr))
+            let device = device
+            NativeState.metal4CompilerLock.lock()
+            let serializerDescriptor = MTL4PipelineDataSetSerializerDescriptor()
+            serializerDescriptor.configuration = .captureDescriptors
+            NativeState.metal4Serializer = device.makePipelineDataSetSerializer(descriptor: serializerDescriptor)
+            // Previous launch's archive, if any, becomes the compiler lookup set.
+            // Absent or unreadable simply means a cold start.
+            if FileManager.default.fileExists(atPath: url.path) {
+                if let archive = try? device.makeArchive(url: url) {
+                    NativeState.metal4LookupArchive = archive
+                } else {
+                    NSLog("[metallum] Metal 4 pipeline archive unreadable, rebuilding")
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
+            let loaded = NativeState.metal4LookupArchive != nil
+            NativeState.metal4CompilerLock.unlock()
+            NSLog("[metallum] Metal 4 pipeline data set opened (lookup archive: %@)", loaded ? "yes" : "cold")
+            return 1
+        }
         let url = URL(fileURLWithPath: String(cString: pathPtr))
         let descriptor = MTLBinaryArchiveDescriptor()
         let loadedFromDisk = FileManager.default.fileExists(atPath: url.path)
@@ -5159,7 +5332,21 @@ public func metallum_pso_archive_open(
 @_cdecl("metallum_pso_archive_flush")
 public func metallum_pso_archive_flush(_ pathPtr: UnsafePointer<CChar>?) -> Int32 {
     return autoreleasepool {
-        guard let pathPtr, let archive = NativeState.binaryArchive else { return 0 }
+        guard let pathPtr else { return 0 }
+        if #available(macOS 26.0, iOS 26.0, *),
+           let serializer = NativeState.metal4Serializer as? MTL4PipelineDataSetSerializer {
+            let url = metal4ArchiveURL(forBinaryArchivePath: String(cString: pathPtr))
+            NativeState.metal4CompilerLock.lock()
+            defer { NativeState.metal4CompilerLock.unlock() }
+            do {
+                try serializer.serializeAsArchiveAndFlush(url: url)
+                return 1
+            } catch {
+                NSLog("[metallum] Metal 4 pipeline data set flush failed: %@", String(describing: error))
+                return 0
+            }
+        }
+        guard let archive = NativeState.binaryArchive else { return 0 }
         if NativeState.binaryArchiveReadOnly {
             // Loaded archives cannot be re-serialized on current macOS; the
             // on-disk file from the launch that built it stays authoritative.
@@ -5207,6 +5394,45 @@ public func metallum_MTLDevice_makeRenderPipelineState(
                 return nil
             }
         #endif
+        // Metal 4 path (migration spec M2b). MTL4Compiler returns an ordinary
+        // MTLRenderPipelineState that binds to the existing Metal 3 encoders
+        // (proved by metal4PipelineSmokeTest), so this needs no encoder changes.
+        // Any failure — no compiler, an untranslatable descriptor, a compile
+        // error — falls through to the unchanged Metal 3 path below.
+        if NativeState.metal4CompilerEnabled, #available(macOS 26.0, iOS 26.0, *) {
+            if let compiler = NativeState.metal4Compiler(device),
+               let metal4Descriptor = makeMetal4Descriptor(descriptor) {
+                do {
+                    // lookupArchives is Metal 4's replacement for
+                    // descriptor.binaryArchives: last launch's compiled pipelines
+                    // are found here instead of being recompiled. The serializer
+                    // attached to the compiler collects this launch's, and
+                    // metallum_pso_archive_flush writes them back.
+                    let state: MTLRenderPipelineState
+                    if let archive = NativeState.metal4LookupArchive as? MTL4Archive {
+                        let options = MTL4CompilerTaskOptions()
+                        options.lookupArchives = [archive]
+                        state = try compiler.makeRenderPipelineState(
+                            descriptor: metal4Descriptor,
+                            compilerTaskOptions: options
+                        )
+                    } else {
+                        state = try compiler.makeRenderPipelineState(descriptor: metal4Descriptor)
+                    }
+                    if !NativeState.metal4PipelineLogged {
+                        NativeState.metal4PipelineLogged = true
+                        NSLog("[metallum] Metal 4 pipeline path engaged (MTL4Compiler)")
+                    }
+                    return retainedPointer(state)
+                } catch {
+                    NativeState.logMetal4PipelineFallback(
+                        "MTL4Compiler rejected the descriptor: \(String(describing: error))"
+                    )
+                }
+            } else {
+                NativeState.logMetal4PipelineFallback("no compiler, or descriptor not translatable")
+            }
+        }
         if let archive = NativeState.binaryArchive {
             descriptor.binaryArchives = [archive]
         }
