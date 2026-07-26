@@ -118,7 +118,7 @@ exact post-discard coverage to the reactive mask.
 
 ## Automated client validation determinism
 
-`minecraftMetalFxClientValidation` performs ten frame-exact GPU readbacks. To
+`minecraftMetalFxClientValidation` performs twelve frame-exact GPU readbacks. To
 keep them deterministic on a loaded machine:
 
 - the run directory's `run/config/sodium-options.json` sets
@@ -140,6 +140,22 @@ keep them deterministic on a loaded machine:
 The acceptance for the CUTOUT frames requires more than 32 exact-coverage
 pixels, every covered pixel present in the final reactive mask, and nonzero
 dilation outside exact coverage whenever the jitter/scale radius is nonzero.
+
+A passing build must also prove the run happened. `MetalValidationClient`
+writes `build/metal-validation/minecraft-client-current/run-state.json` from
+`finishRunState`, and calls `minecraft.stop()` only on its success path, so an
+absent file means the scripted timeline never completed. That is reachable with
+no error at all: when the window opens unfocused the pause screen can open on
+the same frame the player joins, the compositor throttles the paused unfocused
+client to roughly zero frames, and `beforeFrame` never reaches a frame with a
+non-null level. Three such runs on 2026-07-27 captured zero GPU readbacks and
+still reported `BUILD SUCCESSFUL`. Clearing `pauseOnLostFocus` before the level
+guard narrowed the race but could not distinguish "validated" from "never ran",
+so `runClient` now carries a `doLast` (active only when
+`minecraftMetalFxClientValidation` is the invoked task) that requires the file
+to exist, parse, report `status` `passed`, and have `completedGpuCaptures`
+equal `expectedGpuCaptures`. The expected count is read from the file rather
+than hard-coded so the gate follows the client.
 
 The run entered `New World` and remained alive for more than one minute. A
 system screenshot attempt was unavailable because this macOS session denies
