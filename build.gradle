@@ -40,6 +40,34 @@ processResources {
 	}
 }
 
+// Helper: run a command, stream its combined output to the logger, and throw
+// on failure. Defined at the top level so every native build task
+// (buildIOSSpvc, buildGlslangMac, buildSpvcMac, buildGlslangIOS) can reuse it
+// instead of re-declaring a local closure. The `tag` prefixes each log line so
+// output from the various native builds stays attributable to its task.
+def runCmd = { List<String> cmd, File workDir = null, String tag = "native" ->
+	logger.lifecycle("[${tag}] Running: " + cmd.join(" "))
+	// Groovy list literals are ArrayList<Object>; ProcessBuilder needs List<String>
+	def strCmd = new ArrayList<String>(cmd.size())
+	for (String s : cmd) strCmd.add(s)
+	def pb = new ProcessBuilder(strCmd)
+	if (workDir != null) pb.directory(workDir)
+	pb.redirectErrorStream(true)
+	def proc = pb.start()
+	proc.inputStream.eachLine { line -> logger.lifecycle("[${tag}] " + line) }
+	def exitCode = proc.waitFor()
+	if (exitCode != 0) {
+		throw new GradleException("Command failed (exit " + exitCode + "): " + cmd.join(" "))
+	}
+}
+
+// JDK include paths for JNI headers (jni.h, jni_md.h). Used by buildMacNative
+// and buildIOSNative when compiling MetallumShaderBridge.c. jni_md.h lives in
+// include/darwin on macOS; iOS uses the same header (no include/ios exists).
+// Defined before the tasks so the task configuration closures can capture it.
+def jdkInclude = "${System.getProperty('java.home')}/include"
+def jdkIncludeDarwin = "${jdkInclude}/darwin"
+
 tasks.register("buildMacNative", Exec) {
 	onlyIf {
 		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
@@ -50,6 +78,19 @@ tasks.register("buildMacNative", Exec) {
 		file("src/main/resources/natives/macos").mkdirs()
 	}
 
+	// swiftc drives the compilation of both the Swift bridge (MetallumNative.swift)
+	// and the JNI C bridge (MetallumShaderBridge.c). The C file's glslang_* /
+	// spvc_* references are left undefined at link time (-undefined dynamic_lookup)
+	// and resolved at runtime from libglslang.dylib / libspvc.dylib, which
+	// MetalNativeBridge.ensureShaderLibrariesLoaded() loads and promotes to
+	// RTLD_GLOBAL before libmetallum.dylib is used.
+	//
+	// -Xcc flags are forwarded to clang (invoked by swiftc for .c input):
+	//   -Ithird_party/glslang           → glslang/Include/glslang_c_interface.h,
+	//                                     glslang/Public/resource_limits_c.h
+	//   -Ithird_party/SPIRV-Cross       → spirv_cross_c.h
+	//   -I${jdkInclude}                 → jni.h
+	//   -I${jdkIncludeDarwin}           → jni_md.h (macOS/iOS share this header)
 	commandLine "swiftc",
 		"-O",
 		"-whole-module-optimization",
@@ -59,8 +100,14 @@ tasks.register("buildMacNative", Exec) {
 		"-framework", "Foundation",
 		"-framework", "Metal",
 		"-framework", "QuartzCore",
+		"-Xcc", "-Ithird_party/glslang",
+		"-Xcc", "-Ithird_party/SPIRV-Cross",
+		"-Xcc", "-I${jdkInclude}",
+		"-Xcc", "-I${jdkIncludeDarwin}",
+		"-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup",
 		"-o", "src/main/resources/natives/macos/libmetallum.dylib",
-		"src/main/native/MetallumNative.swift"
+		"src/main/native/MetallumNative.swift",
+		"src/main/native/MetallumShaderBridge.c"
 }
 
 // Builds the Metallum native bridge as a dylib targeting iOS arm64. The
@@ -105,6 +152,9 @@ tasks.register("buildIOSNative", Exec) {
 
 	// The dylib is built with `-static`-style linking of the Swift stdlib so it
 	// can be loaded directly via dlopen on a jailbroken/signable device.
+	// MetallumShaderBridge.c is compiled alongside MetallumNative.swift; its
+	// glslang_* / spvc_* references use -undefined dynamic_lookup (resolved at
+	// runtime from libglslang.dylib / libspvc.dylib loaded by MetalNativeBridge).
 	if (iosSdkPath != null) {
 		commandLine "swiftc",
 			"-O",
@@ -117,8 +167,14 @@ tasks.register("buildIOSNative", Exec) {
 			"-framework", "Metal",
 			"-framework", "QuartzCore",
 			"-framework", "UIKit",
+			"-Xcc", "-Ithird_party/glslang",
+			"-Xcc", "-Ithird_party/SPIRV-Cross",
+			"-Xcc", "-I${jdkInclude}",
+			"-Xcc", "-I${jdkIncludeDarwin}",
+			"-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup",
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
-			"src/main/native/MetallumNative.swift"
+			"src/main/native/MetallumNative.swift",
+			"src/main/native/MetallumShaderBridge.c"
 	}
 }
 
@@ -137,12 +193,10 @@ tasks.register("buildIOSNative", Exec) {
 tasks.register("buildIOSSpvc") {
 	onlyIf { iosSdkPath != null }
 
-	def spvcSourceDir = file("${buildDir}/spirv-cross-src")
+	def spvcSourceDir = file("${rootDir}/third_party/SPIRV-Cross")
 	def spvcBuildDir = file("${buildDir}/spirv-cross-build")
 	def spvcOutput = file("src/main/resources/natives/ios/libspvc.dylib")
-	def spvcTag = "vulkan-sdk-1.3.290.0"
 
-	inputs.property "tag", spvcTag
 	outputs.file spvcOutput
 
 	doLast {
@@ -152,32 +206,10 @@ tasks.register("buildIOSSpvc") {
 			return
 		}
 
-		// Helper: run a command and throw on failure
-		def runCmd = { List<String> cmd, File workDir = null ->
-			logger.lifecycle("[buildIOSSpvc] Running: " + cmd.join(" "))
-			// Groovy list literals are ArrayList<Object>; ProcessBuilder needs List<String>
-			def strCmd = new ArrayList<String>(cmd.size())
-			for (String s : cmd) strCmd.add(s)
-			def pb = new ProcessBuilder(strCmd)
-			if (workDir != null) pb.directory(workDir)
-			pb.redirectErrorStream(true)
-			def proc = pb.start()
-			proc.inputStream.eachLine { line -> logger.lifecycle("[buildIOSSpvc] " + line) }
-			def exitCode = proc.waitFor()
-			if (exitCode != 0) {
-				throw new GradleException("Command failed (exit " + exitCode + "): " + cmd.join(" "))
-			}
-		}
-
-		// 1. Clone SPIRV-Cross (shallow, specific tag)
-		if (!spvcSourceDir.exists()) {
-			runCmd(["git", "clone", "--depth", "1", "--branch", spvcTag,
-				"https://github.com/KhronosGroup/SPIRV-Cross.git", spvcSourceDir.absolutePath])
-		}
-
-		// 2. CMake configure + build (use built-in iOS support, no toolchain file)
+		// 1. CMake configure + build (use built-in iOS support, no toolchain file).
+		//    Source is the third_party/SPIRV-Cross git submodule (no clone needed).
 		spvcBuildDir.mkdirs()
-		// SPIRV-Cross option names (see CMakeLists.txt for vulkan-sdk-1.3.290.0):
+		// SPIRV-Cross option names (see third_party/SPIRV-Cross/CMakeLists.txt):
 		//   SPIRV_CROSS_SHARED  - builds the C API as a single shared library (libspirv-cross-c-shared.dylib)
 		//   SPIRV_CROSS_STATIC  - static libs (off, we only want shared)
 		//   SPIRV_CROSS_CLI     - CLI binary, requires HLSL/GLSL/MSL/CPP/REFLECT/UTIL; turn off so we can trim backends
@@ -201,10 +233,10 @@ tasks.register("buildIOSSpvc") {
 			"-DSPIRV_CROSS_ENABLE_REFLECT=OFF",
 			"-DSPIRV_CROSS_ENABLE_UTIL=OFF",
 			"-DCMAKE_BUILD_TYPE=Release",
-			spvcSourceDir.absolutePath], spvcBuildDir)
-		runCmd(["cmake", "--build", ".", "--config", "Release", "-j", "4"], spvcBuildDir)
+			spvcSourceDir.absolutePath], spvcBuildDir, "buildIOSSpvc")
+		runCmd(["cmake", "--build", ".", "--config", "Release", "-j", "4"], spvcBuildDir, "buildIOSSpvc")
 
-		// 3. Locate built dylib. The shared target is `spirv-cross-c-shared`, so the
+		// 2. Locate built dylib. The shared target is `spirv-cross-c-shared`, so the
 		// file is `libspirv-cross-c-shared.dylib` (with versioned symlinks). Resolve
 		// the real file via canonical path to avoid copying a symlink.
 		def candidates = [
@@ -242,7 +274,7 @@ tasks.register("buildIOSSpvc") {
 		}
 		logger.lifecycle("[buildIOSSpvc] Built libspvc.dylib -> ${spvcOutput}")
 
-		// 4. Verify MSL backend is actually compiled in. The C API's
+		// 3. Verify MSL backend is actually compiled in. The C API's
 		//    spvc_context_create_compiler switch has `case SPVC_BACKEND_MSL:`
 		//    wrapped in `#if SPIRV_CROSS_C_API_MSL`. If the macro wasn't defined
 		//    at build time (e.g. SPIRV_CROSS_ENABLE_MSL didn't propagate), the
@@ -268,7 +300,7 @@ tasks.register("buildIOSSpvc") {
 			logger.lifecycle("[buildIOSSpvc] nm not available, skipping MSL symbol verification")
 		}
 
-		// 5. Verify the dylib targets iOS (not macOS). CMake with
+		// 4. Verify the dylib targets iOS (not macOS). CMake with
 		//    CMAKE_SYSTEM_NAME=iOS should produce a Mach-O with LC_BUILD_VERSION
 		//    platform=ios. If CMake silently fell back to the host (macOS), the
 		//    dylib would be a macOS arm64 binary that iOS refuses to load
@@ -308,6 +340,245 @@ tasks.register("buildIOSSpvc") {
 	}
 }
 
+// Builds libglslang.dylib (glslang C API + SPIR-V codegen) for macOS arm64
+// from the third_party/glslang git submodule. With BUILD_SHARED_LIBS=ON the
+// `glslang` target bundles the C interface (glslang_c_interface.cpp), the
+// SPIR-V backend (GlslangToSpv etc.) and the machine-independent frontend
+// into a single libglslang.dylib, so it is self-contained for the C API in
+// glslang/Public/ShaderLang.h and glslang/Include/glslang_c_interface.h.
+//
+// Skipped automatically if the host is not macOS (the macOS SDK is required
+// for CMAKE_OSX_DEPLOYMENT_TARGET / CMAKE_OSX_ARCHITECTURES to take effect).
+tasks.register("buildGlslangMac") {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+
+	def glslangSourceDir = file("${rootDir}/third_party/glslang")
+	def glslangBuildDir = file("${buildDir}/glslang-mac-build")
+	def glslangOutput = file("src/main/resources/natives/macos/libglslang.dylib")
+
+	outputs.file glslangOutput
+
+	doLast {
+		file("src/main/resources/natives/macos").mkdirs()
+		if (glslangOutput.exists()) {
+			logger.lifecycle("[buildGlslangMac] libglslang.dylib already exists, skipping build")
+			return
+		}
+
+		// glslang keeps local copies of the canonical SPIR-V headers in its
+		// SPIRV/ directory, so it does not strictly require external
+		// SPIRV-Headers. SPIRV_HEADERS_INCLUDE_DIR is still pointed at the
+		// submodule in case any translation unit looks for spirv/unified1.
+		glslangBuildDir.mkdirs()
+		runCmd(["cmake",
+			"-G", "Unix Makefiles",
+			"-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0",
+			"-DCMAKE_OSX_ARCHITECTURES=arm64",
+			"-DCMAKE_BUILD_TYPE=Release",
+			"-DENABLE_HLSL=OFF",
+			"-DENABLE_OPT=OFF",
+			"-DBUILD_SHARED_LIBS=ON",
+			"-DGLSLANG_TESTS=OFF",
+			"-DENABLE_GLSLANG_BINARIES=OFF",
+			"-DSPIRV_HEADERS_INCLUDE_DIR=${rootDir}/third_party/SPIRV-Headers/include",
+			glslangSourceDir.absolutePath], glslangBuildDir, "buildGlslangMac")
+		runCmd(["cmake", "--build", ".", "--config", "Release", "-j", "4"], glslangBuildDir, "buildGlslangMac")
+
+		// BUILD_SHARED_LIBS=ON produces libglslang.dylib (with versioned
+		// symlinks). withInputStream follows symlinks, so the destination is a
+		// real Mach-O file named libglslang.dylib.
+		def candidates = [
+			"${glslangBuildDir}/libglslang.dylib",
+			"${glslangBuildDir}/glslang/libglslang.dylib",
+			"${glslangBuildDir}/Release/libglslang.dylib"
+		]
+		def builtLib = null
+		for (String p : candidates) {
+			def f = file(p)
+			if (f.exists()) {
+				builtLib = f
+				break
+			}
+		}
+		if (builtLib == null) {
+			def found = []
+			glslangBuildDir.eachFileRecurse { f ->
+				if (f.isFile() && f.name.startsWith("libglslang") && f.name.endsWith(".dylib")) {
+					found << f
+				}
+			}
+			if (found.size() > 0) {
+				builtLib = found.sort { it.name.length() }[0]
+			}
+		}
+		if (builtLib == null) {
+			throw new GradleException("libglslang.dylib not found in build output: ${glslangBuildDir}")
+		}
+		glslangOutput.parentFile.mkdirs()
+		builtLib.withInputStream { ins ->
+			glslangOutput.withOutputStream { outs -> outs << ins }
+		}
+		logger.lifecycle("[buildGlslangMac] Built libglslang.dylib -> ${glslangOutput}")
+	}
+}
+
+// Builds libspvc.dylib (SPIRV-Cross C API with MSL backend) for macOS arm64
+// from the third_party/SPIRV-Cross git submodule. The shared target
+// spirv-cross-c-shared produces libspirv-cross-c-shared.dylib, which is copied
+// to libspvc.dylib to match the name expected by MetalCrossShaderCompiler /
+// LWJGL's spvc bindings.
+//
+// Skipped automatically if the host is not macOS.
+tasks.register("buildSpvcMac") {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+
+	def spvcSourceDir = file("${rootDir}/third_party/SPIRV-Cross")
+	def spvcBuildDir = file("${buildDir}/spirv-cross-mac-build")
+	def spvcOutput = file("src/main/resources/natives/macos/libspvc.dylib")
+
+	outputs.file spvcOutput
+
+	doLast {
+		file("src/main/resources/natives/macos").mkdirs()
+		if (spvcOutput.exists()) {
+			logger.lifecycle("[buildSpvcMac] libspvc.dylib already exists, skipping build")
+			return
+		}
+
+		spvcBuildDir.mkdirs()
+		runCmd(["cmake",
+			"-G", "Unix Makefiles",
+			"-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0",
+			"-DCMAKE_OSX_ARCHITECTURES=arm64",
+			"-DCMAKE_BUILD_TYPE=Release",
+			"-DSPIRV_CROSS_SHARED=ON",
+			"-DSPIRV_CROSS_STATIC=OFF",
+			"-DSPIRV_CROSS_CLI=OFF",
+			"-DSPIRV_CROSS_ENABLE_TESTS=OFF",
+			"-DSPIRV_CROSS_ENABLE_C_API=ON",
+			"-DSPIRV_CROSS_ENABLE_MSL=ON",
+			"-DSPIRV_CROSS_ENABLE_GLSL=ON",
+			"-DSPIRV_CROSS_ENABLE_HLSL=OFF",
+			"-DSPIRV_CROSS_ENABLE_CPP=OFF",
+			"-DSPIRV_CROSS_ENABLE_REFLECT=OFF",
+			"-DSPIRV_CROSS_ENABLE_UTIL=OFF",
+			spvcSourceDir.absolutePath], spvcBuildDir, "buildSpvcMac")
+		runCmd(["cmake", "--build", ".", "--config", "Release", "-j", "4"], spvcBuildDir, "buildSpvcMac")
+
+		def candidates = [
+			"${spvcBuildDir}/libspirv-cross-c-shared.dylib",
+			"${spvcBuildDir}/Release/libspirv-cross-c-shared.dylib",
+			"${spvcBuildDir}/src/libspirv-cross-c-shared.dylib"
+		]
+		def builtLib = null
+		for (String p : candidates) {
+			def f = file(p)
+			if (f.exists()) {
+				builtLib = f
+				break
+			}
+		}
+		if (builtLib == null) {
+			def found = []
+			spvcBuildDir.eachFileRecurse { f ->
+				if (f.isFile() && f.name.startsWith("libspirv-cross-c-shared") && f.name.endsWith(".dylib")) {
+					found << f
+				}
+			}
+			if (found.size() > 0) {
+				builtLib = found.sort { it.name.length() }[0]
+			}
+		}
+		if (builtLib == null) {
+			throw new GradleException("libspirv-cross-c-shared.dylib not found in build output: ${spvcBuildDir}")
+		}
+		spvcOutput.parentFile.mkdirs()
+		builtLib.withInputStream { ins ->
+			spvcOutput.withOutputStream { outs -> outs << ins }
+		}
+		logger.lifecycle("[buildSpvcMac] Built libspvc.dylib -> ${spvcOutput}")
+	}
+}
+
+// Builds libglslang.dylib (glslang C API + SPIR-V codegen) for iOS arm64 by
+// cross-compiling the third_party/glslang git submodule with
+// CMAKE_SYSTEM_NAME=iOS. Mirrors buildIOSSpvc's iOS cross-compile setup; the
+// resulting dylib is meant to be embedded in the iOS app bundle's Frameworks
+// directory (like libmetallum.dylib / libspvc.dylib).
+//
+// Skipped automatically if the iOS SDK is unavailable.
+tasks.register("buildGlslangIOS") {
+	onlyIf { iosSdkPath != null }
+
+	def glslangSourceDir = file("${rootDir}/third_party/glslang")
+	def glslangBuildDir = file("${buildDir}/glslang-ios-build")
+	def glslangOutput = file("src/main/resources/natives/ios/libglslang.dylib")
+
+	outputs.file glslangOutput
+
+	doLast {
+		file("src/main/resources/natives/ios").mkdirs()
+		if (glslangOutput.exists()) {
+			logger.lifecycle("[buildGlslangIOS] libglslang.dylib already exists, skipping build")
+			return
+		}
+
+		glslangBuildDir.mkdirs()
+		runCmd(["cmake",
+			"-G", "Unix Makefiles",
+			"-DCMAKE_SYSTEM_NAME=iOS",
+			"-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0",
+			"-DCMAKE_OSX_ARCHITECTURES=arm64",
+			"-DCMAKE_MAKE_PROGRAM=/usr/bin/make",
+			"-DCMAKE_BUILD_TYPE=Release",
+			"-DENABLE_HLSL=OFF",
+			"-DENABLE_OPT=OFF",
+			"-DBUILD_SHARED_LIBS=ON",
+			"-DGLSLANG_TESTS=OFF",
+			"-DENABLE_GLSLANG_BINARIES=OFF",
+			"-DSPIRV_HEADERS_INCLUDE_DIR=${rootDir}/third_party/SPIRV-Headers/include",
+			glslangSourceDir.absolutePath], glslangBuildDir, "buildGlslangIOS")
+		runCmd(["cmake", "--build", ".", "--config", "Release", "-j", "4"], glslangBuildDir, "buildGlslangIOS")
+
+		def candidates = [
+			"${glslangBuildDir}/libglslang.dylib",
+			"${glslangBuildDir}/glslang/libglslang.dylib",
+			"${glslangBuildDir}/Release/libglslang.dylib"
+		]
+		def builtLib = null
+		for (String p : candidates) {
+			def f = file(p)
+			if (f.exists()) {
+				builtLib = f
+				break
+			}
+		}
+		if (builtLib == null) {
+			def found = []
+			glslangBuildDir.eachFileRecurse { f ->
+				if (f.isFile() && f.name.startsWith("libglslang") && f.name.endsWith(".dylib")) {
+					found << f
+				}
+			}
+			if (found.size() > 0) {
+				builtLib = found.sort { it.name.length() }[0]
+			}
+		}
+		if (builtLib == null) {
+			throw new GradleException("libglslang.dylib not found in build output: ${glslangBuildDir}")
+		}
+		glslangOutput.parentFile.mkdirs()
+		builtLib.withInputStream { ins ->
+			glslangOutput.withOutputStream { outs -> outs << ins }
+		}
+		logger.lifecycle("[buildGlslangIOS] Built libglslang.dylib -> ${glslangOutput}")
+	}
+}
+
 tasks.named("processResources") {
 	dependsOn(tasks.named("buildMacNative"))
 	// The iOS native is only built on a macOS host with the iOS SDK installed.
@@ -315,6 +586,9 @@ tasks.named("processResources") {
 	// iOS dylib is simply not packaged in the jar.
 	dependsOn(tasks.named("buildIOSNative"))
 	dependsOn(tasks.named("buildIOSSpvc"))
+	dependsOn(tasks.named("buildGlslangMac"))
+	dependsOn(tasks.named("buildSpvcMac"))
+	dependsOn(tasks.named("buildGlslangIOS"))
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -338,6 +612,9 @@ tasks.named("sourcesJar") {
 	dependsOn(tasks.named("buildMacNative"))
 	dependsOn(tasks.named("buildIOSNative"))
 	dependsOn(tasks.named("buildIOSSpvc"))
+	dependsOn(tasks.named("buildGlslangMac"))
+	dependsOn(tasks.named("buildSpvcMac"))
+	dependsOn(tasks.named("buildGlslangIOS"))
 }
 
 jar {
