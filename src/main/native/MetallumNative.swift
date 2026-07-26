@@ -5730,52 +5730,106 @@ func metal4WaitForCompletion(
 ///
 /// Metal 3's 4 KB set*Bytes ceiling does not apply here. That is a side effect,
 /// not an invitation: the uniform-caching invariants from S11 still hold.
+/// Running out of room cannot fall back to a Metal 3 binding: there is no
+/// set*Bytes anywhere on the MTL4 encoders (the whole family is absent from the
+/// SDK headers), so a nil here would mean the draw runs with no uniform at all.
+/// The arena therefore grows instead, by chaining another chunk.
+///
+/// Growth is a plain `makeBuffer` rather than a transient block put through the
+/// destruction queue, specifically to protect M3's one rule: a new chunk only
+/// marks the residency set dirty, and the single batched `commit()` still happens
+/// once per submit. Routing growth through transient blocks would force a
+/// residency `commit()` per overflow, and `commit()` is the one expensive
+/// operation in the residency design.
 @available(macOS 26.0, iOS 26.0, *)
 final class Metal4BumpAllocator {
-    private let buffer: MTLBuffer
-    private let capacity: Int
+    private let device: MTLDevice
+    private let chunkCapacity: Int
+    private let label: String
+    /// Chunk 0 is allocated up front; later chunks appear only if a frame overflows
+    /// and are then kept for reuse, so a frame that overflows once pays for the
+    /// allocation once rather than every frame.
+    private var chunks: [MTLBuffer] = []
+    private var bases: [UnsafeMutableRawPointer] = []
+    private var chunkIndex = 0
     private var cursor: Int = 0
-    private let base: UnsafeMutableRawPointer
 
     init?(device: MTLDevice, capacity: Int, label: String) {
-        guard let buffer = device.makeBuffer(length: capacity, options: [.storageModeShared]) else {
-            return nil
-        }
-        buffer.label = label
-        self.buffer = buffer
-        self.capacity = capacity
-        self.base = buffer.contents()
-        // The GPU reads this by address, so it has to be resident: Metal 4 does no
-        // automatic residency and an address into a non-resident buffer is a read
-        // of unmapped memory.
-        residencyTrackCreated(buffer)
+        self.device = device
+        self.chunkCapacity = capacity
+        self.label = label
+        guard appendChunk() else { return nil }
     }
 
-    var backing: MTLBuffer { buffer }
+    @discardableResult
+    private func appendChunk() -> Bool {
+        guard let buffer = device.makeBuffer(length: chunkCapacity, options: [.storageModeShared]) else {
+            return false
+        }
+        buffer.label = "\(label)-chunk\(chunks.count)"
+        chunks.append(buffer)
+        bases.append(buffer.contents())
+        // The GPU reads this by address, so it has to be resident: Metal 4 does no
+        // automatic residency and an address into a non-resident buffer is a read
+        // of unmapped memory. This only sets the dirty flag; the commit stays
+        // batched to once per submit.
+        residencyTrackCreated(buffer)
+        return true
+    }
 
-    /// High-water mark since the last reset, for diagnostics and capacity tuning.
+    /// Chunk 0. Allocation after a reset always starts here.
+    var primaryBacking: MTLBuffer { chunks[0] }
+
+    /// Every chunk, for callers that must make the whole arena resident on a queue
+    /// of their own.
+    var allBackings: [MTLBuffer] { chunks }
+
+    /// Bytes handed out since the last reset, across chunks. Capacity tuning input:
+    /// if this regularly exceeds one chunk, raise the chunk size instead of paying
+    /// for chaining every frame.
     private(set) var peakUsage: Int = 0
 
     /// Called at frame start, and only for the allocator belonging to a frame that
     /// is no longer in flight — the ring is what guarantees that. Resetting an
     /// allocator whose frame the GPU is still reading would let the next frame
-    /// overwrite live uniform data.
+    /// overwrite live uniform data. Chunks are kept, only the cursor rewinds.
     func reset() {
+        chunkIndex = 0
         cursor = 0
+        usedThisFrame = 0
     }
 
-    /// Copies `length` bytes in and returns the GPU address to bind. Nil means the
-    /// allocator is full for this frame; the caller must fall back to the Metal 3
-    /// path rather than skip the binding.
+    private var usedThisFrame = 0
+
+    /// Copies `length` bytes in and returns the GPU address to bind.
+    ///
+    /// Nil is returned only when `length` exceeds a whole chunk, which no uniform
+    /// in this project comes close to (the largest is MotionUniforms at 240 B) and
+    /// which chaining cannot fix. Ordinary exhaustion grows the arena instead.
     func allocate(bytes: UnsafeRawPointer, length: Int, alignment: Int = 16) -> MTLGPUAddress? {
         let effectiveAlignment = max(16, alignment)
-        let aligned = (cursor + effectiveAlignment - 1) & ~(effectiveAlignment - 1)
-        guard aligned + length <= capacity else { return nil }
-        base.advanced(by: aligned).copyMemory(from: bytes, byteCount: length)
+        guard length <= chunkCapacity else { return nil }
+        var aligned = (cursor + effectiveAlignment - 1) & ~(effectiveAlignment - 1)
+        if aligned + length > chunkCapacity {
+            // Current chunk is full: move to the next one, allocating it if this is
+            // the first frame to need it.
+            if chunkIndex + 1 >= chunks.count {
+                guard appendChunk() else { return nil }
+            }
+            chunkIndex += 1
+            cursor = 0
+            aligned = 0
+        }
+        bases[chunkIndex].advanced(by: aligned).copyMemory(from: bytes, byteCount: length)
         cursor = aligned + length
-        peakUsage = max(peakUsage, cursor)
-        return buffer.gpuAddress + UInt64(aligned)
+        usedThisFrame += length
+        peakUsage = max(peakUsage, usedThisFrame)
+        return chunks[chunkIndex].gpuAddress + UInt64(aligned)
     }
+
+    /// Chunks currently held, for diagnostics: more than one means some frame
+    /// overflowed the primary chunk.
+    var chunkCount: Int { chunks.count }
 }
 
 /// One bump allocator per in-flight frame, rotated at frame start.
@@ -5791,9 +5845,9 @@ final class Metal4BumpAllocatorRing {
     static let depth = 4
     /// 240 B largest uniform, and the clear path can allocate once per clear; 64 KiB
     /// leaves room for ~270 largest-case allocations per frame, far above any
-    /// observed frame, at a total cost of 256 KiB across the ring. Overflow is
-    /// handled (fall back and log) rather than fatal, so this is a comfort margin
-    /// and not a correctness bound.
+    /// observed frame, at a total cost of 256 KiB across the ring. Exceeding it
+    /// chains another chunk rather than failing, so this is a "how often do we pay
+    /// for a second chunk" knob, not a correctness bound.
     static let capacityPerFrame = 64 * 1024
 
     private var allocators: [Metal4BumpAllocator] = []
@@ -5826,13 +5880,27 @@ final class Metal4BumpAllocatorRing {
         allocators[(frameIndex + allocators.count - 1) % allocators.count]
     }
 
-    /// Reports the first overflow only. A silent nil would drop a uniform binding
-    /// and render with stale values, so the fall-back has to be visible.
-    func logOverflowOnce(_ length: Int) {
+    /// Reports the first chunk chain only. Not an error — the arena grew and the
+    /// frame is correct — but it means the chunk size is undersized for real
+    /// frames, which is worth knowing because every such frame allocates.
+    func logGrowthOnce(chunkCount: Int) {
         guard !overflowLogged else { return }
         overflowLogged = true
         NSLog(
-            "[metallum] uniform bump allocator full (needed %ld B of %ld B); falling back to the Metal 3 path",
+            "[metallum] uniform bump allocator chained a chunk (now %ld x %ld B); consider raising capacityPerFrame",
+            chunkCount,
+            Self.capacityPerFrame
+        )
+    }
+
+    /// A single allocation larger than one whole chunk cannot be served by chaining.
+    /// No uniform in this project is close (largest is 240 B), so this is a
+    /// programming error rather than a capacity problem.
+    func logOversizedOnce(_ length: Int) {
+        guard !overflowLogged else { return }
+        overflowLogged = true
+        NSLog(
+            "[metallum] uniform of %ld B exceeds the %ld B bump chunk; binding skipped",
             length,
             Self.capacityPerFrame
         )

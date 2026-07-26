@@ -550,24 +550,32 @@ private func bumpAllocatorTest(device: MTLDevice) throws {
     }
     try check(uniformAddress % 16 == 0,
               "bump allocation is not 16-byte aligned: offset \(uniformAddress % 16)")
-    try check(uniformAddress > allocator.backing.gpuAddress,
+    try check(uniformAddress > allocator.primaryBacking.gpuAddress,
               "the uniform was placed on top of the preceding allocation")
 
-    // Largest real uniform is MotionUniforms at 240 B; confirm one frame can hold
-    // a realistic number of them, then that overflow is refused rather than
-    // wrapping or overwriting.
+    // Exhausting a chunk must chain another, not fail: Metal 4 has no set*Bytes to
+    // fall back to, so a nil return would mean a draw with no uniform bound at all.
+    // Push well past one chunk and require every allocation to succeed.
+    let perChunk = Metal4BumpAllocatorRing.capacityPerFrame / 240
     var chunk = [UInt8](repeating: 0, count: 240)
     var accepted = 0
-    while chunk.withUnsafeBytes({ allocator.allocate(bytes: $0.baseAddress!, length: 240) }) != nil {
+    for _ in 0..<(perChunk * 2 + 8) {
+        guard chunk.withUnsafeBytes({ allocator.allocate(bytes: $0.baseAddress!, length: 240) }) != nil else {
+            try fail("the arena failed to grow: allocation \(accepted + 1) returned nil")
+        }
         accepted += 1
-        if accepted > 4096 { break }
     }
-    try check(accepted >= 200,
-              "only \(accepted) largest-case uniforms fit in one frame; capacity is too small")
-    var overflow: UInt8 = 0
-    try check(allocator.allocate(bytes: &overflow, length: Metal4BumpAllocatorRing.capacityPerFrame) == nil,
-              "an allocation larger than the whole arena was accepted")
-    ring.logOverflowOnce(Metal4BumpAllocatorRing.capacityPerFrame)
+    try check(allocator.chunkCount >= 2,
+              "the arena served \(accepted) allocations without chaining a chunk, so growth was never exercised")
+    ring.logGrowthOnce(chunkCount: allocator.chunkCount)
+
+    // The one genuinely unservable case: a single allocation bigger than a whole
+    // chunk. Chaining cannot help, so nil is correct here.
+    var oversized = [UInt8](repeating: 0, count: Metal4BumpAllocatorRing.capacityPerFrame + 16)
+    try check(oversized.withUnsafeBytes({
+        allocator.allocate(bytes: $0.baseAddress!, length: oversized.count)
+    }) == nil, "an allocation larger than a whole chunk was accepted")
+    ring.logOversizedOnce(oversized.count)
 
     // reset() must make the space available again, which is what the ring relies on.
     let recycled = ring.beginFrame()
@@ -576,7 +584,7 @@ private func bumpAllocatorTest(device: MTLDevice) throws {
     }) else {
         try fail("allocation after a ring rotation failed")
     }
-    try check(recycledAddress == recycled.backing.gpuAddress,
+    try check(recycledAddress == recycled.primaryBacking.gpuAddress,
               "a rotated allocator did not start from the beginning of its arena")
 
     // Now the part only the GPU can answer: is the uniform actually readable at
@@ -604,7 +612,7 @@ private func bumpAllocatorTest(device: MTLDevice) throws {
     let residencyDescriptor = MTLResidencySetDescriptor()
     residencyDescriptor.initialCapacity = 4
     let residencySet = try device.makeResidencySet(descriptor: residencyDescriptor)
-    residencySet.addAllocations([recycled.backing, target])
+    residencySet.addAllocations(recycled.allBackings + [target])
     residencySet.commit()
     residencySet.requestResidency()
     queue.addResidencySet(residencySet)
@@ -643,7 +651,7 @@ private func bumpAllocatorTest(device: MTLDevice) throws {
     target.getBytes(&readback, bytesPerRow: 4, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
     try check(readback == [64, 128, 191, 255],
               "the GPU did not read the bump-allocated uniform: \(readback)")
-    print("Metal 4 bump allocator: \(accepted) largest-case (240 B) uniforms fit per frame, alignment and overflow behave, ring rotation recycles, and the GPU reads the uniform at the returned address")
+    print("Metal 4 bump allocator: \(accepted) largest-case (240 B) allocations served across \(allocator.chunkCount) chunks, alignment holds, growth chains instead of failing, an oversized request is refused, ring rotation recycles, and the GPU reads the uniform at the returned address")
 }
 
 private func runBumpAllocatorTest(device: MTLDevice) throws {
