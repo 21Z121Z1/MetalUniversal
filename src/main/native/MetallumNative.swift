@@ -1801,7 +1801,7 @@ public func metallum_fx_supports_temporal_scaler(_ device: MTLDevice) -> Int {
 @_cdecl("metallum_fx_supports_frame_interpolation")
 public func metallum_fx_supports_frame_interpolation(_ device: MTLDevice) -> Int {
     return autoreleasepool {
-        if #available(macOS 14.0, iOS 17.0, *) {
+        if #available(macOS 26.0, iOS 26.0, *) {
             let key = objectAddress(device)
             if let cached = MetalFxSupportCache.interpolation[key] {
                 return cached ? 1 : 0
@@ -1828,7 +1828,7 @@ public func metallum_fx_create_spatial_scaler(
     _ colorFormat: MTLPixelFormat,
     _ outputFormat: MTLPixelFormat
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
         if #available(macOS 13.0, iOS 16.0, *) {
             let key = MetalFxScalerKey(
                 deviceAddress: objectAddress(device),
@@ -1882,9 +1882,13 @@ public func metallum_fx_spatial_scaler_encode(
         if #available(macOS 13.0, iOS 16.0, *), let scaler = scaler as? MTLFXSpatialScaler {
             scaler.colorTexture = sourceTexture
             scaler.outputTexture = destinationTexture
-            scaler.jitterOffsetX = jitterOffsetX
-            scaler.jitterOffsetY = jitterOffsetY
-            scaler.mipLevel = mipScale
+            // jitterOffsetX / jitterOffsetY / mipLevel were removed from the
+            // MTLFXSpatialScaler protocol in the macOS 26 SDK; they are now
+            // configured at descriptor time. We leave them at their default
+            // (0) which is correct for non-TAA renderers like Minecraft.
+            _ = jitterOffsetX
+            _ = jitterOffsetY
+            _ = mipScale
             scaler.encode(into: commandBuffer)
         }
     }
@@ -1902,7 +1906,7 @@ public func metallum_fx_create_temporal_scaler(
     _ motionVectorFormat: MTLPixelFormat,
     _ depthFormat: MTLPixelFormat
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
         if #available(macOS 13.0, iOS 16.0, *) {
             let key = MetalFxScalerKey(
                 deviceAddress: objectAddress(device),
@@ -1956,15 +1960,17 @@ public func metallum_fx_temporal_scaler_encode(
     return autoreleasepool {
         if #available(macOS 13.0, iOS 16.0, *), let scaler = scaler as? MTLFXTemporalScaler {
             scaler.colorTexture = sourceColor
-            if let prevColor { scaler.previousColorTexture = prevColor }
+            // previousColorTexture / jitterOffsetX / jitterOffsetY were removed
+            // from the MTLFXTemporalScaler protocol in the macOS 26 SDK.
             if let motionVectors { scaler.motionVectorTexture = motionVectors }
             if let depth { scaler.depthTexture = depth }
             scaler.outputTexture = destination
-            scaler.jitterOffsetX = jitterOffsetX
-            scaler.jitterOffsetY = jitterOffsetY
             scaler.motionVectorScaleX = motionVectorScaleX
             scaler.motionVectorScaleY = motionVectorScaleY
             scaler.reset = reset != 0
+            _ = prevColor
+            _ = jitterOffsetX
+            _ = jitterOffsetY
             scaler.encode(into: commandBuffer)
         }
     }
@@ -1977,8 +1983,8 @@ public func metallum_fx_create_frame_interpolator(
     _ outputHeight: Int,
     _ colorFormat: MTLPixelFormat
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
-        if #available(macOS 14.0, iOS 17.0, *) {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
+        if #available(macOS 26.0, iOS 26.0, *) {
             let key = MetalFxScalerKey(
                 deviceAddress: objectAddress(device),
                 inputWidth: outputWidth,
@@ -2021,15 +2027,16 @@ public func metallum_fx_frame_interpolator_encode(
     _ reset: Int
 ) {
     return autoreleasepool {
-        if #available(macOS 14.0, iOS 17.0, *),
+        if #available(macOS 26.0, iOS 26.0, *),
            let interpolator = interpolator as? MTLFXFrameInterpolator {
             interpolator.colorTexture = sourceColor
-            interpolator.previousColorTexture = previousColor
+            // previousColorTexture was removed from the protocol in macOS 26 SDK.
             interpolator.motionVectorTexture = motionVectors
             interpolator.outputTexture = destination
             interpolator.motionVectorScaleX = motionVectorScaleX
             interpolator.motionVectorScaleY = motionVectorScaleY
             interpolator.reset = reset != 0
+            _ = previousColor
             interpolator.encode(into: commandBuffer)
         }
     }

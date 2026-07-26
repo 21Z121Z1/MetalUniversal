@@ -48,6 +48,12 @@ jobs:
           echo "SDK path: $(xcrun --show-sdk-path)"
           echo "MetalFX framework check:"
           ls -la "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/" 2>/dev/null || echo "MetalFX headers not found at default SDK path"
+          echo "=== MTLFXSpatialScaler.h ==="
+          cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXSpatialScaler.h" 2>/dev/null | head -120
+          echo "=== MTLFXTemporalScaler.h ==="
+          cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXTemporalScaler.h" 2>/dev/null | head -120
+          echo "=== MTLFXFrameInterpolator.h (first 80 lines) ==="
+          cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXFrameInterpolator.h" 2>/dev/null | head -80
       - name: build
         run: ./gradlew buildMacNative build
       - name: capture build artifacts
