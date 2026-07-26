@@ -41,3 +41,7 @@ replay_*.log
 /src/main/resources/natives/macos/*
 /src/main/resources/natives/ios/*
 libs/
+
+# third_party: 子模块内容由 git 跟踪，但子模块内的构建产物（build/、*.dylib）忽略
+third_party/*/build/
+third_party/*/*.dylib
