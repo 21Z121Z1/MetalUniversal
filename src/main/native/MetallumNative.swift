@@ -994,7 +994,7 @@ public func metallum_MTLDevice_makeDepthStencilState(
     _ writeDepth: Int32
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        unretainedPointer(ensureDepthStencilState(device: device, compareOp: depthCompareOp, writeDepth: writeDepth != 0))
+        retainedPointer(ensureDepthStencilState(device: device, compareOp: depthCompareOp, writeDepth: writeDepth != 0))
     }
 }
 

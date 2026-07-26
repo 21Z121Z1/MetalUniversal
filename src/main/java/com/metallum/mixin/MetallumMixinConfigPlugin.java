@@ -33,14 +33,6 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
-        // The PreferredGraphicsApiMixin only renames the DEFAULT enum's caption
-        // to "Prefer Metal" and prepends MetalBackend to the backend try-list.
-        // On non-Apple platforms MetalBackend initialization will naturally fail
-        // and fall back to Vulkan/OpenGL, so it is safe to always apply this
-        // mixin and keep the "Prefer Metal" option visible in the UI.
-        if (PREFERRED_GRAPHICS_API_MIXIN.equals(mixinClassName)) {
-            return true;
-        }
         if (!this.isApplePlatform) {
             return false;
         }
@@ -58,7 +50,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             // detection. They are harmless on any backend.
             return true;
         }
-        return this.isDefaultGraphicsApi;
+        return PREFERRED_GRAPHICS_API_MIXIN.equals(mixinClassName) || this.isDefaultGraphicsApi;
     }
 
     @Override
@@ -79,50 +71,55 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     }
 
     /**
-     * Detects whether we are running on an Apple platform (macOS or iOS),
-     * including iOS-via-Android-launcher scenarios such as PojavLauncher or
-     * Amethyst, where {@code os.name} reports as "Linux" rather than "Mac".
+     * Detects whether we are running on an Apple platform (macOS or iOS).
+     * <p>
+     * This mirrors the pure-Java detection logic in
+     * {@code MetalNativeBridge.isIOS()} (without triggering native-library
+     * loading, which is too early for the mixin plugin's {@code onLoad}).
+     * iOS detection signals (in priority order):
+     * <ol>
+     *   <li>{@code os.name} contains "ios"</li>
+     *   <li>{@code pojav.launcher} / {@code org.pojavlauncher} system property
+     *       (PojavLauncher / Amethyst on iOS)</li>
+     *   <li>{@code java.io.tmpdir} / {@code user.home} under
+     *       {@code /var/mobile/} or {@code /var/containers/} (iOS sandbox)</li>
+     *   <li>{@code os.name} contains "darwin" + {@code os.arch} contains
+     *       "aarch64" + {@code os.name} does not contain "mac"</li>
+     * </ol>
+     * macOS is detected via {@code os.name} containing "mac".
      */
     private static boolean detectApplePlatform() {
         String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-        // Native macOS reports "Mac OS X" / "macOS".
+        String osArch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+
+        // macOS
         if (osName.contains("mac")) {
             return true;
         }
-        // iOS via PojavLauncher/Amethyst on Android reports "Linux" on aarch64.
-        // Distinguish from desktop Linux by looking for launcher-specific signals.
-        if (osName.contains("linux") || osName.contains("nix")) {
-            String osArch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
-            if (osArch.contains("aarch64") && isMobileAppleLauncherPresent()) {
-                return true;
-            }
+        // iOS — os.name explicitly reports "iOS"
+        if (osName.contains("ios")) {
+            return true;
         }
-        return false;
-    }
-
-    /**
-     * Heuristic check for the presence of an iOS-on-Android launcher
-     * (PojavLauncher/Amethyst) that bridges to Apple's Metal backend.
-     */
-    private static boolean isMobileAppleLauncherPresent() {
-        // PojavLauncher exposes a number of "pojav.*" system properties.
-        for (String property : System.getProperties().stringPropertyNames()) {
-            if (property.startsWith("pojav.")) {
-                return true;
-            }
+        // iOS — PojavLauncher / Amethyst on iOS set these properties
+        if (System.getProperty("pojav.launcher") != null
+                || System.getProperty("org.pojavlauncher") != null) {
+            return true;
         }
-        // Amethyst and PojavLauncher typically nest the game under a launcher
-        // directory whose name reflects the launcher.
-        try {
-            String gameDirName = FabricLoader.getInstance().getGameDir()
-                    .getFileName().toString().toLowerCase(Locale.ROOT);
-            if (gameDirName.contains("pojav") || gameDirName.contains("amethyst")) {
-                return true;
-            }
-        } catch (RuntimeException ignored) {
-            // Defensive: ignore any unexpected path/access issues.
+        // iOS — the JVM on iOS (Azul Zulu via PojavLauncher/Amethyst) often
+        // reports os.name as "Mac OS X" or "Darwin". The most reliable signal
+        // is the sandbox path: on iOS, java.io.tmpdir and user.home are under
+        // /private/var/mobile/Containers/Data/Application/<UUID>/, which never
+        // exists on macOS.
+        String tmpDir = System.getProperty("java.io.tmpdir", "");
+        String userHome = System.getProperty("user.home", "");
+        if (tmpDir.contains("/var/mobile/") || tmpDir.contains("/var/containers/")
+                || userHome.contains("/var/mobile/") || userHome.contains("/var/containers/")) {
+            return true;
         }
-        return false;
+        // iOS — Darwin + aarch64 without "Mac" in os.name
+        return osName.contains("darwin")
+                && osArch.contains("aarch64")
+                && !osName.contains("mac");
     }
 
     private static boolean isDefaultGraphicsApiSelected() {
