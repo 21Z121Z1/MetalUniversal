@@ -106,7 +106,7 @@ tasks.register("buildMacNative") {
 	}
 
 	// Step 1: compile C → object with clang (explicit -I for jni.h, glslang, spvc)
-	exec {
+	project.exec {
 		workingDir project.projectDir
 		commandLine "clang",
 			"-O2",
@@ -121,7 +121,7 @@ tasks.register("buildMacNative") {
 	}
 
 	// Step 2: compile + link Swift with the C object file
-	exec {
+	project.exec {
 		workingDir project.projectDir
 		commandLine "swiftc",
 			"-O",
@@ -192,7 +192,7 @@ tasks.register("buildIOSNative") {
 	}
 
 	// Step 1: compile C → object with clang (iOS target, explicit -I flags)
-	exec {
+	project.exec {
 		workingDir project.projectDir
 		commandLine "xcrun", "clang",
 			"-O2",
@@ -208,7 +208,7 @@ tasks.register("buildIOSNative") {
 	}
 
 	// Step 2: compile + link Swift with the C object file
-	exec {
+	project.exec {
 		workingDir project.projectDir
 		commandLine "swiftc",
 			"-O",
