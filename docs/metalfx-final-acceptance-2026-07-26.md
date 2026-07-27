@@ -475,11 +475,14 @@ Deployment state (updated 2026-07-27):
 - The stable launcher profile `minecraftmetal-current-20260726` keeps
   `-Dmetallum.metalfx.frameGeneration=false`. Its shared persistent config is
   `TEMPORAL`, 67%, transparency reactive enabled and Frame Generation off.
-- The separate launcher profile `minecraftmetal-framegen-qa-20260727`
-  explicitly adds `-Dmetallum.metalfx.objectMotionProducer=true` and
-  `-Dmetallum.metalfx.frameGeneration=true`. It is the attended-QA entry point;
-  selecting it opens the production gate only for that launch and does not
-  change the shipped `OBJECT_MOTION_PRODUCER_CONNECTED=false` default.
+- The separate launcher profile `metallum-fabric-26.2-framegen`, displayed as
+  `FrameGen QA - MetalUniversal 26.2 (Gate Override)`, points to the existing
+  `MetalUniversal-26.2` instance. That instance also carries the byte-identical
+  `1.0.2` JAR, and the profile explicitly adds
+  `-Dmetallum.metalfx.objectMotionProducer=true` plus
+  `-Dmetallum.metalfx.frameGeneration=true`. Selecting it opens the production
+  gate only for that launch and does not change the shipped
+  `OBJECT_MOTION_PRODUCER_CONNECTED=false` default.
 
 This addendum does not change the main gate:
 
