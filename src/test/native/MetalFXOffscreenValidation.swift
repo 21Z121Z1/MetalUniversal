@@ -371,6 +371,27 @@ private final class OffscreenHarness {
         try commitAndWait(commandBuffer, label: "clear \(texture.label ?? "texture")")
     }
 
+    func copyTexture(_ source: MTLTexture, to destination: MTLTexture, label: String) throws {
+        guard source.width == destination.width, source.height == destination.height,
+              source.pixelFormat == destination.pixelFormat,
+              let commandBuffer = queue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            try fail("could not create \(label) texture copy")
+        }
+        blit.copy(
+            from: source,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            to: destination,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            sliceCount: 1,
+            levelCount: 1
+        )
+        blit.endEncoding()
+        try commitAndWait(commandBuffer, label: label)
+    }
+
     func encodeTemporal(
         frame: FrameTextures,
         cameraMotion: MTLTexture,
@@ -383,10 +404,28 @@ private final class OffscreenHarness {
         previousViewProjection: simd_float4x4,
         reset: Bool,
         preserveReactiveMask: Bool,
-        label: String
+        label: String,
+        handDepth: MTLTexture? = nil,
+        emitMotionDiagnostics: Bool = true
     ) throws {
         guard let commandBuffer = queue.makeCommandBuffer() else {
             try fail("could not create \(label) temporal command buffer")
+        }
+        if handDepth != nil && ProcessInfo.processInfo.environment[
+            "METALLUM_METALFX_LEGACY_MOTION_PASSES"
+        ] == "1" {
+            let handResult = metallum_metalfx_encode_hand_overlay(
+                commandBuffer,
+                handDepth!,
+                objectMotion,
+                validity,
+                reactive,
+                Int32(width),
+                Int32(height),
+                0.35,
+                nil
+            )
+            try require(handResult == 1, "\(label) legacy hand overlay encode was rejected")
         }
         let identity = matrixFloats(matrix_identity_float4x4)
         let previous = matrixFloats(previousViewProjection)
@@ -398,6 +437,7 @@ private final class OffscreenHarness {
                         device,
                         frame.color,
                         frame.depth,
+                        handDepth,
                         cameraMotion,
                         objectMotion,
                         validity,
@@ -411,11 +451,13 @@ private final class OffscreenHarness {
                         nil,
                         0.0,
                         0.0,
+                        0.35,
                         Int32(width),
                         Int32(height),
                         reset ? 1 : 0,
                         1,
-                        preserveReactiveMask ? 1 : 0
+                        preserveReactiveMask ? 1 : 0,
+                        emitMotionDiagnostics ? 1 : 0
                     )
                 }
             }
@@ -1084,6 +1126,97 @@ private func runScenario(
     return metrics
 }
 
+private func runHandFusionScenario(
+    harness: OffscreenHarness,
+    root: URL
+) throws -> [String: Any] {
+    let scenario = Scenario(
+        name: "hand_fusion_steady",
+        start: Transform(center: SIMD2<Float>(26, 32), angle: -0.2),
+        middle: Transform(center: SIMD2<Float>(32, 32), angle: 0.0),
+        end: Transform(center: SIMD2<Float>(38, 32), angle: 0.2),
+        cameraPrevious: matrix_identity_float4x4
+    )
+    let directory = root.appendingPathComponent(scenario.name, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let frame = try harness.render(
+        current: scenario.end,
+        previous: scenario.start,
+        scenario: scenario,
+        label: "hand fusion input"
+    )
+    let handDepth = try harness.makeWorkingTexture(
+        format: .r8Unorm,
+        label: "hand fusion depth coverage"
+    )
+    try harness.copyTexture(frame.validity, to: handDepth, label: "hand fusion depth coverage copy")
+    let cameraMotion = try harness.makeWorkingTexture(format: .rg16Float, label: "hand fusion camera motion")
+    let disocclusion = try harness.makeWorkingTexture(format: .r8Unorm, label: "hand fusion disocclusion")
+    let mergedMotion = try harness.makeWorkingTexture(format: .rg16Float, label: "hand fusion merged motion")
+    let reactive = try harness.makeWorkingTexture(format: .r8Unorm, label: "hand fusion reactive")
+    let temporalOutput = try harness.makeWorkingTexture(
+        format: .rgba8Unorm,
+        width: harness.temporalWidth,
+        height: harness.temporalHeight,
+        label: "hand fusion temporal output"
+    )
+    try harness.clearColor(reactive)
+    try harness.encodeTemporal(
+        frame: frame,
+        cameraMotion: cameraMotion,
+        objectMotion: frame.objectMotion,
+        validity: frame.validity,
+        disocclusion: disocclusion,
+        mergedMotion: mergedMotion,
+        reactive: reactive,
+        output: temporalOutput,
+        previousViewProjection: matrix_identity_float4x4,
+        reset: true,
+        preserveReactiveMask: false,
+        label: "hand fusion production temporal",
+        handDepth: handDepth,
+        emitMotionDiagnostics: false
+    )
+
+    let handBytes = try exportTexture(
+        harness: harness,
+        texture: handDepth,
+        name: "hand_depth",
+        directory: directory
+    )
+    let motionBytes = try exportTexture(
+        harness: harness,
+        texture: mergedMotion,
+        name: "merged_motion",
+        directory: directory
+    )
+    let reactiveBytes = try exportTexture(
+        harness: harness,
+        texture: reactive,
+        name: "reactive",
+        directory: directory
+    )
+    let handMotion = motionMetrics(motion: motionBytes, validity: handBytes)
+    let covered = handBytes.indices.filter { handBytes[$0] > 127 }
+    let minimumReactive = covered.map { reactiveBytes[$0] }.min() ?? 0
+    try require(!covered.isEmpty, "hand fusion scenario produced no hand coverage")
+    try require(
+        ((handMotion["max_magnitude"] as? Double) ?? 1.0) < 0.0001,
+        "fused hand path did not override object motion with camera-locked zero motion"
+    )
+    try require(
+        minimumReactive >= 88,
+        "fused hand path did not preserve the 0.35 reactive boost"
+    )
+    return [
+        "scenario": scenario.name,
+        "hand_pixels": covered.count,
+        "hand_motion": handMotion,
+        "minimum_hand_reactive_byte": minimumReactive,
+        "history_reset": true
+    ]
+}
+
 @main
 private enum MetalFXOffscreenValidationMain {
     static func main() {
@@ -1112,6 +1245,8 @@ private enum MetalFXOffscreenValidationMain {
                 print("[offscreen] running \(scenario.name)")
                 results.append(try runScenario(scenario, harness: harness, root: root))
             }
+            print("[offscreen] running hand_fusion_steady")
+            results.append(try runHandFusionScenario(harness: harness, root: root))
             let summary: [String: Any] = [
                 "status": "passed",
                 "device": harness.device.name,

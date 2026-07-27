@@ -283,6 +283,24 @@ public final class MetalValidationClient implements ClientModInitializer {
             return;
         }
         if (!timelineAnchored) {
+            // A prior interactive run can leave run/options.txt in fullscreen
+            // mode. setWindowed() only changes the saved windowed rectangle; it
+            // cannot resize the active fullscreen drawable, so the old loop
+            // retried the same native resolution until its 200-attempt guard
+            // fired. Force both fullscreen modes off before pinning the logical
+            // window size used by golden captures.
+            if (minecraft.getWindow().isFullscreen()) {
+                minecraft.options.exclusiveFullscreen().set(false);
+                minecraft.options.fullscreen().set(false);
+                minecraft.getWindow().updateFullscreenIfChanged();
+                if (minecraft.getWindow().isFullscreen()) {
+                    minecraft.getWindow().toggleFullScreen();
+                }
+                windowResizeAttempts = 0;
+                holdInitialPose(minecraft);
+                sleepForAsyncWork(25L);
+                return;
+            }
             // Hold the timeline until the FRAMEBUFFER is the pinned size.
             // The Gradle run passes --width/--height, but macOS window
             // management can zoom or tile the window afterwards, and the

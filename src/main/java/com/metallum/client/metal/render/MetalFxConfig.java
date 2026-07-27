@@ -124,8 +124,8 @@ final class MetalFxConfig {
         boolean frameGeneration = parseBoolean(
                 System.getProperty(FRAME_GENERATION_PROPERTY), defaults.frameGeneration
         );
-        int frameGenerationOutputWidth = parseBoundedInt(
-                System.getProperty(FRAME_GENERATION_OUTPUT_WIDTH_PROPERTY), 1280, 640, 3840
+        int frameGenerationOutputWidth = parseFrameGenerationOutputWidth(
+                System.getProperty(FRAME_GENERATION_OUTPUT_WIDTH_PROPERTY), 1280
         );
         float cutoutReactiveEdgeWeight = parseUnitFloat(
                 System.getProperty("metallum.metalfx.cutoutReactiveEdgeWeight"), 0.35F
@@ -257,6 +257,17 @@ final class MetalFxConfig {
             return 1.0F;
         }
         return maximumOutputWidth / (float) displayWidth;
+    }
+
+    static int parseFrameGenerationOutputWidth(final String value, final int fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        if (normalized.equals("native") || normalized.equals("display") || normalized.equals("0")) {
+            return 0;
+        }
+        return parseBoundedInt(value, fallback, 640, 3840);
     }
 
     static float textureLodBias(final int renderWidth, final int displayWidth) {

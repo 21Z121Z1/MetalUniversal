@@ -185,7 +185,13 @@ private enum NativeState {
     static var motionPipeline: MTLComputePipelineState?
     static var motionV2Pipeline: MTLComputePipelineState?
     static var motionMergePipeline: MTLComputePipelineState?
+    static var motionFusedPipeline: MTLComputePipelineState?
     static var motionClearPipeline: MTLComputePipelineState?
+    // QA-only A/B escape hatch. Production uses the fused motion path; setting
+    // this before launch restores the two-dispatch camera/merge implementation.
+    static let legacyMotionPasses = ProcessInfo.processInfo.environment[
+        "METALLUM_METALFX_LEGACY_MOTION_PASSES"
+    ] == "1"
     static var transparencyMaskPipeline: MTLComputePipelineState?
     static var cutoutReactivePipeline: MTLComputePipelineState?
     static var handOverlayPipeline: MTLComputePipelineState?
@@ -221,6 +227,7 @@ private enum NativeState {
 #if os(macOS) && canImport(MetalFX)
 @available(macOS 26.0, *)
 struct MetalFrameGenerationDiagnosticSnapshot {
+    let presentPath: String
     let sourceFrameID: UInt64
     let frameKind: String
     let displayUpdateID: UInt64
@@ -254,42 +261,57 @@ struct MetalFrameGenerationDiagnosticSnapshot {
 /// type owns only the Metal 4 mechanics.
 @available(macOS 26.0, *)
 final class Metal4PresentPath {
+    private enum SlotState: Equatable {
+        case free
+        case recording
+        case submitted
+    }
+
+    private final class FrameSlot {
+        let commandBuffer: MTL4CommandBuffer
+        let allocator: MTL4CommandAllocator
+        var state: SlotState = .free
+
+        init(commandBuffer: MTL4CommandBuffer, allocator: MTL4CommandAllocator) {
+            self.commandBuffer = commandBuffer
+            self.allocator = allocator
+        }
+    }
+
+    /// Matches the layer's two-drawable pool. More slots cannot create more
+    /// display-link drawables and would only let stale work accumulate.
+    static let inFlightSlotCount = 2
+
     private let queue: MTL4CommandQueue
-    private let commandBuffer: MTL4CommandBuffer
-    private let allocators: [MTL4CommandAllocator]
+    private let slots: [FrameSlot]
     private let argumentTable: MTL4ArgumentTable
     private let residencySet: MTLResidencySet
-    private var frameIndex = 0
-    /// True between beginFrame() and the close that submit() or abandonFrame()
-    /// performs. The command buffer is reusable, so leaving it open across frames
-    /// would make the next beginCommandBuffer illegal; this makes closing
-    /// idempotent so every exit path can close unconditionally.
-    private var isRecording = false
+    private let slotLock = NSLock()
+    /// Only the display-link callback records commands, so at most one slot is
+    /// recording. Completion feedback can release submitted slots concurrently.
+    private var recordingSlotIndex: Int?
 
     init?(device: MTLDevice, layer: CAMetalLayer) {
         let queueDescriptor = MTL4CommandQueueDescriptor()
         // MTL4CommandQueue.label is get-only, unlike MTLCommandQueue's: the label
         // has to come from the descriptor.
         queueDescriptor.label = "MetalFX Frame Generation Present (Metal 4)"
-        guard let queue = try? device.makeMTL4CommandQueue(descriptor: queueDescriptor),
-              let commandBuffer = device.makeCommandBuffer() else {
+        guard let queue = try? device.makeMTL4CommandQueue(descriptor: queueDescriptor) else {
             return nil
         }
-        commandBuffer.label = "MetalFX Frame Generation Present (Metal 4)"
-        // One allocator per in-flight frame. maxOutstandingFrames is 1, so two is
-        // enough — but one would be wrong: reset() reclaims command memory the GPU
-        // may still be reading.
-        var allocators: [MTL4CommandAllocator] = []
-        for index in 0..<2 {
+        var slots: [FrameSlot] = []
+        for index in 0..<Self.inFlightSlotCount {
             let allocatorDescriptor = MTL4CommandAllocatorDescriptor()
             allocatorDescriptor.label = "MetalFX Frame Generation Allocator \(index)"
-            guard let allocator = try? device.makeCommandAllocator(descriptor: allocatorDescriptor) else {
+            guard let allocator = try? device.makeCommandAllocator(descriptor: allocatorDescriptor),
+                  let commandBuffer = device.makeCommandBuffer() else {
                 return nil
             }
-            allocators.append(allocator)
+            commandBuffer.label = "MetalFX Frame Generation Present \(index) (Metal 4)"
+            slots.append(FrameSlot(commandBuffer: commandBuffer, allocator: allocator))
         }
         let tableDescriptor = MTL4ArgumentTableDescriptor()
-        tableDescriptor.maxTextureBindCount = 1
+        tableDescriptor.maxTextureBindCount = 2
         tableDescriptor.maxSamplerStateBindCount = 1
         // Unbound slots must read as a defined empty value; without this they are
         // undefined behaviour.
@@ -302,8 +324,7 @@ final class Metal4PresentPath {
             return nil
         }
         self.queue = queue
-        self.commandBuffer = commandBuffer
-        self.allocators = allocators
+        self.slots = slots
         self.argumentTable = argumentTable
         self.residencySet = residencySet
         queue.addResidencySet(residencySet)
@@ -321,22 +342,53 @@ final class Metal4PresentPath {
         residencySet.requestResidency()
     }
 
-    /// Starts a frame: rotates to this frame's allocator, reclaims its command
-    /// memory, and opens the reusable command buffer. Unlike Metal 3 the command
-    /// buffer is not allocated per frame.
-    func beginFrame() -> MTL4CommandBuffer {
-        let allocator = allocators[frameIndex % allocators.count]
-        frameIndex += 1
-        allocator.reset()
-        commandBuffer.beginCommandBuffer(allocator: allocator)
-        isRecording = true
-        return commandBuffer
+    /// Starts a frame without waiting. A slot remains unavailable until Metal's
+    /// commit feedback proves its previous GPU submission complete, which is the
+    /// precondition for allocator.reset(). If both drawable-backed submissions
+    /// are still in flight, the display-link update is dropped by the caller.
+    func beginFrame() -> MTL4CommandBuffer? {
+        slotLock.lock()
+        guard recordingSlotIndex == nil,
+              let index = slots.firstIndex(where: { $0.state == .free }) else {
+            slotLock.unlock()
+            return nil
+        }
+        let slot = slots[index]
+        slot.state = .recording
+        recordingSlotIndex = index
+        slotLock.unlock()
+
+        slot.allocator.reset()
+        slot.commandBuffer.beginCommandBuffer(allocator: slot.allocator)
+        return slot.commandBuffer
     }
 
-    private func endRecording() {
-        guard isRecording else { return }
-        commandBuffer.endCommandBuffer()
-        isRecording = false
+    private func endRecordingForSubmission() -> (Int, FrameSlot)? {
+        slotLock.lock()
+        guard let index = recordingSlotIndex else {
+            slotLock.unlock()
+            return nil
+        }
+        let slot = slots[index]
+        recordingSlotIndex = nil
+        slot.state = .submitted
+        slotLock.unlock()
+        slot.commandBuffer.endCommandBuffer()
+        return (index, slot)
+    }
+
+    private func releaseSubmittedSlot(_ index: Int) {
+        slotLock.lock()
+        if slots[index].state == .submitted {
+            slots[index].state = .free
+        }
+        slotLock.unlock()
+    }
+
+    var availableFrameSlotCount: Int {
+        slotLock.lock()
+        defer { slotLock.unlock() }
+        return slots.reduce(0) { $0 + ($1.state == .free ? 1 : 0) }
     }
 
     /// The full-screen copy, with the texture and sampler routed through the
@@ -364,6 +416,43 @@ final class Metal4PresentPath {
         }
         encoder.label = label
         argumentTable.setTexture(source.gpuResourceID, index: 0)
+        argumentTable.setSamplerState(sampler.gpuResourceID, index: 0)
+        encoder.setArgumentTable(argumentTable, stages: .fragment)
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: Double(destination.width),
+            height: Double(destination.height),
+            znear: 0.0,
+            zfar: 1.0
+        ))
+        encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        return true
+    }
+
+    func encodeComposite(
+        commandBuffer: MTL4CommandBuffer,
+        scene: MTLTexture,
+        ui: MTLTexture,
+        destination: MTLTexture,
+        pipeline: MTLRenderPipelineState,
+        sampler: MTLSamplerState,
+        label: String
+    ) -> Bool {
+        let descriptor = MTL4RenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = destination
+        descriptor.colorAttachments[0].loadAction = .dontCare
+        descriptor.colorAttachments[0].storeAction = .store
+        descriptor.renderTargetWidth = destination.width
+        descriptor.renderTargetHeight = destination.height
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+            return false
+        }
+        encoder.label = label
+        argumentTable.setTexture(scene.gpuResourceID, index: 0)
+        argumentTable.setTexture(ui.gpuResourceID, index: 1)
         argumentTable.setSamplerState(sampler.gpuResourceID, index: 0)
         encoder.setArgumentTable(argumentTable, stages: .fragment)
         encoder.setRenderPipelineState(pipeline)
@@ -408,16 +497,19 @@ final class Metal4PresentPath {
         eventValue: UInt64,
         onCompleted: @escaping (Error?, CFTimeInterval, CFTimeInterval) -> Void
     ) {
-        endRecording()
+        guard let (slotIndex, slot) = endRecordingForSubmission() else {
+            return
+        }
         let options = MTL4CommitOptions()
         // MTL4CommandBufferFeedback has no status, only error: succeeded is
         // error == nil.
-        options.addFeedbackHandler {
-            feedback in onCompleted(feedback.error, feedback.gpuStartTime, feedback.gpuEndTime)
+        options.addFeedbackHandler { [weak self] feedback in
+            self?.releaseSubmittedSlot(slotIndex)
+            onCompleted(feedback.error, feedback.gpuStartTime, feedback.gpuEndTime)
         }
         queue.waitForEvent(readyEvent, value: eventValue)
         queue.waitForDrawable(drawable)
-        queue.commit([commandBuffer], options: options)
+        queue.commit([slot.commandBuffer], options: options)
         queue.signalDrawable(drawable)
         drawable.present()
     }
@@ -426,7 +518,19 @@ final class Metal4PresentPath {
     /// is not left open across frames. Idempotent, so every early return can call
     /// it without tracking whether an earlier one already did.
     func abandonFrame() {
-        endRecording()
+        slotLock.lock()
+        guard let index = recordingSlotIndex else {
+            slotLock.unlock()
+            return
+        }
+        let slot = slots[index]
+        recordingSlotIndex = nil
+        slotLock.unlock()
+
+        slot.commandBuffer.endCommandBuffer()
+        slotLock.lock()
+        slot.state = .free
+        slotLock.unlock()
     }
 }
 
@@ -508,15 +612,22 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     }
 
     private static let bufferCount = 3
-    // Keep one source frame's GPU work in flight. Ownership is released when
-    // the real present command buffer completes: at that point the drawable is
-    // fully populated and the source slot is reusable even if WindowServer's
-    // presented callback arrives several refreshes later.
-    private static let maxOutstandingFrames = 1
+    // Keep the active source plus one ready successor. Without the successor,
+    // the render thread starts the next source after real-present completion and
+    // regularly misses the immediately following 120 Hz display update.
+    private static let maxOutstandingFrames = 2
     private static let diagnosticCapacity = 256
     private static let sourceAdmissionCapacity = 1024
     private static let presentationCallbackTimeout: CFTimeInterval = 0.25
     private static let displayUpdateStarvationTimeout: CFTimeInterval = 0.75
+    // Six 120 Hz refresh periods distinguish a briefly busy presenter from an
+    // occluded/locked display. A foreground source waits for ownership; once
+    // updates go stale, later sources immediately switch to latest-source-wins.
+    private static let displayUpdateActivityTimeout: CFTimeInterval = 0.05
+    // Bound foreground admission independently of callback activity. This still
+    // allows several refreshes for a genuine GPU spike, while a wedged presenter
+    // cannot hold Minecraft's render thread indefinitely.
+    private static let maxActiveAdmissionWait: CFTimeInterval = 0.05
 
     private let device: MTLDevice
     private let layer: CAMetalLayer
@@ -524,7 +635,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private let readyEvent: MTLSharedEvent
     private var frameInterpolator: any MTLFXFrameInterpolator
     private var copyPipeline: MTLRenderPipelineState
-    private var overlayPipeline: MTLRenderPipelineState
+    private var fusedPresentPipeline: MTLRenderPipelineState
     private var copySampler: MTLSamplerState
     private var copyFormat: MTLPixelFormat
     // Metal 4 present path (spec M4), non-nil only when metallum.opt.metal4Present
@@ -557,8 +668,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var lastPresentedIndex: Int?
     private var lastPresentedTimestamp: CFTimeInterval?
     private var displayLink: CAMetalDisplayLink?
+    private var displayLinkInstallationTime: CFTimeInterval?
+    private var lastDisplayUpdateTime: CFTimeInterval?
     private var currentFrame: PendingFrame?
     private var currentLifecycle: MetalFrameGenerationLifecycle?
+    private var queuedFrame: PendingFrame?
+    private var queuedLifecycle: MetalFrameGenerationLifecycle?
     private var activePreviousIndex: Int?
     private var activeShouldResetHistory = true
     private var activeDeltaTime: Float = 1.0 / 60.0
@@ -595,7 +710,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         guard let presentQueue = device.makeCommandQueue(),
               let readyEvent = device.makeSharedEvent(),
               let copyPipeline = buildPresentPipeline(device: device, colorFormat: layer.pixelFormat),
-              let overlayPipeline = buildOverlayPipeline(device: device, colorFormat: layer.pixelFormat),
+              let fusedPresentPipeline = buildFusedPresentPipeline(
+                  device: device,
+                  colorFormat: layer.pixelFormat
+              ),
               let copySampler = buildPresentSampler(device: device, filter: .linear),
               let frameInterpolator = Self.makeFrameInterpolator(
                   device: device,
@@ -613,7 +731,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.readyEvent = readyEvent
         self.frameInterpolator = frameInterpolator
         self.copyPipeline = copyPipeline
-        self.overlayPipeline = overlayPipeline
+        self.fusedPresentPipeline = fusedPresentPipeline
         self.copySampler = copySampler
         self.copyFormat = layer.pixelFormat
         self.outputWidth = sceneColor.width
@@ -623,10 +741,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.outputFormat = sceneColor.pixelFormat
         self.depthFormat = depth.pixelFormat
         self.motionFormat = motion.pixelFormat
-        // A two-drawable pool asks WindowServer for the lowest possible
-        // compositing latency. With three drawables, a windowed 120 Hz display
-        // can report a four-refresh presentation horizon and continuously
-        // supersede every other submitted drawable before scanout.
+        // Two drawables are sufficient for the generated/real pair. A three-
+        // drawable Quick Play A/B did not improve the presented-frame ratio.
         layer.maximumDrawableCount = 2
         // A hidden or minimized window may not recycle drawables promptly.
         // Let the present thread time out and fall back to the rendered frame
@@ -800,9 +916,22 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             return nil
         }
 
-        let colorUsage: MTLTextureUsage = [.shaderRead, .shaderWrite, .renderTarget]
-        let depthUsage: MTLTextureUsage = [.shaderRead, .renderTarget]
-        let motionUsage: MTLTextureUsage = [.shaderRead, .shaderWrite, .renderTarget]
+        // Use the exact MetalFX requirements plus the present shader read.
+        // On current Apple GPUs the inputs remain read-only, preserving lossless
+        // compression, while this stays correct if a future implementation
+        // advertises a stricter minimum usage.
+        var sceneUsage = frameInterpolator.colorTextureUsage.union(.shaderRead)
+        var uiUsage = frameInterpolator.uiTextureUsage.union(.shaderRead)
+        var depthUsage = frameInterpolator.depthTextureUsage.union(.shaderRead)
+        var motionUsage = frameInterpolator.motionTextureUsage.union(.shaderRead)
+        var interpolationUsage = frameInterpolator.outputTextureUsage.union(.shaderRead)
+        if let metal4Interpolator {
+            sceneUsage.formUnion(metal4Interpolator.colorTextureUsage)
+            uiUsage.formUnion(metal4Interpolator.uiTextureUsage)
+            depthUsage.formUnion(metal4Interpolator.depthTextureUsage)
+            motionUsage.formUnion(metal4Interpolator.motionTextureUsage)
+            interpolationUsage.formUnion(metal4Interpolator.outputTextureUsage)
+        }
         var newScene: [MTLTexture] = []
         var newComposed: [MTLTexture] = []
         var newDepth: [MTLTexture] = []
@@ -814,13 +943,13 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 pixelFormat: outputFormat,
                 width: outputWidth,
                 height: outputHeight,
-                usage: colorUsage,
+                usage: sceneUsage,
                 label: "Frame Generation Scene \(index)"
             ), let uiOverlay = makeTexture(
                 pixelFormat: outputFormat,
                 width: uiWidth,
                 height: uiHeight,
-                usage: colorUsage,
+                usage: uiUsage,
                 label: "Frame Generation UI Overlay \(index)"
             ), let depth = makeTexture(
                 pixelFormat: depthFormat,
@@ -845,7 +974,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 pixelFormat: outputFormat,
                 width: outputWidth,
                 height: outputHeight,
-                usage: colorUsage,
+                usage: interpolationUsage,
                 label: "Frame Generation Interpolation \(index)"
             ) else {
                 return nil
@@ -967,7 +1096,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             depth: textureSet.depth[0],
             motion: textureSet.motion[0]
         ), let newCopyPipeline = buildPresentPipeline(device: device, colorFormat: layer.pixelFormat),
-           let newOverlayPipeline = buildOverlayPipeline(device: device, colorFormat: layer.pixelFormat) else {
+           let newFusedPresentPipeline = buildFusedPresentPipeline(
+               device: device,
+               colorFormat: layer.pixelFormat
+           ) else {
             return false
         }
         installTextureSet(
@@ -1002,7 +1134,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             }
         }
         self.copyPipeline = newCopyPipeline
-        self.overlayPipeline = newOverlayPipeline
+        self.fusedPresentPipeline = newFusedPresentPipeline
         self.copyFormat = layer.pixelFormat
         self.nextBufferIndex = 0
         self.lastPresentedIndex = nil
@@ -1056,21 +1188,50 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
 
         let waitStart = CACurrentMediaTime()
+        let absoluteAdmissionDeadline = waitStart + Self.maxActiveAdmissionWait
+        var cancelledForAdmission = false
         condition.lock()
-        if outstandingFrames >= Self.maxOutstandingFrames && !stopping {
-            // The display link can stop producing updates for an occluded,
-            // hidden or locked window. Waiting for its starvation timeout here
-            // serializes WindowServer eligibility into Minecraft's render rate
-            // (0.75 seconds per source in the locked-console probe). A newer
-            // source makes an unpresented older source obsolete: cancel it and
-            // wait only for already-submitted GPU work to drain before reusing
-            // its private textures.
-            supersededSourceFrames += 1
-            cancelCurrentSourceLocked(reason: "superseded by newer source")
-            condition.broadcast()
-        }
         while outstandingFrames >= Self.maxOutstandingFrames && !stopping {
-            condition.wait()
+            if cancelledForAdmission {
+                // Cancellation cannot release a slot that still has GPU work in
+                // flight. Wait for its completion handler before reusing it.
+                condition.wait()
+                continue
+            }
+            let admissionNow = CACurrentMediaTime()
+            if lastDisplayUpdateTime == nil {
+                let installationTime = displayLinkInstallationTime ?? waitStart
+                let initialDeadline = min(
+                    installationTime + Self.displayUpdateActivityTimeout,
+                    absoluteAdmissionDeadline
+                )
+                if admissionNow < initialDeadline {
+                    _ = condition.wait(until: Date(
+                        timeIntervalSinceNow: initialDeadline - admissionNow
+                    ))
+                    continue
+                }
+            }
+            switch MetalFrameGenerationAdmissionPolicy.decide(
+                now: admissionNow,
+                lastDisplayUpdateTime: lastDisplayUpdateTime,
+                activityTimeout: Self.displayUpdateActivityTimeout,
+                absoluteDeadline: absoluteAdmissionDeadline
+            ) {
+            case .wait(let activityDeadline):
+                let remaining = max(0.0, activityDeadline - CACurrentMediaTime())
+                if remaining > 0.0 {
+                    _ = condition.wait(until: Date(timeIntervalSinceNow: remaining))
+                }
+            case .supersede:
+                // Hidden, occluded and locked windows stop receiving display
+                // updates. In that state an unpresented source is obsolete;
+                // cancel it and wait only for submitted GPU work to drain.
+                supersededSourceFrames += 1
+                cancelAllSourcesLocked(reason: "superseded after display became inactive")
+                cancelledForAdmission = true
+                condition.broadcast()
+            }
         }
         guard !stopping else {
             condition.unlock()
@@ -1187,9 +1348,14 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         condition.lock()
         var lifecycle = MetalFrameGenerationLifecycle(sourceFrameID: sourceFrameID)
         _ = lifecycle.submitInput()
-        currentFrame = frame
-        currentLifecycle = lifecycle
-        displayUpdateStarvationTimeoutAt = timestamp + Self.displayUpdateStarvationTimeout
+        if currentFrame == nil {
+            currentFrame = frame
+            currentLifecycle = lifecycle
+            displayUpdateStarvationTimeoutAt = timestamp + Self.displayUpdateStarvationTimeout
+        } else {
+            queuedFrame = frame
+            queuedLifecycle = lifecycle
+        }
         condition.signal()
         condition.unlock()
 
@@ -1213,8 +1379,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         gpuEndTime: CFTimeInterval
     ) {
         condition.lock()
-        guard let frame = currentFrame, frame.eventValue == eventValue,
-              var lifecycle = currentLifecycle else {
+        let isCurrent = currentFrame?.eventValue == eventValue
+        guard let frame = isCurrent ? currentFrame : queuedFrame,
+              frame.eventValue == eventValue,
+              var lifecycle = isCurrent ? currentLifecycle : queuedLifecycle else {
             condition.unlock()
             return
         }
@@ -1235,8 +1403,13 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             succeeded: succeeded,
             reason: succeeded ? nil : "input command buffer failed: \(String(describing: error))"
         )
-        currentLifecycle = lifecycle
-        applyLifecycleActionsLocked(actions, eventValue: eventValue)
+        if isCurrent {
+            currentLifecycle = lifecycle
+            applyLifecycleActionsLocked(actions, eventValue: eventValue)
+        } else {
+            queuedLifecycle = lifecycle
+            applyQueuedLifecycleActionsLocked(actions, eventValue: eventValue)
+        }
         condition.broadcast()
         condition.unlock()
 
@@ -1286,6 +1459,38 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         return true
     }
 
+    private func encodeComposite(
+        commandBuffer: MTLCommandBuffer,
+        scene: MTLTexture,
+        ui: MTLTexture,
+        destination: MTLTexture,
+        label: String
+    ) -> Bool {
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = destination
+        descriptor.colorAttachments[0].loadAction = .dontCare
+        descriptor.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+            return false
+        }
+        encoder.label = label
+        encoder.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: Double(destination.width),
+            height: Double(destination.height),
+            znear: 0.0,
+            zfar: 1.0
+        ))
+        encoder.setRenderPipelineState(fusedPresentPipeline)
+        encoder.setFragmentTexture(scene, index: 0)
+        encoder.setFragmentTexture(ui, index: 1)
+        encoder.setFragmentSamplerState(copySampler, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        return true
+    }
+
     private func installDisplayLink() -> Bool {
         let link = CAMetalDisplayLink(metalLayer: layer)
         link.delegate = self
@@ -1295,6 +1500,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         link.preferredFrameLatency = 1.0
         link.add(to: RunLoop.current, forMode: .default)
         displayLink = link
+        condition.lock()
+        displayLinkInstallationTime = CACurrentMediaTime()
+        condition.broadcast()
+        condition.unlock()
         return true
     }
 
@@ -1357,6 +1566,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         nextDisplayUpdateID += 1
 
         let now = CACurrentMediaTime()
+        lastDisplayUpdateTime = now
+        condition.broadcast()
         expireRealPresentationLocked(now: now)
         expireDisplayUpdateStarvationLocked(now: now)
 
@@ -1417,7 +1628,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private func runWorker() {
         guard installDisplayLink() else {
             condition.lock()
-            cancelCurrentSourceLocked(reason: "display link installation failed")
+            stopping = true
+            cancelAllSourcesLocked(reason: "display link installation failed")
             workerExited = true
             condition.broadcast()
             condition.unlock()
@@ -1492,35 +1704,18 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameInterpolator.isDepthReversed = true
             frameInterpolator.shouldResetHistory = work.shouldResetHistory
             frameInterpolator.encode(commandBuffer: commandBuffer)
-            guard encodeCopy(
-                commandBuffer: commandBuffer,
-                source: interpolationOutputs[frame.index],
-                destination: work.update.drawable.texture,
-                label: "Frame Generation Interpolation Copy"
-            ) else {
-                failPresentationBeforeSubmission(work, reason: "interpolated copy encoder unavailable")
-                return
-            }
-        } else {
-            guard encodeCopy(
-                commandBuffer: commandBuffer,
-                source: sceneBuffers[frame.index],
-                destination: work.update.drawable.texture,
-                label: "Frame Generation Rendered Copy"
-            ) else {
-                failPresentationBeforeSubmission(work, reason: "rendered copy encoder unavailable")
-                return
-            }
         }
-        guard encodeCopy(
+        let presentScene = work.step == .generated
+                ? interpolationOutputs[frame.index]
+                : sceneBuffers[frame.index]
+        guard encodeComposite(
             commandBuffer: commandBuffer,
-            source: uiOverlayBuffers[frame.index],
+            scene: presentScene,
+            ui: uiOverlayBuffers[frame.index],
             destination: work.update.drawable.texture,
-            pipeline: overlayPipeline,
-            loadAction: .load,
-            label: "Frame Generation Native UI Overlay"
+            label: "Frame Generation Fused Scene and UI"
         ) else {
-            failPresentationBeforeSubmission(work, reason: "native UI overlay encoder unavailable")
+            failPresentationBeforeSubmission(work, reason: "fused present encoder unavailable")
             return
         }
 
@@ -1607,9 +1802,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     ///     issued inside submit() rather than up front. Every early return below
     ///     happens before any wait has been placed on the queue timeline; see
     ///     Metal4PresentPath.submit for what issuing it early would wedge.
-    ///   - the command buffer is reusable and must be closed on every path out of
-    ///     here, which is what abandonFrame() is for. All four early returns call
-    ///     it, and it is idempotent.
+    ///   - the selected Metal 4 slot must be closed on every path out of here,
+    ///     which is what abandonFrame() is for. All early returns after beginFrame
+    ///     call it, and it is idempotent. Slot exhaustion returns before encoding.
     @available(macOS 26.0, *)
     private func presentMetal4(
         _ work: PresentationWork,
@@ -1617,7 +1812,18 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         interpolator: any MTL4FXFrameInterpolator
     ) {
         let frame = work.frame
-        let commandBuffer = path.beginFrame()
+        guard let commandBuffer = path.beginFrame() else {
+            condition.lock()
+            droppedDisplayUpdates += 1
+            appendDiagnosticLocked(
+                sourceFrameID: frame.sourceFrameID,
+                frameKind: diagnosticKind(work.step),
+                update: work.update,
+                outcome: "dropped:metal4-in-flight-saturated"
+            )
+            condition.unlock()
+            return
+        }
 
         if work.step == .generated {
             interpolator.colorTexture = sceneBuffers[frame.index]
@@ -1639,43 +1845,21 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             interpolator.isDepthReversed = true
             interpolator.shouldResetHistory = work.shouldResetHistory
             interpolator.encode(commandBuffer: commandBuffer)
-            guard path.encodeCopy(
-                commandBuffer: commandBuffer,
-                source: interpolationOutputs[frame.index],
-                destination: work.update.drawable.texture,
-                pipeline: copyPipeline,
-                sampler: copySampler,
-                label: "Frame Generation Interpolation Copy"
-            ) else {
-                path.abandonFrame()
-                failPresentationBeforeSubmission(work, reason: "interpolated copy encoder unavailable")
-                return
-            }
-        } else {
-            guard path.encodeCopy(
-                commandBuffer: commandBuffer,
-                source: sceneBuffers[frame.index],
-                destination: work.update.drawable.texture,
-                pipeline: copyPipeline,
-                sampler: copySampler,
-                label: "Frame Generation Rendered Copy"
-            ) else {
-                path.abandonFrame()
-                failPresentationBeforeSubmission(work, reason: "rendered copy encoder unavailable")
-                return
-            }
         }
-        guard path.encodeCopy(
+        let presentScene = work.step == .generated
+                ? interpolationOutputs[frame.index]
+                : sceneBuffers[frame.index]
+        guard path.encodeComposite(
             commandBuffer: commandBuffer,
-            source: uiOverlayBuffers[frame.index],
+            scene: presentScene,
+            ui: uiOverlayBuffers[frame.index],
             destination: work.update.drawable.texture,
-            pipeline: overlayPipeline,
+            pipeline: fusedPresentPipeline,
             sampler: copySampler,
-            loadAction: .load,
-            label: "Frame Generation Native UI Overlay"
+            label: "Frame Generation Fused Scene and UI"
         ) else {
             path.abandonFrame()
-            failPresentationBeforeSubmission(work, reason: "native UI overlay encoder unavailable")
+            failPresentationBeforeSubmission(work, reason: "fused present encoder unavailable")
             return
         }
 
@@ -1918,6 +2102,43 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         realPresentationTimeoutAt = nil
         displayUpdateStarvationTimeoutAt = nil
         completeFrameLocked()
+        promoteQueuedSourceLocked()
+    }
+
+    private func applyQueuedLifecycleActionsLocked(
+        _ actions: [MetalFrameGenerationLifecycleAction],
+        eventValue: UInt64
+    ) {
+        if actions.contains(.invalidateHistory) {
+            historyOwnership.invalidateAll()
+            lastPresentedIndex = nil
+            lastPresentedTimestamp = nil
+        }
+        guard actions.contains(.releaseOwnership),
+              queuedFrame?.eventValue == eventValue else {
+            return
+        }
+        queuedFrame = nil
+        queuedLifecycle = nil
+        completeFrameLocked()
+    }
+
+    private func promoteQueuedSourceLocked() {
+        guard currentFrame == nil,
+              let frame = queuedFrame,
+              let lifecycle = queuedLifecycle else {
+            return
+        }
+        currentFrame = frame
+        currentLifecycle = lifecycle
+        queuedFrame = nil
+        queuedLifecycle = nil
+        activePreviousIndex = nil
+        activeShouldResetHistory = true
+        activeDeltaTime = 1.0 / 60.0
+        displayUpdateStarvationTimeoutAt = CACurrentMediaTime()
+                + Self.displayUpdateStarvationTimeout
+        condition.broadcast()
     }
 
     private func cancelCurrentSourceLocked(reason: String) {
@@ -1933,9 +2154,25 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         applyLifecycleActionsLocked(actions, eventValue: frame.eventValue)
     }
 
+    private func cancelQueuedSourceLocked(reason: String) {
+        guard let frame = queuedFrame, var lifecycle = queuedLifecycle else {
+            return
+        }
+        let actions = lifecycle.cancel(reason: reason)
+        queuedLifecycle = lifecycle
+        applyQueuedLifecycleActionsLocked(actions, eventValue: frame.eventValue)
+    }
+
+    private func cancelAllSourcesLocked(reason: String) {
+        // Cancel the successor first so releasing the active source cannot
+        // promote uncancelled work during resize, shutdown or display loss.
+        cancelQueuedSourceLocked(reason: reason)
+        cancelCurrentSourceLocked(reason: reason)
+    }
+
     private func cancelAndDrain(reason: String) {
         condition.lock()
-        cancelCurrentSourceLocked(reason: reason)
+        cancelAllSourcesLocked(reason: reason)
         condition.broadcast()
         while outstandingFrames > 0 {
             condition.wait()
@@ -2042,8 +2279,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             return
         }
         if let outputPath {
+            let presentPath = metal4Path != nil && metal4Interpolator != nil ? "metal4" : "metal3"
             let records: [[String: Any]] = snapshot.map { diagnostic in
                 [
+                    "presentPath": presentPath,
                     "sourceFrameID": diagnostic.sourceFrameID,
                     "frameKind": diagnostic.frameKind,
                     "displayUpdateID": diagnostic.displayUpdateID,
@@ -2171,8 +2410,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
 
     func validationTimelineSnapshot() -> [MetalFrameGenerationDiagnosticSnapshot] {
         condition.lock()
+        let presentPath = metal4Path != nil && metal4Interpolator != nil ? "metal4" : "metal3"
         let snapshot = diagnostics.map {
             MetalFrameGenerationDiagnosticSnapshot(
+                presentPath: presentPath,
                 sourceFrameID: $0.sourceFrameID,
                 frameKind: $0.frameKind,
                 displayUpdateID: $0.displayUpdateID,
@@ -2214,7 +2455,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             // The callback checks `stopping` before claiming work, so no new
             // presentation is committed from this point forward.
             stopping = true
-            cancelCurrentSourceLocked(reason: "shutdown")
+            cancelAllSourcesLocked(reason: "shutdown")
             condition.broadcast()
         }
         while !workerExited || outstandingFrames > 0 {
@@ -2358,6 +2599,34 @@ private func fullscreenMslSource(flipY: Bool) -> String {
       sampler smp [[sampler(0)]]
     ) {
       return tex.sample(smp, in.uv);
+    }
+
+    fragment float4 metallum_present_composite_fs(
+      PresentVertexOut in [[stage_in]],
+      texture2d<float> scene [[texture(0)]],
+      texture2d<float> ui [[texture(1)]],
+      sampler smp [[sampler(0)]]
+    ) {
+      float4 sceneValue = scene.sample(smp, in.uv);
+      float widthRatio = float(ui.get_width()) / float(max(scene.get_width(), 1u));
+      float sharpenStrength = clamp((widthRatio - 1.0) * 0.55, 0.0, 0.22);
+      if (sharpenStrength > 0.0) {
+        float2 texel = 1.0 / float2(scene.get_width(), scene.get_height());
+        float3 north = scene.sample(smp, in.uv + float2(0.0, -texel.y)).rgb;
+        float3 south = scene.sample(smp, in.uv + float2(0.0, texel.y)).rgb;
+        float3 west = scene.sample(smp, in.uv + float2(-texel.x, 0.0)).rgb;
+        float3 east = scene.sample(smp, in.uv + float2(texel.x, 0.0)).rgb;
+        float3 neighborhoodMin = min(sceneValue.rgb, min(min(north, south), min(west, east)));
+        float3 neighborhoodMax = max(sceneValue.rgb, max(max(north, south), max(west, east)));
+        float3 laplacian = 4.0 * sceneValue.rgb - north - south - west - east;
+        sceneValue.rgb = clamp(
+          sceneValue.rgb + sharpenStrength * laplacian,
+          neighborhoodMin,
+          neighborhoodMax
+        );
+      }
+      float4 uiValue = ui.sample(smp, in.uv);
+      return uiValue + sceneValue * (1.0 - uiValue.a);
     }
     """
 }
@@ -2546,6 +2815,28 @@ private func buildOverlayPipeline(
         return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create native UI overlay pipeline: %@", String(describing: error))
+        return nil
+    }
+}
+
+private func buildFusedPresentPipeline(
+    device: MTLDevice,
+    colorFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    do {
+        let library = try device.makeLibrary(source: presentMslSource(), options: nil)
+        guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
+              let fragmentFunction = library.makeFunction(name: "metallum_present_composite_fs") else {
+            return nil
+        }
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertexFunction
+        descriptor.fragmentFunction = fragmentFunction
+        descriptor.colorAttachments[0].pixelFormat = colorFormat
+        descriptor.colorAttachments[0].isBlendingEnabled = false
+        return try device.makeRenderPipelineState(descriptor: descriptor)
+    } catch {
+        NSLog("[metallum] Failed to create fused present pipeline: %@", String(describing: error))
         return nil
     }
 }
@@ -3245,6 +3536,264 @@ private func motionMergeV2MslSource() -> String {
     """
 }
 
+private func motionFusedV2MslSource() -> String {
+    """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct FusedMotionUniforms {
+      float4x4 currentViewProjection;
+      float4x4 inverseCurrentViewProjection;
+      float4x4 previousViewProjection;
+      float4 viewport;
+      // x = preserve reactive, y = sky far-plane motion,
+      // z = previous depth valid, w = reversed depth.
+      uint4 flags;
+      // x = reprojection depth dilation, y = emit diagnostic textures,
+      // z = first-person hand depth is bound.
+      uint4 options;
+      // x = depth-edge reactive cap, y = disocclusion reactive cap,
+      // z = first-person reactive boost.
+      float4 params;
+    };
+
+    inline bool fusedValidDepth(float depth) {
+      return isfinite(depth) && depth > 0.00001 && depth <= 1.00001;
+    }
+
+    inline float fusedDepthBoundary(
+      texture2d<float, access::read> depthTexture,
+      uint2 pixel,
+      uint width,
+      uint height,
+      float depth,
+      float cap
+    ) {
+      bool centerValid = fusedValidDepth(depth);
+      float gradient = 0.0;
+      bool validityBoundary = false;
+      for (int offsetY = -1; offsetY <= 1; ++offsetY) {
+        for (int offsetX = -1; offsetX <= 1; ++offsetX) {
+          if (offsetX == 0 && offsetY == 0) continue;
+          int2 samplePosition = int2(pixel) + int2(offsetX, offsetY);
+          if (samplePosition.x < 0 || samplePosition.y < 0
+              || samplePosition.x >= int(width) || samplePosition.y >= int(height)) continue;
+          float neighborDepth = depthTexture.read(uint2(samplePosition)).r;
+          bool neighborValid = fusedValidDepth(neighborDepth);
+          if (centerValid != neighborValid) {
+            validityBoundary = true;
+          } else if (centerValid) {
+            gradient = max(gradient, abs(depth - neighborDepth));
+          }
+        }
+      }
+      return validityBoundary ? cap : min(cap, clamp(gradient * 4.0, 0.0, 1.0));
+    }
+
+    inline float quantizeUnorm8(float value) {
+      return rint(clamp(value, 0.0, 1.0) * 255.0) / 255.0;
+    }
+
+    kernel void metallum_motion_fused_v2(
+      texture2d<float, access::read> depthTexture [[texture(0)]],
+      texture2d<half, access::read> objectMotionTexture [[texture(1)]],
+      texture2d<float, access::read> objectValidityTexture [[texture(2)]],
+      texture2d<float, access::read> previousDepthTexture [[texture(3)]],
+      texture2d<half, access::write> motionTexture [[texture(4)]],
+      texture2d<half, access::read_write> reactiveTexture [[texture(5)]],
+      texture2d<half, access::write> cameraDiagnosticTexture [[texture(6)]],
+      texture2d<half, access::write> disocclusionDiagnosticTexture [[texture(7)]],
+      texture2d<float, access::read> handDepthTexture [[texture(8)]],
+      constant FusedMotionUniforms& u [[buffer(0)]],
+      uint2 pixel [[thread_position_in_grid]]) {
+      uint width = uint(u.viewport.x);
+      uint height = uint(u.viewport.y);
+      if (pixel.x >= width || pixel.y >= height) return;
+
+      float currentDepth = depthTexture.read(pixel).r;
+      float reconstructionDepth = currentDepth;
+      float2 cameraMotion = float2(0.0);
+      float reactive = u.flags.x != 0u ? float(reactiveTexture.read(pixel).r) : 0.0;
+      float disocclusion = 0.0;
+      bool reconstruct = fusedValidDepth(reconstructionDepth);
+      if (!reconstruct && u.flags.y != 0u
+          && isfinite(reconstructionDepth)
+          && reconstructionDepth >= 0.0 && reconstructionDepth <= 0.00001) {
+        reconstructionDepth = 0.00002;
+        reconstruct = true;
+      }
+      if (!reconstruct) {
+        disocclusion = 1.0;
+        reactive = 1.0;
+      } else {
+        float2 uv = (float2(pixel) + 0.5) / float2(width, height);
+        float4 currentNdc = float4(
+          uv.x * 2.0 - 1.0,
+          1.0 - uv.y * 2.0,
+          reconstructionDepth,
+          1.0
+        );
+        float4 world = u.inverseCurrentViewProjection * currentNdc;
+        if (!isfinite(world.w) || abs(world.w) <= 0.000001) {
+          disocclusion = 1.0;
+          reactive = 1.0;
+        } else {
+          world /= world.w;
+          float4 currentClip = u.currentViewProjection * world;
+          float4 previousClip = u.previousViewProjection * world;
+          if (!isfinite(currentClip.w) || abs(currentClip.w) <= 0.000001
+              || !isfinite(previousClip.w) || abs(previousClip.w) <= 0.000001) {
+            disocclusion = 1.0;
+            reactive = 1.0;
+          } else {
+            currentClip /= currentClip.w;
+            previousClip /= previousClip.w;
+            cameraMotion = float2(
+              previousClip.x - currentClip.x,
+              currentClip.y - previousClip.y
+            );
+            if (previousClip.x < -1.0 || previousClip.x > 1.0
+                || previousClip.y < -1.0 || previousClip.y > 1.0
+                || !all(isfinite(cameraMotion))
+                || any(abs(cameraMotion) > float2(32.0))) {
+              disocclusion = 1.0;
+              reactive = 1.0;
+              cameraMotion = float2(0.0);
+            }
+          }
+        }
+      }
+
+      reactive = max(
+        reactive,
+        fusedDepthBoundary(
+          depthTexture,
+          pixel,
+          width,
+          height,
+          reconstructionDepth,
+          u.params.x
+        )
+      );
+      if (!all(isfinite(cameraMotion))) {
+        cameraMotion = float2(0.0);
+        disocclusion = 1.0;
+        reactive = 1.0;
+      }
+
+      // The legacy path stores camera motion in RG16F and reactive in R8 before
+      // the merge dispatch reads them. Preserve those quantization points so
+      // fused/legacy validation compares semantics rather than precision drift.
+      half2 storedCameraMotion = half2(cameraMotion);
+      float2 selected = float2(storedCameraMotion);
+      reactive = quantizeUnorm8(reactive);
+
+      float objectValid = objectValidityTexture.read(pixel).r;
+      if (isfinite(objectValid) && objectValid > 0.5) {
+        float2 objectMotion = float2(objectMotionTexture.read(pixel).rg);
+        if (all(isfinite(objectMotion)) && all(abs(objectMotion) <= float2(32.0))) {
+          selected = objectMotion;
+        } else {
+          reactive = 1.0;
+        }
+      }
+
+      if (u.options.z != 0u) {
+        float handDepth = handDepthTexture.read(pixel).r;
+        if (isfinite(handDepth) && handDepth > 0.0000001) {
+          // The hand target is cleared immediately before first-person
+          // rendering. Covered pixels are camera-locked, so zero motion is the
+          // exact camera component; swing/bob remains protected by reactivity.
+          selected = float2(0.0);
+          reactive = max(reactive, quantizeUnorm8(u.params.z));
+        }
+      }
+
+      if (u.flags.z != 0u) {
+        float reprojectedCurrentDepth = currentDepth;
+        bool skyCurrent = u.flags.y != 0u && isfinite(reprojectedCurrentDepth)
+            && reprojectedCurrentDepth >= 0.0 && reprojectedCurrentDepth <= 0.00001;
+        if (skyCurrent) {
+          reprojectedCurrentDepth = 0.00002;
+        }
+        float2 previousPixel = float2(pixel) + 0.5
+            + selected * float2(width, height) * 0.5;
+        if (!fusedValidDepth(reprojectedCurrentDepth)
+            || !all(isfinite(previousPixel))
+            || previousPixel.x < 0.0 || previousPixel.y < 0.0
+            || previousPixel.x >= float(width) || previousPixel.y >= float(height)) {
+          disocclusion = 1.0;
+        } else {
+          uint2 samplePixel = uint2(previousPixel);
+          int radius = u.options.x != 0u ? 1 : 0;
+          float previousDepth = 0.0;
+          bool skyPrevious = false;
+          float bestDelta = -1.0;
+          for (int dy = -radius; dy <= radius; dy++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+              int2 probe = int2(samplePixel) + int2(dx, dy);
+              if (probe.x < 0 || probe.y < 0
+                  || probe.x >= int(width) || probe.y >= int(height)) continue;
+              float probeDepth = previousDepthTexture.read(uint2(probe)).r;
+              bool probeSky = u.flags.y != 0u && isfinite(probeDepth)
+                  && probeDepth >= 0.0 && probeDepth <= 0.00001;
+              if (probeSky) {
+                probeDepth = 0.00002;
+              }
+              float delta = isfinite(probeDepth)
+                  ? abs(probeDepth - reprojectedCurrentDepth)
+                  : 1.0e30;
+              if (bestDelta < 0.0 || delta < bestDelta) {
+                bestDelta = delta;
+                previousDepth = probeDepth;
+                skyPrevious = probeSky;
+              }
+            }
+          }
+          if (skyPrevious && !skyCurrent) {
+            disocclusion = 1.0;
+          } else {
+            float threshold = max(0.0025, abs(reprojectedCurrentDepth) * 0.01);
+            bool wasOccluded = u.flags.w != 0u
+                ? previousDepth > reprojectedCurrentDepth + threshold
+                : previousDepth < reprojectedCurrentDepth - threshold;
+            if (!fusedValidDepth(previousDepth) || wasOccluded) {
+              disocclusion = 1.0;
+            }
+          }
+        }
+      }
+
+      if (!isfinite(disocclusion) || disocclusion > 0.5) {
+        reactive = max(reactive, u.params.y);
+      }
+      if (!all(isfinite(selected)) || any(abs(selected) > float2(32.0))) {
+        selected = float2(0.0);
+        reactive = 1.0;
+      }
+
+      motionTexture.write(
+        half4(half(selected.x), half(selected.y), half(0.0), half(0.0)),
+        pixel
+      );
+      reactiveTexture.write(
+        half4(half(clamp(reactive, 0.0, 1.0)), half(0.0), half(0.0), half(0.0)),
+        pixel
+      );
+      if (u.options.y != 0u) {
+        cameraDiagnosticTexture.write(
+          half4(storedCameraMotion.x, storedCameraMotion.y, half(0.0), half(0.0)),
+          pixel
+        );
+        disocclusionDiagnosticTexture.write(
+          half4(half(clamp(disocclusion, 0.0, 1.0)), half(0.0), half(0.0), half(0.0)),
+          pixel
+        );
+      }
+    }
+    """
+}
+
 private func motionClearV2MslSource() -> String {
     """
     #include <metal_stdlib>
@@ -3269,30 +3818,36 @@ private func motionClearV2MslSource() -> String {
 private func ensureMotionV2Pipelines(_ device: MTLDevice) -> (
     camera: MTLComputePipelineState,
     merge: MTLComputePipelineState,
+    fused: MTLComputePipelineState,
     clear: MTLComputePipelineState
 )? {
     if let camera = NativeState.motionV2Pipeline,
        let merge = NativeState.motionMergePipeline,
+       let fused = NativeState.motionFusedPipeline,
        let clear = NativeState.motionClearPipeline {
-        return (camera, merge, clear)
+        return (camera, merge, fused, clear)
     }
     do {
         let cameraLibrary = try device.makeLibrary(source: motionCameraV2MslSource(), options: nil)
         let mergeLibrary = try device.makeLibrary(source: motionMergeV2MslSource(), options: nil)
+        let fusedLibrary = try device.makeLibrary(source: motionFusedV2MslSource(), options: nil)
         let clearLibrary = try device.makeLibrary(source: motionClearV2MslSource(), options: nil)
         guard let cameraFunction = cameraLibrary.makeFunction(name: "metallum_motion_camera_v2"),
               let mergeFunction = mergeLibrary.makeFunction(name: "metallum_motion_merge_v2"),
+              let fusedFunction = fusedLibrary.makeFunction(name: "metallum_motion_fused_v2"),
               let clearFunction = clearLibrary.makeFunction(name: "metallum_motion_clear_v2") else {
             NSLog("[Metallum] MetalFX v2 motion compute function missing")
             return nil
         }
         let camera = try device.makeComputePipelineState(function: cameraFunction)
         let merge = try device.makeComputePipelineState(function: mergeFunction)
+        let fused = try device.makeComputePipelineState(function: fusedFunction)
         let clear = try device.makeComputePipelineState(function: clearFunction)
         NativeState.motionV2Pipeline = camera
         NativeState.motionMergePipeline = merge
+        NativeState.motionFusedPipeline = fused
         NativeState.motionClearPipeline = clear
-        return (camera, merge, clear)
+        return (camera, merge, fused, clear)
     } catch {
         NSLog("[Metallum] Failed to build MetalFX v2 motion pipelines: %@", String(describing: error))
         return nil
@@ -3784,6 +4339,7 @@ public func metallum_metalfx_encode_v2(
     _ device: MTLDevice,
     _ colorTexture: MTLTexture,
     _ depthTexture: MTLTexture,
+    _ handDepthTexture: MTLTexture?,
     _ cameraMotionTexture: MTLTexture,
     _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture,
@@ -3797,11 +4353,13 @@ public func metallum_metalfx_encode_v2(
     _ fence: MTLFence?,
     _ jitterX: Float,
     _ jitterY: Float,
+    _ handReactiveBoost: Float,
     _ inputWidth: Int32,
     _ inputHeight: Int32,
     _ reset: Int32,
     _ depthReversed: Int32,
-    _ preserveReactiveMask: Int32
+    _ preserveReactiveMask: Int32,
+    _ emitMotionDiagnostics: Int32
 ) -> Int32 {
     #if os(macOS) && canImport(MetalFX)
     if #available(macOS 13.0, *) {
@@ -3809,6 +4367,8 @@ public func metallum_metalfx_encode_v2(
             guard inputWidth > 0, inputHeight > 0,
                   colorTexture.width == Int(inputWidth), colorTexture.height == Int(inputHeight),
                   depthTexture.width == Int(inputWidth), depthTexture.height == Int(inputHeight),
+                  handDepthTexture == nil || (handDepthTexture?.width == Int(inputWidth)
+                      && handDepthTexture?.height == Int(inputHeight)),
                   cameraMotionTexture.width == Int(inputWidth), cameraMotionTexture.height == Int(inputHeight),
                   objectMotionTexture.width == Int(inputWidth), objectMotionTexture.height == Int(inputHeight),
                   objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
@@ -3886,66 +4446,20 @@ public func metallum_metalfx_encode_v2(
                 NativeState.metalFxScalers[key] = scaler as AnyObject
             }
 
-            guard let scaler = scalerObject as? any MTLFXTemporalScaler,
-                  let cameraEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                logMetalFxFailureOnce("temporal-v2-cast", "cached scaler or camera compute encoder unavailable")
+            guard let scaler = scalerObject as? any MTLFXTemporalScaler else {
+                logMetalFxFailureOnce("temporal-v2-cast", "cached temporal scaler unavailable")
                 return 0
             }
             NativeState.lastTemporalScalerForInterpolation = scalerObject
-            cameraEncoder.label = "MetalFX Camera Motion Reconstruction"
-            metal4BarrierComputeAfterRender(cameraEncoder)
-            if let fence {
-                cameraEncoder.waitForFence(fence)
-            }
-            var motionUniforms = MotionUniforms(
-                currentViewProjection: makeMatrix(currentViewProjection),
-                inverseCurrentViewProjection: makeMatrix(inverseCurrentViewProjection),
-                previousViewProjection: makeMatrix(previousViewProjection),
-                viewport: SIMD4<Float>(
-                    Float(inputWidth), Float(inputHeight),
-                    1.0 / Float(max(inputWidth, 1)), 1.0 / Float(max(inputHeight, 1))
-                ),
-                flags: SIMD4<UInt32>(
-                    preserveReactiveMask != 0 ? 1 : 0,
-                    NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
-                    0,
-                    0
-                ),
-                params: SIMD4<Float>(NativeState.reactiveTuning.z, 0.0, 0.0, 0.0)
-            )
-            cameraEncoder.setComputePipelineState(pipelines.camera)
-            cameraEncoder.setBytes(&motionUniforms, length: MemoryLayout<MotionUniforms>.stride, index: 0)
-            cameraEncoder.setTexture(depthTexture, index: 0)
-            cameraEncoder.setTexture(cameraMotionTexture, index: 1)
-            cameraEncoder.setTexture(disocclusionTexture, index: 2)
-            cameraEncoder.setTexture(reactiveTexture, index: 3)
-            let cameraWidth = max(1, min(pipelines.camera.threadExecutionWidth, 64))
-            let cameraHeight = max(1, min(8, pipelines.camera.maxTotalThreadsPerThreadgroup / cameraWidth))
-            cameraEncoder.dispatchThreads(
-                MTLSize(width: Int(inputWidth), height: Int(inputHeight), depth: 1),
-                threadsPerThreadgroup: MTLSize(width: cameraWidth, height: cameraHeight, depth: 1)
-            )
-            if let fence {
-                cameraEncoder.updateFence(fence)
-            }
-            cameraEncoder.endEncoding()
-
-            guard let mergeEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                logMetalFxFailureOnce("motion-v2-merge-encoder", "could not create v2 merge compute encoder")
-                return 0
-            }
-            mergeEncoder.label = "MetalFX Object and Camera Motion Merge"
-            // E9 is the one dispatch->dispatch edge: it reads the camera encoder above.
-            metal4BarrierComputeAfterCompute(mergeEncoder)
-            if let fence {
-                mergeEncoder.waitForFence(fence)
-            }
             struct MergeUniforms {
                 var viewport: SIMD4<UInt32>
                 var flags: SIMD4<UInt32>
                 var params: SIMD4<Float>
             }
-            var mergeUniforms = MergeUniforms(
+            let currentMatrix = makeMatrix(currentViewProjection)
+            let inverseMatrix = makeMatrix(inverseCurrentViewProjection)
+            let previousMatrix = makeMatrix(previousViewProjection)
+            let mergeUniforms = MergeUniforms(
                 viewport: SIMD4<UInt32>(
                     UInt32(inputWidth),
                     UInt32(inputHeight),
@@ -3960,26 +4474,152 @@ public func metallum_metalfx_encode_v2(
                 ),
                 params: SIMD4<Float>(NativeState.disocclusionReactiveCap, 0.0, 0.0, 0.0)
             )
-            mergeEncoder.setComputePipelineState(pipelines.merge)
-            mergeEncoder.setBytes(&mergeUniforms, length: MemoryLayout<MergeUniforms>.stride, index: 0)
-            mergeEncoder.setTexture(cameraMotionTexture, index: 0)
-            mergeEncoder.setTexture(objectMotionTexture, index: 1)
-            mergeEncoder.setTexture(objectValidityTexture, index: 2)
-            mergeEncoder.setTexture(disocclusionTexture, index: 3)
-            mergeEncoder.setTexture(motionTexture, index: 4)
-            mergeEncoder.setTexture(reactiveTexture, index: 5)
-            mergeEncoder.setTexture(previousDepthTexture, index: 6)
-            mergeEncoder.setTexture(depthTexture, index: 7)
-            let mergeWidth = max(1, min(pipelines.merge.threadExecutionWidth, 64))
-            let mergeHeight = max(1, min(8, pipelines.merge.maxTotalThreadsPerThreadgroup / mergeWidth))
-            mergeEncoder.dispatchThreads(
-                MTLSize(width: Int(inputWidth), height: Int(inputHeight), depth: 1),
-                threadsPerThreadgroup: MTLSize(width: mergeWidth, height: mergeHeight, depth: 1)
-            )
-            if let fence {
-                mergeEncoder.updateFence(fence)
+            if NativeState.legacyMotionPasses {
+                guard let cameraEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                    logMetalFxFailureOnce("motion-v2-camera-encoder", "could not create v2 camera compute encoder")
+                    return 0
+                }
+                cameraEncoder.label = "MetalFX Camera Motion Reconstruction"
+                metal4BarrierComputeAfterRender(cameraEncoder)
+                if let fence {
+                    cameraEncoder.waitForFence(fence)
+                }
+                var motionUniforms = MotionUniforms(
+                    currentViewProjection: currentMatrix,
+                    inverseCurrentViewProjection: inverseMatrix,
+                    previousViewProjection: previousMatrix,
+                    viewport: SIMD4<Float>(
+                        Float(inputWidth), Float(inputHeight),
+                        1.0 / Float(max(inputWidth, 1)), 1.0 / Float(max(inputHeight, 1))
+                    ),
+                    flags: SIMD4<UInt32>(
+                        preserveReactiveMask != 0 ? 1 : 0,
+                        NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
+                        0,
+                        0
+                    ),
+                    params: SIMD4<Float>(NativeState.reactiveTuning.z, 0.0, 0.0, 0.0)
+                )
+                cameraEncoder.setComputePipelineState(pipelines.camera)
+                cameraEncoder.setBytes(&motionUniforms, length: MemoryLayout<MotionUniforms>.stride, index: 0)
+                cameraEncoder.setTexture(depthTexture, index: 0)
+                cameraEncoder.setTexture(cameraMotionTexture, index: 1)
+                cameraEncoder.setTexture(disocclusionTexture, index: 2)
+                cameraEncoder.setTexture(reactiveTexture, index: 3)
+                let cameraWidth = max(1, min(pipelines.camera.threadExecutionWidth, 64))
+                let cameraHeight = max(1, min(8, pipelines.camera.maxTotalThreadsPerThreadgroup / cameraWidth))
+                cameraEncoder.dispatchThreads(
+                    MTLSize(width: Int(inputWidth), height: Int(inputHeight), depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: cameraWidth, height: cameraHeight, depth: 1)
+                )
+                if let fence {
+                    cameraEncoder.updateFence(fence)
+                }
+                cameraEncoder.endEncoding()
+
+                guard let mergeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                    logMetalFxFailureOnce("motion-v2-merge-encoder", "could not create v2 merge compute encoder")
+                    return 0
+                }
+                mergeEncoder.label = "MetalFX Object and Camera Motion Merge"
+                metal4BarrierComputeAfterCompute(mergeEncoder)
+                if let fence {
+                    mergeEncoder.waitForFence(fence)
+                }
+                var mutableMergeUniforms = mergeUniforms
+                mergeEncoder.setComputePipelineState(pipelines.merge)
+                mergeEncoder.setBytes(
+                    &mutableMergeUniforms,
+                    length: MemoryLayout<MergeUniforms>.stride,
+                    index: 0
+                )
+                mergeEncoder.setTexture(cameraMotionTexture, index: 0)
+                mergeEncoder.setTexture(objectMotionTexture, index: 1)
+                mergeEncoder.setTexture(objectValidityTexture, index: 2)
+                mergeEncoder.setTexture(disocclusionTexture, index: 3)
+                mergeEncoder.setTexture(motionTexture, index: 4)
+                mergeEncoder.setTexture(reactiveTexture, index: 5)
+                mergeEncoder.setTexture(previousDepthTexture, index: 6)
+                mergeEncoder.setTexture(depthTexture, index: 7)
+                let mergeWidth = max(1, min(pipelines.merge.threadExecutionWidth, 64))
+                let mergeHeight = max(1, min(8, pipelines.merge.maxTotalThreadsPerThreadgroup / mergeWidth))
+                mergeEncoder.dispatchThreads(
+                    MTLSize(width: Int(inputWidth), height: Int(inputHeight), depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: mergeWidth, height: mergeHeight, depth: 1)
+                )
+                if let fence {
+                    mergeEncoder.updateFence(fence)
+                }
+                mergeEncoder.endEncoding()
+            } else {
+                guard let fusedEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                    logMetalFxFailureOnce("motion-v2-fused-encoder", "could not create fused v2 motion encoder")
+                    return 0
+                }
+                fusedEncoder.label = "MetalFX Fused Camera and Object Motion"
+                metal4BarrierComputeAfterRender(fusedEncoder)
+                if let fence {
+                    fusedEncoder.waitForFence(fence)
+                }
+                struct FusedMotionUniforms {
+                    var currentViewProjection: simd_float4x4
+                    var inverseCurrentViewProjection: simd_float4x4
+                    var previousViewProjection: simd_float4x4
+                    var viewport: SIMD4<Float>
+                    var flags: SIMD4<UInt32>
+                    var options: SIMD4<UInt32>
+                    var params: SIMD4<Float>
+                }
+                var fusedUniforms = FusedMotionUniforms(
+                    currentViewProjection: currentMatrix,
+                    inverseCurrentViewProjection: inverseMatrix,
+                    previousViewProjection: previousMatrix,
+                    viewport: SIMD4<Float>(Float(inputWidth), Float(inputHeight), 0.0, 0.0),
+                    flags: SIMD4<UInt32>(
+                        preserveReactiveMask != 0 ? 1 : 0,
+                        NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
+                        previousDepthIsValid ? 1 : 0,
+                        depthReversed != 0 ? 1 : 0
+                    ),
+                    options: SIMD4<UInt32>(
+                        NativeState.mergeDepthDilation > 0.5 ? 1 : 0,
+                        emitMotionDiagnostics != 0 ? 1 : 0,
+                        handDepthTexture != nil ? 1 : 0,
+                        0
+                    ),
+                    params: SIMD4<Float>(
+                        NativeState.reactiveTuning.z,
+                        NativeState.disocclusionReactiveCap,
+                        handReactiveBoost,
+                        0.0
+                    )
+                )
+                fusedEncoder.setComputePipelineState(pipelines.fused)
+                fusedEncoder.setBytes(
+                    &fusedUniforms,
+                    length: MemoryLayout<FusedMotionUniforms>.stride,
+                    index: 0
+                )
+                fusedEncoder.setTexture(depthTexture, index: 0)
+                fusedEncoder.setTexture(objectMotionTexture, index: 1)
+                fusedEncoder.setTexture(objectValidityTexture, index: 2)
+                fusedEncoder.setTexture(previousDepthTexture, index: 3)
+                fusedEncoder.setTexture(motionTexture, index: 4)
+                fusedEncoder.setTexture(reactiveTexture, index: 5)
+                fusedEncoder.setTexture(cameraMotionTexture, index: 6)
+                fusedEncoder.setTexture(disocclusionTexture, index: 7)
+                fusedEncoder.setTexture(handDepthTexture, index: 8)
+                let fusedWidth = max(1, min(pipelines.fused.threadExecutionWidth, 64))
+                let fusedHeight = max(1, min(8, pipelines.fused.maxTotalThreadsPerThreadgroup / fusedWidth))
+                fusedEncoder.dispatchThreads(
+                    MTLSize(width: Int(inputWidth), height: Int(inputHeight), depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: fusedWidth, height: fusedHeight, depth: 1)
+                )
+                if let fence {
+                    fusedEncoder.updateFence(fence)
+                }
+                fusedEncoder.endEncoding()
             }
-            mergeEncoder.endEncoding()
 
             scaler.colorTexture = colorTexture
             scaler.depthTexture = depthTexture
@@ -4311,6 +4951,7 @@ public func metallum_metalfx_shutdown() {
     NativeState.motionPipeline = nil
     NativeState.motionV2Pipeline = nil
     NativeState.motionMergePipeline = nil
+    NativeState.motionFusedPipeline = nil
     NativeState.motionClearPipeline = nil
     NativeState.transparencyMaskPipeline = nil
     NativeState.cutoutReactivePipeline = nil

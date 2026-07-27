@@ -374,7 +374,11 @@ tasks.register("metal4PresentValidation", Exec) {
 		requireUnlockedConsoleForPresentation()
 		delete file("${buildDir}/metal-validation/presentation-metal4")
 	}
-	environment "MTL_DEBUG_LAYER", "1"
+	// macOS 26.5 MetalFX calls globalTraceObjectID on the Debug Layer's
+	// MTL4DebugComputeCommandEncoder wrapper and aborts before the first frame.
+	// Keep API Validation on the headless Metal 4 path test; the real MTL4FX
+	// interpolator must run against the release encoder until Apple fixes it.
+	environment "MTL_DEBUG_LAYER", "0"
 	environment "MTL_SHADER_VALIDATION", "0"
 	environment "METALLUM_VALIDATE_METAL4_PRESENT", "1"
 	commandLine metalFrameGenerationPresentationValidationBinary.absolutePath,
@@ -529,6 +533,23 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 	def requestedObjectMotionProducer = lockedBackpressureValidationRequested
 			? "true"
 			: System.getProperty("metallum.metalfx.objectMotionProducer", "false")
+	def requestedFrameGenerationOutputWidth = System.getProperty(
+			"metallum.metalfx.frameGenerationOutputWidth", "1280")
+	def expectedFrameGenerationPresentPath = System.getProperty(
+			"metallum.opt.metal4Present", "false").toBoolean() ? "metal4" : "metal3"
+	def normalizedFrameGenerationOutputWidth = requestedFrameGenerationOutputWidth
+			.trim().toLowerCase(Locale.ROOT)
+	def receiptFrameGenerationOutputWidth
+	if (normalizedFrameGenerationOutputWidth in ["native", "display", "0"]) {
+		receiptFrameGenerationOutputWidth = 0
+	} else {
+		try {
+			receiptFrameGenerationOutputWidth = Math.max(
+					640, Math.min(3840, Integer.parseInt(normalizedFrameGenerationOutputWidth)))
+		} catch (NumberFormatException ignored) {
+			receiptFrameGenerationOutputWidth = 1280
+		}
+	}
 	tasks.named("runClient") {
 		doFirst {
 			if (lockedBackpressureValidationRequested) {
@@ -547,6 +568,10 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 		systemProperty "metallum.validation.enabled", "true"
 		systemProperty "metallum.validation.output", validationOutputDir.absolutePath
 		systemProperty "metallum.metalfx.mode", "TEMPORAL"
+		def requestedScale = System.getProperty("metallum.metalfx.scale")
+		if (requestedScale != null) {
+			systemProperty "metallum.metalfx.scale", requestedScale
+		}
 		systemProperty "metallum.metalfx.debug", "true"
 		// Frame generation stays off by default: the readback captures are the
 		// deterministic attachment gate, and an asynchronous presenter would race
@@ -558,7 +583,7 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 		systemProperty "metallum.metalfx.frameGeneration", requestedFrameGeneration
 		systemProperty "metallum.metalfx.objectMotionProducer", requestedObjectMotionProducer
 		systemProperty "metallum.metalfx.frameGenerationOutputWidth",
-				System.getProperty("metallum.metalfx.frameGenerationOutputWidth", "1280")
+				requestedFrameGenerationOutputWidth
 		if (requestedFrameGeneration.toBoolean()) {
 			environment "METALLUM_METALFX_PRESENT_DIAGNOSTICS_PATH",
 					file("${validationOutputDir}/frame-generation-timeline.json").absolutePath
@@ -578,7 +603,8 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				// incomparable across runs.
 				"--width", "854",
 				"--height", "480"
-		environment "MTL_DEBUG_LAYER", "1"
+		environment "MTL_DEBUG_LAYER",
+				System.getProperty("metallum.validation.metalDebugLayer", "1")
 		environment "MTL_SHADER_VALIDATION", "0"
 		// A run that validated nothing must not pass by omission.
 		// MetalValidationClient.finishRunState is the only writer of
@@ -732,6 +758,14 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 					if (!(timeline instanceof List)) {
 						problems << "Frame Generation timeline is not a JSON array".toString()
 					} else {
+						def presentPaths = timeline.collect { it.presentPath }
+								.findAll { it instanceof String }
+								.toSet()
+						def expectedPresentPaths = [expectedFrameGenerationPresentPath] as Set
+						if (presentPaths != expectedPresentPaths) {
+							problems << "Frame Generation requested ${expectedFrameGenerationPresentPath}"
+									+ " presenter but timeline recorded ${presentPaths ?: 'no path'}"
+						}
 						def percentile = { values, fraction ->
 							def ordered = values.findAll { Double.isFinite(it as double) }
 									.collect { it as double }
@@ -825,8 +859,8 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 						def presentedCount = timeline.count { it.outcome == "presented" }
 						def summary = [
 								status: "measured",
-								frameGenerationOutputWidth: Integer.parseInt(System.getProperty(
-										"metallum.metalfx.frameGenerationOutputWidth", "1280")),
+								presentPath: presentPaths.size() == 1 ? presentPaths.first() : "mixed",
+								frameGenerationOutputWidth: receiptFrameGenerationOutputWidth,
 								records: timeline.size(),
 								completeSourcePairs: totalGpuMilliseconds.size(),
 								presentedRecords: presentedCount,

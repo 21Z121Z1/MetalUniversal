@@ -1,5 +1,35 @@
 import Foundation
 
+enum MetalFrameGenerationAdmissionDecision: Equatable {
+    case wait(until: CFTimeInterval)
+    case supersede
+}
+
+struct MetalFrameGenerationAdmissionPolicy {
+    static func decide(
+        now: CFTimeInterval,
+        lastDisplayUpdateTime: CFTimeInterval?,
+        activityTimeout: CFTimeInterval,
+        absoluteDeadline: CFTimeInterval
+    ) -> MetalFrameGenerationAdmissionDecision {
+        guard let lastDisplayUpdateTime,
+              now.isFinite,
+              lastDisplayUpdateTime.isFinite,
+              activityTimeout > 0.0,
+              absoluteDeadline.isFinite,
+              now >= lastDisplayUpdateTime else {
+            return .supersede
+        }
+        let activityDeadline = lastDisplayUpdateTime + activityTimeout
+        guard activityDeadline.isFinite,
+              now < activityDeadline,
+              now < absoluteDeadline else {
+            return .supersede
+        }
+        return .wait(until: min(activityDeadline, absoluteDeadline))
+    }
+}
+
 enum MetalFrameGenerationSourcePhase: String, Equatable {
     case queued
     case active
@@ -107,7 +137,10 @@ struct MetalFrameGenerationLifecycle {
         if hasInterpolation && !generatedSubmitted {
             return .generated
         }
-        if (!hasInterpolation || generatedCompleted) && !realSubmitted {
+        // Generated and real command buffers share one serial presenter queue.
+        // Submission order is therefore sufficient; waiting for the generated
+        // completion handler here can unnecessarily skip the next display update.
+        if (!hasInterpolation || generatedSubmitted) && !realSubmitted {
             return .real
         }
         return nil

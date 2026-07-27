@@ -230,8 +230,8 @@ public final class MetalNativeBridge {
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-                    FLOAT, FLOAT, INT, INT, INT, INT, INT
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                    FLOAT, FLOAT, FLOAT, INT, INT, INT, INT, INT, INT
             ));
             metalfxEncode = downcallWithoutCritical(lookup, "metallum_metalfx_encode", FunctionDescriptor.of(
                     INT,
@@ -1155,6 +1155,7 @@ public final class MetalNativeBridge {
             final MemorySegment device,
             final MemorySegment color,
             final MemorySegment depth,
+            @Nullable final MemorySegment handDepth,
             final MemorySegment cameraMotion,
             final MemorySegment objectMotion,
             final MemorySegment objectValidity,
@@ -1167,11 +1168,13 @@ public final class MetalNativeBridge {
             @Nullable final float[] previousViewProjection,
             final float jitterX,
             final float jitterY,
+            final float handReactiveBoost,
             final int inputWidth,
             final int inputHeight,
             final boolean reset,
             final boolean depthReversed,
             final boolean preserveReactiveMask,
+            final boolean emitMotionDiagnostics,
             final MemorySegment fence
     ) {
         if (metalfxEncodeV2 == null) {
@@ -1184,10 +1187,12 @@ public final class MetalNativeBridge {
             MemorySegment previous = scratch.copy(previousViewProjection, scratch.previous);
             return (int) metalfxEncodeV2.invokeExact(
                     segment(commandBuffer), segment(device), segment(color), segment(depth),
-                    segment(cameraMotion), segment(objectMotion), segment(objectValidity), segment(disocclusion),
-                    segment(motion), segment(reactive), segment(output), current, inverse, previous,
-                    segment(fence), jitterX, jitterY, inputWidth, inputHeight,
-                    reset ? 1 : 0, depthReversed ? 1 : 0, preserveReactiveMask ? 1 : 0
+                    segment(handDepth), segment(cameraMotion), segment(objectMotion), segment(objectValidity),
+                    segment(disocclusion), segment(motion), segment(reactive), segment(output),
+                    current, inverse, previous, segment(fence), jitterX, jitterY, handReactiveBoost,
+                    inputWidth, inputHeight,
+                    reset ? 1 : 0, depthReversed ? 1 : 0, preserveReactiveMask ? 1 : 0,
+                    emitMotionDiagnostics ? 1 : 0
             ) != 0;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metalfx_encode_v2", throwable);

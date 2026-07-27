@@ -41,6 +41,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -77,6 +78,8 @@ public final class MetalFxManager {
     // camera movement exactly; the residual swing/bob animation relies on a
     // moderate history bias instead of per-vertex motion.
     private static final float HAND_OVERLAY_REACTIVE_BOOST = 0.35F;
+    private static final boolean LEGACY_MOTION_PASSES =
+            "1".equals(System.getenv("METALLUM_METALFX_LEGACY_MOTION_PASSES"));
     // Validation thresholds for the CUTOUT reactive policy (see
     // docs/cutout-shimmer-remediation-2026-07-27.md). Interior CUTOUT pixels
     // may only carry residual reactivity (depth gradients read ~0-0.06
@@ -148,6 +151,8 @@ public final class MetalFxManager {
     private int frameGenerationOutputHeight;
     private boolean sceneFrame;
     private boolean frameUsesUpscaledTarget;
+    private boolean uiTargetShaderWrite;
+    private boolean objectMotionInputsCleared;
     private boolean frameGenerationEnabled;
     private int frameGenerationFramesQueued;
     // Set while a recoverable condition (an open GUI, an immediate present mode)
@@ -253,6 +258,16 @@ public final class MetalFxManager {
     private MetalGpuTexture sceneDepthTexture;
     @Nullable
     private MetalGpuTexture frameDepthTexture;
+
+    private final List<ObjectMotionReplay> objectMotionReplays = new ArrayList<>();
+
+    private record ObjectMotionReplay(
+            PreparedRenderType prepared,
+            StagedVertexBuffer.ExecuteInfo executeInfo,
+            GpuBufferSlice dynamicTransforms,
+            GpuBufferSlice motionUniform
+    ) {
+    }
 
     private MetalFxManager(final MetalDevice device) {
         this.device = device;
@@ -425,6 +440,14 @@ public final class MetalFxManager {
         MetalFxManager manager = active;
         if (manager != null) {
             manager.drawEntityMotionInternal(prepared, executeInfo, sample);
+        }
+    }
+
+    /** Flushes queued object-motion draws before Minecraft releases their staged buffers. */
+    public static void flushEntityMotionReplays() {
+        MetalFxManager manager = active;
+        if (manager != null) {
+            manager.flushEntityMotionReplaysInternal(Minecraft.getInstance().gameRenderer);
         }
     }
 
@@ -688,6 +711,8 @@ public final class MetalFxManager {
         this.frameUsesUpscaledTarget = false;
         this.motionStateStore.beginFrame();
         MetalEntityMotionCapture.beginFrame();
+        this.objectMotionReplays.clear();
+        this.objectMotionInputsCleared = false;
     }
 
     private void captureEntityMotionInternal(final Entity entity, final EntityRenderState state) {
@@ -746,13 +771,6 @@ public final class MetalFxManager {
             MetalEntityMotionCapture.recordMotionDrawSkip("pipeline-unsupported");
             return;
         }
-        RenderTarget mainTarget = Minecraft.getInstance().gameRenderer.mainRenderTarget();
-        GpuTextureView depthView = mainTarget.getDepthTextureView();
-        if (depthView == null) {
-            MetalEntityMotionCapture.recordMotionDrawSkip("depth-unavailable");
-            return;
-        }
-
         Matrix4f currentUnjitteredFromRaster =
                 new Matrix4f(currentViewProjection).mul(inverseCurrentViewProjection);
         Matrix4f previousFromRaster = new Matrix4f(previousViewProjection)
@@ -765,6 +783,7 @@ public final class MetalFxManager {
         }
 
         CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
+        GpuBufferSlice dynamicTransforms = prepared.dynamicTransforms();
         GpuBufferSlice motionUniform;
         try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
                 .allocateGpuMapped(128L, 256L, GpuBuffer.USAGE_UNIFORM)) {
@@ -774,31 +793,68 @@ public final class MetalFxManager {
             motionUniform = mapped.slice();
         }
 
+        objectMotionReplays.add(new ObjectMotionReplay(
+                prepared,
+                executeInfo,
+                dynamicTransforms,
+                motionUniform
+        ));
+    }
+
+    private void flushEntityMotionReplaysInternal(final GameRenderer renderer) {
+        if (!motionInputsPrepared || (objectMotionReplays.isEmpty() && objectMotionInputsCleared)) {
+            return;
+        }
+        List<ObjectMotionReplay> replays = List.copyOf(objectMotionReplays);
+        objectMotionReplays.clear();
+
+        RenderTarget mainTarget = renderer.mainRenderTarget();
+        GpuTextureView depthView = mainTarget.getDepthTextureView();
+        if (depthView == null || objectMotionView == null || objectValidityView == null) {
+            replays.forEach(ignored -> MetalEntityMotionCapture.recordMotionDrawSkip("flush-attachments-unavailable"));
+            return;
+        }
+
+        CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
+
         RenderPassDescriptor descriptor = RenderPassDescriptor
-                .create(() -> "Metallum ordinary entity object motion")
-                .withColorAttachment(objectMotionView)
-                .withColorAttachment(objectValidityView)
+                .create(() -> "Metallum batched ordinary entity object motion");
+        if (objectMotionInputsCleared) {
+            descriptor = descriptor
+                    .withColorAttachment(objectMotionView)
+                    .withColorAttachment(objectValidityView);
+        } else {
+            descriptor = descriptor
+                    .withColorAttachment(objectMotionView, Optional.of(UI_CLEAR))
+                    .withColorAttachment(objectValidityView, Optional.of(UI_CLEAR));
+        }
+        descriptor = descriptor
                 .withDepthAttachment(depthView)
                 .withRenderArea(new RenderPass.RenderArea(0, 0, renderWidth, renderHeight));
         try (RenderPass pass = encoder.createRenderPass(descriptor)) {
-            pass.setPipeline(MetalEntityMotionPipeline.forSource(prepared.pipeline()));
-            RenderSystem.bindDefaultUniforms(pass);
-            pass.setUniform("DynamicTransforms", prepared.dynamicTransforms());
-            pass.setUniform("MetallumMotion", motionUniform);
-            pass.setVertexBuffer(0, executeInfo.vertexBuffer().slice());
-            for (PreparedRenderType.Texture texture : prepared.textures()) {
-                pass.bindTexture(texture.name(), texture.textureView(), texture.sampler());
+            for (ObjectMotionReplay replay : replays) {
+                PreparedRenderType prepared = replay.prepared();
+                StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
+                pass.setPipeline(MetalEntityMotionPipeline.forSource(prepared.pipeline()));
+                RenderSystem.bindDefaultUniforms(pass);
+                pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
+                pass.setUniform("MetallumMotion", replay.motionUniform());
+                pass.setVertexBuffer(0, executeInfo.vertexBuffer().slice());
+                for (PreparedRenderType.Texture texture : prepared.textures()) {
+                    pass.bindTexture(texture.name(), texture.textureView(), texture.sampler());
+                }
+                pass.setIndexBuffer(executeInfo.indexBuffer(), executeInfo.indexType());
+                pass.drawIndexed(
+                        executeInfo.indexCount(),
+                        1,
+                        executeInfo.firstIndex(),
+                        executeInfo.baseVertex(),
+                        0
+                );
+                MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
             }
-            pass.setIndexBuffer(executeInfo.indexBuffer(), executeInfo.indexType());
-            pass.drawIndexed(
-                    executeInfo.indexCount(),
-                    1,
-                    executeInfo.firstIndex(),
-                    executeInfo.baseVertex(),
-                    0
-            );
-            MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
         }
+        objectMotionInputsCleared = true;
     }
 
     private Matrix4f prepareSceneProjectionInternal(
@@ -951,6 +1007,11 @@ public final class MetalFxManager {
             return;
         }
 
+        // The feature-frame hook normally flushes while staged buffers are
+        // alive. This also guarantees a clear-only pass on static/reset frames
+        // before the hand overlay and final motion merge consume the textures.
+        flushEntityMotionReplaysInternal(renderer);
+
         MetalCommandEncoder encoder = device.commandEncoder();
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
                 && cutoutReactivePipelineAvailable
@@ -977,32 +1038,42 @@ public final class MetalFxManager {
                 );
             }
         }
+        boolean emitMotionDiagnostics = validationFrame != null && validationFrame.shouldCapture();
+        MetalGpuTexture handDepth = null;
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && sceneFrame
                 && handOverlayPipelineAvailable && motionInputsPrepared
                 && objectMotionTexture != null && objectValidityTexture != null
                 && reactiveTexture != null
-                && renderer.mainRenderTarget().getDepthTexture() instanceof MetalGpuTexture handDepth
-                && handDepth.getWidth(0) == renderWidth
-                && handDepth.getHeight(0) == renderHeight) {
+                && renderer.mainRenderTarget().getDepthTexture() instanceof MetalGpuTexture candidateHandDepth
+                && candidateHandDepth.getWidth(0) == renderWidth
+                && candidateHandDepth.getHeight(0) == renderHeight) {
+            handDepth = candidateHandDepth;
             // Vanilla clears the reversed-Z depth buffer right before the
             // first-person pass, so at this point it contains only hand,
             // held-item, and screen-effect coverage. Those pixels are
             // camera-locked: stamp zero object motion with full validity so
             // the merge pass does not apply world reprojection to them.
-            boolean handEncoded = encoder.encodeHandOverlayMotion(
-                    handDepth,
-                    objectMotionTexture,
-                    objectValidityTexture,
-                    reactiveTexture,
-                    renderWidth,
-                    renderHeight,
-                    HAND_OVERLAY_REACTIVE_BOOST
-            );
-            if (config.debug && handEncoded && !loggedHandOverlay) {
+            // Production folds this operation into the fused motion kernel.
+            // Keep the separate writer for legacy A/B and diagnostic frames so
+            // their object-motion/validity readbacks retain the old contract.
+            boolean handPrepared = true;
+            if (LEGACY_MOTION_PASSES || emitMotionDiagnostics) {
+                handPrepared = encoder.encodeHandOverlayMotion(
+                        handDepth,
+                        objectMotionTexture,
+                        objectValidityTexture,
+                        reactiveTexture,
+                        renderWidth,
+                        renderHeight,
+                        HAND_OVERLAY_REACTIVE_BOOST
+                );
+            }
+            if (config.debug && handPrepared && !loggedHandOverlay) {
                 loggedHandOverlay = true;
                 Metallum.LOGGER.info(
-                        "MetalFX first-person overlay motion prepared: zero-motion validity plus reactive boost {}",
-                        HAND_OVERLAY_REACTIVE_BOOST
+                        "MetalFX first-person overlay motion prepared: zero-motion plus reactive boost {} ({})",
+                        HAND_OVERLAY_REACTIVE_BOOST,
+                        LEGACY_MOTION_PASSES || emitMotionDiagnostics ? "separate pass" : "fused motion pass"
                 );
             }
         }
@@ -1023,6 +1094,8 @@ public final class MetalFxManager {
                 encoded = encoder.encodeMetalFxV2(
                         color,
                         depth,
+                        handDepth,
+                        HAND_OVERLAY_REACTIVE_BOOST,
                         cameraMotionTexture,
                         objectMotionTexture,
                         objectValidityTexture,
@@ -1039,7 +1112,8 @@ public final class MetalFxManager {
                         historyReset,
                         true,
                         (config.transparencyReactiveMask && reactiveMaskPrepared)
-                                || cutoutReactivePrepared
+                                || cutoutReactivePrepared,
+                        emitMotionDiagnostics
                 );
             } else if (effectiveMode == MetalFxConfig.Mode.SPATIAL) {
                 encoded = encoder.encodeMetalFx(
@@ -2244,16 +2318,27 @@ public final class MetalFxManager {
         this.renderHeight = targetRenderHeight;
         this.frameGenerationOutputWidth = targetFrameGenerationOutputWidth;
         this.frameGenerationOutputHeight = targetFrameGenerationOutputHeight;
-        if (uiTarget == null || uiTarget.width != width || uiTarget.height != height) {
+        boolean targetUiShaderWrite = !keepFrameGenerationResources;
+        if (uiTarget == null || uiTarget.width != width || uiTarget.height != height
+                || uiTargetShaderWrite != targetUiShaderWrite) {
             if (uiTarget != null) uiTarget.destroyBuffers();
-            // Upscaler/frame-generation output targets are the only vanilla
-            // TextureTargets that need MTLTextureUsage.ShaderWrite (MetalFX
-            // writes them from compute). Route the backend-only usage bit
-            // through the creation scope so every other color target keeps
-            // lossless bandwidth compression.
-            device.withExtraTextureUsage(MetalGpuTexture.USAGE_SHADER_WRITE, () ->
-                    uiTarget = new TextureTarget("MetalFX Native Resolution UI", width, height, true, GpuFormat.RGBA8_UNORM)
-            );
+            if (targetUiShaderWrite) {
+                // Without the separate Frame Generation scene target, Temporal
+                // writes its full-resolution output directly into the UI target.
+                device.withExtraTextureUsage(MetalGpuTexture.USAGE_SHADER_WRITE, () ->
+                        uiTarget = new TextureTarget(
+                                "MetalFX Native Resolution UI", width, height, true, GpuFormat.RGBA8_UNORM
+                        )
+                );
+            } else {
+                // In Frame Generation topology this texture is only cleared,
+                // rendered and sampled. Omitting ShaderWrite preserves Apple
+                // GPU lossless compression for the native-resolution overlay.
+                uiTarget = new TextureTarget(
+                        "MetalFX Native Resolution UI", width, height, true, GpuFormat.RGBA8_UNORM
+                );
+            }
+            uiTargetShaderWrite = targetUiShaderWrite;
             dimensionsChanged = true;
         }
         if (keepFrameGenerationResources) {
@@ -2381,12 +2466,7 @@ public final class MetalFxManager {
         // transparent-target mask without a read/write race.
         device.commandEncoder().clearColorTexture(reactiveTexture, UI_CLEAR);
         device.commandEncoder().clearColorTexture(cutoutReactiveTexture, UI_CLEAR);
-        return device.commandEncoder().clearMotionInputs(
-                objectMotionTexture,
-                objectValidityTexture,
-                renderWidth,
-                renderHeight
-        );
+        return true;
     }
 
     private void resetHistoryInternal(final String reason) {

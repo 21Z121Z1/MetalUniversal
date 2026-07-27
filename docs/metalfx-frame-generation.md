@@ -166,9 +166,9 @@ For interpolation it directly renders `t=0`, `t=0.5` and `t=1`. It feeds
 `t=0` and `t=1` to MetalFX, treats the directly rendered `t=0.5` image as
 ground truth, and exports the interpolated image and their difference.
 
-Eight scenarios pass: static, translation, rotation, occlusion/reveal,
-alpha-test, scene cut, illegal motion and history reset. The latest midpoint
-metrics include:
+Nine scenarios pass: static, translation, rotation, occlusion/reveal,
+alpha-test, scene cut, illegal motion, history reset, and steady first-person
+hand fusion. The latest midpoint metrics include:
 
 | Scenario | PSNR dB | Mean absolute error |
 | --- | ---: | ---: |
@@ -181,11 +181,39 @@ metrics include:
 | illegal motion | 24.978 | 0.004799 |
 | history reset | 22.005 | 0.009561 |
 
-The task emits 217 current-run files under
+The task emits 225 current-run files under
 `build/metal-validation/offscreen-current`, including all requested texture
 planes, PNGs, raw readbacks and JSON.
 
 ## Resolution order and GPU budget
+
+### Retina fullscreen ownership
+
+Minecraft's ordinary macOS fullscreen path binds the GLFW window to a monitor
+video mode. On the current M1 Pro test machine that changes the drawable to
+1920x1200, so a nominal 50% render scale becomes 960x600 and no longer exercises
+the native Retina target required by the QA goal.
+
+The QA-only property below selects a borderless macOS fullscreen path instead:
+
+```text
+-Dmetallum.window.retinaFullscreen=true
+```
+
+The window remains a windowed Cocoa surface (`glfwGetWindowMonitor == 0`) and
+covers the current monitor work area in logical coordinates. GLFW therefore
+keeps the monitor's Retina backing scale: the framebuffer and CAMetalLayer
+drawable use backing pixels, while the window dimensions remain logical points.
+The work area is queried again on every fullscreen mode update, so the behavior
+tracks display migration and is not tied to 1512x839 or any other fixed size.
+Leaving fullscreen restores the original decorated window geometry. The
+property defaults to false and does not change the persistent MetalFX mode,
+render scale, reactive-mask or Frame Generation settings.
+
+Runtime framebuffer proof is still required before adding this property to the
+Launcher QA profile. The current macOS user session cannot complete that probe
+because its WindowServer/launchd XPC state is returning error 141; Java and
+mixin compilation alone are not treated as runtime acceptance.
 
 Frame Generation uses a bounded scene-working resolution while keeping the
 drawable and GUI at native backing resolution. At the 1708x960 QA size with
@@ -206,10 +234,12 @@ Temporal history. Reversing the order would either pollute Temporal history
 with synthetic frames or require running Temporal at the 120 Hz present rate.
 
 `metallum.metalfx.frameGenerationOutputWidth` controls the cap and defaults to
-1280 (bounded to 640...3840). It does not lock the persisted mode, Temporal
-percentage, reactive-mask or Frame Generation UI settings. Texture LOD bias is
-computed from the actual 3D/display ratio, so the extra work-resolution cap does
-not silently select softer mips.
+1280 (bounded to 640...3840). The explicit values `native`, `display`, and `0`
+remove the cap so Temporal and Frame Generation output track the current
+drawable through fullscreen, resize, and display migration. It does not lock
+the persisted mode, Temporal percentage, reactive-mask or Frame Generation UI
+settings. Texture LOD bias is computed from the actual 3D/display ratio, so the
+extra work-resolution cap does not silently select softer mips.
 
 `metalFxPerformanceValidation` measures real GPU timestamps without a layer,
 drawable, window or Computer Use. Apple M1 Pro results (30 measured iterations
@@ -307,6 +337,53 @@ gate fails. A passing run then writes `timeline.json`. The 120 Hz gate uses the
 screen's nominal maximum refresh rather than the average of only the callbacks
 the presenter happened to claim, so dropping every other update can no longer
 misclassify the display as 60 Hz and skip the 55 source / 110 present floors.
+
+### Metal 4 presentation
+
+`metal4PresentValidation` runs the same visible-window pacing, resize and
+shutdown harness with the MTL4 FrameInterpolator and present queue. The present
+path owns two nonblocking command-buffer/allocator slots, matching the layer's
+two-drawable pool. A slot is released only by MTL4 commit feedback; if both are
+still in flight, that display update is recorded as
+`dropped:metal4-in-flight-saturated` without waiting in the display-link
+callback or resetting allocator memory that the GPU may still reference.
+
+The headless `metal4PipelinePathTest` holds both submissions behind an
+unsignaled shared event and verifies that a third begin fails immediately, both
+slots return after GPU completion, and encoding can resume. It runs with Metal
+API Validation. The visible MTL4FX test explicitly disables the Debug Layer on
+macOS 26.5: MetalFX otherwise sends `globalTraceObjectID` to Apple's
+`MTL4DebugComputeCommandEncoder` wrapper and aborts before the first frame. This
+is isolated to the validation wrapper; the same automatic window run against
+the release encoder passes and still provides GPU timestamps and drawable
+presented-time evidence.
+
+The post-fix M1 Pro run presented 57 real and 56 generated measured frames at
+57.93 source / 114.87 present FPS, exercised resize, and shut down in 0.0017
+seconds. Generated GPU p95 was 8.97 ms and no in-flight saturation drop occurred.
+That establishes Metal 4 lifecycle stability, not the final performance goal:
+the generated-frame tail still exceeds one 120 Hz slot by 0.63 ms and leaves no
+shader headroom.
+
+The same Metal 4 path also passed the automated real Minecraft client at a
+1708x960 drawable with 50% 3D rendering, native-width Temporal output and
+native-width Frame Generation. The 256-record steady tail presented every real
+and generated frame, with 8.3334 ms present-interval p95, 7.3861 ms source GPU
+p95, 6.6176 ms generated GPU p95 and 13.7399 ms combined GPU p95. That leaves
+2.92675 ms to the 16.67 ms source budget, so the strict 3 ms shader-headroom
+gate fails by about 0.073 ms even though no measured source pair exceeded the
+budget. The client completed all 16 attachment captures, queued 436 source
+frames, and kept Frame Generation enabled through shutdown.
+
+An earlier run inherited `fullscreen:true` and `exclusiveFullscreen:true` from
+`run/options.txt`, so it did not exercise the requested 1708x960 validation
+window. It instead sustained a 3416x1678 drawable with approximately 2288x1124
+3D input, native Temporal output and native Metal 4 Frame Generation. Source and
+generated GPU p95 were approximately 34.54 and 32.99 ms respectively, proving
+that the lifecycle remains bounded under the larger allocation but also that
+full Retina is far outside the 60-to-120 budget. The validation client now exits
+both fullscreen modes before pinning its framebuffer, preventing future runs
+from silently measuring the wrong resolution.
 
 ## Production-gate follow-up (2026-07-27)
 

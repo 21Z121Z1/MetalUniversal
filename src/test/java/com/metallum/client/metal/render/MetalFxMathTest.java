@@ -379,6 +379,12 @@ final class MetalFxMathTest {
         assertEquals(808, MetalFxConfig.scaledDimension(960, frameGenerationScale));
         assertEquals(964, MetalFxConfig.scaledDimension(1708, 0.67F * frameGenerationScale));
         assertEquals(542, MetalFxConfig.scaledDimension(960, 0.67F * frameGenerationScale));
+        assertEquals(1.0F, MetalFxConfig.frameGenerationOutputScale(3024, 0));
+        assertEquals(0, MetalFxConfig.parseFrameGenerationOutputWidth("native", 1280));
+        assertEquals(0, MetalFxConfig.parseFrameGenerationOutputWidth("display", 1280));
+        assertEquals(0, MetalFxConfig.parseFrameGenerationOutputWidth("0", 1280));
+        assertEquals(3024, MetalFxConfig.parseFrameGenerationOutputWidth("3024", 1280));
+        assertEquals(1280, MetalFxConfig.parseFrameGenerationOutputWidth("invalid", 1280));
         assertEquals(0.0F, MetalFxConfig.textureLodBias(1708, 1708), 1.0E-6F);
         assertEquals(-1.825F, MetalFxConfig.textureLodBias(964, 1708), 1.0E-3F);
     }

@@ -19,6 +19,76 @@ private func expect(
     }
 }
 
+private func testAdmissionTracksDisplayActivity() throws {
+    let freshDecision = MetalFrameGenerationAdmissionPolicy.decide(
+        now: 10.0,
+        lastDisplayUpdateTime: 9.98,
+        activityTimeout: 0.05,
+        absoluteDeadline: 10.02
+    )
+    guard case .wait(let deadline) = freshDecision else {
+        throw TestFailure.assertion("fresh display activity must preserve the current source")
+    }
+    try expect(abs(deadline - 10.02) < 0.000_001, "absolute deadline must cap fresh activity")
+    try expect(
+        MetalFrameGenerationAdmissionPolicy.decide(
+            now: 10.04,
+            lastDisplayUpdateTime: 9.98,
+            activityTimeout: 0.05,
+            absoluteDeadline: 10.10
+        ) == .supersede,
+        "stale display activity must use latest-source-wins"
+    )
+    try expect(
+        MetalFrameGenerationAdmissionPolicy.decide(
+            now: 10.0,
+            lastDisplayUpdateTime: nil,
+            activityTimeout: 0.05,
+            absoluteDeadline: 10.02
+        ) == .supersede,
+        "a display that has never updated must not block the render thread"
+    )
+    try expect(
+        MetalFrameGenerationAdmissionPolicy.decide(
+            now: 10.02,
+            lastDisplayUpdateTime: 10.019,
+            activityTimeout: 0.05,
+            absoluteDeadline: 10.02
+        ) == .supersede,
+        "continuous callbacks must not extend the absolute admission deadline"
+    )
+    let activityBoundary = 9.98 + 0.05
+    try expect(
+        MetalFrameGenerationAdmissionPolicy.decide(
+            now: activityBoundary,
+            lastDisplayUpdateTime: 9.98,
+            activityTimeout: 0.05,
+            absoluteDeadline: 10.10
+        ) == .supersede,
+        "the activity timeout boundary must supersede"
+    )
+    for invalid in [Double.nan, Double.infinity, -Double.infinity] {
+        try expect(
+            MetalFrameGenerationAdmissionPolicy.decide(
+                now: invalid,
+                lastDisplayUpdateTime: 9.99,
+                activityTimeout: 0.05,
+                absoluteDeadline: 10.02
+            ) == .supersede,
+            "non-finite admission timestamps must supersede"
+        )
+    }
+    try expect(
+        MetalFrameGenerationAdmissionPolicy.decide(
+            now: 10.0,
+            lastDisplayUpdateTime: 10.01,
+            activityTimeout: 0.05,
+            absoluteDeadline: 10.02
+        ) == .supersede,
+        "future display timestamps must supersede"
+    )
+}
+
 private func makeReady(
     sourceFrameID: UInt64,
     interpolation: Bool
@@ -34,10 +104,10 @@ private func testGeneratedThenReal() throws {
     var state = try makeReady(sourceFrameID: 1, interpolation: true)
     try expect(state.nextPresentationStep == .generated, "generated must be first")
     _ = state.submitPresentation(.generated)
+    try expect(state.nextPresentationStep == .real, "serial queue order permits real submission")
+    _ = state.submitPresentation(.real)
     _ = state.recordPresented(.generated, presentedTime: 1.0)
     _ = state.completeGPUWork(.generated, succeeded: true)
-    try expect(state.nextPresentationStep == .real, "real must follow generated completion")
-    _ = state.submitPresentation(.real)
     let actions = state.completeGPUWork(.real, succeeded: true)
     try expect(
         state.terminalPhase == .realPresentPending,
@@ -197,6 +267,7 @@ private func testPresentedTimeZeroFails() throws {
 private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
+            ("display-aware source admission", testAdmissionTracksDisplayActivity),
             ("generated then real", testGeneratedThenReal),
             ("GUI suspend and resize", testGuiSuspendAndResizeCancel),
             ("enqueue then shutdown", testEnqueueThenShutdown),

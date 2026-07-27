@@ -581,6 +581,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     boolean encodeMetalFxV2(
             final MetalGpuTexture color,
             final MetalGpuTexture depth,
+            @Nullable final MetalGpuTexture handDepth,
+            final float handReactiveBoost,
             final MetalGpuTexture cameraMotion,
             final MetalGpuTexture objectMotion,
             final MetalGpuTexture objectValidity,
@@ -596,10 +598,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int inputHeight,
             final boolean reset,
             final boolean depthReversed,
-            final boolean preserveReactiveMask
+            final boolean preserveReactiveMask,
+            final boolean emitMotionDiagnostics
     ) {
         flushPendingClear(color);
         flushPendingClear(depth);
+        if (handDepth != null) flushPendingClear(handDepth);
         flushPendingClear(cameraMotion);
         flushPendingClear(objectMotion);
         flushPendingClear(objectValidity);
@@ -620,6 +624,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 device.metalDeviceHandle(),
                 color.nativeHandle(),
                 depth.nativeHandle(),
+                handDepth == null ? MemorySegment.NULL : handDepth.nativeHandle(),
                 cameraMotion.nativeHandle(),
                 objectMotion.nativeHandle(),
                 objectValidity.nativeHandle(),
@@ -632,11 +637,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 previousViewProjection.get(previousViewProjectionBuffer),
                 pixelJitter.x,
                 pixelJitter.y,
+                handReactiveBoost,
                 inputWidth,
                 inputHeight,
                 reset,
                 depthReversed,
                 preserveReactiveMask,
+                emitMotionDiagnostics,
                 fence
         );
     }

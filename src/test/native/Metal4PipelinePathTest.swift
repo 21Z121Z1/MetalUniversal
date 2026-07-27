@@ -421,7 +421,9 @@ private func presentPathTest(device: MTLDevice) throws {
     // missing adopt() is exactly the bug this checks for.
     path.adopt(textures: [source, destination])
 
-    let commandBuffer = path.beginFrame()
+    guard let commandBuffer = path.beginFrame() else {
+        try fail("no Metal 4 frame slot was available for the initial copy")
+    }
     try check(path.encodeCopy(
         commandBuffer: commandBuffer,
         source: source,
@@ -449,7 +451,7 @@ private func presentPathTest(device: MTLDevice) throws {
     readyEvent.signaledValue = 7
     let completed = DispatchSemaphore(value: 0)
     var submitError: Error?
-    path.submit(drawable: drawable, readyEvent: readyEvent, eventValue: 7) { error in
+    path.submit(drawable: drawable, readyEvent: readyEvent, eventValue: 7) { error, _, _ in
         submitError = error
         completed.signal()
     }
@@ -471,7 +473,9 @@ private func presentPathTest(device: MTLDevice) throws {
     // commit would queue behind it forever. Here a frame is encoded and abandoned
     // exactly as the deadline path does, abandonFrame is called twice to confirm it
     // is idempotent, and then a real frame must still complete.
-    let abandoned = path.beginFrame()
+    guard let abandoned = path.beginFrame() else {
+        try fail("no Metal 4 frame slot was available for the abandoned frame")
+    }
     try check(path.encodeCopy(
         commandBuffer: abandoned,
         source: source,
@@ -487,7 +491,9 @@ private func presentPathTest(device: MTLDevice) throws {
         print("Metal 4 present path: abandon path exercised, but no second drawable was vended")
         return
     }
-    let secondCommandBuffer = path.beginFrame()
+    guard let secondCommandBuffer = path.beginFrame() else {
+        try fail("the abandoned Metal 4 frame did not release its slot")
+    }
     try check(path.encodeCopy(
         commandBuffer: secondCommandBuffer,
         source: source,
@@ -499,7 +505,7 @@ private func presentPathTest(device: MTLDevice) throws {
     let secondCompleted = DispatchSemaphore(value: 0)
     var secondError: Error?
     readyEvent.signaledValue = 8
-    path.submit(drawable: secondDrawable, readyEvent: readyEvent, eventValue: 8) { error in
+    path.submit(drawable: secondDrawable, readyEvent: readyEvent, eventValue: 8) { error, _, _ in
         secondError = error
         secondCompleted.signal()
     }
@@ -508,7 +514,101 @@ private func presentPathTest(device: MTLDevice) throws {
     try check(secondError == nil,
               "the post-abandon submit failed: \(String(describing: secondError))")
 
-    print("Metal 4 present path: queue, allocator ring, argument table, residency set, MTL4 interpolator, copy encode and the commit/present handshake all functional, and an abandoned frame leaves the queue usable")
+    // Keep both slots submitted behind an unsignaled event. This models the
+    // production failure case where full-resolution interpolation lasts longer
+    // than multiple display periods. The third callback must drop immediately;
+    // resetting either allocator here would violate MTL4CommandAllocator's
+    // completion contract and was the source of the WindowServer watchdog.
+    let saturationLayer = CAMetalLayer()
+    saturationLayer.device = device
+    saturationLayer.pixelFormat = .bgra8Unorm
+    saturationLayer.drawableSize = CGSize(width: 8, height: 8)
+    saturationLayer.maximumDrawableCount = Metal4PresentPath.inFlightSlotCount
+    saturationLayer.allowsNextDrawableTimeout = true
+    guard let saturationPath = Metal4PresentPath(device: device, layer: saturationLayer),
+          let saturationEvent = device.makeSharedEvent(),
+          let saturationDrawable0 = saturationLayer.nextDrawable() else {
+        print("Metal 4 present path: sustained in-flight test skipped because the detached layer vended no drawable")
+        return
+    }
+    saturationPath.adopt(textures: [source, destination])
+    var saturationErrors: [Error] = []
+    let saturationErrorLock = NSLock()
+    let saturationCompletions = DispatchGroup()
+
+    guard let saturationCommand0 = saturationPath.beginFrame() else {
+        try fail("the first sustained-test Metal 4 slot was unavailable")
+    }
+    try check(saturationPath.encodeCopy(
+        commandBuffer: saturationCommand0,
+        source: source,
+        destination: destination,
+        pipeline: copyPipeline,
+        sampler: copySampler,
+        label: "present path sustained copy 0"
+    ), "the first sustained-test copy failed to encode")
+    saturationCompletions.enter()
+    saturationPath.submit(
+        drawable: saturationDrawable0,
+        readyEvent: saturationEvent,
+        eventValue: 100
+    ) { error, _, _ in
+        if let error {
+            saturationErrorLock.lock()
+            saturationErrors.append(error)
+            saturationErrorLock.unlock()
+        }
+        saturationCompletions.leave()
+    }
+
+    guard let saturationDrawable1 = saturationLayer.nextDrawable(),
+          let saturationCommand1 = saturationPath.beginFrame() else {
+        saturationEvent.signaledValue = 101
+        try fail("the detached layer or second sustained-test slot was unavailable")
+    }
+    try check(saturationPath.encodeCopy(
+        commandBuffer: saturationCommand1,
+        source: source,
+        destination: destination,
+        pipeline: copyPipeline,
+        sampler: copySampler,
+        label: "present path sustained copy 1"
+    ), "the second sustained-test copy failed to encode")
+    saturationCompletions.enter()
+    saturationPath.submit(
+        drawable: saturationDrawable1,
+        readyEvent: saturationEvent,
+        eventValue: 101
+    ) { error, _, _ in
+        if let error {
+            saturationErrorLock.lock()
+            saturationErrors.append(error)
+            saturationErrorLock.unlock()
+        }
+        saturationCompletions.leave()
+    }
+
+    try check(saturationPath.availableFrameSlotCount == 0,
+              "both sustained-test submissions should own their slots")
+    try check(saturationPath.beginFrame() == nil,
+              "slot exhaustion must be nonblocking and must not reset in-flight allocator memory")
+
+    saturationEvent.signaledValue = 101
+    try check(saturationCompletions.wait(timeout: .now() + .seconds(5)) == .success,
+              "the sustained-test submissions did not complete after their event was released")
+    saturationErrorLock.lock()
+    let capturedSaturationErrors = saturationErrors
+    saturationErrorLock.unlock()
+    try check(capturedSaturationErrors.isEmpty,
+              "the sustained-test submissions failed: \(capturedSaturationErrors)")
+    try check(saturationPath.availableFrameSlotCount == Metal4PresentPath.inFlightSlotCount,
+              "commit feedback did not release every Metal 4 frame slot")
+    guard saturationPath.beginFrame() != nil else {
+        try fail("no Metal 4 frame slot was reusable after sustained completion")
+    }
+    saturationPath.abandonFrame()
+
+    print("Metal 4 present path: queue, completion-owned frame slots, nonblocking saturation, argument table, residency set, MTL4 interpolator, copy encode and drawable handshake all functional")
 }
 
 private func runPresentPathTest(device: MTLDevice) throws {
@@ -557,7 +657,7 @@ private func bumpAllocatorTest(device: MTLDevice) throws {
     // fall back to, so a nil return would mean a draw with no uniform bound at all.
     // Push well past one chunk and require every allocation to succeed.
     let perChunk = Metal4BumpAllocatorRing.capacityPerFrame / 240
-    var chunk = [UInt8](repeating: 0, count: 240)
+    let chunk = [UInt8](repeating: 0, count: 240)
     var accepted = 0
     for _ in 0..<(perChunk * 2 + 8) {
         guard chunk.withUnsafeBytes({ allocator.allocate(bytes: $0.baseAddress!, length: 240) }) != nil else {
@@ -571,7 +671,7 @@ private func bumpAllocatorTest(device: MTLDevice) throws {
 
     // The one genuinely unservable case: a single allocation bigger than a whole
     // chunk. Chaining cannot help, so nil is correct here.
-    var oversized = [UInt8](repeating: 0, count: Metal4BumpAllocatorRing.capacityPerFrame + 16)
+    let oversized = [UInt8](repeating: 0, count: Metal4BumpAllocatorRing.capacityPerFrame + 16)
     try check(oversized.withUnsafeBytes({
         allocator.allocate(bytes: $0.baseAddress!, length: oversized.count)
     }) == nil, "an allocation larger than a whole chunk was accepted")

@@ -240,10 +240,10 @@ private final class ValidationRunner {
         Thread.sleep(forTimeInterval: 0.5)
         var displayWidth = 1708
         var displayHeight = 960
-        var sceneWidth = 1440
-        var sceneHeight = 808
-        var inputWidth = 964
-        var inputHeight = 542
+        var sceneWidth = 1280
+        var sceneHeight = 718
+        var inputWidth = 858
+        var inputHeight = 482
         var inputs = try makeInputs(
             sceneWidth: sceneWidth,
             sceneHeight: sceneHeight,
@@ -269,12 +269,17 @@ private final class ValidationRunner {
         for sourceIndex in 0..<(warmupSourceCount + measuredSourceCount) {
             let measuredFrame = sourceIndex - warmupSourceCount
             if measuredFrame == measuredSourceCount / 2 {
+                guard presenter.waitUntilIdle(timeout: 3.0) else {
+                    throw PresentationValidationError.failed(
+                        "Presenter did not drain before resize"
+                    )
+                }
                 displayWidth = 1600
                 displayHeight = 900
-                sceneWidth = 1440
-                sceneHeight = 810
-                inputWidth = 964
-                inputHeight = 542
+                sceneWidth = 1280
+                sceneHeight = 720
+                inputWidth = 858
+                inputHeight = 482
                 inputs = try makeInputs(
                     sceneWidth: sceneWidth,
                     sceneHeight: sceneHeight,
@@ -322,11 +327,11 @@ private final class ValidationRunner {
                 throw PresentationValidationError.failed("Presenter rejected source frame \(sourceIndex)")
             }
             commandBuffer.commit()
-            guard presenter.waitUntilIdle(timeout: 3.0) else {
-                throw PresentationValidationError.failed(
-                    "Source frame \(sourceIndex) did not reach a terminal ownership state"
-                )
-            }
+        }
+        guard presenter.waitUntilIdle(timeout: 3.0) else {
+            throw PresentationValidationError.failed(
+                "Final source frames did not reach terminal ownership states"
+            )
         }
 
         // Source ownership now ends at real-present GPU completion, while
@@ -351,6 +356,7 @@ private final class ValidationRunner {
 
     private func diagnosticRecord(_ item: MetalFrameGenerationDiagnosticSnapshot) -> [String: Any] {
         [
+            "presentPath": item.presentPath,
             "sourceFrameID": item.sourceFrameID,
             "frameKind": item.frameKind,
             "displayUpdateID": item.displayUpdateID,
@@ -376,9 +382,11 @@ private final class ValidationRunner {
     }
 
     private func writeRawTimeline(_ timeline: [MetalFrameGenerationDiagnosticSnapshot]) throws {
+        let presentPaths = Set(timeline.map(\.presentPath))
         let data = try JSONSerialization.data(
             withJSONObject: [
                 "status": "captured",
+                "presentPath": presentPaths.count == 1 ? presentPaths.first! : "mixed",
                 "timeline": timeline.map(diagnosticRecord)
             ],
             options: [.prettyPrinted, .sortedKeys]
@@ -411,6 +419,20 @@ private final class ValidationRunner {
         }
         guard shutdownDuration < 2.0 else {
             throw PresentationValidationError.failed("Shutdown took \(shutdownDuration)s")
+        }
+        let presentPaths = Set(timeline.map(\.presentPath))
+        guard presentPaths.count == 1, let presentPath = presentPaths.first else {
+            throw PresentationValidationError.failed(
+                "Expected one presenter path, found \(presentPaths.sorted())"
+            )
+        }
+        let expectedPresentPath = ProcessInfo.processInfo.environment[
+            "METALLUM_VALIDATE_METAL4_PRESENT"
+        ] == "1" ? "metal4" : "metal3"
+        guard presentPath == expectedPresentPath else {
+            throw PresentationValidationError.failed(
+                "Requested \(expectedPresentPath), but presenter used \(presentPath)"
+            )
         }
 
         func averagePositiveInterval(_ values: [CFTimeInterval]) -> CFTimeInterval {
@@ -550,6 +572,7 @@ private final class ValidationRunner {
             "usedTargetedPresent": false,
             "usedComputerUse": false,
             "usedSystemScreenshot": false,
+            "presentPath": presentPath,
             "sourceFrames": measuredSourceCount,
             "warmupSourceFrames": warmupSourceCount,
             "realPresented": real.count,
