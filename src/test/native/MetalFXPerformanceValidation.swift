@@ -31,9 +31,12 @@ private struct PresentationCase {
 }
 
 @available(macOS 26.0, *)
-private final class Metal4FrameInterpolatorBenchmark {
+private final class Metal4EffectsBenchmark {
+    let temporal: any MTL4FXTemporalScaler
     let interpolator: any MTL4FXFrameInterpolator
+    let usesLinkedScaler: Bool
 
+    private let compiler: MTL4Compiler
     private let queue: MTL4CommandQueue
     private let commandBuffer: MTL4CommandBuffer
     private let allocator: MTL4CommandAllocator
@@ -44,18 +47,47 @@ private final class Metal4FrameInterpolatorBenchmark {
         let compilerDescriptor = MTL4CompilerDescriptor()
         compilerDescriptor.label = "MetalFX Performance Compiler"
         let compiler = try device.makeCompiler(descriptor: compilerDescriptor)
-        let descriptor = MTLFXFrameInterpolatorDescriptor()
-        descriptor.colorTextureFormat = .bgra8Unorm
-        descriptor.depthTextureFormat = .depth32Float
-        descriptor.motionTextureFormat = .rg16Float
-        descriptor.outputTextureFormat = .bgra8Unorm
-        descriptor.inputWidth = item.inputWidth
-        descriptor.inputHeight = item.inputHeight
-        descriptor.outputWidth = item.outputWidth
-        descriptor.outputHeight = item.outputHeight
-        guard let interpolator = descriptor.makeFrameInterpolator(device: device, compiler: compiler),
+        let temporalDescriptor = MTLFXTemporalScalerDescriptor()
+        temporalDescriptor.colorTextureFormat = .bgra8Unorm
+        temporalDescriptor.depthTextureFormat = .depth32Float
+        temporalDescriptor.motionTextureFormat = .rg16Float
+        temporalDescriptor.outputTextureFormat = .bgra8Unorm
+        temporalDescriptor.inputWidth = item.inputWidth
+        temporalDescriptor.inputHeight = item.inputHeight
+        temporalDescriptor.outputWidth = item.outputWidth
+        temporalDescriptor.outputHeight = item.outputHeight
+        temporalDescriptor.isAutoExposureEnabled = false
+        temporalDescriptor.requiresSynchronousInitialization = true
+        let interpolationDescriptor = MTLFXFrameInterpolatorDescriptor()
+        interpolationDescriptor.colorTextureFormat = .bgra8Unorm
+        interpolationDescriptor.depthTextureFormat = .depth32Float
+        interpolationDescriptor.motionTextureFormat = .rg16Float
+        interpolationDescriptor.outputTextureFormat = .bgra8Unorm
+        interpolationDescriptor.inputWidth = item.inputWidth
+        interpolationDescriptor.inputHeight = item.inputHeight
+        interpolationDescriptor.outputWidth = item.outputWidth
+        interpolationDescriptor.outputHeight = item.outputHeight
+        guard let temporal = temporalDescriptor.makeTemporalScaler(device: device, compiler: compiler) else {
+            throw PerformanceFailure.message("Could not create Metal 4 Temporal for \(item.name)")
+        }
+        var interpolator: (any MTL4FXFrameInterpolator)?
+        var usesLinkedScaler = false
+        interpolationDescriptor.scaler = temporal
+        interpolator = interpolationDescriptor.makeFrameInterpolator(
+            device: device,
+            compiler: compiler
+        )
+        usesLinkedScaler = interpolator != nil
+        if interpolator == nil {
+            interpolationDescriptor.scaler = nil
+            interpolator = interpolationDescriptor.makeFrameInterpolator(
+                device: device,
+                compiler: compiler
+            )
+        }
+        guard let interpolator,
               let commandBuffer: MTL4CommandBuffer = device.makeCommandBuffer() else {
-            throw PerformanceFailure.message("Could not create Metal 4 FrameInterpolator for \(item.name)")
+            throw PerformanceFailure.message("Could not create Metal 4 effects for \(item.name)")
         }
         let queueDescriptor = MTL4CommandQueueDescriptor()
         queueDescriptor.label = "MetalFX Performance Metal 4 Queue"
@@ -66,7 +98,10 @@ private final class Metal4FrameInterpolatorBenchmark {
         let residencyDescriptor = MTLResidencySetDescriptor()
         residencyDescriptor.label = "MetalFX Performance Metal 4 Residency"
         residencyDescriptor.initialCapacity = 8
+        self.temporal = temporal
         self.interpolator = interpolator
+        self.usesLinkedScaler = usesLinkedScaler
+        self.compiler = compiler
         self.queue = try device.makeMTL4CommandQueue(descriptor: queueDescriptor)
         self.commandBuffer = commandBuffer
         self.allocator = try device.makeCommandAllocator(descriptor: allocatorDescriptor)
@@ -76,7 +111,8 @@ private final class Metal4FrameInterpolatorBenchmark {
     }
 
     func configure(
-        color: MTLTexture,
+        inputColor: MTLTexture,
+        temporalOutput: MTLTexture,
         previousColor: MTLTexture,
         depth: MTLTexture,
         motion: MTLTexture,
@@ -84,10 +120,28 @@ private final class Metal4FrameInterpolatorBenchmark {
         item: PerformanceCase
     ) {
         residencySet.removeAllAllocations()
-        residencySet.addAllocations([color, previousColor, depth, motion, output])
+        residencySet.addAllocations([
+            inputColor,
+            temporalOutput,
+            previousColor,
+            depth,
+            motion,
+            output
+        ])
         residencySet.commit()
         residencySet.requestResidency()
-        interpolator.colorTexture = color
+        temporal.colorTexture = inputColor
+        temporal.depthTexture = depth
+        temporal.motionTexture = motion
+        temporal.outputTexture = temporalOutput
+        temporal.inputContentWidth = item.inputWidth
+        temporal.inputContentHeight = item.inputHeight
+        temporal.jitterOffsetX = 0.0
+        temporal.jitterOffsetY = 0.0
+        temporal.motionVectorScaleX = Float(item.inputWidth) * 0.5
+        temporal.motionVectorScaleY = Float(item.inputHeight) * 0.5
+        temporal.isDepthReversed = true
+        interpolator.colorTexture = temporalOutput
         interpolator.prevColorTexture = previousColor
         interpolator.uiTexture = nil
         interpolator.depthTexture = depth
@@ -106,13 +160,17 @@ private final class Metal4FrameInterpolatorBenchmark {
         interpolator.isDepthReversed = true
     }
 
-    func measure(warmupCount: Int, measuredCount: Int) throws -> [Double] {
+    private func measure(
+        label: String,
+        warmupCount: Int,
+        measuredCount: Int,
+        encode: (MTL4CommandBuffer, Int) -> Void
+    ) throws -> [Double] {
         var samples: [Double] = []
         for index in 0..<(warmupCount + measuredCount) {
             allocator.reset()
             commandBuffer.beginCommandBuffer(allocator: allocator)
-            interpolator.shouldResetHistory = index == 0
-            interpolator.encode(commandBuffer: commandBuffer)
+            encode(commandBuffer, index)
             commandBuffer.endCommandBuffer()
             let options = MTL4CommitOptions()
             let completed = DispatchSemaphore(value: 0)
@@ -127,19 +185,56 @@ private final class Metal4FrameInterpolatorBenchmark {
             }
             queue.commit([commandBuffer], options: options)
             guard completed.wait(timeout: .now() + 5.0) == .success else {
-                throw PerformanceFailure.message("Metal 4 FrameInterpolator feedback timed out")
+                throw PerformanceFailure.message("\(label) feedback timed out")
             }
             if let feedbackError {
-                throw PerformanceFailure.message("Metal 4 FrameInterpolator failed: \(feedbackError)")
+                throw PerformanceFailure.message("\(label) failed: \(feedbackError)")
             }
             guard gpuEndTime > gpuStartTime else {
-                throw PerformanceFailure.message("Metal 4 FrameInterpolator returned invalid GPU timestamps")
+                throw PerformanceFailure.message("\(label) returned invalid GPU timestamps")
             }
             if index >= warmupCount {
                 samples.append((gpuEndTime - gpuStartTime) * 1_000.0)
             }
         }
         return samples
+    }
+
+    func measureTemporal(warmupCount: Int, measuredCount: Int) throws -> [Double] {
+        try measure(
+            label: "Metal 4 Temporal",
+            warmupCount: warmupCount,
+            measuredCount: measuredCount
+        ) { commandBuffer, index in
+            temporal.reset = index == 0
+            temporal.encode(commandBuffer: commandBuffer)
+        }
+    }
+
+    func measureFrameInterpolator(warmupCount: Int, measuredCount: Int) throws -> [Double] {
+        try measure(
+            label: "Metal 4 FrameInterpolator",
+            warmupCount: warmupCount,
+            measuredCount: measuredCount
+        ) { commandBuffer, index in
+            interpolator.shouldResetHistory = index == 0
+            interpolator.encode(commandBuffer: commandBuffer)
+        }
+    }
+
+    func detachResources() {
+        temporal.colorTexture = nil
+        temporal.depthTexture = nil
+        temporal.motionTexture = nil
+        temporal.outputTexture = nil
+        interpolator.colorTexture = nil
+        interpolator.prevColorTexture = nil
+        interpolator.uiTexture = nil
+        interpolator.depthTexture = nil
+        interpolator.motionTexture = nil
+        interpolator.outputTexture = nil
+        residencySet.removeAllAllocations()
+        residencySet.commit()
     }
 }
 
@@ -571,20 +666,30 @@ private final class PerformanceRunner {
             throw PerformanceFailure.message("Could not create standalone FrameInterpolator for \(item.name)")
         }
         let metal4Benchmark = item.name == "fullscreen-half-scale-3024"
-                ? try Metal4FrameInterpolatorBenchmark(device: device, item: item)
+                ? try Metal4EffectsBenchmark(device: device, item: item)
                 : nil
+        // macOS 26.5 crashes in the framework's MTL4FX teardown after successful
+        // encoding. This short-lived benchmark keeps the effects alive until exit.
+        if let metal4Benchmark {
+            _ = Unmanaged.passRetained(metal4Benchmark)
+        }
 
+        var inputColorUsage = temporal.colorTextureUsage
+        if let metal4Benchmark {
+            inputColorUsage.formUnion(metal4Benchmark.temporal.colorTextureUsage)
+        }
         let inputColor = try makeTexture(
             format: colorFormat,
             width: item.inputWidth,
             height: item.inputHeight,
-            usage: temporal.colorTextureUsage.union(.renderTarget),
+            usage: inputColorUsage.union(.renderTarget),
             label: "\(item.name) temporal input"
         )
         var depthUsage = temporal.depthTextureUsage
             .union(interpolator.depthTextureUsage)
             .union(standaloneInterpolator.depthTextureUsage)
         if let metal4Benchmark {
+            depthUsage.formUnion(metal4Benchmark.temporal.depthTextureUsage)
             depthUsage.formUnion(metal4Benchmark.interpolator.depthTextureUsage)
         }
         let depth = try makeTexture(
@@ -598,6 +703,7 @@ private final class PerformanceRunner {
             .union(interpolator.motionTextureUsage)
             .union(standaloneInterpolator.motionTextureUsage)
         if let metal4Benchmark {
+            motionUsage.formUnion(metal4Benchmark.temporal.motionTextureUsage)
             motionUsage.formUnion(metal4Benchmark.interpolator.motionTextureUsage)
         }
         let motion = try makeTexture(
@@ -607,11 +713,18 @@ private final class PerformanceRunner {
             usage: motionUsage.union(.renderTarget),
             label: "\(item.name) motion"
         )
+        var temporalOutputUsage = temporal.outputTextureUsage
+            .union(interpolator.colorTextureUsage)
+            .union(standaloneInterpolator.colorTextureUsage)
+        if let metal4Benchmark {
+            temporalOutputUsage.formUnion(metal4Benchmark.temporal.outputTextureUsage)
+            temporalOutputUsage.formUnion(metal4Benchmark.interpolator.colorTextureUsage)
+        }
         let temporalOutput = try makeTexture(
             format: colorFormat,
             width: item.outputWidth,
             height: item.outputHeight,
-            usage: temporal.outputTextureUsage.union(.shaderRead).union(.renderTarget),
+            usage: temporalOutputUsage.union(.shaderRead).union(.renderTarget),
             label: "\(item.name) temporal output"
         )
         var colorUsage = interpolator.colorTextureUsage.union(standaloneInterpolator.colorTextureUsage)
@@ -707,20 +820,29 @@ private final class PerformanceRunner {
             standaloneInterpolator.shouldResetHistory = index == 0
             standaloneInterpolator.encode(commandBuffer: commandBuffer)
         }
-        var metal4Statistics: [String: Any]?
+        var metal4TemporalStatistics: [String: Any]?
+        var metal4FrameInterpolatorStatistics: [String: Any]?
         if let metal4Benchmark {
             metal4Benchmark.configure(
-                color: temporalOutput,
+                inputColor: inputColor,
+                temporalOutput: temporalOutput,
                 previousColor: previousColor,
                 depth: depth,
                 motion: motion,
                 output: interpolationOutput,
                 item: item
             )
-            metal4Statistics = statistics(try metal4Benchmark.measure(
+            defer { metal4Benchmark.detachResources() }
+            metal4TemporalStatistics = statistics(try metal4Benchmark.measureTemporal(
                 warmupCount: warmupCount,
                 measuredCount: measuredCount
             ))
+            metal4FrameInterpolatorStatistics = statistics(
+                try metal4Benchmark.measureFrameInterpolator(
+                    warmupCount: warmupCount,
+                    measuredCount: measuredCount
+                )
+            )
         }
 
         var result: [String: Any] = [
@@ -734,8 +856,12 @@ private final class PerformanceRunner {
             "frameInterpolator": statistics(interpolationSamples),
             "standaloneFrameInterpolator": statistics(standaloneSamples)
         ]
-        if let metal4Statistics {
-            result["metal4FrameInterpolator"] = metal4Statistics
+        if let metal4TemporalStatistics {
+            result["metal4Temporal"] = metal4TemporalStatistics
+        }
+        if let metal4FrameInterpolatorStatistics {
+            result["metal4FrameInterpolator"] = metal4FrameInterpolatorStatistics
+            result["metal4FrameInterpolatorLinkedScaler"] = metal4Benchmark?.usesLinkedScaler ?? false
         }
         return result
     }
@@ -756,13 +882,15 @@ private final class PerformanceRunner {
             let temporal = result["temporal"] as? [String: Any]
             let frameInterpolator = result["frameInterpolator"] as? [String: Any]
             let standalone = result["standaloneFrameInterpolator"] as? [String: Any]
-            let metal4 = result["metal4FrameInterpolator"] as? [String: Any]
-            print(String(format: "[performance] %@ Temporal %.2f ms p95; linked FrameInterpolator %.2f ms p95; standalone %.2f ms p95; Metal 4 %.2f ms p95",
+            let metal4Temporal = result["metal4Temporal"] as? [String: Any]
+            let metal4FrameInterpolator = result["metal4FrameInterpolator"] as? [String: Any]
+            print(String(format: "[performance] %@ Metal 3 Temporal %.2f ms p95; Metal 4 Temporal %.2f ms p95; linked FrameInterpolator %.2f ms p95; standalone %.2f ms p95; Metal 4 FrameInterpolator %.2f ms p95",
                          item.name,
                          temporal?["p95Milliseconds"] as? Double ?? 0.0,
+                         metal4Temporal?["p95Milliseconds"] as? Double ?? 0.0,
                          frameInterpolator?["p95Milliseconds"] as? Double ?? 0.0,
                          standalone?["p95Milliseconds"] as? Double ?? 0.0,
-                         metal4?["p95Milliseconds"] as? Double ?? 0.0))
+                         metal4FrameInterpolator?["p95Milliseconds"] as? Double ?? 0.0))
         }
         let presentationCases = [
             PresentationCase(

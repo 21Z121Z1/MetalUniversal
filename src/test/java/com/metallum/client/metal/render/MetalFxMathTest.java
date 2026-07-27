@@ -371,6 +371,7 @@ final class MetalFxMathTest {
         assertEquals(1920, MetalFxConfig.scaledDimension(1920, 1.0F));
         assertEquals(1286, MetalFxConfig.scaledDimension(1920, 0.67F));
         assertEquals(960, MetalFxConfig.scaledDimension(1920, 0.5F));
+        assertEquals(867, MetalFxConfig.scaledDimension(1734, 0.5F));
         assertEquals(8, MetalFxConfig.phaseCount(1.0F));
         assertEquals(18, MetalFxConfig.phaseCount(0.67F));
         assertEquals(32, MetalFxConfig.phaseCount(0.5F));

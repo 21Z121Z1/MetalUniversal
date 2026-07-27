@@ -256,6 +256,52 @@ The 3024-wide interpolator alone consumes about 86% of a 16.67 ms source-frame
 budget and cannot support 60 source -> 120 present with render or shader
 headroom. This is a GPU budget, not proof of scanout cadence.
 
+### Native Retina fullscreen ceiling on M1 Pro
+
+The later Metal 4 comparison adds a true 50% fullscreen case and measures both
+MTL3 and MTL4 effects against the same 1512x839 -> 3024x1678 textures. The MTL4
+Temporal scaler is linked to the MTL4 FrameInterpolator and the result records
+that link explicitly. On the Apple M1 Pro (30 measured iterations after five
+warm-ups), the p95 values were:
+
+| Path | Temporal | FrameInterpolator |
+| --- | ---: | ---: |
+| Metal 3 linked | 7.60 ms | 22.32 ms |
+| Metal 4 linked | 7.76 ms | 22.53 ms |
+
+The linked MTL4 path therefore does not reduce interpolation cost. Moving the
+production Temporal encode from the established MTL3 command stream to a new
+MTL4 queue was also 0.16 ms slower in this run while adding a cross-queue event
+and another resize/shutdown lifetime. That migration is rejected by the measured
+result rather than reported as a performance improvement.
+
+For the real client gate, `-Dmetallum.validation.preserveFullscreen=true`
+keeps the scripted readbacks, GUI open/close and 180-frame steady tail on the
+current fullscreen drawable instead of switching to the 1708x960 golden-frame
+window. The 2026-07-27 M1 Pro run used a 3024x1734 drawable, exact 1512x867 3D
+input, native MTL4 Frame Generation output and direct native presentation. It
+passed 16/16 attachment readbacks, but failed every performance budget:
+
+| Metric | Measured p95 | Required |
+| --- | ---: | ---: |
+| Source interval | 30.50 ms | <= 18.50 ms |
+| Presenter admission wait | 27.80 ms | diagnostic |
+| Generated-frame GPU | 25.71 ms | <= 7.00 ms |
+| Present interval | 25.00 ms | <= 8.50 ms |
+| Total GPU | 63.91 ms | <= 13.67 ms |
+
+Only 220/256 retained presentation records reported nonzero `presentedTime`
+(0.859), and all 128 complete source pairs exceeded 16.67 ms. This is direct
+Minecraft/WindowServer evidence that native 3024x1734 60-source/120-present is
+not attainable with Apple's current FrameInterpolator on this M1 Pro. The
+1280/1708 bounded paths remain the deployable 120 Hz modes; native fullscreen
+must remain a measured fail-closed option unless the framework or hardware
+cost changes.
+
+The exact-half rule is intentional: 50% no longer clears the low bit after
+rounding, so an even 1734-pixel drawable produces 867 input pixels rather than
+866. Other quality ratios keep their existing even-size alignment.
+
 The default was reduced from 1440 to 1280 after an automated real Minecraft
 Quick Play comparison at a 1708x960 framebuffer. Both runs used Temporal 67%,
 native-resolution GUI composition, a 180-source-frame readback-free steady tail,

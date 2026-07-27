@@ -246,7 +246,10 @@ final class MetalFxConfig {
             return displayDimension;
         }
         int scaled = Math.max(1, Math.round(displayDimension * scale));
-        if (scaled > 1) {
+        // A 50% mode is an exact geometry contract, including odd half sizes
+        // such as 1734 -> 867. Other quality ratios retain the established
+        // even-size alignment used by the bounded-output path.
+        if (scaled > 1 && Math.abs(scale - 0.5F) > 1.0E-6F) {
             scaled &= ~1;
         }
         return Math.max(1, scaled);

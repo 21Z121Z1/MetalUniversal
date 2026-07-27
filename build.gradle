@@ -584,6 +584,10 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 		systemProperty "metallum.metalfx.objectMotionProducer", requestedObjectMotionProducer
 		systemProperty "metallum.metalfx.frameGenerationOutputWidth",
 				requestedFrameGenerationOutputWidth
+		systemProperty "metallum.window.retinaFullscreen",
+				System.getProperty("metallum.window.retinaFullscreen", "false")
+		systemProperty "metallum.validation.preserveFullscreen",
+				System.getProperty("metallum.validation.preserveFullscreen", "false")
 		if (requestedFrameGeneration.toBoolean()) {
 			environment "METALLUM_METALFX_PRESENT_DIAGNOSTICS_PATH",
 					file("${validationOutputDir}/frame-generation-timeline.json").absolutePath

@@ -57,6 +57,9 @@ import java.util.UUID;
  */
 public final class MetalValidationClient implements ClientModInitializer {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.validation.enabled");
+    private static final boolean PRESERVE_FULLSCREEN = Boolean.getBoolean(
+            "metallum.validation.preserveFullscreen"
+    );
     private static final int CONTROLLED_ENTITY_ID = -2_147_000_001;
     private static final UUID CONTROLLED_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf01");
@@ -283,55 +286,56 @@ public final class MetalValidationClient implements ClientModInitializer {
             return;
         }
         if (!timelineAnchored) {
-            // A prior interactive run can leave run/options.txt in fullscreen
-            // mode. setWindowed() only changes the saved windowed rectangle; it
-            // cannot resize the active fullscreen drawable, so the old loop
-            // retried the same native resolution until its 200-attempt guard
-            // fired. Force both fullscreen modes off before pinning the logical
-            // window size used by golden captures.
-            if (minecraft.getWindow().isFullscreen()) {
-                minecraft.options.exclusiveFullscreen().set(false);
-                minecraft.options.fullscreen().set(false);
-                minecraft.getWindow().updateFullscreenIfChanged();
-                if (minecraft.getWindow().isFullscreen()) {
-                    minecraft.getWindow().toggleFullScreen();
-                }
-                windowResizeAttempts = 0;
-                holdInitialPose(minecraft);
-                sleepForAsyncWork(25L);
-                return;
-            }
-            // Hold the timeline until the FRAMEBUFFER is the pinned size.
-            // The Gradle run passes --width/--height, but macOS window
-            // management can zoom or tile the window afterwards, and the
-            // backing scale differs by which display the window lands on
-            // (built-in Retina 2x vs external 1x) — both change the capture
-            // size and make golden runs incomparable. setWindowed takes the
-            // LOGICAL size, so on a 2x display the request is halved to land
-            // the framebuffer on the target.
             int framebufferWidth = minecraft.getWindow().getWidth();
             int framebufferHeight = minecraft.getWindow().getHeight();
-            if (framebufferWidth != FRAMEBUFFER_WIDTH || framebufferHeight != FRAMEBUFFER_HEIGHT) {
-                windowResizeAttempts++;
-                if (windowResizeAttempts > 200) {
+            if (PRESERVE_FULLSCREEN) {
+                if (!minecraft.getWindow().isFullscreen() || framebufferWidth <= 0 || framebufferHeight <= 0) {
                     throw new IllegalStateException(
-                            "Validation framebuffer stuck at " + framebufferWidth + "x" + framebufferHeight
-                                    + "; expected " + FRAMEBUFFER_WIDTH + "x" + FRAMEBUFFER_HEIGHT
+                            "Fullscreen validation requires an active non-empty fullscreen drawable; found "
+                                    + framebufferWidth + "x" + framebufferHeight
                     );
                 }
-                if (windowResizeAttempts % 40 == 1) {
-                    int logicalWidth = minecraft.getWindow().getScreenWidth();
-                    int logicalHeight = minecraft.getWindow().getScreenHeight();
-                    boolean retinaBacking = logicalWidth > 0 && logicalHeight > 0
-                            && Math.abs((double) framebufferWidth / logicalWidth - 2.0) < 0.1
-                            && Math.abs((double) framebufferHeight / logicalHeight - 2.0) < 0.1;
-                    requestedLogicalWidth = retinaBacking ? FRAMEBUFFER_WIDTH / 2 : FRAMEBUFFER_WIDTH;
-                    requestedLogicalHeight = retinaBacking ? FRAMEBUFFER_HEIGHT / 2 : FRAMEBUFFER_HEIGHT;
-                    minecraft.getWindow().setWindowed(requestedLogicalWidth, requestedLogicalHeight);
+                Metallum.LOGGER.info(
+                        "Validation timeline preserving fullscreen drawable {}x{}",
+                        framebufferWidth,
+                        framebufferHeight
+                );
+            } else {
+                // Golden captures use one pinned windowed framebuffer across runs.
+                if (minecraft.getWindow().isFullscreen()) {
+                    minecraft.options.exclusiveFullscreen().set(false);
+                    minecraft.options.fullscreen().set(false);
+                    minecraft.getWindow().updateFullscreenIfChanged();
+                    if (minecraft.getWindow().isFullscreen()) {
+                        minecraft.getWindow().toggleFullScreen();
+                    }
+                    windowResizeAttempts = 0;
+                    holdInitialPose(minecraft);
+                    sleepForAsyncWork(25L);
+                    return;
                 }
-                holdInitialPose(minecraft);
-                sleepForAsyncWork(25L);
-                return;
+                if (framebufferWidth != FRAMEBUFFER_WIDTH || framebufferHeight != FRAMEBUFFER_HEIGHT) {
+                    windowResizeAttempts++;
+                    if (windowResizeAttempts > 200) {
+                        throw new IllegalStateException(
+                                "Validation framebuffer stuck at " + framebufferWidth + "x" + framebufferHeight
+                                        + "; expected " + FRAMEBUFFER_WIDTH + "x" + FRAMEBUFFER_HEIGHT
+                        );
+                    }
+                    if (windowResizeAttempts % 40 == 1) {
+                        int logicalWidth = minecraft.getWindow().getScreenWidth();
+                        int logicalHeight = minecraft.getWindow().getScreenHeight();
+                        boolean retinaBacking = logicalWidth > 0 && logicalHeight > 0
+                                && Math.abs((double) framebufferWidth / logicalWidth - 2.0) < 0.1
+                                && Math.abs((double) framebufferHeight / logicalHeight - 2.0) < 0.1;
+                        requestedLogicalWidth = retinaBacking ? FRAMEBUFFER_WIDTH / 2 : FRAMEBUFFER_WIDTH;
+                        requestedLogicalHeight = retinaBacking ? FRAMEBUFFER_HEIGHT / 2 : FRAMEBUFFER_HEIGHT;
+                        minecraft.getWindow().setWindowed(requestedLogicalWidth, requestedLogicalHeight);
+                    }
+                    holdInitialPose(minecraft);
+                    sleepForAsyncWork(25L);
+                    return;
+                }
             }
             timelineAnchored = true;
             // A pause screen may already be open if focus was lost before
