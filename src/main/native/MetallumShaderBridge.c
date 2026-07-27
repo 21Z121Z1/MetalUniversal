@@ -271,7 +271,8 @@ Java_com_metallum_client_metal_render_bridge_ShaderBridge_glslangCompile(
 /* -------------------------------------------------------------------------
  * JNI: ShaderBridge.spvcCompileToMsl(byte[] spirv, int mslPlatform,
  *          int mslVersion, boolean enableDecorationBinding,
- *          boolean textureBufferNative, boolean flipVertexY)
+ *          boolean textureBufferNative, boolean flipVertexY,
+ *          int pushConstantBinding)
  *
  * Cross-compiles a SPIR-V binary to Metal Shading Language (MSL) using
  * SPIRV-Cross's C API. Returns the MSL source as a Java String.
@@ -283,7 +284,8 @@ JNIEXPORT jstring JNICALL
 Java_com_metallum_client_metal_render_bridge_ShaderBridge_spvcCompileToMsl(
     JNIEnv *env, jclass cls, jbyteArray jSpirv,
     jint mslPlatform, jint mslVersion, jboolean enableDecorationBinding,
-    jboolean textureBufferNative, jboolean flipVertexY) {
+    jboolean textureBufferNative, jboolean flipVertexY,
+    jint pushConstantBinding) {
 
     (void)cls; /* unused — static method */
 
@@ -463,6 +465,42 @@ Java_com_metallum_client_metal_render_bridge_ShaderBridge_spvcCompileToMsl(
         spvc_context_destroy(context);
         throw_runtime_exception(env, msg);
         return NULL;
+    }
+
+    /* --- Remap push constant buffer index (if requested) ---------------- *
+     * SPIRV-Cross 默认将 push constant 分配到 next_metal_resource_index_buffer
+     * (初始值为 0)，与 binding=0 的 UBO 冲突。通过 spvc_compiler_msl_add_resource_binding_2
+     * 将 (SPVC_MSL_PUSH_CONSTANT_DESC_SET, SPVC_MSL_PUSH_CONSTANT_BINDING) 映射到
+     * 指定的 msl_buffer，使 push constant 获得唯一的 [[buffer(N)]] 槽位。
+     * 需为 vertex (SpvExecutionModelVertex=0) 和 fragment (SpvExecutionModelFragment=4)
+     * 各注册一次，因为 spirvToMsl 不知道当前编译的 stage。
+     * 注意：spirv_bytes 已在 spvc_context_parse_spirv 后释放，此处错误路径不再释放。 */
+    if (pushConstantBinding >= 0) {
+        const unsigned stages[] = { 0u /*SpvExecutionModelVertex*/, 4u /*SpvExecutionModelFragment*/ };
+        for (size_t i = 0; i < sizeof(stages) / sizeof(stages[0]); i++) {
+            spvc_msl_resource_binding_2 binding;
+            spvc_msl_resource_binding_init_2(&binding);
+            binding.stage = stages[i];
+            binding.desc_set = SPVC_MSL_PUSH_CONSTANT_DESC_SET;   /* (~0u) */
+            binding.binding = SPVC_MSL_PUSH_CONSTANT_BINDING;     /* 0 */
+            binding.count = 1;
+            binding.msl_buffer = (unsigned)pushConstantBinding;
+            binding.msl_texture = ~0u;
+            binding.msl_sampler = ~0u;
+            rc = spvc_compiler_msl_add_resource_binding_2(compiler, &binding);
+            if (rc != SPVC_SUCCESS) {
+                const char *err = spvc_context_get_last_error_string(context);
+                char msg[2048];
+                snprintf(msg, sizeof(msg),
+                         "spvcCompileToMsl: spvc_compiler_msl_add_resource_binding_2 "
+                         "(stage=%u, pushConstantBinding=%d) failed (%d).\n%s",
+                         stages[i], (int)pushConstantBinding, (int)rc,
+                         err ? err : "(no error string)");
+                spvc_context_destroy(context);
+                throw_runtime_exception(env, msg);
+                return NULL;
+            }
+        }
     }
 
     /* --- Compile to MSL ------------------------------------------------- */

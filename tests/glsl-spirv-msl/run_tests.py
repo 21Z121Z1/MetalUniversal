@@ -410,6 +410,30 @@ def _ubo_no_alias_check(msl: str) -> List[str]:
     return failures
 
 
+def _push_constant_ubo_collision_check(msl: str) -> List[str]:
+    """验证 push constant 与 UBO 在未重映射时的 buffer(0) 冲突（基线行为）。
+
+    此用例验证 CLI 层面的基线行为：spirv-cross CLI 不支持
+    spvc_compiler_msl_add_resource_binding_2 重映射，因此 push constant
+    和 binding=0 的 UBO 都映射到 [[buffer(0)]]，产生冲突。
+
+    JVM/native 层面的重映射（将 PC 移至 buffer(N)）由 build.yml 编译验证
+    + 真机运行验证，CLI 无法测试 spvc_compiler_msl_add_resource_binding_2。
+
+    断言：当前阶段 MSL 中 [[buffer(0)]] 出现至少 2 次
+    （PC + u_Globals 均在 buffer(0)）。顶点/片元各注册独立用例，
+    分别验证各自阶段 MSL 中的冲突。
+    """
+    failures: List[str] = []
+    count = len(re.findall(r"\[\[buffer\(0\)\]\]", msl))
+    if count < 2:
+        failures.append(
+            f"push_constant_ubo_collision: MSL 应至少出现 2 次 [[buffer(0)]]"
+            f"（PC + u_Globals 冲突），实际 {count} 次。\nMSL:\n{msl}"
+        )
+    return failures
+
+
 CASES: List[TestCase] = [
 
     TestCase(
@@ -796,6 +820,76 @@ void main() {
             "回归（片元阶段）：同 14_ubo_alias_collision_vert，验证 frag 阶段两个 UBO 不别名"
         ),
         desc="两个 UBO 显式不同 binding（片元阶段）：同样验证不别名",
+    ),
+
+    TestCase(
+        name="16_push_constant_ubo_collision_vert",
+        stage="vert",
+        # Push constant (Vulkan 禁止带 binding) + UBO(binding=0) 共存。
+        # spirv-cross CLI 不支持 spvc_compiler_msl_add_resource_binding_2 重映射，
+        # 因此 PC 与 u_Globals 都映射到 [[buffer(0)]]，产生冲突（基线行为）。
+        # 与 tests/glsl-spirv-msl/cases/push_constant_ubo_collision.vert 内容一致。
+        # 注意：ensure_spirv_compatible 不会注入 binding 到 push_constant 块 ——
+        # Python 版仅移植 bumpVersion/wrapLooseUniforms/addLayoutLocations 三步，
+        # 无 assignUniqueUboBindings（那是 Java MetalIrisBridge 的步骤），故 PC 声明安全。
+        glsl="""#version 450
+
+// Push constant block — Vulkan 禁止带 binding，SPIRV-Cross 默认分配到 buffer(0)
+layout(push_constant) uniform PC {
+    mat4 u_ModelViewMat;
+};
+
+// UBO with explicit binding=0 — decoration binding=true 时映射到 buffer(0)
+// 与 push constant 冲突：两者都在 [[buffer(0)]]
+layout(std140, binding=0) uniform u_Globals {
+    mat4 u_ProjMat;
+};
+
+void main() {
+    gl_Position = u_ProjMat * u_ModelViewMat * vec4(0.0, 0.0, 0.0, 1.0);
+}
+""",
+        must_contain=["vertex ", "u_ModelViewMat", "u_ProjMat", "[[buffer(0)]]"],
+        custom_check=_push_constant_ubo_collision_check,
+        iris_ref=(
+            "基线：Iris push constants (PC) 与全局 UBO (u_Globals) 在 GLSL 中 PC 无 binding、"
+            "u_Globals 声明 binding=0；spirv-cross CLI 无 spvc_compiler_msl_add_resource_binding_2 "
+            "重映射入口，PC 默认落到 [[buffer(0)]]，与 u_Globals 的 [[buffer(0)]] 冲突。"
+            "JVM/native 层将 PC 重映射至 buffer(N) 的修复由 build.yml 编译验证 + 真机运行验证，"
+            "CLI 无法覆盖该重映射 API。"
+        ),
+        desc="push constant + UBO(binding=0) 在未重映射时冲突于 [[buffer(0)]]（顶点阶段，基线行为）",
+    ),
+
+    TestCase(
+        name="17_push_constant_ubo_collision_frag",
+        stage="frag",
+        # 同 16_push_constant_ubo_collision_vert 的片元阶段版本。
+        # 与 tests/glsl-spirv-msl/cases/push_constant_ubo_collision.frag 内容一致。
+        glsl="""#version 450
+
+// Fragment shader also has push constant + UBO to test fragment stage collision
+layout(push_constant) uniform PC {
+    vec4 u_ColorModulator;
+};
+
+layout(std140, binding=0) uniform u_Globals {
+    vec4 u_FogColor;
+};
+
+layout(location=0) out vec4 fragColor;
+
+void main() {
+    fragColor = u_ColorModulator + u_FogColor;
+}
+""",
+        must_contain=["fragment ", "u_ColorModulator", "u_FogColor", "[[buffer(0)]]"],
+        custom_check=_push_constant_ubo_collision_check,
+        iris_ref=(
+            "基线（片元阶段）：同 16_push_constant_ubo_collision_vert，验证 frag 阶段 "
+            "PC + u_Globals 同样冲突于 [[buffer(0)]]"
+        ),
+        desc="push constant + UBO(binding=0) 在未重映射时冲突于 [[buffer(0)]]（片元阶段，基线行为）",
     ),
 ]
 

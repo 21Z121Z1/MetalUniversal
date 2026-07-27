@@ -79,6 +79,8 @@ public final class ShaderBridge {
      *   <li>{@code SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING} = enableDecorationBinding</li>
      *   <li>{@code SPVC_COMPILER_OPTION_MSL_TEXTURE_BUFFER_NATIVE} = textureBufferNative</li>
      *   <li>{@code SPVC_COMPILER_OPTION_FLIP_VERTEX_Y} = flipVertexY</li>
+     *   <li>{@code SPVC_MSL_PUSH_CONSTANT_DESC_SET/BINDING} -> msl_buffer = pushConstantBinding
+     *       （通过 {@code spvc_compiler_msl_add_resource_binding_2} 注册，覆盖 vertex 和 fragment 两个 stage）</li>
      * </ul>
      *
      * @param spirv SPIR-V 字节数组（长度必须是 4 的倍数，含 5-word 头）
@@ -87,12 +89,16 @@ public final class ShaderBridge {
      * @param enableDecorationBinding 启用 {@code [[buffer(N)]]} 等 decoration binding
      * @param textureBufferNative 启用原生 texture buffer
      * @param flipVertexY 翻转顶点 Y 坐标（与 OpenGL clip-space 约定一致）
+     * @param pushConstantBinding {@code >= 0} 为 push constant 重映射到的 MSL buffer 索引
+     *                            （通过 {@code spvc_compiler_msl_add_resource_binding_2}）；
+     *                            {@code < 0} 为不重映射，使用 SPIRV-Cross 默认 fallback 分配
      * @return MSL 源码字符串
      * @throws RuntimeException 编译失败（含 SPIRV-Cross 错误信息）
      */
     public static native String spvcCompileToMsl(
             byte[] spirv, int mslPlatform, int mslVersion,
-            boolean enableDecorationBinding, boolean textureBufferNative, boolean flipVertexY);
+            boolean enableDecorationBinding, boolean textureBufferNative, boolean flipVertexY,
+            int pushConstantBinding);
 
     /**
      * 将 Mojang {@link ShaderType} 映射为 native 层使用的 stage 整数。

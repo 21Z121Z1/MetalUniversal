@@ -29,6 +29,12 @@ public final class MetalCrossShaderCompiler {
     // MSL 3.1（macOS 14+ / Metal 3.0+）原生支持图像原子操作（imageAtomicAdd/Min/Max/Exchange 等），
     // 通过 metal::atomic_fetch_add_explicit 等 API 实现。MSL 3.0 下 SPIRV-Cross 会生成回退代码或失败。
     private static final int MSL_VERSION_3_1 = 31000;
+    /**
+     * Iris 路径中 push constant 重映射到的固定 MSL buffer 索引。
+     * 使用高索引避免与 Iris UBO（从 binding=0 递增）冲突。
+     * Metal 设备保证至少 31 个 buffer 槽位，30 为安全上限。
+     */
+    private static final int IRIS_PUSH_CONSTANT_BUFFER_INDEX = 30;
     private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     private static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
 
@@ -102,7 +108,7 @@ public final class MetalCrossShaderCompiler {
             lastCompileError = "glslang produced empty/invalid SPIR-V for shader: " + name;
             throw new ShaderCompileException("glslang produced empty/invalid SPIR-V for shader: " + name);
         }
-        return spirvToMsl(spirvBytes, 0, Map.of());
+        return spirvToMsl(spirvBytes, IRIS_PUSH_CONSTANT_BUFFER_INDEX, Map.of());
     }
 
     static MetalCompiledRenderPipeline compile(final MetalDevice device, final RenderPipeline pipeline, final ShaderSource shaderSource) {
@@ -314,21 +320,30 @@ public final class MetalCrossShaderCompiler {
      * 编译选项与原实现保持一致：MSL_PLATFORM_MACOS、MSL 3.1、
      * enableDecorationBinding、textureBufferNative、flipVertexY。
      *
+     * <p><b>pushConstantBinding 新行为</b>：通过 SPIRV-Cross 的
+     * {@code spvc_compiler_msl_add_resource_binding_2} 将 push constant
+     * 重映射到指定的 {@code [[buffer(N)]]}，避免与 binding=0 的 UBO 冲突。
+     * <ul>
+     *   <li>vanilla 路径传 {@code layoutEntries.size()}，与
+     *       {@link #buildResourceBindings} 中为 {@code push_constants} 分配的
+     *       {@code entries.size()} 一致（push_constants 的 bindingIndex）。</li>
+     *   <li>Iris 路径传 {@link #IRIS_PUSH_CONSTANT_BUFFER_INDEX}（30），
+     *       避免与 Iris UBO（从 binding=0 递增）冲突。</li>
+     * </ul>
+     *
      * <p><b>已知限制</b>（因 ShaderBridge 单次调用 API 不暴露反射回调）：
      * <ul>
      *   <li>不再执行 {@code registerIntegerInputConversions} —— _UINT 顶点属性的
      *       uint8/uint16 位宽转换不生效。如需恢复需扩展 ShaderBridge API 增加
      *       per-attribute format 参数。</li>
-     *   <li>不再主动设置 push constant 资源的 binding decoration 为
-     *       {@code pushConstantBinding}。SPIRV-Cross 按 SPIR-V 中的 binding 转为
-     *       MSL 的 {@code [[buffer(N)]]}，但无法重定向到指定 bind index。</li>
      *   <li>{@code activeResources} 返回空集合，导致 {@link #stageMask} 回退到
      *       {@code STAGE_ALL}（功能降级但非致命）。</li>
      * </ul>
      *
      * @param spirvBytes            SPIR-V 二进制（字节数组，长度 ≥ 20）
-     * @param pushConstantBinding   预留的 push constant bind index（当前未使用，
-     *                              保留参数以维持调用方兼容性）
+     * @param pushConstantBinding  push constant 重映射到的 MSL buffer 索引：
+     *                              {@code >= 0} 为重映射目标 buffer 索引；
+     *                              {@code < 0} 为不重映射（保留 SPIR-V 原 binding）
      * @param attributeFormats      顶点属性格式映射（当前未使用，保留参数以维持
      *                              调用方兼容性）
      * @return 编译后的 MSL 源码及反射元数据
@@ -352,7 +367,8 @@ public final class MetalCrossShaderCompiler {
                     MSL_VERSION_3_1,
                     true,   // enableDecorationBinding=true: SPIRV-Cross respects rebind() binding decorations, matching vanilla's flat bindingIndex (buildResourceBindings). Iris UBO uniqueness is handled by MetalIrisBridge.assignUniqueUboBindings.
                     true,   // textureBufferNative
-                    true    // flipVertexY
+                    true,   // flipVertexY
+                    pushConstantBinding  // push constant 重映射到的 MSL buffer 索引（>= 0 重映射，< 0 不重映射）
             );
         } catch (RuntimeException e) {
             lastCompileError = "SPIR-V→MSL failed: " + e.getMessage();
@@ -363,10 +379,16 @@ public final class MetalCrossShaderCompiler {
             throw new ShaderCompileException("SPIRV-Cross produced empty MSL source");
         }
 
-        // 启发式检测：SPIRV-Cross 默认将 push constant 块命名为 "push_constants"。
-        // 仅用于让 buildResourceBindings 知道是否需要为 push_constants 预留 binding 槽位。
-        // TODO(ShaderBridge): 若扩展 ShaderBridge API 暴露反射，可改用准确的资源查询替代启发式。
-        boolean hasPushConstants = mslSource.contains("push_constants");
+        // 启发式检测：重映射后 push constant 位于 [[buffer(pushConstantBinding)]]。
+        // SPIRV-Cross MSL 后端不会将 push constant 命名为 "push_constants"（该名称仅用于
+        // reflect 后端，参考 reference/shaders-msl/vulkan/frag/push-constant.vk.frag），
+        // 故旧的 contains("push_constants") 检测始终返回 false，导致 buildResourceBindings
+        // 不为 push_constants 添加资源绑定，MetalRenderPass 无法绑定 push constant buffer。
+        // 改为检查 MSL 是否包含重映射目标 buffer 索引的引用。
+        // 注意：若 UBO 恰好也在此索引，可能误报；但 push constant 重映射到 entries.size()
+        // 或 IRIS_PUSH_CONSTANT_BUFFER_INDEX(30)，通常高于 UBO 索引，冲突概率低。
+        boolean hasPushConstants = pushConstantBinding >= 0
+                && mslSource.contains("[[buffer(" + pushConstantBinding + ")]]");
 
         return new MslShader(mslSource, hasPushConstants, Set.of());
     }
