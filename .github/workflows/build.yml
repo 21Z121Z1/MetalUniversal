@@ -58,7 +58,10 @@ jobs:
           echo "=== MTLFXFrameInterpolator.h ==="
           cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXFrameInterpolator.h" 2>/dev/null
       - name: build
-        run: ./gradlew buildMacNative build
+        # GitHub's macOS 26 runner can execute the offscreen MetalFX gate but
+        # has no attended WindowServer surface for the visible CAMetalDisplayLink
+        # harness. That harness remains part of every local `build`.
+        run: ./gradlew buildMacNative build -x metalFrameGenerationPresentationValidation
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:

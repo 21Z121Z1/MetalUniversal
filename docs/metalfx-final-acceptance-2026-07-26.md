@@ -476,13 +476,14 @@ Deployment state (updated 2026-07-27):
   `-Dmetallum.metalfx.frameGeneration=false`. Its shared persistent config is
   `TEMPORAL`, 67%, transparency reactive enabled and Frame Generation off.
 - The separate launcher profile `metallum-fabric-26.2-framegen`, displayed as
-  `FrameGen QA - MetalUniversal 26.2 (Gate Override)`, points to the existing
+  `FrameGen QA - MetalUniversal 26.2 (UI Unlocked)`, points to the existing
   `MetalUniversal-26.2` instance. That instance also carries the byte-identical
-  `1.0.2` JAR, and the profile explicitly adds
-  `-Dmetallum.metalfx.objectMotionProducer=true` plus
-  `-Dmetallum.metalfx.frameGeneration=true`. Selecting it opens the production
-  gate only for that launch and does not change the shipped
-  `OBJECT_MOTION_PRODUCER_CONNECTED=false` default.
+  `1.0.2` JAR. The profile forces only the hidden
+  `-Dmetallum.metalfx.objectMotionProducer=true` source gate; mode, scale,
+  reactive policy and Frame Generation remain persistent settings so the
+  Sodium UI stays editable. The instance defaults those settings to TEMPORAL,
+  67%, reactive enabled and Frame Generation enabled. Selecting this profile
+  does not change the shipped `OBJECT_MOTION_PRODUCER_CONNECTED=false` default.
 
 This addendum does not change the main gate:
 
@@ -513,6 +514,8 @@ remains `false` pending the attended refresh/source-rate/VRR matrix.
 The first manually dispatched GitHub Actions run also found an infrastructure
 error: the workflow used macOS 15 while `check` intentionally executes the
 macOS 26-only Frame Interpolator offscreen gate. The workflow now targets the
-available `macos-26` runner so CI can execute the assertion rather than skip or
-fail solely on host version. A remote rerun still requires these local changes
-to be committed and pushed.
+available `macos-26` runner so CI can execute the assertion rather than fail
+solely on host version. GitHub's runner has no attended WindowServer surface,
+so CI excludes only `metalFrameGenerationPresentationValidation`; the
+offscreen Frame Interpolator gate still runs there, while every local `build`
+continues to run the visible-window harness.
