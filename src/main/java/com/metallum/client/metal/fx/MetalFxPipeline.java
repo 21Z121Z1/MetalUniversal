@@ -83,7 +83,7 @@ public final class MetalFxPipeline {
     private static final long COLOR_FORMAT = MTLPixelFormat.BGRA8Unorm.value;
     // Motion vectors are 2-component floats (x, y) per texel — this matches
     // MTLFXFrameInterpolator's required motion vector format.
-    private static final long MOTION_FORMAT = MTLPixelFormat.RG32Float.value;
+    private static final MTLPixelFormat MOTION_FORMAT_ENUM = MTLPixelFormat.RG32Float;
     private static final long USAGE_SHADER_RW =
             MTLTextureUsage.ShaderRead.value | MTLTextureUsage.ShaderWrite.value;
 
@@ -353,7 +353,7 @@ public final class MetalFxPipeline {
         }
         motionVectorTexture = MetalNativeBridge.metallum_create_texture_2d(
                 deviceHandle(),
-                MOTION_FORMAT,
+                MOTION_FORMAT_ENUM,
                 width, height,
                 1L, 1L, 0L,
                 USAGE_SHADER_RW,
