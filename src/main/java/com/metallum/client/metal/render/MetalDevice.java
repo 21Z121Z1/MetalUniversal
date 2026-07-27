@@ -47,6 +47,27 @@ final class MetalDevice implements GpuDeviceBackend {
     private final Map<MslFunctionKey, MemorySegment> functionCache = new HashMap<>();
     private final Map<Long, Deque<MemorySegment>> bufferPool = new HashMap<>();
     private static final int MAX_POOLED_BUFFERS_PER_SIZE = 16;
+    /**
+     * Hard cap on the total bytes retained across every pooled bucket. iOS
+     * jetsams the app when its resident memory crosses ~3 GB; Sodium's
+     * {@code GlBufferArena} routinely requests multi-MB vertex/index
+     * buffers, so an unbounded pool could silently accumulate hundreds of
+     * megabytes of "free" MTLBuffers that the OS still bills against the
+     * process. Draining the pool proactively once it crosses this threshold
+     * lets the OS reclaim that memory between frames instead of waiting
+     * for a {@code close()} that may not come for hours.
+     */
+    private static final long MAX_POOLED_BYTES_TOTAL = 256L * 1024L * 1024L;
+    /**
+     * Buffers larger than this are never retained in the pool. They are
+     * almost always one-shot chunk geometry arenas whose allocation
+     * pattern (grow, free, grow again at a different size) makes pooling
+     * them actively harmful: each kept entry fragments the address space
+     * and the OS still charges it to the process. Releasing them eagerly
+     * lets the driver return the pages immediately.
+     */
+    private static final long POOL_RETAIN_MAX_BUFFER_BYTES = 4L * 1024L * 1024L;
+    private long pooledBytesTotal = 0L;
     private ShaderSource activeShaderSource;
 
     MetalDevice(
@@ -251,10 +272,20 @@ final class MetalDevice implements GpuDeviceBackend {
 
     void queueBufferRelease(final MemorySegment handle, final long size, final long resourceOptions) {
         this.commandEncoder.queueForDestroy(() -> {
+            // Never pool very large buffers (chunk geometry arenas): their
+            // allocation pattern is grow-and-discard, and keeping them in
+            // the pool just inflates resident memory on iOS where the OS
+            // jetsams the process at ~3 GB. Release eagerly.
+            if (size > POOL_RETAIN_MAX_BUFFER_BYTES) {
+                MetalNativeBridge.metallum_release_object(handle);
+                return;
+            }
             long key = composePoolKey(size, resourceOptions);
             Deque<MemorySegment> bucket = bufferPool.computeIfAbsent(key, k -> new ArrayDeque<>());
-            if (bucket.size() < MAX_POOLED_BUFFERS_PER_SIZE) {
+            if (bucket.size() < MAX_POOLED_BUFFERS_PER_SIZE
+                    && pooledBytesTotal + size <= MAX_POOLED_BYTES_TOTAL) {
                 bucket.push(handle);
+                pooledBytesTotal += size;
             } else {
                 MetalNativeBridge.metallum_release_object(handle);
             }
@@ -272,6 +303,25 @@ final class MetalDevice implements GpuDeviceBackend {
             }
         }
         bufferPool.clear();
+        pooledBytesTotal = 0L;
+    }
+
+    /**
+     * Immediately releases every pooled {@code MTLBuffer}. Called by
+     * {@link MetalGpuBuffer} when {@code metallum_create_buffer} returns
+     * null — i.e. when the Metal driver refused the allocation, almost
+     * always because the process is approaching its resident-memory cap
+     * (iOS jetsam) or hit the per-buffer size limit. Draining the pool
+     * gives the driver an instant chunk of free address space to satisfy
+     * the retry, instead of waiting for the next submit's destroy-queue
+     * rotation to free the same buffers.
+     *
+     * <p>Must only be called from the render thread (the same thread that
+     * owns {@link MetalCommandEncoder}). Safe to call repeatedly — drains
+     * are idempotent.
+     */
+    void emergencyDrainBufferPool() {
+        drainBufferPool();
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {

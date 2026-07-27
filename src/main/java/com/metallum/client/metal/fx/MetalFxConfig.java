@@ -75,12 +75,19 @@ public final class MetalFxConfig {
     private static final String KEY_SPATIAL = "spatialUpscaling";
     private static final String KEY_INTERP = "frameInterpolation";
     private static final String KEY_FXAA = "fxaaAfterUpscale";
+    private static final String KEY_ACKNOWLEDGED = "acknowledged";
 
     private static volatile MetalFxConfig INSTANCE = new MetalFxConfig();
 
     private volatile SpatialMode spatialMode = SpatialMode.OFF;
     private volatile FrameInterpolationMode interpolationMode = FrameInterpolationMode.OFF;
     private volatile boolean fxaaAfterUpscale = false;
+    /**
+     * Whether the user has acknowledged the MetalFX warning dialog at least
+     * once. Persisted so the warning only shows the first time the user
+     * opens the MetalFX settings. Reset by deleting the config file.
+     */
+    private volatile boolean acknowledged = false;
     private volatile boolean deviceCapabilitiesQueried = false;
     private volatile boolean spatialSupported = false;
     private volatile boolean interpolationSupported = false;
@@ -104,6 +111,14 @@ public final class MetalFxConfig {
 
     public boolean fxaaAfterUpscale() {
         return fxaaAfterUpscale;
+    }
+
+    public boolean acknowledged() {
+        return acknowledged;
+    }
+
+    public void setAcknowledged(boolean acknowledged) {
+        this.acknowledged = acknowledged;
     }
 
     public void setSpatialMode(SpatialMode mode) {
@@ -225,6 +240,7 @@ public final class MetalFxConfig {
             cfg.spatialMode = parseEnum(props.getProperty(KEY_SPATIAL), SpatialMode.OFF, SpatialMode.class);
             cfg.interpolationMode = parseEnum(props.getProperty(KEY_INTERP), FrameInterpolationMode.OFF, FrameInterpolationMode.class);
             cfg.fxaaAfterUpscale = Boolean.parseBoolean(props.getProperty(KEY_FXAA, "false"));
+            cfg.acknowledged = Boolean.parseBoolean(props.getProperty(KEY_ACKNOWLEDGED, "false"));
         }
         // Preserve previously-queried device capabilities across reloads so
         // changing a setting in-game doesn't force a re-query (the Metal
@@ -235,6 +251,7 @@ public final class MetalFxConfig {
         cfg.interpolationSupported = prev.interpolationSupported;
         cfg.blendSupported = prev.blendSupported;
         cfg.deviceName = prev.deviceName;
+        cfg.acknowledged = prev.acknowledged || cfg.acknowledged;
         INSTANCE = cfg;
     }
 
@@ -248,6 +265,7 @@ public final class MetalFxConfig {
         props.setProperty(KEY_SPATIAL, cfg.spatialMode.name());
         props.setProperty(KEY_INTERP, cfg.interpolationMode.name());
         props.setProperty(KEY_FXAA, Boolean.toString(cfg.fxaaAfterUpscale));
+        props.setProperty(KEY_ACKNOWLEDGED, Boolean.toString(cfg.acknowledged));
         Path configPath = configPath();
         try {
             Files.createDirectories(configPath.getParent());

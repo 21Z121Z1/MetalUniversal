@@ -1,7 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.fx.MetalFxConfig;
-import com.metallum.client.metal.fx.MetalFxOptionsScreen;
+import com.metallum.client.metal.fx.MetalFxWarningScreen;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
@@ -23,6 +23,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * already been laid out; we then add our button via the standard
  * {@link Screen#addRenderableWidget} entry point, which keeps it
  * eligible for rendering, narration, and tab-ordering.
+ *
+ * <p>Clicking the button routes through
+ * {@link MetalFxWarningScreen#openIfNotAcknowledged(Screen)}: the first
+ * time the user opens MetalFX settings they see a warning dialog with
+ * the official Apple MetalFX system/chip requirements and explicit
+ * Enable / Do Not Enable choices. On subsequent opens the warning is
+ * skipped and the options screen is shown directly.
  */
 @Mixin(VideoSettingsScreen.class)
 public abstract class VideoSettingsScreenMixin extends Screen {
@@ -49,7 +56,7 @@ public abstract class VideoSettingsScreenMixin extends Screen {
 
         this.addRenderableWidget(Button.builder(
                 Component.translatable("metallum.fx.button.open"),
-                button -> Minecraft.getInstance().setScreenAndShow(new MetalFxOptionsScreen((Screen) (Object) this))
+                button -> MetalFxWarningScreen.openIfNotAcknowledged((Screen) (Object) this)
         ).bounds(x, y, buttonWidth, buttonHeight).build());
     }
 

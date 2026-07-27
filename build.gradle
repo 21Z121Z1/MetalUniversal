@@ -6,6 +6,13 @@ plugins {
 version = project.mod_version
 group = project.maven_group
 
+// Build artefacts are published as `MetalUniversal-<version>.jar` (matching
+// the mod's display name and GitHub repo) rather than the Gradle project
+// name. The mod id stays `metallum` for Fabric / mixin compatibility.
+base {
+	archivesName = "MetalUniversal"
+}
+
 loom {
 	accessWidenerPath = file("src/main/resources/metallum.accesswidener")
 }

@@ -1,7 +1,7 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.metal.fx.MetalFxConfig;
-import com.metallum.client.metal.fx.MetalFxOptionsScreen;
+import com.metallum.client.metal.fx.MetalFxWarningScreen;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -31,6 +31,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * <p>The mixin is only applied when Sodium is loaded (gated by the
  * {@code MetallumMixinConfigPlugin}'s {@code .sodium.} package rule)
  * and only renders the button when the active GPU backend is Metal.
+ *
+ * <p>Clicking the button routes through
+ * {@link MetalFxWarningScreen#openIfNotAcknowledged(Screen)}: the first
+ * time the user opens MetalFX settings they see a warning dialog with
+ * the official Apple MetalFX system/chip requirements and explicit
+ * Enable / Do Not Enable choices. On subsequent opens the warning is
+ * skipped and the options screen is shown directly.
  */
 @Mixin(targets = "net.caffeinemc.mods.sodium.client.gui.VideoSettingsScreen")
 public abstract class SodiumVideoSettingsScreenMixin extends Screen {
@@ -105,7 +112,7 @@ public abstract class SodiumVideoSettingsScreenMixin extends Screen {
             return;
         }
         MetalFxConfig.reload();
-        Minecraft.getInstance().setScreenAndShow(new MetalFxOptionsScreen((Screen) (Object) this));
+        MetalFxWarningScreen.openIfNotAcknowledged((Screen) (Object) this);
         cir.setReturnValue(true);
     }
 }

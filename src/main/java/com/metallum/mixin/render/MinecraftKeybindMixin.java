@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.fx.MetalFxConfig;
 import com.metallum.client.metal.fx.MetalFxOptionsScreen;
+import com.metallum.client.metal.fx.MetalFxWarningScreen;
 import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.blaze3d.platform.Window;
 import net.minecraft.client.Minecraft;
@@ -50,15 +51,19 @@ public abstract class MinecraftKeybindMixin {
         }
 
         Screen current = self.gui.screen();
-        // Don't open recursively if the user is already on the MetalFX screen.
-        if (current instanceof MetalFxOptionsScreen) {
+        // Don't open recursively if the user is already on a MetalFX screen
+        // (either the warning dialog or the options screen itself).
+        if (current instanceof MetalFxOptionsScreen
+                || current instanceof MetalFxWarningScreen) {
             return;
         }
 
         // Reload persisted config so the freshly-opened screen reflects any
         // out-of-band edits (e.g. config file tweaks on iOS via Files app).
         MetalFxConfig.reload();
-        self.setScreenAndShow(new MetalFxOptionsScreen(current));
+        // Route through the warning screen helper so the user sees the
+        // compatibility warning the first time, identical to the button path.
+        MetalFxWarningScreen.openIfNotAcknowledged(current);
     }
 
     private static boolean metallum$isMetalBackend() {
