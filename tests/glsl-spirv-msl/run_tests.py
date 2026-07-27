@@ -314,10 +314,15 @@ def glsl_to_spirv(glsl: str, stage: str, workdir: str) -> str:
     return spv
 
 
-def spirv_to_msl(spv_path: str, workdir: str) -> str:
-    """spirv-cross --msl <MetalUniversal 选项>，产出 MSL 源码字符串。"""
+def spirv_to_msl(spv_path: str, workdir: str, extra_opts: Optional[List[str]] = None) -> str:
+    """spirv-cross --msl <MetalUniversal 选项>，产出 MSL 源码字符串。
+
+    extra_opts 用于按用例覆盖 MSL 选项（如启用 --msl-decoration-binding 复现
+    生产环境 enableDecorationBinding=true 下的冲突行为）。
+    """
     spirv_cross = shutil.which("spirv-cross") or "spirv-cross"
-    cp = _run([spirv_cross] + _SPIRV_CROSS_MSL_OPTS + [spv_path])
+    opts = _SPIRV_CROSS_MSL_OPTS + (extra_opts or [])
+    cp = _run([spirv_cross] + opts + [spv_path])
     if cp.returncode != 0:
         raise PipelineError(
             f"spirv-cross 失败 (rc={cp.returncode}):\n"
@@ -329,11 +334,11 @@ def spirv_to_msl(spv_path: str, workdir: str) -> str:
     return msl
 
 
-def compile_glsl_to_msl(glsl: str, stage: str) -> str:
+def compile_glsl_to_msl(glsl: str, stage: str, extra_opts: Optional[List[str]] = None) -> str:
     """完整 GLSL→SPIR-V→MSL，返回 MSL 源码。"""
     with tempfile.TemporaryDirectory(prefix="mu-spirv-") as d:
         spv = glsl_to_spirv(glsl, stage, d)
-        return spirv_to_msl(spv, d)
+        return spirv_to_msl(spv, d, extra_opts)
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +358,9 @@ class TestCase:
     # 自定义断言：输入生成的 MSL，返回失败消息列表（空列表 = 通过）。用于 must_contain/must_not_contain
     # 无法表达的断言（如统计某子串出现次数）。见 _binding_collision_check。
     custom_check: Optional[Callable[[str], List[str]]] = None
+    # 按用例追加的 spirv-cross MSL 选项（追加到全局 _SPIRV_CROSS_MSL_OPTS 之后）。
+    # 例：["--msl-decoration-binding"] 复现 enableDecorationBinding=true 下的冲突。
+    extra_msl_opts: List[str] = field(default_factory=list)
 
 
 def _binding_collision_check(msl: str) -> List[str]:
@@ -411,18 +419,18 @@ def _ubo_no_alias_check(msl: str) -> List[str]:
 
 
 def _push_constant_ubo_collision_check(msl: str) -> List[str]:
-    """验证 push constant 与 UBO 在未重映射时的 buffer(0) 冲突（基线行为）。
+    """验证 push constant 与 UBO 在 enableDecorationBinding=true 下的 buffer(0) 冲突（基线行为）。
 
-    此用例验证 CLI 层面的基线行为：spirv-cross CLI 不支持
-    spvc_compiler_msl_add_resource_binding_2 重映射，因此 push constant
-    和 binding=0 的 UBO 都映射到 [[buffer(0)]]，产生冲突。
+    此用例复现生产环境（MetalCrossShaderCompiler.spirvToMsl 中 enableDecorationBinding=true）
+    下的冲突：spirv-cross CLI 通过 --msl-decoration-binding 启用 decoration binding 后，
+    u_Globals（binding=0）映射到 [[buffer(0)]]，而 push constant 无 binding 走 fallback
+    分配（next_metal_resource_index_buffer 从 0 起），也落到 [[buffer(0)]]，产生冲突。
 
-    JVM/native 层面的重映射（将 PC 移至 buffer(N)）由 build.yml 编译验证
-    + 真机运行验证，CLI 无法测试 spvc_compiler_msl_add_resource_binding_2。
+    CLI 不支持 spvc_compiler_msl_add_resource_binding_2 重映射（native 层修复），
+    故本用例仅验证"未重映射时冲突存在"的基线；native 重映射效果由 build.yml 编译
+    + 真机运行验证。
 
-    断言：当前阶段 MSL 中 [[buffer(0)]] 出现至少 2 次
-    （PC + u_Globals 均在 buffer(0)）。顶点/片元各注册独立用例，
-    分别验证各自阶段 MSL 中的冲突。
+    断言：MSL 中 [[buffer(0)]] 出现至少 2 次（PC + u_Globals 均在 buffer(0)）。
     """
     failures: List[str] = []
     count = len(re.findall(r"\[\[buffer\(0\)\]\]", msl))
@@ -826,8 +834,9 @@ void main() {
         name="16_push_constant_ubo_collision_vert",
         stage="vert",
         # Push constant (Vulkan 禁止带 binding) + UBO(binding=0) 共存。
-        # spirv-cross CLI 不支持 spvc_compiler_msl_add_resource_binding_2 重映射，
-        # 因此 PC 与 u_Globals 都映射到 [[buffer(0)]]，产生冲突（基线行为）。
+        # 必须传 --msl-decoration-binding 复现生产环境 enableDecorationBinding=true：
+        # 启用后 u_Globals（binding=0）→ [[buffer(0)]]，PC（无 binding）走 fallback 也
+        # → [[buffer(0)]]，产生冲突。不传该标志时两者按声明顺序自动分配，不冲突。
         # 与 tests/glsl-spirv-msl/cases/push_constant_ubo_collision.vert 内容一致。
         # 注意：ensure_spirv_compatible 不会注入 binding 到 push_constant 块 ——
         # Python 版仅移植 bumpVersion/wrapLooseUniforms/addLayoutLocations 三步，
@@ -851,20 +860,22 @@ void main() {
 """,
         must_contain=["vertex ", "u_ModelViewMat", "u_ProjMat", "[[buffer(0)]]"],
         custom_check=_push_constant_ubo_collision_check,
+        extra_msl_opts=["--msl-decoration-binding"],
         iris_ref=(
             "基线：Iris push constants (PC) 与全局 UBO (u_Globals) 在 GLSL 中 PC 无 binding、"
-            "u_Globals 声明 binding=0；spirv-cross CLI 无 spvc_compiler_msl_add_resource_binding_2 "
-            "重映射入口，PC 默认落到 [[buffer(0)]]，与 u_Globals 的 [[buffer(0)]] 冲突。"
-            "JVM/native 层将 PC 重映射至 buffer(N) 的修复由 build.yml 编译验证 + 真机运行验证，"
-            "CLI 无法覆盖该重映射 API。"
+            "u_Globals 声明 binding=0；生产环境 enableDecorationBinding=true 下两者都映射到 "
+            "[[buffer(0)]] 冲突。CLI 用 --msl-decoration-binding 复现该条件。"
+            "spirv-cross CLI 无 spvc_compiler_msl_add_resource_binding_2 重映射入口，"
+            "JVM/native 层将 PC 重映射至 buffer(N) 的修复由 build.yml 编译验证 + 真机运行验证。"
         ),
-        desc="push constant + UBO(binding=0) 在未重映射时冲突于 [[buffer(0)]]（顶点阶段，基线行为）",
+        desc="push constant + UBO(binding=0) 在 enableDecorationBinding=true 下冲突于 [[buffer(0)]]（顶点阶段，基线行为）",
     ),
 
     TestCase(
         name="17_push_constant_ubo_collision_frag",
         stage="frag",
         # 同 16_push_constant_ubo_collision_vert 的片元阶段版本。
+        # 同样需要 --msl-decoration-binding 复现 enableDecorationBinding=true 下的冲突。
         # 与 tests/glsl-spirv-msl/cases/push_constant_ubo_collision.frag 内容一致。
         glsl="""#version 450
 
@@ -885,11 +896,12 @@ void main() {
 """,
         must_contain=["fragment ", "u_ColorModulator", "u_FogColor", "[[buffer(0)]]"],
         custom_check=_push_constant_ubo_collision_check,
+        extra_msl_opts=["--msl-decoration-binding"],
         iris_ref=(
             "基线（片元阶段）：同 16_push_constant_ubo_collision_vert，验证 frag 阶段 "
-            "PC + u_Globals 同样冲突于 [[buffer(0)]]"
+            "PC + u_Globals 在 enableDecorationBinding=true 下同样冲突于 [[buffer(0)]]"
         ),
-        desc="push constant + UBO(binding=0) 在未重映射时冲突于 [[buffer(0)]]（片元阶段，基线行为）",
+        desc="push constant + UBO(binding=0) 在 enableDecorationBinding=true 下冲突于 [[buffer(0)]]（片元阶段，基线行为）",
     ),
 ]
 
@@ -921,7 +933,7 @@ def check_case(case: TestCase) -> Tuple[bool, str]:
 
     # 步骤 2+3：GLSL→SPIR-V→MSL
     try:
-        msl = compile_glsl_to_msl(preprocessed, case.stage)
+        msl = compile_glsl_to_msl(preprocessed, case.stage, case.extra_msl_opts or None)
     except PipelineError as e:
         report_lines.append(f"  [FAIL] 转换管线错误:\n{e}")
         return False, "\n".join(report_lines)
