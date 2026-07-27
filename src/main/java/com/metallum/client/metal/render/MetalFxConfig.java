@@ -125,7 +125,7 @@ final class MetalFxConfig {
                 System.getProperty(FRAME_GENERATION_PROPERTY), defaults.frameGeneration
         );
         int frameGenerationOutputWidth = parseBoundedInt(
-                System.getProperty(FRAME_GENERATION_OUTPUT_WIDTH_PROPERTY), 1440, 640, 3840
+                System.getProperty(FRAME_GENERATION_OUTPUT_WIDTH_PROPERTY), 1280, 640, 3840
         );
         float cutoutReactiveEdgeWeight = parseUnitFloat(
                 System.getProperty("metallum.metalfx.cutoutReactiveEdgeWeight"), 0.35F

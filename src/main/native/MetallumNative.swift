@@ -227,6 +227,8 @@ struct MetalFrameGenerationDiagnosticSnapshot {
     let targetTimestamp: CFTimeInterval
     let targetPresentationTimestamp: CFTimeInterval
     let cpuCommitTime: CFTimeInterval
+    let sourceGpuStartTime: CFTimeInterval
+    let sourceGpuEndTime: CFTimeInterval
     let gpuStartTime: CFTimeInterval
     let gpuEndTime: CFTimeInterval
     let gpuCompletionTime: CFTimeInterval
@@ -477,6 +479,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let targetTimestamp: CFTimeInterval
         let targetPresentationTimestamp: CFTimeInterval
         var cpuCommitTime: CFTimeInterval
+        var sourceGpuStartTime: CFTimeInterval
+        var sourceGpuEndTime: CFTimeInterval
         var gpuStartTime: CFTimeInterval
         var gpuEndTime: CFTimeInterval
         var gpuCompletionTime: CFTimeInterval
@@ -551,6 +555,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var realPresentationTimeoutAt: CFTimeInterval?
     private var displayUpdateStarvationTimeoutAt: CFTimeInterval?
     private var diagnostics: [FrameDiagnostic] = []
+    private var sourceGpuTimings: [UInt64: (start: CFTimeInterval, end: CFTimeInterval)] = [:]
     private var diagnosticsDumped = false
     private var droppedDisplayUpdates = 0
     private var presentationDeadlineMisses = 0
@@ -1157,7 +1162,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             self?.handleInputCommandBufferCompletion(
                 eventValue: eventValue,
                 succeeded: completed.status == .completed,
-                error: completed.error
+                error: completed.error,
+                gpuStartTime: completed.gpuStartTime,
+                gpuEndTime: completed.gpuEndTime
             )
         }
         return 1
@@ -1166,13 +1173,27 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private func handleInputCommandBufferCompletion(
         eventValue: UInt64,
         succeeded: Bool,
-        error: Error?
+        error: Error?,
+        gpuStartTime: CFTimeInterval,
+        gpuEndTime: CFTimeInterval
     ) {
         condition.lock()
         guard let frame = currentFrame, frame.eventValue == eventValue,
               var lifecycle = currentLifecycle else {
             condition.unlock()
             return
+        }
+        if gpuStartTime > 0.0, gpuEndTime > gpuStartTime {
+            sourceGpuTimings[frame.sourceFrameID] = (gpuStartTime, gpuEndTime)
+            for index in diagnostics.indices where diagnostics[index].sourceFrameID == frame.sourceFrameID {
+                diagnostics[index].sourceGpuStartTime = gpuStartTime
+                diagnostics[index].sourceGpuEndTime = gpuEndTime
+            }
+            if frame.sourceFrameID > UInt64(Self.diagnosticCapacity) {
+                sourceGpuTimings.removeValue(
+                    forKey: frame.sourceFrameID - UInt64(Self.diagnosticCapacity)
+                )
+            }
         }
         let actions = lifecycle.completeGPUWork(
             .input,
@@ -1932,6 +1953,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         cpuCommitTime: CFTimeInterval = 0.0,
         outcome: String
     ) {
+        let sourceTiming = sourceGpuTimings[sourceFrameID]
         diagnostics.append(FrameDiagnostic(
             sourceFrameID: sourceFrameID,
             frameKind: frameKind,
@@ -1939,6 +1961,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             targetTimestamp: update.targetTimestamp,
             targetPresentationTimestamp: update.targetPresentationTimestamp,
             cpuCommitTime: cpuCommitTime,
+            sourceGpuStartTime: sourceTiming?.start ?? 0.0,
+            sourceGpuEndTime: sourceTiming?.end ?? 0.0,
             gpuStartTime: 0.0,
             gpuEndTime: 0.0,
             gpuCompletionTime: 0.0,
@@ -1963,18 +1987,80 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     }
 
     private func dumpDiagnosticsIfEnabled(_ snapshot: [FrameDiagnostic]) {
-        guard ProcessInfo.processInfo.environment["METALLUM_METALFX_PRESENT_DIAGNOSTICS"] == "1" else {
+        let process = ProcessInfo.processInfo
+        let outputPath = process.environment["METALLUM_METALFX_PRESENT_DIAGNOSTICS_PATH"]
+        let enabled = process.environment["METALLUM_METALFX_PRESENT_DIAGNOSTICS"] == "1"
+                || process.arguments.contains("-Dmetallum.metalfx.debug=true")
+                || outputPath != nil
+        guard enabled else {
             return
+        }
+        if let outputPath {
+            let records: [[String: Any]] = snapshot.map { diagnostic in
+                [
+                    "sourceFrameID": diagnostic.sourceFrameID,
+                    "frameKind": diagnostic.frameKind,
+                    "displayUpdateID": diagnostic.displayUpdateID,
+                    "targetTimestamp": diagnostic.targetTimestamp,
+                    "targetPresentationTimestamp": diagnostic.targetPresentationTimestamp,
+                    "cpuCommitTime": diagnostic.cpuCommitTime,
+                    "sourceGpuStartTime": diagnostic.sourceGpuStartTime,
+                    "sourceGpuEndTime": diagnostic.sourceGpuEndTime,
+                    "gpuStartTime": diagnostic.gpuStartTime,
+                    "gpuEndTime": diagnostic.gpuEndTime,
+                    "gpuCompletionTime": diagnostic.gpuCompletionTime,
+                    "presentedTime": diagnostic.presentedTime,
+                    "outcome": diagnostic.outcome,
+                ]
+            }
+            do {
+                let url = URL(fileURLWithPath: outputPath)
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                // GUI/focus transitions can stop one presenter and briefly
+                // create another during shutdown. Preserve the longest session
+                // from this validation run so a one-frame tail cannot overwrite
+                // the steady-state timeline that preceded it.
+                let existingRecordCount: Int? = {
+                    guard let existingData = try? Data(contentsOf: url),
+                          let existingRecords = try? JSONSerialization.jsonObject(with: existingData)
+                                as? [[String: Any]] else {
+                        return nil
+                    }
+                    return existingRecords.count
+                }()
+                if let existingRecordCount, existingRecordCount >= records.count {
+                    NSLog(
+                        "[Metallum] MetalFX timeline retained longer session: %d records at %@ (discarded %d)",
+                        existingRecordCount,
+                        outputPath,
+                        records.count
+                    )
+                } else {
+                    let data = try JSONSerialization.data(
+                        withJSONObject: records,
+                        options: [.prettyPrinted, .sortedKeys]
+                    )
+                    try data.write(to: url, options: .atomic)
+                    NSLog("[Metallum] MetalFX timeline written: %@", outputPath)
+                }
+            } catch {
+                NSLog("[Metallum] MetalFX timeline write failed for %@: %@", outputPath, String(describing: error))
+            }
         }
         for diagnostic in snapshot {
             NSLog(
-                "[Metallum] MetalFX timeline source=%llu kind=%@ update=%llu target=%.6f presentationTarget=%.6f commit=%.6f gpuStart=%.6f gpuEnd=%.6f gpuComplete=%.6f presented=%.6f outcome=%@",
+                "[Metallum] MetalFX timeline source=%llu kind=%@ update=%llu target=%.6f presentationTarget=%.6f commit=%.6f sourceGpuStart=%.6f sourceGpuEnd=%.6f gpuStart=%.6f gpuEnd=%.6f gpuComplete=%.6f presented=%.6f outcome=%@",
                 diagnostic.sourceFrameID,
                 diagnostic.frameKind,
                 diagnostic.displayUpdateID,
                 diagnostic.targetTimestamp,
                 diagnostic.targetPresentationTimestamp,
                 diagnostic.cpuCommitTime,
+                diagnostic.sourceGpuStartTime,
+                diagnostic.sourceGpuEndTime,
                 diagnostic.gpuStartTime,
                 diagnostic.gpuEndTime,
                 diagnostic.gpuCompletionTime,
@@ -1994,6 +2080,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 targetTimestamp: $0.targetTimestamp,
                 targetPresentationTimestamp: $0.targetPresentationTimestamp,
                 cpuCommitTime: $0.cpuCommitTime,
+                sourceGpuStartTime: $0.sourceGpuStartTime,
+                sourceGpuEndTime: $0.sourceGpuEndTime,
                 gpuStartTime: $0.gpuStartTime,
                 gpuEndTime: $0.gpuEndTime,
                 gpuCompletionTime: $0.gpuCompletionTime,

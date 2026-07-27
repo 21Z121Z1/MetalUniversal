@@ -598,13 +598,20 @@ public final class MetalFxManager {
     }
 
     @Nullable
-    public static GpuTextureView cutoutReactiveAttachment() {
+    public static GpuTextureView cutoutReactiveAttachment(final int expectedColorWidth, final int expectedColorHeight) {
         MetalFxManager manager = active;
         if (!usesCutoutReactiveTerrain() || manager == null) {
             return null;
         }
+        GpuTextureView coverage = manager.cutoutReactiveView;
+        if (coverage.getWidth(0) != expectedColorWidth || coverage.getHeight(0) != expectedColorHeight) {
+            // A resize can land between Sodium's color attachment lookup and
+            // this redirect. A one-frame ordinary pass is preferable to
+            // submitting an invalid MRT descriptor and crashing the client.
+            return null;
+        }
         manager.cutoutReactivePassObserved = true;
-        return manager.cutoutReactiveView;
+        return coverage;
     }
 
     private static MetalFxConfig.Mode chooseMode(final MetalDevice device, final MetalFxConfig config) {
@@ -638,8 +645,12 @@ public final class MetalFxManager {
         };
     }
 
+    private boolean usesFrameGenerationWorkResolution() {
+        return frameGenerationEnabled || frameGenerationSuspended;
+    }
+
     private float frameGenerationOutputScale(final int width) {
-        return frameGenerationEnabled
+        return usesFrameGenerationWorkResolution()
                 ? MetalFxConfig.frameGenerationOutputScale(width, config.frameGenerationOutputWidth)
                 : 1.0F;
     }
@@ -1001,7 +1012,7 @@ public final class MetalFxManager {
             MetalGpuTexture color = (MetalGpuTexture) renderer.mainRenderTarget().getColorTexture();
             MetalGpuTexture depth = this.frameDepthTexture;
             this.frameDepthTexture = depth;
-            MetalGpuTexture output = frameGenerationEnabled && sceneOutputTarget != null
+            MetalGpuTexture output = usesFrameGenerationWorkResolution() && sceneOutputTarget != null
                     ? (MetalGpuTexture) sceneOutputTarget.getColorTexture()
                     : (MetalGpuTexture) uiTarget.getColorTexture();
             this.frameResetForPresent = historyReset;
@@ -1056,6 +1067,9 @@ public final class MetalFxManager {
             }
         }
 
+        boolean sceneOutputEncoded = encoded && sceneOutputTarget != null
+                && sceneOutputTarget.getColorTexture() != null
+                && sceneOutputTarget.getColorTexture() != uiTarget.getColorTexture();
         if (!encoded) {
             this.motionStateStore.discardFrame();
             if (frameGenerationEnabled) {
@@ -1085,8 +1099,8 @@ public final class MetalFxManager {
             loggedFirstSuccessfulFrame = true;
             Metallum.LOGGER.info("MetalFX encode succeeded: mode={}, input={}x{}, output={}x{}, display={}x{}, reactiveMask={}",
                     effectiveMode, renderWidth, renderHeight,
-                    frameGenerationEnabled ? frameGenerationOutputWidth : width,
-                    frameGenerationEnabled ? frameGenerationOutputHeight : height,
+                    usesFrameGenerationWorkResolution() ? frameGenerationOutputWidth : width,
+                    usesFrameGenerationWorkResolution() ? frameGenerationOutputHeight : height,
                     width, height, reactiveMaskPrepared);
             if (effectiveMode == MetalFxConfig.Mode.TEMPORAL) {
                 Metallum.LOGGER.info(
@@ -1106,6 +1120,18 @@ public final class MetalFxManager {
                     uiTarget.getColorTexture(), UI_CLEAR, uiTarget.getDepthTexture(), 0.0
             );
         } else {
+            if (sceneOutputEncoded) {
+                boolean copied = encoder.encodeTextureCopy(
+                        (MetalGpuTexture) sceneOutputTarget.getColorTexture(),
+                        (MetalGpuTexture) uiTarget.getColorTexture(),
+                        true
+                );
+                if (!copied) {
+                    this.motionStateStore.discardFrame();
+                    disableForSession(renderer, "paused frame-generation scene composition failed");
+                    return;
+                }
+            }
             RenderSystem.getDevice().createCommandEncoder().clearDepthTexture(uiTarget.getDepthTexture(), 0.0);
         }
         this.frameUsesUpscaledTarget = true;
@@ -2200,12 +2226,13 @@ public final class MetalFxManager {
     }
 
     private void ensureTargets(final int width, final int height) {
+        boolean keepFrameGenerationResources = usesFrameGenerationWorkResolution();
         int targetRenderWidth = sceneWidthInternal(width);
         int targetRenderHeight = sceneHeightInternal(height, width);
         float frameGenerationScale = frameGenerationOutputScale(width);
-        int targetFrameGenerationOutputWidth = frameGenerationEnabled
+        int targetFrameGenerationOutputWidth = keepFrameGenerationResources
                 ? MetalFxConfig.scaledDimension(width, frameGenerationScale) : width;
-        int targetFrameGenerationOutputHeight = frameGenerationEnabled
+        int targetFrameGenerationOutputHeight = keepFrameGenerationResources
                 ? MetalFxConfig.scaledDimension(height, frameGenerationScale) : height;
         boolean dimensionsChanged = this.displayWidth != width || this.displayHeight != height
                 || this.renderWidth != targetRenderWidth || this.renderHeight != targetRenderHeight
@@ -2229,7 +2256,7 @@ public final class MetalFxManager {
             );
             dimensionsChanged = true;
         }
-        if (frameGenerationEnabled) {
+        if (keepFrameGenerationResources) {
             if (sceneOutputTarget == null
                     || sceneOutputTarget.width != targetFrameGenerationOutputWidth
                     || sceneOutputTarget.height != targetFrameGenerationOutputHeight) {
@@ -2404,10 +2431,11 @@ public final class MetalFxManager {
     }
 
     private void disableFrameGenerationInternal(final String reason) {
-        if (!frameGenerationEnabled) {
+        if (!frameGenerationEnabled && !frameGenerationSuspended) {
             return;
         }
         frameGenerationEnabled = false;
+        frameGenerationSuspended = false;
         if (sceneOutputTarget != null) {
             sceneOutputTarget.destroyBuffers();
             sceneOutputTarget = null;

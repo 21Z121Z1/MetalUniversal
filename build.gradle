@@ -489,6 +489,12 @@ if (gradle.startParameter.taskNames.any {
 				System.getProperty("metallum.metalfx.frameGeneration", "false")
 		systemProperty "metallum.metalfx.objectMotionProducer",
 				System.getProperty("metallum.metalfx.objectMotionProducer", "false")
+		systemProperty "metallum.metalfx.frameGenerationOutputWidth",
+				System.getProperty("metallum.metalfx.frameGenerationOutputWidth", "1280")
+		if (System.getProperty("metallum.metalfx.frameGeneration", "false").toBoolean()) {
+			environment "METALLUM_METALFX_PRESENT_DIAGNOSTICS_PATH",
+					file("${buildDir}/metal-validation/minecraft-client-current/frame-generation-timeline.json").absolutePath
+		}
 		// Forward backend kill-switch overrides (-Dmetallum.opt.*) from the
 		// Gradle invocation to the client JVM for toggle validation runs.
 		System.properties.each { key, value ->
@@ -562,6 +568,156 @@ if (gradle.startParameter.taskNames.any {
 				}
 				if (enabledAtCompletion != true) {
 					problems << "Frame Generation was requested but was disabled before validation completed".toString()
+				}
+
+				def timelineFile = file(
+						"${buildDir}/metal-validation/minecraft-client-current/frame-generation-timeline.json")
+				if (!timelineFile.isFile()) {
+					problems << "Frame Generation timeline is missing at ${timelineFile}".toString()
+				} else {
+					def timeline
+					try {
+						timeline = new groovy.json.JsonSlurper().parseText(timelineFile.getText("UTF-8"))
+					} catch (Exception parseFailure) {
+						throw new GradleException(
+								"Could not parse ${timelineFile}: ${parseFailure.message}", parseFailure)
+					}
+					if (!(timeline instanceof List)) {
+						problems << "Frame Generation timeline is not a JSON array".toString()
+					} else {
+						def percentile = { values, fraction ->
+							def ordered = values.findAll { Double.isFinite(it as double) }
+									.collect { it as double }
+									.sort()
+							if (ordered.isEmpty()) return 0.0d
+							def index = Math.ceil((ordered.size() - 1) * (fraction as double)) as int
+							return ordered[Math.max(0, Math.min(index, ordered.size() - 1))]
+						}
+						def bySource = timeline.groupBy { (it.sourceFrameID as Number).longValue() }
+						def completeSourceIds = bySource.keySet().sort().findAll { sourceId ->
+							def kinds = bySource[sourceId].collect { it.frameKind as String }.toSet()
+							kinds.contains("generated") && kinds.contains("real")
+						}
+						def sourceGpuMilliseconds = []
+						def generatedGpuMilliseconds = []
+						def realGpuMilliseconds = []
+						def totalGpuMilliseconds = []
+						def sourceStartById = [:]
+						def presentedTimes = []
+						completeSourceIds.each { sourceId ->
+							def records = bySource[sourceId]
+							def generated = records.find { it.frameKind == "generated" }
+							def real = records.find { it.frameKind == "real" }
+							def sourceStart = (records[0].sourceGpuStartTime as Number).doubleValue()
+							def sourceEnd = (records[0].sourceGpuEndTime as Number).doubleValue()
+							def generatedStart = (generated.gpuStartTime as Number).doubleValue()
+							def generatedEnd = (generated.gpuEndTime as Number).doubleValue()
+							def realStart = (real.gpuStartTime as Number).doubleValue()
+							def realEnd = (real.gpuEndTime as Number).doubleValue()
+							def sourceMs = (sourceEnd - sourceStart) * 1000.0d
+							def generatedMs = (generatedEnd - generatedStart) * 1000.0d
+							def realMs = (realEnd - realStart) * 1000.0d
+							if (sourceMs > 0.0d && generatedMs > 0.0d && realMs > 0.0d) {
+								sourceGpuMilliseconds << sourceMs
+								generatedGpuMilliseconds << generatedMs
+								realGpuMilliseconds << realMs
+								totalGpuMilliseconds << sourceMs + generatedMs + realMs
+								sourceStartById[sourceId] = sourceStart
+							}
+							[generated, real].each { item ->
+								def presented = (item.presentedTime as Number).doubleValue()
+								if (item.outcome == "presented" && presented > 0.0d) {
+									presentedTimes << presented
+								}
+							}
+						}
+						def sourceIntervals = []
+						completeSourceIds.collate(2, 1, false).each { pair ->
+							if (pair[1] == pair[0] + 1
+									&& sourceStartById.containsKey(pair[0])
+									&& sourceStartById.containsKey(pair[1])) {
+								def interval = (sourceStartById[pair[1]] - sourceStartById[pair[0]]) * 1000.0d
+								if (interval > 0.0d) sourceIntervals << interval
+							}
+						}
+						def presentIntervals = []
+						presentedTimes.sort().collate(2, 1, false).each { pair ->
+							def interval = (pair[1] - pair[0]) * 1000.0d
+							if (interval > 0.0d) presentIntervals << interval
+						}
+						def sourceIntervalP50 = percentile(sourceIntervals, 0.50d)
+						def sourceIntervalP95 = percentile(sourceIntervals, 0.95d)
+						def presentIntervalP50 = percentile(presentIntervals, 0.50d)
+						def presentIntervalP95 = percentile(presentIntervals, 0.95d)
+						def sourceGpuP95 = percentile(sourceGpuMilliseconds, 0.95d)
+						def generatedGpuP95 = percentile(generatedGpuMilliseconds, 0.95d)
+						def realGpuP95 = percentile(realGpuMilliseconds, 0.95d)
+						def totalGpuP95 = percentile(totalGpuMilliseconds, 0.95d)
+						def overBudgetFrames = totalGpuMilliseconds.count { it > (1000.0d / 60.0d) }
+						def presentedCount = timeline.count { it.outcome == "presented" }
+						def summary = [
+								status: "measured",
+								frameGenerationOutputWidth: Integer.parseInt(System.getProperty(
+										"metallum.metalfx.frameGenerationOutputWidth", "1280")),
+								records: timeline.size(),
+								completeSourcePairs: totalGpuMilliseconds.size(),
+								presentedRecords: presentedCount,
+								presentedRatio: timeline.isEmpty() ? 0.0d : presentedCount / (double) timeline.size(),
+								sourceIntervalP50Milliseconds: sourceIntervalP50,
+								sourceIntervalP95Milliseconds: sourceIntervalP95,
+								presentIntervalP50Milliseconds: presentIntervalP50,
+								presentIntervalP95Milliseconds: presentIntervalP95,
+								sourceGpuP95Milliseconds: sourceGpuP95,
+								generatedGpuP95Milliseconds: generatedGpuP95,
+								realGpuP95Milliseconds: realGpuP95,
+								totalGpuP95Milliseconds: totalGpuP95,
+								totalGpuP95MarginTo16_67Milliseconds: (1000.0d / 60.0d) - totalGpuP95,
+								over16_67MillisecondFrames: overBudgetFrames,
+								gates: [
+										minimumCompleteSourcePairs: 120,
+										minimumPresentedRatio: 0.95d,
+										maximumSourceIntervalP95Milliseconds: 18.5d,
+										maximumPresentIntervalP95Milliseconds: 8.5d,
+										maximumGeneratedGpuP95Milliseconds: 7.0d,
+										minimumTotalGpuP95MarginMilliseconds: 3.0d,
+										maximumOver16_67MillisecondFrames: 0
+								]
+						]
+						def summaryFile = file(
+								"${buildDir}/metal-validation/minecraft-client-current/frame-generation-performance.json")
+						summaryFile.setText(new groovy.json.JsonBuilder(summary).toPrettyString() + "\n", "UTF-8")
+						logger.lifecycle(String.format(Locale.ROOT,
+								"Frame Generation steady-state: source p95 %.2f ms, present p95 %.2f ms,"
+										+ " total GPU p95 %.2f ms (%.2f ms margin), presented %d/%d",
+								sourceIntervalP95, presentIntervalP95, totalGpuP95,
+								(1000.0d / 60.0d) - totalGpuP95, presentedCount, timeline.size()))
+						if (totalGpuMilliseconds.size() < 120) {
+							problems << "Frame Generation steady-state captured only ${totalGpuMilliseconds.size()} complete source pairs".toString()
+						}
+						if (summary.presentedRatio < 0.95d) {
+							problems << String.format(Locale.ROOT,
+									"presented ratio %.3f is below 0.950", summary.presentedRatio)
+						}
+						if (sourceIntervalP95 > 18.5d) {
+							problems << String.format(Locale.ROOT,
+									"source interval p95 %.2f ms exceeds 18.50 ms", sourceIntervalP95)
+						}
+						if (presentIntervalP95 > 8.5d) {
+							problems << String.format(Locale.ROOT,
+									"present interval p95 %.2f ms exceeds 8.50 ms", presentIntervalP95)
+						}
+						if (generatedGpuP95 > 7.0d) {
+							problems << String.format(Locale.ROOT,
+									"generated-frame GPU p95 %.2f ms exceeds 7.00 ms", generatedGpuP95)
+						}
+						if (totalGpuP95 > (1000.0d / 60.0d - 3.0d)) {
+							problems << String.format(Locale.ROOT,
+									"total GPU p95 %.2f ms leaves less than 3.00 ms headroom", totalGpuP95)
+						}
+						if (overBudgetFrames > 0) {
+							problems << "${overBudgetFrames} steady-state source pairs exceeded 16.67 ms GPU time".toString()
+						}
+					}
 				}
 			}
 			if (!problems.isEmpty()) {

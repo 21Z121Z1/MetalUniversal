@@ -179,13 +179,13 @@ planes, PNGs, raw readbacks and JSON.
 
 Frame Generation uses a bounded scene-working resolution while keeping the
 drawable and GUI at native backing resolution. At the 1708x960 QA size with
-Temporal 67% and the default 1440-pixel Frame Generation output cap, the graph
+Temporal 67% and the default 1280-pixel Frame Generation output cap, the graph
 is:
 
 ```text
-Minecraft 3D 964x542
-  -> MetalFX Temporal 1440x808
-  -> MTLFXFrameInterpolator 1440x808
+Minecraft 3D 858x482
+  -> MetalFX Temporal 1280x718
+  -> MTLFXFrameInterpolator 1280x718
   -> linear scene scale to 1708x960 drawable
   -> premultiplied-alpha 1708x960 GUI overlay
 ```
@@ -196,7 +196,7 @@ Temporal history. Reversing the order would either pollute Temporal history
 with synthetic frames or require running Temporal at the 120 Hz present rate.
 
 `metallum.metalfx.frameGenerationOutputWidth` controls the cap and defaults to
-1440 (bounded to 640...3840). It does not lock the persisted mode, Temporal
+1280 (bounded to 640...3840). It does not lock the persisted mode, Temporal
 percentage, reactive-mask or Frame Generation UI settings. Texture LOD bias is
 computed from the actual 3D/display ratio, so the extra work-resolution cap does
 not silently select softer mips.
@@ -214,10 +214,32 @@ after five warm-ups) are:
 
 The 3024-wide interpolator alone consumes about 86% of a 16.67 ms source-frame
 budget and cannot support 60 source -> 120 present with render or shader
-headroom. At 1440, measured average Temporal plus interpolation is 4.35 ms; the
-real scene-scale plus native-UI composition command buffer is about 0.24 ms,
-leaving about 12.08 ms before the 60 Hz source deadline for Minecraft rendering
-and shaders. This is a GPU budget, not proof of scanout cadence.
+headroom. This is a GPU budget, not proof of scanout cadence.
+
+The default was reduced from 1440 to 1280 after an automated real Minecraft
+Quick Play comparison at a 1708x960 framebuffer. Both runs used Temporal 67%,
+native-resolution GUI composition, a 180-source-frame readback-free steady tail,
+and native GPU timestamps. The raw presenter records are written to
+`build/metal-validation/minecraft-client-current/frame-generation-timeline.json`;
+the Gradle gate writes its aggregate to `frame-generation-performance.json`.
+
+| FG work width | Source interval p50 / p95 | Present interval p50 / p95 | Source GPU p95 | Generated GPU p95 | Total GPU p95 / 16.67 ms margin |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1440 | 16.68 / 24.73 ms | 8.33 / 16.67 ms | 6.17 ms | 7.32 ms | 12.44 / 4.22 ms |
+| 1280 | 16.62 / 17.90 ms | 8.33 / 8.33 ms | 5.63 ms | 5.30 ms | 11.10 / 5.57 ms |
+
+At 1440, the interpolation tail is close enough to one 8.33 ms display slot
+that occasional frames defer the next real present. At 1280, no measured source
+pair exceeded the 16.67 ms total GPU budget and the present-interval p95 stayed
+at 8.33 ms. `minecraftMetalFxClientValidation` now fails if the 180-frame tail
+does not contain at least 120 complete pairs, source interval p95 exceeds 18.5
+ms, present interval p95 exceeds 8.5 ms, generated GPU p95 exceeds 7 ms, total
+GPU p95 leaves less than 3 ms headroom, or any complete pair exceeds 16.67 ms.
+
+The automated client is normally unfocused, so occasional `presentedTime == 0`
+callbacks can still be WindowServer coalescing of an occluded window. A
+foreground Launcher run remains required to close the zero-dropped-scanout gate;
+the unattended result is not relabelled as that visual acceptance.
 
 ## Real presentation validation
 

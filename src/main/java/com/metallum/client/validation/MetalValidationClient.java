@@ -107,8 +107,18 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final int MINECART_NEW_TURN_FRAME = 216;
     private static final int MINECART_NEW_CAPTURE_FRAME = 224;
     private static final int OBJECT_SERIES_END_FRAME = 228;
-    // The timeline now runs past the old 220-frame ceiling.
-    private static final int TIMELINE_TIMEOUT_FRAME = 300;
+    // Attachment readbacks deliberately block GPU progress. When frame
+    // generation is under test, follow them with a clean steady-state tail so
+    // the same Quick Play run can measure sustained source/present pacing and
+    // GPU headroom without conflating validation-copy stalls with gameplay.
+    private static final boolean FRAME_GENERATION_REQUESTED =
+            Boolean.getBoolean("metallum.metalfx.frameGeneration");
+    private static final int FRAME_GENERATION_STEADY_FRAMES = 180;
+    private static final int VALIDATION_END_FRAME = OBJECT_SERIES_END_FRAME
+            + (FRAME_GENERATION_REQUESTED ? FRAME_GENERATION_STEADY_FRAMES : 0);
+    // The timeline now runs past the old 220-frame ceiling. Keep a bounded
+    // allowance for delayed asynchronous readbacks before failing the run.
+    private static final int TIMELINE_TIMEOUT_FRAME = VALIDATION_END_FRAME + 72;
     // Item spin is driven by ageInTicks, which the renderer builds as
     // `tickCount + partialTick`. partialTick is wall-clock and cannot be
     // pinned from here, so the commanded per-frame step is made large enough
@@ -418,7 +428,9 @@ public final class MetalValidationClient implements ClientModInitializer {
                                 + completed + "/16, failures=" + failures
                 );
             }
-            finishAndStop(minecraft, completed, failures);
+            if (frame >= VALIDATION_END_FRAME) {
+                finishAndStop(minecraft, completed, failures);
+            }
         } else if (frame >= TIMELINE_TIMEOUT_FRAME) {
             throw new IllegalStateException(
                     "Timed out waiting for automated Minecraft GPU readbacks: pending="
@@ -1575,6 +1587,8 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "usedSystemScreenshot": false,
                       "usedComputerUse": false,
                       "controlledFrames": 90,
+                      "timelineFrames": %d,
+                      "frameGenerationSteadyFrames": %d,
                       "controlledEntity": "armor_stand",
                       "expectedGpuCaptures": 16,
                       "completedGpuCaptures": %d,
@@ -1585,6 +1599,8 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "status": "%s"
                     }
                     """,
+                            frame,
+                            FRAME_GENERATION_REQUESTED ? FRAME_GENERATION_STEADY_FRAMES : 0,
                             completed,
                             failures,
                             Boolean.getBoolean("metallum.metalfx.frameGeneration"),

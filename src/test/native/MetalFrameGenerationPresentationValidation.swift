@@ -357,6 +357,11 @@ private final class ValidationRunner {
             "targetTimestamp": item.targetTimestamp,
             "targetPresentationTimestamp": item.targetPresentationTimestamp,
             "cpuCommitTime": item.cpuCommitTime,
+            "sourceGpuStartTime": item.sourceGpuStartTime,
+            "sourceGpuEndTime": item.sourceGpuEndTime,
+            "sourceGpuDurationMilliseconds": item.sourceGpuEndTime > item.sourceGpuStartTime
+                ? (item.sourceGpuEndTime - item.sourceGpuStartTime) * 1_000.0
+                : 0.0,
             "gpuStartTime": item.gpuStartTime,
             "gpuEndTime": item.gpuEndTime,
             "gpuDurationMilliseconds": item.gpuEndTime > item.gpuStartTime
@@ -484,14 +489,40 @@ private final class ValidationRunner {
         let realGpuMilliseconds = measuredDiagnostics
             .filter { $0.frameKind == "real" }
             .map { ($0.gpuEndTime - $0.gpuStartTime) * 1_000.0 }
+        var sourceGpuByFrame: [UInt64: Double] = [:]
+        var presentGpuByFrame: [UInt64: Double] = [:]
+        var presentKindsByFrame: [UInt64: Set<String>] = [:]
+        for item in measuredDiagnostics {
+            if item.sourceGpuEndTime > item.sourceGpuStartTime {
+                sourceGpuByFrame[item.sourceFrameID] =
+                    (item.sourceGpuEndTime - item.sourceGpuStartTime) * 1_000.0
+            }
+            presentGpuByFrame[item.sourceFrameID, default: 0.0] +=
+                (item.gpuEndTime - item.gpuStartTime) * 1_000.0
+            presentKindsByFrame[item.sourceFrameID, default: []].insert(item.frameKind)
+        }
+        var totalGpuMilliseconds: [Double] = []
+        for (sourceFrameID, sourceGpu) in sourceGpuByFrame
+                where presentKindsByFrame[sourceFrameID] == Set(["generated", "real"]) {
+            totalGpuMilliseconds.append(sourceGpu + (presentGpuByFrame[sourceFrameID] ?? 0.0))
+        }
+        let sourceGpuMilliseconds = Array(sourceGpuByFrame.values)
         let generatedGpuAverage = generatedGpuMilliseconds.isEmpty
             ? 0.0
             : generatedGpuMilliseconds.reduce(0.0, +) / Double(generatedGpuMilliseconds.count)
         let realGpuAverage = realGpuMilliseconds.isEmpty
             ? 0.0
             : realGpuMilliseconds.reduce(0.0, +) / Double(realGpuMilliseconds.count)
+        let sourceGpuAverage = sourceGpuMilliseconds.isEmpty
+            ? 0.0
+            : sourceGpuMilliseconds.reduce(0.0, +) / Double(sourceGpuMilliseconds.count)
+        let totalGpuAverage = totalGpuMilliseconds.isEmpty
+            ? 0.0
+            : totalGpuMilliseconds.reduce(0.0, +) / Double(totalGpuMilliseconds.count)
         let generatedGpuP95 = percentile(generatedGpuMilliseconds, 0.95)
         let realGpuP95 = percentile(realGpuMilliseconds, 0.95)
+        let sourceGpuP95 = percentile(sourceGpuMilliseconds, 0.95)
+        let totalGpuP95 = percentile(totalGpuMilliseconds, 0.95)
         let records = timeline.map(diagnosticRecord)
         let report: [String: Any] = [
             "status": "passed",
@@ -513,6 +544,11 @@ private final class ValidationRunner {
             "generatedGpuP95MarginTo8_33Milliseconds": (1_000.0 / 120.0) - generatedGpuP95,
             "realGpuAverageMilliseconds": realGpuAverage,
             "realGpuP95Milliseconds": realGpuP95,
+            "sourceGpuAverageMilliseconds": sourceGpuAverage,
+            "sourceGpuP95Milliseconds": sourceGpuP95,
+            "totalGpuAverageMilliseconds": totalGpuAverage,
+            "totalGpuP95Milliseconds": totalGpuP95,
+            "totalGpuP95MarginTo16_67Milliseconds": (1_000.0 / 60.0) - totalGpuP95,
             "resizeExercised": true,
             "shutdownDurationSeconds": shutdownDuration,
             "timeline": records
@@ -527,6 +563,7 @@ private final class ValidationRunner {
                 + "real=\(real.count) generated=\(generated.count) "
                 + "sourceFps=\(String(format: "%.1f", sourceFramesPerSecond)) "
                 + "presentFps=\(String(format: "%.1f", presentedFramesPerSecond)) "
+                + "totalGpuP95=\(String(format: "%.2f", totalGpuP95))ms "
                 + "generatedGpuP95=\(String(format: "%.2f", generatedGpuP95))ms "
                 + "shutdown=\(String(format: "%.4f", shutdownDuration))s"
         )
