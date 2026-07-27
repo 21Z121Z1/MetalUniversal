@@ -106,6 +106,33 @@ private func testNewerSourceSupersedesStalledSource() throws {
     )
 }
 
+private func testStaleCallbackCannotInvalidateNewerHistory() throws {
+    var history = MetalFrameGenerationHistoryOwnership()
+    history.recordInterpolator(eventValue: 20)
+    history.recordDisplay(eventValue: 20)
+    history.recordInterpolator(eventValue: 21)
+    history.recordDisplay(eventValue: 21)
+
+    try expect(
+        !history.invalidateInterpolator(ifOwnedBy: 20),
+        "stale generated callback must not invalidate newer interpolator history"
+    )
+    try expect(
+        !history.invalidateDisplay(ifOwnedBy: 20),
+        "stale real callback must not invalidate newer display history"
+    )
+    try expect(history.interpolatorValid, "newer interpolator history must remain valid")
+    try expect(history.displayValid, "newer display history must remain valid")
+    try expect(
+        history.invalidateInterpolator(ifOwnedBy: 21),
+        "owning generated callback must invalidate its history"
+    )
+    try expect(
+        history.invalidateDisplay(ifOwnedBy: 21),
+        "owning real callback must invalidate its history"
+    )
+}
+
 private func testGeneratedSubmittedShutdown() throws {
     var state = try makeReady(sourceFrameID: 5, interpolation: true)
     _ = state.submitPresentation(.generated)
@@ -174,6 +201,7 @@ private enum MetalFrameGenerationLifecycleTestMain {
             ("GUI suspend and resize", testGuiSuspendAndResizeCancel),
             ("enqueue then shutdown", testEnqueueThenShutdown),
             ("newer source supersedes stalled source", testNewerSourceSupersedesStalledSource),
+            ("stale callback preserves newer history", testStaleCallbackCannotInvalidateNewerHistory),
             ("generated submitted shutdown", testGeneratedSubmittedShutdown),
             ("real submitted shutdown", testRealSubmittedShutdown),
             ("command buffer failure", testCommandBufferFailure),

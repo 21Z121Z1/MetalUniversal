@@ -555,8 +555,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var activePreviousIndex: Int?
     private var activeShouldResetHistory = true
     private var activeDeltaTime: Float = 1.0 / 60.0
-    private var interpolatorEncodeHistoryValid = false
-    private var displayHistoryValid = false
+    private var historyOwnership = MetalFrameGenerationHistoryOwnership()
     private var realPresentationTimeoutAt: CFTimeInterval?
     private var displayUpdateStarvationTimeoutAt: CFTimeInterval?
     private var diagnostics: [FrameDiagnostic] = []
@@ -1000,8 +999,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.nextBufferIndex = 0
         self.lastPresentedIndex = nil
         self.lastPresentedTimestamp = nil
-        self.interpolatorEncodeHistoryValid = false
-        self.displayHistoryValid = false
+        self.historyOwnership.invalidateAll()
         return true
     }
 
@@ -1350,14 +1348,15 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             return nil
         }
         if !lifecycle.activated {
-            let hasInterpolation = !frame.reset && displayHistoryValid && lastPresentedIndex != nil
+            let hasInterpolation = !frame.reset && historyOwnership.displayValid
+                    && lastPresentedIndex != nil
             guard lifecycle.activate(hasInterpolation: hasInterpolation) else {
                 return nil
             }
             activePreviousIndex = lastPresentedIndex
             activeShouldResetHistory = frame.reset
-                    || !interpolatorEncodeHistoryValid
-                    || !displayHistoryValid
+                    || !historyOwnership.interpolatorValid
+                    || !historyOwnership.displayValid
             activeDeltaTime = {
                 guard !activeShouldResetHistory else {
                     return 1.0 / 60.0
@@ -1799,17 +1798,20 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             reason: succeeded ? nil : "present command buffer failed: \(String(describing: error))"
         )
         if step == .generated {
-            interpolatorEncodeHistoryValid = succeeded && !lifecycle.cancellationRequested
+            if succeeded && !lifecycle.cancellationRequested {
+                historyOwnership.recordInterpolator(eventValue: eventValue)
+            } else {
+                historyOwnership.invalidateInterpolator(ifOwnedBy: eventValue)
+            }
         } else if succeeded && !lifecycle.cancellationRequested {
             // The present queue is serial and the real drawable has consumed
             // this slot. Use it as interpolation history immediately instead
             // of stalling the render thread on WindowServer scanout latency.
             lastPresentedIndex = frame.index
             lastPresentedTimestamp = frame.timestamp
-            displayHistoryValid = true
+            historyOwnership.recordDisplay(eventValue: eventValue)
             realPresentationTimeoutAt = nil
-        } else {
-            displayHistoryValid = false
+        } else if historyOwnership.invalidateDisplay(ifOwnedBy: eventValue) {
             lastPresentedIndex = nil
             lastPresentedTimestamp = nil
         }
@@ -1842,9 +1844,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
         if !actuallyPresented {
             if step == .generated {
-                interpolatorEncodeHistoryValid = false
-            } else {
-                displayHistoryValid = false
+                historyOwnership.invalidateInterpolator(ifOwnedBy: eventValue)
+            } else if historyOwnership.invalidateDisplay(ifOwnedBy: eventValue) {
                 lastPresentedIndex = nil
                 lastPresentedTimestamp = nil
             }
@@ -1859,13 +1860,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             if presentedTime.isFinite && presentedTime > 0.0 && !lifecycle.cancellationRequested {
                 lastPresentedIndex = frame.index
                 lastPresentedTimestamp = frame.timestamp
-                displayHistoryValid = true
+                historyOwnership.recordDisplay(eventValue: eventValue)
                 realPresentationTimeoutAt = nil
-            } else {
-                displayHistoryValid = false
             }
-        } else if !(presentedTime.isFinite && presentedTime > 0.0) {
-            interpolatorEncodeHistoryValid = false
         }
         currentLifecycle = lifecycle
         applyLifecycleActionsLocked(actions, eventValue: eventValue)
@@ -1889,8 +1886,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         eventValue: UInt64
     ) {
         if actions.contains(.invalidateHistory) {
-            interpolatorEncodeHistoryValid = false
-            displayHistoryValid = false
+            historyOwnership.invalidateAll()
             lastPresentedIndex = nil
             lastPresentedTimestamp = nil
         }

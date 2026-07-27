@@ -136,6 +136,8 @@ after input/generated/real GPU work already submitted for that source completes;
 the render thread does not wait for the 0.75-second display-starvation timeout.
 Normal 120 Hz generated/real pairs are unchanged because their real command
 buffer releases ownership before the next 60 Hz source arrives.
+Late drawable callbacks carry history ownership tokens, so a failed callback
+from a superseded source cannot reset history established by a newer source.
 
 ## Shutdown
 

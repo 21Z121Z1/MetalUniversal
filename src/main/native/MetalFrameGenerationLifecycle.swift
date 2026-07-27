@@ -27,6 +27,44 @@ enum MetalFrameGenerationLifecycleAction: Equatable {
     case invalidateHistory
 }
 
+/// Identifies which source most recently established each presenter history.
+/// Drawable callbacks can arrive after source ownership has moved on; a stale
+/// failure must not invalidate history produced by a newer source.
+struct MetalFrameGenerationHistoryOwnership {
+    private(set) var interpolatorEventValue: UInt64?
+    private(set) var displayEventValue: UInt64?
+
+    var interpolatorValid: Bool { interpolatorEventValue != nil }
+    var displayValid: Bool { displayEventValue != nil }
+
+    mutating func recordInterpolator(eventValue: UInt64) {
+        interpolatorEventValue = eventValue
+    }
+
+    mutating func recordDisplay(eventValue: UInt64) {
+        displayEventValue = eventValue
+    }
+
+    @discardableResult
+    mutating func invalidateInterpolator(ifOwnedBy eventValue: UInt64) -> Bool {
+        guard interpolatorEventValue == eventValue else { return false }
+        interpolatorEventValue = nil
+        return true
+    }
+
+    @discardableResult
+    mutating func invalidateDisplay(ifOwnedBy eventValue: UInt64) -> Bool {
+        guard displayEventValue == eventValue else { return false }
+        displayEventValue = nil
+        return true
+    }
+
+    mutating func invalidateAll() {
+        interpolatorEventValue = nil
+        displayEventValue = nil
+    }
+}
+
 /// Metal-independent reducer for one source frame.
 ///
 /// All calls are expected to be serialized by the presenter. The reducer owns
