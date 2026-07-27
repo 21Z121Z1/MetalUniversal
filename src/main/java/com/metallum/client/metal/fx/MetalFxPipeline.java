@@ -185,16 +185,6 @@ public final class MetalFxPipeline {
                             // falls back to its internal optical-flow estimate
                             // when motion vectors are zero, which is still
                             // far better than a naive 50/50 blend.
-                            //
-                            // The Java bridge signature is:
-                            //   metallum_fx_frame_interpolator_encode(
-                            //     interpolator, commandBuffer,
-                            //     sourceColor, previousColor,
-                            //     motionVectors, destination,
-                            //     motionVectorScaleX, motionVectorScaleY,
-                            //     reset)
-                            // It returns void, so we treat "no exception
-                            // thrown" as success.
                             MetalNativeBridge.metallum_fx_frame_interpolator_encode(
                                     frameInterpolator,
                                     commandBuffer,
@@ -208,35 +198,33 @@ public final class MetalFxPipeline {
                             encoded = true;
                         }
                         if (encoded) {
-                            MemorySegment tmp = currentFrame;
+                            // Save the pre-interpolation frame (source or
+                            // upscaled) before reassigning currentFrame.
+                            MemorySegment preInterpFrame = currentFrame;
                             currentFrame = interpolationOutputTexture;
-                            // Swap: the presented interpolated frame becomes
-                            // "previous" for next frame, and the old previous
-                            // becomes the next output target.
-                            if (tmp == upscaledColorTexture) {
-                                previousColorTexture = upscaledColorTexture;
-                                upscaledColorTexture = interpolationOutputTexture;
-                                interpolationOutputTexture = tmp;
-                            } else {
-                                // currentFrame was the raw source — we can't
-                                // hold it across frames, so blit it into
-                                // previousColorTexture instead.
-                                MetalNativeBridge.metallum_fx_encode_frame_blend(
-                                        deviceHandle(), commandBuffer,
-                                        currentFrame, currentFrame, previousColorTexture
-                                );
-                            }
+                            // Blit the pre-interpolation frame into
+                            // previousColorTexture for use as "previous" on
+                            // the next iteration. We can't hold the source or
+                            // upscaled texture across frames (they may be
+                            // overwritten next frame), so we copy into our
+                            // own previousColorTexture.
+                            //
+                            // The previous swap-based approach was buggy: after
+                            // the swap, previousColorTexture and
+                            // interpolationOutputTexture aliased the same
+                            // texture, causing the interpolator to read from
+                            // and write to the same texture on subsequent
+                            // frames — undefined behavior that crashed Metal
+                            // validation and made the window disappear.
+                            MetalNativeBridge.metallum_fx_encode_frame_blend(
+                                    deviceHandle(), commandBuffer,
+                                    preInterpFrame, preInterpFrame, previousColorTexture
+                            );
                             if (!loggedInterpActive) {
                                 Metallum.LOGGER.info(
                                         "[MetalFX] frame interpolation RUNNING (hardware): {}x{}",
                                         outputWidth, outputHeight);
                                 loggedInterpActive = true;
-                            }
-                        } else if (previousFrameValid) {
-                            // First failure after a valid previous — log once.
-                            if (loggedInterpActive) {
-                                Metallum.LOGGER.warn("[MetalFX] frame interpolator encode returned false; falling back to source");
-                                loggedInterpActive = false;
                             }
                         }
                     } catch (Throwable t) {

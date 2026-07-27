@@ -113,7 +113,11 @@ public final class MetalFxWarningScreen extends Screen {
 
         column.visitWidgets(this::addRenderableWidget);
         column.arrangeElements();
-        FrameLayout.alignInRectangle(column, 0, 36, this.width, this.height, 0.5F, 0.5F);
+        // Center within the full screen so the dialog appears at the true
+        // center. The title is drawn separately at y=16 and the content block
+        // is short enough that it never overlaps the title on any reasonable
+        // resolution.
+        FrameLayout.alignInRectangle(column, 0, 0, this.width, this.height, 0.5F, 0.5F);
     }
 
     private void onEnable(Button button) {

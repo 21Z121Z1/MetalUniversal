@@ -2,7 +2,6 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.fx.MetalFxConfig;
 import com.metallum.client.metal.fx.MetalFxWarningScreen;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.options.VideoSettingsScreen;
@@ -34,15 +33,19 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  *   {@code protected void addOptions()}  (method_60325 / m_338523_)
  *
  * <p>Injecting at {@code TAIL} of {@code addOptions} guarantees the vanilla
- * options list has already been built (so we can reference {@code this.list}
- * and the layout), and the {@link HeaderAndFooterLayout} is ready for us to
- * add the MetalFX button via the standard {@link Screen#addRenderableWidget}
- * path — giving it proper rendering, narration, and tab-ordering.
+ * options list has already been built, and we add the MetalFX button via
+ * the standard {@link Screen#addRenderableWidget} path — giving it proper
+ * rendering, narration, and tab-ordering.
  *
- * <p>The button is placed at the bottom-right of the screen so it doesn't
- * disturb the existing options list, and is only added when the active GPU
- * backend is Metal — on OpenGL/Vulkan it would be misleading to show
- * MetalFX controls.
+ * <p>The button is placed at the top-right corner of the screen, below the
+ * title. The previous bottom-right placement was inside the
+ * {@code HeaderAndFooterLayout}'s footer background panel, which rendered
+ * on top of the button and made it invisible. The top-right position
+ * avoids the footer/header background panels entirely and is consistent
+ * with how Iris/Sodium surface their settings entry points.
+ *
+ * The button is only added when the active GPU backend is Metal — on
+ * OpenGL/Vulkan it would be misleading to show MetalFX controls.
  *
  * <p>Clicking the button routes through
  * {@link MetalFxWarningScreen#openIfNotAcknowledged(Screen)}: the first
@@ -69,10 +72,13 @@ public abstract class VideoSettingsScreenMixin extends Screen {
         // loaded so the options screen reflects persisted state.
         MetalFxConfig.reload();
 
-        int buttonWidth = 200;
+        int buttonWidth = 150;
         int buttonHeight = 20;
+        // Top-right corner: below the title (y=16) and above the options list.
+        // This avoids the HeaderAndFooterLayout's footer background panel that
+        // previously rendered on top of the button.
         int x = this.width - buttonWidth - 8;
-        int y = this.height - buttonHeight - 28; // above the "Done" button row
+        int y = 6;
 
         this.addRenderableWidget(Button.builder(
                 Component.translatable("metallum.fx.button.open"),
