@@ -112,6 +112,10 @@ public final class MetalNativeBridge {
      * {@link #createSymbolLookup()}。
      */
     private static volatile boolean shaderLibrariesLoaded = false;
+    // 记录 libglslang / libspvc 的加载状态（成功为 "loaded"，失败为 "failed: <reason>"），
+    // 供渲染层在 pipeline 崩溃诊断点查询根因。
+    private static volatile String glslangLoadStatus = "not loaded";
+    private static volatile String spvcLoadStatus = "not loaded";
 
     public static void ensureShaderLibrariesLoaded() {
         if (shaderLibrariesLoaded) return;
@@ -124,14 +128,18 @@ public final class MetalNativeBridge {
                 try {
                     loadAndPromoteShaderLibrary(GLSLANG_RESOURCE_PATH_MACOS, GLSLANG_RESOURCE_PATH_IOS,
                             "glslang", "libglslang.dylib");
+                    glslangLoadStatus = "loaded";
                 } catch (Throwable t) {
+                    glslangLoadStatus = "failed: " + t.toString();
                     Metallum.LOGGER.warn("Failed to load libglslang.dylib: {}. ShaderBridge JNI will be unavailable.", t.getMessage());
                 }
                 // 2. 加载并提升 libspvc.dylib（libmetallum.dylib 的依赖）
                 try {
                     loadAndPromoteShaderLibrary(SPVC_RESOURCE_PATH_MACOS, SPVC_RESOURCE_PATH_IOS,
                             "spvc", "libspvc.dylib");
+                    spvcLoadStatus = "loaded";
                 } catch (Throwable t) {
+                    spvcLoadStatus = "failed: " + t.toString();
                     Metallum.LOGGER.warn("Failed to load libspvc.dylib: {}. ShaderBridge JNI will be unavailable.", t.getMessage());
                 }
                 // 3. 加载 libmetallum.dylib —— JNI 符号查找需要 System.load
@@ -140,6 +148,23 @@ public final class MetalNativeBridge {
                 shaderLibrariesLoaded = true;
             }
         }
+    }
+
+    /**
+     * 返回 libglslang.dylib / libspvc.dylib 的加载状态，供渲染层在
+     * pipeline 崩溃诊断点查询根因。
+     *
+     * @return 形如 "libglslang: loaded; libspvc: failed: <reason>" 的摘要
+     */
+    public static String shaderLibrariesStatus() {
+        return "libglslang: " + glslangLoadStatus + "; libspvc: " + spvcLoadStatus;
+    }
+
+    /**
+     * 便利方法：仅当 libglslang 与 libspvc 均成功加载时返回 {@code true}。
+     */
+    public static boolean shaderLibrariesAvailable() {
+        return glslangLoadStatus.equals("loaded") && spvcLoadStatus.equals("loaded");
     }
 
     /**

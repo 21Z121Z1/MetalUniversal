@@ -38,6 +38,9 @@ public final class MetalCrossShaderCompiler {
     private static final int SPV_DIM_CUBE = 3;
     private static final int SPV_DIM_BUFFER = 5;
 
+    /** 最近一次 GLSL→SPIR-V 或 SPIR-V→MSL 编译失败的根因，供渲染层诊断查询。 */
+    private static volatile String lastCompileError = null;
+
     static {
         // native 库（libglslang + libspvc + libmetallum）由 MetalNativeBridge 静态块加载。
         // 不再需要单独配置 LWJGL spvc —— MetalUniversal 已改用自建 ShaderBridge JNI，
@@ -45,6 +48,16 @@ public final class MetalCrossShaderCompiler {
     }
 
     private MetalCrossShaderCompiler() {
+    }
+
+    /**
+     * 返回最近一次着色器编译失败的根因描述（shader 名 + 错误信息），
+     * 供渲染层在 pipeline 崩溃诊断点查询。若无失败记录则返回 null。
+     *
+     * @return 最近一次编译错误，或 null
+     */
+    public static String lastCompileError() {
+        return lastCompileError;
     }
 
     /**
@@ -72,9 +85,11 @@ public final class MetalCrossShaderCompiler {
         try {
             spirvBytes = ShaderBridge.glslangCompile(glslSource, stage, ShaderBridge.SPV_ENV_VULKAN_1_0);
         } catch (RuntimeException e) {
+            lastCompileError = "GLSL→SPIR-V failed for shader '" + name + "': " + e.getMessage();
             throw new ShaderCompileException("Failed to compile GLSL to SPIR-V for shader: " + name + ": " + e.getMessage());
         }
         if (spirvBytes == null || spirvBytes.length < 20) {
+            lastCompileError = "glslang produced empty/invalid SPIR-V for shader: " + name;
             throw new ShaderCompileException("glslang produced empty/invalid SPIR-V for shader: " + name);
         }
         return spirvToMsl(spirvBytes, 0, Map.of());
@@ -313,6 +328,7 @@ public final class MetalCrossShaderCompiler {
         // SPIR-V 二进制必须至少包含 5 个字（头部：magic、version、generator、bound、schema）。
         // 空或过短的 SPIR-V 会导致 spvc_context_parse_spirv 行为不确定。
         if (spirvBytes == null || spirvBytes.length < 20) {
+            lastCompileError = "SPIR-V is too small: " + (spirvBytes == null ? 0 : spirvBytes.length) + " bytes (minimum 20 required)";
             throw new ShaderCompileException(
                     "SPIR-V is too small: " + (spirvBytes == null ? 0 : spirvBytes.length) + " bytes (minimum 20 required)"
             );
@@ -329,9 +345,11 @@ public final class MetalCrossShaderCompiler {
                     true    // flipVertexY
             );
         } catch (RuntimeException e) {
+            lastCompileError = "SPIR-V→MSL failed: " + e.getMessage();
             throw new ShaderCompileException("SPIRV-Cross failed to compile SPIR-V to MSL: " + e.getMessage());
         }
         if (mslSource == null || mslSource.isBlank()) {
+            lastCompileError = "SPIRV-Cross produced empty MSL source";
             throw new ShaderCompileException("SPIRV-Cross produced empty MSL source");
         }
 

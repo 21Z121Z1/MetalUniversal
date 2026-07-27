@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
@@ -122,6 +123,15 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MTLPixelFormat depthFormat
     ) {
         if (MetalNativeBridge.isNullHandle(vertexFunction) || MetalNativeBridge.isNullHandle(fragmentFunction)) {
+            StringBuilder missing = new StringBuilder();
+            if (MetalNativeBridge.isNullHandle(vertexFunction)) {
+                missing.append("vertex function");
+            }
+            if (MetalNativeBridge.isNullHandle(fragmentFunction)) {
+                if (missing.length() > 0) missing.append("; ");
+                missing.append("fragment function");
+            }
+            Metallum.LOGGER.warn("[MetalCompiledRenderPipeline] createPipeline returning NULL: missing {}", missing);
             return MemorySegment.NULL;
         }
 

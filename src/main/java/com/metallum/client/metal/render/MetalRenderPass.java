@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
@@ -547,7 +548,14 @@ final class MetalRenderPass implements RenderPassBackend {
                 fillMode = compiledPipeline.fillMode();
             }
             if (MetalNativeBridge.isNullHandle(pipelineHandle)) {
-                throw new IllegalStateException("Native pipeline is unavailable");
+                String libStatus = MetalNativeBridge.shaderLibrariesStatus();
+                String compileErr = MetalCrossShaderCompiler.lastCompileError();
+                Metallum.LOGGER.error("[MetalRenderPass] Native pipeline is unavailable. Root-cause diagnostics: "
+                        + "shader libraries = [" + libStatus + "]; "
+                        + "last compile error = [" + (compileErr != null ? compileErr : "none") + "]");
+                throw new IllegalStateException("Native pipeline is unavailable (shader libs: "
+                        + libStatus + "; last compile error: "
+                        + (compileErr != null ? compileErr : "none") + ")");
             }
             enc.setRenderPipelineState(pipelineHandle);
             pipelineDirty = false;

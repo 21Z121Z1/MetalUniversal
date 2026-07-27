@@ -15,7 +15,7 @@ import java.util.regex.Pattern;
  * <p>面向 PojavLauncher + Java 25 运行环境，检测已知的环境层兼容性问题：
  * <ul>
  *   <li>Java 25 移除了 {@code sun.java2d.SurfaceManagerFactory}（JDK-8355611），
- *       CacioCTC（PojavLauncher 的无头 AWT 实现）依赖此类。<b>致命</b>（阻断启动）。</li>
+ *       CacioCTC（PojavLauncher 的无头 AWT 实现）依赖此类。<b>非致命</b>（环境兼容性提示，不影响 MetalUniversal 启动）。</li>
  *   <li>LWJGL 版本过低（&lt; 3.3.3）无法识别 Java 25 的 JNI 版本，可能导致崩溃。<b>非致命</b>（警告）。</li>
  *   <li>JNA 版本过低（&lt; 5.17.0）不满足 fabric-loader 0.19.3 在 Java 25 +
  *       Android 16KB 页大小下的要求。<b>非致命</b>（警告，非 Java 25 移除）。</li>
@@ -55,9 +55,9 @@ public final class EnvironmentDiagnostics {
         try {
             final Severity s = checkSurfaceManagerFactory();
             if (s == Severity.FATAL) {
-                fatal.add("sun.java2d.SurfaceManagerFactory was removed in Java 25 (JDK-8355611) — CacioCTC headless AWT will fail.");
+                fatal.add("sun.java2d.SurfaceManagerFactory was removed in Java 25 (JDK-8355611).");
             } else if (s == Severity.NON_FATAL) {
-                nonFatal.add("SurfaceManagerFactory");
+                nonFatal.add("sun.java2d.SurfaceManagerFactory removed (Java 25) — does not affect MetalUniversal");
             }
         } catch (Throwable t) {
             Metallum.LOGGER.warn("[MetalUniversal] ENV WARN: checkSurfaceManagerFactory threw unexpectedly: {}", t.toString());
@@ -105,7 +105,7 @@ public final class EnvironmentDiagnostics {
             for (final String f : fatal) {
                 Metallum.LOGGER.error("[MetalUniversal]   - FATAL: {}", f);
             }
-            Metallum.LOGGER.error("[MetalUniversal] Fix fatal issues before proceeding. For SurfaceManagerFactory removal: use MojoLauncher beta or Amethyst-Android (Java 25-compatible runtime), or stay on Java 21.");
+            Metallum.LOGGER.error("[MetalUniversal] Fix fatal issues before proceeding.");
         }
         if (nonFatal.isEmpty()) {
             Metallum.LOGGER.info("[MetalUniversal] ENV SUMMARY: No non-fatal warnings detected.");
@@ -120,7 +120,8 @@ public final class EnvironmentDiagnostics {
 
     /**
      * 检测 {@code sun.java2d.SurfaceManagerFactory} 是否存在。
-     * Java 25（JDK-8355611）移除了此类，CacioCTC 依赖它。此为<b>致命</b>问题。
+     * Java 25（JDK-8355611）移除了此类，CacioCTC 依赖它。MetalUniversal 本身不依赖 AWT/CacioCTC，
+     * 此为<b>非致命</b>的环境兼容性提示（不影响 MetalUniversal 启动）。
      */
     private static Severity checkSurfaceManagerFactory() {
         try {
@@ -128,10 +129,11 @@ public final class EnvironmentDiagnostics {
             Metallum.LOGGER.info("[MetalUniversal] ENV INFO: sun.java2d.SurfaceManagerFactory is present; CacioCTC headless AWT should function.");
             return Severity.OK;
         } catch (ClassNotFoundException e) {
-            // 类被删除（Java 25 移除了该类）— 致命
-            Metallum.LOGGER.error("[MetalUniversal] ENV ERROR: sun.java2d.SurfaceManagerFactory was removed in Java 25 (JDK-8355611).\n"
-                    + "CacioCTC (PojavLauncher's headless AWT) requires this class. Please use MojoLauncher beta or Amethyst-Android which ship a Java 25-compatible runtime, or stay on Java 21.");
-            return Severity.FATAL;
+            // 类被删除（Java 25 移除了该类）— 非致命：MetalUniversal 不依赖 AWT/CacioCTC
+            Metallum.LOGGER.warn("[MetalUniversal] ENV NOTE: sun.java2d.SurfaceManagerFactory was removed in Java 25 (JDK-8355611).\n"
+                    + "This is an environment compatibility note only — MetalUniversal does NOT depend on AWT/CacioCTC, so this does NOT block MetalUniversal startup.\n"
+                    + "CacioCTC-based launchers (e.g. PojavLauncher's headless AWT) may be affected; if so, use MojoLauncher beta or Amethyst-Android (Java 25-compatible runtime), or stay on Java 21.");
+            return Severity.NON_FATAL;
         } catch (Throwable t) {
             Metallum.LOGGER.warn("[MetalUniversal] ENV WARN: SurfaceManagerFactory diagnostic failed: {}", t.toString());
             return Severity.NON_FATAL;
