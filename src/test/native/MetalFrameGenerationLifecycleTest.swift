@@ -80,6 +80,32 @@ private func testEnqueueThenShutdown() throws {
     try expect(completionActions.contains(.releaseOwnership), "drained cancelled source must release")
 }
 
+private func testNewerSourceSupersedesStalledSource() throws {
+    var inputInFlight = MetalFrameGenerationLifecycle(sourceFrameID: 13)
+    _ = inputInFlight.submitInput()
+    let cancelActions = inputInFlight.cancel(reason: "superseded by newer source")
+    try expect(
+        !cancelActions.contains(.releaseOwnership),
+        "supersession must not reuse textures while input GPU work is in flight"
+    )
+    let completionActions = inputInFlight.completeGPUWork(.input, succeeded: true)
+    try expect(
+        completionActions.contains(.releaseOwnership),
+        "superseded input must release as soon as its GPU work drains"
+    )
+    try expect(
+        inputInFlight.terminalPhase == .cancelled,
+        "superseded input must remain a cancellation, not a presentation"
+    )
+
+    var waitingForDisplay = try makeReady(sourceFrameID: 14, interpolation: true)
+    let displayActions = waitingForDisplay.cancel(reason: "superseded by newer source")
+    try expect(
+        displayActions.contains(.releaseOwnership),
+        "a source with no presentation GPU work must release without a display update"
+    )
+}
+
 private func testGeneratedSubmittedShutdown() throws {
     var state = try makeReady(sourceFrameID: 5, interpolation: true)
     _ = state.submitPresentation(.generated)
@@ -147,6 +173,7 @@ private enum MetalFrameGenerationLifecycleTestMain {
             ("generated then real", testGeneratedThenReal),
             ("GUI suspend and resize", testGuiSuspendAndResizeCancel),
             ("enqueue then shutdown", testEnqueueThenShutdown),
+            ("newer source supersedes stalled source", testNewerSourceSupersedesStalledSource),
             ("generated submitted shutdown", testGeneratedSubmittedShutdown),
             ("real submitted shutdown", testRealSubmittedShutdown),
             ("command buffer failure", testCommandBufferFailure),

@@ -129,6 +129,14 @@ source frame receives no usable update within the bounded starvation interval,
 it is cancelled and its submitted GPU work is safely drained. Diagnostics are
 bounded and opt-in rather than logged once per frame.
 
+Source admission is also latest-source-wins. If a newer Minecraft source reaches
+the presenter while an older source is still waiting for a display-link update,
+the older source is cancelled immediately. Texture ownership is reused only
+after input/generated/real GPU work already submitted for that source completes;
+the render thread does not wait for the 0.75-second display-starvation timeout.
+Normal 120 Hz generated/real pairs are unchanged because their real command
+buffer releases ownership before the next 60 Hz source arrives.
+
 ## Shutdown
 
 Shutdown follows:

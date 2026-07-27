@@ -564,6 +564,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var diagnosticsDumped = false
     private var droppedDisplayUpdates = 0
     private var presentationDeadlineMisses = 0
+    private var supersededSourceFrames = 0
 
     private let condition = NSCondition()
     private var outstandingFrames = 0
@@ -1050,6 +1051,18 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
 
         let waitStart = CACurrentMediaTime()
         condition.lock()
+        if outstandingFrames >= Self.maxOutstandingFrames && !stopping {
+            // The display link can stop producing updates for an occluded,
+            // hidden or locked window. Waiting for its starvation timeout here
+            // serializes WindowServer eligibility into Minecraft's render rate
+            // (0.75 seconds per source in the locked-console probe). A newer
+            // source makes an unpresented older source obsolete: cancel it and
+            // wait only for already-submitted GPU work to drain before reusing
+            // its private textures.
+            supersededSourceFrames += 1
+            cancelCurrentSourceLocked(reason: "superseded by newer source")
+            condition.broadcast()
+        }
         while outstandingFrames >= Self.maxOutstandingFrames && !stopping {
             condition.wait()
         }
@@ -1899,6 +1912,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         guard let frame = currentFrame, var lifecycle = currentLifecycle else {
             return
         }
+        for index in diagnostics.indices where diagnostics[index].sourceFrameID == frame.sourceFrameID
+                && diagnostics[index].outcome == "submitted" {
+            diagnostics[index].outcome = "cancelled:\(reason.replacingOccurrences(of: " ", with: "-"))"
+        }
         let actions = lifecycle.cancel(reason: reason)
         currentLifecycle = lifecycle
         applyLifecycleActionsLocked(actions, eventValue: frame.eventValue)
@@ -2063,6 +2080,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 NSLog("[Metallum] MetalFX timeline write failed for %@: %@", outputPath, String(describing: error))
             }
         }
+        NSLog(
+            "[Metallum] MetalFX presenter counters: supersededSources=%d droppedDisplayUpdates=%d deadlineMisses=%d",
+            supersededSourceFrames,
+            droppedDisplayUpdates,
+            presentationDeadlineMisses
+        )
         for diagnostic in snapshot {
             NSLog(
                 "[Metallum] MetalFX timeline source=%llu kind=%@ update=%llu target=%.6f presentationTarget=%.6f commit=%.6f sourceEnqueue=%.6f sourceCpuWait=%.6f sourceGpuStart=%.6f sourceGpuEnd=%.6f gpuStart=%.6f gpuEnd=%.6f gpuComplete=%.6f presented=%.6f outcome=%@",
