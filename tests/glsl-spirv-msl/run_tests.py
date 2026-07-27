@@ -649,7 +649,7 @@ void main() {
         # enableDecorationBinding=true 会产生两个 [[buffer(0)]]（碰撞）；=false 时
         # SPIRV-Cross 按声明顺序自动分配 [[buffer(0)]] / [[buffer(1)]]。
         # 与 tests/glsl-spirv-msl/cases/binding_collision.vert 内容一致。
-        glsl="""#version 460
+        glsl="""#version 460 core
 
 // Two UBOs at the SAME binding=0 but DIFFERENT descriptor sets.
 // With enableDecorationBinding=true both map to [[buffer(0)]] (Metal compile error).
@@ -683,7 +683,7 @@ void main() {
         stage="frag",
         # 同 12_binding_collision_vert 的片元阶段版本。
         # 与 tests/glsl-spirv-msl/cases/binding_collision.frag 内容一致。
-        glsl="""#version 460
+        glsl="""#version 460 core
 
 layout(location=0) out vec4 fragColor;
 

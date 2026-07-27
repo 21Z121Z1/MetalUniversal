@@ -1,4 +1,4 @@
-#version 460
+#version 460 core
 
 // Two UBOs at the SAME binding=0 but DIFFERENT descriptor sets.
 // With enableDecorationBinding=true both map to [[buffer(0)]] (Metal compile error).
