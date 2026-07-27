@@ -515,7 +515,9 @@ The first manually dispatched GitHub Actions run also found an infrastructure
 error: the workflow used macOS 15 while `check` intentionally executes the
 macOS 26-only Frame Interpolator offscreen gate. The workflow now targets the
 available `macos-26` runner so CI can execute the assertion rather than fail
-solely on host version. GitHub's runner has no attended WindowServer surface,
-so CI excludes only `metalFrameGenerationPresentationValidation`; the
-offscreen Frame Interpolator gate still runs there, while every local `build`
-continues to run the visible-window harness.
+solely on host version. The runner then proved to have neither an attended
+WindowServer surface nor MetalFX-capable virtual GPU
+(`MTLFXTemporalScaler is unsupported on this device`). CI therefore compiles
+both harnesses but excludes their execution, while continuing to run lifecycle,
+Java and MRT validation. Every local Apple Silicon `build` still executes both
+the offscreen Frame Interpolator gate and the visible-window harness.
