@@ -9,6 +9,7 @@
     "render.PreferredGraphicsApiMixin",
     "render.VideoSettingsScreenMixin",
     "render.MinecraftKeybindMixin",
+    "render.WindowMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
     "sodium.SodiumPreferredGraphicsApiMixin",

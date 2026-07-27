@@ -11,6 +11,8 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.NonNull;
+import org.lwjgl.glfw.GLFW;
+import org.lwjgl.system.MemoryStack;
 
 import java.lang.foreign.MemorySegment;
 import java.util.Collection;
@@ -54,6 +56,15 @@ final class MetalSurface implements GpuSurfaceBackend {
     private static final Set<GpuSurface.PresentMode> SUPPORTED_PRESENT_MODES = EnumSet.of(GpuSurface.PresentMode.FIFO, GpuSurface.PresentMode.MAILBOX);
     private final MetalDevice device;
     private final MemorySegment metalLayer;
+    /**
+     * The GLFW window handle. Used to read the <i>real</i> framebuffer size
+     * via {@code glfwGetFramebufferSize} in {@link #configure}, because the
+     * {@link GpuSurface.Configuration} passed to {@code configure} may have
+     * already been shrunk by {@code WindowMixin} when spatial upscaling is
+     * active. The drawable must always be sized to the true display
+     * resolution so Core Animation presents the MetalFX-upscaled frame 1:1.
+     */
+    private final long windowHandle;
     private GpuSurface.Configuration configuration;
     /**
      * Full display resolution (the dimensions Minecraft's window actually
@@ -83,9 +94,10 @@ final class MetalSurface implements GpuSurfaceBackend {
     private MetalFxConfig.SpatialMode appliedSpatialMode = MetalFxConfig.SpatialMode.OFF;
     private MetalCommandEncoder pendingPresentEncoder;
 
-    MetalSurface(final MetalDevice device, final MemorySegment metalLayer) {
+    MetalSurface(final MetalDevice device, final MemorySegment metalLayer, final long windowHandle) {
         this.device = device;
         this.metalLayer = metalLayer;
+        this.windowHandle = windowHandle;
     }
 
     @Override
@@ -94,8 +106,23 @@ final class MetalSurface implements GpuSurfaceBackend {
             throw new SurfaceException("Metal surface configuration must be positive, got " + config.width() + "x" + config.height());
         }
 
-        this.displayWidth = config.width();
-        this.displayHeight = config.height();
+        // Read the TRUE display resolution directly from GLFW. We can't trust
+        // config.width()/height() here because WindowMixin shrinks those
+        // getters when spatial upscaling is active — the configuration
+        // passed to us carries the shrunk (internal) dimensions, but the
+        // CAMetalLayer.drawableSize must be the full display resolution so
+        // Core Animation presents the MetalFX-upscaled frame 1:1.
+        int realWidth;
+        int realHeight;
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            var pW = stack.mallocInt(1);
+            var pH = stack.mallocInt(1);
+            GLFW.glfwGetFramebufferSize(windowHandle, pW, pH);
+            realWidth = pW.get(0);
+            realHeight = pH.get(0);
+        }
+        this.displayWidth = realWidth > 0 ? realWidth : config.width();
+        this.displayHeight = realHeight > 0 ? realHeight : config.height();
         applyInternalResolution(config);
 
         // The CAMetalLayer.drawableSize is ALWAYS the full display

@@ -74,6 +74,12 @@ public final class MetalFxPipeline {
     private int cachedInputHeight = -1;
     private int cachedOutputWidth = -1;
     private int cachedOutputHeight = -1;
+    // upscaledColorTexture has its own cache because ensureSpatialScaler
+    // (called just before ensureUpscaledTexture) updates cachedOutputWidth,
+    // which would otherwise make ensureUpscaledTexture skip rebuilding when
+    // only the output resolution changed.
+    private int cachedUpscaledWidth = -1;
+    private int cachedUpscaledHeight = -1;
     private boolean previousFrameValid = false;
     private boolean loggedSpatialActive = false;
     private boolean loggedInterpActive = false;
@@ -311,7 +317,7 @@ public final class MetalFxPipeline {
 
     private void ensureUpscaledTexture(int width, int height) {
         if (upscaledColorTexture != null
-                && cachedOutputWidth == width && cachedOutputHeight == height) {
+                && cachedUpscaledWidth == width && cachedUpscaledHeight == height) {
             return;
         }
         if (upscaledColorTexture != null) {
@@ -327,6 +333,8 @@ public final class MetalFxPipeline {
                 MTLStorageMode.Private,
                 "metallum-fx-upscaled"
         );
+        cachedUpscaledWidth = width;
+        cachedUpscaledHeight = height;
     }
 
     private void ensurePreviousTexture(int width, int height) {
@@ -428,5 +436,6 @@ public final class MetalFxPipeline {
         motionVectorCleared = false;
         firstInterpFrame = true;
         cachedInputWidth = cachedInputHeight = cachedOutputWidth = cachedOutputHeight = -1;
+        cachedUpscaledWidth = cachedUpscaledHeight = -1;
     }
 }
