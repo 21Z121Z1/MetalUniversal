@@ -1579,11 +1579,17 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "expectedGpuCaptures": 16,
                       "completedGpuCaptures": %d,
                       "failedGpuCaptures": %d,
+                      "frameGenerationRequested": %s,
+                      "frameGenerationFramesQueued": %d,
+                      "frameGenerationEnabledAtCompletion": %s,
                       "status": "%s"
                     }
                     """,
                             completed,
                             failures,
+                            Boolean.getBoolean("metallum.metalfx.frameGeneration"),
+                            MetalFxManager.frameGenerationFramesQueued(),
+                            MetalFxManager.frameGenerationEnabledAtCompletion(),
                             status
                     ),
                     StandardCharsets.UTF_8

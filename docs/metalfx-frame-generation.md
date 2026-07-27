@@ -205,6 +205,32 @@ zero remained classified as failures.
 The current artifact is
 `build/metal-validation/presentation-current/timeline.json`.
 
+## Production-gate follow-up (2026-07-27)
+
+The gate-open Minecraft command exposed a recovery bug that the 16 attachment
+readbacks did not cover. The first world resize could make the scene encode
+fail after the GUI target had changed size; that one dropped source frame
+permanently disabled Frame Generation, while the remaining Temporal readbacks
+still reported 16/16 and made the task look green.
+
+Scene-encode failure is now a recoverable suspension. Pending presenter work is
+stopped, the frame uses the ordinary fullscreen-copy fallback, and the next
+stable frame resumes Frame Generation with reset history. The client receipt
+also records `frameGenerationFramesQueued` and
+`frameGenerationEnabledAtCompletion`; when the Gradle command explicitly
+requests Frame Generation it fails unless at least one source frame reached the
+native presenter and the feature remained enabled through completion.
+
+On the Apple M1 Pro the repaired gate-open run recovered from both startup and
+GUI-transition size churn, completed 16/16 GPU readbacks, queued 255 source
+frames, and ended with Frame Generation enabled. This is connectivity and
+recovery evidence only. Because the automated Minecraft window ran in the
+background, its presentation diagnostics reported `presentedTime == 0` and
+classified those drawable presents as `not-presented`; it supplies no scanout,
+smoothness, tearing or VRR evidence. The independent foreground AppKit
+presentation harness still passed 10 real / 9 generated presents with a
+0.0068-second shutdown in the same checkout.
+
 ## GUI and scene policy
 
 Opening a screen or overlay suspends frame generation and cancels work through
@@ -236,6 +262,9 @@ keeps a hidden or minimized window from blocking shutdown forever.
 - Production Frame Generation remains disabled pending the attended visual and
   pacing QA in the audit's 13.4 matrix, not for lack of an object-motion
   producer.
+- The gate-open Minecraft integration receipt proves enqueue and recovery, not
+  display scanout. Its background run had no nonzero drawable presented time;
+  the attended foreground matrix remains mandatory.
 - Piston-moved blocks reach the interpolator with no object motion.
   `PistonHeadRenderer` submits two moving blocks through the same `core/block`
   family that now carries falling blocks, so the shader side is in place, but the

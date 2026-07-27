@@ -147,6 +147,7 @@ public final class MetalFxManager {
     private boolean sceneFrame;
     private boolean frameUsesUpscaledTarget;
     private boolean frameGenerationEnabled;
+    private int frameGenerationFramesQueued;
     // Set while a recoverable condition (an open GUI, an immediate present mode)
     // holds frame generation off. Unlike runtimeDisabled this is reversible and
     // beginFrameInternal re-enables the presenter once every gate clears.
@@ -503,6 +504,23 @@ public final class MetalFxManager {
     static FrameGenerationInput frameGenerationInput(final MetalGpuTexture presentedUiTexture) {
         MetalFxManager manager = active;
         return manager == null ? null : manager.frameGenerationInputInternal(presentedUiTexture);
+    }
+
+    static void recordFrameGenerationQueued() {
+        MetalFxManager manager = active;
+        if (manager != null) {
+            manager.frameGenerationFramesQueued++;
+        }
+    }
+
+    public static int frameGenerationFramesQueued() {
+        MetalFxManager manager = active;
+        return manager == null ? 0 : manager.frameGenerationFramesQueued;
+    }
+
+    public static boolean frameGenerationEnabledAtCompletion() {
+        MetalFxManager manager = active;
+        return manager != null && manager.frameGenerationEnabled && !manager.runtimeDisabled;
     }
 
     public static void addTransparencyReactivePass(final FrameGraphBuilder frame, final LevelTargetBundle targets) {
@@ -1031,7 +1049,12 @@ public final class MetalFxManager {
         if (!encoded) {
             this.motionStateStore.discardFrame();
             if (frameGenerationEnabled) {
-                disableFrameGenerationInternal("MetalFX scene encode failed while preparing frame generation");
+                // A resize can settle between projection preparation and GUI
+                // composition. The old-size scene cannot be interpolated, but
+                // that is a dropped source frame rather than a permanent
+                // presenter failure. Stop pending presentation work and let
+                // beginFrame resume with reset history at the stable size.
+                suspendFrameGenerationInternal("the MetalFX scene encode failed during a transient frame");
             }
             if (sceneFrame && renderer.mainRenderTarget().getColorTexture() != null) {
                 encoded = encoder.encodeTextureCopy(

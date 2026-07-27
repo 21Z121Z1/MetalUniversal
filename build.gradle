@@ -522,6 +522,18 @@ if (gradle.startParameter.taskNames.any {
 			if (completed != expected) {
 				problems << "captured ${completed} of ${expected} GPU readbacks".toString()
 			}
+			if (System.getProperty("metallum.metalfx.frameGeneration", "false").toBoolean()) {
+				def queued = runState.frameGenerationFramesQueued
+				def enabledAtCompletion = runState.frameGenerationEnabledAtCompletion
+				if (!(queued instanceof Number)) {
+					problems << "frameGenerationFramesQueued is missing or malformed".toString()
+				} else if (queued <= 0) {
+					problems << "Frame Generation was requested but queued no source frames".toString()
+				}
+				if (enabledAtCompletion != true) {
+					problems << "Frame Generation was requested but was disabled before validation completed".toString()
+				}
+			}
 			if (!problems.isEmpty()) {
 				problems.each { logger.error("VALIDATION ${it}") }
 				throw new GradleException(

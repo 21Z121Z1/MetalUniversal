@@ -21,7 +21,10 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    # MetalFX Frame Interpolator validation is a real part of `check` and is
+    # only available on macOS 26+. Keep CI on a host that can execute the gate
+    # instead of compiling it on 15 and failing before the assertions run.
+    runs-on: macos-26
     steps:
       - name: checkout repository
         uses: actions/checkout@v6

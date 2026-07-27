@@ -465,28 +465,21 @@ Defects found and fixed during this acceptance:
   with prioritized `important` rebuild requests after every controlled scene
   block change, plus 40 warm-up frames before the scripted timeline.
 
-Deployment state:
+Deployment state (updated 2026-07-27):
 
-- JAR `build/libs/metallum-1.0.1.jar` (SHA-256
-  `1ab7b8ace951b450cf09ee35ff3853be7a7851cd2325528703d87365ee299f42`) embeds
-  macOS dylib SHA-256
-  `e130d9d2ef02dd62122d215ed86e55ebcbd61ace81fb4454d7b3404f941a8fde`, byte
-  identical to the freshly built
-  `build/resources/main/natives/macos/libmetallum.dylib` from the same
-  `./gradlew build`. (swiftc output is not byte-reproducible across builds;
-  the native source is unchanged since the validated client run.)
-- The JAR was copied into the experience profile instance
-  `MinecraftMetal-Current-2026-07-26/mods/`. A client restart is required for
-  the new build and for any MetalFX option change.
-- The launcher profile `minecraftmetal-current-20260726` still forces
-  `-Dmetallum.metalfx.mode/scale/reactiveMask/debug`; trimming its `javaArgs`
-  to only `-Xms2G -Xmx6G -Dmetallum.metalfx.frameGeneration=false` is pending
-  the user's own edit (out-of-repo launcher configuration). Until then the
-  in-game MetalFX controls remain locked by design. The instance's persistent
-  `config/metallum-metalfx.properties` already carries
-  `mode=TEMPORAL, scalePercent=67, transparencyReactiveMask=true,
-  frameGeneration=false`, so removing the forced properties preserves the
-  current experience while unlocking the UI.
+- JAR `build/libs/metallum-1.0.2.jar` (SHA-256
+  `83e2c8c6d048f40a01dbee8bb0171da42514a4f729ab6f9821fb137724014ad7`)
+  is byte-identical to the copy in
+  `MinecraftMetal-Current-2026-07-26/mods/`. The previous `1.0.1` JAR was
+  moved to `.codex-backups/20260727-framegen-qa/` rather than deleted.
+- The stable launcher profile `minecraftmetal-current-20260726` keeps
+  `-Dmetallum.metalfx.frameGeneration=false`. Its shared persistent config is
+  `TEMPORAL`, 67%, transparency reactive enabled and Frame Generation off.
+- The separate launcher profile `minecraftmetal-framegen-qa-20260727`
+  explicitly adds `-Dmetallum.metalfx.objectMotionProducer=true` and
+  `-Dmetallum.metalfx.frameGeneration=true`. It is the attended-QA entry point;
+  selecting it opens the production gate only for that launch and does not
+  change the shipped `OBJECT_MOTION_PRODUCER_CONNECTED=false` default.
 
 This addendum does not change the main gate:
 
@@ -495,3 +488,28 @@ Frame Generation gate: CLOSED
 OBJECT_MOTION_PRODUCER_CONNECTED: false
 Overall status: PARTIAL ACCEPTANCE; CUTOUT reactive repair ACCEPTED
 ```
+
+## Addendum (2026-07-27): Frame Generation recovery and CI gate
+
+A gate-open real-client rerun disproved the prior assumption that 16/16 GPU
+readbacks implied the presenter stayed live. Startup size churn produced one
+scene-encode failure, permanently disabled Frame Generation, and then allowed
+the attachment-only validation to finish green. The failure now suspends only
+the affected frame, stops pending presenter work, and resumes on the next
+stable frame with reset history. The structured client receipt now gates on a
+positive native-enqueue count and an enabled completion state whenever Frame
+Generation is explicitly requested.
+
+The repaired run completed 16/16 readbacks, queued 255 source frames and ended
+enabled. Its background drawable callbacks all had `presentedTime == 0`, so
+this is connection/recovery evidence, not visual or scanout acceptance. The
+independent foreground presentation harness passed 10 real and 9 generated
+presents with 0.0068-second shutdown. The production constant therefore
+remains `false` pending the attended refresh/source-rate/VRR matrix.
+
+The first manually dispatched GitHub Actions run also found an infrastructure
+error: the workflow used macOS 15 while `check` intentionally executes the
+macOS 26-only Frame Interpolator offscreen gate. The workflow now targets the
+available `macos-26` runner so CI can execute the assertion rather than skip or
+fail solely on host version. A remote rerun still requires these local changes
+to be committed and pushed.

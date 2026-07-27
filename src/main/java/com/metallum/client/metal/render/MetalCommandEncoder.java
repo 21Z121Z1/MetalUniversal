@@ -500,6 +500,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     fence
             );
             if (queued) {
+                MetalFxManager.recordFrameGenerationQueued();
                 return;
             }
             MetalFxManager.disableFrameGeneration("native frame generation encode failed");
