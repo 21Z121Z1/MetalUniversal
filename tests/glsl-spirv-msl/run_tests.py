@@ -649,16 +649,16 @@ void main() {
         # enableDecorationBinding=true 会产生两个 [[buffer(0)]]（碰撞）；=false 时
         # SPIRV-Cross 按声明顺序自动分配 [[buffer(0)]] / [[buffer(1)]]。
         # 与 tests/glsl-spirv-msl/cases/binding_collision.vert 内容一致。
-        glsl="""#version 460 core
+        glsl="""#version 460
 
-// Two UBOs with the SAME binding=0 — simulates Iris's push constants (PC) + global UBO (u_Globals)
-// With enableDecorationBinding=true this would produce two [[buffer(0)]] in MSL (collision).
-// With enableDecorationBinding=false SPIRV-Cross auto-assigns buffer(0) and buffer(1).
-layout(binding=0) uniform PC {
+// Two UBOs at the SAME binding=0 but DIFFERENT descriptor sets.
+// With enableDecorationBinding=true both map to [[buffer(0)]] (Metal compile error).
+// With enableDecorationBinding=false SPIRV-Cross auto-assigns [[buffer(0)]] and [[buffer(1)]].
+layout(set=0, binding=0) uniform PC {
     float pc_value;
 };
 
-layout(binding=0) uniform u_Globals {
+layout(set=1, binding=0) uniform u_Globals {
     float global_value;
 };
 
@@ -683,15 +683,15 @@ void main() {
         stage="frag",
         # 同 12_binding_collision_vert 的片元阶段版本。
         # 与 tests/glsl-spirv-msl/cases/binding_collision.frag 内容一致。
-        glsl="""#version 460 core
+        glsl="""#version 460
 
 layout(location=0) out vec4 fragColor;
 
-layout(binding=0) uniform PC {
+layout(set=0, binding=0) uniform PC {
     float pc_value;
 };
 
-layout(binding=0) uniform u_Globals {
+layout(set=1, binding=0) uniform u_Globals {
     float global_value;
 };
 

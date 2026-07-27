@@ -1,12 +1,12 @@
-#version 460 core
+#version 460
 
 layout(location=0) out vec4 fragColor;
 
-layout(binding=0) uniform PC {
+layout(set=0, binding=0) uniform PC {
     float pc_value;
 };
 
-layout(binding=0) uniform u_Globals {
+layout(set=1, binding=0) uniform u_Globals {
     float global_value;
 };
 

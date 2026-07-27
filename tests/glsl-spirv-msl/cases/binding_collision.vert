@@ -1,13 +1,13 @@
-#version 460 core
+#version 460
 
-// Two UBOs with the SAME binding=0 — simulates Iris's push constants (PC) + global UBO (u_Globals)
-// With enableDecorationBinding=true this would produce two [[buffer(0)]] in MSL (collision).
-// With enableDecorationBinding=false SPIRV-Cross auto-assigns buffer(0) and buffer(1).
-layout(binding=0) uniform PC {
+// Two UBOs at the SAME binding=0 but DIFFERENT descriptor sets.
+// With enableDecorationBinding=true both map to [[buffer(0)]] (Metal compile error).
+// With enableDecorationBinding=false SPIRV-Cross auto-assigns [[buffer(0)]] and [[buffer(1)]].
+layout(set=0, binding=0) uniform PC {
     float pc_value;
 };
 
-layout(binding=0) uniform u_Globals {
+layout(set=1, binding=0) uniform u_Globals {
     float global_value;
 };
 
