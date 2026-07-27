@@ -357,6 +357,8 @@ private final class ValidationRunner {
             "targetTimestamp": item.targetTimestamp,
             "targetPresentationTimestamp": item.targetPresentationTimestamp,
             "cpuCommitTime": item.cpuCommitTime,
+            "sourceEnqueueTime": item.sourceEnqueueTime,
+            "sourceCpuWaitMilliseconds": item.sourceCpuWaitTime * 1_000.0,
             "sourceGpuStartTime": item.sourceGpuStartTime,
             "sourceGpuEndTime": item.sourceGpuEndTime,
             "sourceGpuDurationMilliseconds": item.sourceGpuEndTime > item.sourceGpuStartTime
@@ -490,12 +492,18 @@ private final class ValidationRunner {
             .filter { $0.frameKind == "real" }
             .map { ($0.gpuEndTime - $0.gpuStartTime) * 1_000.0 }
         var sourceGpuByFrame: [UInt64: Double] = [:]
+        var sourceEnqueueByFrame: [UInt64: CFTimeInterval] = [:]
+        var sourceCpuWaitByFrame: [UInt64: Double] = [:]
         var presentGpuByFrame: [UInt64: Double] = [:]
         var presentKindsByFrame: [UInt64: Set<String>] = [:]
         for item in measuredDiagnostics {
             if item.sourceGpuEndTime > item.sourceGpuStartTime {
                 sourceGpuByFrame[item.sourceFrameID] =
                     (item.sourceGpuEndTime - item.sourceGpuStartTime) * 1_000.0
+            }
+            if item.sourceEnqueueTime > 0.0 {
+                sourceEnqueueByFrame[item.sourceFrameID] = item.sourceEnqueueTime
+                sourceCpuWaitByFrame[item.sourceFrameID] = item.sourceCpuWaitTime * 1_000.0
             }
             presentGpuByFrame[item.sourceFrameID, default: 0.0] +=
                 (item.gpuEndTime - item.gpuStartTime) * 1_000.0
@@ -507,6 +515,15 @@ private final class ValidationRunner {
             totalGpuMilliseconds.append(sourceGpu + (presentGpuByFrame[sourceFrameID] ?? 0.0))
         }
         let sourceGpuMilliseconds = Array(sourceGpuByFrame.values)
+        let orderedSourceEnqueues = sourceEnqueueByFrame.sorted { $0.key < $1.key }
+        let sourceCpuIntervals = zip(
+            orderedSourceEnqueues.dropFirst(), orderedSourceEnqueues
+        ).compactMap { current, previous -> Double? in
+            guard current.key == previous.key + 1 else { return nil }
+            let interval = (current.value - previous.value) * 1_000.0
+            return interval.isFinite && interval > 0.0 ? interval : nil
+        }
+        let sourceCpuWaitMilliseconds = Array(sourceCpuWaitByFrame.values)
         let generatedGpuAverage = generatedGpuMilliseconds.isEmpty
             ? 0.0
             : generatedGpuMilliseconds.reduce(0.0, +) / Double(generatedGpuMilliseconds.count)
@@ -523,6 +540,8 @@ private final class ValidationRunner {
         let realGpuP95 = percentile(realGpuMilliseconds, 0.95)
         let sourceGpuP95 = percentile(sourceGpuMilliseconds, 0.95)
         let totalGpuP95 = percentile(totalGpuMilliseconds, 0.95)
+        let sourceCpuIntervalP95 = percentile(sourceCpuIntervals, 0.95)
+        let sourceCpuWaitP95 = percentile(sourceCpuWaitMilliseconds, 0.95)
         let records = timeline.map(diagnosticRecord)
         let report: [String: Any] = [
             "status": "passed",
@@ -546,6 +565,10 @@ private final class ValidationRunner {
             "realGpuP95Milliseconds": realGpuP95,
             "sourceGpuAverageMilliseconds": sourceGpuAverage,
             "sourceGpuP95Milliseconds": sourceGpuP95,
+            "sourceCpuIntervalP95Milliseconds": sourceCpuIntervalP95,
+            "sourceCpuIntervalP95MarginTo16_67Milliseconds":
+                (1_000.0 / 60.0) - sourceCpuIntervalP95,
+            "sourceCpuWaitP95Milliseconds": sourceCpuWaitP95,
             "totalGpuAverageMilliseconds": totalGpuAverage,
             "totalGpuP95Milliseconds": totalGpuP95,
             "totalGpuP95MarginTo16_67Milliseconds": (1_000.0 / 60.0) - totalGpuP95,
@@ -563,6 +586,7 @@ private final class ValidationRunner {
                 + "real=\(real.count) generated=\(generated.count) "
                 + "sourceFps=\(String(format: "%.1f", sourceFramesPerSecond)) "
                 + "presentFps=\(String(format: "%.1f", presentedFramesPerSecond)) "
+                + "sourceCpuWaitP95=\(String(format: "%.2f", sourceCpuWaitP95))ms "
                 + "totalGpuP95=\(String(format: "%.2f", totalGpuP95))ms "
                 + "generatedGpuP95=\(String(format: "%.2f", generatedGpuP95))ms "
                 + "shutdown=\(String(format: "%.4f", shutdownDuration))s"

@@ -227,6 +227,8 @@ struct MetalFrameGenerationDiagnosticSnapshot {
     let targetTimestamp: CFTimeInterval
     let targetPresentationTimestamp: CFTimeInterval
     let cpuCommitTime: CFTimeInterval
+    let sourceEnqueueTime: CFTimeInterval
+    let sourceCpuWaitTime: CFTimeInterval
     let sourceGpuStartTime: CFTimeInterval
     let sourceGpuEndTime: CFTimeInterval
     let gpuStartTime: CFTimeInterval
@@ -435,6 +437,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let index: Int
         let eventValue: UInt64
         let timestamp: CFTimeInterval
+        let cpuWaitDuration: CFTimeInterval
         let inputWidth: Int
         let inputHeight: Int
         let jitterX: Float
@@ -479,6 +482,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let targetTimestamp: CFTimeInterval
         let targetPresentationTimestamp: CFTimeInterval
         var cpuCommitTime: CFTimeInterval
+        let sourceEnqueueTime: CFTimeInterval
+        let sourceCpuWaitTime: CFTimeInterval
         var sourceGpuStartTime: CFTimeInterval
         var sourceGpuEndTime: CFTimeInterval
         var gpuStartTime: CFTimeInterval
@@ -1043,6 +1048,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             }
         }
 
+        let waitStart = CACurrentMediaTime()
         condition.lock()
         while outstandingFrames >= Self.maxOutstandingFrames && !stopping {
             condition.wait()
@@ -1058,6 +1064,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let sourceFrameID = nextSourceFrameID
         nextSourceFrameID += 1
         let timestamp = CACurrentMediaTime()
+        let cpuWaitDuration = max(0.0, timestamp - waitStart)
         outstandingFrames += 1
         condition.unlock()
 
@@ -1137,6 +1144,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             index: index,
             eventValue: eventValue,
             timestamp: timestamp,
+            cpuWaitDuration: cpuWaitDuration,
             inputWidth: depth.width,
             inputHeight: depth.height,
             jitterX: jitterX,
@@ -1954,6 +1962,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         outcome: String
     ) {
         let sourceTiming = sourceGpuTimings[sourceFrameID]
+        let sourceFrame = currentFrame?.sourceFrameID == sourceFrameID ? currentFrame : nil
         diagnostics.append(FrameDiagnostic(
             sourceFrameID: sourceFrameID,
             frameKind: frameKind,
@@ -1961,6 +1970,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             targetTimestamp: update.targetTimestamp,
             targetPresentationTimestamp: update.targetPresentationTimestamp,
             cpuCommitTime: cpuCommitTime,
+            sourceEnqueueTime: sourceFrame?.timestamp ?? 0.0,
+            sourceCpuWaitTime: sourceFrame?.cpuWaitDuration ?? 0.0,
             sourceGpuStartTime: sourceTiming?.start ?? 0.0,
             sourceGpuEndTime: sourceTiming?.end ?? 0.0,
             gpuStartTime: 0.0,
@@ -2004,6 +2015,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                     "targetTimestamp": diagnostic.targetTimestamp,
                     "targetPresentationTimestamp": diagnostic.targetPresentationTimestamp,
                     "cpuCommitTime": diagnostic.cpuCommitTime,
+                    "sourceEnqueueTime": diagnostic.sourceEnqueueTime,
+                    "sourceCpuWaitTime": diagnostic.sourceCpuWaitTime,
                     "sourceGpuStartTime": diagnostic.sourceGpuStartTime,
                     "sourceGpuEndTime": diagnostic.sourceGpuEndTime,
                     "gpuStartTime": diagnostic.gpuStartTime,
@@ -2052,13 +2065,15 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
         for diagnostic in snapshot {
             NSLog(
-                "[Metallum] MetalFX timeline source=%llu kind=%@ update=%llu target=%.6f presentationTarget=%.6f commit=%.6f sourceGpuStart=%.6f sourceGpuEnd=%.6f gpuStart=%.6f gpuEnd=%.6f gpuComplete=%.6f presented=%.6f outcome=%@",
+                "[Metallum] MetalFX timeline source=%llu kind=%@ update=%llu target=%.6f presentationTarget=%.6f commit=%.6f sourceEnqueue=%.6f sourceCpuWait=%.6f sourceGpuStart=%.6f sourceGpuEnd=%.6f gpuStart=%.6f gpuEnd=%.6f gpuComplete=%.6f presented=%.6f outcome=%@",
                 diagnostic.sourceFrameID,
                 diagnostic.frameKind,
                 diagnostic.displayUpdateID,
                 diagnostic.targetTimestamp,
                 diagnostic.targetPresentationTimestamp,
                 diagnostic.cpuCommitTime,
+                diagnostic.sourceEnqueueTime,
+                diagnostic.sourceCpuWaitTime,
                 diagnostic.sourceGpuStartTime,
                 diagnostic.sourceGpuEndTime,
                 diagnostic.gpuStartTime,
@@ -2080,6 +2095,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 targetTimestamp: $0.targetTimestamp,
                 targetPresentationTimestamp: $0.targetPresentationTimestamp,
                 cpuCommitTime: $0.cpuCommitTime,
+                sourceEnqueueTime: $0.sourceEnqueueTime,
+                sourceCpuWaitTime: $0.sourceCpuWaitTime,
                 sourceGpuStartTime: $0.sourceGpuStartTime,
                 sourceGpuEndTime: $0.sourceGpuEndTime,
                 gpuStartTime: $0.gpuStartTime,

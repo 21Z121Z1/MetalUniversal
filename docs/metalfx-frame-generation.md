@@ -222,6 +222,10 @@ native-resolution GUI composition, a 180-source-frame readback-free steady tail,
 and native GPU timestamps. The raw presenter records are written to
 `build/metal-validation/minecraft-client-current/frame-generation-timeline.json`;
 the Gradle gate writes its aggregate to `frame-generation-performance.json`.
+Each record also carries the source enqueue timestamp and the time the render
+thread waited to acquire the presenter slot. The aggregate therefore separates
+source CPU cadence, presenter backpressure p95 and GPU execution time instead of
+inferring all three from the displayed FPS counter.
 
 | FG work width | Source interval p50 / p95 | Present interval p50 / p95 | Source GPU p95 | Generated GPU p95 | Total GPU p95 / 16.67 ms margin |
 | ---: | ---: | ---: | ---: | ---: | ---: |

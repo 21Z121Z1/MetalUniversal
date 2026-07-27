@@ -639,6 +639,8 @@ if (gradle.startParameter.taskNames.any {
 						def realGpuMilliseconds = []
 						def totalGpuMilliseconds = []
 						def sourceStartById = [:]
+						def sourceEnqueueById = [:]
+						def sourceCpuWaitMilliseconds = []
 						def presentedTimes = []
 						completeSourceIds.each { sourceId ->
 							def records = bySource[sourceId]
@@ -646,6 +648,8 @@ if (gradle.startParameter.taskNames.any {
 							def real = records.find { it.frameKind == "real" }
 							def sourceStart = (records[0].sourceGpuStartTime as Number).doubleValue()
 							def sourceEnd = (records[0].sourceGpuEndTime as Number).doubleValue()
+							def sourceEnqueue = (records[0].sourceEnqueueTime as Number).doubleValue()
+							def sourceCpuWait = (records[0].sourceCpuWaitTime as Number).doubleValue()
 							def generatedStart = (generated.gpuStartTime as Number).doubleValue()
 							def generatedEnd = (generated.gpuEndTime as Number).doubleValue()
 							def realStart = (real.gpuStartTime as Number).doubleValue()
@@ -659,6 +663,10 @@ if (gradle.startParameter.taskNames.any {
 								realGpuMilliseconds << realMs
 								totalGpuMilliseconds << sourceMs + generatedMs + realMs
 								sourceStartById[sourceId] = sourceStart
+								if (sourceEnqueue > 0.0d) {
+									sourceEnqueueById[sourceId] = sourceEnqueue
+									sourceCpuWaitMilliseconds << sourceCpuWait * 1000.0d
+								}
 							}
 							[generated, real].each { item ->
 								def presented = (item.presentedTime as Number).doubleValue()
@@ -681,6 +689,15 @@ if (gradle.startParameter.taskNames.any {
 							def interval = (pair[1] - pair[0]) * 1000.0d
 							if (interval > 0.0d) presentIntervals << interval
 						}
+						def sourceCpuIntervals = []
+						completeSourceIds.collate(2, 1, false).each { pair ->
+							if (pair[1] == pair[0] + 1
+									&& sourceEnqueueById.containsKey(pair[0])
+									&& sourceEnqueueById.containsKey(pair[1])) {
+								def interval = (sourceEnqueueById[pair[1]] - sourceEnqueueById[pair[0]]) * 1000.0d
+								if (interval > 0.0d) sourceCpuIntervals << interval
+							}
+						}
 						def sourceIntervalP50 = percentile(sourceIntervals, 0.50d)
 						def sourceIntervalP95 = percentile(sourceIntervals, 0.95d)
 						def presentIntervalP50 = percentile(presentIntervals, 0.50d)
@@ -689,6 +706,10 @@ if (gradle.startParameter.taskNames.any {
 						def generatedGpuP95 = percentile(generatedGpuMilliseconds, 0.95d)
 						def realGpuP95 = percentile(realGpuMilliseconds, 0.95d)
 						def totalGpuP95 = percentile(totalGpuMilliseconds, 0.95d)
+						def sourceCpuIntervalP50 = percentile(sourceCpuIntervals, 0.50d)
+						def sourceCpuIntervalP95 = percentile(sourceCpuIntervals, 0.95d)
+						def sourceCpuWaitP50 = percentile(sourceCpuWaitMilliseconds, 0.50d)
+						def sourceCpuWaitP95 = percentile(sourceCpuWaitMilliseconds, 0.95d)
 						def overBudgetFrames = totalGpuMilliseconds.count { it > (1000.0d / 60.0d) }
 						def presentedCount = timeline.count { it.outcome == "presented" }
 						def summary = [
@@ -701,6 +722,12 @@ if (gradle.startParameter.taskNames.any {
 								presentedRatio: timeline.isEmpty() ? 0.0d : presentedCount / (double) timeline.size(),
 								sourceIntervalP50Milliseconds: sourceIntervalP50,
 								sourceIntervalP95Milliseconds: sourceIntervalP95,
+								sourceCpuIntervalP50Milliseconds: sourceCpuIntervalP50,
+								sourceCpuIntervalP95Milliseconds: sourceCpuIntervalP95,
+								sourceCpuIntervalP95MarginTo16_67Milliseconds:
+										(1000.0d / 60.0d) - sourceCpuIntervalP95,
+								sourceCpuWaitP50Milliseconds: sourceCpuWaitP50,
+								sourceCpuWaitP95Milliseconds: sourceCpuWaitP95,
 								presentIntervalP50Milliseconds: presentIntervalP50,
 								presentIntervalP95Milliseconds: presentIntervalP95,
 								sourceGpuP95Milliseconds: sourceGpuP95,
@@ -723,9 +750,11 @@ if (gradle.startParameter.taskNames.any {
 								"${buildDir}/metal-validation/minecraft-client-current/frame-generation-performance.json")
 						summaryFile.setText(new groovy.json.JsonBuilder(summary).toPrettyString() + "\n", "UTF-8")
 						logger.lifecycle(String.format(Locale.ROOT,
-								"Frame Generation steady-state: source p95 %.2f ms, present p95 %.2f ms,"
+								"Frame Generation steady-state: source GPU p95 %.2f ms, source CPU p95 %.2f ms,"
+										+ " presenter wait p95 %.2f ms, present p95 %.2f ms,"
 										+ " total GPU p95 %.2f ms (%.2f ms margin), presented %d/%d",
-								sourceIntervalP95, presentIntervalP95, totalGpuP95,
+								sourceIntervalP95, sourceCpuIntervalP95, sourceCpuWaitP95,
+								presentIntervalP95, totalGpuP95,
 								(1000.0d / 60.0d) - totalGpuP95, presentedCount, timeline.size()))
 						if (totalGpuMilliseconds.size() < 120) {
 							problems << "Frame Generation steady-state captured only ${totalGpuMilliseconds.size()} complete source pairs".toString()
