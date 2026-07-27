@@ -14,15 +14,27 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * Injects a "MetalFX Settings..." button into the vanilla
- * {@link VideoSettingsScreen}. The button is placed at the bottom-right
- * of the screen so it doesn't disturb the existing options list, and is
- * only added when the active GPU backend is Metal — on OpenGL/Vulkan it
- * would be misleading to show MetalFX controls.
+ * {@link VideoSettingsScreen}.
  *
- * <p>Injects at the tail of {@code init()} so all default widgets have
- * already been laid out; we then add our button via the standard
- * {@link Screen#addRenderableWidget} entry point, which keeps it
- * eligible for rendering, narration, and tab-ordering.
+ * <p><b>Why {@code rebuildWidgets} and not {@code init}.</b> In Minecraft
+ * 26.2 the {@code VideoSettingsScreen} class no longer overrides
+ * {@link Screen#init}. Mixin can only inject into methods declared by the
+ * target class itself (not inherited ones), so {@code @Inject(method = "init")}
+ * fails at runtime with
+ * {@code "could not find any targets matching 'init'"}, which crashes the
+ * whole screen — the video settings becomes impossible to open.
+ *
+ * <p>{@code rebuildWidgets()} is the 26.x widget-layout entry point that
+ * every concrete Screen subclass overrides to populate its UI. Injecting at
+ * its {@code TAIL} guarantees all default widgets (the options list, the
+ * "Done" button) have already been added, so our button lands on top of
+ * them and stays eligible for rendering, narration, and tab-ordering via
+ * the standard {@link Screen#addRenderableWidget} path.
+ *
+ * <p>The button is placed at the bottom-right of the screen so it doesn't
+ * disturb the existing options list, and is only added when the active GPU
+ * backend is Metal — on OpenGL/Vulkan it would be misleading to show
+ * MetalFX controls.
  *
  * <p>Clicking the button routes through
  * {@link MetalFxWarningScreen#openIfNotAcknowledged(Screen)}: the first
@@ -37,7 +49,7 @@ public abstract class VideoSettingsScreenMixin extends Screen {
         super(title);
     }
 
-    @Inject(method = "init", at = @At("TAIL"))
+    @Inject(method = "rebuildWidgets", at = @At("TAIL"))
     private void metallum$addMetalFxButton(CallbackInfo ci) {
         if (!metallum$isMetalBackend()) {
             return;
