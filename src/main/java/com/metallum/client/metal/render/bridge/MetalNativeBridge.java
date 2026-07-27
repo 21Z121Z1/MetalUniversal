@@ -1710,7 +1710,10 @@ public final class MetalNativeBridge {
         }
         if (isNullHandle(function)) {
             // metallum_create_shader_function 返回 NULL —— 查询 native 错误并记录诊断信息。
-            final String nativeError;
+            // 注意：nativeError 不能声明为 final —— Java 的 definite-assignment 分析认为
+            // try 块中的赋值若在表达式求值后抛异常，catch 块再赋值会构成"重复赋值"。
+            // 改用普通局部变量；后续仅作只读使用，语义上仍 effectively final。
+            String nativeError;
             try {
                 nativeError = metallumLastNativeError();
             } catch (Throwable e) {
