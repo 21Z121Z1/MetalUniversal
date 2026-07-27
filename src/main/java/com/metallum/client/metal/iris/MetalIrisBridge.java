@@ -280,6 +280,22 @@ public final class MetalIrisBridge {
     );
 
     /**
+     * Matches a UBO block declaration {@code layout(...) uniform <Name> { ... };}
+     * (with or without an existing {@code binding=N}). Captures:
+     * <ul>
+     *   <li>group 1 = layout qualifier content (e.g. "std140" or "std140, binding=5")</li>
+     *   <li>group 2 = UBO block name (e.g. "iris_Fog", "u_Globals")</li>
+     * </ul>
+     * The block body {@code \{ ... \}} permits a single level of nested braces
+     * (e.g. struct members). Used by {@link #assignUniqueUboBindings} to inject
+     * unique {@code binding=N} for blocks that lack it.
+     */
+    private static final Pattern UBO_BLOCK_PATTERN = Pattern.compile(
+            "layout\\s*\\(\\s*([^)]*?)\\s*\\)\\s*uniform\\s+(\\w+)\\s*\\{[^{}]*(?:\\{[^{}]*\\}[^{}]*)*\\}\\s*;",
+            Pattern.MULTILINE
+    );
+
+    /**
      * Matches a top-level {@code in}/{@code out} declaration that lacks a
      * {@code layout(...)} qualifier, including optional interpolation
      * qualifiers (flat, smooth, noperspective, centroid, invariant, precise).
@@ -310,6 +326,10 @@ public final class MetalIrisBridge {
      *       samplers/images/already-in-blocks), removes them, and injects
      *       a single {@code layout(std140) uniform iris_LooseUniforms { ... };}
      *       block at the position of the first removed declaration.</li>
+     *   <li><b>Assign unique UBO bindings.</b> Scans for {@code layout(...) uniform <Name> { ... };}
+     *       blocks lacking {@code binding=N} and assigns sequential unique bindings,
+     *       so each UBO gets its own {@code [[buffer(N)]]} slot in MSL (avoids
+     *       SPIRV-Cross aliasing multiple UBOs to a single {@code void* [[buffer(0)]]}).</li>
      *   <li><b>Add {@code layout(location=N)} to in/out.</b> Assigns
      *       sequential locations to in and out variables separately.</li>
      * </ol>
@@ -323,6 +343,7 @@ public final class MetalIrisBridge {
         }
         String result = bumpVersionTo450(glslSource);
         result = wrapLooseUniformsInUbo(result);
+        result = assignUniqueUboBindings(result);
         result = addLayoutLocationsToInOut(result);
         return result;
     }
@@ -399,6 +420,68 @@ public final class MetalIrisBridge {
         }
         result.append(glslSource, lastPos, glslSource.length());
         return result.toString();
+    }
+
+    /**
+     * Scans for UBO block declarations ({@code layout(...) uniform <Name> { ... };})
+     * and injects a unique {@code binding=N} for each block that lacks one.
+     *
+     * <p>Iris injects UBOs like {@code layout(std140) uniform iris_Fog { ... };}
+     * without {@code binding=N}. The glslang C API has no autoMapBindings option,
+     * so these default to (set=0, binding=0) in SPIR-V and get aliased by
+     * SPIRV-Cross to a single {@code void* [[buffer(0)]]}. Assigning unique
+     * bindings ensures each UBO lands at its own {@code [[buffer(N)]]} slot.
+     *
+     * <p>Blocks that already declare {@code binding=N} keep their value; the
+     * counter skips past it to avoid collisions.
+     */
+    private static String assignUniqueUboBindings(final String glslSource) {
+        final Matcher matcher = UBO_BLOCK_PATTERN.matcher(glslSource);
+        final StringBuilder result = new StringBuilder(glslSource.length() + 64);
+        int nextBinding = 0;
+        int lastEnd = 0;
+        while (matcher.find()) {
+            result.append(glslSource, lastEnd, matcher.start());
+            final String layoutQual = matcher.group(1);
+            final String uboName = matcher.group(2);
+            final String existingBinding = extractBindingNumber(layoutQual);
+            final int binding;
+            if (existingBinding != null) {
+                binding = Integer.parseInt(existingBinding);
+                if (binding >= nextBinding) {
+                    nextBinding = binding + 1;
+                }
+                // keep original declaration unchanged
+                result.append(matcher.group(0));
+            } else {
+                binding = nextBinding++;
+                result.append("layout(").append(layoutQual).append(", binding=")
+                        .append(binding).append(") uniform ").append(uboName)
+                        .append(" ").append(extractBlockBody(matcher.group(0)));
+            }
+            lastEnd = matcher.end();
+        }
+        result.append(glslSource, lastEnd, glslSource.length());
+        return result.toString();
+    }
+
+    /** Extracts the {@code N} from a {@code binding=N} substring, or null if absent. */
+    private static String extractBindingNumber(final String layoutQual) {
+        int idx = layoutQual.indexOf("binding");
+        if (idx < 0) return null;
+        int eq = layoutQual.indexOf('=', idx);
+        if (eq < 0) return null;
+        int end = eq + 1;
+        while (end < layoutQual.length() && Character.isWhitespace(layoutQual.charAt(end))) end++;
+        int start = end;
+        while (end < layoutQual.length() && Character.isDigit(layoutQual.charAt(end))) end++;
+        return end > start ? layoutQual.substring(start, end) : null;
+    }
+
+    /** Extracts the {@code uniform <Name> { ... };} portion from a full UBO declaration. */
+    private static String extractBlockBody(final String fullDeclaration) {
+        int uniformIdx = fullDeclaration.indexOf("uniform");
+        return uniformIdx >= 0 ? fullDeclaration.substring(uniformIdx) : fullDeclaration;
     }
 
     // ---- std140 layout computation (M5e) ----

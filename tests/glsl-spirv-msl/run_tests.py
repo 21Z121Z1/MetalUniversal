@@ -385,6 +385,31 @@ def _binding_collision_check(msl: str) -> List[str]:
     return failures
 
 
+def _ubo_no_alias_check(msl: str) -> List[str]:
+    """回归断言：两个 UBO（iris_Fog + iris_Globals）不得被 SPIRV-Cross 别名到同一 buffer。
+
+    当 UBO 无 binding 或同 (set,binding) 时，SPIRV-Cross 会生成 spvBufferAliasSetNBindingM
+    别名指针，多个 UBO 读同一内存。本断言验证修复后两个 UBO 各自独立绑定到不同 [[buffer(N)]]。
+    """
+    failures: List[str] = []
+    # 别名标志：SPIRV-Cross 在别名资源时生成 "spvBufferAlias" 命名
+    if "spvBufferAlias" in msl:
+        failures.append("UBO 别名：MSL 中出现 spvBufferAlias，两个 UBO 被别名到同一 buffer")
+    # 两个 UBO 应分别绑定到 buffer(0) 和 buffer(1)
+    buffer0_count = len(re.findall(r"\[\[buffer\(0\)\]\]", msl))
+    buffer1_count = len(re.findall(r"\[\[buffer\(1\)\]\]", msl))
+    if buffer0_count < 1:
+        failures.append("期望 [[buffer(0)]] 至少出现 1 次（iris_Fog 绑定），实际 0 次")
+    if buffer1_count < 1:
+        failures.append("期望 [[buffer(1)]] 至少出现 1 次（iris_Globals 绑定），实际 0 次")
+    # 两个 UBO 应作为独立 constant auto& 引用出现（非同一 void*）
+    if "iris_Fog" not in msl:
+        failures.append("MSL 中未找到 iris_Fog 引用")
+    if "iris_Globals" not in msl:
+        failures.append("MSL 中未找到 iris_Globals 引用")
+    return failures
+
+
 CASES: List[TestCase] = [
 
     TestCase(
@@ -706,6 +731,72 @@ void main() {
             "同 binding=0 也能被分配到不同 [[buffer(N)]]"
         ),
         desc="两个 UBO 同 binding=0 碰撞（片元阶段）：同样自动分配不同 [[buffer(N)]]",
+    ),
+
+    TestCase(
+        name="14_ubo_alias_collision_vert",
+        stage="vert",
+        # 两个 UBO 显式不同 binding —— 模拟修复后状态
+        # （MetalIrisBridge.assignUniqueUboBindings 注入唯一 binding）。
+        # SPIRV-Cross 不得将二者别名到同一 void* [[buffer(0)]]。
+        # 与 tests/glsl-spirv-msl/cases/ubo_alias_collision.vert 内容一致。
+        glsl="""#version 460 core
+
+layout(std140, binding=0) uniform iris_Fog {
+    vec4 FogColor;
+    float FogDensity;
+};
+
+layout(std140, binding=1) uniform iris_Globals {
+    mat4 iris_ProjMat;
+    vec4 iris_ColorModulator;
+};
+
+void main() {
+    gl_Position = iris_ProjMat * vec4(FogColor.rgb * FogDensity, 1.0);
+}
+""",
+        must_contain=["vertex ", "iris_Fog", "iris_Globals", "[[buffer("],
+        must_not_contain=["spvBufferAlias"],
+        custom_check=_ubo_no_alias_check,
+        iris_ref=(
+            "回归：Iris 注入的 UBO（iris_Fog/iris_Globals）经 "
+            "MetalIrisBridge.assignUniqueUboBindings 注入唯一 binding 后，"
+            "SPIRV-Cross 不得别名到同一 void* [[buffer(0)]]"
+        ),
+        desc="两个 UBO 显式不同 binding（顶点阶段）：验证 SPIRV-Cross 不别名到同一 buffer",
+    ),
+
+    TestCase(
+        name="15_ubo_alias_collision_frag",
+        stage="frag",
+        # 同 14_ubo_alias_collision_vert 的片元阶段版本。
+        # 与 tests/glsl-spirv-msl/cases/ubo_alias_collision.frag 内容一致。
+        glsl="""#version 460 core
+
+layout(location=0) out vec4 fragColor;
+
+layout(std140, binding=0) uniform iris_Fog {
+    vec4 FogColor;
+    float FogDensity;
+};
+
+layout(std140, binding=1) uniform iris_Globals {
+    mat4 iris_ProjMat;
+    vec4 iris_ColorModulator;
+};
+
+void main() {
+    fragColor = iris_ProjMat * vec4(FogColor.rgb * FogDensity, 1.0);
+}
+""",
+        must_contain=["fragment ", "fragColor", "iris_Fog", "iris_Globals", "[[buffer("],
+        must_not_contain=["spvBufferAlias"],
+        custom_check=_ubo_no_alias_check,
+        iris_ref=(
+            "回归（片元阶段）：同 14_ubo_alias_collision_vert，验证 frag 阶段两个 UBO 不别名"
+        ),
+        desc="两个 UBO 显式不同 binding（片元阶段）：同样验证不别名",
     ),
 ]
 
