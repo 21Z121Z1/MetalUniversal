@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render.bridge;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.MetalCrossShaderCompiler;
 import com.metallum.client.metal.render.mtl.*;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -1685,13 +1686,21 @@ public final class MetalNativeBridge {
         }
     }
 
+    /**
+     * 返回最近一次 {@code metallum_create_shader_function} 失败的 native 错误文本
+     * （MSL 编译错误或入口点未找到）。若无错误返回空字符串。
+     * <p>底层通过 JNI 调用 Swift 导出的 {@code metallum_get_last_native_error()}。
+     */
+    private static native String metallumLastNativeError();
+
     public static MemorySegment metallum_create_shader_function(
             final MemorySegment device,
             final String source,
             final String entryPoint
     ) {
+        final MemorySegment function;
         try (Arena arena = Arena.ofConfined()) {
-            return (MemorySegment) createShaderFunction.invokeExact(
+            function = (MemorySegment) createShaderFunction.invokeExact(
                     segment(device),
                     toCString(arena, source),
                     toCString(arena, entryPoint)
@@ -1699,6 +1708,25 @@ public final class MetalNativeBridge {
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_shader_function", throwable);
         }
+        if (isNullHandle(function)) {
+            // metallum_create_shader_function 返回 NULL —— 查询 native 错误并记录诊断信息。
+            final String nativeError;
+            try {
+                nativeError = metallumLastNativeError();
+            } catch (Throwable e) {
+                Metallum.LOGGER.error("[MetalNativeBridge] metallumLastNativeError() JNI call failed", e);
+                nativeError = "(metallumLastNativeError JNI call failed: " + e + ")";
+            }
+            Metallum.LOGGER.error("[MetalNativeBridge] metallum_create_shader_function returned NULL. Native error: {}",
+                    nativeError.isEmpty() ? "(no native error recorded)" : nativeError);
+            MetalCrossShaderCompiler.setLastCompileError("Native MSL compile failed: " + nativeError);
+            // 输出被 Metal 拒绝的 MSL 源码摘要（截断到前 2000 字符），便于定位编译错误位置。
+            final String mslSummary = source.length() > 2000
+                    ? source.substring(0, 2000) + "...(truncated)"
+                    : source;
+            Metallum.LOGGER.error("[MetalNativeBridge] MSL source rejected by Metal (first 2000 chars):\n{}", mslSummary);
+        }
+        return function;
     }
 
     public static void metallum_MTLRenderPipelineDescriptor_setCompiledFunctions(

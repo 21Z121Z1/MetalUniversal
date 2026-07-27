@@ -1621,6 +1621,28 @@ public func metallum_MTLRenderPipelineDescriptor_create() -> UnsafeMutableRawPoi
     retainedPointer(MTLRenderPipelineDescriptor())
 }
 
+// 记录最近一次 metallum_create_shader_function 失败的错误详情，
+// 供 JNI 查询函数 metallum_get_last_native_error() 读取。
+// 使用预分配的固定容量缓冲区，避免 malloc/free，返回的指针在下次调用前保持有效。
+private let g_last_native_error_buf: UnsafeMutablePointer<CChar> = {
+    let p = UnsafeMutablePointer<CChar>.allocate(capacity: 4096)
+    p.initialize(repeating: 0, count: 4096)
+    return p
+}()
+
+@inline(__always)
+private func set_last_native_error(_ message: String) {
+    message.utf8CString.withUnsafeBufferPointer { src in
+        let n = Swift.min(src.count, 4096 - 1)
+        for i in 0..<n {
+            g_last_native_error_buf[i] = src[i]
+        }
+        for i in n..<4096 {
+            g_last_native_error_buf[i] = 0
+        }
+    }
+}
+
 @_cdecl("metallum_create_shader_function")
 public func metallum_create_shader_function(
     _ device: MTLDevice,
@@ -1629,20 +1651,29 @@ public func metallum_create_shader_function(
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
         guard let sourcePtr, let entryPtr else {
+            set_last_native_error("[metallum] metallum_create_shader_function called with NULL source or entry pointer (source=\(sourcePtr == nil ? "nil" : "set"), entry=\(entryPtr == nil ? "nil" : "set"))")
             return nil
         }
         do {
+            set_last_native_error("")
             let library = try device.makeLibrary(source: String(cString: sourcePtr), options: nil)
             guard let function = library.makeFunction(name: String(cString: entryPtr)) else {
+                set_last_native_error("[metallum] Failed to resolve MSL entry point '\(String(cString: entryPtr))'")
                 NSLog("[metallum] Failed to resolve MSL entry point '%s'", entryPtr)
                 return nil
             }
             return retainedPointer(function)
         } catch {
+            set_last_native_error("[metallum] Failed to compile MSL: \(String(describing: error))")
             NSLog("[metallum] Failed to compile MSL: %@", String(describing: error))
             return nil
         }
     }
+}
+
+@_cdecl("metallum_get_last_native_error")
+public func metallum_get_last_native_error() -> UnsafePointer<CChar>? {
+    return UnsafePointer(g_last_native_error_buf)
 }
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setCompiledFunctions")
@@ -1714,6 +1745,7 @@ public func metallum_MTLDevice_makeRenderPipelineState(
         do {
             return retainedPointer(try device.makeRenderPipelineState(descriptor: descriptor))
         } catch {
+            set_last_native_error("[metallum] Failed to create render pipeline state: \(String(describing: error))")
             NSLog("[metallum] Failed to create render pipeline state: %@", String(describing: error))
             return nil
         }

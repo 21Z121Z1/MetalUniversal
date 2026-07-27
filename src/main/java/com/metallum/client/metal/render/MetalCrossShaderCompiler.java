@@ -61,6 +61,16 @@ public final class MetalCrossShaderCompiler {
     }
 
     /**
+     * 设置最近一次编译/native 错误，供 MetalNativeBridge 在 native MSL 编译失败时写入。
+     * 包级可见性不足以跨包访问，故设为 public。
+     *
+     * @param error 错误描述，或 null 清除
+     */
+    public static void setLastCompileError(final String error) {
+        lastCompileError = error;
+    }
+
+    /**
      * Compiles a raw GLSL source string to Metal Shading Language (MSL) via
      * SPIR-V, using the self-built JNI bridge ({@link ShaderBridge}):
      * GLSL → SPIR-V via glslang, then SPIR-V → MSL via SPIRV-Cross. This is

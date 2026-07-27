@@ -492,3 +492,27 @@ Java_com_metallum_client_metal_render_bridge_ShaderBridge_spvcCompileToMsl(
 
     return result;
 }
+
+/* -------------------------------------------------------------------------
+ * 声明 Swift 导出的 metallum_get_last_native_error（@_cdecl 符号）。
+ * 返回指向静态缓冲区的 const char*，内容为最近一次
+ * metallum_create_shader_function 失败的错误详情。
+ */
+extern const char *metallum_get_last_native_error(void);
+
+/* -------------------------------------------------------------------------
+ * JNI: MetalNativeBridge.metallumLastNativeError()
+ *
+ * 返回最近一次 native MSL 编译/入口点解析失败的错误文本。
+ * 若无错误返回空字符串。
+ */
+JNIEXPORT jstring JNICALL
+Java_com_metallum_client_metal_render_bridge_MetalNativeBridge_metallumLastNativeError(
+    JNIEnv *env, jclass cls) {
+    (void)cls;
+    const char *err = metallum_get_last_native_error();
+    if (err == NULL || err[0] == '\0') {
+        return (*env)->NewStringUTF(env, "");
+    }
+    return (*env)->NewStringUTF(env, err);
+}

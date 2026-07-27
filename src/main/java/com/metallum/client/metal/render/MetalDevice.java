@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.mojang.blaze3d.GpuFormat;
@@ -282,10 +283,22 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     MemorySegment getOrCompileFunction(final String msl, final String entryPoint) {
-        return this.functionCache.computeIfAbsent(
-                new MslFunctionKey(msl, entryPoint),
-                key -> MetalNativeBridge.metallum_create_shader_function(this.metalDeviceHandle, key.msl(), key.entryPoint())
-        );
+        final MslFunctionKey key = new MslFunctionKey(msl, entryPoint);
+        // 先查缓存（命中则直接返回，包括之前成功编译的句柄）
+        MemorySegment cached = this.functionCache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        // 未命中 → 调用 native 编译
+        MemorySegment handle = MetalNativeBridge.metallum_create_shader_function(this.metalDeviceHandle, msl, entryPoint);
+        if (MetalNativeBridge.isNullHandle(handle)) {
+            // 不缓存 NULL 句柄，以便后续重试能重新调用 native 编译
+            Metallum.LOGGER.warn("[MetalDevice] getOrCompileFunction: native returned NULL for entry point '{}'", entryPoint);
+            return handle; // 返回 NULL（MemorySegment.NULL）
+        }
+        // 成功 → 写入缓存
+        this.functionCache.put(key, handle);
+        return handle;
     }
 
     private record ShaderCompilationKey(Identifier id, ShaderType type, ShaderDefines defines) {
