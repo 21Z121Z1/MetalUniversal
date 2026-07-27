@@ -1,12 +1,13 @@
 #version 460 core
 
+// Two UBOs with DIFFERENT bindings (0 and 1). With enableDecorationBinding=true, SPIRV-Cross maps them to [[buffer(0)]] and [[buffer(1)]] respectively.
 layout(location=0) out vec4 fragColor;
 
-layout(set=0, binding=0) uniform PC {
+layout(binding=0) uniform PC {
     float pc_value;
 };
 
-layout(set=1, binding=0) uniform u_Globals {
+layout(binding=1) uniform u_Globals {
     float global_value;
 };
 

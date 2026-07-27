@@ -1,13 +1,11 @@
 #version 460 core
 
-// Two UBOs at the SAME binding=0 but DIFFERENT descriptor sets.
-// With enableDecorationBinding=true both map to [[buffer(0)]] (Metal compile error).
-// With enableDecorationBinding=false SPIRV-Cross auto-assigns [[buffer(0)]] and [[buffer(1)]].
-layout(set=0, binding=0) uniform PC {
+// Two UBOs with DIFFERENT bindings (0 and 1). With enableDecorationBinding=true, SPIRV-Cross maps them to [[buffer(0)]] and [[buffer(1)]] respectively.
+layout(binding=0) uniform PC {
     float pc_value;
 };
 
-layout(set=1, binding=0) uniform u_Globals {
+layout(binding=1) uniform u_Globals {
     float global_value;
 };
 

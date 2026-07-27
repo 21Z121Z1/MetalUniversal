@@ -350,7 +350,7 @@ public final class MetalCrossShaderCompiler {
                     spirvBytes,
                     ShaderBridge.MSL_PLATFORM_MACOS,
                     MSL_VERSION_3_1,
-                    false,   // enableDecorationBinding=false: auto-assign unique MSL buffer/texture/sampler slots (avoids [[buffer(0)]] collision when multiple UBOs share layout(binding=0))
+                    true,   // enableDecorationBinding=true: SPIRV-Cross respects rebind() binding decorations, matching vanilla's flat bindingIndex (buildResourceBindings). Iris UBO uniqueness is handled by MetalIrisBridge.assignUniqueUboBindings.
                     true,   // textureBufferNative
                     true    // flipVertexY
             );
