@@ -21,6 +21,62 @@ MetalUniversal 是一个基于 Apple Metal API 的 Minecraft 渲染后端模组�
 - **macOS**：Apple Silicon（M1 或更新），通过 Native Bridge 直接加载 `libmetallum.dylib`
 - **iOS**：iOS 14.0 或更高版本，预编译 `libmetallum.dylib`（arm64）和 `libspvc.dylib`（带 MSL 后端）内置于 jar 中
 
+## MetalFX 超分辨率与帧插值
+
+本模组集成了 Apple [MetalFX](https://developer.apple.com/documentation/metalfx) 框架，提供空间超分辨率（Spatial Upscaling）与帧插值（Frame Interpolation）两项 GPU 加速功能，可在支持的设备上显著提升帧率与画面流畅度。
+
+### 功能说明
+
+| 功能 | 说明 |
+|------|------|
+| **空间超分（Spatial Scaler）** | 在低分辨率渲染游戏画面，再用 MetalFX 专用硬件放大到原生分辨率，降低 GPU 着色负担，提升帧率。提供 Quality / Balanced / Performance / Ultra Performance 四档预设（分别对应 77% / 67% / 56% / 33% 内部渲染分辨率） |
+| **帧插值（Frame Interpolator）** | 利用硬件光流估计在两帧之间合成中间帧，将有效帧率翻倍，大幅改善快速移动场景的流畅度 |
+
+### 适配的系统与芯片
+
+以下为 Apple 官方 MetalFX 框架的适配要求。本模组严格遵循官方支持范围，不支持硬件路径的设备将自动禁用对应功能（不会崩溃，仅静默无效）。
+
+#### 空间超分（MTLFXSpatialScaler）
+
+| 平台 | 系统版本 | 芯片要求 |
+|------|---------|---------|
+| macOS | 13.0+ | Apple GPU family 7+（M1 / A14 及以上） |
+| iOS | 16.0+ | Apple GPU family 7+（A14 及以上） |
+
+#### 时间超分（MTLFXTemporalScaler）
+
+| 平台 | 系统版本 | 芯片要求 |
+|------|---------|---------|
+| macOS | 14.0+ | Apple GPU family 7+ |
+| iOS | 17.0+ | Apple GPU family 7+ |
+
+#### 帧插值（MTLFXFrameInterpolator，硬件加速路径）
+
+| 平台 | 系统版本 | 芯片要求 |
+|------|---------|---------|
+| macOS | 14.0+ | Apple GPU family 9+（M3 及以上） |
+| iOS | 17.0+ | Apple GPU family 9+（A17 Pro 及以上） |
+
+> ⚠️ **关于不支持硬件帧插值的设备**：M1 / M2 / A14–A16 等芯片不具备 Apple GPU family 9 的硬件光流加速单元，本模组在这些设备上**不会启用**帧插值。早期版本曾使用 50/50 混合作为回退，但该方案在快速移动的第一人称视角下会产生严重拖影，效果反而不如关闭，已在当前版本移除。
+
+### 使用方法
+
+1. 启动 Minecraft，进入 **视频设置**（原版或 Sodium 视频设置界面均可）
+2. 点击右上角的 **"MetalFX 设置..."** 按钮（或按 `F8` 快捷键）
+3. 首次进入会弹出**适配警告界面**，列出上述官方系统与芯片要求，请确认您的设备满足条件
+4. 点击 **"开启 MetalFX"** 进入设置界面（点击 "不开启" 则返回，下次进入仍会提示）
+5. 在设置界面选择空间超分模式与帧插值模式，点击 **"完成"** 保存
+
+### 设备能力自检
+
+设置界面会自动显示当前设备的支持情况，包括：
+
+- GPU 设备名称
+- 空间超分是否支持
+- 帧插值是否支持
+
+如果某项功能显示"不支持"，说明当前芯片或系统版本不满足 Apple 官方要求，启用该选项将不会有任何效果。
+
 ## 构建
 
 ### 前置条件
