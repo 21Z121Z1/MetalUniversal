@@ -2005,6 +2005,12 @@ public func metallum_fx_create_frame_interpolator(
             descriptor.outputWidth = outputWidth
             descriptor.outputHeight = outputHeight
             descriptor.colorTextureFormat = colorFormat
+            // Must match the MTLPixelFormat.RG32Float motion texture created
+            // by MetalFxPipeline.ensureMotionVectorTexture(). If left at the
+            // default (.invalid), assigning a RG32Float motionTexture at encode
+            // time is a format mismatch that newer Metal validation (e.g. on
+            // M5 Max) rejects — crashing the encoder.
+            descriptor.motionTextureFormat = .rg32Float
             guard let interp = try? descriptor.makeFrameInterpolator(device: device) else {
                 NSLog("[metallum-fx] Failed to create MTLFXFrameInterpolator (%dx%d)",
                       outputWidth, outputHeight)
@@ -2154,6 +2160,37 @@ public func metallum_fx_encode_frame_blend(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Clear a texture to all zeros via a render pass with .clear loadAction.
+// Used to initialise the MetalFX motion-vector texture: a Private-storage
+// texture has undefined initial contents, and feeding garbage RG32Float
+// motion vectors into MTLFXFrameInterpolator crashes the GPU encoder on
+// stricter drivers (e.g. M5 Max). A one-shot clear at creation time is
+// sufficient — the interpolator only reads it; nothing writes new motion
+// vectors, so it stays zero for the lifetime of the texture.
+// ---------------------------------------------------------------------------
+
+@_cdecl("metallum_fx_clear_texture")
+public func metallum_fx_clear_texture(
+    _ commandBuffer: MTLCommandBuffer,
+    _ texture: MTLTexture
+) -> Int {
+    return autoreleasepool {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(
+            red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0
+        )
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            return 0
+        }
+        encoder.endEncoding()
+        return 1
+    }
+}
+
 #else
 
 // Stubs for toolchains/SDKs without MetalFX (older Xcode that predates the
@@ -2219,6 +2256,11 @@ public func metallum_fx_frame_interpolator_encode(
 public func metallum_fx_encode_frame_blend(
     _ device: MTLDevice, _ commandBuffer: AnyObject,
     _ sourceTexture: AnyObject, _ previousTexture: AnyObject, _ destinationTexture: AnyObject
+) -> Int { return 0 }
+
+@_cdecl("metallum_fx_clear_texture")
+public func metallum_fx_clear_texture(
+    _ commandBuffer: AnyObject, _ texture: AnyObject
 ) -> Int { return 0 }
 
 #endif // canImport(MetalFX)

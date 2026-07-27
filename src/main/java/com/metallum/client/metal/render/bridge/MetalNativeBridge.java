@@ -447,6 +447,11 @@ public final class MetalNativeBridge {
                                     ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)))
                     .orElse(null);
+            fxClearTexture = lookup.find("metallum_fx_clear_texture")
+                    .map(h -> downcall(h,
+                            FunctionDescriptor.of(INT,
+                                    ValueLayout.ADDRESS, ValueLayout.ADDRESS)))
+                    .orElse(null);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to load Metal native bridge", e);
         }
@@ -668,6 +673,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle fxCreateFrameInterpolator;
     private static final MethodHandle fxFrameInterpolatorEncode;
     private static final MethodHandle fxEncodeFrameBlend;
+    private static final MethodHandle fxClearTexture;
 
 
     private static MethodHandle downcall(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
@@ -1811,6 +1817,31 @@ public final class MetalNativeBridge {
                     segment(destinationTexture)) != 0;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_fx_encode_frame_blend", throwable);
+        }
+    }
+
+    /**
+     * Clears the given texture to all zeros via a render pass with
+     * {@code loadAction = clear}. Used to initialise the MetalFX motion-vector
+     * texture, which has undefined initial contents under
+     * {@link MTLStorageMode#Private} — feeding garbage motion vectors into
+     * {@code MTLFXFrameInterpolator} crashes the encoder on stricter drivers
+     * (e.g. M5 Max).
+     *
+     * @param commandBuffer the active MTLCommandBuffer
+     * @param texture       the texture to clear (must be a renderable color target)
+     * @return {@code true} if the clear encoder was created successfully
+     */
+    public static boolean metallum_fx_clear_texture(
+            final MemorySegment commandBuffer,
+            final MemorySegment texture
+    ) {
+        if (fxClearTexture == null) return false;
+        try {
+            return (int) fxClearTexture.invokeExact(
+                    segment(commandBuffer), segment(texture)) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fx_clear_texture", throwable);
         }
     }
 }

@@ -77,6 +77,16 @@ public final class MetalFxPipeline {
     private boolean previousFrameValid = false;
     private boolean loggedSpatialActive = false;
     private boolean loggedInterpActive = false;
+    // Tracks whether the motion-vector texture has been zeroed. Private-storage
+    // textures start with undefined contents; feeding garbage RG32Float motion
+    // vectors into MTLFXFrameInterpolator crashes the encoder on stricter
+    // drivers (e.g. M5 Max). Cleared once after creation.
+    private boolean motionVectorCleared = false;
+    // True until the first successful interpolator encode completes. The first
+    // encode must set shouldResetHistory=true so the interpolator initialises
+    // its internal history from the provided color+previous pair rather than
+    // reading stale/uninitialised history.
+    private boolean firstInterpFrame = true;
 
     // BGRA8Unorm is the format CAMetalLayer drawables use on Apple platforms;
     // the present pipeline in MetallumNative.swift is hardwired to it.
@@ -176,6 +186,22 @@ public final class MetalFxPipeline {
                     );
                 }
                 if (frameInterpolator != null) {
+                    // Zero the motion-vector texture once after creation. The
+                    // texture uses Private storage, which has undefined initial
+                    // contents — feeding garbage RG32Float motion vectors into
+                    // MTLFXFrameInterpolator crashes the encoder on stricter
+                    // drivers (e.g. M5 Max). The texture is only ever read by
+                    // the interpolator (we never write new motion vectors), so
+                    // a single clear keeps it zero for its lifetime.
+                    if (!motionVectorCleared && motionVectorTexture != null) {
+                        try {
+                            MetalNativeBridge.metallum_fx_clear_texture(
+                                    commandBuffer, motionVectorTexture);
+                            motionVectorCleared = true;
+                        } catch (Throwable t) {
+                            Metallum.LOGGER.warn("[MetalFX] failed to clear motion vector texture", t);
+                        }
+                    }
                     boolean encoded = false;
                     try {
                         if (previousFrameValid) {
@@ -185,6 +211,14 @@ public final class MetalFxPipeline {
                             // falls back to its internal optical-flow estimate
                             // when motion vectors are zero, which is still
                             // far better than a naive 50/50 blend.
+                            //
+                            // The reset argument maps to the interpolator's
+                            // shouldResetHistory. It must be 1 on the first
+                            // encode after the previous-frame seed so the
+                            // interpolator initialises its internal history
+                            // from the provided color+previous pair instead of
+                            // reading uninitialised history (crash on M5 Max).
+                            int reset = firstInterpFrame ? 1 : 0;
                             MetalNativeBridge.metallum_fx_frame_interpolator_encode(
                                     frameInterpolator,
                                     commandBuffer,
@@ -193,9 +227,10 @@ public final class MetalFxPipeline {
                                     motionVectorTexture != null ? motionVectorTexture : MemorySegment.NULL,
                                     interpolationOutputTexture,
                                     1.0f, 1.0f,
-                                    0
+                                    reset
                             );
                             encoded = true;
+                            firstInterpFrame = false;
                         }
                         if (encoded) {
                             // Save the pre-interpolation frame (source or
@@ -244,6 +279,10 @@ public final class MetalFxPipeline {
         } else if (!cfg.isFrameInterpolationActive()) {
             previousFrameValid = false;
             loggedInterpActive = false;
+            // Reset so the next time interpolation is re-enabled, the motion
+            // texture is re-cleared and the first encode signals reset.
+            motionVectorCleared = false;
+            firstInterpFrame = true;
         }
 
         return currentFrame;
@@ -339,15 +378,20 @@ public final class MetalFxPipeline {
             MetalNativeBridge.metallum_release_object(motionVectorTexture);
             motionVectorTexture = null;
         }
+        // RenderTarget is required so metallum_fx_clear_texture can attach the
+        // texture to a render pass (loadAction = .clear). ShaderRead|ShaderWrite
+        // alone is not sufficient for the clear pass.
         motionVectorTexture = MetalNativeBridge.metallum_create_texture_2d(
                 deviceHandle(),
                 MOTION_FORMAT_ENUM,
                 width, height,
                 1L, 1L, 0L,
-                USAGE_SHADER_RW,
+                USAGE_SHADER_RW | MTLTextureUsage.RenderTarget.value,
                 MTLStorageMode.Private,
                 "metallum-fx-motion"
         );
+        // New texture: needs a clear before first interpolator use.
+        motionVectorCleared = false;
     }
 
     /**
@@ -381,6 +425,8 @@ public final class MetalFxPipeline {
         previousFrameValid = false;
         loggedSpatialActive = false;
         loggedInterpActive = false;
+        motionVectorCleared = false;
+        firstInterpFrame = true;
         cachedInputWidth = cachedInputHeight = cachedOutputWidth = cachedOutputHeight = -1;
     }
 }

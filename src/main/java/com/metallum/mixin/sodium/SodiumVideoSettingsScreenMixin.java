@@ -38,8 +38,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  *       needed.</li>
  * </ul>
  *
- * <p>The button is placed at the top-right corner, consistent with the
- * vanilla {@code VideoSettingsScreenMixin}'s placement.
+ * <p><b>Placement.</b> The button is placed at the top-left corner of the
+ * screen. Sodium 0.9.0 renders its mod-list tabs along the left edge and
+ * its search field at the top-right, so the top-left position (above the
+ * tab list, beside the title) is the only consistently free slot. Iris
+ * historically surfaced its "Shader Packs" entry in the same area before
+ * migrating to Sodium's {@code ConfigEntryPoint} API. We keep the button
+ * narrower (140px) so it doesn't crowd the title.
  *
  * <p>The mixin is only applied when Sodium is loaded (gated by the
  * {@code MetallumMixinConfigPlugin}'s {@code .sodium.} package rule)
@@ -58,9 +63,12 @@ public abstract class SodiumVideoSettingsScreenMixin extends Screen {
         }
         MetalFxConfig.reload();
 
-        int buttonWidth = 150;
+        int buttonWidth = 140;
         int buttonHeight = 20;
-        int x = this.width - buttonWidth - 8;
+        // Top-left corner: beside the title, above Sodium's tab list. The
+        // previous top-right placement collided with Sodium's search field;
+        // bottom-right collided with the "Done" button.
+        int x = 8;
         int y = 6;
 
         this.addRenderableWidget(Button.builder(
