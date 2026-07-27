@@ -301,6 +301,37 @@ def presentationValidationSkipReason = {
 	return null
 }
 
+// WindowServer does not scan out CAMetalLayer drawables while the console is
+// locked; presented handlers then report presentedTime == 0 even though the GPU
+// command buffers completed. Detect that state before starting a multi-minute
+// visible validation so a missing foreground session cannot masquerade as a
+// renderer or frame-interpolator regression.
+def lockedConsoleValidationReason = {
+	if (!org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		return null
+	}
+	def process = new ProcessBuilder("/usr/sbin/ioreg", "-n", "Root", "-d1")
+			.redirectErrorStream(true)
+			.start()
+	def output = process.inputStream.getText("UTF-8")
+	def exitCode = process.waitFor()
+	if (exitCode != 0) {
+		return "could not query the macOS console lock state (ioreg exit ${exitCode})".toString()
+	}
+	if (output.contains('"IOConsoleLocked" = Yes')
+			|| output.contains('"CGSSessionScreenIsLocked"=Yes')) {
+		return "the macOS console is locked; WindowServer cannot provide nonzero presentedTime callbacks".toString()
+	}
+	return null
+}
+
+def requireUnlockedConsoleForPresentation = {
+	def reason = lockedConsoleValidationReason()
+	if (reason != null) {
+		throw new GradleException("Visible MetalFX presentation validation cannot run: ${reason}.")
+	}
+}
+
 tasks.register("metalFrameGenerationPresentationValidation", Exec) {
 	group = "verification"
 	description = "Runs an automatic visible-window CAMetalDisplayLink pacing, resize and shutdown validation."
@@ -313,6 +344,7 @@ tasks.register("metalFrameGenerationPresentationValidation", Exec) {
 	}
 	dependsOn "compileMetalFrameGenerationPresentationValidation"
 	doFirst {
+		requireUnlockedConsoleForPresentation()
 		delete file("${buildDir}/metal-validation/presentation-current")
 	}
 	environment "MTL_DEBUG_LAYER", "1"
@@ -339,6 +371,7 @@ tasks.register("metal4PresentValidation", Exec) {
 	}
 	dependsOn "compileMetalFrameGenerationPresentationValidation"
 	doFirst {
+		requireUnlockedConsoleForPresentation()
 		delete file("${buildDir}/metal-validation/presentation-metal4")
 	}
 	environment "MTL_DEBUG_LAYER", "1"
@@ -471,6 +504,9 @@ if (gradle.startParameter.taskNames.any {
 }) {
 	tasks.named("runClient") {
 		doFirst {
+			if (System.getProperty("metallum.metalfx.frameGeneration", "false").toBoolean()) {
+				requireUnlockedConsoleForPresentation()
+			}
 			delete file("${buildDir}/metal-validation/minecraft-client-current")
 		}
 		systemProperty "metallum.validation.enabled", "true"

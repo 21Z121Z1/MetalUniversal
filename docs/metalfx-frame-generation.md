@@ -241,6 +241,11 @@ callbacks can still be WindowServer coalescing of an occluded window. A
 foreground Launcher run remains required to close the zero-dropped-scanout gate;
 the unattended result is not relabelled as that visual acceptance.
 
+Both visible Gradle gates now fail before launch when `ioreg` reports a locked
+macOS console. A locked session cannot produce nonzero WindowServer
+`presentedTime` callbacks, so waiting for the full scripted run would only
+measure GPU completion behind a display that is ineligible for scanout.
+
 ## Real presentation validation
 
 `metalFrameGenerationPresentationValidation` creates an automated visible
