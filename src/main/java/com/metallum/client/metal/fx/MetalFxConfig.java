@@ -143,18 +143,23 @@ public final class MetalFxConfig {
 
     /**
      * @return {@code true} if frame interpolation is enabled <em>and</em>
-     * either {@code MTLFXFrameInterpolator} or the blend fallback is
-     * available on this device.
+     * the device supports the hardware {@code MTLFXFrameInterpolator}
+     * path (M3+ / A17 Pro+). The legacy 50/50 blend fallback has been
+     * removed because it produced unacceptable ghosting on fast-moving
+     * first-person content — presenting a worse experience than no
+     * interpolation at all.
+     *
+     * <p>{@link FrameInterpolationMode#FORCE_BLEND} is now treated as
+     * "use the hardware path if available, otherwise off" — it's kept
+     * as an enum value only for config-file backwards compatibility.
      */
     public boolean isFrameInterpolationActive() {
         if (interpolationMode == FrameInterpolationMode.OFF) {
             return false;
         }
-        if (interpolationMode == FrameInterpolationMode.FORCE_BLEND) {
-            return blendSupported;
-        }
-        // AUTO
-        return interpolationSupported || blendSupported;
+        // Both AUTO and FORCE_BLEND now require the hardware path.
+        // The blend fallback was removed due to quality issues.
+        return interpolationSupported;
     }
 
     /**
