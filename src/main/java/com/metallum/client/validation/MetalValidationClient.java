@@ -23,6 +23,7 @@ import net.minecraft.world.entity.vehicle.boat.Boat;
 import net.minecraft.world.entity.vehicle.minecart.Minecart;
 import net.minecraft.world.entity.vehicle.minecart.MinecartBehavior;
 import net.minecraft.world.entity.vehicle.minecart.NewMinecartBehavior;
+import net.minecraft.world.entity.vehicle.minecart.OldMinecartBehavior;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
@@ -119,27 +120,6 @@ public final class MetalValidationClient implements ClientModInitializer {
     // old == new makes the rendered pose exact and these scenarios carry no
     // wall-clock term at all. 6 degrees a frame keeps per-frame motion small.
     private static final float OBJECT_TURN_DEGREES_PER_FRAME = 6.0F;
-    // Minecart hurt shake. On a straight rail the renderer re-derives yaw from
-    // the rail samples and ignores the cart's own, so the shake is the only
-    // rotation available without curving the track.
-    //
-    // The shake angle is `sin(hurtTime) * hurtTime * damage / 10` degrees, and
-    // hurtTime is fed to sin as if it were radians. Counting hurtTime down a
-    // step per frame therefore does not give a smooth wobble at all: 10 -> 9 at
-    // damage 40 swings 36 degrees in a single frame, which is precisely the
-    // large per-frame motion these scenarios avoid. Holding hurtTime fixed and
-    // ramping damage instead makes the angle linear in the ramp: at hurtTime 5
-    // the angle is -0.479 * damage degrees, so a 4.0 step is about 1.9 degrees
-    // a frame, matching the other scenarios' 6 degree yaw step in magnitude.
-    //
-    // This is the one object scenario that keeps a wall-clock term: the
-    // renderer extracts hurtTime as `getHurtTime() - partialTick`, which no
-    // amount of old == new pinning removes. The effective hurtTime therefore
-    // roams [4, 5] and the realised step lands somewhere in 1.9-6.9 degrees.
-    // That stays small in absolute terms and well inside the spread envelope,
-    // but it is why this scenario is the least reproducible of the five.
-    private static final int MINECART_HURT_TIME = 5;
-    private static final float MINECART_DAMAGE_PER_FRAME = 4.0F;
     // Spin angle the item is pinned to on its capture frame. bobOffs is
     // randomised per ItemEntity and is final, so rather than pinning the offset
     // itself the integer tick base absorbs it (see installObjectMotionScene).
@@ -178,6 +158,7 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static int requestedLogicalWidth = FRAMEBUFFER_WIDTH / 2;
     private static int requestedLogicalHeight = FRAMEBUFFER_HEIGHT / 2;
     private static boolean timelineAnchored;
+    private static boolean sceneReinstalledAfterWarmup;
     private static boolean loggedFirstFrame;
     private static boolean loggedFirstLevelFrame;
     private static ArmorStand controlledEntity;
@@ -277,6 +258,20 @@ public final class MetalValidationClient implements ClientModInitializer {
             sleepForAsyncWork(WARMUP_FRAME_SLEEP_MILLIS);
             return;
         }
+        // The integrated server can resend chunks while it applies the launch
+        // view distance, overwriting the client-only room installed on the
+        // first level frame. Reinstall after warm-up, once that startup sync
+        // has finished, then wait for Sodium to publish the replacement mesh.
+        if (!sceneReinstalledAfterWarmup) {
+            installSceneClearing(minecraft);
+            sceneReinstalledAfterWarmup = true;
+            holdInitialPose(minecraft);
+            return;
+        }
+        if (!terrainSettled()) {
+            holdInitialPose(minecraft);
+            return;
+        }
         if (!timelineAnchored) {
             // Hold the timeline until the FRAMEBUFFER is the pinned size.
             // The Gradle run passes --width/--height, but macOS window
@@ -297,8 +292,11 @@ public final class MetalValidationClient implements ClientModInitializer {
                     );
                 }
                 if (windowResizeAttempts % 40 == 1) {
-                    boolean retinaBacking = framebufferWidth == requestedLogicalWidth * 2
-                            && framebufferHeight == requestedLogicalHeight * 2;
+                    int logicalWidth = minecraft.getWindow().getScreenWidth();
+                    int logicalHeight = minecraft.getWindow().getScreenHeight();
+                    boolean retinaBacking = logicalWidth > 0 && logicalHeight > 0
+                            && Math.abs((double) framebufferWidth / logicalWidth - 2.0) < 0.1
+                            && Math.abs((double) framebufferHeight / logicalHeight - 2.0) < 0.1;
                     requestedLogicalWidth = retinaBacking ? FRAMEBUFFER_WIDTH / 2 : FRAMEBUFFER_WIDTH;
                     requestedLogicalHeight = retinaBacking ? FRAMEBUFFER_HEIGHT / 2 : FRAMEBUFFER_HEIGHT;
                     minecraft.getWindow().setWindowed(requestedLogicalWidth, requestedLogicalHeight);
@@ -743,17 +741,17 @@ public final class MetalValidationClient implements ClientModInitializer {
             shakingMinecart.yRotO = 0.0F;
             shakingMinecart.setXRot(0.0F);
             shakingMinecart.xRotO = 0.0F;
-            // On a rail the renderer discards the cart's own yaw and re-derives
-            // orientation from the front/back rail samples, so turning the cart
-            // would change nothing on a straight track. The hurt shake is the
-            // rotation this scenario drives, and it is the other half of the
-            // minecart row in the coverage table. hurtTime is held fixed and
-            // damage carries the ramp, which keeps the angle linear in the step
-            // rather than swinging with sin(hurtTime).
-            shakingMinecart.setHurtTime(minecart ? MINECART_HURT_TIME : 0);
-            shakingMinecart.setDamage(minecart
-                    ? (frame - MINECART_TURN_FRAME) * MINECART_DAMAGE_PER_FRAME
-                    : 0.0F);
+            // The validation behavior keeps the real rail position samples but
+            // rotates their front/back direction by a deterministic amount.
+            // This exercises the old rail-sampled reconstruction without the
+            // wall-clock partialTick term in the vanilla hurt-shake animation.
+            if (shakingMinecart instanceof ValidationOldMinecart validationCart) {
+                validationCart.setValidationSampleYaw(minecart
+                        ? (frame - MINECART_TURN_FRAME) * OBJECT_TURN_DEGREES_PER_FRAME
+                        : 0.0F);
+            }
+            shakingMinecart.setHurtTime(0);
+            shakingMinecart.setDamage(0.0F);
             shakingMinecart.setHurtDir(1);
         }
         if (newBehaviorMinecart != null) {
@@ -834,6 +832,57 @@ public final class MetalValidationClient implements ClientModInitializer {
             // The superclass constructor can reach getBehavior before the field
             // is assigned; fall back until it is.
             return newBehavior == null ? super.getBehavior() : newBehavior;
+        }
+    }
+
+    /** Old-behavior cart with deterministic orientation layered onto real rail samples. */
+    private static final class ValidationOldMinecart extends Minecart {
+        private final ValidationOldMinecartBehavior validationBehavior;
+
+        private ValidationOldMinecart(final net.minecraft.world.level.Level level) {
+            super(EntityTypes.MINECART, level);
+            this.validationBehavior = new ValidationOldMinecartBehavior(this);
+        }
+
+        private void setValidationSampleYaw(final float yawDegrees) {
+            if (validationBehavior != null) {
+                validationBehavior.sampleYawDegrees = yawDegrees;
+            }
+        }
+
+        @Override
+        public MinecartBehavior getBehavior() {
+            return validationBehavior == null ? super.getBehavior() : validationBehavior;
+        }
+    }
+
+    private static final class ValidationOldMinecartBehavior extends OldMinecartBehavior {
+        private float sampleYawDegrees;
+
+        private ValidationOldMinecartBehavior(final Minecart minecart) {
+            super(minecart);
+        }
+
+        @Override
+        public Vec3 getPosOffs(
+                final double x,
+                final double y,
+                final double z,
+                final double offset
+        ) {
+            Vec3 center = super.getPos(x, y, z);
+            Vec3 sampled = super.getPosOffs(x, y, z, offset);
+            if (center == null || sampled == null) {
+                return sampled;
+            }
+            double radians = Math.toRadians(sampleYawDegrees);
+            double dx = sampled.x - center.x;
+            double dz = sampled.z - center.z;
+            return new Vec3(
+                    center.x + dx * Math.cos(radians) - dz * Math.sin(radians),
+                    sampled.y,
+                    center.z + dx * Math.sin(radians) + dz * Math.cos(radians)
+            );
         }
     }
 
@@ -1290,7 +1339,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         // branch of the reconstruction rather than the plain fallback.
         installMinecartRail(minecraft);
         Vec3 railPosition = minecartRailPosition();
-        Minecart cart = new Minecart(EntityTypes.MINECART, minecraft.level);
+        Minecart cart = new ValidationOldMinecart(minecraft.level);
         cart.setId(MINECART_ENTITY_ID);
         cart.setUUID(MINECART_ENTITY_UUID);
         cart.setNoGravity(true);

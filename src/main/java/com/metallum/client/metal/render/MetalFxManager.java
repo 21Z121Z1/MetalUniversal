@@ -1777,10 +1777,19 @@ public final class MetalFxManager {
         int cutoutInteriorPixels = 0;
         int cutoutInteriorViolations = 0;
         int cutoutEdgeBandReactivePixels = 0;
+        int lowReactiveValidityPixels = 0;
         int effectiveRadius = Math.clamp(cutoutRadius, 1, 3);
         for (int pixel = 0; pixel < pixelCount; pixel++) {
             boolean covered = Byte.toUnsignedInt(cutoutCoverage[pixel]) >= 128;
             int reactiveValue = Byte.toUnsignedInt(reactive[pixel]);
+            boolean objectValid = Byte.toUnsignedInt(validity[pixel]) >= 128;
+            // First-person overlay pixels are deliberately stamped valid with
+            // the same 0.35 reactive bias as the CUTOUT edge band. The low-
+            // reactive subset therefore isolates ordinary world-object
+            // validity for the occlusion and reset assertions.
+            if (objectValid && reactiveValue < EDGE_REACTIVE_MIN) {
+                lowReactiveValidityPixels++;
+            }
             int x = pixel % renderWidth;
             int y = pixel / renderWidth;
             if (covered) {
@@ -1791,7 +1800,11 @@ public final class MetalFxManager {
                     // one frame (the capture frames sit a few frames after a
                     // scripted scene mutation); the invariant targets the
                     // standing policy, so those transients are excluded.
-                    if (reactiveValue > INTERIOR_REACTIVE_MAX
+                    // Coverage can remain set behind a nearer entity or hand,
+                    // but that foreground pixel is not CUTOUT output. Exclude
+                    // it from the background material-policy assertion.
+                    if (!objectValid
+                            && reactiveValue > INTERIOR_REACTIVE_MAX
                             && Byte.toUnsignedInt(disocclusion[pixel]) < 128) {
                         cutoutInteriorViolations++;
                     }
@@ -1804,7 +1817,7 @@ public final class MetalFxManager {
             }
         }
         boolean passed = switch (requested.scenario) {
-            case "occluded_entity" -> depthContractPassed && validPixels < 2_500;
+            case "occluded_entity" -> depthContractPassed && lowReactiveValidityPixels < 2_500;
             // The 3x3 occlusion wall two blocks ahead spans the whole
             // viewport, so a frame-exact removal legitimately disoccludes
             // every pixel; requiring disocclusionPixels < pixelCount here
@@ -1816,7 +1829,7 @@ public final class MetalFxManager {
                     && Double.isFinite(error)
                     && error <= 0.03;
             case "scene_reset" -> depthContractPassed
-                    && validPixels == 0
+                    && lowReactiveValidityPixels == 0
                     && objectDisocclusionPixels == 0;
             // A dropped item spinning in place. itemMotionDrawsEncoded is the
             // core/item subset of motionDrawsEncoded: asserting it is non-zero
@@ -1878,6 +1891,7 @@ public final class MetalFxManager {
                 depthValidPixels,
                 disocclusionPixels,
                 objectDisocclusionPixels,
+                lowReactiveValidityPixels,
                 cutoutCoveragePixels,
                 cutoutInteriorPixels,
                 cutoutInteriorViolations,
@@ -1997,6 +2011,7 @@ public final class MetalFxManager {
             int depthValidPixels,
             int disocclusionPixels,
             int objectDisocclusionPixels,
+            int lowReactiveValidityPixels,
             int cutoutCoveragePixels,
             int cutoutInteriorPixels,
             int cutoutInteriorViolations,
@@ -2030,6 +2045,7 @@ public final class MetalFxManager {
                       "depthValidPixels": %d,
                       "disocclusionPixels": %d,
                       "objectDisocclusionPixels": %d,
+                      "lowReactiveValidityPixels": %d,
                       "cutoutCoveragePixels": %d,
                       "cutoutInteriorPixels": %d,
                       "cutoutInteriorViolations": %d,
@@ -2056,6 +2072,7 @@ public final class MetalFxManager {
                     depthValidPixels,
                     disocclusionPixels,
                     objectDisocclusionPixels,
+                    lowReactiveValidityPixels,
                     cutoutCoveragePixels,
                     cutoutInteriorPixels,
                     cutoutInteriorViolations,

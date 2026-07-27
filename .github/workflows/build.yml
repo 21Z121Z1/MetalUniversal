@@ -8,8 +8,13 @@ run-name: ${{ github.ref_name }}
 on:
   workflow_dispatch:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - master
 
 permissions:
   contents: write
@@ -29,6 +34,26 @@ jobs:
           distribution: 'microsoft'
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
+      - name: select latest xcode
+        run: |
+          set -euo pipefail
+          echo "xcode-select current path: $(xcode-select -p)"
+          LATEST_XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "${LATEST_XCODE}" ]; then
+            echo "Selecting latest Xcode: ${LATEST_XCODE}"
+            sudo xcode-select -s "${LATEST_XCODE}"
+          fi
+          echo "xcode-select new path: $(xcode-select -p)"
+          echo "swiftc version: $(xcrun -f swiftc)"
+          echo "SDK path: $(xcrun --show-sdk-path)"
+          echo "MetalFX framework check:"
+          ls -la "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/" 2>/dev/null || echo "MetalFX headers not found at default SDK path"
+          echo "=== MTLFXSpatialScaler.h ==="
+          cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXSpatialScaler.h" 2>/dev/null
+          echo "=== MTLFXTemporalScaler.h ==="
+          cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXTemporalScaler.h" 2>/dev/null
+          echo "=== MTLFXFrameInterpolator.h ==="
+          cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXFrameInterpolator.h" 2>/dev/null
       - name: build
         run: ./gradlew buildMacNative build
       - name: capture build artifacts
