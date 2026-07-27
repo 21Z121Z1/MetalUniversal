@@ -29,16 +29,24 @@ MetalCrossShaderCompiler 依赖 Minecraft classpath (Fabric Loom) + LWJGL spvc
 MetalUniversal 在 spirvToMsl() 中设置的 MSL 选项（MetalCrossShaderCompiler.java:388-407）：
     SPVC_COMPILER_OPTION_MSL_PLATFORM               = SPVC_MSL_PLATFORM_MACOS
     SPVC_COMPILER_OPTION_MSL_VERSION                = 31000      # MSL 3.1（major*10000+minor*1000+patch）
-    SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING = true
+    SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING = false   # ★ 由 true 改为 false（修复 binding 碰撞，见下）
     SPVC_COMPILER_OPTION_MSL_TEXTURE_BUFFER_NATIVE     = true
     SPVC_COMPILER_OPTION_FLIP_VERTEX_Y                  = true
 
 对应 CLI 标志（spirv-cross）：
-    --msl-decoration-binding
     --msl-texture-buffer-native
     --flip-vert-y
     平台 macOS 为默认（--msl-ios 才切换到 iOS）
     --msl-version 31000
+    ★ 不传 --msl-decoration-binding：spirv-cross main.cpp:658 中 msl_decoration_binding 默认即为
+      false，且 CLI 无 --msl-disable-decoration-binding 变体（main.cpp:1783 仅有 enable 形式），
+      故直接省略该标志即可对应 enable_decoration_binding=false。
+
+为何关闭 decoration-binding（回归修复）：
+    Iris 的 push constants (PC) 与全局 UBO (u_Globals) 在 GLSL 中均声明 layout(binding=0)。
+    若 enableDecorationBinding=true，SPIRV-Cross 会把两个 UBO 都映射到 [[buffer(0)]]，
+    触发 Metal 编译错误 "cannot reserve 'buffer' resource location at index 0"。
+    关闭后 SPIRV-Cross 按声明顺序自动分配 [[buffer(0)]] / [[buffer(1)]]（见用例 12_binding_collision_vert）。
 
 MSL 版本说明：MetalUniversal 源码常量 MSL_VERSION_3_1 = 31000（MSL 3.1），
 采用 SPIRV-Cross 标准编码 major*10000+minor*1000+patch。MSL 3.1 对应 macOS 14+
@@ -105,7 +113,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -254,9 +262,13 @@ def ensure_spirv_compatible(glsl: str) -> str:
 _SPIRV_CROSS_MSL_OPTS = [
     "--msl",
     "--msl-version", "31000",        # MSL 3.1（原生图像原子操作支持，对应 MetalUniversal MSL_VERSION_3_1=31000）
-    "--msl-decoration-binding",       # SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING=true
     "--msl-texture-buffer-native",    # SPVC_COMPILER_OPTION_MSL_TEXTURE_BUFFER_NATIVE=true
     "--flip-vert-y",                  # SPVC_COMPILER_OPTION_FLIP_VERTEX_Y=true；macOS 默认平台
+    # 注意：刻意不传 --msl-decoration-binding。对应 SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING=false
+    # （spirv-cross main.cpp:658 默认值即 false）。原因：Iris 的 PC 与 u_Globals 两个 UBO 在 GLSL 中均
+    # 声明 layout(binding=0)，启用 decoration-binding 会让两者都映射到 [[buffer(0)]] 造成 Metal
+    # "cannot reserve 'buffer' resource location at index 0" 编译错误；关闭后 SPIRV-Cross 按声明顺序
+    # 自动分配 [[buffer(0)]] / [[buffer(1)]]。回归用例见 12_binding_collision_vert / 13_binding_collision_frag。
 ]
 
 
@@ -338,6 +350,39 @@ class TestCase:
     must_not_contain: List[str] = field(default_factory=list)
     iris_ref: str = ""               # 追溯的 Iris 26.2 源代码位置
     desc: str = ""
+    # 自定义断言：输入生成的 MSL，返回失败消息列表（空列表 = 通过）。用于 must_contain/must_not_contain
+    # 无法表达的断言（如统计某子串出现次数）。见 _binding_collision_check。
+    custom_check: Optional[Callable[[str], List[str]]] = None
+
+
+def _binding_collision_check(msl: str) -> List[str]:
+    """回归断言：两个 layout(binding=0) UBO（Iris 的 PC + u_Globals）在 MSL 中必须被分配到
+    不同的 buffer 槽，不得出现 [[buffer(0)]] 重复。
+
+    回归背景：当 SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING=true（CLI 传
+    --msl-decoration-binding）时，SPIRV-Cross 会把两个 binding=0 的 UBO 都映射到
+    [[buffer(0)]]，导致 Metal "cannot reserve 'buffer' resource location at index 0"。
+    关闭后（默认 false）SPIRV-Cross 按声明顺序自动分配 [[buffer(0)]] / [[buffer(1)]]。
+    """
+    failures: List[str] = []
+    buffer0_count = len(re.findall(r"\[\[buffer\(0\)\]\]", msl))
+    buffer1_count = len(re.findall(r"\[\[buffer\(1\)\]\]", msl))
+    # 主回归断言：[[buffer(0)]] 至多出现一次（碰撞 bug 下会出现两次）
+    if buffer0_count > 1:
+        failures.append(
+            f"Binding 碰撞：[[buffer(0)]] 出现 {buffer0_count} 次（应 ≤ 1）"
+        )
+    # 强化断言：恰好一次（其中一个 UBO 拿到 buffer(0)）
+    if buffer0_count != 1:
+        failures.append(
+            f"期望 [[buffer(0)]] 恰好出现 1 次，实际 {buffer0_count} 次"
+        )
+    # 第二个 UBO 应分到不同槽 buffer(1)
+    if buffer1_count < 1:
+        failures.append(
+            f"期望 [[buffer(1)]] 至少出现 1 次（第二个 UBO 应分到不同槽），实际 {buffer1_count} 次"
+        )
+    return failures
 
 
 CASES: List[TestCase] = [
@@ -596,6 +641,72 @@ void main() {
         ),
         desc="flat 插值限定符保留（MSL 中整型变量隐式 flat，验证 int v_id 正确映射）",
     ),
+
+    TestCase(
+        name="12_binding_collision_vert",
+        stage="vert",
+        # 两个 UBO 同 binding=0 —— 模拟 Iris 的 push constants (PC) + 全局 UBO (u_Globals)。
+        # enableDecorationBinding=true 会产生两个 [[buffer(0)]]（碰撞）；=false 时
+        # SPIRV-Cross 按声明顺序自动分配 [[buffer(0)]] / [[buffer(1)]]。
+        # 与 tests/glsl-spirv-msl/cases/binding_collision.vert 内容一致。
+        glsl="""#version 460 core
+
+// Two UBOs with the SAME binding=0 — simulates Iris's push constants (PC) + global UBO (u_Globals)
+// With enableDecorationBinding=true this would produce two [[buffer(0)]] in MSL (collision).
+// With enableDecorationBinding=false SPIRV-Cross auto-assigns buffer(0) and buffer(1).
+layout(binding=0) uniform PC {
+    float pc_value;
+};
+
+layout(binding=0) uniform u_Globals {
+    float global_value;
+};
+
+void main() {
+    gl_Position = vec4(pc_value + global_value, 0.0, 0.0, 1.0);
+}
+""",
+        must_contain=["vertex ", "pc_value", "global_value", "[[buffer("],
+        custom_check=_binding_collision_check,
+        iris_ref=(
+            "回归：Iris push constants (PC) + 全局 UBO (u_Globals) 在 GLSL 中均声明 layout(binding=0)；"
+            "MetalCrossShaderCompiler.spirvToMsl (MetalCrossShaderCompiler.java:388-407) "
+            "SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING 由 true 改为 false；"
+            "对应 CLI 移除 --msl-decoration-binding（spirv-cross main.cpp:658 默认 false，"
+            "main.cpp:1783 仅有 enable 形式，无 disable 变体）"
+        ),
+        desc="两个 UBO 同 binding=0 碰撞（顶点阶段）：关闭 decoration-binding 后自动分配不同 [[buffer(N)]]",
+    ),
+
+    TestCase(
+        name="13_binding_collision_frag",
+        stage="frag",
+        # 同 12_binding_collision_vert 的片元阶段版本。
+        # 与 tests/glsl-spirv-msl/cases/binding_collision.frag 内容一致。
+        glsl="""#version 460 core
+
+layout(location=0) out vec4 fragColor;
+
+layout(binding=0) uniform PC {
+    float pc_value;
+};
+
+layout(binding=0) uniform u_Globals {
+    float global_value;
+};
+
+void main() {
+    fragColor = vec4(pc_value + global_value, 0.0, 0.0, 1.0);
+}
+""",
+        must_contain=["fragment ", "fragColor", "pc_value", "global_value", "[[buffer("],
+        custom_check=_binding_collision_check,
+        iris_ref=(
+            "回归（片元阶段）：同 12_binding_collision_vert，验证 frag 阶段 PC + u_Globals "
+            "同 binding=0 也能被分配到不同 [[buffer(N)]]"
+        ),
+        desc="两个 UBO 同 binding=0 碰撞（片元阶段）：同样自动分配不同 [[buffer(N)]]",
+    ),
 ]
 
 
@@ -643,6 +754,8 @@ def check_case(case: TestCase) -> Tuple[bool, str]:
     for bad in case.must_not_contain:
         if bad in msl:
             failed.append(f"必须不包含 {bad!r} 但存在")
+    if case.custom_check is not None:
+        failed.extend(case.custom_check(msl))
 
     if failed:
         for f in failed:
