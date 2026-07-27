@@ -144,6 +144,8 @@ public final class MetalFxManager {
     private int displayHeight;
     private int renderWidth;
     private int renderHeight;
+    private int frameGenerationOutputWidth;
+    private int frameGenerationOutputHeight;
     private boolean sceneFrame;
     private boolean frameUsesUpscaledTarget;
     private boolean frameGenerationEnabled;
@@ -280,10 +282,11 @@ public final class MetalFxManager {
         }
         if (this.effectiveMode != MetalFxConfig.Mode.OFF) {
             Metallum.LOGGER.info(
-                    "MetalFX configured: requested={}, effective={}, scale={}, phases={}, motionPipelineV2={}, cutoutReactive={}, objectMotionProducer={}, frameGeneration={}, reactiveTuning=(edge={}, interior={}, depthCap={}, transparency={}, skyFarPlaneMotion={}, disocclusionCap={}, depthDilation={})",
+                    "MetalFX configured: requested={}, effective={}, scale={}, phases={}, motionPipelineV2={}, cutoutReactive={}, objectMotionProducer={}, frameGeneration={}, frameGenerationOutputWidth={}, reactiveTuning=(edge={}, interior={}, depthCap={}, transparency={}, skyFarPlaneMotion={}, disocclusionCap={}, depthDilation={})",
                     this.config.requestedMode, this.effectiveMode, this.config.scale, this.phaseCount,
                     this.motionPipelineV2Available, this.cutoutReactivePipelineAvailable,
                     objectMotionProducerConnected(), this.frameGenerationEnabled,
+                    this.config.frameGenerationOutputWidth,
                     this.config.cutoutReactiveEdgeWeight, this.config.cutoutReactiveInteriorWeight,
                     this.config.depthEdgeReactiveCap, this.config.transparencyReactiveValue,
                     this.config.skyFarPlaneMotion, this.config.disocclusionReactiveCap,
@@ -323,7 +326,7 @@ public final class MetalFxManager {
         MetalFxManager manager = active;
         if (manager == null) return displayHeight;
         manager.displayHeight = displayHeight;
-        return manager.sceneHeightInternal(displayHeight);
+        return manager.sceneHeightInternal(displayHeight, manager.displayWidth);
     }
 
     public static int reportedWidth(final int fallback) {
@@ -360,11 +363,7 @@ public final class MetalFxManager {
                 || manager.runtimeDisabled) {
             return 0.0F;
         }
-        float scale = manager.config.scale;
-        if (!(scale > 0.0F) || scale >= 1.0F) {
-            return 0.0F;
-        }
-        return (float) (Math.log(scale) / Math.log(2.0)) - 1.0F;
+        return MetalFxConfig.textureLodBias(manager.renderWidth, manager.displayWidth);
     }
 
     public static Matrix4f prepareSceneProjection(
@@ -639,17 +638,31 @@ public final class MetalFxManager {
         };
     }
 
-    private int sceneWidthInternal(final int width) {
-        return effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled
-                ? width : MetalFxConfig.scaledDimension(width, config.scale);
+    private float frameGenerationOutputScale(final int width) {
+        return frameGenerationEnabled
+                ? MetalFxConfig.frameGenerationOutputScale(width, config.frameGenerationOutputWidth)
+                : 1.0F;
     }
 
-    private int sceneHeightInternal(final int height) {
+    private int sceneWidthInternal(final int width) {
         return effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled
-                ? height : MetalFxConfig.scaledDimension(height, config.scale);
+                ? width : MetalFxConfig.scaledDimension(width, config.scale * frameGenerationOutputScale(width));
+    }
+
+    private int sceneHeightInternal(final int height, final int width) {
+        return effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled
+                ? height : MetalFxConfig.scaledDimension(
+                        height,
+                        config.scale * frameGenerationOutputScale(Math.max(1, width))
+                );
     }
 
     private void beginFrameInternal() {
+        if (frameGenerationEnabled && (hasActiveGui() || immediatePresentMode)) {
+            suspendFrameGenerationInternal(
+                    hasActiveGui() ? "a GUI screen or overlay is active" : "VSync is off"
+            );
+        }
         if (frameGenerationSuspended && !runtimeDisabled && !hasActiveGui() && !immediatePresentMode) {
             frameGenerationSuspended = false;
             frameGenerationEnabled = true;
@@ -675,8 +688,13 @@ public final class MetalFxManager {
         long objectId = uuid.getMostSignificantBits() ^ Long.rotateLeft(uuid.getLeastSignificantBits(), 1);
         MetalMotionStateStore.ObjectKey key = new MetalMotionStateStore.ObjectKey(objectId, generation);
         Matrix4f currentObject = MetalEntityObjectPose.compose(state);
+        // Extraction can also run from packet-side preparation outside the
+        // renderFrame transaction. It has no submission boundary and must not
+        // advance or clear motion history for the next rendered frame.
+        if (!motionStateStore.observeIfFrameOpen(key, currentObject)) {
+            return;
+        }
         Matrix4f previousObject = motionStateStore.previous(key);
-        motionStateStore.observe(key, currentObject);
         MetalEntityMotionCapture.attachState(
                 state,
                 new MetalEntityMotionCapture.Sample(
@@ -786,7 +804,7 @@ public final class MetalFxManager {
         this.displayWidth = displayWidth;
         this.displayHeight = displayHeight;
         this.renderWidth = sceneWidthInternal(displayWidth);
-        this.renderHeight = sceneHeightInternal(displayHeight);
+        this.renderHeight = sceneHeightInternal(displayHeight, displayWidth);
         dimensionsChanged |= ensureAuxiliaryTextures();
         if (dimensionsChanged) {
             resetHistoryInternal("display or render size changed");
@@ -1031,14 +1049,6 @@ public final class MetalFxManager {
                         false
                 );
             }
-            if (encoded && frameGenerationEnabled) {
-                // Keep the pre-composited full-resolution scene for the frame
-                // interpolator, then seed the GUI target with the same scene.
-                encoded = encoder.encodeTextureCopy(output, (MetalGpuTexture) uiTarget.getColorTexture(), false);
-                if (!encoded) {
-                    disableFrameGenerationInternal("scene/UI composition copy failed");
-                }
-            }
             historyTransactionEncoded = encoded && effectiveMode == MetalFxConfig.Mode.TEMPORAL;
             if (historyTransactionEncoded && depth != null) {
                 captureValidationFrameIfRequested(color, depth, output);
@@ -1073,8 +1083,11 @@ public final class MetalFxManager {
             Metallum.LOGGER.warn("MetalFX encode failed; using fullscreen copy fallback for this frame");
         } else if (config.debug && !loggedFirstSuccessfulFrame) {
             loggedFirstSuccessfulFrame = true;
-            Metallum.LOGGER.info("MetalFX encode succeeded: mode={}, input={}x{}, output={}x{}, reactiveMask={}",
-                    effectiveMode, renderWidth, renderHeight, width, height, reactiveMaskPrepared);
+            Metallum.LOGGER.info("MetalFX encode succeeded: mode={}, input={}x{}, output={}x{}, display={}x{}, reactiveMask={}",
+                    effectiveMode, renderWidth, renderHeight,
+                    frameGenerationEnabled ? frameGenerationOutputWidth : width,
+                    frameGenerationEnabled ? frameGenerationOutputHeight : height,
+                    width, height, reactiveMaskPrepared);
             if (effectiveMode == MetalFxConfig.Mode.TEMPORAL) {
                 Metallum.LOGGER.info(
                         "MetalFX temporal state: jitterPixels=({}, {}), motionVectorScale=({}, {}), inputContent={}x{}, fieldOfView={}deg, depthReversed=true, motion=previousScreen-currentScreen",
@@ -1084,7 +1097,17 @@ public final class MetalFxManager {
             }
         }
 
-        RenderSystem.getDevice().createCommandEncoder().clearDepthTexture(uiTarget.getDepthTexture(), 0.0);
+        if (frameGenerationEnabled) {
+            // The presenter composites this native-resolution premultiplied UI
+            // overlay onto both the generated and real scene. Keeping the scene
+            // out of this texture lets interpolation run at its bounded work
+            // resolution without alternating GUI sharpness.
+            RenderSystem.getDevice().createCommandEncoder().clearColorAndDepthTextures(
+                    uiTarget.getColorTexture(), UI_CLEAR, uiTarget.getDepthTexture(), 0.0
+            );
+        } else {
+            RenderSystem.getDevice().createCommandEncoder().clearDepthTexture(uiTarget.getDepthTexture(), 0.0);
+        }
         this.frameUsesUpscaledTarget = true;
         if (historyTransactionEncoded) {
             Matrix4f submittedViewProjection = new Matrix4f(this.currentViewProjection);
@@ -2178,13 +2201,22 @@ public final class MetalFxManager {
 
     private void ensureTargets(final int width, final int height) {
         int targetRenderWidth = sceneWidthInternal(width);
-        int targetRenderHeight = sceneHeightInternal(height);
+        int targetRenderHeight = sceneHeightInternal(height, width);
+        float frameGenerationScale = frameGenerationOutputScale(width);
+        int targetFrameGenerationOutputWidth = frameGenerationEnabled
+                ? MetalFxConfig.scaledDimension(width, frameGenerationScale) : width;
+        int targetFrameGenerationOutputHeight = frameGenerationEnabled
+                ? MetalFxConfig.scaledDimension(height, frameGenerationScale) : height;
         boolean dimensionsChanged = this.displayWidth != width || this.displayHeight != height
-                || this.renderWidth != targetRenderWidth || this.renderHeight != targetRenderHeight;
+                || this.renderWidth != targetRenderWidth || this.renderHeight != targetRenderHeight
+                || this.frameGenerationOutputWidth != targetFrameGenerationOutputWidth
+                || this.frameGenerationOutputHeight != targetFrameGenerationOutputHeight;
         this.displayWidth = width;
         this.displayHeight = height;
         this.renderWidth = targetRenderWidth;
         this.renderHeight = targetRenderHeight;
+        this.frameGenerationOutputWidth = targetFrameGenerationOutputWidth;
+        this.frameGenerationOutputHeight = targetFrameGenerationOutputHeight;
         if (uiTarget == null || uiTarget.width != width || uiTarget.height != height) {
             if (uiTarget != null) uiTarget.destroyBuffers();
             // Upscaler/frame-generation output targets are the only vanilla
@@ -2198,10 +2230,18 @@ public final class MetalFxManager {
             dimensionsChanged = true;
         }
         if (frameGenerationEnabled) {
-            if (sceneOutputTarget == null || sceneOutputTarget.width != width || sceneOutputTarget.height != height) {
+            if (sceneOutputTarget == null
+                    || sceneOutputTarget.width != targetFrameGenerationOutputWidth
+                    || sceneOutputTarget.height != targetFrameGenerationOutputHeight) {
                 if (sceneOutputTarget != null) sceneOutputTarget.destroyBuffers();
                 device.withExtraTextureUsage(MetalGpuTexture.USAGE_SHADER_WRITE, () ->
-                        sceneOutputTarget = new TextureTarget("MetalFX Scene Output", width, height, false, GpuFormat.RGBA8_UNORM)
+                        sceneOutputTarget = new TextureTarget(
+                                "MetalFX FrameGen Scene",
+                                targetFrameGenerationOutputWidth,
+                                targetFrameGenerationOutputHeight,
+                                false,
+                                GpuFormat.RGBA8_UNORM
+                        )
                 );
                 dimensionsChanged = true;
             }

@@ -23,6 +23,7 @@ private final class ValidationRunner {
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let outputDirectory: URL
+    private let nominalDisplayUpdatesPerSecond: Double
     private var presenter: MetalFrameGenerationPresenter?
     private var failure: Error?
 
@@ -34,6 +35,7 @@ private final class ValidationRunner {
         self.device = device
         self.queue = queue
         self.outputDirectory = outputDirectory
+        self.nominalDisplayUpdatesPerSecond = Double(NSScreen.main?.maximumFramesPerSecond ?? 0)
         self.app = NSApplication.shared
         // WindowServer silently drops presents for occluded layers, reporting
         // presentedTime == 0 for the whole run. Center the window on the main
@@ -42,10 +44,10 @@ private final class ValidationRunner {
         let screenFrame = NSScreen.main?.visibleFrame
                 ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
         let contentRect = NSRect(
-            x: screenFrame.midX - 160,
-            y: screenFrame.midY - 120,
-            width: 320,
-            height: 240
+            x: screenFrame.midX - 427,
+            y: screenFrame.midY - 240,
+            width: 854,
+            height: 480
         )
         self.window = NSWindow(
             contentRect: contentRect,
@@ -54,6 +56,7 @@ private final class ValidationRunner {
             defer: false
         )
         self.window.level = .floating
+        self.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         self.layer = CAMetalLayer()
 
         try FileManager.default.createDirectory(
@@ -63,7 +66,10 @@ private final class ValidationRunner {
         layer.device = device
         layer.pixelFormat = .bgra8Unorm
         layer.framebufferOnly = true
-        layer.drawableSize = CGSize(width: 320, height: 240)
+        // Match the Retina framebuffer used by the Launcher QA profile. The
+        // logical window remains 854x480 so the validation surface fits on the
+        // built-in display while interpolation runs at the real pixel count.
+        layer.drawableSize = CGSize(width: 1708, height: 960)
         let view = NSView(frame: window.contentView?.bounds ?? .zero)
         view.wantsLayer = true
         view.layer = layer
@@ -131,7 +137,14 @@ private final class ValidationRunner {
         return texture
     }
 
-    private func makeInputs(width: Int, height: Int) throws -> (
+    private func makeInputs(
+        sceneWidth: Int,
+        sceneHeight: Int,
+        uiWidth: Int,
+        uiHeight: Int,
+        inputWidth: Int,
+        inputHeight: Int
+    ) throws -> (
         scene: MTLTexture,
         ui: MTLTexture,
         depth: MTLTexture,
@@ -139,18 +152,20 @@ private final class ValidationRunner {
     ) {
         let colorUsage: MTLTextureUsage = [.renderTarget, .shaderRead, .shaderWrite]
         return (
-            try makeTexture(format: .bgra8Unorm, width: width, height: height, usage: colorUsage),
-            try makeTexture(format: .bgra8Unorm, width: width, height: height, usage: colorUsage),
+            try makeTexture(
+                format: .bgra8Unorm, width: sceneWidth, height: sceneHeight, usage: colorUsage
+            ),
+            try makeTexture(format: .bgra8Unorm, width: uiWidth, height: uiHeight, usage: colorUsage),
             try makeTexture(
                 format: .depth32Float,
-                width: width,
-                height: height,
+                width: inputWidth,
+                height: inputHeight,
                 usage: [.renderTarget, .shaderRead]
             ),
             try makeTexture(
                 format: .rg16Float,
-                width: width,
-                height: height,
+                width: inputWidth,
+                height: inputHeight,
                 usage: [.renderTarget, .shaderRead, .shaderWrite]
             )
         )
@@ -171,24 +186,30 @@ private final class ValidationRunner {
             blue: 0.6,
             alpha: 1.0
         )
-        scenePass.depthAttachment.texture = inputs.depth
-        scenePass.depthAttachment.loadAction = .clear
-        scenePass.depthAttachment.storeAction = .store
-        scenePass.depthAttachment.clearDepth = 0.75
         guard let sceneEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: scenePass) else {
             throw PresentationValidationError.failed("Could not encode source clear")
         }
         sceneEncoder.endEncoding()
+
+        let depthPass = MTLRenderPassDescriptor()
+        depthPass.depthAttachment.texture = inputs.depth
+        depthPass.depthAttachment.loadAction = .clear
+        depthPass.depthAttachment.storeAction = .store
+        depthPass.depthAttachment.clearDepth = 0.75
+        guard let depthEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: depthPass) else {
+            throw PresentationValidationError.failed("Could not encode depth clear")
+        }
+        depthEncoder.endEncoding()
 
         let uiPass = MTLRenderPassDescriptor()
         uiPass.colorAttachments[0].texture = inputs.ui
         uiPass.colorAttachments[0].loadAction = .clear
         uiPass.colorAttachments[0].storeAction = .store
         uiPass.colorAttachments[0].clearColor = MTLClearColor(
-            red: 0.05,
-            green: Double(frame % 2) * 0.1,
-            blue: 0.15,
-            alpha: 1.0
+            red: 0.02,
+            green: Double(frame % 2) * 0.02,
+            blue: 0.03,
+            alpha: 0.2
         )
         guard let uiEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: uiPass) else {
             throw PresentationValidationError.failed("Could not encode UI clear")
@@ -217,9 +238,20 @@ private final class ValidationRunner {
         // legitimately call their handler with presentedTime == 0 and must
         // remain failures rather than being counted as warm-up successes.
         Thread.sleep(forTimeInterval: 0.5)
-        var width = 320
-        var height = 240
-        var inputs = try makeInputs(width: width, height: height)
+        var displayWidth = 1708
+        var displayHeight = 960
+        var sceneWidth = 1440
+        var sceneHeight = 808
+        var inputWidth = 964
+        var inputHeight = 542
+        var inputs = try makeInputs(
+            sceneWidth: sceneWidth,
+            sceneHeight: sceneHeight,
+            uiWidth: displayWidth,
+            uiHeight: displayHeight,
+            inputWidth: inputWidth,
+            inputHeight: inputHeight
+        )
         guard let presenter = MetalFrameGenerationPresenter(
             device: device,
             layer: layer,
@@ -232,17 +264,38 @@ private final class ValidationRunner {
         }
         self.presenter = presenter
 
-        let warmupSourceCount = 3
-        let measuredSourceCount = 10
+        let warmupSourceCount = 10
+        let measuredSourceCount = 60
         for sourceIndex in 0..<(warmupSourceCount + measuredSourceCount) {
             let measuredFrame = sourceIndex - warmupSourceCount
-            if measuredFrame == 5 {
-                width = 400
-                height = 300
-                inputs = try makeInputs(width: width, height: height)
+            if measuredFrame == measuredSourceCount / 2 {
+                displayWidth = 1600
+                displayHeight = 900
+                sceneWidth = 1440
+                sceneHeight = 810
+                inputWidth = 964
+                inputHeight = 542
+                inputs = try makeInputs(
+                    sceneWidth: sceneWidth,
+                    sceneHeight: sceneHeight,
+                    uiWidth: displayWidth,
+                    uiHeight: displayHeight,
+                    inputWidth: inputWidth,
+                    inputHeight: inputHeight
+                )
                 DispatchQueue.main.sync {
-                    self.window.setContentSize(NSSize(width: width, height: height))
-                    self.layer.drawableSize = CGSize(width: width, height: height)
+                    self.window.setContentSize(NSSize(width: displayWidth / 2, height: displayHeight / 2))
+                    // Exercise the same surface reconfigure and deferred layer
+                    // policy refresh sequence used by Minecraft. This caught a
+                    // production crash where the refresh tried to change
+                    // maximumDrawableCount after CAMetalDisplayLink attached.
+                    metallum_configure_layer(
+                        self.layer,
+                        Double(displayWidth),
+                        Double(displayHeight),
+                        0
+                    )
+                    presenter.requestLayerPolicyRefresh()
                 }
             }
             guard let commandBuffer = queue.makeCommandBuffer() else {
@@ -260,7 +313,7 @@ private final class ValidationRunner {
                 fieldOfView: 70.0,
                 nearPlane: 0.05,
                 farPlane: 1000.0,
-                aspectRatio: Float(width) / Float(height),
+                aspectRatio: Float(displayWidth) / Float(displayHeight),
                 sourceDeltaSeconds: 1.0 / 60.0,
                 reset: sourceIndex == 0 || measuredFrame == 5,
                 globalFence: nil
@@ -274,10 +327,16 @@ private final class ValidationRunner {
                     "Source frame \(sourceIndex) did not reach a terminal ownership state"
                 )
             }
-            Thread.sleep(forTimeInterval: 1.0 / 120.0)
         }
 
+        // Source ownership now ends at real-present GPU completion, while
+        // WindowServer's presented callbacks remain intentionally asynchronous.
+        // Give those diagnostics a bounded settle window before snapshotting;
+        // this wait belongs only to validation and must not re-enter the game's
+        // source-frame path.
+        Thread.sleep(forTimeInterval: 0.25)
         let timeline = presenter.validationTimelineSnapshot()
+        try writeRawTimeline(timeline)
         let shutdownStart = CACurrentMediaTime()
         presenter.shutdown()
         let shutdownDuration = CACurrentMediaTime() - shutdownStart
@@ -288,6 +347,36 @@ private final class ValidationRunner {
             measuredSourceCount: measuredSourceCount,
             shutdownDuration: shutdownDuration
         )
+    }
+
+    private func diagnosticRecord(_ item: MetalFrameGenerationDiagnosticSnapshot) -> [String: Any] {
+        [
+            "sourceFrameID": item.sourceFrameID,
+            "frameKind": item.frameKind,
+            "displayUpdateID": item.displayUpdateID,
+            "targetTimestamp": item.targetTimestamp,
+            "targetPresentationTimestamp": item.targetPresentationTimestamp,
+            "cpuCommitTime": item.cpuCommitTime,
+            "gpuStartTime": item.gpuStartTime,
+            "gpuEndTime": item.gpuEndTime,
+            "gpuDurationMilliseconds": item.gpuEndTime > item.gpuStartTime
+                ? (item.gpuEndTime - item.gpuStartTime) * 1_000.0
+                : 0.0,
+            "gpuCompletionTime": item.gpuCompletionTime,
+            "presentedTime": item.presentedTime,
+            "outcome": item.outcome
+        ]
+    }
+
+    private func writeRawTimeline(_ timeline: [MetalFrameGenerationDiagnosticSnapshot]) throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: [
+                "status": "captured",
+                "timeline": timeline.map(diagnosticRecord)
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(to: outputDirectory.appendingPathComponent("timeline-raw.json"))
     }
 
     private func validateAndWrite(
@@ -302,16 +391,56 @@ private final class ValidationRunner {
         }
         let real = presented.filter { $0.frameKind == "real" }
         let generated = presented.filter { $0.frameKind == "generated" }
-        guard real.count >= 8 else {
-            throw PresentationValidationError.failed("Expected at least 8 presented real frames, found \(real.count)")
-        }
-        guard generated.count >= 4 else {
+        let minimumPresentedCount = Int(Double(measuredSourceCount) * 0.8)
+        guard real.count >= minimumPresentedCount else {
             throw PresentationValidationError.failed(
-                "Expected at least 4 generated presentations, found \(generated.count)"
+                "Expected at least \(minimumPresentedCount) presented real frames, found \(real.count)"
+            )
+        }
+        guard generated.count >= minimumPresentedCount else {
+            throw PresentationValidationError.failed(
+                "Expected at least \(minimumPresentedCount) generated presentations, found \(generated.count)"
             )
         }
         guard shutdownDuration < 2.0 else {
             throw PresentationValidationError.failed("Shutdown took \(shutdownDuration)s")
+        }
+
+        func averagePositiveInterval(_ values: [CFTimeInterval]) -> CFTimeInterval {
+            let ordered = values.sorted()
+            let intervals = zip(ordered.dropFirst(), ordered).compactMap { current, previous in
+                let delta = current - previous
+                return delta.isFinite && delta > 0.0 ? delta : nil
+            }
+            return intervals.isEmpty ? 0.0 : intervals.reduce(0.0, +) / Double(intervals.count)
+        }
+
+        func percentile(_ values: [Double], _ fraction: Double) -> Double {
+            let ordered = values.filter(\.isFinite).sorted()
+            guard !ordered.isEmpty else { return 0.0 }
+            let index = Int((Double(ordered.count - 1) * fraction).rounded(.up))
+            return ordered[min(max(index, 0), ordered.count - 1)]
+        }
+
+        let sourceInterval = averagePositiveInterval(real.map(\.presentedTime))
+        let presentInterval = averagePositiveInterval(presented.map(\.presentedTime))
+        let sourceFramesPerSecond = sourceInterval > 0.0 ? 1.0 / sourceInterval : 0.0
+        let presentedFramesPerSecond = presentInterval > 0.0 ? 1.0 / presentInterval : 0.0
+        let sampledUpdateInterval = averagePositiveInterval(timeline.map(\.targetTimestamp))
+        let sampledDisplayUpdatesPerSecond = sampledUpdateInterval > 0.0
+            ? 1.0 / sampledUpdateInterval
+            : 0.0
+        if nominalDisplayUpdatesPerSecond >= 100.0 {
+            guard sourceFramesPerSecond >= 55.0 else {
+                throw PresentationValidationError.failed(
+                    "120 Hz source cadence regressed to \(sourceFramesPerSecond) FPS"
+                )
+            }
+            guard presentedFramesPerSecond >= 110.0 else {
+                throw PresentationValidationError.failed(
+                    "120 Hz present cadence regressed to \(presentedFramesPerSecond) FPS"
+                )
+            }
         }
 
         var updateIDs = Set<UInt64>()
@@ -344,19 +473,26 @@ private final class ValidationRunner {
             }
         }
 
-        let records: [[String: Any]] = timeline.map {
-            [
-                "sourceFrameID": $0.sourceFrameID,
-                "frameKind": $0.frameKind,
-                "displayUpdateID": $0.displayUpdateID,
-                "targetTimestamp": $0.targetTimestamp,
-                "targetPresentationTimestamp": $0.targetPresentationTimestamp,
-                "cpuCommitTime": $0.cpuCommitTime,
-                "gpuCompletionTime": $0.gpuCompletionTime,
-                "presentedTime": $0.presentedTime,
-                "outcome": $0.outcome
-            ]
+        let measuredDiagnostics = timeline.filter {
+            $0.sourceFrameID > UInt64(warmupSourceCount)
+                && $0.gpuStartTime > 0.0
+                && $0.gpuEndTime > $0.gpuStartTime
         }
+        let generatedGpuMilliseconds = measuredDiagnostics
+            .filter { $0.frameKind == "generated" }
+            .map { ($0.gpuEndTime - $0.gpuStartTime) * 1_000.0 }
+        let realGpuMilliseconds = measuredDiagnostics
+            .filter { $0.frameKind == "real" }
+            .map { ($0.gpuEndTime - $0.gpuStartTime) * 1_000.0 }
+        let generatedGpuAverage = generatedGpuMilliseconds.isEmpty
+            ? 0.0
+            : generatedGpuMilliseconds.reduce(0.0, +) / Double(generatedGpuMilliseconds.count)
+        let realGpuAverage = realGpuMilliseconds.isEmpty
+            ? 0.0
+            : realGpuMilliseconds.reduce(0.0, +) / Double(realGpuMilliseconds.count)
+        let generatedGpuP95 = percentile(generatedGpuMilliseconds, 0.95)
+        let realGpuP95 = percentile(realGpuMilliseconds, 0.95)
+        let records = timeline.map(diagnosticRecord)
         let report: [String: Any] = [
             "status": "passed",
             "usedRealCAMetalLayer": true,
@@ -368,6 +504,15 @@ private final class ValidationRunner {
             "warmupSourceFrames": warmupSourceCount,
             "realPresented": real.count,
             "generatedPresented": generated.count,
+            "nominalDisplayUpdatesPerSecond": nominalDisplayUpdatesPerSecond,
+            "sampledDisplayUpdatesPerSecond": sampledDisplayUpdatesPerSecond,
+            "sourceFramesPerSecond": sourceFramesPerSecond,
+            "presentedFramesPerSecond": presentedFramesPerSecond,
+            "generatedGpuAverageMilliseconds": generatedGpuAverage,
+            "generatedGpuP95Milliseconds": generatedGpuP95,
+            "generatedGpuP95MarginTo8_33Milliseconds": (1_000.0 / 120.0) - generatedGpuP95,
+            "realGpuAverageMilliseconds": realGpuAverage,
+            "realGpuP95Milliseconds": realGpuP95,
             "resizeExercised": true,
             "shutdownDurationSeconds": shutdownDuration,
             "timeline": records
@@ -380,6 +525,9 @@ private final class ValidationRunner {
         print(
             "MetalFrameGenerationPresentationValidation PASS "
                 + "real=\(real.count) generated=\(generated.count) "
+                + "sourceFps=\(String(format: "%.1f", sourceFramesPerSecond)) "
+                + "presentFps=\(String(format: "%.1f", presentedFramesPerSecond)) "
+                + "generatedGpuP95=\(String(format: "%.2f", generatedGpuP95))ms "
                 + "shutdown=\(String(format: "%.4f", shutdownDuration))s"
         )
     }

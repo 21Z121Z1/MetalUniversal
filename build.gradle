@@ -105,6 +105,7 @@ def metalFrameGenerationLifecycleTestBinary = file("${buildDir}/metal-tests/Meta
 def metalFrameGenerationPresentationValidationBinary = file("${buildDir}/metal-tests/MetalFrameGenerationPresentationValidation")
 def metalFxOffscreenValidationBinary = file("${buildDir}/metal-tests/MetalFXOffscreenValidation")
 def metalFxOffscreenValidationOutput = file("${buildDir}/metal-validation/offscreen-current")
+def metalFxPerformanceValidationBinary = file("${buildDir}/metal-tests/MetalFXPerformanceValidation")
 
 tasks.register("compileMetalMrtSmokeTest", Exec) {
 	onlyIf {
@@ -396,6 +397,34 @@ tasks.register("metalFxOffscreenValidation", Exec) {
 	commandLine metalFxOffscreenValidationBinary.absolutePath, metalFxOffscreenValidationOutput.absolutePath
 }
 
+tasks.register("compileMetalFxPerformanceValidation", Exec) {
+	onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX() }
+	workingDir project.projectDir
+	inputs.file("src/test/native/MetalFXPerformanceValidation.swift")
+	outputs.file(metalFxPerformanceValidationBinary)
+	doFirst { metalFxPerformanceValidationBinary.parentFile.mkdirs() }
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-o", metalFxPerformanceValidationBinary.absolutePath,
+		"src/test/native/MetalFXPerformanceValidation.swift"
+}
+
+tasks.register("metalFxPerformanceValidation", Exec) {
+	group = "verification"
+	description = "Measures Temporal and FrameInterpolator GPU cost across production resolutions."
+	onlyIf { presentationValidationSkipReason() == null }
+	dependsOn "compileMetalFxPerformanceValidation"
+	doFirst { delete file("${buildDir}/metal-validation/performance-current") }
+	environment "MTL_SHADER_VALIDATION", "0"
+	commandLine metalFxPerformanceValidationBinary.absolutePath,
+			file("${buildDir}/metal-validation/performance-current").absolutePath
+}
+
 tasks.register("metalMrtBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Java RenderPass -> FFM -> Swift indexed MRT GPU readback integration suite."
@@ -418,6 +447,7 @@ tasks.named("check") {
 	dependsOn "metalFrameGenerationLifecycleTest"
 	dependsOn "metalMrtBackendIntegrationTest"
 	dependsOn "metalFxOffscreenValidation"
+	dependsOn "metalFxPerformanceValidation"
 	dependsOn "metalMrtSmokeTest"
 	// Windowed CAMetalDisplayLink pacing/resize/shutdown acceptance. Requires
 	// a WindowServer session; headless CI should exclude it with -x.

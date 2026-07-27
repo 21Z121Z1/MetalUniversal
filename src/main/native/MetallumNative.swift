@@ -227,6 +227,8 @@ struct MetalFrameGenerationDiagnosticSnapshot {
     let targetTimestamp: CFTimeInterval
     let targetPresentationTimestamp: CFTimeInterval
     let cpuCommitTime: CFTimeInterval
+    let gpuStartTime: CFTimeInterval
+    let gpuEndTime: CFTimeInterval
     let gpuCompletionTime: CFTimeInterval
     let presentedTime: CFTimeInterval
     let outcome: String
@@ -343,11 +345,12 @@ final class Metal4PresentPath {
         destination: MTLTexture,
         pipeline: MTLRenderPipelineState,
         sampler: MTLSamplerState,
+        loadAction: MTLLoadAction = .dontCare,
         label: String
     ) -> Bool {
         let descriptor = MTL4RenderPassDescriptor()
         descriptor.colorAttachments[0].texture = destination
-        descriptor.colorAttachments[0].loadAction = .dontCare
+        descriptor.colorAttachments[0].loadAction = loadAction
         descriptor.colorAttachments[0].storeAction = .store
         // MTL4RenderPassDescriptor carries no attachment size implicitly.
         descriptor.renderTargetWidth = destination.width
@@ -399,13 +402,15 @@ final class Metal4PresentPath {
         drawable: CAMetalDrawable,
         readyEvent: MTLSharedEvent,
         eventValue: UInt64,
-        onCompleted: @escaping (Error?) -> Void
+        onCompleted: @escaping (Error?, CFTimeInterval, CFTimeInterval) -> Void
     ) {
         endRecording()
         let options = MTL4CommitOptions()
         // MTL4CommandBufferFeedback has no status, only error: succeeded is
         // error == nil.
-        options.addFeedbackHandler { feedback in onCompleted(feedback.error) }
+        options.addFeedbackHandler {
+            feedback in onCompleted(feedback.error, feedback.gpuStartTime, feedback.gpuEndTime)
+        }
         queue.waitForEvent(readyEvent, value: eventValue)
         queue.waitForDrawable(drawable)
         queue.commit([commandBuffer], options: options)
@@ -472,6 +477,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let targetTimestamp: CFTimeInterval
         let targetPresentationTimestamp: CFTimeInterval
         var cpuCommitTime: CFTimeInterval
+        var gpuStartTime: CFTimeInterval
+        var gpuEndTime: CFTimeInterval
         var gpuCompletionTime: CFTimeInterval
         var presentedTime: CFTimeInterval
         var outcome: String
@@ -479,16 +486,17 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
 
     private struct TextureSet {
         let scene: [MTLTexture]
-        let composed: [MTLTexture]
+        let uiOverlay: [MTLTexture]
         let depth: [MTLTexture]
         let motion: [MTLTexture]
         let interpolation: [MTLTexture]
     }
 
     private static let bufferCount = 3
-    // Source frames remain pinned until the real drawable reports its presented
-    // boundary. Keeping one source frame in flight also prevents a later frame
-    // from overtaking the real/interpolated pair in WindowServer.
+    // Keep one source frame's GPU work in flight. Ownership is released when
+    // the real present command buffer completes: at that point the drawable is
+    // fully populated and the source slot is reusable even if WindowServer's
+    // presented callback arrives several refreshes later.
     private static let maxOutstandingFrames = 1
     private static let diagnosticCapacity = 256
     private static let presentationCallbackTimeout: CFTimeInterval = 0.25
@@ -500,6 +508,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private let readyEvent: MTLSharedEvent
     private var frameInterpolator: any MTLFXFrameInterpolator
     private var copyPipeline: MTLRenderPipelineState
+    private var overlayPipeline: MTLRenderPipelineState
     private var copySampler: MTLSamplerState
     private var copyFormat: MTLPixelFormat
     // Metal 4 present path (spec M4), non-nil only when metallum.opt.metal4Present
@@ -513,13 +522,15 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var metal4Interpolator: (any MTL4FXFrameInterpolator)?
 
     private var sceneBuffers: [MTLTexture] = []
-    private var composedBuffers: [MTLTexture] = []
+    private var uiOverlayBuffers: [MTLTexture] = []
     private var depthBuffers: [MTLTexture] = []
     private var motionBuffers: [MTLTexture] = []
     private var interpolationOutputs: [MTLTexture] = []
 
     private var outputWidth: Int
     private var outputHeight: Int
+    private var uiWidth: Int
+    private var uiHeight: Int
     private var outputFormat: MTLPixelFormat
     private var depthFormat: MTLPixelFormat
     private var motionFormat: MTLPixelFormat
@@ -566,6 +577,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         guard let presentQueue = device.makeCommandQueue(),
               let readyEvent = device.makeSharedEvent(),
               let copyPipeline = buildPresentPipeline(device: device, colorFormat: layer.pixelFormat),
+              let overlayPipeline = buildOverlayPipeline(device: device, colorFormat: layer.pixelFormat),
               let copySampler = buildPresentSampler(device: device, filter: .linear),
               let frameInterpolator = Self.makeFrameInterpolator(
                   device: device,
@@ -583,14 +595,21 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.readyEvent = readyEvent
         self.frameInterpolator = frameInterpolator
         self.copyPipeline = copyPipeline
+        self.overlayPipeline = overlayPipeline
         self.copySampler = copySampler
         self.copyFormat = layer.pixelFormat
         self.outputWidth = sceneColor.width
         self.outputHeight = sceneColor.height
+        self.uiWidth = uiColor.width
+        self.uiHeight = uiColor.height
         self.outputFormat = sceneColor.pixelFormat
         self.depthFormat = depth.pixelFormat
         self.motionFormat = motion.pixelFormat
-        layer.maximumDrawableCount = 3
+        // A two-drawable pool asks WindowServer for the lowest possible
+        // compositing latency. With three drawables, a windowed 120 Hz display
+        // can report a four-refresh presentation horizon and continuously
+        // supersede every other submitted drawable before scanout.
+        layer.maximumDrawableCount = 2
         // A hidden or minimized window may not recycle drawables promptly.
         // Let the present thread time out and fall back to the rendered frame
         // instead of blocking shutdown or the next resize forever.
@@ -629,6 +648,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         guard rebuildTextures(
             outputWidth: sceneColor.width,
             outputHeight: sceneColor.height,
+            uiWidth: uiColor.width,
+            uiHeight: uiColor.height,
             outputFormat: sceneColor.pixelFormat,
             depthFormat: depth.pixelFormat,
             motionFormat: motion.pixelFormat,
@@ -665,7 +686,6 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         descriptor.outputTextureFormat = sceneColor.pixelFormat
         descriptor.depthTextureFormat = depth.pixelFormat
         descriptor.motionTextureFormat = motion.pixelFormat
-        descriptor.uiTextureFormat = uiColor.pixelFormat
         descriptor.inputWidth = depth.width
         descriptor.inputHeight = depth.height
         descriptor.outputWidth = sceneColor.width
@@ -708,7 +728,6 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         descriptor.outputTextureFormat = sceneColor.pixelFormat
         descriptor.depthTextureFormat = depth.pixelFormat
         descriptor.motionTextureFormat = motion.pixelFormat
-        descriptor.uiTextureFormat = uiColor.pixelFormat
         descriptor.inputWidth = depth.width
         descriptor.inputHeight = depth.height
         descriptor.outputWidth = sceneColor.width
@@ -749,6 +768,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private func makeTextureSet(
         outputWidth: Int,
         outputHeight: Int,
+        uiWidth: Int,
+        uiHeight: Int,
         outputFormat: MTLPixelFormat,
         depthFormat: MTLPixelFormat,
         motionFormat: MTLPixelFormat,
@@ -757,7 +778,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         motionWidth: Int,
         motionHeight: Int
     ) -> TextureSet? {
-        guard outputWidth > 0, outputHeight > 0 else {
+        guard outputWidth > 0, outputHeight > 0, uiWidth > 0, uiHeight > 0 else {
             return nil
         }
 
@@ -777,12 +798,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 height: outputHeight,
                 usage: colorUsage,
                 label: "Frame Generation Scene \(index)"
-            ), let composed = makeTexture(
+            ), let uiOverlay = makeTexture(
                 pixelFormat: outputFormat,
-                width: outputWidth,
-                height: outputHeight,
+                width: uiWidth,
+                height: uiHeight,
                 usage: colorUsage,
-                label: "Frame Generation UI \(index)"
+                label: "Frame Generation UI Overlay \(index)"
             ), let depth = makeTexture(
                 pixelFormat: depthFormat,
                 width: depthWidth,
@@ -799,7 +820,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 return nil
             }
             newScene.append(scene)
-            newComposed.append(composed)
+            newComposed.append(uiOverlay)
             newDepth.append(depth)
             newMotion.append(motion)
             guard let interpolation = makeTexture(
@@ -816,7 +837,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
 
         return TextureSet(
             scene: newScene,
-            composed: newComposed,
+            uiOverlay: newComposed,
             depth: newDepth,
             motion: newMotion,
             interpolation: newInterpolation
@@ -827,17 +848,21 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         _ textureSet: TextureSet,
         outputWidth: Int,
         outputHeight: Int,
+        uiWidth: Int,
+        uiHeight: Int,
         outputFormat: MTLPixelFormat,
         depthFormat: MTLPixelFormat,
         motionFormat: MTLPixelFormat
     ) {
         self.outputWidth = outputWidth
         self.outputHeight = outputHeight
+        self.uiWidth = uiWidth
+        self.uiHeight = uiHeight
         self.outputFormat = outputFormat
         self.depthFormat = depthFormat
         self.motionFormat = motionFormat
         self.sceneBuffers = textureSet.scene
-        self.composedBuffers = textureSet.composed
+        self.uiOverlayBuffers = textureSet.uiOverlay
         self.depthBuffers = textureSet.depth
         self.motionBuffers = textureSet.motion
         self.interpolationOutputs = textureSet.interpolation
@@ -847,7 +872,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         // residency automatically.
         metal4Path?.adopt(
             textures: textureSet.scene
-                + textureSet.composed
+                + textureSet.uiOverlay
                 + textureSet.depth
                 + textureSet.motion
                 + textureSet.interpolation
@@ -857,6 +882,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private func rebuildTextures(
         outputWidth: Int,
         outputHeight: Int,
+        uiWidth: Int,
+        uiHeight: Int,
         outputFormat: MTLPixelFormat,
         depthFormat: MTLPixelFormat,
         motionFormat: MTLPixelFormat,
@@ -868,6 +895,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         guard let textureSet = makeTextureSet(
             outputWidth: outputWidth,
             outputHeight: outputHeight,
+            uiWidth: uiWidth,
+            uiHeight: uiHeight,
             outputFormat: outputFormat,
             depthFormat: depthFormat,
             motionFormat: motionFormat,
@@ -882,6 +911,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             textureSet,
             outputWidth: outputWidth,
             outputHeight: outputHeight,
+            uiWidth: uiWidth,
+            uiHeight: uiHeight,
             outputFormat: outputFormat,
             depthFormat: depthFormat,
             motionFormat: motionFormat
@@ -892,6 +923,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private func resizeResources(
         outputWidth: Int,
         outputHeight: Int,
+        uiWidth: Int,
+        uiHeight: Int,
         outputFormat: MTLPixelFormat,
         depth: MTLTexture,
         motion: MTLTexture
@@ -900,6 +933,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         guard let textureSet = makeTextureSet(
             outputWidth: outputWidth,
             outputHeight: outputHeight,
+            uiWidth: uiWidth,
+            uiHeight: uiHeight,
             outputFormat: outputFormat,
             depthFormat: depth.pixelFormat,
             motionFormat: motion.pixelFormat,
@@ -910,16 +945,19 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         ), let newInterpolator = Self.makeFrameInterpolator(
             device: device,
             sceneColor: textureSet.scene[0],
-            uiColor: textureSet.composed[0],
+            uiColor: textureSet.uiOverlay[0],
             depth: textureSet.depth[0],
             motion: textureSet.motion[0]
-        ), let newCopyPipeline = buildPresentPipeline(device: device, colorFormat: layer.pixelFormat) else {
+        ), let newCopyPipeline = buildPresentPipeline(device: device, colorFormat: layer.pixelFormat),
+           let newOverlayPipeline = buildOverlayPipeline(device: device, colorFormat: layer.pixelFormat) else {
             return false
         }
         installTextureSet(
             textureSet,
             outputWidth: outputWidth,
             outputHeight: outputHeight,
+            uiWidth: uiWidth,
+            uiHeight: uiHeight,
             outputFormat: outputFormat,
             depthFormat: depth.pixelFormat,
             motionFormat: motion.pixelFormat
@@ -934,7 +972,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             if let rebuilt = Self.makeMetal4FrameInterpolator(
                 device: device,
                 sceneColor: textureSet.scene[0],
-                uiColor: textureSet.composed[0],
+                uiColor: textureSet.uiOverlay[0],
                 depth: textureSet.depth[0],
                 motion: textureSet.motion[0]
             ) {
@@ -946,6 +984,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             }
         }
         self.copyPipeline = newCopyPipeline
+        self.overlayPipeline = newOverlayPipeline
         self.copyFormat = layer.pixelFormat
         self.nextBufferIndex = 0
         self.lastPresentedIndex = nil
@@ -972,14 +1011,15 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         globalFence: MTLFence?
     ) -> Int32 {
         guard sceneColor.width > 0, sceneColor.height > 0,
+              uiColor.width > 0, uiColor.height > 0,
               depth.width > 0, depth.height > 0,
-              sceneColor.width == uiColor.width, sceneColor.height == uiColor.height,
               sceneColor.pixelFormat == uiColor.pixelFormat,
               depth.width == motion.width, depth.height == motion.height else {
             return 0
         }
 
         if sceneColor.width != outputWidth || sceneColor.height != outputHeight
+                || uiColor.width != uiWidth || uiColor.height != uiHeight
                 || sceneColor.pixelFormat != outputFormat
                 || depth.pixelFormat != depthFormat || motion.pixelFormat != motionFormat
                 || depthBuffers.first?.width != depth.width || depthBuffers.first?.height != depth.height
@@ -988,6 +1028,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             guard resizeResources(
                 outputWidth: sceneColor.width,
                 outputHeight: sceneColor.height,
+                uiWidth: uiColor.width,
+                uiHeight: uiColor.height,
                 outputFormat: sceneColor.pixelFormat,
                 depth: depth,
                 motion: motion
@@ -1046,7 +1088,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             from: uiColor,
             sourceSlice: 0,
             sourceLevel: 0,
-            to: composedBuffers[index],
+            to: uiOverlayBuffers[index],
             destinationSlice: 0,
             destinationLevel: 0,
             sliceCount: 1,
@@ -1127,7 +1169,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         error: Error?
     ) {
         condition.lock()
-        guard currentFrame?.eventValue == eventValue, var lifecycle = currentLifecycle else {
+        guard let frame = currentFrame, frame.eventValue == eventValue,
+              var lifecycle = currentLifecycle else {
             condition.unlock()
             return
         }
@@ -1155,10 +1198,17 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
     }
 
-    private func encodeCopy(commandBuffer: MTLCommandBuffer, source: MTLTexture, destination: MTLTexture, label: String) -> Bool {
+    private func encodeCopy(
+        commandBuffer: MTLCommandBuffer,
+        source: MTLTexture,
+        destination: MTLTexture,
+        pipeline: MTLRenderPipelineState? = nil,
+        loadAction: MTLLoadAction = .dontCare,
+        label: String
+    ) -> Bool {
         let descriptor = MTLRenderPassDescriptor()
         descriptor.colorAttachments[0].texture = destination
-        descriptor.colorAttachments[0].loadAction = .dontCare
+        descriptor.colorAttachments[0].loadAction = loadAction
         descriptor.colorAttachments[0].storeAction = .store
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
             return false
@@ -1172,7 +1222,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             znear: 0.0,
             zfar: 1.0
         ))
-        encoder.setRenderPipelineState(copyPipeline)
+        encoder.setRenderPipelineState(pipeline ?? copyPipeline)
         encoder.setFragmentTexture(source, index: 0)
         encoder.setFragmentSamplerState(copySampler, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -1218,6 +1268,11 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     /// `allowsNextDrawableTimeout` off — the presenter would then block forever
     /// on a hidden or minimized window — and could drop vsync underneath a
     /// display link that only ever schedules on the refresh boundary.
+    ///
+    /// `maximumDrawableCount` is intentionally absent. QuartzCore forbids
+    /// changing it after a CAMetalDisplayLink has attached to the layer and
+    /// throws CAMetalLayerInvalidOperation during a live resize. The presenter
+    /// sets the drawable count once, before installing its display link.
     private func applyLayerPolicyIfNeeded() {
         condition.lock()
         let refresh = pendingLayerPolicyRefresh
@@ -1226,7 +1281,6 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         guard refresh else {
             return
         }
-        layer.maximumDrawableCount = 3
         layer.allowsNextDrawableTimeout = true
         layer.displaySyncEnabled = true
     }
@@ -1366,9 +1420,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameInterpolator.prevColorTexture = sceneBuffers[work.previousIndex]
             frameInterpolator.depthTexture = depthBuffers[frame.index]
             frameInterpolator.motionTexture = motionBuffers[frame.index]
-            frameInterpolator.uiTexture = composedBuffers[frame.index]
+            frameInterpolator.uiTexture = nil
             frameInterpolator.outputTexture = interpolationOutputs[frame.index]
-            frameInterpolator.isUITextureComposited = true
+            frameInterpolator.isUITextureComposited = false
             frameInterpolator.jitterOffsetX = frame.jitterX
             frameInterpolator.jitterOffsetY = frame.jitterY
             frameInterpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
@@ -1393,13 +1447,24 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         } else {
             guard encodeCopy(
                 commandBuffer: commandBuffer,
-                source: composedBuffers[frame.index],
+                source: sceneBuffers[frame.index],
                 destination: work.update.drawable.texture,
                 label: "Frame Generation Rendered Copy"
             ) else {
                 failPresentationBeforeSubmission(work, reason: "rendered copy encoder unavailable")
                 return
             }
+        }
+        guard encodeCopy(
+            commandBuffer: commandBuffer,
+            source: uiOverlayBuffers[frame.index],
+            destination: work.update.drawable.texture,
+            pipeline: overlayPipeline,
+            loadAction: .load,
+            label: "Frame Generation Native UI Overlay"
+        ) else {
+            failPresentationBeforeSubmission(work, reason: "native UI overlay encoder unavailable")
+            return
         }
 
         let commitTime = CACurrentMediaTime()
@@ -1434,7 +1499,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 step: work.step,
                 displayUpdateID: updateID,
                 succeeded: completed.status == .completed,
-                error: completed.error
+                error: completed.error,
+                gpuStartTime: completed.gpuStartTime,
+                gpuEndTime: completed.gpuEndTime
             )
         }
 
@@ -1500,9 +1567,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             interpolator.prevColorTexture = sceneBuffers[work.previousIndex]
             interpolator.depthTexture = depthBuffers[frame.index]
             interpolator.motionTexture = motionBuffers[frame.index]
-            interpolator.uiTexture = composedBuffers[frame.index]
+            interpolator.uiTexture = nil
             interpolator.outputTexture = interpolationOutputs[frame.index]
-            interpolator.isUITextureComposited = true
+            interpolator.isUITextureComposited = false
             interpolator.jitterOffsetX = frame.jitterX
             interpolator.jitterOffsetY = frame.jitterY
             interpolator.motionVectorScaleX = Float(frame.inputWidth) * 0.5
@@ -1530,7 +1597,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         } else {
             guard path.encodeCopy(
                 commandBuffer: commandBuffer,
-                source: composedBuffers[frame.index],
+                source: sceneBuffers[frame.index],
                 destination: work.update.drawable.texture,
                 pipeline: copyPipeline,
                 sampler: copySampler,
@@ -1540,6 +1607,19 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 failPresentationBeforeSubmission(work, reason: "rendered copy encoder unavailable")
                 return
             }
+        }
+        guard path.encodeCopy(
+            commandBuffer: commandBuffer,
+            source: uiOverlayBuffers[frame.index],
+            destination: work.update.drawable.texture,
+            pipeline: overlayPipeline,
+            sampler: copySampler,
+            loadAction: .load,
+            label: "Frame Generation Native UI Overlay"
+        ) else {
+            path.abandonFrame()
+            failPresentationBeforeSubmission(work, reason: "native UI overlay encoder unavailable")
+            return
         }
 
         let commitTime = CACurrentMediaTime()
@@ -1607,7 +1687,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         // makes this pilot possible without touching the main queue at all. The
         // wait is issued inside submit(), past every path that can still abandon
         // the frame — see its documentation for why that placement is load-bearing.
-        path.submit(drawable: drawable, readyEvent: readyEvent, eventValue: eventValue) { [weak self] error in
+        path.submit(drawable: drawable, readyEvent: readyEvent, eventValue: eventValue) {
+            [weak self] error, gpuStartTime, gpuEndTime in
             // MTL4CommandBufferFeedback carries no status, so error == nil is the
             // only success signal. Routing into the same handler as Metal 3 keeps
             // the failure path — which advances readyEvent so the present thread
@@ -1617,7 +1698,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 step: work.step,
                 displayUpdateID: updateID,
                 succeeded: error == nil,
-                error: error
+                error: error,
+                gpuStartTime: gpuStartTime,
+                gpuEndTime: gpuEndTime
             )
         }
     }
@@ -1648,17 +1731,22 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         step: MetalFrameGenerationPresentationStep,
         displayUpdateID: UInt64,
         succeeded: Bool,
-        error: Error?
+        error: Error?,
+        gpuStartTime: CFTimeInterval,
+        gpuEndTime: CFTimeInterval
     ) {
         let completionTime = CACurrentMediaTime()
         condition.lock()
         updateDiagnosticLocked(displayUpdateID: displayUpdateID) { diagnostic in
+            diagnostic.gpuStartTime = gpuStartTime
+            diagnostic.gpuEndTime = gpuEndTime
             diagnostic.gpuCompletionTime = completionTime
             if !succeeded {
                 diagnostic.outcome = "failed:gpu-command-buffer"
             }
         }
-        guard currentFrame?.eventValue == eventValue, var lifecycle = currentLifecycle else {
+        guard let frame = currentFrame, frame.eventValue == eventValue,
+              var lifecycle = currentLifecycle else {
             condition.unlock()
             return
         }
@@ -1670,6 +1758,18 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         )
         if step == .generated {
             interpolatorEncodeHistoryValid = succeeded && !lifecycle.cancellationRequested
+        } else if succeeded && !lifecycle.cancellationRequested {
+            // The present queue is serial and the real drawable has consumed
+            // this slot. Use it as interpolation history immediately instead
+            // of stalling the render thread on WindowServer scanout latency.
+            lastPresentedIndex = frame.index
+            lastPresentedTimestamp = frame.timestamp
+            displayHistoryValid = true
+            realPresentationTimeoutAt = nil
+        } else {
+            displayHistoryValid = false
+            lastPresentedIndex = nil
+            lastPresentedTimestamp = nil
         }
         currentLifecycle = lifecycle
         applyLifecycleActionsLocked(actions, eventValue: eventValue)
@@ -1691,11 +1791,21 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         presentedTime: CFTimeInterval
     ) {
         condition.lock()
+        let actuallyPresented = presentedTime.isFinite && presentedTime > 0.0
         updateDiagnosticLocked(displayUpdateID: displayUpdateID) { diagnostic in
             diagnostic.presentedTime = presentedTime
-            diagnostic.outcome = presentedTime.isFinite && presentedTime > 0.0
+            diagnostic.outcome = actuallyPresented
                     ? "presented"
                     : "failed:not-presented"
+        }
+        if !actuallyPresented {
+            if step == .generated {
+                interpolatorEncodeHistoryValid = false
+            } else {
+                displayHistoryValid = false
+                lastPresentedIndex = nil
+                lastPresentedTimestamp = nil
+            }
         }
         guard let frame = currentFrame, frame.eventValue == eventValue,
               var lifecycle = currentLifecycle else {
@@ -1829,6 +1939,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             targetTimestamp: update.targetTimestamp,
             targetPresentationTimestamp: update.targetPresentationTimestamp,
             cpuCommitTime: cpuCommitTime,
+            gpuStartTime: 0.0,
+            gpuEndTime: 0.0,
             gpuCompletionTime: 0.0,
             presentedTime: 0.0,
             outcome: outcome
@@ -1856,13 +1968,15 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
         for diagnostic in snapshot {
             NSLog(
-                "[Metallum] MetalFX timeline source=%llu kind=%@ update=%llu target=%.6f presentationTarget=%.6f commit=%.6f gpu=%.6f presented=%.6f outcome=%@",
+                "[Metallum] MetalFX timeline source=%llu kind=%@ update=%llu target=%.6f presentationTarget=%.6f commit=%.6f gpuStart=%.6f gpuEnd=%.6f gpuComplete=%.6f presented=%.6f outcome=%@",
                 diagnostic.sourceFrameID,
                 diagnostic.frameKind,
                 diagnostic.displayUpdateID,
                 diagnostic.targetTimestamp,
                 diagnostic.targetPresentationTimestamp,
                 diagnostic.cpuCommitTime,
+                diagnostic.gpuStartTime,
+                diagnostic.gpuEndTime,
                 diagnostic.gpuCompletionTime,
                 diagnostic.presentedTime,
                 diagnostic.outcome
@@ -1880,6 +1994,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 targetTimestamp: $0.targetTimestamp,
                 targetPresentationTimestamp: $0.targetPresentationTimestamp,
                 cpuCommitTime: $0.cpuCommitTime,
+                gpuStartTime: $0.gpuStartTime,
+                gpuEndTime: $0.gpuEndTime,
                 gpuCompletionTime: $0.gpuCompletionTime,
                 presentedTime: $0.presentedTime,
                 outcome: $0.outcome
@@ -2199,6 +2315,38 @@ private func buildPresentPipeline(
         return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create present render pipeline: %@", String(describing: error))
+        return nil
+    }
+}
+
+private func buildOverlayPipeline(
+    device: MTLDevice,
+    colorFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    do {
+        let library = try device.makeLibrary(source: presentMslSource(), options: nil)
+        guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
+              let fragmentFunction = library.makeFunction(name: "metallum_present_fs") else {
+            return nil
+        }
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertexFunction
+        descriptor.fragmentFunction = fragmentFunction
+        let attachment = descriptor.colorAttachments[0]!
+        attachment.pixelFormat = colorFormat
+        attachment.isBlendingEnabled = true
+        // Minecraft's GUI is rendered onto a transparent target first, so its
+        // stored RGB is premultiplied by alpha. Preserve native-resolution edge
+        // coverage when compositing it over the upscaled scene.
+        attachment.rgbBlendOperation = .add
+        attachment.sourceRGBBlendFactor = .one
+        attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        attachment.alphaBlendOperation = .add
+        attachment.sourceAlphaBlendFactor = .one
+        attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        return try device.makeRenderPipelineState(descriptor: descriptor)
+    } catch {
+        NSLog("[metallum] Failed to create native UI overlay pipeline: %@", String(describing: error))
         return nil
     }
 }

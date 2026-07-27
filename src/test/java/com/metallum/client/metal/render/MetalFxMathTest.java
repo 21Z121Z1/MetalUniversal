@@ -318,6 +318,26 @@ final class MetalFxMathTest {
     }
 
     @Test
+    void packetSideObservationOutsideFrameIsSkippedWithoutPollutingHistory() {
+        MetalMotionStateStore store = new MetalMotionStateStore();
+        MetalMotionStateStore.ObjectKey key = new MetalMotionStateStore.ObjectKey(9L, 1L);
+        Matrix4f submitted = new Matrix4f().translate(1.0F, 0.0F, 0.0F);
+        Matrix4f packetSide = new Matrix4f().translate(99.0F, 0.0F, 0.0F);
+
+        store.beginFrame();
+        assertTrue(store.observeIfFrameOpen(key, submitted));
+        store.commitSubmittedFrame();
+
+        assertFalse(store.observeIfFrameOpen(key, packetSide));
+        assertEquals(1.0F, store.previous(key).m30(), 1.0E-6F);
+
+        store.beginFrame();
+        assertEquals(1.0F, store.previous(key).m30(), 1.0E-6F);
+        store.discardFrame();
+        assertEquals(1.0F, store.previous(key).m30(), 1.0E-6F);
+    }
+
+    @Test
     void cameraJitterDoesNotBecomeMotion() {
         Matrix4f unjittered = new Matrix4f();
         Matrix4f jitteredInverse = new Matrix4f().translate(0.25F, -0.125F, 0.0F);
@@ -354,6 +374,13 @@ final class MetalFxMathTest {
         assertEquals(8, MetalFxConfig.phaseCount(1.0F));
         assertEquals(18, MetalFxConfig.phaseCount(0.67F));
         assertEquals(32, MetalFxConfig.phaseCount(0.5F));
+        float frameGenerationScale = MetalFxConfig.frameGenerationOutputScale(1708, 1440);
+        assertEquals(1440, MetalFxConfig.scaledDimension(1708, frameGenerationScale));
+        assertEquals(808, MetalFxConfig.scaledDimension(960, frameGenerationScale));
+        assertEquals(964, MetalFxConfig.scaledDimension(1708, 0.67F * frameGenerationScale));
+        assertEquals(542, MetalFxConfig.scaledDimension(960, 0.67F * frameGenerationScale));
+        assertEquals(0.0F, MetalFxConfig.textureLodBias(1708, 1708), 1.0E-6F);
+        assertEquals(-1.825F, MetalFxConfig.textureLodBias(964, 1708), 1.0E-3F);
     }
 
     @Test

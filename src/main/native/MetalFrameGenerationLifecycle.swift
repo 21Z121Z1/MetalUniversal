@@ -198,7 +198,16 @@ struct MetalFrameGenerationLifecycle {
                 }
                 return terminalActions()
             }
+            // The present command buffer has finished reading the source slot
+            // and writing the CAMetalDrawable, so the slot is safe to reuse.
+            // WindowServer may report the actual scanout several refreshes
+            // later in windowed mode; retaining ownership until that callback
+            // serializes this latency into the game's source-frame rate.
             phase = .realPresentPending
+            terminalPhase = .realPresentPending
+            ownershipReleased = true
+            phase = .released
+            return [.releaseOwnership]
         }
         return []
     }

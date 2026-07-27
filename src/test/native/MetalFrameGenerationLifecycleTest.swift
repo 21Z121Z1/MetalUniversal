@@ -38,10 +38,28 @@ private func testGeneratedThenReal() throws {
     _ = state.completeGPUWork(.generated, succeeded: true)
     try expect(state.nextPresentationStep == .real, "real must follow generated completion")
     _ = state.submitPresentation(.real)
-    _ = state.completeGPUWork(.real, succeeded: true)
-    let actions = state.recordPresented(.real, presentedTime: 2.0)
-    try expect(state.terminalPhase == .presented, "real presentation must complete source")
-    try expect(actions == [.releaseOwnership], "normal path releases exactly once")
+    let actions = state.completeGPUWork(.real, succeeded: true)
+    try expect(
+        state.terminalPhase == .realPresentPending,
+        "real GPU completion must not claim a WindowServer presentation"
+    )
+    try expect(actions == [.releaseOwnership], "real GPU completion releases source ownership")
+    try expect(
+        state.recordPresented(.real, presentedTime: 2.0).isEmpty,
+        "late presented callback cannot release ownership twice"
+    )
+}
+
+private func testPresentedBeforeGPUCompletion() throws {
+    var state = try makeReady(sourceFrameID: 12, interpolation: false)
+    _ = state.submitPresentation(.real)
+    try expect(
+        state.recordPresented(.real, presentedTime: 2.0).isEmpty,
+        "presented callback must still wait for GPU completion"
+    )
+    let actions = state.completeGPUWork(.real, succeeded: true)
+    try expect(state.terminalPhase == .presented, "early callback records a real presentation")
+    try expect(actions == [.releaseOwnership], "GPU completion releases after early callback")
 }
 
 private func testGuiSuspendAndResizeCancel() throws {
@@ -105,11 +123,10 @@ private func testStaleDisplayUpdateDoesNotAdvance() throws {
 private func testDuplicateCallbackAndIdempotentRelease() throws {
     var state = try makeReady(sourceFrameID: 10, interpolation: false)
     _ = state.submitPresentation(.real)
-    _ = state.completeGPUWork(.real, succeeded: true)
-    let first = state.recordPresented(.real, presentedTime: 3.0)
+    let first = state.completeGPUWork(.real, succeeded: true)
     let duplicate = state.recordPresented(.real, presentedTime: 3.0)
     let cancelAfterRelease = state.cancel(reason: "duplicate shutdown")
-    try expect(first == [.releaseOwnership], "first presented callback releases")
+    try expect(first == [.releaseOwnership], "GPU completion releases")
     try expect(duplicate.isEmpty, "duplicate callback is ignored")
     try expect(cancelAfterRelease.isEmpty, "release is idempotent")
 }
@@ -117,8 +134,8 @@ private func testDuplicateCallbackAndIdempotentRelease() throws {
 private func testPresentedTimeZeroFails() throws {
     var state = try makeReady(sourceFrameID: 11, interpolation: false)
     _ = state.submitPresentation(.real)
-    _ = state.completeGPUWork(.real, succeeded: true)
-    let actions = state.recordPresented(.real, presentedTime: 0.0)
+    _ = state.recordPresented(.real, presentedTime: 0.0)
+    let actions = state.completeGPUWork(.real, succeeded: true)
     try expect(state.terminalPhase == .failed, "presentedTime zero is not success")
     try expect(actions.contains(.releaseOwnership), "non-presented real frame releases")
 }
@@ -135,7 +152,8 @@ private enum MetalFrameGenerationLifecycleTestMain {
             ("command buffer failure", testCommandBufferFailure),
             ("stale display update", testStaleDisplayUpdateDoesNotAdvance),
             ("duplicate callback and idempotent release", testDuplicateCallbackAndIdempotentRelease),
-            ("presentedTime zero", testPresentedTimeZeroFails)
+            ("presentedTime zero", testPresentedTimeZeroFails),
+            ("presented before GPU completion", testPresentedBeforeGPUCompletion)
         ]
         do {
             for (name, test) in tests {

@@ -20,6 +20,8 @@ final class MetalFxConfig {
     static final String SCALE_PROPERTY = "metallum.metalfx.scale";
     static final String REACTIVE_MASK_PROPERTY = "metallum.metalfx.reactiveMask";
     static final String FRAME_GENERATION_PROPERTY = "metallum.metalfx.frameGeneration";
+    static final String FRAME_GENERATION_OUTPUT_WIDTH_PROPERTY =
+            "metallum.metalfx.frameGenerationOutputWidth";
 
     private static final String CONFIG_FILE = "metallum-metalfx.properties";
     private static final String MODE_KEY = "mode";
@@ -69,6 +71,7 @@ final class MetalFxConfig {
     final boolean debug;
     final boolean transparencyReactiveMask;
     final boolean frameGeneration;
+    final int frameGenerationOutputWidth;
     // Reactive-policy tuning (launch-argument knobs, not persisted). See
     // docs/cutout-shimmer-remediation-2026-07-27.md; 1.0 across the board
     // restores the pre-remediation full-suppression policy.
@@ -86,6 +89,7 @@ final class MetalFxConfig {
             final boolean debug,
             final boolean transparencyReactiveMask,
             final boolean frameGeneration,
+            final int frameGenerationOutputWidth,
             final float cutoutReactiveEdgeWeight,
             final float cutoutReactiveInteriorWeight,
             final float depthEdgeReactiveCap,
@@ -99,6 +103,7 @@ final class MetalFxConfig {
         this.debug = debug;
         this.transparencyReactiveMask = transparencyReactiveMask;
         this.frameGeneration = frameGeneration;
+        this.frameGenerationOutputWidth = frameGenerationOutputWidth;
         this.cutoutReactiveEdgeWeight = cutoutReactiveEdgeWeight;
         this.cutoutReactiveInteriorWeight = cutoutReactiveInteriorWeight;
         this.depthEdgeReactiveCap = depthEdgeReactiveCap;
@@ -118,6 +123,9 @@ final class MetalFxConfig {
         );
         boolean frameGeneration = parseBoolean(
                 System.getProperty(FRAME_GENERATION_PROPERTY), defaults.frameGeneration
+        );
+        int frameGenerationOutputWidth = parseBoundedInt(
+                System.getProperty(FRAME_GENERATION_OUTPUT_WIDTH_PROPERTY), 1440, 640, 3840
         );
         float cutoutReactiveEdgeWeight = parseUnitFloat(
                 System.getProperty("metallum.metalfx.cutoutReactiveEdgeWeight"), 0.35F
@@ -142,6 +150,7 @@ final class MetalFxConfig {
         );
         return new MetalFxConfig(
                 mode, scale, debug, transparencyReactiveMask, frameGeneration,
+                frameGenerationOutputWidth,
                 cutoutReactiveEdgeWeight, cutoutReactiveInteriorWeight,
                 depthEdgeReactiveCap, transparencyReactiveValue,
                 skyFarPlaneMotion, disocclusionReactiveCap, mergeDepthDilation
@@ -241,6 +250,37 @@ final class MetalFxConfig {
             scaled &= ~1;
         }
         return Math.max(1, scaled);
+    }
+
+    static float frameGenerationOutputScale(final int displayWidth, final int maximumOutputWidth) {
+        if (displayWidth <= 0 || maximumOutputWidth <= 0 || displayWidth <= maximumOutputWidth) {
+            return 1.0F;
+        }
+        return maximumOutputWidth / (float) displayWidth;
+    }
+
+    static float textureLodBias(final int renderWidth, final int displayWidth) {
+        if (renderWidth <= 0 || displayWidth <= 0 || renderWidth >= displayWidth) {
+            return 0.0F;
+        }
+        float scale = renderWidth / (float) displayWidth;
+        return (float) (Math.log(scale) / Math.log(2.0)) - 1.0F;
+    }
+
+    private static int parseBoundedInt(
+            final String value,
+            final int fallback,
+            final int minimum,
+            final int maximum
+    ) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Math.max(minimum, Math.min(maximum, Integer.parseInt(value.trim())));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
     }
 
     static Mode parseMode(final String value, final Mode fallback) {

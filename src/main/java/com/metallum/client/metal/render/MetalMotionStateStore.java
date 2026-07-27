@@ -37,10 +37,19 @@ final class MetalMotionStateStore {
         if (!frameOpen) {
             throw new IllegalStateException("Motion state observed outside a frame transaction");
         }
+        observeValidated(key, currentTransform);
+    }
+
+    boolean observeIfFrameOpen(final ObjectKey key, final Matrix4fc currentTransform) {
+        return frameOpen && observeValidated(key, currentTransform);
+    }
+
+    private boolean observeValidated(final ObjectKey key, final Matrix4fc currentTransform) {
         if (key == null || currentTransform == null || !MetalFxMath.isFinite(currentTransform)) {
-            return;
+            return false;
         }
         pending.put(key, new Matrix4f(currentTransform));
+        return true;
     }
 
     @Nullable

@@ -100,7 +100,7 @@ The central invariants are:
 The pure lifecycle tests cover normal generated-to-real ordering, GUI suspend,
 resize, shutdown after enqueue, shutdown after generated submit, shutdown after
 real submit, command-buffer failure, stale display updates, duplicate callbacks
-and idempotent release. The current native test reports 9 passed.
+and idempotent release. The current native test reports 10 passed.
 
 ## CAMetalDisplayLink timing contract
 
@@ -175,6 +175,50 @@ The task emits 217 current-run files under
 `build/metal-validation/offscreen-current`, including all requested texture
 planes, PNGs, raw readbacks and JSON.
 
+## Resolution order and GPU budget
+
+Frame Generation uses a bounded scene-working resolution while keeping the
+drawable and GUI at native backing resolution. At the 1708x960 QA size with
+Temporal 67% and the default 1440-pixel Frame Generation output cap, the graph
+is:
+
+```text
+Minecraft 3D 964x542
+  -> MetalFX Temporal 1440x808
+  -> MTLFXFrameInterpolator 1440x808
+  -> linear scene scale to 1708x960 drawable
+  -> premultiplied-alpha 1708x960 GUI overlay
+```
+
+The interpolator is linked to the active Temporal scaler through
+`MTLFXFrameInterpolatorDescriptor.scaler`. Generated frames never enter the
+Temporal history. Reversing the order would either pollute Temporal history
+with synthetic frames or require running Temporal at the 120 Hz present rate.
+
+`metallum.metalfx.frameGenerationOutputWidth` controls the cap and defaults to
+1440 (bounded to 640...3840). It does not lock the persisted mode, Temporal
+percentage, reactive-mask or Frame Generation UI settings. Texture LOD bias is
+computed from the actual 3D/display ratio, so the extra work-resolution cap does
+not silently select softer mips.
+
+`metalFxPerformanceValidation` measures real GPU timestamps without a layer,
+drawable, window or Computer Use. Apple M1 Pro results (30 measured iterations
+after five warm-ups) are:
+
+| Input -> Temporal/FG output | Temporal avg / p95 | FrameInterpolator avg / p95 |
+| --- | ---: | ---: |
+| 858x482 -> 1280x720 | 0.89 / 1.56 ms | 2.83 / 2.84 ms |
+| 964x542 -> 1440x808 | 0.86 / 1.05 ms | 3.49 / 3.52 ms |
+| 1144x643 -> 1708x960 | 1.24 / 1.30 ms | 4.81 / 4.86 ms |
+| 2026x1119 -> 3024x1670 | 3.80 / 3.80 ms | 14.29 / 14.31 ms |
+
+The 3024-wide interpolator alone consumes about 86% of a 16.67 ms source-frame
+budget and cannot support 60 source -> 120 present with render or shader
+headroom. At 1440, measured average Temporal plus interpolation is 4.35 ms; the
+real scene-scale plus native-UI composition command buffer is about 0.24 ms,
+leaving about 12.08 ms before the 60 Hz source deadline for Minecraft rendering
+and shaders. This is a GPU budget, not proof of scanout cadence.
+
 ## Real presentation validation
 
 `metalFrameGenerationPresentationValidation` creates an automated visible
@@ -191,6 +235,7 @@ displayUpdateID
 targetTimestamp
 targetPresentationTimestamp
 CPU commit time
+GPU start/end time and command-buffer duration
 GPU completion time
 drawable presentedTime
 drop/cancel/failure reason
@@ -202,8 +247,11 @@ shut down in 0.0048 seconds. Three consecutive pre-clean repetitions also
 passed with bounded shutdown. Startup drawables whose presented timestamp was
 zero remained classified as failures.
 
-The current artifact is
-`build/metal-validation/presentation-current/timeline.json`.
+Every run first writes `timeline-raw.json`, even when a cadence or presentation
+gate fails. A passing run then writes `timeline.json`. The 120 Hz gate uses the
+screen's nominal maximum refresh rather than the average of only the callbacks
+the presenter happened to claim, so dropping every other update can no longer
+misclassify the display as 60 Hz and skip the 55 source / 110 present floors.
 
 ## Production-gate follow-up (2026-07-27)
 
@@ -235,9 +283,11 @@ presentation harness still passed 10 real / 9 generated presents with a
 
 Opening a screen or overlay suspends frame generation and cancels work through
 the lifecycle state machine. Closing it resets temporal/interpolator history.
-Resize and world/history reset similarly invalidate source history. The GUI is
-not independently interpolated; the presenter receives the pre-GUI scene and
-the composed UI texture with the UI-composited contract.
+Resize and world/history reset similarly invalidate source history. During
+normal gameplay the presenter receives a Temporal-upscaled scene and a separate
+native-resolution transparent GUI texture. The GUI is not given to the
+interpolator; the presenter composites the same sharp overlay after both the
+generated and real scene paths, avoiding alternating sharp/soft text.
 
 ## Present-mode policy
 
