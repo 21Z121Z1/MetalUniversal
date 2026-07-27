@@ -499,19 +499,53 @@ tasks.register("minecraftMetalFxClientValidation") {
 	}
 }
 
-if (gradle.startParameter.taskNames.any {
+tasks.register("minecraftMetalFxLockedBackpressureValidation") {
+	group = "verification"
+	description = "Runs locked-console Minecraft Quick Play and gates FrameGen source-admission backpressure only."
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		dependsOn "runClient"
+	} else {
+		doLast {
+			logger.lifecycle("minecraftMetalFxLockedBackpressureValidation SKIPPED: macOS Metal is required")
+		}
+	}
+}
+
+def lockedBackpressureValidationRequested = gradle.startParameter.taskNames.any {
+	it == "minecraftMetalFxLockedBackpressureValidation"
+			|| it.endsWith(":minecraftMetalFxLockedBackpressureValidation")
+}
+def minecraftMetalFxValidationRequested = gradle.startParameter.taskNames.any {
 	it == "minecraftMetalFxClientValidation" || it.endsWith(":minecraftMetalFxClientValidation")
-}) {
+}
+if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested) {
+	def validationOutputDir = file("${buildDir}/metal-validation/"
+			+ (lockedBackpressureValidationRequested
+					? "minecraft-client-locked-backpressure-current"
+					: "minecraft-client-current"))
+	def requestedFrameGeneration = lockedBackpressureValidationRequested
+			? "true"
+			: System.getProperty("metallum.metalfx.frameGeneration", "false")
+	def requestedObjectMotionProducer = lockedBackpressureValidationRequested
+			? "true"
+			: System.getProperty("metallum.metalfx.objectMotionProducer", "false")
 	tasks.named("runClient") {
 		doFirst {
-			if (System.getProperty("metallum.metalfx.frameGeneration", "false").toBoolean()) {
+			if (lockedBackpressureValidationRequested) {
+				def reason = lockedConsoleValidationReason()
+				if (reason == null || !reason.startsWith("the macOS console is locked")) {
+					throw new GradleException(
+							"Locked FrameGen backpressure validation requires a confirmed locked console;"
+									+ " found: ${reason ?: 'console is unlocked'}."
+					)
+				}
+			} else if (requestedFrameGeneration.toBoolean()) {
 				requireUnlockedConsoleForPresentation()
 			}
-			delete file("${buildDir}/metal-validation/minecraft-client-current")
+			delete validationOutputDir
 		}
 		systemProperty "metallum.validation.enabled", "true"
-		systemProperty "metallum.validation.output",
-				file("${buildDir}/metal-validation/minecraft-client-current").absolutePath
+		systemProperty "metallum.validation.output", validationOutputDir.absolutePath
 		systemProperty "metallum.metalfx.mode", "TEMPORAL"
 		systemProperty "metallum.metalfx.debug", "true"
 		// Frame generation stays off by default: the readback captures are the
@@ -521,15 +555,13 @@ if (gradle.startParameter.taskNames.any {
 		//   -Dmetallum.metalfx.objectMotionProducer=true
 		// (the second one opens the OBJECT_MOTION_PRODUCER_CONNECTED gate without
 		// changing what ships).
-		systemProperty "metallum.metalfx.frameGeneration",
-				System.getProperty("metallum.metalfx.frameGeneration", "false")
-		systemProperty "metallum.metalfx.objectMotionProducer",
-				System.getProperty("metallum.metalfx.objectMotionProducer", "false")
+		systemProperty "metallum.metalfx.frameGeneration", requestedFrameGeneration
+		systemProperty "metallum.metalfx.objectMotionProducer", requestedObjectMotionProducer
 		systemProperty "metallum.metalfx.frameGenerationOutputWidth",
 				System.getProperty("metallum.metalfx.frameGenerationOutputWidth", "1280")
-		if (System.getProperty("metallum.metalfx.frameGeneration", "false").toBoolean()) {
+		if (requestedFrameGeneration.toBoolean()) {
 			environment "METALLUM_METALFX_PRESENT_DIAGNOSTICS_PATH",
-					file("${buildDir}/metal-validation/minecraft-client-current/frame-generation-timeline.json").absolutePath
+					file("${validationOutputDir}/frame-generation-timeline.json").absolutePath
 		}
 		// Forward backend kill-switch overrides (-Dmetallum.opt.*) from the
 		// Gradle invocation to the client JVM for toggle validation runs.
@@ -559,8 +591,7 @@ if (gradle.startParameter.taskNames.any {
 		// non-null level. Three such runs on 2026-07-27 captured zero GPU
 		// readbacks and still reported BUILD SUCCESSFUL.
 		doLast {
-			def runStateFile = file(
-					"${buildDir}/metal-validation/minecraft-client-current/run-state.json")
+			def runStateFile = file("${validationOutputDir}/run-state.json")
 			if (!runStateFile.isFile()) {
 				throw new GradleException(
 						"Vacuous MetalFX client validation: no run-state.json at ${runStateFile}."
@@ -594,7 +625,7 @@ if (gradle.startParameter.taskNames.any {
 			if (completed != expected) {
 				problems << "captured ${completed} of ${expected} GPU readbacks".toString()
 			}
-			if (System.getProperty("metallum.metalfx.frameGeneration", "false").toBoolean()) {
+			if (requestedFrameGeneration.toBoolean()) {
 				def queued = runState.frameGenerationFramesQueued
 				def enabledAtCompletion = runState.frameGenerationEnabledAtCompletion
 				if (!(queued instanceof Number)) {
@@ -606,9 +637,89 @@ if (gradle.startParameter.taskNames.any {
 					problems << "Frame Generation was requested but was disabled before validation completed".toString()
 				}
 
-				def timelineFile = file(
-						"${buildDir}/metal-validation/minecraft-client-current/frame-generation-timeline.json")
-				if (!timelineFile.isFile()) {
+				if (lockedBackpressureValidationRequested) {
+					def admissionFile = file(
+							"${validationOutputDir}/frame-generation-source-admission.json")
+					if (!admissionFile.isFile()) {
+						problems << "Frame Generation source-admission diagnostics are missing at ${admissionFile}".toString()
+					} else {
+						def admission
+						try {
+							admission = new groovy.json.JsonSlurper().parseText(admissionFile.getText("UTF-8"))
+						} catch (Exception parseFailure) {
+							throw new GradleException(
+									"Could not parse ${admissionFile}: ${parseFailure.message}", parseFailure)
+						}
+						def sources = admission.sources
+						if (!(sources instanceof List)) {
+							problems << "Frame Generation source-admission sources are missing or malformed".toString()
+						} else {
+							def percentile = { values, fraction ->
+								def ordered = values.findAll { Double.isFinite(it as double) }
+										.collect { it as double }
+										.sort()
+								if (ordered.isEmpty()) return 0.0d
+								def index = Math.ceil((ordered.size() - 1) * (fraction as double)) as int
+								return ordered[Math.max(0, Math.min(index, ordered.size() - 1))]
+							}
+							def waits = sources.collect { it.cpuWaitMilliseconds as Number }
+									.collect { it.doubleValue() }
+							def enqueueTimes = sources.collect { it.enqueueTime as Number }
+									.collect { it.doubleValue() }
+									.sort()
+							def enqueueIntervals = enqueueTimes.collate(2, 1, false).collect { pair ->
+								(pair[1] - pair[0]) * 1000.0d
+							}.findAll { Double.isFinite(it) && it > 0.0d }
+							def waitP50 = percentile(waits, 0.50d)
+							def waitP95 = percentile(waits, 0.95d)
+							def waitMax = waits.isEmpty() ? 0.0d : waits.max()
+							def enqueueIntervalP50 = percentile(enqueueIntervals, 0.50d)
+							def superseded = admission.supersededSources
+							def summary = [
+									status: "measured-locked-backpressure-only",
+									scanoutValidated: false,
+									sourceFrames: sources.size(),
+									supersededSources: superseded,
+									sourceCpuWaitP50Milliseconds: waitP50,
+									sourceCpuWaitP95Milliseconds: waitP95,
+									sourceCpuWaitMaximumMilliseconds: waitMax,
+									sourceEnqueueIntervalP50Milliseconds: enqueueIntervalP50,
+									gates: [
+											minimumSourceFrames: 120,
+											minimumSupersededSources: 1,
+											maximumSourceCpuWaitP95Milliseconds: 16.67d,
+											maximumSourceCpuWaitMilliseconds: 100.0d,
+									]
+							]
+							def summaryFile = file(
+									"${validationOutputDir}/frame-generation-backpressure.json")
+							summaryFile.setText(
+									new groovy.json.JsonBuilder(summary).toPrettyString() + "\n", "UTF-8")
+							logger.lifecycle(String.format(Locale.ROOT,
+									"Locked Frame Generation backpressure: sources %d, superseded %s,"
+											+ " presenter wait p50/p95/max %.2f/%.2f/%.2f ms",
+									sources.size(), superseded, waitP50, waitP95, waitMax))
+							if (sources.size() < 120) {
+								problems << "locked backpressure run captured only ${sources.size()} source admissions".toString()
+							}
+							if (!(superseded instanceof Number) || superseded < 1) {
+								problems << "locked backpressure run did not supersede a stalled source".toString()
+							}
+							if (waitP95 > 16.67d) {
+								problems << String.format(Locale.ROOT,
+										"locked presenter wait p95 %.2f ms exceeds 16.67 ms", waitP95)
+							}
+							if (waitMax > 100.0d) {
+								problems << String.format(Locale.ROOT,
+										"locked presenter wait maximum %.2f ms exceeds 100.00 ms", waitMax)
+							}
+						}
+					}
+				}
+				if (!lockedBackpressureValidationRequested) {
+					def timelineFile = file(
+							"${validationOutputDir}/frame-generation-timeline.json")
+					if (!timelineFile.isFile()) {
 					problems << "Frame Generation timeline is missing at ${timelineFile}".toString()
 				} else {
 					def timeline
@@ -745,9 +856,9 @@ if (gradle.startParameter.taskNames.any {
 										minimumTotalGpuP95MarginMilliseconds: 3.0d,
 										maximumOver16_67MillisecondFrames: 0
 								]
-						]
+							]
 						def summaryFile = file(
-								"${buildDir}/metal-validation/minecraft-client-current/frame-generation-performance.json")
+								"${validationOutputDir}/frame-generation-performance.json")
 						summaryFile.setText(new groovy.json.JsonBuilder(summary).toPrettyString() + "\n", "UTF-8")
 						logger.lifecycle(String.format(Locale.ROOT,
 								"Frame Generation steady-state: source GPU p95 %.2f ms, source CPU p95 %.2f ms,"
@@ -783,6 +894,7 @@ if (gradle.startParameter.taskNames.any {
 							problems << "${overBudgetFrames} steady-state source pairs exceeded 16.67 ms GPU time".toString()
 						}
 					}
+				}
 				}
 			}
 			if (!problems.isEmpty()) {

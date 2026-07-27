@@ -260,6 +260,20 @@ macOS console. A locked session cannot produce nonzero WindowServer
 `presentedTime` callbacks, so waiting for the full scripted run would only
 measure GPU completion behind a display that is ineligible for scanout.
 
+`minecraftMetalFxLockedBackpressureValidation` is a separate locked-console
+stress gate. It deliberately does not evaluate presentation cadence and writes
+`scanoutValidated: false`; instead, it records every bounded source admission in
+`frame-generation-source-admission.json` and gates the time Minecraft's render
+thread waited for the presenter slot. The ordinary foreground task retains its
+strict unlocked-console preflight and scanout gates.
+
+The Apple M1 Pro locked-console Quick Play run on 2026-07-27 completed all 16
+GPU readbacks and queued 436 Frame Generation sources. The longest presenter
+session admitted 345 sources, superseded 343 stalled sources, and measured
+source-admission wait p50/p95/max of 0.0015/0.0022/2.1841 ms. This proves that
+missing WindowServer callbacks no longer serialize the render thread onto the
+0.75-second starvation timeout; it is not evidence of 120 Hz scanout.
+
 ## Real presentation validation
 
 `metalFrameGenerationPresentationValidation` creates an automated visible

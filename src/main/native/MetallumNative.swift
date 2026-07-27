@@ -493,6 +493,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         var outcome: String
     }
 
+    private struct SourceAdmissionDiagnostic {
+        let sourceFrameID: UInt64
+        let enqueueTime: CFTimeInterval
+        let cpuWaitDuration: CFTimeInterval
+    }
+
     private struct TextureSet {
         let scene: [MTLTexture]
         let uiOverlay: [MTLTexture]
@@ -508,6 +514,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     // presented callback arrives several refreshes later.
     private static let maxOutstandingFrames = 1
     private static let diagnosticCapacity = 256
+    private static let sourceAdmissionCapacity = 1024
     private static let presentationCallbackTimeout: CFTimeInterval = 0.25
     private static let displayUpdateStarvationTimeout: CFTimeInterval = 0.75
 
@@ -559,6 +566,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var realPresentationTimeoutAt: CFTimeInterval?
     private var displayUpdateStarvationTimeoutAt: CFTimeInterval?
     private var diagnostics: [FrameDiagnostic] = []
+    private var sourceAdmissions: [SourceAdmissionDiagnostic] = []
     private var sourceGpuTimings: [UInt64: (start: CFTimeInterval, end: CFTimeInterval)] = [:]
     private var diagnosticsDumped = false
     private var droppedDisplayUpdates = 0
@@ -1076,6 +1084,14 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         nextSourceFrameID += 1
         let timestamp = CACurrentMediaTime()
         let cpuWaitDuration = max(0.0, timestamp - waitStart)
+        sourceAdmissions.append(SourceAdmissionDiagnostic(
+            sourceFrameID: sourceFrameID,
+            enqueueTime: timestamp,
+            cpuWaitDuration: cpuWaitDuration
+        ))
+        if sourceAdmissions.count > Self.sourceAdmissionCapacity {
+            sourceAdmissions.removeFirst(sourceAdmissions.count - Self.sourceAdmissionCapacity)
+        }
         outstandingFrames += 1
         condition.unlock()
 
@@ -2010,7 +2026,13 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         update(&diagnostics[index])
     }
 
-    private func dumpDiagnosticsIfEnabled(_ snapshot: [FrameDiagnostic]) {
+    private func dumpDiagnosticsIfEnabled(
+        _ snapshot: [FrameDiagnostic],
+        sourceAdmissionSnapshot: [SourceAdmissionDiagnostic],
+        supersededSourceSnapshot: Int,
+        droppedDisplayUpdateSnapshot: Int,
+        presentationDeadlineMissSnapshot: Int
+    ) {
         let process = ProcessInfo.processInfo
         let outputPath = process.environment["METALLUM_METALFX_PRESENT_DIAGNOSTICS_PATH"]
         let enabled = process.environment["METALLUM_METALFX_PRESENT_DIAGNOSTICS"] == "1"
@@ -2072,15 +2094,58 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                     try data.write(to: url, options: .atomic)
                     NSLog("[Metallum] MetalFX timeline written: %@", outputPath)
                 }
+
+                let admissionURL = url.deletingLastPathComponent()
+                    .appendingPathComponent("frame-generation-source-admission.json")
+                let sourceRecords: [[String: Any]] = sourceAdmissionSnapshot.map { admission in
+                    [
+                        "sourceFrameID": admission.sourceFrameID,
+                        "enqueueTime": admission.enqueueTime,
+                        "cpuWaitMilliseconds": admission.cpuWaitDuration * 1_000.0,
+                    ]
+                }
+                let admissionReport: [String: Any] = [
+                    "status": "captured",
+                    "sourceFrames": sourceRecords.count,
+                    "supersededSources": supersededSourceSnapshot,
+                    "droppedDisplayUpdates": droppedDisplayUpdateSnapshot,
+                    "deadlineMisses": presentationDeadlineMissSnapshot,
+                    "sources": sourceRecords,
+                ]
+                let existingAdmissionCount: Int? = {
+                    guard let existingData = try? Data(contentsOf: admissionURL),
+                          let existingReport = try? JSONSerialization.jsonObject(with: existingData)
+                                as? [String: Any],
+                          let existingSources = existingReport["sources"] as? [[String: Any]] else {
+                        return nil
+                    }
+                    return existingSources.count
+                }()
+                if let existingAdmissionCount,
+                   existingAdmissionCount >= sourceAdmissionSnapshot.count {
+                    NSLog(
+                        "[Metallum] MetalFX source admission retained longer session: %d records at %@ (discarded %d)",
+                        existingAdmissionCount,
+                        admissionURL.path,
+                        sourceAdmissionSnapshot.count
+                    )
+                } else {
+                    let admissionData = try JSONSerialization.data(
+                        withJSONObject: admissionReport,
+                        options: [.prettyPrinted, .sortedKeys]
+                    )
+                    try admissionData.write(to: admissionURL, options: .atomic)
+                    NSLog("[Metallum] MetalFX source admission written: %@", admissionURL.path)
+                }
             } catch {
                 NSLog("[Metallum] MetalFX timeline write failed for %@: %@", outputPath, String(describing: error))
             }
         }
         NSLog(
             "[Metallum] MetalFX presenter counters: supersededSources=%d droppedDisplayUpdates=%d deadlineMisses=%d",
-            supersededSourceFrames,
-            droppedDisplayUpdates,
-            presentationDeadlineMisses
+            supersededSourceSnapshot,
+            droppedDisplayUpdateSnapshot,
+            presentationDeadlineMissSnapshot
         )
         for diagnostic in snapshot {
             NSLog(
@@ -2158,6 +2223,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let shouldDumpDiagnostics = !diagnosticsDumped
         diagnosticsDumped = true
         let diagnosticSnapshot = shouldDumpDiagnostics ? diagnostics : []
+        let sourceAdmissionSnapshot = shouldDumpDiagnostics ? sourceAdmissions : []
+        let supersededSourceSnapshot = supersededSourceFrames
+        let droppedDisplayUpdateSnapshot = droppedDisplayUpdates
+        let presentationDeadlineMissSnapshot = presentationDeadlineMisses
         condition.unlock()
         worker = nil
         // The worker has exited and no further present can be committed, so the
@@ -2166,7 +2235,13 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         layer.allowsNextDrawableTimeout = false
         layer.displaySyncEnabled = !NativeState.immediatePresentModeRequested
         if shouldDumpDiagnostics {
-            dumpDiagnosticsIfEnabled(diagnosticSnapshot)
+            dumpDiagnosticsIfEnabled(
+                diagnosticSnapshot,
+                sourceAdmissionSnapshot: sourceAdmissionSnapshot,
+                supersededSourceSnapshot: supersededSourceSnapshot,
+                droppedDisplayUpdateSnapshot: droppedDisplayUpdateSnapshot,
+                presentationDeadlineMissSnapshot: presentationDeadlineMissSnapshot
+            )
         }
     }
 }
