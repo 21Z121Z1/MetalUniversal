@@ -33,11 +33,12 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Environment(EnvType.CLIENT)
-final class MetalCrossShaderCompiler {
+public final class MetalCrossShaderCompiler {
     private static final Set<String> BUILT_IN_UNIFORMS = Set.of("Projection", "Lighting", "Fog", "Globals");
     private static final int MSL_VERSION_4_0 = 0x040000;
     private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
@@ -195,6 +196,153 @@ final class MetalCrossShaderCompiler {
                 depthStencilState,
                 colorTarget
         );
+    }
+
+    /**
+     * Cache of shaderpack programs that have been successfully dry-compiled to
+     * MSL, keyed by program name. Populated by
+     * {@link #tryCompileShaderpackMsl} and intended for retrieval by the
+     * (forthcoming) full Iris&rarr;Metal pipeline-binding step, which needs the
+     * compiled MSL sources and entry points to construct a
+     * {@link MetalCompiledRenderPipeline}.
+     */
+    private static final Map<String, ShaderpackMslResult> SHADERPACK_MSL_CACHE = new ConcurrentHashMap<>();
+
+    /**
+     * Dry-compile an Iris shaderpack program through the full
+     * glslang&#8594;SPIRV-Cross&#8594;MSL pipeline WITHOUT creating a
+     * {@link MetalCompiledRenderPipeline} or requiring a {@link MetalDevice}.
+     *
+     * <p>This entry point validates that a shaderpack program's GLSL (already
+     * patched and {@code #include}-expanded by Iris's {@code TransformPatcher})
+     * can be cross-compiled to MSL, and caches the resulting MSL sources for
+     * the subsequent pipeline-binding step. It is the natural progression from
+     * {@link #compileShaderpack}: same GLSL&#8594;MSL pipeline, but decoupled
+     * from {@code MetalDevice} so it can be invoked from Iris
+     * {@code ShaderCreator.link} interception before a Metal pipeline state
+     * object is assembled.
+     *
+     * <p><b>Limitations.</b>
+     * <ul>
+     *   <li>Geometry and tessellation (tessControl/tessEval) stages are accepted
+     *       for API symmetry with {@code ShaderCreator.link} but are <b>not</b>
+     *       compiled: the current Metal pipeline is vertex+fragment only. A
+     *       warning is logged when any non-null non-vertex/fragment stage is
+     *       present.</li>
+     *   <li>Vertex attribute integer&#8594;MSL conversion
+     *       ({@link #registerIntegerInputConversions}) is skipped (empty
+     *       attribute-format map); the dry-compiled MSL therefore uses default
+     *       vertex input declarations. Full conversion is applied in
+     *       {@link #compileShaderpack} once the {@code VertexFormat} bindings
+     *       are known.</li>
+     *   <li>The push-constant binding slot defaults to {@code 0} (no bind-group
+     *       entries); {@link #compileShaderpack} derives it from
+     *       {@code bindGroupEntries.size()}.</li>
+     *   <li>{@code enablePointSize} is {@code false} for the vertex stage in
+     *       dry-compile (the actual topology is not known here).</li>
+     * </ul>
+     *
+     * <p>On success the result is cached in {@link #SHADERPACK_MSL_CACHE} under
+     * {@code name} (overwriting any prior entry) so the pipeline-binding step
+     * can retrieve it without recompiling.
+     *
+     * @param name             logical program name (also the cache key).
+     * @param vertexGlsl       vertex GLSL source (must be non-null and declare
+     *                         its own {@code #version}).
+     * @param geometryGlsl     geometry GLSL source (nullable; ignored with a
+     *                         warning if non-null).
+     * @param tessControlGlsl  tessellation-control GLSL source (nullable;
+     *                         ignored with a warning if non-null).
+     * @param tessEvalGlsl     tessellation-evaluation GLSL source (nullable;
+     *                         ignored with a warning if non-null).
+     * @param fragmentGlsl     fragment GLSL source (must be non-null and declare
+     *                         its own {@code #version}).
+     * @param defines          optional preprocessor defines forwarded to
+     *                         glslang (may be {@code null}).
+     * @return the dry-compiled MSL result (also cached).
+     * @throws ShaderCompileException if GLSL&#8594;SPIR-V or SPIR-V&#8594;MSL
+     *                               fails; the exception message includes the
+     *                               glslang info log.
+     */
+    public static ShaderpackMslResult tryCompileShaderpackMsl(
+            final String name,
+            final @Nullable String vertexGlsl,
+            final @Nullable String geometryGlsl,
+            final @Nullable String tessControlGlsl,
+            final @Nullable String tessEvalGlsl,
+            final @Nullable String fragmentGlsl,
+            final @Nullable String defines
+    ) throws ShaderCompileException {
+        if (vertexGlsl == null || fragmentGlsl == null) {
+            throw new ShaderCompileException(
+                    "Cannot dry-compile shaderpack program '" + name + "': vertex or fragment GLSL is null "
+                            + "(vertex=" + (vertexGlsl == null ? "null" : "present")
+                            + ", fragment=" + (fragmentGlsl == null ? "null" : "present") + ")."
+            );
+        }
+        if (geometryGlsl != null || tessControlGlsl != null || tessEvalGlsl != null) {
+            Metallum.LOGGER.warn(
+                    "[MetalUniversal/Iris] Shaderpack program '{}' declares geometry/tessellation stages, "
+                            + "which have no Metal equivalent in the current vertex+fragment pipeline; "
+                            + "they are skipped by tryCompileShaderpackMsl.",
+                    name
+            );
+        }
+
+        final int[] vertexSpvWords;
+        final int[] fragmentSpvWords;
+        try {
+            vertexSpvWords = GlslangBridge.compileGlslToSpv(GlslangBridge.Stage.VERTEX, vertexGlsl, defines);
+        } catch (GlslangBridge.ShaderCompileException e) {
+            throw wrapGlslangError("Failed to dry-compile shaderpack vertex shader '" + name + "'", e);
+        }
+        try {
+            fragmentSpvWords = GlslangBridge.compileGlslToSpv(GlslangBridge.Stage.FRAGMENT, fragmentGlsl, defines);
+        } catch (GlslangBridge.ShaderCompileException e) {
+            throw wrapGlslangError("Failed to dry-compile shaderpack fragment shader '" + name + "'", e);
+        }
+
+        // Dry-compile defaults: no vertex-attribute integer conversion, no point
+        // size, push-constant binding slot 0 (no bind-group entries). These are
+        // refined by compileShaderpack once the full pipeline state is known.
+        final MslShader vertexMsl = spirvToMsl(spirvWordsToByteBuffer(vertexSpvWords), 0, Map.of(), false);
+        final MslShader fragmentMsl = spirvToMsl(spirvWordsToByteBuffer(fragmentSpvWords), 0, Map.of(), true);
+
+        final String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
+        final String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
+
+        final ShaderpackMslResult result = new ShaderpackMslResult(
+                name, vertexMsl.source(), fragmentMsl.source(), vertexEntryPoint, fragmentEntryPoint
+        );
+        SHADERPACK_MSL_CACHE.put(name, result);
+        return result;
+    }
+
+    /**
+     * Retrieves a previously dry-compiled shaderpack MSL result by program name,
+     * or {@code null} if {@code name} has not been dry-compiled (or was evicted).
+     * Intended for the forthcoming Iris&rarr;Metal pipeline-binding step.
+     *
+     * @param name the program name used as the cache key.
+     * @return the cached MSL result, or {@code null}.
+     */
+    public static @Nullable ShaderpackMslResult getCachedShaderpackMsl(final String name) {
+        return SHADERPACK_MSL_CACHE.get(name);
+    }
+
+    /**
+     * Result of a successful shaderpack dry-compile: the program name, the
+     * compiled vertex/fragment MSL sources, and their entry-point function
+     * names. Cached in {@link #SHADERPACK_MSL_CACHE} for retrieval by the
+     * pipeline-binding step.
+     */
+    public record ShaderpackMslResult(
+            String name,
+            String vertexMsl,
+            String fragmentMsl,
+            String vertexEntryPoint,
+            String fragmentEntryPoint
+    ) {
     }
 
     /**
