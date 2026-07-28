@@ -246,7 +246,7 @@ final class MetalDevice implements GpuDeviceBackend {
         });
     }
 
-    private static long composePoolKey(final long size, final long resourceOptions) {
+    static long composePoolKey(final long size, final long resourceOptions) {
         return (size << 12) | (resourceOptions & 0xFFFL);
     }
 
