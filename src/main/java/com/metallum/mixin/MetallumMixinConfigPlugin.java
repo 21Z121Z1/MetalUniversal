@@ -40,6 +40,14 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
         }
+        if (mixinClassName.contains(".mixin.iris.")) {
+            // Iris integration only makes sense when Iris is present. The
+            // isMacOs gate above covers the macOS dev environment; iOS targets
+            // are packaged separately and the actual Metal-active gating is
+            // enforced at runtime by MetalActive (RenderSystem device backend
+            // name), so the mixins are no-ops whenever Metal is not in use.
+            return FabricLoader.getInstance().isModLoaded("iris");
+        }
         return PREFERRED_GRAPHICS_API_MIXIN.equals(mixinClassName) || this.isDefaultGraphicsApi;
     }
 

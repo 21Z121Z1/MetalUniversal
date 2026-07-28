@@ -9,7 +9,9 @@
     "render.PreferredGraphicsApiMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
-    "sodium.SodiumPreferredGraphicsApiMixin"
+    "sodium.SodiumPreferredGraphicsApiMixin",
+    "iris.GlShaderMixin",
+    "iris.ShaderCreatorMixin"
   ],
   "injectors": {
     "defaultRequire": 1

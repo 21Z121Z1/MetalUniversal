@@ -19,6 +19,15 @@ dependencies {
 	
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	implementation "maven.modrinth:sodium:${project.sodium_version}"
+
+	// Iris 26.2 (optional). When Iris is present AND the Metal backend is
+	// active, the metallum iris intercept mixins (com.metallum.mixin.iris.*)
+	// take over shaderpack compilation; when Metal is not active those mixins
+	// are no-ops and Iris uses its normal GL path. modImplementation (rather
+	// than plain implementation) puts Iris on the mod dev classpath so the
+	// @Mixin targets (GlShader, ShaderCreator) resolve at compile time and Iris
+	// loads in dev runs.
+	modImplementation "maven.modrinth:iris:${project.iris_version}"
 }
 
 processResources {
