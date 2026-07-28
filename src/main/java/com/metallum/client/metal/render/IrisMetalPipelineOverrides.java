@@ -314,19 +314,10 @@ final class IrisMetalPipelineOverrides {
                 return null;
             }
             if (!isSodiumPipeline(pipeline)) {
-                // MetalFX TEMPORAL replaces sodium's cutout program with its own
-                // reactive pipeline, whose namespace is "metallum" — so it never
-                // reaches the override and the pack's CUTOUT program is silently
-                // bypassed. Harmless while MetalFX is off; phase 2 has to resolve
-                // the overlap rather than let it fail quietly.
-                if (pipeline.getLocation().getPath().contains("cutout_reactive")
-                        && this.reportedPlaceholders.add("<metalfx-cutout-bypass>")) {
-                    Metallum.LOGGER.warn(
-                            "[metallum-iris] {} replaced sodium's cutout terrain pipeline;"
-                                    + " the pack's CUTOUT program is bypassed for as long as MetalFX owns it",
-                            pipeline.getLocation()
-                    );
-                }
+                // The mainline ShaderChunkRendererMetalFxMixin owns the one-shot
+                // warning for the MetalFX CUTOUT namespace substitution. Keeping
+                // another warning here would report the same event twice after
+                // the Iris branch is merged.
                 return null;
             }
             TerrainKind kind = discriminate(pipeline);

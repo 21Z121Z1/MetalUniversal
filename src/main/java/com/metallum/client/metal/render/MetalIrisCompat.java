@@ -25,8 +25,10 @@ import net.fabricmc.api.Environment;
 @Environment(EnvType.CLIENT)
 public final class MetalIrisCompat {
     /**
-     * Kill switch for the Iris-on-Metal semantic layer (B2-1 onwards). With
-     * {@code -Dmetallum.iris.semantic=false} the shims fall back to the pure
+     * Opt-in switch for the experimental Iris-on-Metal semantic layer. With
+     * the default {@code false}, the shims keep Iris safely dormant on Metal;
+     * {@code -Dmetallum.iris.semantic=true} enables the incomplete B2-1 path.
+     * With the semantic layer disabled the shims fall back to the pure
      * dormancy behaviour described above: no pack is loaded, no terrain
      * pipeline is overridden, and the client renders exactly as it did before
      * the semantic layer existed. Any doubt about a regression should be
@@ -42,7 +44,7 @@ public final class MetalIrisCompat {
      * output.</p>
      */
     private static final boolean SEMANTIC_LAYER =
-            !"false".equalsIgnoreCase(System.getProperty("metallum.iris.semantic", "true"));
+            Boolean.parseBoolean(System.getProperty("metallum.iris.semantic", "false"));
 
     private static volatile boolean announced;
     private static volatile boolean semanticAnnounced;
@@ -73,7 +75,7 @@ public final class MetalIrisCompat {
             Metallum.LOGGER.info(
                     "Iris-on-Metal semantic layer active: shader packs load for real and sodium terrain"
                             + " draws through the pack's gbuffers_terrain programs"
-                            + " (disable with -Dmetallum.iris.semantic=false)"
+                            + " (experimental opt-in via -Dmetallum.iris.semantic=true)"
             );
         }
         return true;

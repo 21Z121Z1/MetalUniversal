@@ -7,6 +7,7 @@
 
 | 日期 | 命令 | 结果 |
 |---|---|---|
+| 2026-07-28 | 合入最新 `fork/master` 后:`test metalIrisShaderTranslationTest metalIrisTargetsIntegrationTest metalMrtBackendIntegrationTest metalComputeBackendIntegrationTest buildMacNative --no-daemon` | **BUILD SUCCESSFUL**(OpenJDK 25.0.2);BSL 52/52 + Potato 44/44,terrain 6/6 PSO 全绿 |
 | 2026-07-26 | `compileJava compileTestJava test buildMacNative`(基线 ea2dfd4,master 树) | BUILD SUCCESSFUL |
 | 2026-07-26 | `buildMacNative`(新增 compute/mipmap/sampler-v2 ABI 后) | BUILD SUCCESSFUL |
 | 2026-07-26 | `compileJava` / `compileTestJava`(B0/B1 各步后) | BUILD SUCCESSFUL |
@@ -72,6 +73,6 @@
 - shadow targets:✅
 - compute/image/SSBO 后端 smoke:✅(10/10,超出 smoke 深度)
 - Iris composite/final 可执行:❌ 未实现(集成层未起步)
-- Sodium 几何走 Iris shader:❌ 未实现
-- reload/resize 不崩溃:后端层 ✅(L2);Iris 层 N/A
-- ≥1 光影包真实运行验证:❌ 未达成
+- Sodium 几何走 Iris shader:✅(真实客户端 solid/cutout override 编译并绑定;多附件 S6b 仍缺)
+- reload/resize 不崩溃:后端层 ✅(L2);注册表生命周期自动化 ✅;真实 GUI 矩阵 ❌
+- ≥1 光影包真实运行验证:❌(已进世界并命中 override,但无可见对照/持续帧证据,且该轮 SIGABRT 134)
