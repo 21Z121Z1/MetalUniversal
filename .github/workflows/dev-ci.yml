@@ -1,0 +1,52 @@
+# AI-monitorable dev CI. Trigger via workflow_dispatch or push to feat/* branches.
+# Monitor with:
+#   gh run watch --repo EternityQwQ/MetalUniversal
+#   gh run list --workflow=dev-ci.yml --repo EternityQwQ/MetalUniversal
+
+name: dev-ci
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'feat/iris-26.2-msl-pipeline'
+      - 'feat/*'
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: setup jdk
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'microsoft'
+      - name: make gradle wrapper executable
+        run: chmod +x ./gradlew
+      - name: verify cmake
+        run: |
+          if ! command -v cmake >/dev/null 2>&1; then
+            brew install cmake
+          fi
+          cmake --version
+      - name: build
+        run: ./gradlew buildMacNative buildMacSpvc buildMacGlslang build
+      - name: capture build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: metallum-dev
+          path: build/libs/
+      - name: capture native libraries
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-libs-dev
+          path: src/main/resources/natives/

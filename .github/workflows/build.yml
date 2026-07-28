@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - name: validate gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
       - name: setup jdk
@@ -29,13 +31,24 @@ jobs:
           distribution: 'microsoft'
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
+      - name: verify cmake
+        run: |
+          if ! command -v cmake >/dev/null 2>&1; then
+            brew install cmake
+          fi
+          cmake --version
       - name: build
-        run: ./gradlew buildMacNative build
+        run: ./gradlew buildMacNative buildMacSpvc buildMacGlslang buildIOSNative buildIOSSpvc buildIOSGlslang build
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:
           name: metallum
           path: build/libs/
+      - name: capture native libraries
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-libs
+          path: src/main/resources/natives/
 
   publish:
     needs: build
@@ -44,6 +57,8 @@ jobs:
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: download build artifacts
         uses: actions/download-artifact@v5
