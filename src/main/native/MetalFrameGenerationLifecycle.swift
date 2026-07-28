@@ -1,5 +1,35 @@
 import Foundation
 
+enum MetalFrameGenerationAdmissionDecision: Equatable {
+    case wait(until: CFTimeInterval)
+    case supersede
+}
+
+struct MetalFrameGenerationAdmissionPolicy {
+    static func decide(
+        now: CFTimeInterval,
+        lastDisplayUpdateTime: CFTimeInterval?,
+        activityTimeout: CFTimeInterval,
+        absoluteDeadline: CFTimeInterval
+    ) -> MetalFrameGenerationAdmissionDecision {
+        guard let lastDisplayUpdateTime,
+              now.isFinite,
+              lastDisplayUpdateTime.isFinite,
+              activityTimeout > 0.0,
+              absoluteDeadline.isFinite,
+              now >= lastDisplayUpdateTime else {
+            return .supersede
+        }
+        let activityDeadline = lastDisplayUpdateTime + activityTimeout
+        guard activityDeadline.isFinite,
+              now < activityDeadline,
+              now < absoluteDeadline else {
+            return .supersede
+        }
+        return .wait(until: min(activityDeadline, absoluteDeadline))
+    }
+}
+
 enum MetalFrameGenerationSourcePhase: String, Equatable {
     case queued
     case active
@@ -25,6 +55,44 @@ enum MetalFrameGenerationPresentationStep: Equatable {
 enum MetalFrameGenerationLifecycleAction: Equatable {
     case releaseOwnership
     case invalidateHistory
+}
+
+/// Identifies which source most recently established each presenter history.
+/// Drawable callbacks can arrive after source ownership has moved on; a stale
+/// failure must not invalidate history produced by a newer source.
+struct MetalFrameGenerationHistoryOwnership {
+    private(set) var interpolatorEventValue: UInt64?
+    private(set) var displayEventValue: UInt64?
+
+    var interpolatorValid: Bool { interpolatorEventValue != nil }
+    var displayValid: Bool { displayEventValue != nil }
+
+    mutating func recordInterpolator(eventValue: UInt64) {
+        interpolatorEventValue = eventValue
+    }
+
+    mutating func recordDisplay(eventValue: UInt64) {
+        displayEventValue = eventValue
+    }
+
+    @discardableResult
+    mutating func invalidateInterpolator(ifOwnedBy eventValue: UInt64) -> Bool {
+        guard interpolatorEventValue == eventValue else { return false }
+        interpolatorEventValue = nil
+        return true
+    }
+
+    @discardableResult
+    mutating func invalidateDisplay(ifOwnedBy eventValue: UInt64) -> Bool {
+        guard displayEventValue == eventValue else { return false }
+        displayEventValue = nil
+        return true
+    }
+
+    mutating func invalidateAll() {
+        interpolatorEventValue = nil
+        displayEventValue = nil
+    }
 }
 
 /// Metal-independent reducer for one source frame.
@@ -69,7 +137,10 @@ struct MetalFrameGenerationLifecycle {
         if hasInterpolation && !generatedSubmitted {
             return .generated
         }
-        if (!hasInterpolation || generatedCompleted) && !realSubmitted {
+        // Generated and real command buffers share one serial presenter queue.
+        // Submission order is therefore sufficient; waiting for the generated
+        // completion handler here can unnecessarily skip the next display update.
+        if (!hasInterpolation || generatedSubmitted) && !realSubmitted {
             return .real
         }
         return nil
@@ -198,7 +269,16 @@ struct MetalFrameGenerationLifecycle {
                 }
                 return terminalActions()
             }
+            // The present command buffer has finished reading the source slot
+            // and writing the CAMetalDrawable, so the slot is safe to reuse.
+            // WindowServer may report the actual scanout several refreshes
+            // later in windowed mode; retaining ownership until that callback
+            // serializes this latency into the game's source-frame rate.
             phase = .realPresentPending
+            terminalPhase = .realPresentPending
+            ownershipReleased = true
+            phase = .released
+            return [.releaseOwnership]
         }
         return []
     }

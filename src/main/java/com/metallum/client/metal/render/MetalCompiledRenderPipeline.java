@@ -12,6 +12,7 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormatElement;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
@@ -25,6 +26,9 @@ import java.util.Set;
 
 @Environment(EnvType.CLIENT)
 final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoCloseable {
+    private static final Identifier SODIUM_TERRAIN_VERTEX_SHADER =
+            Identifier.fromNamespaceAndPath("sodium", "blocks/block_layer_opaque");
+
     enum ResourceKind {
         UNIFORM_BUFFER,
         SAMPLED_IMAGE,
@@ -99,6 +103,28 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
         this.vertexBufferCount = info.getVertexFormatBindings().length;
+        if (device.metal4MainRendererEnabled()) {
+            for (ResourceBinding binding : resources) {
+                int limit = switch (binding.kind()) {
+                    case UNIFORM_BUFFER -> 31;
+                    case SAMPLED_IMAGE -> 16;
+                    case TEXEL_BUFFER -> 128;
+                };
+                if (binding.bindingIndex() >= limit) {
+                    throw new IllegalStateException(
+                            "Metal 4 pipeline " + info.getLocation() + " has " + binding.kind()
+                                    + " binding index " + binding.bindingIndex() + ", limit is " + (limit - 1)
+                    );
+                }
+            }
+            if (this.firstAvailableVertexBufferSlot + this.vertexBufferCount > 31) {
+                throw new IllegalStateException(
+                        "Metal 4 pipeline " + info.getLocation() + " needs vertex buffer slot "
+                                + (this.firstAvailableVertexBufferSlot + this.vertexBufferCount - 1)
+                                + ", limit is 30"
+                );
+            }
+        }
 
         MTLCompareFunction depthCompareOp;
         int depthWrite;
@@ -317,6 +343,15 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     @Nullable
     ResourceBinding resource(final String name) {
         return this.resourcesByName.get(name);
+    }
+
+    boolean usesStableTerrainSampler(final ResourceBinding binding) {
+        return binding.kind() == ResourceKind.SAMPLED_IMAGE
+                && isSodiumTerrainBlockSampler(binding.name(), this.info.getVertexShader());
+    }
+
+    static boolean isSodiumTerrainBlockSampler(final String bindingName, final Identifier vertexShader) {
+        return "u_BlockTex".equals(bindingName) && SODIUM_TERRAIN_VERTEX_SHADER.equals(vertexShader);
     }
 
     int firstAvailableVertexBufferSlot() {

@@ -50,4 +50,5 @@ final class MetalShaderLodBiasTest {
         String msl = "float4 c = tex.sample(smplr, uv);";
         assertSame(msl, MetalCrossShaderCompiler.applySampleLodBias(msl, 0.0F));
     }
+
 }

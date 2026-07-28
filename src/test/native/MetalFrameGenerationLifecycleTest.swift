@@ -19,6 +19,76 @@ private func expect(
     }
 }
 
+private func testAdmissionTracksDisplayActivity() throws {
+    let freshDecision = MetalFrameGenerationAdmissionPolicy.decide(
+        now: 10.0,
+        lastDisplayUpdateTime: 9.98,
+        activityTimeout: 0.05,
+        absoluteDeadline: 10.02
+    )
+    guard case .wait(let deadline) = freshDecision else {
+        throw TestFailure.assertion("fresh display activity must preserve the current source")
+    }
+    try expect(abs(deadline - 10.02) < 0.000_001, "absolute deadline must cap fresh activity")
+    try expect(
+        MetalFrameGenerationAdmissionPolicy.decide(
+            now: 10.04,
+            lastDisplayUpdateTime: 9.98,
+            activityTimeout: 0.05,
+            absoluteDeadline: 10.10
+        ) == .supersede,
+        "stale display activity must use latest-source-wins"
+    )
+    try expect(
+        MetalFrameGenerationAdmissionPolicy.decide(
+            now: 10.0,
+            lastDisplayUpdateTime: nil,
+            activityTimeout: 0.05,
+            absoluteDeadline: 10.02
+        ) == .supersede,
+        "a display that has never updated must not block the render thread"
+    )
+    try expect(
+        MetalFrameGenerationAdmissionPolicy.decide(
+            now: 10.02,
+            lastDisplayUpdateTime: 10.019,
+            activityTimeout: 0.05,
+            absoluteDeadline: 10.02
+        ) == .supersede,
+        "continuous callbacks must not extend the absolute admission deadline"
+    )
+    let activityBoundary = 9.98 + 0.05
+    try expect(
+        MetalFrameGenerationAdmissionPolicy.decide(
+            now: activityBoundary,
+            lastDisplayUpdateTime: 9.98,
+            activityTimeout: 0.05,
+            absoluteDeadline: 10.10
+        ) == .supersede,
+        "the activity timeout boundary must supersede"
+    )
+    for invalid in [Double.nan, Double.infinity, -Double.infinity] {
+        try expect(
+            MetalFrameGenerationAdmissionPolicy.decide(
+                now: invalid,
+                lastDisplayUpdateTime: 9.99,
+                activityTimeout: 0.05,
+                absoluteDeadline: 10.02
+            ) == .supersede,
+            "non-finite admission timestamps must supersede"
+        )
+    }
+    try expect(
+        MetalFrameGenerationAdmissionPolicy.decide(
+            now: 10.0,
+            lastDisplayUpdateTime: 10.01,
+            activityTimeout: 0.05,
+            absoluteDeadline: 10.02
+        ) == .supersede,
+        "future display timestamps must supersede"
+    )
+}
+
 private func makeReady(
     sourceFrameID: UInt64,
     interpolation: Bool
@@ -34,14 +104,32 @@ private func testGeneratedThenReal() throws {
     var state = try makeReady(sourceFrameID: 1, interpolation: true)
     try expect(state.nextPresentationStep == .generated, "generated must be first")
     _ = state.submitPresentation(.generated)
+    try expect(state.nextPresentationStep == .real, "serial queue order permits real submission")
+    _ = state.submitPresentation(.real)
     _ = state.recordPresented(.generated, presentedTime: 1.0)
     _ = state.completeGPUWork(.generated, succeeded: true)
-    try expect(state.nextPresentationStep == .real, "real must follow generated completion")
+    let actions = state.completeGPUWork(.real, succeeded: true)
+    try expect(
+        state.terminalPhase == .realPresentPending,
+        "real GPU completion must not claim a WindowServer presentation"
+    )
+    try expect(actions == [.releaseOwnership], "real GPU completion releases source ownership")
+    try expect(
+        state.recordPresented(.real, presentedTime: 2.0).isEmpty,
+        "late presented callback cannot release ownership twice"
+    )
+}
+
+private func testPresentedBeforeGPUCompletion() throws {
+    var state = try makeReady(sourceFrameID: 12, interpolation: false)
     _ = state.submitPresentation(.real)
-    _ = state.completeGPUWork(.real, succeeded: true)
-    let actions = state.recordPresented(.real, presentedTime: 2.0)
-    try expect(state.terminalPhase == .presented, "real presentation must complete source")
-    try expect(actions == [.releaseOwnership], "normal path releases exactly once")
+    try expect(
+        state.recordPresented(.real, presentedTime: 2.0).isEmpty,
+        "presented callback must still wait for GPU completion"
+    )
+    let actions = state.completeGPUWork(.real, succeeded: true)
+    try expect(state.terminalPhase == .presented, "early callback records a real presentation")
+    try expect(actions == [.releaseOwnership], "GPU completion releases after early callback")
 }
 
 private func testGuiSuspendAndResizeCancel() throws {
@@ -60,6 +148,59 @@ private func testEnqueueThenShutdown() throws {
     try expect(!cancelActions.contains(.releaseOwnership), "input GPU work must drain before release")
     let completionActions = state.completeGPUWork(.input, succeeded: true)
     try expect(completionActions.contains(.releaseOwnership), "drained cancelled source must release")
+}
+
+private func testNewerSourceSupersedesStalledSource() throws {
+    var inputInFlight = MetalFrameGenerationLifecycle(sourceFrameID: 13)
+    _ = inputInFlight.submitInput()
+    let cancelActions = inputInFlight.cancel(reason: "superseded by newer source")
+    try expect(
+        !cancelActions.contains(.releaseOwnership),
+        "supersession must not reuse textures while input GPU work is in flight"
+    )
+    let completionActions = inputInFlight.completeGPUWork(.input, succeeded: true)
+    try expect(
+        completionActions.contains(.releaseOwnership),
+        "superseded input must release as soon as its GPU work drains"
+    )
+    try expect(
+        inputInFlight.terminalPhase == .cancelled,
+        "superseded input must remain a cancellation, not a presentation"
+    )
+
+    var waitingForDisplay = try makeReady(sourceFrameID: 14, interpolation: true)
+    let displayActions = waitingForDisplay.cancel(reason: "superseded by newer source")
+    try expect(
+        displayActions.contains(.releaseOwnership),
+        "a source with no presentation GPU work must release without a display update"
+    )
+}
+
+private func testStaleCallbackCannotInvalidateNewerHistory() throws {
+    var history = MetalFrameGenerationHistoryOwnership()
+    history.recordInterpolator(eventValue: 20)
+    history.recordDisplay(eventValue: 20)
+    history.recordInterpolator(eventValue: 21)
+    history.recordDisplay(eventValue: 21)
+
+    try expect(
+        !history.invalidateInterpolator(ifOwnedBy: 20),
+        "stale generated callback must not invalidate newer interpolator history"
+    )
+    try expect(
+        !history.invalidateDisplay(ifOwnedBy: 20),
+        "stale real callback must not invalidate newer display history"
+    )
+    try expect(history.interpolatorValid, "newer interpolator history must remain valid")
+    try expect(history.displayValid, "newer display history must remain valid")
+    try expect(
+        history.invalidateInterpolator(ifOwnedBy: 21),
+        "owning generated callback must invalidate its history"
+    )
+    try expect(
+        history.invalidateDisplay(ifOwnedBy: 21),
+        "owning real callback must invalidate its history"
+    )
 }
 
 private func testGeneratedSubmittedShutdown() throws {
@@ -105,11 +246,10 @@ private func testStaleDisplayUpdateDoesNotAdvance() throws {
 private func testDuplicateCallbackAndIdempotentRelease() throws {
     var state = try makeReady(sourceFrameID: 10, interpolation: false)
     _ = state.submitPresentation(.real)
-    _ = state.completeGPUWork(.real, succeeded: true)
-    let first = state.recordPresented(.real, presentedTime: 3.0)
+    let first = state.completeGPUWork(.real, succeeded: true)
     let duplicate = state.recordPresented(.real, presentedTime: 3.0)
     let cancelAfterRelease = state.cancel(reason: "duplicate shutdown")
-    try expect(first == [.releaseOwnership], "first presented callback releases")
+    try expect(first == [.releaseOwnership], "GPU completion releases")
     try expect(duplicate.isEmpty, "duplicate callback is ignored")
     try expect(cancelAfterRelease.isEmpty, "release is idempotent")
 }
@@ -117,8 +257,8 @@ private func testDuplicateCallbackAndIdempotentRelease() throws {
 private func testPresentedTimeZeroFails() throws {
     var state = try makeReady(sourceFrameID: 11, interpolation: false)
     _ = state.submitPresentation(.real)
-    _ = state.completeGPUWork(.real, succeeded: true)
-    let actions = state.recordPresented(.real, presentedTime: 0.0)
+    _ = state.recordPresented(.real, presentedTime: 0.0)
+    let actions = state.completeGPUWork(.real, succeeded: true)
     try expect(state.terminalPhase == .failed, "presentedTime zero is not success")
     try expect(actions.contains(.releaseOwnership), "non-presented real frame releases")
 }
@@ -127,15 +267,19 @@ private func testPresentedTimeZeroFails() throws {
 private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
+            ("display-aware source admission", testAdmissionTracksDisplayActivity),
             ("generated then real", testGeneratedThenReal),
             ("GUI suspend and resize", testGuiSuspendAndResizeCancel),
             ("enqueue then shutdown", testEnqueueThenShutdown),
+            ("newer source supersedes stalled source", testNewerSourceSupersedesStalledSource),
+            ("stale callback preserves newer history", testStaleCallbackCannotInvalidateNewerHistory),
             ("generated submitted shutdown", testGeneratedSubmittedShutdown),
             ("real submitted shutdown", testRealSubmittedShutdown),
             ("command buffer failure", testCommandBufferFailure),
             ("stale display update", testStaleDisplayUpdateDoesNotAdvance),
             ("duplicate callback and idempotent release", testDuplicateCallbackAndIdempotentRelease),
-            ("presentedTime zero", testPresentedTimeZeroFails)
+            ("presentedTime zero", testPresentedTimeZeroFails),
+            ("presented before GPU completion", testPresentedBeforeGPUCompletion)
         ]
         do {
             for (name, test) in tests {
