@@ -61,6 +61,10 @@ final class MetalRenderPass implements RenderPassBackend {
     private boolean vertexBuffersDirty = true;
     private boolean pipelineDirty = true;
     private long boundEncoderGeneration = -1L;
+    @Nullable
+    private MTLRenderCommandEncoder nativeEncoder;
+    private final long cpuTimingStartNanos = System.nanoTime();
+    private boolean cpuTimingRecorded;
 
     MetalRenderPass(
             final MetalDevice device,
@@ -75,7 +79,9 @@ final class MetalRenderPass implements RenderPassBackend {
     ) {
         this.device = device;
         this.commandEncoder = encoder;
-        this.label = device.useLabels() ? label.get() : null;
+        this.label = device.useLabels() || MetalGpuTimingRecorder.passTimingEnabled()
+                ? label.get()
+                : null;
         this.colorTextures = colorTextures.clone();
         this.depthTexture = depthTexture;
         this.renderArea = renderArea;
@@ -384,7 +390,24 @@ final class MetalRenderPass implements RenderPassBackend {
         }
     }
 
+    void finishTiming() {
+        if (cpuTimingRecorded) {
+            return;
+        }
+        cpuTimingRecorded = true;
+        MetalGpuTimingRecorder.recordCpuPass(
+                label == null ? "unlabeled render pass" : label,
+                cpuTimingStartNanos,
+                System.nanoTime()
+        );
+    }
+
     private MTLRenderCommandEncoder renderEncoder() {
+        if (nativeEncoder != null && commandEncoder.isCurrentEncoder(nativeEncoder)) {
+            MetalGpuTimingRecorder.recordRenderEncoderLookup(true);
+            return nativeEncoder;
+        }
+        MetalGpuTimingRecorder.recordRenderEncoderLookup(false);
         MetalGpuTextureView[] colorTextureViews = new MetalGpuTextureView[colorTextures.length];
         int[] clearColorEnabled = new int[colorTextures.length];
         float[] clearColorValues = new float[colorTextures.length * 4];
@@ -414,8 +437,10 @@ final class MetalRenderPass implements RenderPassBackend {
                 clearColorEnabled,
                 clearColorValues,
                 clearDepthNow,
-                clearDepthValue
+                clearDepthValue,
+                label == null ? "unlabeled render pass" : label
         );
+        nativeEncoder = encoder;
         clearColors = null;
         clearDepthEnabled = false;
         long generation = commandEncoder.encoderGeneration();
@@ -641,6 +666,10 @@ final class MetalRenderPass implements RenderPassBackend {
 
             MetalGpuTextureView textureView = (MetalGpuTextureView) textureBinding.textureView();
             MetalGpuSampler sampler = (MetalGpuSampler) textureBinding.sampler();
+            if (MetalFxManager.usesTemporalUpscaling()
+                    && compiledPipeline.usesStableTerrainSampler(binding)) {
+                sampler = device.stableTerrainSampler(sampler);
+            }
             enc.setTextureAndSampler(textureView.nativeHandle(), sampler.nativeHandle(), binding.bindingIndex(), binding.stageMask());
             return;
         }

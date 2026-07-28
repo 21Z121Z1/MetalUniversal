@@ -122,7 +122,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return blit;
         }
         endEncoder();
-        MTLBlitCommandEncoder encoder = commandBuffer().makeBlitCommandEncoder();
+        MTLBlitCommandEncoder encoder = commandBuffer().makeBlitCommandEncoder("batched upload/copy");
         encoder.waitForFence(fence);
         if (SPLIT_FENCE) {
             // Transfer-chain ordering (WAW/upload sequencing between blits)
@@ -161,6 +161,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     long encoderGeneration() {
         return encoderGeneration;
+    }
+
+    boolean isCurrentEncoder(final MTLRenderCommandEncoder encoder) {
+        return currentEncoder == encoder;
     }
 
     /**
@@ -330,7 +334,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int[] clearColorEnabled,
             final float[] clearColorValues,
             final boolean clearDepthEnabled,
-            final double clearDepthValue
+            final double clearDepthValue,
+            final String label
     ) {
         if (colorTextureViews == null || colorTextureViews.length > Math.min(
                 com.mojang.blaze3d.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
@@ -370,7 +375,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 clearColorEnabled,
                 clearColorValues,
                 clearDepthEnabled ? 1 : 0,
-                clearDepthValue
+                clearDepthValue,
+                label
         );
         waitRenderFences(encoder);
         encoderGeneration++;
@@ -542,6 +548,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     public void submitRenderPass() {
         if (currentRenderPass != null) {
             currentRenderPass.materializePendingClear();
+            currentRenderPass.finishTiming();
             currentRenderPass.popDebugGroup();
             currentRenderPass = null;
         }
@@ -553,6 +560,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         if (frameInput != null) {
             flushPendingClear(source);
             flushPendingClear(frameInput.sceneColor());
+            flushPendingClear(frameInput.nativeSceneColor());
             flushPendingClear(frameInput.depth());
             flushPendingClear(frameInput.motion());
             submitRenderPass();
@@ -563,6 +571,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     device.metalDeviceHandle(),
                     layer,
                     frameInput.sceneColor().nativeHandle(),
+                    frameInput.nativeSceneColor().nativeHandle(),
                     frameInput.uiColor().nativeHandle(),
                     frameInput.depth().nativeHandle(),
                     frameInput.motion().nativeHandle(),
@@ -579,6 +588,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     fence
             );
             if (queued) {
+                MetalFxManager.recordFrameGenerationQueued();
                 return;
             }
             MetalFxManager.disableFrameGeneration("native frame generation encode failed");
@@ -659,6 +669,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     boolean encodeMetalFxV2(
             final MetalGpuTexture color,
             final MetalGpuTexture depth,
+            @Nullable final MetalGpuTexture handDepth,
+            final float handReactiveBoost,
             final MetalGpuTexture cameraMotion,
             final MetalGpuTexture objectMotion,
             final MetalGpuTexture objectValidity,
@@ -674,10 +686,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int inputHeight,
             final boolean reset,
             final boolean depthReversed,
-            final boolean preserveReactiveMask
+            final boolean preserveReactiveMask,
+            final boolean emitMotionDiagnostics
     ) {
         flushPendingClear(color);
         flushPendingClear(depth);
+        if (handDepth != null) flushPendingClear(handDepth);
         flushPendingClear(cameraMotion);
         flushPendingClear(objectMotion);
         flushPendingClear(objectValidity);
@@ -698,6 +712,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 device.metalDeviceHandle(),
                 color.nativeHandle(),
                 depth.nativeHandle(),
+                handDepth == null ? MemorySegment.NULL : handDepth.nativeHandle(),
                 cameraMotion.nativeHandle(),
                 objectMotion.nativeHandle(),
                 objectValidity.nativeHandle(),
@@ -710,11 +725,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 previousViewProjection.get(previousViewProjectionBuffer),
                 pixelJitter.x,
                 pixelJitter.y,
+                handReactiveBoost,
                 inputWidth,
                 inputHeight,
                 reset,
                 depthReversed,
                 preserveReactiveMask,
+                emitMotionDiagnostics,
                 fence
         );
     }
@@ -1244,7 +1261,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoder(
                 colorClear != null ? texture.nativeHandle() : null,
                 depthClear != null ? texture.nativeHandle() : null,
-                1.0, 1.0,
+                // Metal 4 carries the render-target dimensions explicitly.
+                // Metal 3 load-action clears historically ignored this
+                // viewport-sized hint and cleared the full attachment, but a
+                // 1x1 Metal 4 pass only initializes one pixel. Use the full
+                // resource extent so delayed clears remain deterministic when
+                // no later full-frame writer happens to mask the bug.
+                texture.getWidth(0), texture.getHeight(0),
                 colorClear != null ? 1 : 0,
                 colorClear != null ? colorClear.x() : 0.0F,
                 colorClear != null ? colorClear.y() : 0.0F,
@@ -1305,6 +1328,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 return;
             }
             completionHandled = true;
+            MetalGpuTimingRecorder.record(index, buffer.gpuStartTime(), buffer.gpuEndTime());
             if (!buffer.completedSuccessfully()) {
                 for (SubmitCallback callback : callbacks) {
                     callback.failed.run();

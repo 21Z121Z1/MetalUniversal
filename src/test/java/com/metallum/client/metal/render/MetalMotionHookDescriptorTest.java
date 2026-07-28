@@ -96,6 +96,19 @@ final class MetalMotionHookDescriptorTest {
     }
 
     @Test
+    void theWrapperStillHasAMethodToBeScopedTo() {
+        Class<?> renderer = load(MetalMotionHooks.MOVING_BLOCK_FEATURE_RENDERER_CLASS);
+        List<Method> candidates = Arrays.stream(renderer.getDeclaredMethods())
+                .filter(method -> method.getName().equals(MetalMotionHooks.BUILD_GROUP_METHOD))
+                .toList();
+
+        assertEquals(1, candidates.size(),
+                renderer.getName() + " declares " + candidates.size() + " methods named "
+                        + MetalMotionHooks.BUILD_GROUP_METHOD + "; the wrapper scopes itself by that name"
+                        + " alone, so zero makes it unplaceable and more than one makes it ambiguous");
+    }
+
+    @Test
     void theRedirectTargetIsBuiltFromTheCheckedName() {
         // Guards the composition itself: the target string is what Mixin matches on,
         // and the two halves this test verified are only useful if the target is

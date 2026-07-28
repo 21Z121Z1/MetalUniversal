@@ -59,6 +59,12 @@ tasks.withType(JavaExec).configureEach {
 		def validationWorld = System.getProperty("metallum.validation.world")
 		def dedicatedValidation = gradle.startParameter.taskNames.any {
 			it == "minecraftMetalFxClientValidation" || it.endsWith(":minecraftMetalFxClientValidation")
+						|| it == "minecraftNativeFullscreenBaseline"
+						|| it.endsWith(":minecraftNativeFullscreenBaseline")
+						|| it == "minecraftNativeRenderEfficiencyValidation"
+						|| it.endsWith(":minecraftNativeRenderEfficiencyValidation")
+					|| it == "minecraftNativeFrameGenerationValidation"
+					|| it.endsWith(":minecraftNativeFrameGenerationValidation")
 		}
 		if (!dedicatedValidation && validationWorld != null && !validationWorld.isBlank()) {
 			args "--quickPlaySingleplayer", validationWorld
@@ -109,10 +115,12 @@ tasks.register("buildMacNative", Exec) {
 def metalMrtSmokeBinary = file("${buildDir}/metal-tests/MetalMRTSmokeTest")
 def metal4PipelineSmokeBinary = file("${buildDir}/metal-tests/Metal4PipelineSmokeTest")
 def metal4PipelinePathBinary = file("${buildDir}/metal-tests/Metal4PipelinePathTest")
+def metalHudRuntimeTestBinary = file("${buildDir}/metal-tests/MetalHudRuntimeTest")
 def metalFrameGenerationLifecycleTestBinary = file("${buildDir}/metal-tests/MetalFrameGenerationLifecycleTest")
 def metalFrameGenerationPresentationValidationBinary = file("${buildDir}/metal-tests/MetalFrameGenerationPresentationValidation")
 def metalFxOffscreenValidationBinary = file("${buildDir}/metal-tests/MetalFXOffscreenValidation")
 def metalFxOffscreenValidationOutput = file("${buildDir}/metal-validation/offscreen-current")
+def metalFxPerformanceValidationBinary = file("${buildDir}/metal-tests/MetalFXPerformanceValidation")
 
 tasks.register("compileMetalMrtSmokeTest", Exec) {
 	onlyIf {
@@ -229,6 +237,45 @@ tasks.register("metal4PipelinePathTest", Exec) {
 	commandLine metal4PipelinePathBinary.absolutePath
 }
 
+tasks.register("compileMetalHudRuntimeTest", Exec) {
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "buildMacNative"
+	workingDir project.projectDir
+	inputs.files(
+		"src/main/resources/natives/macos/libmetallum.dylib",
+		"src/test/native/MetalHudRuntimeTest.swift"
+	)
+	outputs.file(metalHudRuntimeTestBinary)
+	doFirst {
+		metalHudRuntimeTestBinary.parentFile.mkdirs()
+	}
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "QuartzCore",
+		"-L", file("src/main/resources/natives/macos").absolutePath,
+		"-lmetallum",
+		"-o", metalHudRuntimeTestBinary.absolutePath,
+		"src/test/native/MetalHudRuntimeTest.swift"
+}
+
+tasks.register("metalHudRuntimeTest", Exec) {
+	group = "verification"
+	description = "Checks Apple Metal HUD runtime toggle plus MetalFX metric selector availability."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "compileMetalHudRuntimeTest"
+	workingDir project.projectDir
+	environment "MTL_HUD_ENABLED", "1"
+	commandLine metalHudRuntimeTestBinary.absolutePath
+}
+
 tasks.register("compileMetalFrameGenerationLifecycleTest", Exec) {
 	onlyIf {
 		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
@@ -281,14 +328,77 @@ tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
 		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
 }
 
+// MetalFrameGenerationPresentationValidation.swift guards its whole body with
+// @available(macOS 26.0, *) and signals "unsupported host" by exiting 77, the
+// autotools skip convention. Exec has no notion of 77: it fails on any nonzero
+// exit, so on macOS 15 the build failed with a message that said SKIPPED. The
+// version has to be gated here instead, and gating it in onlyIf rather than
+// mapping 77 to exit 0 is deliberate — a skipped task is reported as SKIPPED,
+// whereas a zero exit would be reported as a task that ran and passed while
+// validating nothing.
+def macOsMajorVersion = -1
+if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+	def versionMatch = (System.getProperty("os.version", "") =~ /^(\d+)/)
+	if (versionMatch.find()) {
+		macOsMajorVersion = versionMatch.group(1) as int
+	}
+}
+def presentationValidationSkipReason = {
+	if (!org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		return "macOS is required"
+	}
+	// -1 means os.version did not parse; treat that as unknown rather than old,
+	// so a host that can run the harness is never silently skipped.
+	if (macOsMajorVersion >= 0 && macOsMajorVersion < 26) {
+		return "macOS 26 is required (found ${System.getProperty('os.version')})"
+	}
+	return null
+}
+
+// WindowServer does not scan out CAMetalLayer drawables while the console is
+// locked; presented handlers then report presentedTime == 0 even though the GPU
+// command buffers completed. Detect that state before starting a multi-minute
+// visible validation so a missing foreground session cannot masquerade as a
+// renderer or frame-interpolator regression.
+def lockedConsoleValidationReason = {
+	if (!org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		return null
+	}
+	def process = new ProcessBuilder("/usr/sbin/ioreg", "-n", "Root", "-d1")
+			.redirectErrorStream(true)
+			.start()
+	def output = process.inputStream.getText("UTF-8")
+	def exitCode = process.waitFor()
+	if (exitCode != 0) {
+		return "could not query the macOS console lock state (ioreg exit ${exitCode})".toString()
+	}
+	if (output.contains('"IOConsoleLocked" = Yes')
+			|| output.contains('"CGSSessionScreenIsLocked"=Yes')) {
+		return "the macOS console is locked; WindowServer cannot provide nonzero presentedTime callbacks".toString()
+	}
+	return null
+}
+
+def requireUnlockedConsoleForPresentation = {
+	def reason = lockedConsoleValidationReason()
+	if (reason != null) {
+		throw new GradleException("Visible MetalFX presentation validation cannot run: ${reason}.")
+	}
+}
+
 tasks.register("metalFrameGenerationPresentationValidation", Exec) {
 	group = "verification"
 	description = "Runs an automatic visible-window CAMetalDisplayLink pacing, resize and shutdown validation."
 	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+		def reason = presentationValidationSkipReason()
+		if (reason != null) {
+			logger.lifecycle("metalFrameGenerationPresentationValidation SKIPPED: ${reason}")
+		}
+		reason == null
 	}
 	dependsOn "compileMetalFrameGenerationPresentationValidation"
 	doFirst {
+		requireUnlockedConsoleForPresentation()
 		delete file("${buildDir}/metal-validation/presentation-current")
 	}
 	environment "MTL_DEBUG_LAYER", "1"
@@ -305,14 +415,24 @@ tasks.register("metalFrameGenerationPresentationValidation", Exec) {
 tasks.register("metal4PresentValidation", Exec) {
 	group = "verification"
 	description = "Runs the frame-generation presentation validation with the Metal 4 present path enabled (migration spec M4)."
+	// Same binary, so the same macOS 26 floor applies.
 	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+		def reason = presentationValidationSkipReason()
+		if (reason != null) {
+			logger.lifecycle("metal4PresentValidation SKIPPED: ${reason}")
+		}
+		reason == null
 	}
 	dependsOn "compileMetalFrameGenerationPresentationValidation"
 	doFirst {
+		requireUnlockedConsoleForPresentation()
 		delete file("${buildDir}/metal-validation/presentation-metal4")
 	}
-	environment "MTL_DEBUG_LAYER", "1"
+	// macOS 26.5 MetalFX calls globalTraceObjectID on the Debug Layer's
+	// MTL4DebugComputeCommandEncoder wrapper and aborts before the first frame.
+	// Keep API Validation on the headless Metal 4 path test; the real MTL4FX
+	// interpolator must run against the release encoder until Apple fixes it.
+	environment "MTL_DEBUG_LAYER", "0"
 	environment "MTL_SHADER_VALIDATION", "0"
 	environment "METALLUM_VALIDATE_METAL4_PRESENT", "1"
 	commandLine metalFrameGenerationPresentationValidationBinary.absolutePath,
@@ -366,6 +486,34 @@ tasks.register("metalFxOffscreenValidation", Exec) {
 	// Validation in metalMrtBackendIntegrationTest.
 	environment "MTL_SHADER_VALIDATION", "0"
 	commandLine metalFxOffscreenValidationBinary.absolutePath, metalFxOffscreenValidationOutput.absolutePath
+}
+
+tasks.register("compileMetalFxPerformanceValidation", Exec) {
+	onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX() }
+	workingDir project.projectDir
+	inputs.file("src/test/native/MetalFXPerformanceValidation.swift")
+	outputs.file(metalFxPerformanceValidationBinary)
+	doFirst { metalFxPerformanceValidationBinary.parentFile.mkdirs() }
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-o", metalFxPerformanceValidationBinary.absolutePath,
+		"src/test/native/MetalFXPerformanceValidation.swift"
+}
+
+tasks.register("metalFxPerformanceValidation", Exec) {
+	group = "verification"
+	description = "Measures Temporal and FrameInterpolator GPU cost across production resolutions."
+	onlyIf { presentationValidationSkipReason() == null }
+	dependsOn "compileMetalFxPerformanceValidation"
+	doFirst { delete file("${buildDir}/metal-validation/performance-current") }
+	environment "MTL_SHADER_VALIDATION", "0"
+	commandLine metalFxPerformanceValidationBinary.absolutePath,
+			file("${buildDir}/metal-validation/performance-current").absolutePath
 }
 
 tasks.register("metalMrtBackendIntegrationTest", Test) {
@@ -475,6 +623,7 @@ tasks.named("check") {
 	dependsOn "metalComputeBackendIntegrationTest"
 	dependsOn "metalIrisTargetsIntegrationTest"
 	dependsOn "metalFxOffscreenValidation"
+	dependsOn "metalFxPerformanceValidation"
 	dependsOn "metalMrtSmokeTest"
 	// Windowed CAMetalDisplayLink pacing/resize/shutdown acceptance. Requires
 	// a WindowServer session; headless CI should exclude it with -x.
@@ -539,17 +688,151 @@ tasks.register("minecraftMetalFxClientValidation") {
 	}
 }
 
-if (gradle.startParameter.taskNames.any {
+tasks.register("minecraftMetalFxLockedBackpressureValidation") {
+	group = "verification"
+	description = "Runs locked-console Minecraft Quick Play and gates FrameGen source-admission backpressure only."
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		dependsOn "runClient"
+	} else {
+		doLast {
+			logger.lifecycle("minecraftMetalFxLockedBackpressureValidation SKIPPED: macOS Metal is required")
+		}
+	}
+}
+
+tasks.register("minecraftNativeFullscreenBaseline") {
+	group = "verification"
+	description = "Measures MetalFX-off native Retina fullscreen Minecraft source cadence and GPU time."
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		dependsOn "runClient"
+	} else {
+		doLast {
+			logger.lifecycle("minecraftNativeFullscreenBaseline SKIPPED: macOS Metal is required")
+		}
+	}
+}
+
+tasks.register("minecraftNativeRenderEfficiencyValidation") {
+	group = "verification"
+	description = "Profiles MetalFX-off native Retina rendering by logical pass and native encoder."
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		dependsOn "runClient"
+	} else {
+		doLast {
+			logger.lifecycle("minecraftNativeRenderEfficiencyValidation SKIPPED: macOS Metal is required")
+		}
+	}
+}
+
+tasks.register("minecraftNativeFrameGenerationValidation") {
+	group = "verification"
+	description = "Measures native Retina 3D with bounded Metal 4 FrameGen and native real frames."
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		dependsOn "runClient"
+	} else {
+		doLast {
+			logger.lifecycle("minecraftNativeFrameGenerationValidation SKIPPED: macOS Metal is required")
+		}
+	}
+}
+
+def lockedBackpressureValidationRequested = gradle.startParameter.taskNames.any {
+	it == "minecraftMetalFxLockedBackpressureValidation"
+			|| it.endsWith(":minecraftMetalFxLockedBackpressureValidation")
+}
+def minecraftMetalFxValidationRequested = gradle.startParameter.taskNames.any {
 	it == "minecraftMetalFxClientValidation" || it.endsWith(":minecraftMetalFxClientValidation")
-}) {
+}
+def nativeFullscreenBaselineRequested = gradle.startParameter.taskNames.any {
+	it == "minecraftNativeFullscreenBaseline" || it.endsWith(":minecraftNativeFullscreenBaseline")
+}
+def nativeRenderEfficiencyValidationRequested = gradle.startParameter.taskNames.any {
+	it == "minecraftNativeRenderEfficiencyValidation"
+			|| it.endsWith(":minecraftNativeRenderEfficiencyValidation")
+}
+nativeFullscreenBaselineRequested = nativeFullscreenBaselineRequested
+		|| nativeRenderEfficiencyValidationRequested
+def nativeFrameGenerationValidationRequested = gradle.startParameter.taskNames.any {
+	it == "minecraftNativeFrameGenerationValidation"
+			|| it.endsWith(":minecraftNativeFrameGenerationValidation")
+}
+if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
+		|| nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested) {
+	def requestedValidationOutput = System.getProperty("metallum.validation.output")
+	def validationOutputDir = requestedValidationOutput == null
+			? file("${buildDir}/metal-validation/"
+			+ (nativeFrameGenerationValidationRequested
+					? "minecraft-native-framegen-current"
+					: nativeRenderEfficiencyValidationRequested
+					? "minecraft-native-render-efficiency-current"
+					: nativeFullscreenBaselineRequested
+					? "minecraft-native-fullscreen-current"
+					: lockedBackpressureValidationRequested
+					? "minecraft-client-locked-backpressure-current"
+					: "minecraft-client-current"))
+			: file(requestedValidationOutput)
+	def requestedFrameGeneration = nativeFrameGenerationValidationRequested
+			? "true"
+			: lockedBackpressureValidationRequested
+			? "true"
+			: System.getProperty("metallum.metalfx.frameGeneration", "false")
+	def requestedObjectMotionProducer = nativeFrameGenerationValidationRequested
+			? "true"
+			: lockedBackpressureValidationRequested
+			? "true"
+			: System.getProperty("metallum.metalfx.objectMotionProducer", "false")
+	def requestedFrameGenerationOutputWidth = System.getProperty(
+			"metallum.metalfx.frameGenerationOutputWidth", "1280")
+	def expectedFrameGenerationPresentPath = System.getProperty(
+			"metallum.opt.metal4Present", "false").toBoolean() ? "metal4" : "metal3"
+		def normalizedFrameGenerationOutputWidth = requestedFrameGenerationOutputWidth
+				.trim().toLowerCase(Locale.ROOT)
 	tasks.named("runClient") {
 		doFirst {
-			delete file("${buildDir}/metal-validation/minecraft-client-current")
+			if (lockedBackpressureValidationRequested) {
+				def reason = lockedConsoleValidationReason()
+				if (reason == null || !reason.startsWith("the macOS console is locked")) {
+					throw new GradleException(
+							"Locked FrameGen backpressure validation requires a confirmed locked console;"
+									+ " found: ${reason ?: 'console is unlocked'}."
+					)
+				}
+				} else if (requestedFrameGeneration.toBoolean() || nativeFullscreenBaselineRequested) {
+					requireUnlockedConsoleForPresentation()
+			}
+			delete validationOutputDir
 		}
 		systemProperty "metallum.validation.enabled", "true"
-		systemProperty "metallum.validation.output",
-				file("${buildDir}/metal-validation/minecraft-client-current").absolutePath
-		systemProperty "metallum.metalfx.mode", "TEMPORAL"
+		systemProperty "metallum.validation.output", validationOutputDir.absolutePath
+		["metallum.opt.metal4", "metallum.opt.metal4MainRenderer"].each { propertyName ->
+			def requestedValue = System.getProperty(propertyName)
+			if (requestedValue != null) {
+				systemProperty propertyName, requestedValue
+			}
+		}
+		systemProperty "metallum.metalfx.mode",
+				nativeFullscreenBaselineRequested ? "OFF" : "TEMPORAL"
+			if (nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested) {
+				systemProperty "metallum.validation.performanceOnly", "true"
+				systemProperty "metallum.validation.gpuTiming", "true"
+			}
+			if (nativeRenderEfficiencyValidationRequested) {
+				systemProperty "metallum.validation.gpuPassTiming", "true"
+				systemProperty "metallum.opt.metal4", "true"
+				systemProperty "metallum.opt.metal4MainQueuePilot", "true"
+				systemProperty "metallum.opt.metal4MainRenderer", System.getProperty(
+						"metallum.opt.metal4MainRenderer", "false")
+			}
+		if (nativeFrameGenerationValidationRequested) {
+			systemProperty "metallum.metalfx.nativeDirectFrameGeneration", "true"
+			systemProperty "metallum.opt.metal4", "true"
+			systemProperty "metallum.opt.metal4Compiler", "true"
+			systemProperty "metallum.opt.metal4Present", "true"
+		}
+		def requestedScale = System.getProperty("metallum.metalfx.scale")
+		if (requestedScale != null) {
+			systemProperty "metallum.metalfx.scale", requestedScale
+		}
 		systemProperty "metallum.metalfx.debug", "true"
 		// Frame generation stays off by default: the readback captures are the
 		// deterministic attachment gate, and an asynchronous presenter would race
@@ -559,14 +842,39 @@ if (gradle.startParameter.taskNames.any {
 		// (the second one opens the OBJECT_MOTION_PRODUCER_CONNECTED gate without
 		// changing what ships).
 		systemProperty "metallum.metalfx.frameGeneration",
-				System.getProperty("metallum.metalfx.frameGeneration", "false")
+				nativeFullscreenBaselineRequested ? "false" : requestedFrameGeneration
 		systemProperty "metallum.metalfx.objectMotionProducer",
-				System.getProperty("metallum.metalfx.objectMotionProducer", "false")
+				nativeFullscreenBaselineRequested ? "false" : requestedObjectMotionProducer
+		systemProperty "metallum.metalfx.frameGenerationOutputWidth",
+				requestedFrameGenerationOutputWidth
+		systemProperty "metallum.window.retinaFullscreen",
+				nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested
+						? "true"
+						: System.getProperty("metallum.window.retinaFullscreen", "false")
+		systemProperty "metallum.validation.preserveFullscreen",
+				nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested
+						? "true"
+						: System.getProperty("metallum.validation.preserveFullscreen", "false")
+		if (requestedFrameGeneration.toBoolean()) {
+			environment "METALLUM_METALFX_PRESENT_DIAGNOSTICS_PATH",
+					file("${validationOutputDir}/frame-generation-timeline.json").absolutePath
+		}
 		// Forward backend kill-switch overrides (-Dmetallum.opt.*) from the
 		// Gradle invocation to the client JVM for toggle validation runs.
 		System.properties.each { key, value ->
 			if (key.toString().startsWith("metallum.opt.")) {
 				systemProperty key.toString(), value.toString()
+			}
+		}
+			[
+					"metallum.metalfx.stableCutoutAlpha",
+					"metallum.metalfx.stableTerrainSampler",
+					"metallum.metalfx.handReactiveWeight",
+					"metallum.validation.lenient"
+		].each { propertyName ->
+			def requestedValue = System.getProperty(propertyName)
+			if (requestedValue != null) {
+				systemProperty propertyName, requestedValue
 			}
 		}
 		args "--quickPlaySingleplayer",
@@ -577,7 +885,10 @@ if (gradle.startParameter.taskNames.any {
 				// incomparable across runs.
 				"--width", "854",
 				"--height", "480"
-		environment "MTL_DEBUG_LAYER", "1"
+		environment "MTL_DEBUG_LAYER",
+				nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested
+						? System.getProperty("metallum.validation.metalDebugLayer", "0")
+						: System.getProperty("metallum.validation.metalDebugLayer", "1")
 		environment "MTL_SHADER_VALIDATION", "0"
 		// A run that validated nothing must not pass by omission.
 		// MetalValidationClient.finishRunState is the only writer of
@@ -590,8 +901,145 @@ if (gradle.startParameter.taskNames.any {
 		// non-null level. Three such runs on 2026-07-27 captured zero GPU
 		// readbacks and still reported BUILD SUCCESSFUL.
 		doLast {
-			def runStateFile = file(
-					"${buildDir}/metal-validation/minecraft-client-current/run-state.json")
+			if (nativeFullscreenBaselineRequested) {
+				def baselineFile = file("${validationOutputDir}/native-fullscreen-baseline.json")
+				if (!baselineFile.isFile()) {
+					throw new GradleException("Native fullscreen baseline is missing at ${baselineFile}")
+				}
+				def baseline = new groovy.json.JsonSlurper().parseText(baselineFile.getText("UTF-8"))
+				if (!nativeFrameGenerationValidationRequested
+						&& (!(baseline.nativeMainReadback?.completed as boolean)
+						|| !(baseline.nativeMainReadback?.passed as boolean))) {
+					throw new GradleException("Native main-render GPU readback did not complete successfully")
+				}
+				if (System.getProperty("metallum.opt.metal4MainRenderer", "false").toBoolean()) {
+					if (!(baseline.metal4MainRendererEngaged as boolean)) {
+						throw new GradleException("Metal 4 main renderer was requested but did not engage")
+					}
+					if (!(baseline.residencySetEnabled as boolean)
+							|| (baseline.metal4MainRenderer.commandBuffersCreated as long) != 3L
+							|| (baseline.metal4MainRenderer.commandBufferFactoryCallsAvoided as long) <= 0L) {
+						throw new GradleException("Metal 4 main renderer residency/reuse evidence is incomplete")
+					}
+				}
+				logger.lifecycle(String.format(Locale.ROOT,
+						"Native fullscreen baseline %dx%d: interval p50/p95 %.2f/%.2f ms,"
+								+ " GPU p50/p95 %.2f/%.2f ms, stable60=%s",
+						baseline.drawableWidth, baseline.drawableHeight,
+						baseline.frameIntervalP50Milliseconds, baseline.frameIntervalP95Milliseconds,
+						baseline.gpuP50Milliseconds, baseline.gpuP95Milliseconds,
+						baseline.stable60Fps))
+				return
+			}
+			if (nativeFrameGenerationValidationRequested) {
+				def reportFile = file("${validationOutputDir}/native-direct-frame-generation.json")
+				def timelineFile = file("${validationOutputDir}/frame-generation-timeline.json")
+				if (!reportFile.isFile() || !timelineFile.isFile()) {
+					throw new GradleException(
+							"Native-direct FrameGen artifacts missing: report=${reportFile.isFile()},"
+									+ " timeline=${timelineFile.isFile()}")
+				}
+				def report = new groovy.json.JsonSlurper().parseText(reportFile.getText("UTF-8"))
+				def timeline = new groovy.json.JsonSlurper().parseText(timelineFile.getText("UTF-8"))
+				def percentile = { values, fraction ->
+					def ordered = values.findAll { Double.isFinite(it as double) }
+							.collect { it as double }.sort()
+					if (ordered.isEmpty()) return 0.0d
+					def index = Math.ceil((ordered.size() - 1) * (fraction as double)) as int
+					return ordered[Math.max(0, Math.min(index, ordered.size() - 1))]
+				}
+				def bySource = timeline.groupBy { (it.sourceFrameID as Number).longValue() }
+				def complete = bySource.values().findAll { records ->
+					def kinds = records.collect { it.frameKind }.toSet()
+					kinds.contains("generated") && kinds.contains("real")
+				}
+				def generatedGpu = complete.collect { records ->
+					def item = records.find { it.frameKind == "generated" }
+					((item.gpuEndTime as Number).doubleValue()
+							- (item.gpuStartTime as Number).doubleValue()) * 1000.0d
+				}.findAll { it > 0.0d }
+				def realGpu = complete.collect { records ->
+					def item = records.find { it.frameKind == "real" }
+					((item.gpuEndTime as Number).doubleValue()
+							- (item.gpuStartTime as Number).doubleValue()) * 1000.0d
+				}.findAll { it > 0.0d }
+				def totalGpuService = complete.collect { records ->
+					def generated = records.find { it.frameKind == "generated" }
+					def real = records.find { it.frameKind == "real" }
+					def source = ((generated.sourceGpuEndTime as Number).doubleValue()
+							- (generated.sourceGpuStartTime as Number).doubleValue()) * 1000.0d
+					def generatedDuration = ((generated.gpuEndTime as Number).doubleValue()
+							- (generated.gpuStartTime as Number).doubleValue()) * 1000.0d
+					def realDuration = ((real.gpuEndTime as Number).doubleValue()
+							- (real.gpuStartTime as Number).doubleValue()) * 1000.0d
+					source + generatedDuration + realDuration
+				}.findAll { it > 0.0d }
+				def presentedTimes = timeline.findAll { it.outcome == "presented" }
+						.collect { (it.presentedTime as Number).doubleValue() }.sort()
+				def presentIntervals = presentedTimes.collate(2, 1, false).collect { pair ->
+					(pair[1] - pair[0]) * 1000.0d
+				}.findAll { it > 0.0d }
+				def generatedP95 = percentile(generatedGpu, 0.95d)
+				def realP95 = percentile(realGpu, 0.95d)
+				def totalGpuServiceP95 = percentile(totalGpuService, 0.95d)
+				def presentP95 = percentile(presentIntervals, 0.95d)
+				def sourceGpuP95 = (report.gpuP95Milliseconds as Number).doubleValue()
+				def gpuMargin = 16.666667d - totalGpuServiceP95
+				def sampleGenerated = timeline.find { it.frameKind == "generated" }
+				def result = [
+						status: "measured",
+						drawableWidth: report.drawableWidth,
+						drawableHeight: report.drawableHeight,
+						frameIntervalP95Milliseconds: report.frameIntervalP95Milliseconds,
+						sourceGpuP95Milliseconds: sourceGpuP95,
+						generatedGpuP95Milliseconds: generatedP95,
+						realPresentGpuP95Milliseconds: realP95,
+						totalGpuServiceP95Milliseconds: totalGpuServiceP95,
+						gpuMarginTo60FpsMilliseconds: gpuMargin,
+						frameGenerationWidth: sampleGenerated?.frameGenerationWidth ?: 0,
+						frameGenerationHeight: sampleGenerated?.frameGenerationHeight ?: 0,
+						frameGenerationInputWidth: sampleGenerated?.inputWidth ?: 0,
+						frameGenerationInputHeight: sampleGenerated?.inputHeight ?: 0,
+						completeSourcePairs: complete.size(),
+						presentedRecords: presentedTimes.size(),
+						presentIntervalP95Milliseconds: presentP95,
+						stable60Source: report.stable60Fps,
+						stable120Present: presentP95 > 0.0d && presentP95 <= 8.5d,
+				]
+				file("${validationOutputDir}/native-direct-performance.json").setText(
+						new groovy.json.JsonBuilder(result).toPrettyString() + "\n", "UTF-8")
+				logger.lifecycle(String.format(Locale.ROOT,
+						"Native-direct FrameGen %dx%d: source interval/GPU p95 %.2f/%.2f ms,"
+								+ " generated GPU p95 %.2f ms, total GPU p95 %.2f ms,"
+								+ " present p95 %.2f ms, pairs=%d, margin=%.2f ms",
+						result.drawableWidth, result.drawableHeight,
+						result.frameIntervalP95Milliseconds, result.sourceGpuP95Milliseconds,
+						generatedP95, totalGpuServiceP95, presentP95, complete.size(), gpuMargin))
+				def failures = []
+				if (complete.size() < 120) failures << "complete source pairs ${complete.size()} < 120"
+				if (!(report.stable60Fps as boolean)
+						|| (report.frameIntervalP95Milliseconds as double) > 18.5d) {
+					failures << String.format(Locale.ROOT, "source interval p95 %.2f ms > 18.50 ms",
+							report.frameIntervalP95Milliseconds as double)
+				}
+				if (generatedP95 <= 0.0d || generatedP95 > 7.0d) {
+					failures << String.format(Locale.ROOT, "generated GPU p95 %.2f ms outside (0, 7.00] ms",
+							generatedP95)
+				}
+				if (presentP95 <= 0.0d || presentP95 > 8.5d) {
+					failures << String.format(Locale.ROOT, "present interval p95 %.2f ms outside (0, 8.50] ms",
+							presentP95)
+				}
+				if (gpuMargin < 3.0d) {
+					failures << String.format(Locale.ROOT, "GPU margin %.2f ms < 3.00 ms", gpuMargin)
+				}
+				if (!failures.isEmpty()) {
+					throw new GradleException("Native-direct FrameGen acceptance failed: "
+							+ failures.join("; "))
+				}
+				return
+			}
+			def runStateFile = file("${validationOutputDir}/run-state.json")
 			if (!runStateFile.isFile()) {
 				throw new GradleException(
 						"Vacuous MetalFX client validation: no run-state.json at ${runStateFile}."
@@ -624,6 +1072,354 @@ if (gradle.startParameter.taskNames.any {
 			// literal so the gate follows MetalValidationClient's capture count.
 			if (completed != expected) {
 				problems << "captured ${completed} of ${expected} GPU readbacks".toString()
+			}
+			def explicitMetal4Master = System.getProperty("metallum.opt.metal4")
+			def explicitMetal4Main = System.getProperty("metallum.opt.metal4MainRenderer")
+			def metal4MainRequested = explicitMetal4Main?.toBoolean() == true
+			if (metal4MainRequested) {
+				if (runState.metal4MainRendererEngaged != true) {
+					problems << "Metal 4 main renderer was requested but did not engage".toString()
+				}
+				if (!(runState.metal4MainRendererSubmissions instanceof Number)
+						|| runState.metal4MainRendererSubmissions <= 0) {
+					problems << "Metal 4 main renderer recorded no submissions".toString()
+				}
+				if (!(runState.metal4MainRendererFactoryCallsAvoided instanceof Number)
+						|| runState.metal4MainRendererFactoryCallsAvoided <= 0) {
+					problems << "Metal 4 main renderer recorded no command-buffer reuse".toString()
+				}
+				if (runState.metal4MetalFxEngaged != true) {
+					problems << "Metal 4 main renderer was requested but MetalFX did not receive its queue".toString()
+				}
+				if (!(runState.metal4AuxiliaryComputeEncodes instanceof Number)
+						|| runState.metal4AuxiliaryComputeEncodes <= 0) {
+					problems << "Metal 4 Temporal recorded no auxiliary compute encodes".toString()
+				}
+				if (!(runState.metal4TemporalScalerEncodes instanceof Number)
+						|| runState.metal4TemporalScalerEncodes <= 0) {
+					problems << "Metal 4 Temporal scaler recorded no encodes".toString()
+				}
+			}
+			if (explicitMetal4Main != null && !explicitMetal4Main.toBoolean()
+					&& runState.metal4MainRendererEngaged == true) {
+				problems << "Metal 3 kill-switch requested but the Metal 4 main renderer engaged".toString()
+			}
+			if (explicitMetal4Master != null && !explicitMetal4Master.toBoolean()) {
+				def forbiddenMetal4Counts = [
+						runState.metal4AuxiliaryComputeEncodes,
+						runState.metal4SpatialScalerEncodes,
+						runState.metal4TemporalScalerEncodes,
+						runState.metal4FrameGenerationInputSubmissions
+				]
+				if (forbiddenMetal4Counts.any { it instanceof Number && it > 0 }) {
+					problems << "Metal 3 kill-switch requested but Metal 4 MetalFX work was recorded".toString()
+				}
+			}
+			if (requestedFrameGeneration.toBoolean()) {
+				def queued = runState.frameGenerationFramesQueued
+				def enabledAtCompletion = runState.frameGenerationEnabledAtCompletion
+				if (!(queued instanceof Number)) {
+					problems << "frameGenerationFramesQueued is missing or malformed".toString()
+				} else if (queued <= 0) {
+					problems << "Frame Generation was requested but queued no source frames".toString()
+				}
+				if (enabledAtCompletion != true) {
+					problems << "Frame Generation was requested but was disabled before validation completed".toString()
+				}
+				if (metal4MainRequested
+						&& (!(runState.metal4FrameGenerationInputSubmissions instanceof Number)
+						|| runState.metal4FrameGenerationInputSubmissions <= 0)) {
+					problems << "Metal 4 Frame Generation recorded no input submissions".toString()
+				}
+
+				if (lockedBackpressureValidationRequested) {
+					def admissionFile = file(
+							"${validationOutputDir}/frame-generation-source-admission.json")
+					if (!admissionFile.isFile()) {
+						problems << "Frame Generation source-admission diagnostics are missing at ${admissionFile}".toString()
+					} else {
+						def admission
+						try {
+							admission = new groovy.json.JsonSlurper().parseText(admissionFile.getText("UTF-8"))
+						} catch (Exception parseFailure) {
+							throw new GradleException(
+									"Could not parse ${admissionFile}: ${parseFailure.message}", parseFailure)
+						}
+						def sources = admission.sources
+						if (!(sources instanceof List)) {
+							problems << "Frame Generation source-admission sources are missing or malformed".toString()
+						} else {
+							def percentile = { values, fraction ->
+								def ordered = values.findAll { Double.isFinite(it as double) }
+										.collect { it as double }
+										.sort()
+								if (ordered.isEmpty()) return 0.0d
+								def index = Math.ceil((ordered.size() - 1) * (fraction as double)) as int
+								return ordered[Math.max(0, Math.min(index, ordered.size() - 1))]
+							}
+							def waits = sources.collect { it.cpuWaitMilliseconds as Number }
+									.collect { it.doubleValue() }
+							def enqueueTimes = sources.collect { it.enqueueTime as Number }
+									.collect { it.doubleValue() }
+									.sort()
+							def enqueueIntervals = enqueueTimes.collate(2, 1, false).collect { pair ->
+								(pair[1] - pair[0]) * 1000.0d
+							}.findAll { Double.isFinite(it) && it > 0.0d }
+							def waitP50 = percentile(waits, 0.50d)
+							def waitP95 = percentile(waits, 0.95d)
+							def waitMax = waits.isEmpty() ? 0.0d : waits.max()
+							def enqueueIntervalP50 = percentile(enqueueIntervals, 0.50d)
+							def superseded = admission.supersededSources
+							def summary = [
+									status: "measured-locked-backpressure-only",
+									scanoutValidated: false,
+									sourceFrames: sources.size(),
+									supersededSources: superseded,
+									sourceCpuWaitP50Milliseconds: waitP50,
+									sourceCpuWaitP95Milliseconds: waitP95,
+									sourceCpuWaitMaximumMilliseconds: waitMax,
+									sourceEnqueueIntervalP50Milliseconds: enqueueIntervalP50,
+									gates: [
+											minimumSourceFrames: 120,
+											minimumSupersededSources: 1,
+											maximumSourceCpuWaitP95Milliseconds: 16.67d,
+											maximumSourceCpuWaitMilliseconds: 100.0d,
+									]
+							]
+							def summaryFile = file(
+									"${validationOutputDir}/frame-generation-backpressure.json")
+							summaryFile.setText(
+									new groovy.json.JsonBuilder(summary).toPrettyString() + "\n", "UTF-8")
+							logger.lifecycle(String.format(Locale.ROOT,
+									"Locked Frame Generation backpressure: sources %d, superseded %s,"
+											+ " presenter wait p50/p95/max %.2f/%.2f/%.2f ms",
+									sources.size(), superseded, waitP50, waitP95, waitMax))
+							if (sources.size() < 120) {
+								problems << "locked backpressure run captured only ${sources.size()} source admissions".toString()
+							}
+							if (!(superseded instanceof Number) || superseded < 1) {
+								problems << "locked backpressure run did not supersede a stalled source".toString()
+							}
+							if (waitP95 > 16.67d) {
+								problems << String.format(Locale.ROOT,
+										"locked presenter wait p95 %.2f ms exceeds 16.67 ms", waitP95)
+							}
+							if (waitMax > 100.0d) {
+								problems << String.format(Locale.ROOT,
+										"locked presenter wait maximum %.2f ms exceeds 100.00 ms", waitMax)
+							}
+						}
+					}
+				}
+				if (!lockedBackpressureValidationRequested) {
+					def timelineFile = file(
+							"${validationOutputDir}/frame-generation-timeline.json")
+					if (!timelineFile.isFile()) {
+					problems << "Frame Generation timeline is missing at ${timelineFile}".toString()
+				} else {
+					def timeline
+					try {
+						timeline = new groovy.json.JsonSlurper().parseText(timelineFile.getText("UTF-8"))
+					} catch (Exception parseFailure) {
+						throw new GradleException(
+								"Could not parse ${timelineFile}: ${parseFailure.message}", parseFailure)
+					}
+					if (!(timeline instanceof List)) {
+						problems << "Frame Generation timeline is not a JSON array".toString()
+					} else {
+						def presentPaths = timeline.collect { it.presentPath }
+								.findAll { it instanceof String }
+								.toSet()
+						def expectedPresentPaths = [expectedFrameGenerationPresentPath] as Set
+						if (presentPaths != expectedPresentPaths) {
+							problems << "Frame Generation requested ${expectedFrameGenerationPresentPath}"
+									+ " presenter but timeline recorded ${presentPaths ?: 'no path'}"
+						}
+						def percentile = { values, fraction ->
+							def ordered = values.findAll { Double.isFinite(it as double) }
+									.collect { it as double }
+									.sort()
+							if (ordered.isEmpty()) return 0.0d
+							def index = Math.ceil((ordered.size() - 1) * (fraction as double)) as int
+							return ordered[Math.max(0, Math.min(index, ordered.size() - 1))]
+						}
+						def bySource = timeline.groupBy { (it.sourceFrameID as Number).longValue() }
+						def completeSourceIds = bySource.keySet().sort().findAll { sourceId ->
+							def kinds = bySource[sourceId].collect { it.frameKind as String }.toSet()
+							kinds.contains("generated") && kinds.contains("real")
+						}
+						def sourceGpuMilliseconds = []
+						def generatedGpuMilliseconds = []
+						def realGpuMilliseconds = []
+						def totalGpuMilliseconds = []
+						def sourceStartById = [:]
+						def sourceEnqueueById = [:]
+						def sourceCpuWaitById = [:]
+						def sourceCpuWaitMilliseconds = []
+						def presentedTimes = []
+						completeSourceIds.each { sourceId ->
+							def records = bySource[sourceId]
+							def generated = records.find { it.frameKind == "generated" }
+							def real = records.find { it.frameKind == "real" }
+							def sourceStart = (records[0].sourceGpuStartTime as Number).doubleValue()
+							def sourceEnd = (records[0].sourceGpuEndTime as Number).doubleValue()
+							def sourceEnqueue = (records[0].sourceEnqueueTime as Number).doubleValue()
+							def sourceCpuWait = (records[0].sourceCpuWaitTime as Number).doubleValue()
+							def generatedStart = (generated.gpuStartTime as Number).doubleValue()
+							def generatedEnd = (generated.gpuEndTime as Number).doubleValue()
+							def realStart = (real.gpuStartTime as Number).doubleValue()
+							def realEnd = (real.gpuEndTime as Number).doubleValue()
+							def sourceMs = (sourceEnd - sourceStart) * 1000.0d
+							def generatedMs = (generatedEnd - generatedStart) * 1000.0d
+							def realMs = (realEnd - realStart) * 1000.0d
+							if (sourceMs > 0.0d && generatedMs > 0.0d && realMs > 0.0d) {
+								sourceGpuMilliseconds << sourceMs
+								generatedGpuMilliseconds << generatedMs
+								realGpuMilliseconds << realMs
+								totalGpuMilliseconds << sourceMs + generatedMs + realMs
+								sourceStartById[sourceId] = sourceStart
+								if (sourceEnqueue > 0.0d) {
+									sourceEnqueueById[sourceId] = sourceEnqueue
+									def sourceCpuWaitMs = sourceCpuWait * 1000.0d
+									sourceCpuWaitById[sourceId] = sourceCpuWaitMs
+									sourceCpuWaitMilliseconds << sourceCpuWaitMs
+								}
+							}
+							[generated, real].each { item ->
+								def presented = (item.presentedTime as Number).doubleValue()
+								if (item.outcome == "presented" && presented > 0.0d) {
+									presentedTimes << presented
+								}
+							}
+						}
+						def sourceIntervals = []
+						completeSourceIds.collate(2, 1, false).each { pair ->
+							if (pair[1] == pair[0] + 1
+									&& sourceStartById.containsKey(pair[0])
+									&& sourceStartById.containsKey(pair[1])) {
+								def interval = (sourceStartById[pair[1]] - sourceStartById[pair[0]]) * 1000.0d
+								if (interval > 0.0d) sourceIntervals << interval
+							}
+						}
+						def presentIntervals = []
+						presentedTimes.sort().collate(2, 1, false).each { pair ->
+							def interval = (pair[1] - pair[0]) * 1000.0d
+							if (interval > 0.0d) presentIntervals << interval
+						}
+						def sourceCpuIntervals = []
+						def sourceCpuNonWaitIntervals = []
+						completeSourceIds.collate(2, 1, false).each { pair ->
+							if (pair[1] == pair[0] + 1
+									&& sourceEnqueueById.containsKey(pair[0])
+									&& sourceEnqueueById.containsKey(pair[1])) {
+								def interval = (sourceEnqueueById[pair[1]] - sourceEnqueueById[pair[0]]) * 1000.0d
+								if (interval > 0.0d) {
+									sourceCpuIntervals << interval
+									if (sourceCpuWaitById.containsKey(pair[1])) {
+										sourceCpuNonWaitIntervals << Math.max(
+												0.0d, interval - (sourceCpuWaitById[pair[1]] as double))
+									}
+								}
+							}
+						}
+						def sourceIntervalP50 = percentile(sourceIntervals, 0.50d)
+						def sourceIntervalP95 = percentile(sourceIntervals, 0.95d)
+						def presentIntervalP50 = percentile(presentIntervals, 0.50d)
+						def presentIntervalP95 = percentile(presentIntervals, 0.95d)
+						def sourceGpuP95 = percentile(sourceGpuMilliseconds, 0.95d)
+						def generatedGpuP95 = percentile(generatedGpuMilliseconds, 0.95d)
+						def realGpuP95 = percentile(realGpuMilliseconds, 0.95d)
+						def totalGpuP95 = percentile(totalGpuMilliseconds, 0.95d)
+						def sourceCpuIntervalP50 = percentile(sourceCpuIntervals, 0.50d)
+						def sourceCpuIntervalP95 = percentile(sourceCpuIntervals, 0.95d)
+						def sourceCpuWaitP50 = percentile(sourceCpuWaitMilliseconds, 0.50d)
+						def sourceCpuWaitP95 = percentile(sourceCpuWaitMilliseconds, 0.95d)
+						def sourceCpuNonWaitP50 = percentile(sourceCpuNonWaitIntervals, 0.50d)
+						def sourceCpuNonWaitP95 = percentile(sourceCpuNonWaitIntervals, 0.95d)
+							def overBudgetFrames = totalGpuMilliseconds.count { it > (1000.0d / 60.0d) }
+							def presentedCount = timeline.count { it.outcome == "presented" }
+							def sampleGenerated = timeline.find { it.frameKind == "generated" }
+							def summary = [
+									status: "measured",
+									presentPath: presentPaths.size() == 1 ? presentPaths.first() : "mixed",
+									frameGenerationOutputWidthPolicy: normalizedFrameGenerationOutputWidth,
+									frameGenerationOutputWidth: sampleGenerated?.frameGenerationWidth ?: 0,
+									frameGenerationOutputHeight: sampleGenerated?.frameGenerationHeight ?: 0,
+									frameGenerationInputWidth: sampleGenerated?.inputWidth ?: 0,
+									frameGenerationInputHeight: sampleGenerated?.inputHeight ?: 0,
+								records: timeline.size(),
+								completeSourcePairs: totalGpuMilliseconds.size(),
+								presentedRecords: presentedCount,
+								presentedRatio: timeline.isEmpty() ? 0.0d : presentedCount / (double) timeline.size(),
+								sourceIntervalP50Milliseconds: sourceIntervalP50,
+								sourceIntervalP95Milliseconds: sourceIntervalP95,
+								sourceCpuIntervalP50Milliseconds: sourceCpuIntervalP50,
+								sourceCpuIntervalP95Milliseconds: sourceCpuIntervalP95,
+								sourceCpuIntervalP95MarginTo16_67Milliseconds:
+										(1000.0d / 60.0d) - sourceCpuIntervalP95,
+								sourceCpuWaitP50Milliseconds: sourceCpuWaitP50,
+								sourceCpuWaitP95Milliseconds: sourceCpuWaitP95,
+								sourceCpuNonWaitP50Milliseconds: sourceCpuNonWaitP50,
+								sourceCpuNonWaitP95Milliseconds: sourceCpuNonWaitP95,
+								sourceCpuNonWaitP95MarginTo16_67Milliseconds:
+										(1000.0d / 60.0d) - sourceCpuNonWaitP95,
+								presentIntervalP50Milliseconds: presentIntervalP50,
+								presentIntervalP95Milliseconds: presentIntervalP95,
+								sourceGpuP95Milliseconds: sourceGpuP95,
+								generatedGpuP95Milliseconds: generatedGpuP95,
+								realGpuP95Milliseconds: realGpuP95,
+								totalGpuP95Milliseconds: totalGpuP95,
+								totalGpuP95MarginTo16_67Milliseconds: (1000.0d / 60.0d) - totalGpuP95,
+								over16_67MillisecondFrames: overBudgetFrames,
+								gates: [
+										minimumCompleteSourcePairs: 120,
+										minimumPresentedRatio: 0.95d,
+										maximumSourceIntervalP95Milliseconds: 18.5d,
+										maximumPresentIntervalP95Milliseconds: 8.5d,
+										maximumGeneratedGpuP95Milliseconds: 7.0d,
+										minimumTotalGpuP95MarginMilliseconds: 3.0d,
+										maximumOver16_67MillisecondFrames: 0
+								]
+							]
+						def summaryFile = file(
+								"${validationOutputDir}/frame-generation-performance.json")
+						summaryFile.setText(new groovy.json.JsonBuilder(summary).toPrettyString() + "\n", "UTF-8")
+						logger.lifecycle(String.format(Locale.ROOT,
+								"Frame Generation steady-state: source interval p95 %.2f ms, source CPU interval p95 %.2f ms,"
+										+ " CPU non-wait p95 %.2f ms, presenter wait p95 %.2f ms, present p95 %.2f ms,"
+										+ " total GPU p95 %.2f ms (%.2f ms margin), presented %d/%d",
+								sourceIntervalP95, sourceCpuIntervalP95, sourceCpuNonWaitP95, sourceCpuWaitP95,
+								presentIntervalP95, totalGpuP95,
+								(1000.0d / 60.0d) - totalGpuP95, presentedCount, timeline.size()))
+						if (totalGpuMilliseconds.size() < 120) {
+							problems << "Frame Generation steady-state captured only ${totalGpuMilliseconds.size()} complete source pairs".toString()
+						}
+						if (summary.presentedRatio < 0.95d) {
+							problems << String.format(Locale.ROOT,
+									"presented ratio %.3f is below 0.950", summary.presentedRatio)
+						}
+						if (sourceIntervalP95 > 18.5d) {
+							problems << String.format(Locale.ROOT,
+									"source interval p95 %.2f ms exceeds 18.50 ms", sourceIntervalP95)
+						}
+						if (presentIntervalP95 > 8.5d) {
+							problems << String.format(Locale.ROOT,
+									"present interval p95 %.2f ms exceeds 8.50 ms", presentIntervalP95)
+						}
+						if (generatedGpuP95 > 7.0d) {
+							problems << String.format(Locale.ROOT,
+									"generated-frame GPU p95 %.2f ms exceeds 7.00 ms", generatedGpuP95)
+						}
+						if (totalGpuP95 > (1000.0d / 60.0d - 3.0d)) {
+							problems << String.format(Locale.ROOT,
+									"total GPU p95 %.2f ms leaves less than 3.00 ms headroom", totalGpuP95)
+						}
+						if (overBudgetFrames > 0) {
+							problems << "${overBudgetFrames} steady-state source pairs exceeded 16.67 ms GPU time".toString()
+						}
+					}
+				}
+				}
 			}
 			if (!problems.isEmpty()) {
 				problems.each { logger.error("VALIDATION ${it}") }

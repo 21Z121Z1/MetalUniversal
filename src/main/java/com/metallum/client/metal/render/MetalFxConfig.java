@@ -16,18 +16,24 @@ import java.util.Properties;
 /** Stable JVM-property configuration for the optional MetalFX path. */
 @Environment(EnvType.CLIENT)
 final class MetalFxConfig {
+    static final int FRAME_GENERATION_FOLLOW_RENDER_WIDTH = -1;
     static final String MODE_PROPERTY = "metallum.metalfx.mode";
     static final String SCALE_PROPERTY = "metallum.metalfx.scale";
     static final String REACTIVE_MASK_PROPERTY = "metallum.metalfx.reactiveMask";
     static final String FRAME_GENERATION_PROPERTY = "metallum.metalfx.frameGeneration";
+    static final String METAL_HUD_PROPERTY = "metallum.metal.hud";
+    static final String FRAME_GENERATION_OUTPUT_WIDTH_PROPERTY =
+            "metallum.metalfx.frameGenerationOutputWidth";
 
     private static final String CONFIG_FILE = "metallum-metalfx.properties";
     private static final String MODE_KEY = "mode";
     private static final String SCALE_KEY = "scalePercent";
     private static final String REACTIVE_MASK_KEY = "transparencyReactiveMask";
     private static final String FRAME_GENERATION_KEY = "frameGeneration";
+    private static final String METAL_HUD_KEY = "metalHud";
     private static final Object PERSISTENCE_LOCK = new Object();
     private static volatile PersistentSettings persistentSettings;
+    private static volatile long runtimeRevision;
 
     enum Mode {
         OFF,
@@ -69,6 +75,8 @@ final class MetalFxConfig {
     final boolean debug;
     final boolean transparencyReactiveMask;
     final boolean frameGeneration;
+    final boolean metalHud;
+    final int frameGenerationOutputWidth;
     // Reactive-policy tuning (launch-argument knobs, not persisted). See
     // docs/cutout-shimmer-remediation-2026-07-27.md; 1.0 across the board
     // restores the pre-remediation full-suppression policy.
@@ -86,6 +94,8 @@ final class MetalFxConfig {
             final boolean debug,
             final boolean transparencyReactiveMask,
             final boolean frameGeneration,
+            final boolean metalHud,
+            final int frameGenerationOutputWidth,
             final float cutoutReactiveEdgeWeight,
             final float cutoutReactiveInteriorWeight,
             final float depthEdgeReactiveCap,
@@ -99,6 +109,8 @@ final class MetalFxConfig {
         this.debug = debug;
         this.transparencyReactiveMask = transparencyReactiveMask;
         this.frameGeneration = frameGeneration;
+        this.metalHud = metalHud;
+        this.frameGenerationOutputWidth = frameGenerationOutputWidth;
         this.cutoutReactiveEdgeWeight = cutoutReactiveEdgeWeight;
         this.cutoutReactiveInteriorWeight = cutoutReactiveInteriorWeight;
         this.depthEdgeReactiveCap = depthEdgeReactiveCap;
@@ -119,14 +131,20 @@ final class MetalFxConfig {
         boolean frameGeneration = parseBoolean(
                 System.getProperty(FRAME_GENERATION_PROPERTY), defaults.frameGeneration
         );
+        boolean metalHud = parseBoolean(
+                System.getProperty(METAL_HUD_PROPERTY), defaults.metalHud
+        );
+        int frameGenerationOutputWidth = parseFrameGenerationOutputWidth(
+                System.getProperty(FRAME_GENERATION_OUTPUT_WIDTH_PROPERTY), 1280
+        );
         float cutoutReactiveEdgeWeight = parseUnitFloat(
-                System.getProperty("metallum.metalfx.cutoutReactiveEdgeWeight"), 0.35F
+                System.getProperty("metallum.metalfx.cutoutReactiveEdgeWeight"), 0.0F
         );
         float cutoutReactiveInteriorWeight = parseUnitFloat(
                 System.getProperty("metallum.metalfx.cutoutReactiveInteriorWeight"), 0.0F
         );
         float depthEdgeReactiveCap = parseUnitFloat(
-                System.getProperty("metallum.metalfx.depthEdgeReactiveCap"), 0.5F
+                System.getProperty("metallum.metalfx.depthEdgeReactiveCap"), 0.0F
         );
         float transparencyReactiveValue = parseUnitFloat(
                 System.getProperty("metallum.metalfx.transparencyReactiveValue"), 0.9F
@@ -141,7 +159,8 @@ final class MetalFxConfig {
                 System.getProperty("metallum.metalfx.mergeDepthDilation"), true
         );
         return new MetalFxConfig(
-                mode, scale, debug, transparencyReactiveMask, frameGeneration,
+                mode, scale, debug, transparencyReactiveMask, frameGeneration, metalHud,
+                frameGenerationOutputWidth,
                 cutoutReactiveEdgeWeight, cutoutReactiveInteriorWeight,
                 depthEdgeReactiveCap, transparencyReactiveValue,
                 skyFarPlaneMotion, disocclusionReactiveCap, mergeDepthDilation
@@ -172,6 +191,26 @@ final class MetalFxConfig {
         );
     }
 
+    static boolean configuredMetalHudForSodium() {
+        return parseBoolean(
+                System.getProperty(METAL_HUD_PROPERTY), persistentSettings().metalHud
+        );
+    }
+
+    static long runtimeRevision() {
+        return runtimeRevision;
+    }
+
+    RuntimeSettings runtimeSettings() {
+        return new RuntimeSettings(
+                requestedMode,
+                scale,
+                transparencyReactiveMask,
+                frameGeneration,
+                metalHud
+        );
+    }
+
     static boolean hasSystemPropertyOverride(final String property) {
         return System.getProperty(property) != null;
     }
@@ -181,7 +220,8 @@ final class MetalFxConfig {
                 mode == null ? settings.mode : mode,
                 settings.scalePercent,
                 settings.transparencyReactiveMask,
-                settings.frameGeneration
+                settings.frameGeneration,
+                settings.metalHud
         ));
     }
 
@@ -190,7 +230,8 @@ final class MetalFxConfig {
                 settings.mode,
                 scale == null ? settings.scalePercent : scale.percent,
                 settings.transparencyReactiveMask,
-                settings.frameGeneration
+                settings.frameGeneration,
+                settings.metalHud
         ));
     }
 
@@ -199,7 +240,8 @@ final class MetalFxConfig {
                 settings.mode,
                 settings.scalePercent,
                 enabled == null ? settings.transparencyReactiveMask : enabled,
-                settings.frameGeneration
+                settings.frameGeneration,
+                settings.metalHud
         ));
     }
 
@@ -208,7 +250,18 @@ final class MetalFxConfig {
                 settings.mode,
                 settings.scalePercent,
                 settings.transparencyReactiveMask,
-                enabled == null ? settings.frameGeneration : enabled
+                enabled == null ? settings.frameGeneration : enabled,
+                settings.metalHud
+        ));
+    }
+
+    static void setMetalHudFromSodium(final Boolean enabled) {
+        updatePersistent(settings -> new PersistentSettings(
+                settings.mode,
+                settings.scalePercent,
+                settings.transparencyReactiveMask,
+                settings.frameGeneration,
+                enabled == null ? settings.metalHud : enabled
         ));
     }
 
@@ -237,10 +290,79 @@ final class MetalFxConfig {
             return displayDimension;
         }
         int scaled = Math.max(1, Math.round(displayDimension * scale));
-        if (scaled > 1) {
+        // A 50% mode is an exact geometry contract, including odd half sizes
+        // such as 1734 -> 867. Other quality ratios retain the established
+        // even-size alignment used by the bounded-output path.
+        if (scaled > 1 && Math.abs(scale - 0.5F) > 1.0E-6F) {
             scaled &= ~1;
         }
         return Math.max(1, scaled);
+    }
+
+    static float frameGenerationOutputScale(final int displayWidth, final int maximumOutputWidth) {
+        if (displayWidth <= 0 || maximumOutputWidth <= 0 || displayWidth <= maximumOutputWidth) {
+            return 1.0F;
+        }
+        return maximumOutputWidth / (float) displayWidth;
+    }
+
+    static int frameGenerationWorkWidth(
+            final int displayWidth,
+            final int renderWidth,
+            final int preferredMaximumWidth
+    ) {
+        if (displayWidth <= 0) {
+            return 1;
+        }
+        if (preferredMaximumWidth == FRAME_GENERATION_FOLLOW_RENDER_WIDTH) {
+            return Math.min(displayWidth, Math.max(1, renderWidth));
+        }
+        if (preferredMaximumWidth == 0) {
+            return displayWidth;
+        }
+        // A bounded FrameGen path may save work versus the drawable, but it
+        // must never throw away more spatial information than Minecraft's 3D
+        // render already did. The configured width is therefore a preferred
+        // work size, with the live 3D width as a quality floor.
+        return Math.min(displayWidth, Math.max(Math.max(1, renderWidth), preferredMaximumWidth));
+    }
+
+    static int parseFrameGenerationOutputWidth(final String value, final int fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        if (normalized.equals("render") || normalized.equals("source") || normalized.equals("3d")) {
+            return FRAME_GENERATION_FOLLOW_RENDER_WIDTH;
+        }
+        if (normalized.equals("native") || normalized.equals("display") || normalized.equals("0")) {
+            return 0;
+        }
+        return parseBoundedInt(value, fallback, 640, 3840);
+    }
+
+    static float textureLodBias(final int renderWidth, final int displayWidth) {
+        if (renderWidth <= 0 || displayWidth <= 0 || renderWidth >= displayWidth) {
+            return 0.0F;
+        }
+        float scale = renderWidth / (float) displayWidth;
+        return (float) (Math.log(scale) / Math.log(2.0)) - 1.0F;
+    }
+
+    private static int parseBoundedInt(
+            final String value,
+            final int fallback,
+            final int minimum,
+            final int maximum
+    ) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Math.max(minimum, Math.min(maximum, Integer.parseInt(value.trim())));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
     }
 
     static Mode parseMode(final String value, final Mode fallback) {
@@ -298,7 +420,11 @@ final class MetalFxConfig {
         synchronized (PERSISTENCE_LOCK) {
             PersistentSettings current = persistentSettings();
             PersistentSettings next = update.apply(current);
+            if (next.equals(current)) {
+                return;
+            }
             persistentSettings = next;
+            runtimeRevision++;
             writePersistentSettings(next);
         }
     }
@@ -325,7 +451,8 @@ final class MetalFxConfig {
                 properties.getProperty(REACTIVE_MASK_KEY), true
         );
         boolean frameGeneration = parseBoolean(properties.getProperty(FRAME_GENERATION_KEY), false);
-        return new PersistentSettings(mode, scalePercent, transparencyReactiveMask, frameGeneration);
+        boolean metalHud = parseBoolean(properties.getProperty(METAL_HUD_KEY), false);
+        return new PersistentSettings(mode, scalePercent, transparencyReactiveMask, frameGeneration, metalHud);
     }
 
     private static void writePersistentSettings(final PersistentSettings settings) {
@@ -334,6 +461,7 @@ final class MetalFxConfig {
         properties.setProperty(SCALE_KEY, Integer.toString(settings.scalePercent));
         properties.setProperty(REACTIVE_MASK_KEY, Boolean.toString(settings.transparencyReactiveMask));
         properties.setProperty(FRAME_GENERATION_KEY, Boolean.toString(settings.frameGeneration));
+        properties.setProperty(METAL_HUD_KEY, Boolean.toString(settings.metalHud));
 
         Path path = configPath();
         Path parent = path.getParent();
@@ -369,7 +497,27 @@ final class MetalFxConfig {
             Mode mode,
             int scalePercent,
             boolean transparencyReactiveMask,
-            boolean frameGeneration
+            boolean frameGeneration,
+            boolean metalHud
     ) {
+    }
+
+    record RuntimeSettings(
+            Mode mode,
+            float scale,
+            boolean transparencyReactiveMask,
+            boolean frameGeneration,
+            boolean metalHud
+    ) {
+        boolean requiresRenderRefreshComparedTo(final RuntimeSettings previous) {
+            return mode != previous.mode
+                    || Float.compare(scale, previous.scale) != 0
+                    || transparencyReactiveMask != previous.transparencyReactiveMask
+                    || frameGeneration != previous.frameGeneration;
+        }
+
+        boolean requiresShaderRefreshComparedTo(final RuntimeSettings previous) {
+            return mode != previous.mode || Float.compare(scale, previous.scale) != 0;
+        }
     }
 }

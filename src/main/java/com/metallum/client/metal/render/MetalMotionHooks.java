@@ -18,6 +18,15 @@ public final class MetalMotionHooks {
     public static final String MOVING_BLOCK_SUBMIT_CLASS =
             "net.minecraft.client.renderer.feature.MovingBlockFeatureRenderer$Submit";
 
+    public static final String MOVING_BLOCK_FEATURE_RENDERER_CLASS =
+            "net.minecraft.client.renderer.feature.MovingBlockFeatureRenderer";
+
+    /**
+     * The method the moving-block wrapper is scoped to. Independent of the descriptor
+     * below: a rename here leaves the descriptor valid and the injection unplaceable.
+     */
+    public static final String BUILD_GROUP_METHOD = "buildGroup";
+
     public static final String TESSELATE_BLOCK_NAME = "tesselateBlock";
 
     /**

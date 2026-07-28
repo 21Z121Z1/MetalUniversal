@@ -371,6 +371,27 @@ private final class OffscreenHarness {
         try commitAndWait(commandBuffer, label: "clear \(texture.label ?? "texture")")
     }
 
+    func copyTexture(_ source: MTLTexture, to destination: MTLTexture, label: String) throws {
+        guard source.width == destination.width, source.height == destination.height,
+              source.pixelFormat == destination.pixelFormat,
+              let commandBuffer = queue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            try fail("could not create \(label) texture copy")
+        }
+        blit.copy(
+            from: source,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            to: destination,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            sliceCount: 1,
+            levelCount: 1
+        )
+        blit.endEncoding()
+        try commitAndWait(commandBuffer, label: label)
+    }
+
     func encodeTemporal(
         frame: FrameTextures,
         cameraMotion: MTLTexture,
@@ -383,10 +404,28 @@ private final class OffscreenHarness {
         previousViewProjection: simd_float4x4,
         reset: Bool,
         preserveReactiveMask: Bool,
-        label: String
+        label: String,
+        handDepth: MTLTexture? = nil,
+        emitMotionDiagnostics: Bool = true
     ) throws {
         guard let commandBuffer = queue.makeCommandBuffer() else {
             try fail("could not create \(label) temporal command buffer")
+        }
+        if handDepth != nil && ProcessInfo.processInfo.environment[
+            "METALLUM_METALFX_LEGACY_MOTION_PASSES"
+        ] == "1" {
+            let handResult = metallum_metalfx_encode_hand_overlay(
+                commandBuffer,
+                handDepth!,
+                objectMotion,
+                validity,
+                reactive,
+                Int32(width),
+                Int32(height),
+                0.35,
+                nil
+            )
+            try require(handResult == 1, "\(label) legacy hand overlay encode was rejected")
         }
         let identity = matrixFloats(matrix_identity_float4x4)
         let previous = matrixFloats(previousViewProjection)
@@ -398,6 +437,7 @@ private final class OffscreenHarness {
                         device,
                         frame.color,
                         frame.depth,
+                        handDepth,
                         cameraMotion,
                         objectMotion,
                         validity,
@@ -411,11 +451,13 @@ private final class OffscreenHarness {
                         nil,
                         0.0,
                         0.0,
+                        0.35,
                         Int32(width),
                         Int32(height),
                         reset ? 1 : 0,
                         1,
-                        preserveReactiveMask ? 1 : 0
+                        preserveReactiveMask ? 1 : 0,
+                        emitMotionDiagnostics ? 1 : 0
                     )
                 }
             }
@@ -443,6 +485,30 @@ private final class OffscreenHarness {
             nil
         )
         try require(result == 1, "\(label) CUTOUT reactive dilation was rejected")
+        try commitAndWait(commandBuffer, label: label)
+    }
+
+    func applyItemEntityTransparencyReactive(
+        itemEntity: MTLTexture,
+        reactive: MTLTexture,
+        label: String
+    ) throws {
+        guard let commandBuffer = queue.makeCommandBuffer() else {
+            try fail("could not create \(label) transparency command buffer")
+        }
+        let result = metallum_metalfx_mark_transparency(
+            commandBuffer,
+            device,
+            nil,
+            itemEntity,
+            nil,
+            nil,
+            nil,
+            reactive,
+            Int32(width),
+            Int32(height)
+        )
+        try require(result == 1, "\(label) transparency reactive encode was rejected")
         try commitAndWait(commandBuffer, label: label)
     }
 
@@ -1030,16 +1096,15 @@ private func runScenario(
             validityBytes.contains(0) && validityBytes.contains(where: { $0 > 127 }),
             "alpha-test case did not preserve invalid holes and valid object pixels"
         )
-        // Post-remediation policy (docs/cutout-shimmer-remediation-2026-07-27.md):
-        // CUTOUT coverage no longer floods the reactive mask. Interior pixels
-        // have depth and motion and must accumulate normally, so the old
-        // "every coverage pixel > 0.5" invariant is exactly what was removed.
-        // What must hold now: the silhouette band still carries reactivity,
-        // and nothing in the coverage region reaches full suppression — FSR2
-        // guidance is that a reactive value at or near 1.0 never helps.
+        // Static/alpha-tested coverage has depth and motion, so it should use
+        // normal temporal accumulation. Reactive values are reserved for the
+        // exceptional pixels the motion pass confirms as disoccluded; there
+        // must be no standing silhouette band and no full suppression.
         var edgeBandReactivePixels = 0
         var fullSuppressionPixels = 0
+        var coveredPixels = 0
         for pixel in validityBytes.indices where validityBytes[pixel] > 127 {
+            coveredPixels += 1
             if reactiveBytes[pixel] >= 72 {
                 edgeBandReactivePixels += 1
             }
@@ -1049,18 +1114,14 @@ private func runScenario(
             }
         }
         try require(
-            edgeBandReactivePixels > 0,
-            "CUTOUT coverage produced no reactive silhouette band"
+            edgeBandReactivePixels < max(1, coveredPixels / 2),
+            "CUTOUT coverage still carries a standing reactive silhouette band"
+                + " (\(edgeBandReactivePixels)/\(coveredPixels) pixels)"
         )
         try require(
             fullSuppressionPixels == 0,
             "CUTOUT coverage still writes full reactive suppression"
                 + " (\(fullSuppressionPixels) pixels above 224/255)"
-        )
-        let reactivePixels = reactiveBytes.count { $0 > 0 }
-        try require(
-            reactivePixels > edgeBandReactivePixels,
-            "CUTOUT reactive mask did not expand across the jitter/upscale footprint"
         )
     }
     if scenario.occluder {
@@ -1082,6 +1143,170 @@ private func runScenario(
         "\(scenario.name) frame interpolation MAE exceeded 0.05"
     )
     return metrics
+}
+
+private func runHandFusionScenario(
+    harness: OffscreenHarness,
+    root: URL
+) throws -> [String: Any] {
+    let scenario = Scenario(
+        name: "hand_fusion_steady",
+        start: Transform(center: SIMD2<Float>(26, 32), angle: -0.2),
+        middle: Transform(center: SIMD2<Float>(32, 32), angle: 0.0),
+        end: Transform(center: SIMD2<Float>(38, 32), angle: 0.2),
+        cameraPrevious: matrix_identity_float4x4
+    )
+    let directory = root.appendingPathComponent(scenario.name, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let frame = try harness.render(
+        current: scenario.end,
+        previous: scenario.start,
+        scenario: scenario,
+        label: "hand fusion input"
+    )
+    let handDepth = try harness.makeWorkingTexture(
+        format: .r8Unorm,
+        label: "hand fusion depth coverage"
+    )
+    try harness.copyTexture(frame.validity, to: handDepth, label: "hand fusion depth coverage copy")
+    let cameraMotion = try harness.makeWorkingTexture(format: .rg16Float, label: "hand fusion camera motion")
+    let disocclusion = try harness.makeWorkingTexture(format: .r8Unorm, label: "hand fusion disocclusion")
+    let mergedMotion = try harness.makeWorkingTexture(format: .rg16Float, label: "hand fusion merged motion")
+    let reactive = try harness.makeWorkingTexture(format: .r8Unorm, label: "hand fusion reactive")
+    let temporalOutput = try harness.makeWorkingTexture(
+        format: .rgba8Unorm,
+        width: harness.temporalWidth,
+        height: harness.temporalHeight,
+        label: "hand fusion temporal output"
+    )
+    try harness.clearColor(reactive)
+    try harness.encodeTemporal(
+        frame: frame,
+        cameraMotion: cameraMotion,
+        objectMotion: frame.objectMotion,
+        validity: frame.validity,
+        disocclusion: disocclusion,
+        mergedMotion: mergedMotion,
+        reactive: reactive,
+        output: temporalOutput,
+        previousViewProjection: matrix_identity_float4x4,
+        reset: true,
+        preserveReactiveMask: false,
+        label: "hand fusion production temporal",
+        handDepth: handDepth,
+        emitMotionDiagnostics: false
+    )
+
+    let handBytes = try exportTexture(
+        harness: harness,
+        texture: handDepth,
+        name: "hand_depth",
+        directory: directory
+    )
+    let motionBytes = try exportTexture(
+        harness: harness,
+        texture: mergedMotion,
+        name: "merged_motion",
+        directory: directory
+    )
+    let reactiveBytes = try exportTexture(
+        harness: harness,
+        texture: reactive,
+        name: "reactive",
+        directory: directory
+    )
+    let handMotion = motionMetrics(motion: motionBytes, validity: handBytes)
+    let covered = handBytes.indices.filter { handBytes[$0] > 127 }
+    let minimumReactive = covered.map { reactiveBytes[$0] }.min() ?? 0
+    try require(!covered.isEmpty, "hand fusion scenario produced no hand coverage")
+    try require(
+        ((handMotion["max_magnitude"] as? Double) ?? 1.0) < 0.0001,
+        "fused hand path did not override object motion with camera-locked zero motion"
+    )
+    try require(
+        minimumReactive >= 88,
+        "fused hand path did not preserve the 0.35 reactive boost"
+    )
+    return [
+        "scenario": scenario.name,
+        "hand_pixels": covered.count,
+        "hand_motion": handMotion,
+        "minimum_hand_reactive_byte": minimumReactive,
+        "history_reset": true
+    ]
+}
+
+private func runTransparencyAlphaContract(
+    harness: OffscreenHarness,
+    root: URL
+) throws -> [String: Any] {
+    let directory = root.appendingPathComponent("transparency_alpha_contract", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let itemEntity = try harness.makeWorkingTexture(
+        format: .rgba8Unorm,
+        label: "transparency alpha contract item entity"
+    )
+    let reactive = try harness.makeWorkingTexture(
+        format: .r8Unorm,
+        label: "transparency alpha contract reactive"
+    )
+
+    // Colored zero-alpha texels do not contribute to alpha blending. Treating
+    // RGB presence as reactive rejects useful history and exposes shimmer.
+    try harness.clearColor(
+        itemEntity,
+        color: MTLClearColor(red: 1.0, green: 0.2, blue: 0.1, alpha: 0.0)
+    )
+    try harness.clearColor(reactive)
+    try harness.applyItemEntityTransparencyReactive(
+        itemEntity: itemEntity,
+        reactive: reactive,
+        label: "zero-alpha colored item entity"
+    )
+    let zeroAlpha = try exportTexture(
+        harness: harness,
+        texture: reactive,
+        name: "zero_alpha_reactive",
+        directory: directory
+    )
+    try require(
+        zeroAlpha.allSatisfy { $0 == 0 },
+        "colored zero-alpha texels incorrectly produced a reactive mask"
+    )
+
+    // Entity shadows use alpha around 0.4. The production mask preserves that
+    // strength and applies the 0.9 cap, yielding 0.36 (about 92/255), rather
+    // than converting every shadow pixel into full history rejection.
+    try harness.clearColor(
+        itemEntity,
+        color: MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 0.4)
+    )
+    try harness.clearColor(reactive)
+    try harness.applyItemEntityTransparencyReactive(
+        itemEntity: itemEntity,
+        reactive: reactive,
+        label: "partial-alpha item entity"
+    )
+    let partialAlpha = try exportTexture(
+        harness: harness,
+        texture: reactive,
+        name: "partial_alpha_reactive",
+        directory: directory
+    )
+    let minimum = partialAlpha.min() ?? 0
+    let maximum = partialAlpha.max() ?? 0
+    try require(
+        minimum >= 90 && maximum <= 93,
+        "0.4-alpha transparency did not preserve scaled strength"
+            + " (expected about 92/255, got \(minimum)...\(maximum))"
+    )
+    return [
+        "scenario": "transparency_alpha_contract",
+        "zero_alpha_maximum_byte": zeroAlpha.max() ?? 0,
+        "partial_alpha_minimum_byte": minimum,
+        "partial_alpha_maximum_byte": maximum,
+        "expected_partial_alpha_byte": 92
+    ]
 }
 
 @main
@@ -1112,6 +1337,10 @@ private enum MetalFXOffscreenValidationMain {
                 print("[offscreen] running \(scenario.name)")
                 results.append(try runScenario(scenario, harness: harness, root: root))
             }
+            print("[offscreen] running transparency_alpha_contract")
+            results.append(try runTransparencyAlphaContract(harness: harness, root: root))
+            print("[offscreen] running hand_fusion_steady")
+            results.append(try runHandFusionScenario(harness: harness, root: root))
             let summary: [String: Any] = [
                 "status": "passed",
                 "device": harness.device.name,

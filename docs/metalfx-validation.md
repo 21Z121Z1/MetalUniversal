@@ -118,7 +118,7 @@ exact post-discard coverage to the reactive mask.
 
 ## Automated client validation determinism
 
-`minecraftMetalFxClientValidation` performs twelve frame-exact GPU readbacks. To
+`minecraftMetalFxClientValidation` performs sixteen frame-exact GPU readbacks. To
 keep them deterministic on a loaded machine:
 
 - the run directory's `run/config/sodium-options.json` sets
@@ -155,7 +155,24 @@ so `runClient` now carries a `doLast` (active only when
 `minecraftMetalFxClientValidation` is the invoked task) that requires the file
 to exist, parse, report `status` `passed`, and have `completedGpuCaptures`
 equal `expectedGpuCaptures`. The expected count is read from the file rather
-than hard-coded so the gate follows the client.
+than hard-coded so the gate follows the client. A gate-open run additionally
+writes `frameGenerationRequested`, `frameGenerationFramesQueued`, and
+`frameGenerationEnabledAtCompletion`. When the Gradle invocation explicitly
+sets `-Dmetallum.metalfx.frameGeneration=true`, `doLast` also requires a
+positive enqueue count and an enabled end state. This prevents a permanently
+disabled presenter from being hidden behind successful Temporal attachment
+readbacks; it does not claim that a background drawable reached scanout.
+
+The 2026-07-27 gate-open run found exactly that former false positive: startup
+size churn caused one scene encode failure, Frame Generation was permanently
+disabled, and the old gate still passed 16/16. After changing the failure to a
+recoverable suspension, the same command recovered with reset history, queued
+255 source frames, remained enabled at completion, and passed all 16
+readbacks. Presentation diagnostics from this background Minecraft window had
+zero `presentedTime` and were correctly classified as not presented. The
+separate foreground `metalFrameGenerationPresentationValidation` run passed
+10 real and 9 generated presents; attended scanout/VRR judgment is still a
+separate production gate.
 
 The run entered `New World` and remained alive for more than one minute. A
 system screenshot attempt was unavailable because this macOS session denies

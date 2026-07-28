@@ -1438,9 +1438,142 @@ pixel reaches full suppression (`> 224/255`, above the 0.85 cap and below
 - **`skyFarPlaneMotion` has no isolated A/B.** It is on by default and was on
   in both §15.6 arms; its individual contribution was never separated because
   the first attempt to measure it was lost to a concurrent-build failure.
-- The residual 6.18 mean on the silhouette band is still ~30× the scene's
+- ~~The residual 6.18 mean on the silhouette band is still ~30× the scene's
   control. Sky/foliage contrast is far higher than the sealed room's, so some
-  of that is expected, but it has not been decomposed.
+  of that is expected, but it has not been decomposed.~~ **Closed by §16**: the
+  residual is the reactive edge band itself. Zeroing both band producers takes
+  the same statistic to 0.4039 against a 0.0801 control (5×), so essentially all
+  of it was reactivity, not scene contrast. Whether to spend it is a
+  flicker-vs-ghosting trade the static-hold harness cannot judge — see §16.4.
+
+## 16. Follow-up (2026-07-27d): the knob sweep, and what actually gates the run
+
+### 16.1 The client could not start for the whole preceding window
+
+Between `070cc40` and `c82bdaf` the client crashed in `GameRenderer.<init>` on
+every launch. `MovingBlockFeatureRendererMetalFxMixin` (object-motion line) took
+`@Redirect` on the `tesselateBlock` invoke inside `buildGroup`;
+`fabric-renderer-api-v1` redirects that same invoke. `@Redirect` is exclusive, so
+mixin applied metallum's, skipped fabric's, and fabric's redirector then failed
+its own injection check (`0/1 succeeded`) — a fatal `InjectionError`. Fixed by
+switching to MixinExtras `@WrapOperation`, which is built to compose; the
+try/finally contract the redirect existed for is unchanged.
+
+This matters for reading history: **any "L3 red" observed in that window is
+uninformative — not a single frame rendered.** Five other `@Redirect` mixins
+remain in the tree and carry the same latent failure mode if their targets ever
+overlap a fabric/Sodium redirect.
+
+### 16.2 Sweep
+
+Eight arms, `cutout_sky_hold` series, all reporting `skyEdgePixels = 123904` and
+therefore comparable pixel-for-pixel (§15.3's phase pinning holds). Arms
+`probe3`–`eb010` were run by the preceding session; `eb020r` and `zero` are the
+two combined arms it never landed.
+
+| arm | `depthEdgeReactiveCap` | `cutoutReactiveEdgeWeight` | skyEdgeMean | P95 | maskMean | control |
+|---|---|---|---|---|---|---|
+| probe3 | 0.5 (default) | 0.35 (default) | 5.0099 | 17 | 2.5262 | 0.1888 |
+| dc025 | 0.25 | 0.35 | 3.6094 | 12 | 1.9468 | 0.1448 |
+| dc010 | 0.10 | 0.35 | 3.6062 | 12 | 1.9455 | 0.1151 |
+| dc000 | 0.00 | 0.35 | 3.5962 | 12 | 1.9358 | 0.0900 |
+| eb020 | 0.5 | 0.20 | 2.6998 | 9 | 1.4082 | 0.1414 |
+| eb010 | 0.5 | 0.10 | 2.6744 | 9 | 1.2913 | 0.1398 |
+| **eb020r** | **0.25** | **0.20** | **2.7020** | **9** | **1.4093** | **0.1415** |
+| **zero** | **0.00** | **0.00** | **0.4039** | **1** | **0.2791** | **0.0801** |
+
+### 16.3 What the sweep says
+
+1. **The two knobs are not additive; they are nearly interchangeable, and both
+   saturate immediately.** Holding edge at 0.35, dropping the cap 0.5→0.25 buys
+   −28% and then nothing (0.25→0.10→0.00 moves the mean by 0.013). Holding the
+   cap at 0.5, dropping edge 0.35→0.20 buys −46% and then nothing. `eb020r`
+   (0.25 + 0.20) lands at 2.7020 against `eb020`'s (0.5 + 0.20) 2.6998 — a 0.08%
+   difference, i.e. the cap contributes nothing once the edge weight is down.
+   **Lowering either knob below its saturation point is wasted range.**
+2. **Only the exact-zero corner releases the band.** Every arm with any nonzero
+   reactivity on the silhouette sits at 2.7–5.0; `zero` drops to 0.4039 with P95
+   1. The magnitude of a nonzero reactive value barely matters — its *presence*
+   costs roughly 2.3 units of flicker. This is consistent with Apple's stated
+   semantics (>0 biases toward the current frame) being sharply nonlinear near 0,
+   and it is why the earlier single-knob arms all plateaued.
+3. **§15.8's undecomposed residual is now decomposed.** The band's floor is
+   0.4039 against a same-scene control of 0.0801 — 5×, not the ~30× recorded in
+   §15.8. The residual was the reactive edge band itself, not an unexplained
+   term.
+4. **The response is not linear, so it must not be extrapolated.** A parallel
+   analysis of the same arms proposed a linear law and predicted further material
+   gains at (0.10, 0.10), with the zero point extrapolated rather than measured —
+   three attempts to measure it were lost to the §16.1 startup crash. The
+   measured points refute a linear reading: 0.20→0.10 on the edge weight moves
+   the mean by 0.9% (2.6998→2.6744) and 0.5→0.25 on the cap moves it by 0.08%
+   (2.6998→2.7020), while (0, 0) drops 85%. The shape is a plateau with a cliff
+   at exactly zero, not a slope. Any predicted intermediate gain between 0.20 and
+   0.00 is an artifact of fitting a line to a step.
+
+### 16.4 Why this does not simply become the new default
+
+`zero` is the best flicker number available and the worst ghosting posture
+available: it removes the anti-ghosting band this remediation deliberately kept
+(§4, §13). The harness measures a **static hold** and therefore cannot see
+ghosting at all — it has no arm in which the trade is visible. Picking the
+default is exactly acceptance criterion §11(5), the in-game strafe-past-a-tree
+check, and it stays a human step. What the sweep does settle is the *shape* of
+the choice:
+
+- Anything in 0.10–0.35 for the edge weight is within 1% of the same flicker, so
+  **prefer the high end of that range** — it is free protection.
+- `depthEdgeReactiveCap` below 0.25 is inert; leave it at 0.25–0.5.
+- The only decision with real flicker consequence is **band or no band**.
+
+Recommendation, pending §11(5): keep the current defaults (0.5 / 0.35) or move to
+(0.25 / 0.20) — the latter is −46% flicker for a band that is still 0.20 wide.
+Do not ship `zero` without the in-game ghosting check.
+
+### 16.5 The CUTOUT acceptance criteria were never the blocker
+
+Both L3 runs pass `cutout_leaves` and `cutout_grass` at every knob setting
+tested, including `zero`:
+
+| scenario | coverage px | interior px | interior violations | edge-band reactive px |
+|---|---|---|---|---|
+| `cutout_leaves` | 87,581 | 51,712 | 0 | 93 |
+| `cutout_grass` | 72,370 | 51,347 | 0 | 24 |
+
+They pass at every setting, but for a reason that has to be stated plainly,
+because it is a defect in the assertion rather than a property of the code. Per
+arm, on `cutout_leaves`:
+
+| arm | edgeWeight | cap | `cutoutEdgeBandReactivePixels` |
+|---|---|---|---|
+| probe3 | 0.35 | 0.5 | 62,802 |
+| dc000 | 0.35 | 0.00 | 62,802 |
+| eb020 | 0.20 | 0.5 | 93 |
+| eb020r | 0.20 | 0.25 | 93 |
+| zero | 0.00 | 0.00 | 93 |
+
+`EDGE_REACTIVE_MIN` is 72, i.e. 0.282 in normalized terms. An edge weight of 0.35
+writes 89/255 and clears it; 0.20 writes 51/255 and does not. So the count
+collapses from 62,802 to 93 the moment the weight crosses that threshold — and
+those 93 are then **identical at 0.20, at 0.10 and at 0.00**, because they are
+supplied by the disocclusion cap (0.85 = 217/255, §15.5), not by the band.
+
+Consequence: `cutoutEdgeBandReactivePixels > 0` is a real assertion at today's
+0.35 default and a **vacuous** one at any weight below 0.282 — it would pass with
+the band switched off entirely. `depthEdgeReactiveCap` never contributes to it at
+all (dc000 at cap 0.0 still reports 62,802). **Any change of the default edge
+weight below 0.282 must lower `EDGE_REACTIVE_MIN` in the same commit**, or the
+invariant silently stops testing the thing it was written to test.
+
+The interior-violation half of the contract is unaffected — it is a
+`reactive > 48` test on interior pixels and stays meaningful across the range.
+
+The gate's two red scenarios are `item_spin` and `minecart_rail`, both owned by
+the object-motion line, and both failing only `OBJECT_MIN_SPIN_SPREAD_X = 0.008`:
+`item_spin` measures X-spread 0.004677 (Y 0.0078125), `minecart_rail` measures
+[0.001292, 0.007355]. Both are marginal misses against a floor introduced by
+`5504828`. **The S9B/C and S10 enabled-state acceptance is therefore not blocked
+on this line.**
 
 ## 13. Out of scope / known limitations
 

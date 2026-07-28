@@ -1,10 +1,16 @@
 package com.metallum.client.validation;
 
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.MetalGpuTimingRecorder;
 import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.CloudStatus;
+import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.client.renderer.GameRenderer;
@@ -21,6 +27,10 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.projectile.arrow.Arrow;
 import net.minecraft.world.entity.vehicle.boat.Boat;
 import net.minecraft.world.entity.vehicle.minecart.Minecart;
+import net.minecraft.world.entity.vehicle.minecart.MinecartBehavior;
+import net.minecraft.world.entity.vehicle.minecart.NewMinecartBehavior;
+import net.minecraft.world.entity.vehicle.minecart.OldMinecartBehavior;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
@@ -54,6 +64,19 @@ import java.util.UUID;
  */
 public final class MetalValidationClient implements ClientModInitializer {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.validation.enabled");
+    private static final boolean PRESERVE_FULLSCREEN = Boolean.getBoolean(
+            "metallum.validation.preserveFullscreen"
+    );
+    private static final boolean PERFORMANCE_ONLY = Boolean.getBoolean(
+            "metallum.validation.performanceOnly"
+    );
+    private static final boolean NATIVE_DIRECT_FRAME_GENERATION = Boolean.getBoolean(
+            "metallum.metalfx.nativeDirectFrameGeneration"
+    );
+    private static final int BASELINE_SETTLE_FRAMES = 60;
+    private static final int BASELINE_MEASURED_FRAMES = 240;
+    private static final List<Double> baselineFrameIntervalsMillis = new ArrayList<>();
+    private static long baselinePreviousFrameNanos;
     private static final int CONTROLLED_ENTITY_ID = -2_147_000_001;
     private static final UUID CONTROLLED_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf01");
@@ -78,32 +101,58 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final int SKY_FLICKER_START_FRAME = 128;
     private static final int SKY_FLICKER_END_FRAME = 151;
     private static final float SKY_SCENE_PITCH = -50.0F;
+    // Opaque high-frequency terrain receding into a cleared sky boundary.
+    // This isolates material LOD selection from CUTOUT coverage and measures
+    // both the distant floor interior and the exact sky/ground horizon.
+    private static final int LOD_SCENE_FRAME = 156;
+    private static final int LOD_FLICKER_START_FRAME = 168;
+    private static final int LOD_FLICKER_END_FRAME = 191;
+    private static final float LOD_SCENE_PITCH = 6.0F;
     // Object-motion acceptance frames. MetalEntityObjectPose reconstructs root
     // transforms for dropped items and vehicles, but the scripted room holds
     // only an ArmorStand, so the core/item path had no automated proof. These
-    // frames are appended strictly after the cutout flicker series' last frame
-    // (SKY_FLICKER_END_FRAME) rather than inserted into it: frames 90..151
-    // belong to the shimmer-remediation thread
-    // (docs/cutout-shimmer-remediation-2026-07-27.md §8/§14) and nothing at or
-    // below 155 changes behaviour here.
+    // frames are appended strictly after the cutout and distant-LOD flicker
+    // series rather than inserted into either measurement window.
     // One scenario per root-transform category MetalEntityObjectPose covers, so
     // a regression in any single reconstruction shows up as its own failing
     // frame. Each scenario runs 12 frames and captures 8 frames in, leaving the
     // scene swap's disocclusion transient behind. See the coverage table in
     // docs/metalfx-frame-generation.md.
-    private static final int OBJECT_SCENE_FRAME = 156;
-    private static final int ITEM_CAPTURE_FRAME = 164;
-    private static final int VEHICLE_TURN_FRAME = 168;
-    private static final int VEHICLE_CAPTURE_FRAME = 176;
-    private static final int LIVING_TURN_FRAME = 180;
-    private static final int LIVING_CAPTURE_FRAME = 188;
-    private static final int ARROW_TURN_FRAME = 192;
-    private static final int ARROW_CAPTURE_FRAME = 200;
-    private static final int MINECART_TURN_FRAME = 204;
-    private static final int MINECART_CAPTURE_FRAME = 212;
-    private static final int OBJECT_SERIES_END_FRAME = 216;
-    // The timeline now runs past the old 220-frame ceiling.
-    private static final int TIMELINE_TIMEOUT_FRAME = 300;
+    private static final int OBJECT_SCENE_FRAME = 196;
+    private static final int ITEM_CAPTURE_FRAME = 204;
+    private static final int VEHICLE_TURN_FRAME = 208;
+    private static final int VEHICLE_CAPTURE_FRAME = 216;
+    private static final int LIVING_TURN_FRAME = 220;
+    private static final int LIVING_CAPTURE_FRAME = 228;
+    private static final int ARROW_TURN_FRAME = 232;
+    private static final int ARROW_CAPTURE_FRAME = 240;
+    private static final int MINECART_TURN_FRAME = 244;
+    private static final int MINECART_CAPTURE_FRAME = 252;
+    private static final int MINECART_NEW_TURN_FRAME = 256;
+    private static final int MINECART_NEW_CAPTURE_FRAME = 264;
+    private static final int OBJECT_SERIES_END_FRAME = 268;
+    // Production translucent-terrain proof. The first capture validates that
+    // the transparency target both contributes reactive pixels and reaches the
+    // final scene color; the following 24-frame hold measures temporal shimmer.
+    private static final int TRANSLUCENT_SCENE_FRAME = OBJECT_SERIES_END_FRAME;
+    private static final int TRANSLUCENT_CAPTURE_FRAME = 276;
+    private static final int TRANSLUCENT_FLICKER_START_FRAME = 280;
+    private static final int TRANSLUCENT_FLICKER_END_FRAME = 303;
+    private static final int TRANSLUCENT_SERIES_END_FRAME = 308;
+    private static final float HAND_TRANSLUCENT_SCENE_PITCH = 14.0F;
+    private static final int EXPECTED_GPU_CAPTURES = 17;
+    // Attachment readbacks deliberately block GPU progress. When frame
+    // generation is under test, follow them with a clean steady-state tail so
+    // the same Quick Play run can measure sustained source/present pacing and
+    // GPU headroom without conflating validation-copy stalls with gameplay.
+    private static final boolean FRAME_GENERATION_REQUESTED =
+            Boolean.getBoolean("metallum.metalfx.frameGeneration");
+    private static final int FRAME_GENERATION_STEADY_FRAMES = 180;
+    private static final int VALIDATION_END_FRAME = TRANSLUCENT_SERIES_END_FRAME
+            + (FRAME_GENERATION_REQUESTED ? FRAME_GENERATION_STEADY_FRAMES : 0);
+    // The timeline now runs past the old 220-frame ceiling. Keep a bounded
+    // allowance for delayed asynchronous readbacks before failing the run.
+    private static final int TIMELINE_TIMEOUT_FRAME = VALIDATION_END_FRAME + 72;
     // Item spin is driven by ageInTicks, which the renderer builds as
     // `tickCount + partialTick`. partialTick is wall-clock and cannot be
     // pinned from here, so the commanded per-frame step is made large enough
@@ -115,27 +164,6 @@ public final class MetalValidationClient implements ClientModInitializer {
     // old == new makes the rendered pose exact and these scenarios carry no
     // wall-clock term at all. 6 degrees a frame keeps per-frame motion small.
     private static final float OBJECT_TURN_DEGREES_PER_FRAME = 6.0F;
-    // Minecart hurt shake. On a straight rail the renderer re-derives yaw from
-    // the rail samples and ignores the cart's own, so the shake is the only
-    // rotation available without curving the track.
-    //
-    // The shake angle is `sin(hurtTime) * hurtTime * damage / 10` degrees, and
-    // hurtTime is fed to sin as if it were radians. Counting hurtTime down a
-    // step per frame therefore does not give a smooth wobble at all: 10 -> 9 at
-    // damage 40 swings 36 degrees in a single frame, which is precisely the
-    // large per-frame motion these scenarios avoid. Holding hurtTime fixed and
-    // ramping damage instead makes the angle linear in the ramp: at hurtTime 5
-    // the angle is -0.479 * damage degrees, so a 4.0 step is about 1.9 degrees
-    // a frame, matching the other scenarios' 6 degree yaw step in magnitude.
-    //
-    // This is the one object scenario that keeps a wall-clock term: the
-    // renderer extracts hurtTime as `getHurtTime() - partialTick`, which no
-    // amount of old == new pinning removes. The effective hurtTime therefore
-    // roams [4, 5] and the realised step lands somewhere in 1.9-6.9 degrees.
-    // That stays small in absolute terms and well inside the spread envelope,
-    // but it is why this scenario is the least reproducible of the five.
-    private static final int MINECART_HURT_TIME = 5;
-    private static final float MINECART_DAMAGE_PER_FRAME = 4.0F;
     // Spin angle the item is pinned to on its capture frame. bobOffs is
     // randomised per ItemEntity and is final, so rather than pinning the offset
     // itself the integer tick base absorbs it (see installObjectMotionScene).
@@ -153,12 +181,15 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final int LIVING_ENTITY_ID = -2_147_000_004;
     private static final int ARROW_ENTITY_ID = -2_147_000_005;
     private static final int MINECART_ENTITY_ID = -2_147_000_006;
+    private static final int MINECART_NEW_ENTITY_ID = -2_147_000_007;
     private static final UUID LIVING_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf04");
     private static final UUID ARROW_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf05");
     private static final UUID MINECART_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf06");
+    private static final UUID MINECART_NEW_ENTITY_UUID =
+            UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf07");
     // Pinned FRAMEBUFFER size. All metric thresholds and golden baselines
     // are calibrated at this capture size (the 2x-backing framebuffer of the
     // 854x480 logical window the Gradle task requests via --width/--height).
@@ -171,17 +202,24 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static int requestedLogicalWidth = FRAMEBUFFER_WIDTH / 2;
     private static int requestedLogicalHeight = FRAMEBUFFER_HEIGHT / 2;
     private static boolean timelineAnchored;
+    private static boolean sceneReinstalledAfterWarmup;
+    private static boolean loggedFirstFrame;
+    private static boolean loggedFirstLevelFrame;
     private static ArmorStand controlledEntity;
     private static ItemEntity spinningItem;
     private static Boat turningVehicle;
     private static Pig turningLiving;
     private static Arrow turningArrow;
     private static Minecart shakingMinecart;
+    private static Minecart newBehaviorMinecart;
     private static Vec3 cameraOrigin;
     private static float cameraYaw;
     private static float cameraPitch;
     private static Path outputDirectory;
     private static Vec3 previousEntityPosition;
+    private static Boolean originalHudHidden;
+    private static CameraType originalCameraType;
+    private static ItemStack originalSelectedItem;
     private static final Map<BlockPos, BlockState> OCCLUSION_WALL = new LinkedHashMap<>();
     private static final Map<BlockPos, BlockState> CUTOUT_SCENE = new LinkedHashMap<>();
     // Kept separate from CUTOUT_SCENE so restoring the object-motion rail never
@@ -239,8 +277,24 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (minecraft.options != null) {
             minecraft.options.pauseOnLostFocus = false;
         }
+        // A run that never starts its timeline still exits reporting success,
+        // so the two states that precede the timeline are worth one line each:
+        // without them a stalled run and a passing run look identical in the
+        // log. Both fire once.
+        if (!loggedFirstFrame) {
+            loggedFirstFrame = true;
+            Metallum.LOGGER.info(
+                    "Validation driver reached its first rendered frame (level={}, player={})",
+                    minecraft.level != null,
+                    minecraft.player != null
+            );
+        }
         if (minecraft.level == null || minecraft.player == null) {
             return;
+        }
+        if (!loggedFirstLevelFrame) {
+            loggedFirstLevelFrame = true;
+            Metallum.LOGGER.info("Validation driver observed a level; arming the scripted timeline");
         }
         if (controlledEntity == null || controlledEntity.isRemoved()) {
             installControlledScene(minecraft);
@@ -251,35 +305,71 @@ public final class MetalValidationClient implements ClientModInitializer {
             sleepForAsyncWork(WARMUP_FRAME_SLEEP_MILLIS);
             return;
         }
+        // The integrated server can resend chunks while it applies the launch
+        // view distance, overwriting the client-only room installed on the
+        // first level frame. Reinstall after warm-up, once that startup sync
+        // has finished, then wait for Sodium to publish the replacement mesh.
+        if (!sceneReinstalledAfterWarmup) {
+            installSceneClearing(minecraft);
+            sceneReinstalledAfterWarmup = true;
+            holdInitialPose(minecraft);
+            return;
+        }
+        if (!terrainSettled()) {
+            holdInitialPose(minecraft);
+            return;
+        }
         if (!timelineAnchored) {
-            // Hold the timeline until the FRAMEBUFFER is the pinned size.
-            // The Gradle run passes --width/--height, but macOS window
-            // management can zoom or tile the window afterwards, and the
-            // backing scale differs by which display the window lands on
-            // (built-in Retina 2x vs external 1x) — both change the capture
-            // size and make golden runs incomparable. setWindowed takes the
-            // LOGICAL size, so on a 2x display the request is halved to land
-            // the framebuffer on the target.
             int framebufferWidth = minecraft.getWindow().getWidth();
             int framebufferHeight = minecraft.getWindow().getHeight();
-            if (framebufferWidth != FRAMEBUFFER_WIDTH || framebufferHeight != FRAMEBUFFER_HEIGHT) {
-                windowResizeAttempts++;
-                if (windowResizeAttempts > 200) {
+            if (PRESERVE_FULLSCREEN) {
+                if (!minecraft.getWindow().isFullscreen() || framebufferWidth <= 0 || framebufferHeight <= 0) {
                     throw new IllegalStateException(
-                            "Validation framebuffer stuck at " + framebufferWidth + "x" + framebufferHeight
-                                    + "; expected " + FRAMEBUFFER_WIDTH + "x" + FRAMEBUFFER_HEIGHT
+                            "Fullscreen validation requires an active non-empty fullscreen drawable; found "
+                                    + framebufferWidth + "x" + framebufferHeight
                     );
                 }
-                if (windowResizeAttempts % 40 == 1) {
-                    boolean retinaBacking = framebufferWidth == requestedLogicalWidth * 2
-                            && framebufferHeight == requestedLogicalHeight * 2;
-                    requestedLogicalWidth = retinaBacking ? FRAMEBUFFER_WIDTH / 2 : FRAMEBUFFER_WIDTH;
-                    requestedLogicalHeight = retinaBacking ? FRAMEBUFFER_HEIGHT / 2 : FRAMEBUFFER_HEIGHT;
-                    minecraft.getWindow().setWindowed(requestedLogicalWidth, requestedLogicalHeight);
+                Metallum.LOGGER.info(
+                        "Validation timeline preserving fullscreen drawable {}x{}",
+                        framebufferWidth,
+                        framebufferHeight
+                );
+            } else {
+                // Golden captures use one pinned windowed framebuffer across runs.
+                if (minecraft.getWindow().isFullscreen()) {
+                    minecraft.options.exclusiveFullscreen().set(false);
+                    minecraft.options.fullscreen().set(false);
+                    minecraft.getWindow().updateFullscreenIfChanged();
+                    if (minecraft.getWindow().isFullscreen()) {
+                        minecraft.getWindow().toggleFullScreen();
+                    }
+                    windowResizeAttempts = 0;
+                    holdInitialPose(minecraft);
+                    sleepForAsyncWork(25L);
+                    return;
                 }
-                holdInitialPose(minecraft);
-                sleepForAsyncWork(25L);
-                return;
+                if (framebufferWidth != FRAMEBUFFER_WIDTH || framebufferHeight != FRAMEBUFFER_HEIGHT) {
+                    windowResizeAttempts++;
+                    if (windowResizeAttempts > 200) {
+                        throw new IllegalStateException(
+                                "Validation framebuffer stuck at " + framebufferWidth + "x" + framebufferHeight
+                                        + "; expected " + FRAMEBUFFER_WIDTH + "x" + FRAMEBUFFER_HEIGHT
+                        );
+                    }
+                    if (windowResizeAttempts % 40 == 1) {
+                        int logicalWidth = minecraft.getWindow().getScreenWidth();
+                        int logicalHeight = minecraft.getWindow().getScreenHeight();
+                        boolean retinaBacking = logicalWidth > 0 && logicalHeight > 0
+                                && Math.abs((double) framebufferWidth / logicalWidth - 2.0) < 0.1
+                                && Math.abs((double) framebufferHeight / logicalHeight - 2.0) < 0.1;
+                        requestedLogicalWidth = retinaBacking ? FRAMEBUFFER_WIDTH / 2 : FRAMEBUFFER_WIDTH;
+                        requestedLogicalHeight = retinaBacking ? FRAMEBUFFER_HEIGHT / 2 : FRAMEBUFFER_HEIGHT;
+                        minecraft.getWindow().setWindowed(requestedLogicalWidth, requestedLogicalHeight);
+                    }
+                    holdInitialPose(minecraft);
+                    sleepForAsyncWork(25L);
+                    return;
+                }
             }
             timelineAnchored = true;
             // A pause screen may already be open if focus was lost before
@@ -293,6 +383,16 @@ public final class MetalValidationClient implements ClientModInitializer {
             // jitter and accumulation depth in every run — a prerequisite for
             // byte-identical golden captures.
             MetalFxManager.resetHistory("validation timeline start");
+            if (PERFORMANCE_ONLY) {
+                MetalGpuTimingRecorder.reset();
+                baselineFrameIntervalsMillis.clear();
+                baselinePreviousFrameNanos = 0L;
+            }
+        }
+
+        if (PERFORMANCE_ONLY) {
+            runNativeFullscreenBaseline(minecraft);
+            return;
         }
 
         // Scene mutations must land in the frame that triggers them (the
@@ -332,12 +432,17 @@ public final class MetalValidationClient implements ClientModInitializer {
             installCutoutGrassScene(minecraft);
         } else if (frame == SKY_SCENE_FRAME) {
             installCutoutSkyScene(minecraft);
+        } else if (frame == LOD_SCENE_FRAME) {
+            installDistantLodScene(minecraft);
         } else if (frame == OBJECT_SCENE_FRAME) {
             installObjectMotionScene(minecraft);
+        } else if (frame == TRANSLUCENT_SCENE_FRAME) {
+            installTranslucentGlassScene(minecraft);
         } else if (frame == VEHICLE_TURN_FRAME
                 || frame == LIVING_TURN_FRAME
                 || frame == ARROW_TURN_FRAME
-                || frame == MINECART_TURN_FRAME) {
+                || frame == MINECART_TURN_FRAME
+                || frame == MINECART_NEW_TURN_FRAME) {
             // Swapping which object is in view is a large one-frame jump for
             // both the outgoing and incoming object; the capture sits 8 frames
             // later, and the reset keeps that transient out of the accumulated
@@ -369,7 +474,14 @@ public final class MetalValidationClient implements ClientModInitializer {
                 FLICKER_START_FRAME, FLICKER_END_FRAME, SKY_SCENE_FRAME - 1);
         requestFlickerFrameIfDue(
                 frame, "cutout_sky_hold",
-                SKY_FLICKER_START_FRAME, SKY_FLICKER_END_FRAME, 200);
+                SKY_FLICKER_START_FRAME, SKY_FLICKER_END_FRAME, LOD_SCENE_FRAME - 1);
+        requestFlickerFrameIfDue(
+                frame, "lod_horizon_hold",
+                LOD_FLICKER_START_FRAME, LOD_FLICKER_END_FRAME, OBJECT_SCENE_FRAME - 1);
+        requestFlickerFrameIfDue(
+                frame, "hand_translucent_motion_series",
+                TRANSLUCENT_FLICKER_START_FRAME, TRANSLUCENT_FLICKER_END_FRAME,
+                TRANSLUCENT_SERIES_END_FRAME - 1);
         if (frame < 90) {
             appendFrameState(scenario, cameraPosition, entityPosition, entityOffset, cameraOffset);
         }
@@ -379,21 +491,26 @@ public final class MetalValidationClient implements ClientModInitializer {
                 && MetalFxManager.validationCapturesPending() == 0
                 && !MetalFxManager.flickerSeriesPending()
                 && MetalFxManager.flickerMetricCompleted("cutout_grass_hold")
-                && MetalFxManager.flickerMetricCompleted("cutout_sky_hold")) {
+                && MetalFxManager.flickerMetricCompleted("cutout_sky_hold")
+                && MetalFxManager.flickerMetricCompleted("lod_horizon_hold")
+                && MetalFxManager.flickerMetricCompleted("hand_translucent_motion_series")) {
             int completed = MetalFxManager.validationCapturesCompleted();
             int failures = MetalFxManager.validationCaptureFailures();
-            if (completed != 15 || failures != 0) {
+            if (completed != EXPECTED_GPU_CAPTURES || failures != 0) {
                 removeOcclusionWall(minecraft);
                 removeCutoutScene(minecraft);
                 removeObjectMotionScene();
+                restoreHudVisibility(minecraft);
                 applyPlayerPose(minecraft, cameraOrigin, cameraYaw, cameraPitch);
                 finishRunState("failed", completed, failures);
                 throw new IllegalStateException(
                         "Automated Minecraft GPU validation failed: completed="
-                                + completed + "/15, failures=" + failures
+                                + completed + "/" + EXPECTED_GPU_CAPTURES + ", failures=" + failures
                 );
             }
-            finishAndStop(minecraft, completed, failures);
+            if (frame >= VALIDATION_END_FRAME) {
+                finishAndStop(minecraft, completed, failures);
+            }
         } else if (frame >= TIMELINE_TIMEOUT_FRAME) {
             throw new IllegalStateException(
                     "Timed out waiting for automated Minecraft GPU readbacks: pending="
@@ -405,6 +522,202 @@ public final class MetalValidationClient implements ClientModInitializer {
     public static void afterFrame(final GameRenderer renderer) {
         // GPU attachment capture is intentionally connected separately in the
         // MetalFX manager after temporal encoding and before present.
+    }
+
+    private static void runNativeFullscreenBaseline(final Minecraft minecraft) {
+        holdInitialPose(minecraft);
+        if (!NATIVE_DIRECT_FRAME_GENERATION && frame == 16) {
+            MetalFxManager.requestNativeOffReadback();
+        }
+        long now = System.nanoTime();
+        if (baselinePreviousFrameNanos != 0L && frame > BASELINE_SETTLE_FRAMES) {
+            baselineFrameIntervalsMillis.add((now - baselinePreviousFrameNanos) / 1_000_000.0);
+        }
+        baselinePreviousFrameNanos = now;
+        frame++;
+        if (frame < BASELINE_SETTLE_FRAMES + BASELINE_MEASURED_FRAMES + 1) {
+            return;
+        }
+
+        List<Double> gpuMilliseconds = MetalGpuTimingRecorder.snapshot().stream()
+                .map(MetalGpuTimingRecorder.Sample::milliseconds)
+                .filter(value -> value > 0.0 && Double.isFinite(value))
+                .toList();
+        int keep = Math.min(BASELINE_MEASURED_FRAMES, gpuMilliseconds.size());
+        List<Double> steadyGpuMilliseconds = gpuMilliseconds.subList(
+                gpuMilliseconds.size() - keep,
+                gpuMilliseconds.size()
+        );
+        double frameP50 = percentile(baselineFrameIntervalsMillis, 0.50);
+        double frameP95 = percentile(baselineFrameIntervalsMillis, 0.95);
+        double frameMax = baselineFrameIntervalsMillis.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
+        double gpuP50 = percentile(steadyGpuMilliseconds, 0.50);
+        double gpuP95 = percentile(steadyGpuMilliseconds, 0.95);
+        double gpuMax = steadyGpuMilliseconds.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
+        MetalFxManager.NativeOffDiagnostics offDiagnostics = MetalFxManager.nativeOffDiagnostics();
+        MetalFxManager.NativeOffReadbackDiagnostics readbackDiagnostics =
+                MetalFxManager.nativeOffReadbackDiagnostics();
+        boolean offWorkEliminated = NATIVE_DIRECT_FRAME_GENERATION || (offDiagnostics.modeOff()
+                && offDiagnostics.auxiliaryTextureCount() == 0
+                && offDiagnostics.frameGenerationTargetCount() == 0
+                && !offDiagnostics.motionCaptureEnabled()
+                && offDiagnostics.fastPathFrames() >= BASELINE_MEASURED_FRAMES);
+        boolean readbackValidated = NATIVE_DIRECT_FRAME_GENERATION
+                || (readbackDiagnostics.completed() && readbackDiagnostics.passed());
+        boolean stable60 = baselineFrameIntervalsMillis.size() >= BASELINE_MEASURED_FRAMES
+                && steadyGpuMilliseconds.size() >= BASELINE_MEASURED_FRAMES - 8
+                && frameP95 <= 18.5
+                && offWorkEliminated
+                && readbackValidated;
+        try {
+            JsonObject report = new JsonObject();
+            report.addProperty("status", "captured");
+            report.addProperty(
+                    "mode",
+                    NATIVE_DIRECT_FRAME_GENERATION
+                            ? "native-direct-frame-generation"
+                            : "native-metalfx-off"
+            );
+            report.addProperty("drawableWidth", minecraft.getWindow().getWidth());
+            report.addProperty("drawableHeight", minecraft.getWindow().getHeight());
+            report.addProperty("measuredFrameIntervals", baselineFrameIntervalsMillis.size());
+            report.addProperty("measuredGpuCommandBuffers", steadyGpuMilliseconds.size());
+            report.addProperty("frameIntervalP50Milliseconds", frameP50);
+            report.addProperty("frameIntervalP95Milliseconds", frameP95);
+            report.addProperty("frameIntervalMaxMilliseconds", frameMax);
+            report.addProperty("sourceFpsFromP50", frameP50 > 0.0 ? 1_000.0 / frameP50 : 0.0);
+            report.addProperty("gpuP50Milliseconds", gpuP50);
+            report.addProperty("gpuP95Milliseconds", gpuP95);
+            report.addProperty("gpuMaxMilliseconds", gpuMax);
+            report.addProperty(
+                    "metal4MainQueuePilotEngaged",
+                    Boolean.getBoolean("metallum.opt.metal4MainQueuePilot")
+            );
+            report.addProperty(
+                    "metal4MainQueuePilotComputeCopyValidated",
+                    Boolean.getBoolean("metallum.opt.metal4MainQueuePilot")
+            );
+            report.addProperty("splitFenceEnabled", Boolean.getBoolean("metallum.opt.splitFence"));
+            long[] metal4MainStats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
+            boolean metal4MainRendererEngaged = metal4MainStats[0] != 0L;
+            report.addProperty("metal4MainRendererEngaged", metal4MainRendererEngaged);
+            report.addProperty(
+                    "residencySetEnabled",
+                    Boolean.getBoolean("metallum.opt.residencySet") || metal4MainRendererEngaged
+            );
+            JsonObject metal4Main = new JsonObject();
+            metal4Main.addProperty("commandBuffersCreated", metal4MainRendererEngaged ? 3L : 0L);
+            metal4Main.addProperty("leasesBegun", metal4MainStats[1]);
+            metal4Main.addProperty("submissions", metal4MainStats[2]);
+            metal4Main.addProperty("commandBufferFactoryCallsAvoided", metal4MainStats[3]);
+            report.add("metal4MainRenderer", metal4Main);
+            long[] metal4MetalFxStats = MetalNativeBridge.metallum_metal4_metalfx_stats();
+            JsonObject metal4MetalFx = new JsonObject();
+            metal4MetalFx.addProperty("engaged", metal4MetalFxStats[0] != 0L);
+            metal4MetalFx.addProperty("auxiliaryComputeEncodes", metal4MetalFxStats[1]);
+            metal4MetalFx.addProperty("spatialScalerEncodes", metal4MetalFxStats[2]);
+            metal4MetalFx.addProperty("temporalScalerEncodes", metal4MetalFxStats[3]);
+            metal4MetalFx.addProperty("frameGenerationInputSubmissions", metal4MetalFxStats[4]);
+            report.add("metal4MetalFx", metal4MetalFx);
+            MetalGpuTimingRecorder.RenderEncoderLookupStats encoderLookupStats =
+                    MetalGpuTimingRecorder.renderEncoderLookupStats();
+            JsonObject encoderLookup = new JsonObject();
+            encoderLookup.addProperty("nativeFactoryCalls", encoderLookupStats.factoryCalls());
+            encoderLookup.addProperty("cacheHits", encoderLookupStats.cacheHits());
+            encoderLookup.addProperty("nativeFactoryCallsAvoided", encoderLookupStats.cacheHits());
+            encoderLookup.addProperty("temporaryArraysAvoided", encoderLookupStats.cacheHits() * 3L);
+            report.add("renderEncoderLookup", encoderLookup);
+            report.add("cpuLogicalPasses", summarizeCpuPasses(MetalGpuTimingRecorder.cpuPassSnapshot()));
+            report.add("gpuNativeEncoders", summarizeGpuEncoders(MetalGpuTimingRecorder.gpuEncoderSnapshot()));
+            JsonObject off = new JsonObject();
+            off.addProperty("modeOff", offDiagnostics.modeOff());
+            off.addProperty("fastPathFrames", offDiagnostics.fastPathFrames());
+            off.addProperty("auxiliaryTextureCount", offDiagnostics.auxiliaryTextureCount());
+            off.addProperty("frameGenerationTargetCount", offDiagnostics.frameGenerationTargetCount());
+            off.addProperty("motionCaptureEnabled", offDiagnostics.motionCaptureEnabled());
+            off.addProperty("allWorkEliminated", offWorkEliminated);
+            report.add("metalFxOffDiagnostics", off);
+            JsonObject readback = new JsonObject();
+            readback.addProperty("requested", readbackDiagnostics.requested());
+            readback.addProperty("pending", readbackDiagnostics.pending());
+            readback.addProperty("completed", readbackDiagnostics.completed());
+            readback.addProperty("passed", readbackDiagnostics.passed());
+            readback.addProperty("width", readbackDiagnostics.width());
+            readback.addProperty("height", readbackDiagnostics.height());
+            readback.addProperty("nonZeroRgbPixels", readbackDiagnostics.nonZeroRgbPixels());
+            readback.addProperty("varyingRgbPixels", readbackDiagnostics.varyingRgbPixels());
+            readback.addProperty("fnv1a64", Long.toUnsignedString(readbackDiagnostics.checksum(), 16));
+            report.add("nativeMainReadback", readback);
+            report.addProperty("stable60Fps", stable60);
+            Files.writeString(
+                    outputDirectory.resolve(NATIVE_DIRECT_FRAME_GENERATION
+                            ? "native-direct-frame-generation.json"
+                            : "native-fullscreen-baseline.json"),
+                    new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n",
+                    StandardCharsets.UTF_8
+            );
+        } catch (IOException exception) {
+            throw new IllegalStateException("Could not write native fullscreen baseline", exception);
+        }
+        int readbackCompleted = readbackDiagnostics.completed() ? 1 : 0;
+        int readbackFailures = readbackDiagnostics.passed() ? 0 : 1;
+        finishRunState(stable60 ? "passed" : "performance-failed", readbackCompleted, readbackFailures);
+        Metallum.LOGGER.info(
+                "Native fullscreen baseline captured: drawable={}x{}, intervalP95={}ms, gpuP95={}ms, stable60={}",
+                minecraft.getWindow().getWidth(),
+                minecraft.getWindow().getHeight(),
+                frameP95, gpuP95, stable60
+        );
+        removeOcclusionWall(minecraft);
+        removeCutoutScene(minecraft);
+        removeObjectMotionScene();
+        minecraft.stop();
+    }
+
+    private static double percentile(final List<Double> values, final double quantile) {
+        if (values.isEmpty()) {
+            return 0.0;
+        }
+        List<Double> sorted = values.stream().sorted().toList();
+        int index = Math.max(0, Math.min(
+                sorted.size() - 1,
+                (int) Math.ceil(quantile * sorted.size()) - 1
+        ));
+        return sorted.get(index);
+    }
+
+    private static JsonArray summarizeCpuPasses(final List<MetalGpuTimingRecorder.CpuPassSample> samples) {
+        Map<String, List<Double>> grouped = new LinkedHashMap<>();
+        for (MetalGpuTimingRecorder.CpuPassSample sample : samples) {
+            grouped.computeIfAbsent(sample.label(), ignored -> new ArrayList<>()).add(sample.milliseconds());
+        }
+        return summarizeDurations(grouped);
+    }
+
+    private static JsonArray summarizeGpuEncoders(final List<MetalGpuTimingRecorder.GpuEncoderSample> samples) {
+        Map<String, List<Double>> grouped = new LinkedHashMap<>();
+        for (MetalGpuTimingRecorder.GpuEncoderSample sample : samples) {
+            grouped.computeIfAbsent(sample.kind() + ":" + sample.label(), ignored -> new ArrayList<>())
+                    .add(sample.milliseconds());
+        }
+        return summarizeDurations(grouped);
+    }
+
+    private static JsonArray summarizeDurations(final Map<String, List<Double>> grouped) {
+        JsonArray result = new JsonArray();
+        grouped.forEach((label, values) -> {
+            JsonObject item = new JsonObject();
+            item.addProperty("label", label);
+            item.addProperty("samples", values.size());
+            item.addProperty("p50Milliseconds", percentile(values, 0.50));
+            item.addProperty("p95Milliseconds", percentile(values, 0.95));
+            item.addProperty(
+                    "maxMilliseconds",
+                    values.stream().mapToDouble(Double::doubleValue).max().orElse(0.0)
+            );
+            result.add(item);
+        });
+        return result;
     }
 
     /** Camera/entity placement for one timeline frame, pure in the frame index. */
@@ -459,8 +772,14 @@ public final class MetalValidationClient implements ClientModInitializer {
         // Bounding what used to be the open-ended tail. Every frame the
         // shimmer thread owns still resolves to cutout_sky_hold, so this is an
         // append rather than an edit of their range.
-        if (timelineFrame < OBJECT_SCENE_FRAME) {
+        if (timelineFrame < LOD_SCENE_FRAME) {
             return new ScenarioPose("cutout_sky_hold", 0.80, 0.40);
+        }
+        if (timelineFrame < LOD_FLICKER_START_FRAME) {
+            return new ScenarioPose("lod_horizon", 0.80, 0.40);
+        }
+        if (timelineFrame < OBJECT_SCENE_FRAME) {
+            return new ScenarioPose("lod_horizon_hold", 0.80, 0.40);
         }
         // Object-motion scenarios. The camera offset is held at the value the
         // sky hold ends on so the camera never translates across the
@@ -478,7 +797,19 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (timelineFrame < MINECART_TURN_FRAME) {
             return new ScenarioPose("arrow_turn", 0.80, 0.40);
         }
-        return new ScenarioPose("minecart_rail", 0.80, 0.40);
+        if (timelineFrame < MINECART_NEW_TURN_FRAME) {
+            return new ScenarioPose("minecart_rail", 0.80, 0.40);
+        }
+        if (timelineFrame < TRANSLUCENT_SCENE_FRAME) {
+            return new ScenarioPose("minecart_new", 0.80, 0.40);
+        }
+        int motionFrame = Math.floorMod(timelineFrame - TRANSLUCENT_SCENE_FRAME, 16);
+        double triangle = motionFrame <= 8 ? motionFrame / 8.0 : (16 - motionFrame) / 8.0;
+        double strafe = 0.20 + triangle * 0.80;
+        if (timelineFrame < TRANSLUCENT_FLICKER_START_FRAME) {
+            return new ScenarioPose("hand_translucent_motion", triangle, strafe);
+        }
+        return new ScenarioPose("hand_translucent_motion_series", triangle, strafe);
     }
 
     /**
@@ -514,8 +845,10 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static boolean isSceneMutationFrame(final int timelineFrame) {
         return timelineFrame == 38 || timelineFrame == 46 || timelineFrame == 66
                 || timelineFrame == 75 || timelineFrame == SKY_SCENE_FRAME
+                || timelineFrame == LOD_SCENE_FRAME
                 // Restores the sky scene's opened ceiling, so it re-meshes terrain.
-                || timelineFrame == OBJECT_SCENE_FRAME;
+                || timelineFrame == OBJECT_SCENE_FRAME
+                || timelineFrame == TRANSLUCENT_SCENE_FRAME;
     }
 
     private static boolean terrainSettled() {
@@ -535,6 +868,10 @@ public final class MetalValidationClient implements ClientModInitializer {
             pitch = 15.0F;
         } else if (pose.scenario().startsWith("cutout_sky")) {
             pitch = SKY_SCENE_PITCH;
+        } else if (pose.scenario().startsWith("lod_horizon")) {
+            pitch = LOD_SCENE_PITCH;
+        } else if (pose.scenario().startsWith("hand_translucent_motion")) {
+            pitch = HAND_TRANSLUCENT_SCENE_PITCH;
         }
         Vec3 right = horizontalRight(cameraYaw);
         Vec3 cameraPosition = cameraOrigin.add(right.scale(pose.cameraOffset()));
@@ -546,6 +883,29 @@ public final class MetalValidationClient implements ClientModInitializer {
         minecraft.player.setYBodyRot(cameraYaw);
         Vec3 baseEntity = cameraOrigin.add(horizontalLook(cameraYaw).scale(4.0));
         Vec3 entityPosition = baseEntity.add(right.scale(pose.entityOffset()));
+        // Keep the CUTOUT material gate free of a separate alpha-blended
+        // producer. The controlled ArmorStand's 0.4-alpha entity shadow is
+        // rendered into item_entity; with the production 0.9 transparency
+        // scale it correctly writes about 0.36 reactive on top of foliage.
+        // That is valid translucent content, but it must not be counted as a
+        // standing CUTOUT-interior policy violation. Object scenarios restore
+        // the stand before parking it behind the camera below.
+        controlledEntity.setInvisible(
+                pose.scenario().startsWith("cutout_")
+                        || pose.scenario().startsWith("lod_horizon")
+                        || pose.scenario().startsWith("hand_translucent_motion")
+        );
+        if (pose.scenario().startsWith("hand_translucent_motion")) {
+            // Keep the full sequence visibly on screen. Vanilla's attack
+            // transform at progress 1.0 legitimately moves the held item out
+            // of frame, which is not Temporal breakup and would make a
+            // minimum-per-frame coverage gate report a false failure.
+            float attackProgress = 0.15F + (float) pose.entityOffset() * 0.45F;
+            minecraft.player.swinging = true;
+            minecraft.player.swingingArm = InteractionHand.MAIN_HAND;
+            minecraft.player.oAttackAnim = attackProgress;
+            minecraft.player.attackAnim = attackProgress;
+        }
         // old == new: the renderer lerps old→new by partialTick, and the
         // wall-clock partialTick would smear the entity's rendered position
         // nondeterministically between runs. The motion producer keeps the
@@ -584,7 +944,8 @@ public final class MetalValidationClient implements ClientModInitializer {
                 || "vehicle_turn".equals(scenario)
                 || "living_turn".equals(scenario)
                 || "arrow_turn".equals(scenario)
-                || "minecart_rail".equals(scenario);
+                || "minecart_rail".equals(scenario)
+                || "minecart_new".equals(scenario);
     }
 
     /**
@@ -622,6 +983,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         boolean living = "living_turn".equals(scenario);
         boolean arrow = "arrow_turn".equals(scenario);
         boolean minecart = "minecart_rail".equals(scenario);
+        boolean minecartNew = "minecart_new".equals(scenario);
 
         Vec3 itemPosition = item ? itemHome : parked;
         Vec3 vehiclePosition = vehicle ? vehicleHome : parked;
@@ -638,6 +1000,11 @@ public final class MetalValidationClient implements ClientModInitializer {
         // rail-sampled branch re-selects itself the moment the cart is back on
         // the track, with a history reset on that same frame.
         Vec3 minecartPosition = minecart ? minecartHome : parked;
+        // The new-behavior cart needs no rail: newExtractState reads the cart's
+        // own position and rotation rather than sampling the track, so it hangs
+        // in open air where the level camera frames it.
+        Vec3 minecartNewHome = cameraOrigin.add(look.scale(3.0)).add(right.scale(0.40)).add(0.0, 0.6, 0.0);
+        Vec3 minecartNewPosition = minecartNew ? minecartNewHome : parked;
 
         if (spinningItem != null) {
             // The spin phase is a pure function of the timeline frame index.
@@ -706,20 +1073,48 @@ public final class MetalValidationClient implements ClientModInitializer {
             shakingMinecart.yRotO = 0.0F;
             shakingMinecart.setXRot(0.0F);
             shakingMinecart.xRotO = 0.0F;
-            // On a rail the renderer discards the cart's own yaw and re-derives
-            // orientation from the front/back rail samples, so turning the cart
-            // would change nothing on a straight track. The hurt shake is the
-            // rotation this scenario drives, and it is the other half of the
-            // minecart row in the coverage table. hurtTime is held fixed and
-            // damage carries the ramp, which keeps the angle linear in the step
-            // rather than swinging with sin(hurtTime).
-            shakingMinecart.setHurtTime(minecart ? MINECART_HURT_TIME : 0);
-            shakingMinecart.setDamage(minecart
-                    ? (frame - MINECART_TURN_FRAME) * MINECART_DAMAGE_PER_FRAME
-                    : 0.0F);
+            // The validation behavior keeps the real rail position samples but
+            // rotates their front/back direction by a deterministic amount.
+            // This exercises the old rail-sampled reconstruction without the
+            // wall-clock partialTick term in the vanilla hurt-shake animation.
+            if (shakingMinecart instanceof ValidationOldMinecart validationCart) {
+                validationCart.setValidationSampleYaw(minecart
+                        ? (frame - MINECART_TURN_FRAME) * OBJECT_TURN_DEGREES_PER_FRAME
+                        : 0.0F);
+            }
+            shakingMinecart.setHurtTime(0);
+            shakingMinecart.setDamage(0.0F);
             shakingMinecart.setHurtDir(1);
         }
+        if (newBehaviorMinecart != null) {
+            // The new behavior reconstructs as T(pos) * R_y(yRot) * R_z(-xRot)
+            // * T_y(0.375): unlike the rail-sampled path it uses the cart's own
+            // yaw, so this scenario simply turns it. With no lerp steps queued
+            // cartHasPosRotLerp() is false and newExtractState reads getXRot /
+            // getYRot with no partialTick term, which makes this the most
+            // reproducible of the object scenarios.
+            //
+            // The hurt shake is left at zero here on purpose. It is already
+            // covered by minecart_rail, and it is the one term that would
+            // reintroduce a wall-clock component; keeping it out leaves the
+            // yaw as the only rotation under test.
+            float yaw = minecartNew
+                    ? (frame - MINECART_NEW_TURN_FRAME) * OBJECT_TURN_DEGREES_PER_FRAME
+                    : 0.0F;
+            newBehaviorMinecart.setDeltaMovement(Vec3.ZERO);
+            newBehaviorMinecart.setOldPosAndRot(minecartNewPosition, yaw, 0.0F);
+            newBehaviorMinecart.setPos(minecartNewPosition);
+            newBehaviorMinecart.setYRot(yaw);
+            newBehaviorMinecart.yRotO = yaw;
+            newBehaviorMinecart.setXRot(0.0F);
+            newBehaviorMinecart.xRotO = 0.0F;
+            newBehaviorMinecart.setHurtTime(0);
+            newBehaviorMinecart.setDamage(0.0F);
+        }
 
+        if (minecartNew) {
+            return minecartNewPosition;
+        }
         if (item) {
             return itemPosition;
         }
@@ -733,6 +1128,94 @@ public final class MetalValidationClient implements ClientModInitializer {
             return arrowPosition;
         }
         return minecartPosition;
+    }
+
+    /**
+     * A minecart that reports the new movement behavior to the renderer.
+     *
+     * <p>The two minecart behaviors are separate reconstruction paths, and the
+     * old one is all this world can produce on its own: {@code AbstractMinecart}
+     * picks {@code NewMinecartBehavior} only when the level enables
+     * {@code FeatureFlags.MINECART_IMPROVEMENTS}, and the validation world
+     * enables {@code minecraft:vanilla} alone. Turning that flag on would change
+     * a world three sessions share and move every existing golden capture.</p>
+     *
+     * <p>The renderer selects its extraction branch purely on
+     * {@code entity.getBehavior()}, so overriding that reaches
+     * {@code newExtractState} — and therefore
+     * {@code MetalEntityObjectPose.minecartNewRender} — without touching the
+     * world at all. The behavior's physics never run here: the driver pins the
+     * cart's position and rotation every frame regardless.</p>
+     *
+     * <p>Scope worth being explicit about: this covers the reconstruction, not
+     * the feature-flag plumbing that would select the behavior in a real
+     * world.</p>
+     */
+    private static final class NewBehaviorMinecart extends Minecart {
+        private final NewMinecartBehavior newBehavior;
+
+        private NewBehaviorMinecart(final net.minecraft.world.level.Level level) {
+            super(EntityTypes.MINECART, level);
+            this.newBehavior = new NewMinecartBehavior(this);
+        }
+
+        @Override
+        public MinecartBehavior getBehavior() {
+            // The superclass constructor can reach getBehavior before the field
+            // is assigned; fall back until it is.
+            return newBehavior == null ? super.getBehavior() : newBehavior;
+        }
+    }
+
+    /** Old-behavior cart with deterministic orientation layered onto real rail samples. */
+    private static final class ValidationOldMinecart extends Minecart {
+        private final ValidationOldMinecartBehavior validationBehavior;
+
+        private ValidationOldMinecart(final net.minecraft.world.level.Level level) {
+            super(EntityTypes.MINECART, level);
+            this.validationBehavior = new ValidationOldMinecartBehavior(this);
+        }
+
+        private void setValidationSampleYaw(final float yawDegrees) {
+            if (validationBehavior != null) {
+                validationBehavior.sampleYawDegrees = yawDegrees;
+            }
+        }
+
+        @Override
+        public MinecartBehavior getBehavior() {
+            return validationBehavior == null ? super.getBehavior() : validationBehavior;
+        }
+    }
+
+    private static final class ValidationOldMinecartBehavior extends OldMinecartBehavior {
+        private float sampleYawDegrees;
+
+        private ValidationOldMinecartBehavior(final Minecart minecart) {
+            super(minecart);
+        }
+
+        @Override
+        public Vec3 getPosOffs(
+                final double x,
+                final double y,
+                final double z,
+                final double offset
+        ) {
+            Vec3 center = super.getPos(x, y, z);
+            Vec3 sampled = super.getPosOffs(x, y, z, offset);
+            if (center == null || sampled == null) {
+                return sampled;
+            }
+            double radians = Math.toRadians(sampleYawDegrees);
+            double dx = sampled.x - center.x;
+            double dz = sampled.z - center.z;
+            return new Vec3(
+                    center.x + dx * Math.cos(radians) - dz * Math.sin(radians),
+                    sampled.y,
+                    center.z + dx * Math.sin(radians) + dz * Math.cos(radians)
+            );
+        }
     }
 
     /** Centre of the rail tile the minecart sits on, lifted onto the rail. */
@@ -797,18 +1280,28 @@ public final class MetalValidationClient implements ClientModInitializer {
 
     private static void installControlledScene(final Minecraft minecraft) {
         applyDeterministicWorldState(minecraft);
+        // F1-hidden HUD is also Minecraft's production gate for suppressing
+        // the first-person hand. Keep it hidden for the whole automated run so
+        // item_entity cannot overlap a pure terrain/CUTOUT validation pixel.
+        // The previous user setting is restored on every normal pass/fail exit.
+        originalHudHidden = minecraft.gui.hud.isHidden();
+        originalCameraType = minecraft.options.getCameraType();
+        setHudHidden(minecraft, true);
         // Quantize the anchor pose so every run derives the identical scene
         // from the saved player state: the block-center X/Z absorbs sub-block
-        // drift left by an earlier run, and 45-degree yaw steps absorb save
-        // rounding. finishAndStop additionally restores this pose server-side
-        // (the authoritative copy for the world save).
+        // drift left by an earlier run. Keep the validation room axis-aligned:
+        // at a 45-degree yaw, BlockPos.containing() maps several diagonal
+        // boundary samples onto interior cells and can place the camera behind
+        // (or inside) the stone shell while offscreen CUTOUT attachments still
+        // report coverage. finishAndStop additionally restores this pose
+        // server-side (the authoritative copy for the world save).
         Vec3 loaded = minecraft.player.position();
         cameraOrigin = new Vec3(
                 Math.floor(loaded.x) + 0.5,
                 Math.round(loaded.y * 2.0) / 2.0,
                 Math.floor(loaded.z) + 0.5
         );
-        cameraYaw = Math.round(minecraft.player.getYRot() / 45.0F) * 45.0F;
+        cameraYaw = Math.round(minecraft.player.getYRot() / 90.0F) * 90.0F;
         cameraPitch = 0.0F;
         installSceneClearing(minecraft);
         Vec3 position = cameraOrigin.add(horizontalLook(cameraYaw).scale(4.0));
@@ -886,6 +1379,34 @@ public final class MetalValidationClient implements ClientModInitializer {
         minecraft.player.setXRot(pitch);
         minecraft.player.setYHeadRot(yaw);
         minecraft.player.setYBodyRot(yaw);
+    }
+
+    private static void setHudHidden(final Minecraft minecraft, final boolean hidden) {
+        if (minecraft.gui.hud.isHidden() != hidden) {
+            minecraft.gui.hud.toggle();
+        }
+    }
+
+    private static void prepareValidationHandItem(final Minecraft minecraft) {
+        if (originalSelectedItem == null) {
+            originalSelectedItem = minecraft.player.getInventory().getSelectedItem().copy();
+        }
+        minecraft.player.getInventory().setSelectedItem(new ItemStack(Blocks.GOLD_BLOCK));
+    }
+
+    private static void restoreHudVisibility(final Minecraft minecraft) {
+        if (originalSelectedItem != null && minecraft.player != null) {
+            minecraft.player.getInventory().setSelectedItem(originalSelectedItem);
+            originalSelectedItem = null;
+        }
+        if (originalHudHidden != null) {
+            setHudHidden(minecraft, originalHudHidden);
+            originalHudHidden = null;
+        }
+        if (originalCameraType != null) {
+            minecraft.options.setCameraType(originalCameraType);
+            originalCameraType = null;
+        }
     }
 
     private static void sleepForAsyncWork(final long millis) {
@@ -1105,6 +1626,117 @@ public final class MetalValidationClient implements ClientModInitializer {
     }
 
     /**
+     * Builds a static, oblique cobblestone plane that recedes to a cleared sky
+     * boundary. Repeated 16x16 atlas detail across dozens of blocks exercises
+     * mip selection; the far edge provides a deterministic ground/sky seam.
+     */
+    private static void installDistantLodScene(final Minecraft minecraft) {
+        removeCutoutScene(minecraft);
+        Vec3 look = horizontalLook(cameraYaw);
+        Vec3 right = horizontalRight(cameraYaw);
+        BlockState air = Blocks.AIR.defaultBlockState();
+        BlockState floor = Blocks.COBBLESTONE.defaultBlockState();
+        int cleared = 0;
+        int floorBlocks = 0;
+        for (int forward = 7; forward <= 48; forward++) {
+            for (int lateral = -30; lateral <= 30; lateral++) {
+                for (int vertical = -2; vertical <= 10; vertical++) {
+                    Vec3 sample = cameraOrigin
+                            .add(look.scale(forward))
+                            .add(right.scale(lateral))
+                            .add(0.0, vertical, 0.0);
+                    BlockPos pos = BlockPos.containing(sample);
+                    if (!minecraft.level.getBlockState(pos).isAir()) {
+                        placeCutoutSceneBlock(minecraft, pos, air);
+                        cleared++;
+                    }
+                }
+                if (forward <= 40) {
+                    Vec3 floorSample = cameraOrigin
+                            .add(look.scale(forward))
+                            .add(right.scale(lateral))
+                            .add(0.0, -2.0, 0.0);
+                    placeCutoutSceneBlock(minecraft, BlockPos.containing(floorSample), floor);
+                    floorBlocks++;
+                }
+            }
+        }
+        requestImportantRebuild(CUTOUT_SCENE.keySet());
+        MetalFxManager.resetHistory("automated validation distant LOD scene");
+        Metallum.LOGGER.info(
+                "Installed automated validation distant LOD scene: {} cleared blocks,"
+                        + " {} floor blocks, {} restore entries",
+                cleared,
+                floorBlocks,
+                CUTOUT_SCENE.size()
+        );
+    }
+
+    /**
+     * Moving-camera production scene for the two remaining user-visible faults:
+     * first-person hand breakup and distant LOD shimmer through transparency.
+     */
+    private static void installTranslucentGlassScene(final Minecraft minecraft) {
+        removeObjectMotionScene();
+        removeCutoutScene(minecraft);
+        Vec3 look = horizontalLook(cameraYaw);
+        Vec3 right = horizontalRight(cameraYaw);
+        BlockState air = Blocks.AIR.defaultBlockState();
+        BlockState glass = Blocks.STAINED_GLASS.purple().defaultBlockState();
+        BlockState light = Blocks.CONCRETE.white().defaultBlockState();
+        BlockState dark = Blocks.CONCRETE.black().defaultBlockState();
+        int cleared = 0;
+        int glassBlocks = 0;
+        int backingBlocks = 0;
+        for (int forward = 6; forward <= 42; forward++) {
+            for (int lateral = -30; lateral <= 30; lateral++) {
+                for (int vertical = -2; vertical <= 8; vertical++) {
+                    Vec3 sample = cameraOrigin
+                            .add(look.scale(forward))
+                            .add(right.scale(lateral))
+                            .add(0.0, vertical, 0.0);
+                    BlockPos pos = BlockPos.containing(sample);
+                    if (!minecraft.level.getBlockState(pos).isAir()) {
+                        placeCutoutSceneBlock(minecraft, pos, air);
+                        cleared++;
+                    }
+                }
+                if (forward <= 38) {
+                    Vec3 backingSample = cameraOrigin
+                            .add(look.scale(forward))
+                            .add(right.scale(lateral))
+                            .add(0.0, -2.0, 0.0);
+                    BlockPos backingPos = BlockPos.containing(backingSample);
+                    placeCutoutSceneBlock(
+                            minecraft,
+                            backingPos,
+                            ((forward + lateral) & 1) == 0 ? light : dark
+                    );
+                    placeCutoutSceneBlock(minecraft, backingPos.above(), glass);
+                    backingBlocks++;
+                    glassBlocks++;
+                }
+            }
+        }
+        prepareValidationHandItem(minecraft);
+        minecraft.options.setCameraType(CameraType.FIRST_PERSON);
+        setHudHidden(minecraft, false);
+        requestImportantRebuild(CUTOUT_SCENE.keySet());
+        MetalFxManager.resetHistory("automated hand/translucent motion scene");
+        Metallum.LOGGER.info(
+                "Installed hand/translucent motion scene: {} cleared, {} glass, {} backing,"
+                        + " {} restore entries, camera={}, gameMode={}, hudHidden={}",
+                cleared,
+                glassBlocks,
+                backingBlocks,
+                CUTOUT_SCENE.size(),
+                minecraft.options.getCameraType(),
+                minecraft.gameMode == null ? "none" : minecraft.gameMode.getPlayerMode(),
+                minecraft.gui.hud.isHidden()
+        );
+    }
+
+    /**
      * Installs the object-motion scene: re-seals the room the sky scene opened
      * and spawns the two objects whose root transforms MetalEntityObjectPose
      * reconstructs.
@@ -1125,6 +1757,11 @@ public final class MetalValidationClient implements ClientModInitializer {
         // The sky scene opened the ceiling; restoring it re-seals the room so
         // these frames are backed by stone rather than sky.
         removeCutoutScene(minecraft);
+        // Prime ItemInHandRenderer's cached stack and equip height while the
+        // HUD is still hidden. The later moving-hand sequence advances much
+        // faster than client ticks, so selecting the item only at frame 268
+        // can leave the hand fully lowered for every captured frame.
+        prepareValidationHandItem(minecraft);
 
         Vec3 parked = cameraOrigin.add(horizontalLook(cameraYaw).scale(-4.0));
         ItemEntity item = new ItemEntity(
@@ -1188,7 +1825,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         // branch of the reconstruction rather than the plain fallback.
         installMinecartRail(minecraft);
         Vec3 railPosition = minecartRailPosition();
-        Minecart cart = new Minecart(EntityTypes.MINECART, minecraft.level);
+        Minecart cart = new ValidationOldMinecart(minecraft.level);
         cart.setId(MINECART_ENTITY_ID);
         cart.setUUID(MINECART_ENTITY_UUID);
         cart.setNoGravity(true);
@@ -1196,6 +1833,21 @@ public final class MetalValidationClient implements ClientModInitializer {
         cart.setPos(railPosition);
         minecraft.level.addEntity(cart);
         shakingMinecart = cart;
+
+        NewBehaviorMinecart newCart = new NewBehaviorMinecart(minecraft.level);
+        newCart.setId(MINECART_NEW_ENTITY_ID);
+        newCart.setUUID(MINECART_NEW_ENTITY_UUID);
+        newCart.setNoGravity(true);
+        newCart.setDeltaMovement(Vec3.ZERO);
+        newCart.setPos(parked);
+        minecraft.level.addEntity(newCart);
+        newBehaviorMinecart = newCart;
+        if (!(newCart.getBehavior() instanceof NewMinecartBehavior)) {
+            throw new IllegalStateException(
+                    "Validation minecart did not report the new movement behavior;"
+                            + " the new-behavior reconstruction branch would not be exercised"
+            );
+        }
 
         // The re-seal plus the new silhouettes disocclude most of the frame;
         // the captures sit 8 frames later so history is settled by then.
@@ -1289,6 +1941,10 @@ public final class MetalValidationClient implements ClientModInitializer {
             shakingMinecart.discard();
             shakingMinecart = null;
         }
+        if (newBehaviorMinecart != null) {
+            newBehaviorMinecart.discard();
+            newBehaviorMinecart = null;
+        }
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level != null && !OBJECT_SCENE.isEmpty()) {
             OBJECT_SCENE.forEach((pos, state) -> minecraft.level.setBlock(pos, state, 19));
@@ -1356,11 +2012,12 @@ public final class MetalValidationClient implements ClientModInitializer {
         Metallum.LOGGER.info(
                 "Automated Minecraft MetalFX validation passed {}/{} GPU captures; stopping client",
                 completed,
-                15
+                EXPECTED_GPU_CAPTURES
         );
         removeOcclusionWall(minecraft);
         removeCutoutScene(minecraft);
         removeObjectMotionScene();
+        restoreHudVisibility(minecraft);
         // Return the player to the anchor pose so repeated validation runs do
         // not accumulate camera drift in the saved test world. The client-side
         // pose alone is not enough: the integrated server holds the copy that
@@ -1388,6 +2045,8 @@ public final class MetalValidationClient implements ClientModInitializer {
             final int completed,
             final int failures
     ) {
+        long[] metal4MainStats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
+        long[] metal4MetalFxStats = MetalNativeBridge.metallum_metal4_metalfx_stats();
         try {
             Files.writeString(
                     outputDirectory.resolve("frame-state.json"),
@@ -1405,15 +2064,44 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "usedSystemScreenshot": false,
                       "usedComputerUse": false,
                       "controlledFrames": 90,
+                      "timelineFrames": %d,
+                      "frameGenerationSteadyFrames": %d,
                       "controlledEntity": "armor_stand",
-                      "expectedGpuCaptures": 15,
+                      "expectedGpuCaptures": %d,
                       "completedGpuCaptures": %d,
                       "failedGpuCaptures": %d,
+                      "frameGenerationRequested": %s,
+                      "frameGenerationFramesQueued": %d,
+                      "frameGenerationEnabledAtCompletion": %s,
+                      "metal4MainRendererEngaged": %s,
+                      "metal4MainRendererLeasesBegun": %d,
+                      "metal4MainRendererSubmissions": %d,
+                      "metal4MainRendererFactoryCallsAvoided": %d,
+                      "metal4MetalFxEngaged": %s,
+                      "metal4AuxiliaryComputeEncodes": %d,
+                      "metal4SpatialScalerEncodes": %d,
+                      "metal4TemporalScalerEncodes": %d,
+                      "metal4FrameGenerationInputSubmissions": %d,
                       "status": "%s"
                     }
                     """,
+                            frame,
+                            FRAME_GENERATION_REQUESTED ? FRAME_GENERATION_STEADY_FRAMES : 0,
+                            EXPECTED_GPU_CAPTURES,
                             completed,
                             failures,
+                            Boolean.getBoolean("metallum.metalfx.frameGeneration"),
+                            MetalFxManager.frameGenerationFramesQueued(),
+                            MetalFxManager.frameGenerationEnabledAtCompletion(),
+                            metal4MainStats[0] != 0L,
+                            metal4MainStats[1],
+                            metal4MainStats[2],
+                            metal4MainStats[3],
+                            metal4MetalFxStats[0] != 0L,
+                            metal4MetalFxStats[1],
+                            metal4MetalFxStats[2],
+                            metal4MetalFxStats[3],
+                            metal4MetalFxStats[4],
                             status
                     ),
                     StandardCharsets.UTF_8

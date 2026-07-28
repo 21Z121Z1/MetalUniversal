@@ -285,7 +285,9 @@ private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
         guard let commandBuffer = queue.makeCommandBuffer() else {
             try fail("could not allocate the \(label) command buffer")
         }
-        metallum_MTLCommandBuffer_commit(commandBuffer)
+        // The shipping export accepts the opaque pointer representation used
+        // by the Java FFM bridge, not Swift's protocol-typed command buffer.
+        metallum_MTLCommandBuffer_commit(Unmanaged.passUnretained(commandBuffer).toOpaque())
         commandBuffer.waitUntilCompleted()
     }
 
@@ -421,7 +423,9 @@ private func presentPathTest(device: MTLDevice) throws {
     // missing adopt() is exactly the bug this checks for.
     path.adopt(textures: [source, destination])
 
-    let commandBuffer = path.beginFrame()
+    guard let commandBuffer = path.beginFrame() else {
+        try fail("no Metal 4 frame slot was available for the initial copy")
+    }
     try check(path.encodeCopy(
         commandBuffer: commandBuffer,
         source: source,
@@ -449,7 +453,7 @@ private func presentPathTest(device: MTLDevice) throws {
     readyEvent.signaledValue = 7
     let completed = DispatchSemaphore(value: 0)
     var submitError: Error?
-    path.submit(drawable: drawable, readyEvent: readyEvent, eventValue: 7) { error in
+    path.submit(drawable: drawable, readyEvent: readyEvent, eventValue: 7) { error, _, _ in
         submitError = error
         completed.signal()
     }
@@ -471,7 +475,9 @@ private func presentPathTest(device: MTLDevice) throws {
     // commit would queue behind it forever. Here a frame is encoded and abandoned
     // exactly as the deadline path does, abandonFrame is called twice to confirm it
     // is idempotent, and then a real frame must still complete.
-    let abandoned = path.beginFrame()
+    guard let abandoned = path.beginFrame() else {
+        try fail("no Metal 4 frame slot was available for the abandoned frame")
+    }
     try check(path.encodeCopy(
         commandBuffer: abandoned,
         source: source,
@@ -487,7 +493,9 @@ private func presentPathTest(device: MTLDevice) throws {
         print("Metal 4 present path: abandon path exercised, but no second drawable was vended")
         return
     }
-    let secondCommandBuffer = path.beginFrame()
+    guard let secondCommandBuffer = path.beginFrame() else {
+        try fail("the abandoned Metal 4 frame did not release its slot")
+    }
     try check(path.encodeCopy(
         commandBuffer: secondCommandBuffer,
         source: source,
@@ -499,7 +507,7 @@ private func presentPathTest(device: MTLDevice) throws {
     let secondCompleted = DispatchSemaphore(value: 0)
     var secondError: Error?
     readyEvent.signaledValue = 8
-    path.submit(drawable: secondDrawable, readyEvent: readyEvent, eventValue: 8) { error in
+    path.submit(drawable: secondDrawable, readyEvent: readyEvent, eventValue: 8) { error, _, _ in
         secondError = error
         secondCompleted.signal()
     }
@@ -508,7 +516,101 @@ private func presentPathTest(device: MTLDevice) throws {
     try check(secondError == nil,
               "the post-abandon submit failed: \(String(describing: secondError))")
 
-    print("Metal 4 present path: queue, allocator ring, argument table, residency set, MTL4 interpolator, copy encode and the commit/present handshake all functional, and an abandoned frame leaves the queue usable")
+    // Keep both slots submitted behind an unsignaled event. This models the
+    // production failure case where full-resolution interpolation lasts longer
+    // than multiple display periods. The third callback must drop immediately;
+    // resetting either allocator here would violate MTL4CommandAllocator's
+    // completion contract and was the source of the WindowServer watchdog.
+    let saturationLayer = CAMetalLayer()
+    saturationLayer.device = device
+    saturationLayer.pixelFormat = .bgra8Unorm
+    saturationLayer.drawableSize = CGSize(width: 8, height: 8)
+    saturationLayer.maximumDrawableCount = Metal4PresentPath.inFlightSlotCount
+    saturationLayer.allowsNextDrawableTimeout = true
+    guard let saturationPath = Metal4PresentPath(device: device, layer: saturationLayer),
+          let saturationEvent = device.makeSharedEvent(),
+          let saturationDrawable0 = saturationLayer.nextDrawable() else {
+        print("Metal 4 present path: sustained in-flight test skipped because the detached layer vended no drawable")
+        return
+    }
+    saturationPath.adopt(textures: [source, destination])
+    var saturationErrors: [Error] = []
+    let saturationErrorLock = NSLock()
+    let saturationCompletions = DispatchGroup()
+
+    guard let saturationCommand0 = saturationPath.beginFrame() else {
+        try fail("the first sustained-test Metal 4 slot was unavailable")
+    }
+    try check(saturationPath.encodeCopy(
+        commandBuffer: saturationCommand0,
+        source: source,
+        destination: destination,
+        pipeline: copyPipeline,
+        sampler: copySampler,
+        label: "present path sustained copy 0"
+    ), "the first sustained-test copy failed to encode")
+    saturationCompletions.enter()
+    saturationPath.submit(
+        drawable: saturationDrawable0,
+        readyEvent: saturationEvent,
+        eventValue: 100
+    ) { error, _, _ in
+        if let error {
+            saturationErrorLock.lock()
+            saturationErrors.append(error)
+            saturationErrorLock.unlock()
+        }
+        saturationCompletions.leave()
+    }
+
+    guard let saturationDrawable1 = saturationLayer.nextDrawable(),
+          let saturationCommand1 = saturationPath.beginFrame() else {
+        saturationEvent.signaledValue = 101
+        try fail("the detached layer or second sustained-test slot was unavailable")
+    }
+    try check(saturationPath.encodeCopy(
+        commandBuffer: saturationCommand1,
+        source: source,
+        destination: destination,
+        pipeline: copyPipeline,
+        sampler: copySampler,
+        label: "present path sustained copy 1"
+    ), "the second sustained-test copy failed to encode")
+    saturationCompletions.enter()
+    saturationPath.submit(
+        drawable: saturationDrawable1,
+        readyEvent: saturationEvent,
+        eventValue: 101
+    ) { error, _, _ in
+        if let error {
+            saturationErrorLock.lock()
+            saturationErrors.append(error)
+            saturationErrorLock.unlock()
+        }
+        saturationCompletions.leave()
+    }
+
+    try check(saturationPath.availableFrameSlotCount == 0,
+              "both sustained-test submissions should own their slots")
+    try check(saturationPath.beginFrame() == nil,
+              "slot exhaustion must be nonblocking and must not reset in-flight allocator memory")
+
+    saturationEvent.signaledValue = 101
+    try check(saturationCompletions.wait(timeout: .now() + .seconds(5)) == .success,
+              "the sustained-test submissions did not complete after their event was released")
+    saturationErrorLock.lock()
+    let capturedSaturationErrors = saturationErrors
+    saturationErrorLock.unlock()
+    try check(capturedSaturationErrors.isEmpty,
+              "the sustained-test submissions failed: \(capturedSaturationErrors)")
+    try check(saturationPath.availableFrameSlotCount == Metal4PresentPath.inFlightSlotCount,
+              "commit feedback did not release every Metal 4 frame slot")
+    guard saturationPath.beginFrame() != nil else {
+        try fail("no Metal 4 frame slot was reusable after sustained completion")
+    }
+    saturationPath.abandonFrame()
+
+    print("Metal 4 present path: queue, completion-owned frame slots, nonblocking saturation, argument table, residency set, MTL4 interpolator, copy encode and drawable handshake all functional")
 }
 
 private func runPresentPathTest(device: MTLDevice) throws {
@@ -557,7 +659,7 @@ private func bumpAllocatorTest(device: MTLDevice) throws {
     // fall back to, so a nil return would mean a draw with no uniform bound at all.
     // Push well past one chunk and require every allocation to succeed.
     let perChunk = Metal4BumpAllocatorRing.capacityPerFrame / 240
-    var chunk = [UInt8](repeating: 0, count: 240)
+    let chunk = [UInt8](repeating: 0, count: 240)
     var accepted = 0
     for _ in 0..<(perChunk * 2 + 8) {
         guard chunk.withUnsafeBytes({ allocator.allocate(bytes: $0.baseAddress!, length: 240) }) != nil else {
@@ -571,7 +673,7 @@ private func bumpAllocatorTest(device: MTLDevice) throws {
 
     // The one genuinely unservable case: a single allocation bigger than a whole
     // chunk. Chaining cannot help, so nil is correct here.
-    var oversized = [UInt8](repeating: 0, count: Metal4BumpAllocatorRing.capacityPerFrame + 16)
+    let oversized = [UInt8](repeating: 0, count: Metal4BumpAllocatorRing.capacityPerFrame + 16)
     try check(oversized.withUnsafeBytes({
         allocator.allocate(bytes: $0.baseAddress!, length: oversized.count)
     }) == nil, "an allocation larger than a whole chunk was accepted")
@@ -792,6 +894,294 @@ private func runCopyAndWaitTest(device: MTLDevice) throws {
     try copyAndWaitTest(device: device)
 }
 
+/// M6-B: appending the barrier map's consumer barriers to the existing Metal 3
+/// encoders must not change what is rendered.
+///
+/// This drives a shipping export that now carries an appended barrier
+/// (metallum_encode_texture_copy, edge E11) with the switch off and on, and
+/// requires byte-identical output. The argument is the same one the golden-frame
+/// run makes, at test scale: a queue barrier can only add ordering, never remove
+/// it, so if the output moves then the stage pair in the barrier map is wrong.
+/// Finding that out here is far cheaper than finding it out in M7e, where the
+/// fences are gone and there is nothing left to compare against.
+///
+/// Runs under MTL_DEBUG_LAYER, so a malformed barrier is reported rather than
+/// silently accepted.
+private func barrierAppendTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    // metallum_encode_texture_copy takes its sampler from the shared state that
+    // metallum_init_pipelines fills in, exactly as MetalDevice's constructor does.
+    // Without this it fails its sampler guard before reaching any barrier.
+    metallum_init_pipelines(device)
+
+    func copyOnce(barriersEnabled: Bool, withFence: Bool) throws -> [UInt8] {
+        metallum_set_metal4_barrier_enabled(barriersEnabled ? 1 : 0)
+
+        let sourceDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: 8, height: 8, mipmapped: false
+        )
+        sourceDescriptor.storageMode = .shared
+        sourceDescriptor.usage = [.shaderRead, .renderTarget]
+        guard let source = device.makeTexture(descriptor: sourceDescriptor) else {
+            try fail("could not allocate the barrier-test source")
+        }
+        var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
+        for index in 0..<(8 * 8) {
+            pixels[index * 4 + 0] = 64
+            pixels[index * 4 + 1] = 128
+            pixels[index * 4 + 2] = 191
+            pixels[index * 4 + 3] = 255
+        }
+        source.replace(region: MTLRegionMake2D(0, 0, 8, 8), mipmapLevel: 0, withBytes: &pixels, bytesPerRow: 8 * 4)
+        let destination = try makeTarget(device: device, label: "barrier test destination")
+
+        guard let commandBuffer = queue.makeCommandBuffer() else {
+            try fail("could not allocate the barrier-test command buffer")
+        }
+        // Exercised both with and without a fence, because the appended barrier has
+        // to coexist with the existing fence rather than replace it yet.
+        let fence: MTLFence? = withFence ? device.makeFence() : nil
+        let status = metallum_encode_texture_copy(commandBuffer, source, destination, 0, fence)
+        try check(status != 0, "metallum_encode_texture_copy failed (barriers=\(barriersEnabled))")
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try check(commandBuffer.status == .completed,
+                  "barrier-test submit failed (barriers=\(barriersEnabled)): \(String(describing: commandBuffer.error))")
+
+        var readback = [UInt8](repeating: 0, count: 8 * 8 * 4)
+        destination.getBytes(&readback, bytesPerRow: 8 * 4, from: MTLRegionMake2D(0, 0, 8, 8), mipmapLevel: 0)
+        return readback
+    }
+
+    for withFence in [false, true] {
+        let off = try copyOnce(barriersEnabled: false, withFence: withFence)
+        let on = try copyOnce(barriersEnabled: true, withFence: withFence)
+        try check(off == on,
+                  "appending the consumer barrier changed the output (fence=\(withFence)); "
+                  + "the barrier map's stage pair for E11 is wrong")
+        try check(on[0] == 64 && on[1] == 128 && on[2] == 191 && on[3] == 255,
+                  "barrier-test copy produced the wrong colour: \(Array(on.prefix(4)))")
+    }
+    metallum_set_metal4_barrier_enabled(0)
+    print("Metal 4 barrier append: metallum_encode_texture_copy is byte-identical with the consumer barrier appended, both with and without the existing fence")
+}
+
+private func runBarrierAppendTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 26.0, *) else {
+        print("barrier append test skipped: barrierAfterQueueStages needs macOS 26")
+        return
+    }
+    try barrierAppendTest(device: device, queue: queue)
+}
+
+@available(macOS 26.0, *)
+private func shippingMetal4SpatialTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    metallum_set_metal4_compiler_enabled(1)
+    try check(metallum_metal4_main_renderer_enable(device, nil) != 0,
+              "the shipping Metal 4 main renderer could not be enabled for Spatial validation")
+
+    func makeShippingTexture(
+        format: MTLPixelFormat,
+        width: Int,
+        height: Int,
+        label: String
+    ) throws -> (UnsafeMutableRawPointer, MTLTexture) {
+        guard let pointer = label.withCString({ labelPointer in
+            metallum_create_texture_2d(
+                device,
+                format,
+                UInt64(width),
+                UInt64(height),
+                1,
+                1,
+                0,
+                [.shaderRead, .shaderWrite, .renderTarget],
+                .private,
+                labelPointer
+            )
+        }) else {
+            try fail("could not allocate \(label)")
+        }
+        guard let texture = Unmanaged<AnyObject>.fromOpaque(pointer)
+                .takeUnretainedValue() as? MTLTexture else {
+            metallum_release_object(pointer)
+            try fail("\(label) did not resolve to an MTLTexture")
+        }
+        return (pointer, texture)
+    }
+
+    let (inputPointer, input) = try makeShippingTexture(
+        format: .rgba8Unorm,
+        width: 64,
+        height: 64,
+        label: "shipping Metal 4 Spatial input"
+    )
+    let (outputPointer, output) = try makeShippingTexture(
+        format: .rgba8Unorm,
+        width: 128,
+        height: 128,
+        label: "shipping Metal 4 Spatial output"
+    )
+    defer {
+        metallum_release_object(inputPointer)
+        metallum_release_object(outputPointer)
+    }
+
+    guard let initialize = queue.makeCommandBuffer() else {
+        try fail("could not create the Spatial input initialization command buffer")
+    }
+    let renderPass = MTLRenderPassDescriptor()
+    renderPass.colorAttachments[0].texture = input
+    renderPass.colorAttachments[0].loadAction = .clear
+    renderPass.colorAttachments[0].clearColor = MTLClearColor(
+        red: 0.25,
+        green: 0.5,
+        blue: 0.75,
+        alpha: 1.0
+    )
+    renderPass.colorAttachments[0].storeAction = .store
+    guard let initializeEncoder = initialize.makeRenderCommandEncoder(descriptor: renderPass) else {
+        try fail("could not encode the Spatial input initialization")
+    }
+    initializeEncoder.endEncoding()
+    initialize.commit()
+    initialize.waitUntilCompleted()
+    try check(initialize.status == .completed,
+              "Spatial input initialization failed: \(String(describing: initialize.error))")
+
+    let leasePointer: UnsafeMutableRawPointer? = "shipping Metal 4 Spatial".withCString { label in
+        metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
+    }
+    guard let leasePointer else {
+        try fail("the shipping bridge did not provide a Metal 4 command-buffer lease")
+    }
+    defer { metallum_release_object(leasePointer) }
+    guard let fence = device.makeFence() else {
+        try fail("could not create the Spatial synchronization fence")
+    }
+    var auxiliaryBefore: UInt64 = 0
+    var spatialBefore: UInt64 = 0
+    var temporalBefore: UInt64 = 0
+    var frameGenerationInputBefore: UInt64 = 0
+    try check(metallum_metal4_metalfx_stats(
+        &auxiliaryBefore,
+        &spatialBefore,
+        &temporalBefore,
+        &frameGenerationInputBefore
+    ) != 0,
+              "the Metal 4 MetalFX counters were unavailable before the Spatial encode")
+    let rejectedWithoutFence = metallumMetalFxEncodeEntry(
+        leasePointer,
+        device,
+        input,
+        nil,
+        nil,
+        nil,
+        output,
+        nil,
+        nil,
+        nil,
+        nil,
+        0.0,
+        0.0,
+        64,
+        64,
+        1,
+        1,
+        0
+    )
+    try check(rejectedWithoutFence == 0,
+              "the shipping Metal 4 Spatial entry accepted a nil synchronization fence")
+    var auxiliaryAfterRejection: UInt64 = 0
+    var spatialAfterRejection: UInt64 = 0
+    var temporalAfterRejection: UInt64 = 0
+    var frameGenerationInputAfterRejection: UInt64 = 0
+    try check(metallum_metal4_metalfx_stats(
+        &auxiliaryAfterRejection,
+        &spatialAfterRejection,
+        &temporalAfterRejection,
+        &frameGenerationInputAfterRejection
+    ) != 0
+            && auxiliaryAfterRejection == auxiliaryBefore
+            && spatialAfterRejection == spatialBefore
+            && temporalAfterRejection == temporalBefore
+            && frameGenerationInputAfterRejection == frameGenerationInputBefore,
+              "a rejected nil-fence Spatial encode changed the Metal 4 path counters")
+    let encoded = metallumMetalFxEncodeEntry(
+        leasePointer,
+        device,
+        input,
+        nil,
+        nil,
+        nil,
+        output,
+        nil,
+        nil,
+        nil,
+        fence,
+        0.0,
+        0.0,
+        64,
+        64,
+        1,
+        1,
+        0
+    )
+    try check(encoded != 0,
+              "the shipping metallum_metalfx_encode entry did not select MTL4FXSpatialScaler")
+    metallum_MTLCommandBuffer_commit(leasePointer)
+    try check(metallum_MTLCommandBuffer_waitUntilCompleted(leasePointer, 5_000) == 0,
+              "the shipping Metal 4 Spatial command buffer did not complete")
+    try check(metallum_MTLCommandBuffer_completedSuccessfully(leasePointer) != 0,
+              "the shipping Metal 4 Spatial command buffer completed with an error")
+
+    var auxiliary: UInt64 = 0
+    var spatial: UInt64 = 0
+    var temporal: UInt64 = 0
+    var frameGenerationInput: UInt64 = 0
+    try check(metallum_metal4_metalfx_stats(
+        &auxiliary,
+        &spatial,
+        &temporal,
+        &frameGenerationInput
+    ) != 0 && spatial > 0,
+              "the Metal 4 MetalFX counters did not record a Spatial encode")
+
+    guard let readback = device.makeBuffer(length: output.width * output.height * 4,
+                                            options: .storageModeShared),
+          let readbackCommand = queue.makeCommandBuffer(),
+          let blit = readbackCommand.makeBlitCommandEncoder() else {
+        try fail("could not allocate the Spatial output readback")
+    }
+    blit.copy(
+        from: output,
+        sourceSlice: 0,
+        sourceLevel: 0,
+        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+        sourceSize: MTLSize(width: output.width, height: output.height, depth: 1),
+        to: readback,
+        destinationOffset: 0,
+        destinationBytesPerRow: output.width * 4,
+        destinationBytesPerImage: output.width * output.height * 4
+    )
+    blit.endEncoding()
+    readbackCommand.commit()
+    readbackCommand.waitUntilCompleted()
+    try check(readbackCommand.status == .completed,
+              "Spatial output readback failed: \(String(describing: readbackCommand.error))")
+    let bytes = readback.contents().assumingMemoryBound(to: UInt8.self)
+    try check(bytes[0] > 0 && bytes[1] > 0 && bytes[2] > 0 && bytes[3] > 0,
+              "the shipping Metal 4 Spatial output was blank")
+    print("Metal 4 Spatial path: shipping main-queue lease, MTL4FXSpatialScaler, residency and GPU readback all functional")
+}
+
+private func runShippingMetal4SpatialTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 26.0, *) else {
+        print("shipping Metal 4 Spatial test skipped: needs macOS 26")
+        return
+    }
+    try shippingMetal4SpatialTest(device: device, queue: queue)
+}
+
 private func runPathTest() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
         try fail("MTLCreateSystemDefaultDevice returned nil")
@@ -941,7 +1331,14 @@ private func runPathTest() throws {
     // (8) M7g/M7h: the completion wait, and every copy shape on a compute encoder.
     try runCopyAndWaitTest(device: device)
 
-    print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, an unregistered library falls back cleanly, the pipeline data set archive flushes on both a cold and a warm launch, and the residency set tracks native allocations")
+    // (9) M6-B: appended consumer barriers must not change rendering.
+    try runBarrierAppendTest(device: device, queue: queue)
+
+    // (10) The production Spatial export must accept the same opaque Metal 4
+    // lease as Minecraft and execute a real MTL4FXSpatialScaler encode.
+    try runShippingMetal4SpatialTest(device: device, queue: queue)
+
+    print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, an unregistered library falls back cleanly, the pipeline data set archive flushes on both a cold and a warm launch, the residency set tracks native allocations, and the shipping MTL4FX Spatial path produces a nonblank GPU readback")
 }
 
 // Multi-file compile: no top-level code, so the entry point is explicit (same

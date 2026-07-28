@@ -14,8 +14,8 @@ public final class MTLCommandBuffer {
         this.handle = handle;
     }
 
-    public MTLBlitCommandEncoder makeBlitCommandEncoder() {
-        MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeBlitCommandEncoder(handle());
+    public MTLBlitCommandEncoder makeBlitCommandEncoder(final String label) {
+        MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeBlitCommandEncoder(handle(), label);
         if (MetalNativeBridge.isNullHandle(encoder)) {
             throw new IllegalStateException("Failed to create MTLBlitCommandEncoder");
         }
@@ -71,7 +71,8 @@ public final class MTLCommandBuffer {
             final int[] clearColorEnabled,
             final float[] clearColors,
             final int clearDepthEnabled,
-            final double clearDepth
+            final double clearDepth,
+            final String label
     ) {
         MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeRenderCommandEncoderV2(
                 handle(),
@@ -82,7 +83,8 @@ public final class MTLCommandBuffer {
                 clearColorEnabled,
                 clearColors,
                 clearDepthEnabled,
-                clearDepth
+                clearDepth,
+                label
         );
         if (MetalNativeBridge.isNullHandle(encoder)) {
             throw new IllegalStateException("Failed to create indexed MTLRenderCommandEncoder");
@@ -145,6 +147,16 @@ public final class MTLCommandBuffer {
             return false;
         }
         return MetalNativeBridge.MTLCommandBuffer_completedSuccessfully(handle()) == 1;
+    }
+
+    public double gpuStartTime() {
+        return MetalNativeBridge.isNullHandle(handle)
+                ? 0.0 : MetalNativeBridge.MTLCommandBuffer_gpuStartTime(handle());
+    }
+
+    public double gpuEndTime() {
+        return MetalNativeBridge.isNullHandle(handle)
+                ? 0.0 : MetalNativeBridge.MTLCommandBuffer_gpuEndTime(handle());
     }
 
     public boolean waitUntilCompleted(final long timeoutMs) {

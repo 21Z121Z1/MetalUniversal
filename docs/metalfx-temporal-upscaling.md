@@ -51,11 +51,13 @@ pipelines cached. The cap also protects validation runs, where instrumentation
 can report an inflated width, while retaining a small height for balanced 2D
 occupancy.
 
-Negative mip bias remains intentionally unenabled. The current Minecraft
-sampler abstraction exposes max-LOD but not a per-sample bias, and the generated
-SPIR-V-to-MSL path does not provide a safe material-only hook. Applying a
-global MSL text replacement would affect GUI, explicit-LOD, depth, and shadow
-samples, so it is not used.
+Negative mip bias is applied after SPIR-V-to-MSL translation to plain fragment
+texture samples. The bias is `log2(renderScale) - 1`, matching the Game Porting
+Toolkit guidance when `renderScale` is the render/display ratio. The rewriter
+leaves explicit `level`, `bias`, `gradient2d`, `min_lod_clamp`, and offset forms
+unchanged. Single-mip resources cannot select a lower mip, so GUI, font, and
+lightmap sampling remains exact. The bias bits are part of the MSL disk-cache
+key, preventing OFF, 0.67, and 0.5 variants from aliasing.
 
 The configured scale is the render/display ratio. The phase count follows the
 MetalFX guidance used by this project: `ceil(8 / scale^2)`, yielding 8 phases
@@ -67,3 +69,62 @@ composition, and the same render-resolution depth/motion inputs. The UI is
 marked as precomposited for `MTLFXFrameInterpolator`, so HUD pixels are not
 treated as moving scene content. See `metalfx-frame-generation.md` for the
 separate PresentThread and synchronization contract.
+
+## Game Porting Toolkit contract audit (2026-07-27)
+
+The implementation was re-audited against
+`using-metalfx-temporal-upscaler/SKILL.md` and its integration guide after the
+earlier review session stopped before producing this result.
+
+- Halton samples are one-based, centered to `[-0.5, 0.5)`, and cycle through
+  `ceil(8 / scale^2)` phases. Unit tests cover the sequence and phase counts.
+- Pixel jitter is passed unchanged to MetalFX. Shader clip jitter uses
+  `(2*x/renderWidth, -2*y/renderHeight)`. `applyProjectionJitter` accounts for
+  JOML's right-handed projection (`w = -z_view`) rather than copying the
+  left-handed matrix-column edit verbatim.
+- Depth is reconstructed with the inverse jittered view-projection matrix, but
+  current and previous screen positions use unjittered matrices. A static scene
+  therefore emits zero motion while the jitter phase advances.
+- Motion is previous-screen minus current-screen in a top-left framebuffer.
+  The Y subtraction is reversed relative to Metal clip space, and the scaler
+  receives `(inputWidth/2, inputHeight/2)` motion-vector scales.
+- The Temporal descriptor mirrors the real color, depth, motion, reactive, and
+  output formats. Every frame sets input content dimensions, pixel jitter,
+  motion-vector scales, reset, reversed depth, and the reactive texture when
+  the OS exposes that API. The output texture includes shader-write usage.
+- Resize, render/display size changes, projection/FOV changes, teleport,
+  invalid matrices, world transitions, command-buffer failure, and explicit
+  lifecycle events reset history and restart the jitter sequence.
+- GUI/HUD is rendered after Temporal at native resolution. Frame Generation
+  receives the native UI texture through the precomposited UI contract; it does
+  not put GUI pixels into Temporal history.
+
+Verification on Apple M1 Pro with Metal API Validation enabled:
+
+```text
+JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home \
+  ./gradlew test buildMacNative metalFxOffscreenValidation --no-daemon
+
+BUILD SUCCESSFUL
+MetalFX offscreen validation passed: 8/8 scenarios
+```
+
+The eight GPU scenarios are static, translation, rotation, occlusion/reveal,
+alpha test, scene cut, illegal motion, and history reset.
+
+The real Minecraft renderer gate also passed on the same Apple M1 Pro with
+Metal API Validation enabled:
+
+```text
+./gradlew minecraftMetalFxClientValidation --no-daemon
+
+BUILD SUCCESSFUL
+MetalFX client validation: PASS (16/16 GPU readbacks, 0 failed)
+```
+
+The final validation pass also closed three harness defects found while running
+the gate: the room is reinstalled after integrated-server startup chunk sync;
+first-person overlay validity is separated from world-object occlusion/reset
+assertions; and the old-minecart rail samples use a deterministic scripted
+direction instead of the wall-clock-dependent hurt animation. CUTOUT policy
+checks ignore coverage hidden behind nearer object-validity pixels.

@@ -72,6 +72,7 @@ final class MetalCrossShaderCompiler {
     }
 
     static MetalCompiledRenderPipeline compile(final MetalDevice device, final RenderPipeline pipeline, final ShaderSource shaderSource) {
+        float sampleLodBias = MetalFxManager.shaderSampleLodBias();
         try {
             // S8: disk-cache the translated five-tuple. The raw sources are
             // fetched again inside getOrCompileShader on a miss; that double
@@ -91,7 +92,7 @@ final class MetalCrossShaderCompiler {
                             rawFragment,
                             vertexFormatSignature(pipeline),
                             bindGroupSignature(pipeline),
-                            Integer.toHexString(Float.floatToIntBits(MetalFxManager.shaderSampleLodBias())),
+                            Integer.toHexString(Float.floatToIntBits(sampleLodBias)),
                             MetalMslDiskCache.CACHE_SALT
                     );
                     MetalMslDiskCache.Entry cached = diskCache.load(cacheKey);
@@ -147,7 +148,7 @@ final class MetalCrossShaderCompiler {
             validateFragmentOutputSignature(pipeline, fragmentMsl.stageOutputLocations());
             String fragmentMslSource = applySampleLodBias(
                     fragmentMsl.source(),
-                    MetalFxManager.shaderSampleLodBias()
+                    sampleLodBias
             );
 
             String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");

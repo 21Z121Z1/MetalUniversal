@@ -115,6 +115,14 @@ final class MetalGpuSampler extends GpuSampler {
         this.device.queueResourceRelease(this.nativeHandle);
     }
 
+    void closeImmediately() {
+        if (this.closed) {
+            return;
+        }
+        this.closed = true;
+        MetalNativeBridge.metallum_release_object(this.nativeHandle);
+    }
+
     boolean isClosed() {
         return this.closed;
     }

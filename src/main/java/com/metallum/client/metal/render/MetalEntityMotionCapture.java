@@ -22,6 +22,7 @@ import java.util.Map;
  */
 @Environment(EnvType.CLIENT)
 public final class MetalEntityMotionCapture {
+    private static volatile boolean enabled = true;
     public record Diagnostics(
             int statesAttached,
             int entitySubmissionsMatched,
@@ -96,7 +97,25 @@ public final class MetalEntityMotionCapture {
     private MetalEntityMotionCapture() {
     }
 
+    static void setEnabled(final boolean value) {
+        enabled = value;
+        if (!value) {
+            clearFrameState();
+        }
+    }
+
+    static boolean isEnabled() {
+        return enabled;
+    }
+
     public static void beginFrame() {
+        if (!enabled) {
+            return;
+        }
+        clearFrameState();
+    }
+
+    private static void clearFrameState() {
         ENTITY_SUBMISSION.remove();
         MODEL_BUILD.remove();
         STATES.clear();
@@ -119,13 +138,16 @@ public final class MetalEntityMotionCapture {
     }
 
     public static void attachState(final Object state, final Sample sample) {
-        if (state != null && sample != null) {
+        if (enabled && state != null && sample != null) {
             STATES.put(state, sample);
             statesAttached++;
         }
     }
 
     public static void beginEntitySubmission(final Object state) {
+        if (!enabled) {
+            return;
+        }
         Sample sample = STATES.get(state);
         if (sample == null) {
             ENTITY_SUBMISSION.remove();
@@ -136,10 +158,15 @@ public final class MetalEntityMotionCapture {
     }
 
     public static void endEntitySubmission() {
-        ENTITY_SUBMISSION.remove();
+        if (enabled) {
+            ENTITY_SUBMISSION.remove();
+        }
     }
 
     public static void captureModelSubmit(final Object submit) {
+        if (!enabled) {
+            return;
+        }
         Sample sample = ENTITY_SUBMISSION.get();
         if (submit != null && sample != null) {
             SUBMITS.put(submit, sample);
@@ -180,6 +207,9 @@ public final class MetalEntityMotionCapture {
     }
 
     private static void beginBuild(final Object submit, final boolean retainOwner) {
+        if (!enabled) {
+            return;
+        }
         Sample sample = retainOwner ? SUBMITS.get(submit) : SUBMITS.remove(submit);
         if (sample == null) {
             MODEL_BUILD.remove();
@@ -190,10 +220,15 @@ public final class MetalEntityMotionCapture {
     }
 
     public static void endModelBuild() {
-        MODEL_BUILD.remove();
+        if (enabled) {
+            MODEL_BUILD.remove();
+        }
     }
 
     public static boolean shouldSplitEntityDraw(final RenderPipeline pipeline) {
+        if (!enabled) {
+            return false;
+        }
         Sample sample = MODEL_BUILD.get();
         if (sample == null || pipeline == null) {
             return false;
@@ -207,6 +242,9 @@ public final class MetalEntityMotionCapture {
     }
 
     public static void attachDraw(final StagedVertexBuffer.Draw draw) {
+        if (!enabled) {
+            return;
+        }
         Sample sample = MODEL_BUILD.get();
         if (draw != null && sample != null) {
             DRAWS.put(draw, sample);
@@ -218,6 +256,9 @@ public final class MetalEntityMotionCapture {
             final StagedVertexBuffer.Draw draw,
             final StagedVertexBuffer.ExecuteInfo executeInfo
     ) {
+        if (!enabled) {
+            return;
+        }
         Sample sample = DRAWS.remove(draw);
         if (sample != null && executeInfo != null) {
             EXECUTES.put(executeInfo, sample);
@@ -227,6 +268,9 @@ public final class MetalEntityMotionCapture {
 
     @Nullable
     public static Sample takeExecute(final StagedVertexBuffer.ExecuteInfo executeInfo) {
+        if (!enabled) {
+            return null;
+        }
         Sample sample = EXECUTES.remove(executeInfo);
         if (sample != null) {
             executesConsumed++;
@@ -253,6 +297,9 @@ public final class MetalEntityMotionCapture {
     }
 
     static void recordMotionDrawEncoded(final RenderPipeline source) {
+        if (!enabled) {
+            return;
+        }
         motionDrawsEncoded++;
         if (source != null) {
             switch (source.getVertexShader().getPath()) {
@@ -268,7 +315,9 @@ public final class MetalEntityMotionCapture {
     }
 
     static void recordMotionDrawSkip(final String reason) {
-        lastMotionDrawSkip = reason;
+        if (enabled) {
+            lastMotionDrawSkip = reason;
+        }
     }
 
     static Matrix4f objectCurrentToPrevious(final Sample sample) {

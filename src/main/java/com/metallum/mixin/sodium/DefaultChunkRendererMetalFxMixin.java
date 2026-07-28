@@ -43,7 +43,10 @@ public abstract class DefaultChunkRendererMetalFxMixin {
         if (!MetalCutoutReactivePipeline.isActiveCutoutPass()) {
             return encoder.createRenderPass(label, colorTexture, clearColor, depthTexture, clearDepth);
         }
-        GpuTextureView coverage = MetalFxManager.cutoutReactiveAttachment();
+        GpuTextureView coverage = MetalFxManager.cutoutReactiveAttachment(
+                colorTexture.getWidth(0),
+                colorTexture.getHeight(0)
+        );
         if (coverage == null) {
             return encoder.createRenderPass(label, colorTexture, clearColor, depthTexture, clearDepth);
         }
