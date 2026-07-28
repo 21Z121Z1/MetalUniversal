@@ -29,7 +29,11 @@
     "sodium.DrawContextMixin",
     "sodium.ShaderChunkRendererMetalFxMixin",
     "sodium.DefaultChunkRendererMetalFxMixin",
-    "sodium.SodiumPreferredGraphicsApiMixin"
+    "sodium.SodiumPreferredGraphicsApiMixin",
+    "sodium.MinecraftTerrainSchedulingMixin",
+    "sodium.SodiumWorldRendererTerrainSchedulingMixin",
+    "sodium.RenderSectionManagerTerrainSchedulingMixin",
+    "sodium.RenderRegionManagerTerrainSchedulingMixin"
   ],
   "injectors": {
     "defaultRequire": 1

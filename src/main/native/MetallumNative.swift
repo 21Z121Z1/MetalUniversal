@@ -7633,6 +7633,13 @@ public func metallum_set_debug_labels_enabled(_ enabled: Int32) {
     NativeState.debugLabelsEnabled = enabled != 0
 }
 
+/// Foundation's process thermal state is the only thermal signal exposed by
+/// the current native boundary; no fabricated GPU temperature is inferred.
+@_cdecl("metallum_system_thermal_state")
+public func metallum_system_thermal_state() -> Int32 {
+    return Int32(ProcessInfo.processInfo.thermalState.rawValue)
+}
+
 @_cdecl("metallum_MTLDevice_maxMemoryAllocationSize")
 public func metallum_MTLDevice_maxMemoryAllocationSize(_ device: MTLDevice) -> UInt64 {
     let maxBuffer = UInt64(device.maxBufferLength)

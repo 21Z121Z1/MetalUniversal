@@ -165,6 +165,7 @@ public final class MetalNativeBridge {
             NSViewSetMetalLayer = downcall(lookup, "metallum_NSView_setMetalLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setDebugLabelsEnabled = downcall(lookup, "metallum_set_debug_labels_enabled", FunctionDescriptor.ofVoid(INT));
+            systemThermalState = optionalDowncall(lookup, "metallum_system_thermal_state", FunctionDescriptor.of(INT));
             initPipelines = downcall(lookup, "metallum_init_pipelines", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             metalfxSupportsSpatial = downcall(lookup, "metallum_metalfx_supports_spatial", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metalfxSupportsTemporal = downcall(lookup, "metallum_metalfx_supports_temporal", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
@@ -703,6 +704,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle NSViewSetMetalLayer;
     private static final MethodHandle NSViewClearLayer;
     private static final MethodHandle setDebugLabelsEnabled;
+    @Nullable
+    private static final MethodHandle systemThermalState;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
     private static final MethodHandle MTLCommandQueueMakeCommandBuffer;
@@ -853,6 +856,18 @@ public final class MetalNativeBridge {
             return result == 0 ? buffer.getString(0L) : "";
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_copy_device_name", throwable);
+        }
+    }
+
+    /** Returns the Foundation thermal state (0 nominal through 3 critical), or -1 if unavailable. */
+    public static int metallum_system_thermal_state() {
+        if (systemThermalState == null) {
+            return -1;
+        }
+        try {
+            return (int) systemThermalState.invokeExact();
+        } catch (Throwable ignored) {
+            return -1;
         }
     }
 
