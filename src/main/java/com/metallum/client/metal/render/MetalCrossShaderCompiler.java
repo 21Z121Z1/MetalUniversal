@@ -1,11 +1,16 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.bridge.GlslangBridge;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.mojang.blaze3d.GpuFormat;
+import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
 import com.mojang.blaze3d.pipeline.BindGroupLayout.UniformDescription;
+import com.mojang.blaze3d.pipeline.ColorTargetState;
+import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.platform.PolygonMode;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.ShaderType;
 import com.mojang.blaze3d.vertex.VertexFormat;
@@ -25,6 +30,7 @@ import org.lwjgl.util.spvc.SpvcMslShaderInterfaceVar2;
 import org.lwjgl.util.spvc.SpvcReflectedResource;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -99,6 +105,123 @@ final class MetalCrossShaderCompiler {
         } catch (ShaderCompileException e) {
             throw new IllegalStateException("Failed to compile Metal cross shader for pipeline " + pipeline.getLocation(), e);
         }
+    }
+
+    /**
+     * Compiles a shaderpack (Iris light-shader) GLSL pair to a Metal pipeline.
+     *
+     * <p>Unlike {@link #compile(MetalDevice, RenderPipeline, ShaderSource)}, this
+     * entry point bypasses the blaze3d {@code device.getOrCompileShader} SPIR-V
+     * cache and compiles GLSL directly via {@link GlslangBridge} (GLSL&#8594;SPIR-V),
+     * then reuses the existing SPIRV-Cross SPIR-V&#8594;MSL path ({@link #spirvToMsl}).
+     *
+     * <p>The vertex&#8594;fragment input/output rebind tolerance applied in the
+     * vanilla path ({@code tolerateUnprovidedInputs} /
+     * {@code IntermediaryShaderModule.rebind}) is intentionally skipped: there is
+     * no {@code IntermediaryShaderModule} for the raw SPIR-V produced by glslang,
+     * and Iris's {@code TransformPatcher} is expected to already emit
+     * vertex/fragment interfaces that match.
+     *
+     * @param device                   the Metal device.
+     * @param name                     logical name used in error messages.
+     * @param vertexGlsl               vertex GLSL source (must declare its own {@code #version}).
+     * @param fragmentGlsl             fragment GLSL source (must declare its own {@code #version}).
+     * @param defines                  optional preprocessor defines forwarded to glslang.
+     * @param bindGroupEntries         resource bindings; its size selects the
+     *                                 push-constant binding slot (mirrors the
+     *                                 vanilla path's {@code layoutEntries.size()}).
+     * @param vertexAttributeFormats   vertex attribute formats for integer-input
+     *                                 conversion (may be empty).
+     * @param enablePointSize          whether to emit Metal {@code [[point_size]]}
+     *                                 (POINTS topology only).
+     * @param cull                     back-face cull enabled.
+     * @param polygonMode              fill / wireframe.
+     * @param primitiveTopology        primitive topology.
+     * @param vertexFormatBindings     vertex format bindings.
+     * @param depthStencilState        depth/stencil state (nullable).
+     * @param colorTarget              color target state (nullable).
+     * @return the compiled Metal render pipeline.
+     * @throws ShaderCompileException if GLSL&#8594;SPIR-V or SPIR-V&#8594;MSL fails.
+     */
+    static MetalCompiledRenderPipeline compileShaderpack(
+            final MetalDevice device,
+            final String name,
+            final String vertexGlsl,
+            final String fragmentGlsl,
+            final String defines,
+            final List<VulkanBindGroupLayout.Entry> bindGroupEntries,
+            final Map<String, GpuFormat> vertexAttributeFormats,
+            final boolean enablePointSize,
+            final boolean cull,
+            final PolygonMode polygonMode,
+            final PrimitiveTopology primitiveTopology,
+            final VertexFormat[] vertexFormatBindings,
+            final DepthStencilState depthStencilState,
+            final ColorTargetState colorTarget
+    ) throws ShaderCompileException {
+        final int[] vertexSpvWords;
+        final int[] fragmentSpvWords;
+        try {
+            vertexSpvWords = GlslangBridge.compileGlslToSpv(GlslangBridge.Stage.VERTEX, vertexGlsl, defines);
+        } catch (GlslangBridge.ShaderCompileException e) {
+            throw wrapGlslangError("Failed to compile shaderpack vertex shader '" + name + "'", e);
+        }
+        try {
+            fragmentSpvWords = GlslangBridge.compileGlslToSpv(GlslangBridge.Stage.FRAGMENT, fragmentGlsl, defines);
+        } catch (GlslangBridge.ShaderCompileException e) {
+            throw wrapGlslangError("Failed to compile shaderpack fragment shader '" + name + "'", e);
+        }
+
+        final int pushConstantBinding = bindGroupEntries.size();
+        final MslShader vertexMsl = spirvToMsl(spirvWordsToByteBuffer(vertexSpvWords), pushConstantBinding, vertexAttributeFormats, enablePointSize);
+        final MslShader fragmentMsl = spirvToMsl(spirvWordsToByteBuffer(fragmentSpvWords), pushConstantBinding, Map.of(), true);
+
+        final String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
+        final String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
+        final List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(bindGroupEntries, vertexMsl, fragmentMsl);
+
+        return new MetalCompiledRenderPipeline(
+                device,
+                name,
+                vertexMsl.source(),
+                fragmentMsl.source(),
+                vertexEntryPoint,
+                fragmentEntryPoint,
+                resources,
+                cull,
+                polygonMode,
+                primitiveTopology,
+                vertexFormatBindings,
+                depthStencilState,
+                colorTarget
+        );
+    }
+
+    /**
+     * Wraps a SPIR-V word array into a heap {@link ByteBuffer} in
+     * {@link ByteOrder#LITTLE_ENDIAN} order. SPIR-V is a little-endian word
+     * stream; the resulting buffer's position is left at {@code 0} so that
+     * {@code asIntBuffer()} views (used by {@link #spirvToMsl}) start at the
+     * first word. The view buffer advances its own position independently of
+     * this buffer's position.
+     */
+    private static ByteBuffer spirvWordsToByteBuffer(final int[] words) {
+        final ByteBuffer buffer = ByteBuffer.allocate(words.length * 4).order(ByteOrder.LITTLE_ENDIAN);
+        buffer.asIntBuffer().put(words);
+        return buffer;
+    }
+
+    /**
+     * Rewraps a {@link GlslangBridge.ShaderCompileException} (an unchecked
+     * {@code RuntimeException} from the native glslang bridge) as a blaze3d
+     * {@link ShaderCompileException}, preserving the original failure as the
+     * cause via {@code initCause}. The blaze3d type is the one already thrown
+     * throughout this class and expected by callers of {@link #compile}.
+     */
+    private static ShaderCompileException wrapGlslangError(final String message, final GlslangBridge.ShaderCompileException cause) {
+        final ShaderCompileException wrapped = new ShaderCompileException(message);
+        wrapped.initCause(cause);
+        return wrapped;
     }
 
     private static void addToBindGroup(
