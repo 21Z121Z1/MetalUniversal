@@ -126,11 +126,17 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull GpuBuffer createBuffer(@Nullable final Supplier<String> label, @GpuBuffer.Usage final int usage, final long size) {
+        if (size <= 0L) {
+            throw new IllegalArgumentException("Metal buffer size must be > 0 (got " + size + ")");
+        }
         return new MetalGpuBuffer(this, usage, size);
     }
 
     @Override
     public @NonNull GpuBuffer createBuffer(@Nullable final Supplier<String> label, @GpuBuffer.Usage final int usage, final ByteBuffer data) {
+        if (data == null || data.remaining() <= 0) {
+            throw new IllegalArgumentException("Cannot create buffer from empty ByteBuffer");
+        }
         MetalGpuBuffer buffer = (MetalGpuBuffer) this.createBuffer(label, usage | GpuBuffer.USAGE_COPY_DST, data.remaining());
         this.commandEncoder.writeToBuffer(buffer.slice(), data.duplicate());
         return buffer;
@@ -205,6 +211,10 @@ final class MetalDevice implements GpuDeviceBackend {
 
     MemorySegment metalDeviceHandle() {
         return this.metalDeviceHandle;
+    }
+
+    long maxBufferAllocationSize() {
+        return this.deviceInfo.limits().maxMemoryAllocationSize();
     }
 
     void waitForSubmittedGpuWork() {
