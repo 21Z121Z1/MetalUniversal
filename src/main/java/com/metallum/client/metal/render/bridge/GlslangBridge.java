@@ -17,6 +17,7 @@ import java.lang.invoke.VarHandle;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.function.Function;
 
 /**
  * Foreign Memory & Function API (FFM, {@code java.lang.foreign}) bridge to the
@@ -95,8 +96,8 @@ public final class GlslangBridge {
     /** Standard link-time messages for Vulkan SPIR-V generation (mirrors glslang's example.c). */
     private static final int LINK_MESSAGES = GLSLANG_MSG_SPV_RULES_BIT | GLSLANG_MSG_VULKAN_RULES_BIT;
 
-    /** Default GLSL version assumed when the source lacks a {@code #version} directive (desktop GLSL). */
-    private static final int DEFAULT_VERSION = 110;
+    /** Vulkan-compatible GLSL version forced via {@code force_default_version_and_profile}. */
+    private static final int FORCED_VULKAN_VERSION = 460;
 
     /** Upper bound used when reinterpret()ing a returned C string for reading. */
     private static final long CSTRING_MAX = 1L << 20;
@@ -152,12 +153,30 @@ public final class GlslangBridge {
     private static final VarHandle V_CODE = varHandle("code");
     private static final VarHandle V_DEFAULT_VERSION = varHandle("default_version");
     private static final VarHandle V_DEFAULT_PROFILE = varHandle("default_profile");
+    private static final VarHandle V_FORCE_DEFAULT = varHandle("force_default_version_and_profile");
     private static final VarHandle V_MESSAGES = varHandle("messages");
     private static final VarHandle V_RESOURCE = varHandle("resource");
 
     private static VarHandle varHandle(String name) {
         return INPUT_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement(name));
     }
+
+    /**
+     * {@code glsl_include_result_t} layout, mirroring the C struct in
+     * {@code glslang_c_interface.h}. Returned by the include-local upcall to
+     * feed {@code #include} resolution back to glslang's preprocessor.
+     */
+    private static final MemoryLayout INCLUDE_RESULT_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("header_name"),
+            ValueLayout.ADDRESS.withName("header_data"),
+            ValueLayout.JAVA_LONG.withName("header_length")
+    );
+    private static final VarHandle V_IR_HEADER_NAME = INCLUDE_RESULT_LAYOUT.varHandle(
+            MemoryLayout.PathElement.groupElement("header_name"));
+    private static final VarHandle V_IR_HEADER_DATA = INCLUDE_RESULT_LAYOUT.varHandle(
+            MemoryLayout.PathElement.groupElement("header_data"));
+    private static final VarHandle V_IR_HEADER_LENGTH = INCLUDE_RESULT_LAYOUT.varHandle(
+            MemoryLayout.PathElement.groupElement("header_length"));
 
     // --- Resolved glslang downcall handles ---
     private static final MethodHandle glslangInitializeProcess;
@@ -183,6 +202,59 @@ public final class GlslangBridge {
 
     /** Serializes compilations; glslang is not guaranteed reentrant for concurrent compiles. */
     private static final Object COMPILE_LOCK = new Object();
+
+    /**
+     * Thread-local include resolver used by the {@code include_local} upcall.
+     * Set per-compile by {@link #compileGlslToSpv(Stage, String, String, Function)}
+     * and cleared afterwards. Maps a header name (e.g. {@code "/lib/settings.glsl"})
+     * to its full source text, or {@code null} if the include cannot be resolved
+     * (glslang then reports a preprocessor error).
+     */
+    private static final ThreadLocal<Function<String, String>> INCLUDE_RESOLVER = new ThreadLocal<>();
+
+    /**
+     * Per-compile shared arena holding include results returned by the
+     * {@code include_local} upcall. Created at the start of a compile (when a
+     * resolver is active) and closed in the {@code finally} of that compile.
+     * Must be a shared arena because the upcall may execute on a different
+     * thread (glslang may invoke the callback synchronously from within
+     * {@code glslang_shader_preprocess}).
+     */
+    private static final ThreadLocal<Arena> INCLUDE_ARENA = new ThreadLocal<>();
+
+    /** Byte offset of the {@code include_local} field within {@code glslang_input_t}. */
+    private static final long CALLBACKS_OFFSET = INPUT_LAYOUT.byteOffset(
+            MemoryLayout.PathElement.groupElement("callbacks"));
+    private static final long INCLUDE_LOCAL_OFFSET = CALLBACKS_OFFSET + ValueLayout.ADDRESS.byteSize();
+
+    /**
+     * The {@code include_local} upcall stub, allocated once in a process-lifetime
+     * shared arena. Passed to glslang via the {@code callbacks.include_local}
+     * field of {@code glslang_input_t} when an include resolver is active.
+     */
+    private static final MemorySegment INCLUDE_LOCAL_UPCALL;
+    /** Shared arena holding the upcall stub (kept alive for the JVM lifetime). */
+    private static final Arena UPCALL_ARENA = Arena.ofShared();
+
+    /**
+     * Compatibility macros injected before the source when compiling raw
+     * shaderpack GLSL (Task 6.3: macro injection). These are normally supplied
+     * by Iris's TransformPatcher; defining them here lets the glslang frontend
+     * parse shaderpack sources that branch on them ({@code IS_IRIS},
+     * {@code MC_VERSION}, {@code MC_GLSL_VERSION}, ...).
+     */
+    private static final String COMPAT_PREAMBLE = String.join("\n",
+            "#define IS_IRIS 1",
+            "#define MC_VERSION 12111",
+            "#define MC_GLSL_VERSION 460",
+            "#define MC_GL_VERSION 460",
+            "#define MC_RENDER_QUALITY 1.0",
+            "#define MC_SHADOW_QUALITY 1.0",
+            "#define MC_NORMAL_MAP",
+            "#define MC_SPECULAR_MAP",
+            "#define METALLUM_GLSLANG_FRONTEND 1",
+            ""
+    );
 
     static {
         try {
@@ -210,6 +282,24 @@ public final class GlslangBridge {
             glslangProgramSpvGetSize = downcall(lookup, "glslang_program_SPIRV_get_size", FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
             glslangProgramSpvGet = downcall(lookup, "glslang_program_SPIRV_get", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             glslangProgramGetInfoLog = downcall(lookup, "glslang_program_get_info_log", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+
+            // Create the include_local upcall stub. Signature:
+            //   glsl_include_result_t* include_local(void* ctx, const char* header_name,
+            //                                        const char* includer_name, size_t depth)
+            MethodHandle includeLocalHandle;
+            try {
+                includeLocalHandle = java.lang.invoke.MethodHandles.lookup().findStatic(
+                        GlslangBridge.class, "includeLocalCallback",
+                        FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG).toMethodType());
+            } catch (NoSuchMethodException | IllegalAccessException e) {
+                throw new IllegalStateException("Failed to link include_local upcall", e);
+            }
+            INCLUDE_LOCAL_UPCALL = LINKER.upcallStub(
+                    includeLocalHandle,
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.JAVA_LONG),
+                    UPCALL_ARENA);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to load glslang native bridge", e);
         }
@@ -239,6 +329,10 @@ public final class GlslangBridge {
      * Compiles a GLSL source string to a SPIR-V binary using glslang, targeting
      * Vulkan 1.1 / SPIR-V 1.3.
      *
+     * <p>Equivalent to {@link #compileGlslToSpv(Stage, String, String, Function)}
+     * with no include resolver — {@code #include} directives in the source will
+     * be reported as preprocessor errors.
+     *
      * @param stage   the GLSL shader stage.
      * @param source  the GLSL source. Must declare its own {@code #version}.
      * @param defines optional preprocessor defines. Each non-empty line is
@@ -252,6 +346,50 @@ public final class GlslangBridge {
      *                                is not a valid SPIR-V binary.
      */
     public static int[] compileGlslToSpv(Stage stage, String source, String defines) throws ShaderCompileException {
+        return compileGlslToSpv(stage, source, defines, null);
+    }
+
+    /**
+     * Compiles a GLSL source string to a SPIR-V binary using glslang, targeting
+     * Vulkan 1.1 / SPIR-V 1.3, with optional {@code #include} resolution.
+     *
+     * <p><b>Task 6.3 fixes (extension enabling / resource limits / macro
+     * injection) applied here:</b>
+     * <ul>
+     *   <li><b>Macro injection.</b> A compatibility preamble
+     *       ({@link #COMPAT_PREAMBLE}) is prepended so raw shaderpack sources
+     *       that branch on {@code IS_IRIS}/{@code MC_VERSION}/... parse. In the
+     *       real Iris integration path Iris's TransformPatcher supplies these;
+     *       the preamble is a safety net for partially-patched / raw sources.</li>
+     *   <li><b>Version override.</b> {@code force_default_version_and_profile=1}
+     *       with {@code default_version=460} overrides shaderpack
+     *       {@code #version 120} to a Vulkan-compatible target. glslang in
+     *       Vulkan client mode rejects pre-330 versions otherwise.</li>
+     *   <li><b>Resource limits.</b> {@code glslang_default_resource()} already
+     *       supplies generous limits (max varyings, uniforms, samplers); BSL
+     *       stays within them.</li>
+     *   <li><b>Include resolution.</b> When {@code includeResolver} is non-null,
+     *       the {@code include_local} callback is wired so {@code #include}
+     *       directives resolve through the resolver (header name → source text).
+     *       This is what lets the BSL fixture compile programs whose logic lives
+     *       behind {@code #include "/program/..."}.</li>
+     * </ul>
+     *
+     * @param stage           the GLSL shader stage.
+     * @param source          the GLSL source. Must declare its own {@code #version}.
+     * @param defines         optional preprocessor defines (see 3-arg overload).
+     * @param includeResolver optional function mapping an include header name
+     *                        (e.g. {@code "/lib/settings.glsl"}) to its source
+     *                        text, or {@code null} if the include cannot be
+     *                        resolved. When {@code null}, include directives
+     *                        are not wired and glslang reports them as errors.
+     * @return the SPIR-V words (uint32, as Java {@code int}).
+     * @throws ShaderCompileException if preprocessing, parsing, linking or
+     *                                SPIR-V generation fails, or if the result
+     *                                is not a valid SPIR-V binary.
+     */
+    public static int[] compileGlslToSpv(Stage stage, String source, String defines,
+                                         Function<String, String> includeResolver) throws ShaderCompileException {
         if (stage == null) {
             throw new ShaderCompileException("Shader stage is null", null);
         }
@@ -261,13 +399,19 @@ public final class GlslangBridge {
         ensureProcessInitialized();
 
         final int glslangStage = stage.glslangStage;
-        final String fullSource = buildSourceWithDefines(source, defines);
+        // Strip any #version directive — we force 460 via force_default_version_and_profile,
+        // and #version must be the first directive if present. Injecting the
+        // compatibility preamble before the source would otherwise violate that.
+        final String stripped = stripVersionDirective(source);
+        final String fullSource = buildSourceWithDefines(COMPAT_PREAMBLE + stripped, defines);
 
         synchronized (COMPILE_LOCK) {
+            INCLUDE_RESOLVER.set(includeResolver);
+            if (includeResolver != null) {
+                INCLUDE_ARENA.set(Arena.ofShared());
+            }
             try (Arena arena = Arena.ofConfined()) {
                 final MemorySegment input = arena.allocate(INPUT_LAYOUT);
-                // Zero-initialized: callbacks, callbacks_ctx, force_default_version_and_profile
-                // and forward_compatible stay 0/null.
                 V_LANGUAGE.set(input, GLSLANG_SOURCE_GLSL);
                 V_STAGE.set(input, glslangStage);
                 V_CLIENT.set(input, GLSLANG_CLIENT_VULKAN);
@@ -276,10 +420,23 @@ public final class GlslangBridge {
                 V_TARGET_LANGUAGE_VERSION.set(input, GLSLANG_TARGET_SPV_1_3);
                 final MemorySegment code = arena.allocateFrom(fullSource);
                 V_CODE.set(input, code);
-                V_DEFAULT_VERSION.set(input, DEFAULT_VERSION);
+                // Force Vulkan-compatible 460 so shaderpack #version 120/330
+                // sources are accepted in Vulkan client mode.
+                V_DEFAULT_VERSION.set(input, FORCED_VULKAN_VERSION);
                 V_DEFAULT_PROFILE.set(input, GLSLANG_NO_PROFILE);
+                V_FORCE_DEFAULT.set(input, 1);
                 V_MESSAGES.set(input, GLSLANG_MSG_DEFAULT_BIT);
                 V_RESOURCE.set(input, defaultResource);
+
+                // Wire include_local callback when a resolver is provided. The
+                // callbacks struct is a nested group inside glslang_input_t; we
+                // write the include_local function pointer at its byte offset
+                // and leave include_system / free_include_result null — glslang
+                // tolerates null system/free callbacks.
+                if (includeResolver != null) {
+                    input.set(ValueLayout.ADDRESS, CALLBACKS_OFFSET, MemorySegment.NULL);
+                    input.set(ValueLayout.ADDRESS, INCLUDE_LOCAL_OFFSET, INCLUDE_LOCAL_UPCALL);
+                }
 
                 MemorySegment shader = MemorySegment.NULL;
                 MemorySegment program = MemorySegment.NULL;
@@ -347,8 +504,49 @@ public final class GlslangBridge {
                         }
                     }
                 }
+            } finally {
+                INCLUDE_RESOLVER.remove();
+                Arena includeArena = INCLUDE_ARENA.get();
+                if (includeArena != null) {
+                    includeArena.close();
+                    INCLUDE_ARENA.remove();
+                }
             }
         }
+    }
+
+    /**
+     * Upcall target for glslang's {@code include_local} callback. Reads the
+     * header name from native memory, resolves it through the thread-local
+     * {@link #INCLUDE_RESOLVER}, and returns a {@code glsl_include_result_t}
+     * allocated in the per-compile {@link #INCLUDE_ARENA}.
+     */
+    private static MemorySegment includeLocalCallback(MemorySegment ctx, MemorySegment headerNameSeg,
+                                                      MemorySegment includerNameSeg, long depth) {
+        Function<String, String> resolver = INCLUDE_RESOLVER.get();
+        if (resolver == null) {
+            return MemorySegment.NULL;
+        }
+        String headerName = readCString(headerNameSeg);
+        String contents = resolver.apply(headerName);
+        if (contents == null) {
+            return MemorySegment.NULL;
+        }
+        Arena arena = INCLUDE_ARENA.get();
+        if (arena == null) {
+            return MemorySegment.NULL;
+        }
+        byte[] bytes = contents.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        MemorySegment result = arena.allocate(INCLUDE_RESULT_LAYOUT);
+        MemorySegment nameSeg = arena.allocateFrom(headerName);
+        // allocateFrom(String) produces a null-terminated UTF-8 C string; the
+        // header_length is the byte count without the terminator, matching
+        // glslang's expectation.
+        MemorySegment dataSeg = arena.allocateFrom(contents);
+        V_IR_HEADER_NAME.set(result, nameSeg);
+        V_IR_HEADER_DATA.set(result, dataSeg);
+        V_IR_HEADER_LENGTH.set(result, (long) bytes.length);
+        return result;
     }
 
     /**
@@ -477,6 +675,48 @@ public final class GlslangBridge {
     }
 
     // --- helpers ---
+
+    /**
+     * Removes the leading {@code #version} directive (and any preceding
+     * comments/blank lines before it) from the source. We force version 460
+     * via {@code force_default_version_and_profile}, so the {@code #version}
+     * directive is redundant — and stripping it lets us inject the
+     * {@link #COMPAT_PREAMBLE} before the source without violating the GLSL
+     * rule that {@code #version} must be the first directive.
+     *
+     * <p>If no {@code #version} directive is found, the source is returned
+     * unchanged.
+     */
+    private static String stripVersionDirective(String source) {
+        // Find the #version line in the leading run of comments / whitespace.
+        String[] lines = source.split("\\R", -1);
+        int versionLine = -1;
+        for (int i = 0; i < lines.length; i++) {
+            String trimmed = lines[i].trim();
+            if (trimmed.startsWith("#version")) {
+                versionLine = i;
+                break;
+            }
+            // Allow leading comments and blank lines before #version.
+            if (!trimmed.isEmpty() && !trimmed.startsWith("//") && !trimmed.startsWith("/*")) {
+                // Non-comment, non-blank, non-#version line — #version won't
+                // appear after real code, stop looking.
+                break;
+            }
+        }
+        if (versionLine < 0) {
+            return source;
+        }
+        StringBuilder sb = new StringBuilder();
+        boolean first = true;
+        for (int i = 0; i < lines.length; i++) {
+            if (i == versionLine) continue;
+            if (!first) sb.append('\n');
+            sb.append(lines[i]);
+            first = false;
+        }
+        return sb.toString();
+    }
 
     private static String buildSourceWithDefines(String source, String defines) {
         if (defines == null || defines.isBlank()) {

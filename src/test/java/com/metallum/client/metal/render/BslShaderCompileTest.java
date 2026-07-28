@@ -9,7 +9,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
-import java.util.stream.Stream;
+import java.util.function.Function;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * <p>Extracts the bundled BSL shaderpack
  * ({@code src/test/resources/shaderpacks/BSL_v10.1.3.zip}), walks every
- * {@code .vsh}/{@code .fsh} pair under {@code shaders/} (world0), and compiles
+ * {@code .vsh}/{@code .fsh} pair under {@code shaders/world0/}, and compiles
  * each stage through {@link GlslangBridge#compileGlslToSpv}. Asserts the
  * returned SPIR-V has the canonical magic word (0x07230203) and at least the
  * 5-word header.
@@ -33,16 +33,25 @@ import static org.junit.jupiter.api.Assertions.*;
  * green on Linux CI / developer machines. To force-run on macOS, set system
  * property {@code metallum.bsltest.force=true}.
  *
- * <p>BSL's GLSL uses Optifine/Iris shaderpack conventions (#include via the
- * Iris TransformPatcher, {@code #define}-driven branches). This fixture
- * compiles the <i>raw</i> shaderpack sources without Iris's patcher, so some
- * programs are expected to fail to compile here (missing includes, iris-
- * specific macros). The test therefore partitions programs into
- * {@code compiled} / {@code failed} buckets and asserts only that at least
- * one program compiles to valid SPIR-V — proving the glslang frontend is
- * wired end-to-end. Per-program failures are logged for diagnosis, mirroring
- * the spec's "record BSL constructs that glslang rejects, fix iteratively"
- * step (Task 6 SubTask 6.3).
+ * <p><b>Task 6.3 — BSL GLSL constructs glslang rejects (Vulkan SPIR-V mode)
+ * and the fixes applied in {@link GlslangBridge}:</b>
+ * <table>
+ * <tr><th>Construct</th><th>Why glslang rejects it</th><th>Fix</th></tr>
+ * <tr><td>{@code #version 120}</td><td>Vulkan client mode requires &#8805;450; glslang rejects pre-330 versions.</td><td>{@code force_default_version_and_profile=1} with {@code default_version=460} in the glslang_input_t.</td></tr>
+ * <tr><td>{@code #include "/program/..."}, {@code #include "/lib/..."}</td><td>glslang's default preprocessor does not resolve Iris/Optifine-style includes.</td><td>FFM upcall for the {@code include_local} callback; this test pre-scans the zip and feeds a header&#8594;source map as the resolver.</td></tr>
+ * <tr><td>Missing {@code IS_IRIS}, {@code MC_VERSION}, {@code MC_GLSL_VERSION} macros</td><td>BSL branches on these via {@code #if}; undefined &#8594; preprocessor errors or wrong code paths.</td><td>Compatibility preamble injected before the source (macro injection).</td></tr>
+ * <tr><td>{@code varying}, {@code attribute}, {@code gl_FragData[n]}, {@code ftransform()}, {@code gl_TextureMatrix}, {@code gl_MultiTexCoord}, {@code gl_NormalMatrix} &#8230;</td><td>Legacy GLSL 1.20 / fixed-function builtins removed from Vulkan SPIR-V core.</td><td><b>Not stubbed here.</b> These are rewritten by Iris's TransformPatcher in the real integration path. Raw-fixture programs using them still fail (diagnostic); the test asserts only that &#8805;1 program compiles, proving the frontend wiring.</td></tr>
+ * <tr><td>{@code #extension GL_ARB_shader_texture_lod : enable}</td><td>GL desktop extension; glslang in Vulkan mode maps it to {@code textureLod} SPIR-V ops natively, so it is accepted when the version is overridden to 460.</td><td>Version override (above) makes the extension a no-op.</td></tr>
+ * <tr><td>Generous varying/uniform/sampler counts</td><td>BSL declares many varyings and samplers; tight resource limits would reject them.</td><td>{@code glslang_default_resource()} already supplies generous limits; BSL stays within them.</td></tr>
+ * </table>
+ *
+ * <p><b>Expected outcome.</b> Programs whose logic avoids legacy fixed-function
+ * builtins (e.g. {@code gbuffers_basic} after include resolution, simple
+ * composite passes) compile to valid SPIR-V. Programs relying heavily on
+ * {@code ftransform()}/{@code gl_TextureMatrix}/{@code attribute}/{@code varying}
+ * fail until the Iris patcher rewrites them — these failures are logged for
+ * diagnosis, mirroring the spec's "record BSL constructs that glslang rejects,
+ * fix iteratively" step (Task 6 SubTask 6.3).
  */
 class BslShaderCompileTest {
 
@@ -76,14 +85,42 @@ class BslShaderCompileTest {
         Map<String, String> failed = new LinkedHashMap<>();
 
         try (ZipFile zf = new ZipFile(zip.toFile())) {
-            // Group .vsh/.fsh by program name (basename without extension).
-            Map<String, EnumMap<GlslangBridge.Stage, String>> programs = new LinkedHashMap<>();
+            // 1. Build the include map: every .glsl entry under shaders/ keyed
+            //    by its path relative to shaders/ (matches BSL's #include
+            //    "/lib/..." and #include "/program/..." conventions).
+            Map<String, String> includes = new HashMap<>();
+            // settings.glsl lives at shaders/lib/settings.glsl and is included
+            // as "/lib/settings.glsl"; program files as "/program/...". Any
+            // .glsl under shaders/ is a candidate include target.
             Enumeration<? extends ZipEntry> entries = zf.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry e = entries.nextElement();
                 String name = e.getName();
-                // Only world0 shaders/ (skip world-1/world1 stubs and lang/lib).
-                if (!name.startsWith("shaders/") || name.contains("/world-1/") || name.contains("/world1/")) {
+                if (!name.endsWith(".glsl") || e.isDirectory()) {
+                    continue;
+                }
+                if (!name.startsWith("shaders/")) {
+                    continue;
+                }
+                // Key = path relative to shaders/ (e.g. "lib/settings.glsl").
+                String key = name.substring("shaders/".length());
+                includes.put(key, readEntry(zf, e));
+            }
+
+            // Include resolver: header_name "/lib/settings.glsl" -> "lib/settings.glsl".
+            Function<String, String> resolver = headerName -> {
+                String key = headerName.startsWith("/") ? headerName.substring(1) : headerName;
+                return includes.get(key);
+            };
+
+            // 2. Group .vsh/.fsh by program name (basename without extension),
+            //    world0 only (skip world-1/world1 stubs).
+            Map<String, EnumMap<GlslangBridge.Stage, String>> programs = new LinkedHashMap<>();
+            Enumeration<? extends ZipEntry> progEntries = zf.entries();
+            while (progEntries.hasMoreElements()) {
+                ZipEntry e = progEntries.nextElement();
+                String name = e.getName();
+                if (!name.startsWith("shaders/world0/")) {
                     continue;
                 }
                 if (name.endsWith(".vsh")) {
@@ -93,6 +130,7 @@ class BslShaderCompileTest {
                 }
             }
 
+            // 3. Compile each program with the include resolver wired.
             for (Map.Entry<String, EnumMap<GlslangBridge.Stage, String>> prog : programs.entrySet()) {
                 String progName = prog.getKey();
                 EnumMap<GlslangBridge.Stage, String> stages = prog.getValue();
@@ -101,11 +139,12 @@ class BslShaderCompileTest {
                 if (vsh == null || fsh == null) {
                     continue; // incomplete program
                 }
-                // Try vertex first.
                 try {
-                    int[] spv = GlslangBridge.compileGlslToSpv(GlslangBridge.Stage.VERTEX, vsh, null);
+                    int[] spv = GlslangBridge.compileGlslToSpv(
+                            GlslangBridge.Stage.VERTEX, vsh, null, resolver);
                     assertValidSpirv(progName + ".vsh", spv);
-                    int[] spvF = GlslangBridge.compileGlslToSpv(GlslangBridge.Stage.FRAGMENT, fsh, null);
+                    int[] spvF = GlslangBridge.compileGlslToSpv(
+                            GlslangBridge.Stage.FRAGMENT, fsh, null, resolver);
                     assertValidSpirv(progName + ".fsh", spvF);
                     compiled.add(progName);
                 } catch (Throwable t) {
@@ -115,14 +154,17 @@ class BslShaderCompileTest {
         }
 
         // Assert the glslang frontend produces at least one valid SPIR-V from
-        // the real BSL shaderpack — proving the end-to-end pipeline. Per-program
-        // failures are diagnostic (Task 6.3 iterates on these).
+        // the real BSL shaderpack — proving the end-to-end pipeline with
+        // include resolution. Per-program failures are diagnostic (Task 6.3
+        // iterates on these — see the Javadoc table for the rejection
+        // categories and their fixes).
         assertFalse(compiled.isEmpty(),
                 "No BSL program compiled to valid SPIR-V. All failed: " + failed);
         // Log a compact summary to aid Task 6.3 diagnosis.
         System.out.println("[BSL fixture] compiled=" + compiled.size()
                 + " failed=" + failed.size());
-        failed.forEach((n, m) -> System.out.println("  FAIL " + n + ": " + m));
+        System.out.println("[BSL fixture] compiled programs: " + compiled);
+        failed.forEach((n, m) -> System.out.println("  FAIL " + n + ": " + truncate(m, 200)));
     }
 
     private static void assertValidSpirv(String label, int[] spv) {
@@ -135,6 +177,10 @@ class BslShaderCompileTest {
         while (c.getCause() != null) c = c.getCause();
         String m = c.getMessage();
         return m == null ? c.getClass().getSimpleName() : m;
+    }
+
+    private static String truncate(String s, int max) {
+        return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
     private static void putProgram(Map<String, EnumMap<GlslangBridge.Stage, String>> out,
