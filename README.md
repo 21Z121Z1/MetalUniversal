@@ -29,6 +29,23 @@ MetalUniversal 是一个基于 Apple Metal API 的 Minecraft 渲染后端模组�
 - Xcode（含 iOS SDK，用于 iOS 目标）
 - Java 25
 - Swift 编译器（`swiftc`）
+- CMake（用于从子模块构建 glslang / SPIRV-Cross）
+
+### 子模块
+
+本仓库通过 git 子模块引入 GLSL→SPIR-V→MSL 工具链，固定到指定 commit 以保证可复现构建：
+
+| 子模块 | 路径 | Commit |
+|--------|------|--------|
+| glslang | `vendor/glslang` | `2eb8a58103d0d4d75393afef16aa9bc24d1513b0` |
+| SPIRV-Headers | `vendor/SPIRV-Headers` | `29981f65241605e08b0ede4cfeb999fe3b723c6a` |
+| SPIRV-Cross | `vendor/SPIRV-Cross` | `6c09849fe88c48eaed08413aa022aaa136a3a057` |
+
+克隆后请务必初始化子模块：
+
+```bash
+git submodule update --init --recursive
+```
 
 ### 构建命令
 
