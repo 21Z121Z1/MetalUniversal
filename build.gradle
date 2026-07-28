@@ -23,11 +23,12 @@ dependencies {
 	// Iris 26.2 (optional). When Iris is present AND the Metal backend is
 	// active, the metallum iris intercept mixins (com.metallum.mixin.iris.*)
 	// take over shaderpack compilation; when Metal is not active those mixins
-	// are no-ops and Iris uses its normal GL path. modImplementation (rather
-	// than plain implementation) puts Iris on the mod dev classpath so the
-	// @Mixin targets (GlShader, ShaderCreator) resolve at compile time and Iris
-	// loads in dev runs.
-	modImplementation "maven.modrinth:iris:${project.iris_version}"
+	// are no-ops and Iris uses its normal GL path. implementation (matching
+	// sodium above) puts Iris on the compile classpath so the @Mixin targets
+	// (GlShader, ShaderCreator) resolve at compile time and Iris loads in dev
+	// runs. Note: Loom 1.16-SNAPSHOT (MC 26.2) no longer provides the
+	// modImplementation configuration; plain Gradle configurations are used.
+	implementation "maven.modrinth:iris:${project.iris_version}"
 
 	// Test: BSL end-to-end GLSL→SPIR-V→MSL compile fixture. JUnit 5 + zip
 	// extraction only; the test is gated (see BslShaderCompileTest) so it
