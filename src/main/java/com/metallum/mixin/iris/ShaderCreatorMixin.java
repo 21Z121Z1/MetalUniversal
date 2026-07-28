@@ -2,7 +2,6 @@ package com.metallum.mixin.iris;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalCrossShaderCompiler;
-import com.metallum.client.metal.render.MetalCrossShaderCompiler.ShaderpackMslResult;
 import net.irisshaders.iris.gl.shader.ShaderCompileException;
 import net.irisshaders.iris.pipeline.programs.PartialShader;
 import net.irisshaders.iris.pipeline.programs.ShaderCreator;
@@ -27,41 +26,36 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * cascade of silent GL failures.
  *
  * <p>When the Metal backend is <em>active</em> (see {@link MetalActive}), this
- * mixin intercepts {@code link} at {@code HEAD} and performs a <b>dry-compile</b>
- * of the shaderpack program's GLSL through the full
- * glslang&#8594;SPIRV-Cross&#8594;MSL pipeline via
- * {@link MetalCrossShaderCompiler#tryCompileShaderpackMsl}. The dry-compile:
+ * mixin intercepts {@code link} at {@code HEAD} and constructs a real Metal
+ * render pipeline via
+ * {@link MetalCrossShaderCompiler#compileShaderpackPipeline}. That method:
  * <ul>
- *   <li>validates that the (already TransformPatcher-patched,
- *       {@code #include}-expanded) GLSL cross-compiles to valid MSL;</li>
- *   <li>caches the resulting MSL sources and entry-point names in
- *       {@link MetalCrossShaderCompiler#getCachedShaderpackMsl} for retrieval
- *       by the forthcoming pipeline-binding step;</li>
- *   <li>logs success (MSL source lengths) or failure (with glslang/SPIRV-Cross
- *       diagnostics) to the {@link Metallum} logger.</li>
+ *   <li>compiles the (already TransformPatcher-patched, {@code #include}-
+ *       expanded) GLSL through glslang&#8594;SPIR-V&#8594;SPIRV-Cross&#8594;MSL;</li>
+ *   <li>constructs a {@code MetalCompiledRenderPipeline} (Metal pipeline state
+ *       object) using the active {@code MetalDevice} from
+ *       {@code MetalDeviceRegistry};</li>
+ *   <li>caches the pipeline under the program name in
+ *       {@code MetalCrossShaderCompiler.SHADERPACK_PIPELINE_CACHE} for retrieval
+ *       by the forthcoming render-dispatch step.</li>
  * </ul>
  *
- * <p>After a successful dry-compile the mixin still throws
- * {@link UnsupportedOperationException}, because returning a {@link PartialShader}
- * requires a GL program handle and the full Metal pipeline state (vertex format
- * bindings, depth/stencil/color targets, sampler/uniform bind-group entries)
- * is not yet assembled from Iris's {@code ProgramSource}/{@code ProgramDirectives}.
- * The cached MSL is the bridge to that next step: once a {@code MetalDevice}
- * accessor and the Iris&rarr;Metal binding mapping exist, the pipeline-binding
- * step can retrieve the cached MSL via
- * {@link MetalCrossShaderCompiler#getCachedShaderpackMsl} and construct a
- * {@code MetalCompiledRenderPipeline} without recompiling.
+ * <p>After successful pipeline construction the mixin returns a
+ * {@link PartialShader} wrapping sentinel GL handles ({@code 0}). This allows
+ * Iris's {@code ShaderCreator.create} to proceed to {@code ExtendedShader}
+ * construction. The {@code ExtendedShader} constructor will still attempt GL
+ * calls with the sentinel handle; intercepting that is the next integration
+ * phase (the Metal render-dispatch path that retrieves the cached pipeline and
+ * issues Metal draw calls instead of GL ones).
  *
- * <p>If the dry-compile fails, the mixin wraps the blaze3d
+ * <p>If pipeline construction fails, the mixin wraps the blaze3d
  * {@code ShaderCompileException} (carrying glslang/SPIRV-Cross diagnostics) in
  * Iris's {@link ShaderCompileException} and throws it, so the failure surfaces
- * as a shaderpack compile error with a real diagnostic message instead of a
- * generic "not wired" message.
+ * as a shaderpack compile error with a real diagnostic message.
  *
  * <p><b>Geometry / tessellation stages.</b> {@code link}'s signature accepts
  * geometry/tessControl/tessEval source strings. The current Metal pipeline is
- * vertex+fragment only; {@code tryCompileShaderpackMsl} accepts these stages
- * for API symmetry but skips them (logging a warning). Their handling is
+ * vertex+fragment only; they are skipped (logging a warning). Their handling is
  * deferred to a future Metal tessellation/geometry pipeline.
  *
  * <p>When Metal is <em>not</em> active the mixin is a complete no-op and Iris's
@@ -86,21 +80,34 @@ public class ShaderCreatorMixin {
             return;
         }
 
-        // Dry-compile the shaderpack GLSL through glslang→SPIRV-Cross→MSL.
-        // defines=null: the GLSL arriving here is already patched by Iris's
-        // TransformPatcher (includes expanded, macros evaluated by JCPP,
-        // environment defines applied). GlslangBridge still injects its
-        // COMPAT_PREAMBLE (IS_IRIS/MC_VERSION/...) but those macros are fresh
-        // defines (the patched source has no #define directives left) and are
-        // harmless.
-        final ShaderpackMslResult result;
+        // Geometry/tessellation stages have no Metal equivalent in the current
+        // vertex+fragment pipeline; warn and proceed with vertex+fragment only.
+        if (geometry != null || tessControl != null || tessEval != null) {
+            Metallum.LOGGER.warn(
+                    "[MetalUniversal/Iris] Shaderpack program '{}' declares geometry/tessellation stages, "
+                            + "which have no Metal equivalent in the current vertex+fragment pipeline; "
+                            + "they are skipped.",
+                    name
+            );
+        }
+
+        // Construct a real Metal render pipeline (GLSL→SPIR-V→MSL→pipeline
+        // state object) and cache it under `name`. defines=null: the GLSL
+        // arriving here is already patched by Iris's TransformPatcher (includes
+        // expanded, macros evaluated by JCPP, environment defines applied).
+        // GlslangBridge still injects its COMPAT_PREAMBLE (IS_IRIS/MC_VERSION/
+        // ...) but those macros are fresh defines and are harmless.
+        // enablePointSize=false: POINTS topology is rare in shaderpacks; the
+        // forthcoming render-dispatch step can reconstruct the pipeline with
+        // point-size enabled if needed.
+        final boolean compiled;
         try {
-            result = MetalCrossShaderCompiler.tryCompileShaderpackMsl(
-                    name, vertex, geometry, tessControl, tessEval, fragment, null
+            compiled = MetalCrossShaderCompiler.compileShaderpackPipeline(
+                    name, vertex, fragment, null, vertexFormat, false
             );
         } catch (Exception e) {
             Metallum.LOGGER.error(
-                    "[MetalUniversal/Iris] Dry-compile failed for shaderpack program '{}': {}",
+                    "[MetalUniversal/Iris] Pipeline construction failed for shaderpack program '{}': {}",
                     name, e.getMessage(), e
             );
             // Wrap in Iris's ShaderCompileException so it surfaces as a
@@ -108,22 +115,27 @@ public class ShaderCreatorMixin {
             throw new ShaderCompileException(name, e);
         }
 
+        if (!compiled) {
+            // MetalDevice not available — should not happen since
+            // MetalActive.isMetalActive() returned true, but guard anyway.
+            throw new IllegalStateException(
+                    "MetalActive reported Metal backend, but MetalDeviceRegistry has no active device; "
+                            + "cannot construct pipeline for shaderpack program '" + name + "'."
+            );
+        }
+
         Metallum.LOGGER.info(
-                "[MetalUniversal/Iris] Dry-compiled shaderpack program '{}' to MSL "
-                        + "(vertex={} chars, fragment={} chars, entryPoints={}/{}) and cached it; "
-                        + "Metal pipeline binding is not yet wired, refusing to return a GL program handle.",
-                name,
-                result.vertexMsl().length(),
-                result.fragmentMsl().length(),
-                result.vertexEntryPoint(),
-                result.fragmentEntryPoint()
+                "[MetalUniversal/Iris] Constructed and cached Metal render pipeline for shaderpack program '{}'; "
+                        + "returning a no-op PartialShader. The Metal render-dispatch path is not yet wired, "
+                        + "so Iris ExtendedShader construction will fail next.",
+                name
         );
-        throw new UnsupportedOperationException(
-                "Iris shaderpack program '" + name + "' was dry-compiled to MSL and cached "
-                        + "(see MetalCrossShaderCompiler.getCachedShaderpackMsl), but the Metal pipeline "
-                        + "binding (MetalDevice accessor + Iris bind-group/vertex-format/depth-stencil "
-                        + "mapping) is not yet wired. Shaderpack rendering on Metal is unavailable until "
-                        + "that step is implemented."
-        );
+
+        // Return a PartialShader wrapping sentinel GL handles (0). The Metal
+        // pipeline is cached in MetalCrossShaderCompiler.SHADERPACK_PIPELINE_CACHE
+        // for retrieval by the forthcoming render-dispatch step. The
+        // ExtendedShader constructor will still attempt GL calls with handle 0;
+        // intercepting that is the next integration phase.
+        cir.setReturnValue(new PartialShader(0, 0, 0, -1, -1, -1));
     }
 }

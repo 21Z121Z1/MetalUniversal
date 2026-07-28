@@ -64,6 +64,11 @@ final class MetalDevice implements GpuDeviceBackend {
         MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
         this.commandEncoder = new MetalCommandEncoder(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
+        // Publish this device as the process-wide active Metal device so that
+        // the public MetalCrossShaderCompiler shaderpack entry points (called
+        // from the Iris intercept mixins in com.metallum.mixin.iris) can reach
+        // it without a GpuDevice.backend mixin accessor. Cleared in close().
+        MetalDeviceRegistry.setActiveDevice(this);
     }
 
     @Override
@@ -180,6 +185,7 @@ final class MetalDevice implements GpuDeviceBackend {
         this.commandEncoder.close();
         this.clearPipelineCache();
         this.drainBufferPool();
+        MetalDeviceRegistry.clearActiveDevice(this);
         try {
             MetalNativeBridge.metallum_NSView_clearLayer(this.cocoaView);
         } catch (Throwable ignored) {

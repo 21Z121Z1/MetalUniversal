@@ -331,6 +331,123 @@ public final class MetalCrossShaderCompiler {
     }
 
     /**
+     * Cache of shaderpack programs whose Metal render pipeline state object
+     * ({@link MetalCompiledRenderPipeline}) has been successfully constructed,
+     * keyed by program name. Populated by
+     * {@link #compileShaderpackPipeline} and intended for retrieval by the
+     * (forthcoming) Iris&rarr;Metal render dispatch step.
+     */
+    private static final Map<String, MetalCompiledRenderPipeline> SHADERPACK_PIPELINE_CACHE = new ConcurrentHashMap<>();
+
+    /**
+     * Constructs a {@link MetalCompiledRenderPipeline} for an Iris shaderpack
+     * program, using the active {@link MetalDevice} from
+     * {@link MetalDeviceRegistry} and default pipeline states.
+     *
+     * <p>This is the public entry point called from the Iris intercept mixin
+     * ({@code ShaderCreatorMixin}) when the Metal backend is active. It
+     * performs the full GLSL&#8594;SPIR-V&#8594;MSL&#8594;pipeline construction
+     * in one shot, caching the resulting pipeline under {@code name} for later
+     * retrieval by the render dispatch path.
+     *
+     * <p><b>Default pipeline states.</b> Because Iris manages framebuffers,
+     * depth/stencil, blend, and cull states outside of
+     * {@code ShaderCreator.link}, this method uses conservative defaults:
+     * <ul>
+     *   <li>{@code cull = false} (shaderpacks manage their own culling)</li>
+     *   <li>{@code polygonMode = FILL}</li>
+     *   <li>{@code primitiveTopology = TRIANGLES}</li>
+     *   <li>{@code depthStencilState = null} (Iris manages depth via
+     *       framebuffers)</li>
+     *   <li>{@code colorTarget = null} (Iris manages color attachments via
+     *       framebuffers)</li>
+     *   <li>{@code bindGroupEntries = empty} (resource bindings will be
+     *       populated by SPIR-V reflection in a future refinement; the pipeline
+     *       compiles but uniform/sampler bindings are not yet wired)</li>
+     * </ul>
+     *
+     * <p><b>Limitations.</b> The returned pipeline compiles and links the MSL
+     * shaders into a Metal pipeline state object, but the resource bindings
+     * (uniform buffers, samplers) are not yet mapped from Iris's sampler/uniform
+     * model to Metal's bind-group slots. Rendering with this pipeline will
+     * require the forthcoming bind-group mapping step.
+     *
+     * @param name             logical program name (also the cache key).
+     * @param vertexGlsl       vertex GLSL source (must be non-null).
+     * @param fragmentGlsl     fragment GLSL source (must be non-null).
+     * @param defines          optional preprocessor defines (may be null).
+     * @param vertexFormat     the Iris vertex format (drives vertex attribute
+     *                         integer conversion and the Metal vertex
+     *                         descriptor).
+     * @param enablePointSize  whether to emit Metal {@code [[point_size]]}
+     *                         (true for POINTS topology programs).
+     * @return {@code true} if the pipeline was successfully constructed and
+     *         cached; {@code false} if no Metal device is active.
+     * @throws ShaderCompileException if GLSL&#8594;SPIR-V, SPIR-V&#8594;MSL,
+     *                               or Metal pipeline state creation fails.
+     */
+    public static boolean compileShaderpackPipeline(
+            final String name,
+            final String vertexGlsl,
+            final String fragmentGlsl,
+            final @Nullable String defines,
+            final VertexFormat vertexFormat,
+            final boolean enablePointSize
+    ) throws ShaderCompileException {
+        final MetalDevice device = MetalDeviceRegistry.getActiveDevice();
+        if (device == null) {
+            return false;
+        }
+
+        final Map<String, GpuFormat> vertexAttributeFormats = new LinkedHashMap<>();
+        for (VertexFormatElement element : vertexFormat.getElements()) {
+            vertexAttributeFormats.putIfAbsent(element.name(), element.format());
+        }
+
+        final MetalCompiledRenderPipeline pipeline = compileShaderpack(
+                device,
+                name,
+                vertexGlsl,
+                fragmentGlsl,
+                defines,
+                List.of(),
+                vertexAttributeFormats,
+                enablePointSize,
+                false,
+                PolygonMode.FILL,
+                PrimitiveTopology.TRIANGLES,
+                new VertexFormat[]{vertexFormat},
+                null,
+                null
+        );
+        SHADERPACK_PIPELINE_CACHE.put(name, pipeline);
+        return true;
+    }
+
+    /**
+     * Returns whether a Metal render pipeline has been constructed and cached
+     * for the given shaderpack program name.
+     *
+     * @param name the program name.
+     * @return {@code true} if a cached pipeline exists.
+     */
+    public static boolean hasCachedShaderpackPipeline(final String name) {
+        return SHADERPACK_PIPELINE_CACHE.containsKey(name);
+    }
+
+    /**
+     * Retrieves a cached shaderpack Metal render pipeline by program name.
+     * Intended for internal use by the Metal render dispatch path (within the
+     * {@code com.metallum.client.metal.render} package).
+     *
+     * @param name the program name.
+     * @return the cached pipeline, or {@code null}.
+     */
+    static @Nullable MetalCompiledRenderPipeline getCachedShaderpackPipeline(final String name) {
+        return SHADERPACK_PIPELINE_CACHE.get(name);
+    }
+
+    /**
      * Result of a successful shaderpack dry-compile: the program name, the
      * compiled vertex/fragment MSL sources, and their entry-point function
      * names. Cached in {@link #SHADERPACK_MSL_CACHE} for retrieval by the
