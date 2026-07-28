@@ -38,6 +38,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             Boolean.parseBoolean(System.getProperty("metallum.opt.deferredStore", "true"));
     private static final boolean BLIT_BATCH =
             Boolean.parseBoolean(System.getProperty("metallum.opt.blitBatch", "true"));
+    private static final boolean METAL4_PRIVATE_UPLOAD_DRAIN =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4PrivateUploadDrain", "false"));
     private final MetalDevice device;
     private long currentSubmitIndex = MAX_SUBMITS_IN_FLIGHT;
     private final InFlight[] inFlight = new InFlight[MAX_SUBMITS_IN_FLIGHT];
@@ -46,6 +48,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private final MetalTransientMemory transientMemory;
     private final Map<MetalGpuTexture, Vector4fc> pendingColorClears = new IdentityHashMap<>();
     private final Map<MetalGpuTexture, Double> pendingDepthClears = new IdentityHashMap<>();
+    private long metal4PrivateUploadDrainSubmitIndex = Long.MIN_VALUE;
+    private long metal4PrivateUploadDrainCount;
+    private boolean metal4PrivateUploadDrainLogged;
+    private boolean metal4PrivateUploadDrainSummaryLogged;
     /**
      * S10 split-fence mode: blit (transfer) work signals its own fence so
      * render encoders can begin vertex work waiting only on transfers, and
@@ -826,6 +832,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return;
         }
 
+        drainBeforeMetal4PrivateUploads(buffer);
         GpuBufferSlice staging = transientMemory.uploadStaging(data, 4L, GpuBuffer.USAGE_COPY_SRC);
         MetalGpuBuffer stagingBuffer = (MetalGpuBuffer) staging.buffer();
 
@@ -837,6 +844,38 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 destination.offset(),
                 length
         );
+    }
+
+    private void drainBeforeMetal4PrivateUploads(final MetalGpuBuffer buffer) {
+        if (!METAL4_PRIVATE_UPLOAD_DRAIN
+                || !device.metal4MainRendererEnabled()
+                || !isMetal4PrivateBuffer(buffer)
+                || metal4PrivateUploadDrainSubmitIndex == currentSubmitIndex) {
+            return;
+        }
+
+        // This is a correctness diagnostic for a backend that cannot yet see
+        // Sodium's allocation/range ownership. Normal MTL4 submits rely on the
+        // queue barrier in MetallumNative.swift; this fallback waits once before
+        // the first private upload in a submit, then keeps the upload batch
+        // asynchronous. It is intentionally opt-in until allocator metadata
+        // can support a narrower range-scoped dependency.
+        waitForSubmittedGpuWork();
+        metal4PrivateUploadDrainSubmitIndex = currentSubmitIndex;
+        metal4PrivateUploadDrainCount++;
+        if (!metal4PrivateUploadDrainLogged) {
+            metal4PrivateUploadDrainLogged = true;
+            com.metallum.Metallum.LOGGER.warn(
+                    "Metal 4 private-buffer upload drain fallback enabled; "
+                            + "forcing one full GPU wait per upload submit (set "
+                            + "metallum.opt.metal4PrivateUploadDrain=false for the normal barrier path)"
+            );
+        }
+    }
+
+    private static boolean isMetal4PrivateBuffer(final MetalGpuBuffer buffer) {
+        long storageMode = (buffer.resourceOptions() >>> 4) & 0xFL;
+        return storageMode == MTLStorageMode.Private.value;
     }
 
     private void orphanWrite(final MetalGpuBuffer buffer, final long offset, final ByteBuffer data) {
@@ -1092,6 +1131,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     void close() {
         submitRenderPass();
         endEncoder();
+        if (metal4PrivateUploadDrainCount > 0 && !metal4PrivateUploadDrainSummaryLogged) {
+            metal4PrivateUploadDrainSummaryLogged = true;
+            com.metallum.Metallum.LOGGER.warn(
+                    "Metal 4 private-buffer upload drain fallback completed {} time(s) this session",
+                    metal4PrivateUploadDrainCount
+            );
+        }
         for (SubmitCallback callback : currentSubmitCallbacks) {
             callback.failed.run();
         }

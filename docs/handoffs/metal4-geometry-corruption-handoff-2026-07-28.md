@@ -7,6 +7,150 @@ renderer. Keep the investigation narrow until the failing M4 state transition
 is identified. Do not treat this as a Temporal, transparency/reactive, or LOD
 task unless a controlled isolation run proves that boundary.
 
+## 14:00-14:40 live follow-up
+
+The first null-binding/upload-barrier candidate did not fix the attended
+Minecraft scene. The loaded candidate JAR was
+`7f855553d604cb0efb90bf98e761236c14a26f36bcf15be5019986e8c1d7c4b2`.
+
+The user then isolated the failure without restarting:
+
+- corruption remained after switching MetalFX Scaling to `OFF`, at about
+  120 FPS; this excludes Spatial and Temporal as the geometry producer;
+- the stretched surfaces carried the nearby leaf texture and converged on a
+  leaf block in the affected section;
+- breaking that leaf block rebuilt the section and removed the corruption;
+- the same M4 renderer continued drawing the rebuilt section correctly.
+
+The paired screenshots are preserved under
+`build/metal-validation/manual-evidence/`:
+
+```text
+m4-candidate-corruption-temporal-2026-07-28-1400.png
+m4-candidate-corruption-leaves-2026-07-28-1402.png
+m4-candidate-corruption-leaf-origin-2026-07-28-1403.png
+m4-corruption-metalfx-off-2026-07-28-1403.png
+m4-corruption-cleared-after-leaf-break-2026-07-28-1404.png
+```
+
+Minecraft 26.2 bytecode confirms that section draws bind a whole vertex
+uber-buffer and pass `vertexBufferOffset / vertexStride` as `baseVertex`.
+The native M4 regression now covers positive and negative `baseVertex`, a
+nonzero index-buffer byte offset, alternating layouts and bindings, and exact
+GPU readback across all three reusable slots. It passes under Metal API
+Validation, so the generic base-vertex translation is not the current leading
+cause.
+
+The earlier candidate therefore added a bounded correctness drain before each
+M4 submit that began a batch of non-dynamic/private buffer uploads. The current
+implementation keeps that drain only as an explicit diagnostic fallback. The
+normal path relies on the MTL4 queue barrier and leaves submissions
+asynchronous. The fallback can be enabled with:
+
+```text
+-Dmetallum.opt.metal4PrivateUploadDrain=true
+```
+
+Candidate JAR SHA-256:
+
+```text
+4f408c65e7cbfa901388e950c49259e2485e6ad58608cb556cdacdfdb68254eb
+```
+
+Before the installation recorded below, this JAR had not replaced the running
+instance. It still requires a cold Launcher run and attended reproduction in
+fresh terrain. Java tests, JAR packaging, and the M4 path GPU readback pass.
+The complete build's visible presentation task could not run while the macOS
+console was reported locked; that is an environment gate, not a geometry-test
+failure.
+
+The user requested installation before leaving the machine. Minecraft was
+terminated normally at 14:50, the previous installed JAR was backed up at:
+
+```text
+$HOME/Library/Application Support/minecraft/instances/MetalUniversal-26.2/.codex-backups/20260728-145053-metal4-private-upload-drain/metallum-1.0.2.jar
+```
+
+The candidate is now installed at `mods/metallum-1.0.2.jar` with the hash
+above. ZIP integrity passed, no Minecraft process remains, and Launcher was
+left running. No new game launch or visual claim has been made.
+
+## Correctness-first follow-up
+
+The implementation in the current dirty worktree is:
+
+- MetalCommandEncoder.writeToBuffer invokes the fallback only for a
+  non-dynamic buffer whose resource options report StorageModePrivate, only
+  when the Metal 4 main renderer is enabled, and at most once per submit index.
+  The property default is false, so normal Metal 4 uploads do not call
+  waitForSubmittedGpuWork().
+- With -Dmetallum.opt.metal4PrivateUploadDrain=true, the fallback performs one
+  full CPU drain before the first private upload in a submit, emits one warning,
+  and emits one bounded session summary with the total drain count. It is
+  observable diagnostic evidence, not a performance optimization.
+- metallum_MTLCommandBuffer_makeBlitCommandEncoder retains the existing MTL4
+  consumer barrier with afterQueueStages=vertex|fragment|dispatch|blit,
+  beforeStages=blit, and visibilityOptions=device. The render consumer barrier
+  waits on blit|fragment|dispatch before vertex|fragment.
+  metallum_metal4_upload_barrier_stats reports the bounded native
+  upload/copy-barrier count and the first encoded barrier logs its stage and
+  visibility contract.
+- The native ABI has no Sodium allocation identity or byte-range metadata.
+  Therefore this slice does not guess a range tracker or claim that the
+  barrier is resource-selective. Completion-backed three-slot reuse and the
+  four-deep Java destruction queue remain the lifetime mechanism.
+- The native path regression preserves binding churn and adds three MTL4
+  leases that rewrite the same private vertex and index destinations from
+  per-slot staging buffers, commit all three before any completion wait, then
+  verify exact 8x8 GPU readback from three separate targets.
+
+Validation completed on the Apple M1 Pro with Metal API Validation:
+
+~~~
+JAVA_HOME=/opt/homebrew/Cellar/openjdk/25.0.2/libexec/openjdk.jdk/Contents/Home ./gradlew test buildMacNative metal4PipelineSmokeTest metal4PipelinePathTest --no-daemon --console=plain
+~~~
+
+Result: BUILD SUCCESSFUL, 11 actionable tasks. The Java test suite, native
+build, Metal 4 PSO smoke test, and shipping Metal 4 path test passed. The
+shipping path test reported exact binding-churn readback, exact private rewrite
+readback, and upload barriers=6.
+
+Root verification repeated the complete command with `--rerun-tasks` so no
+compile or test result depended on Gradle's up-to-date cache. The rebuild also
+finished `BUILD SUCCESSFUL`; all 11 tasks executed and the same exact GPU
+readbacks and barrier count passed under Metal API Validation.
+
+The requested /tmp/metallum-jdk25/jdk-25.0.3+9/Contents/Home was also checked
+but cannot launch: its lib/server/libjvm.dylib fails macOS dlopen with rebase
+opcodes terminated early. The runnable Homebrew OpenJDK 25.0.2 was used for the
+complete command above; no source change was made to either JDK tree.
+
+Root packaging then rebuilt `build/libs/metallum-1.0.2.jar` from the accepted
+dirty source with `./gradlew jar --rerun-tasks`. ZIP integrity passed and the
+artifact contains both the Java drain gate and native upload-barrier telemetry.
+Its SHA-256 is:
+
+```text
+7bf58cccdfde4071601f9c7d94a66dcb17ca2d6ff46bb3fab19cb31cce0bb313
+```
+
+This final-source artifact is not installed and has not been run in Minecraft.
+The Launcher instance remains unchanged on the earlier `4f408c65...` candidate,
+so evidence from that installed JAR cannot validate this final source state.
+
+Unresolved boundaries:
+
+- No deterministic pre-fix corruption was constructed by the native test; the
+  test proves the encoded dependency and telemetry contract under asynchronous
+  three-slot reuse, not the original Minecraft section failure.
+- Real-client M4 visual correctness after this change remains human-unverified.
+  The existing strict M3 kill switch and OBJECT_MOTION_PRODUCER_CONNECTED
+  setting were not changed.
+- A true range-scoped hazard tracker still requires Sodium allocator ownership
+  and allocation-range metadata. Root decision: defer that contract to the
+  terrain arena/Sodium batching phase. This synchronization slice must not be
+  described as range-scoped and does not authorize a performance rollout.
+
 ## Published state
 
 - Worktree: repository root of `claude/framegen-comparison`
