@@ -19,6 +19,7 @@ import java.nio.file.StandardCopyOption;
 public final class MetalNativeBridge {
     private static final String MACOS_RESOURCE_PATH = "/natives/macos/libmetallum.dylib";
     private static final String IOS_RESOURCE_PATH = "/natives/ios/libmetallum.dylib";
+    private static final String IOS_GLSLANG_RESOURCE_PATH = "/natives/ios/libglslang.dylib";
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG;
     private static final ValueLayout.OfFloat FLOAT = ValueLayout.JAVA_FLOAT;
@@ -88,6 +89,20 @@ public final class MetalNativeBridge {
      */
     private static volatile boolean spvcConfigured = false;
 
+    /**
+     * iOS-only backstop for the glslang native library, mirroring
+     * {@link #ensureSpvcLibraryConfigured()}. On iOS, extracts the bundled
+     * {@code libglslang.dylib} from {@code /natives/ios/} into a writable
+     * directory and {@code System.load}s it (via Amethyst's hooked
+     * {@code dlopen}) so that {@link GlslangBridge}'s
+     * {@link SymbolLookup#loaderLookup()} can find the {@code glslang_*}
+     * symbols. On macOS this is a no-op: {@code GlslangBridge} performs its own
+     * extraction/loading of the macOS dylib(s).
+     *
+     * <p>Idempotent; safe to call multiple times.
+     */
+    private static volatile boolean glslangConfigured = false;
+
     public static void ensureSpvcLibraryConfigured() {
         if (spvcConfigured) return;
         synchronized (MetalNativeBridge.class) {
@@ -144,6 +159,78 @@ public final class MetalNativeBridge {
             // 让 LWJGL 在 Spvc 类初始化时用该绝对路径直接 dlopen，避免
             // dlsym(RTLD_DEFAULT) 被 MoltenVK 抢占
             Configuration.SPVC_LIBRARY_NAME.set(tempLib.toString());
+        }
+    }
+
+    /**
+     * Ensures the bundled glslang native library is loaded on iOS so that
+     * {@link GlslangBridge} can resolve {@code glslang_*} symbols via
+     * {@link SymbolLookup#loaderLookup()}. Mirrors
+     * {@link #ensureSpvcLibraryConfigured()}: it is a no-op on non-iOS (on
+     * macOS, {@code GlslangBridge} extracts and loads the macOS dylib(s)
+     * itself), and on iOS extracts {@code /natives/ios/libglslang.dylib} to a
+     * writable directory and {@code System.load}s it (via Amethyst's hooked
+     * {@code dlopen}). Unlike the Spvc path there is no LWJGL
+     * {@code Configuration} to set, because glslang is accessed purely through
+     * FFM rather than through LWJGL's {@code Spvc} class.
+     *
+     * <p>Idempotent: safe to call multiple times; only loads once.
+     */
+    public static void ensureGlslangLibraryConfigured() {
+        if (glslangConfigured) return;
+        synchronized (MetalNativeBridge.class) {
+            if (glslangConfigured) return;
+            if (!isIOS()) {
+                glslangConfigured = true;
+                return;
+            }
+            try {
+                configureBundledGlslangLibrary();
+            } catch (Throwable t) {
+                // Best-effort: if the glslang dylib cannot be loaded here,
+                // GlslangBridge's own lookup will surface a clear error when it
+                // fails to resolve the glslang_* symbols.
+            } finally {
+                glslangConfigured = true;
+            }
+        }
+    }
+
+    /**
+     * 从 jar 中抽取 {@code /natives/ios/libglslang.dylib} 到可写目录并
+     * {@code System.load} 加载（与 {@link #configureBundledSpvcLibrary} 相同的
+     * 可写目录迭代策略），使 {@link GlslangBridge} 的
+     * {@link SymbolLookup#loaderLookup()} 能找到 {@code glslang_*} 符号。
+     */
+    private static void configureBundledGlslangLibrary() throws IOException {
+        try (InputStream stream = MetalNativeBridge.class.getResourceAsStream(IOS_GLSLANG_RESOURCE_PATH)) {
+            if (stream == null) {
+                return;
+            }
+            Path tempLib = null;
+            IOException lastError = null;
+            for (String dirProperty : new String[]{"pojav.launcher.home", "POJAV_HOME", "user.home", "java.io.tmpdir"}) {
+                String dir = System.getProperty(dirProperty);
+                if (dir == null || dir.isBlank()) continue;
+                Path dirPath = Path.of(dir);
+                if (!Files.isDirectory(dirPath)) continue;
+                try {
+                    tempLib = dirPath.resolve("libglslang_metallum.dylib");
+                    Files.copy(stream, tempLib, StandardCopyOption.REPLACE_EXISTING);
+                    break;
+                } catch (IOException e) {
+                    lastError = e;
+                    tempLib = null;
+                }
+            }
+            if (tempLib == null) {
+                if (lastError != null) throw lastError;
+                throw new IOException("No writable directory available for libglslang.dylib extraction");
+            }
+            tempLib.toFile().deleteOnExit();
+            // System.load via Amethyst's hooked dlopen so the glslang_* symbols
+            // are available to SymbolLookup.loaderLookup() used by GlslangBridge.
+            System.load(tempLib.toString());
         }
     }
 
