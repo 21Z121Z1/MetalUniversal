@@ -28,6 +28,16 @@ dependencies {
 	// @Mixin targets (GlShader, ShaderCreator) resolve at compile time and Iris
 	// loads in dev runs.
 	modImplementation "maven.modrinth:iris:${project.iris_version}"
+
+	// Test: BSL end-to-end GLSL→SPIR-V→MSL compile fixture. JUnit 5 + zip
+	// extraction only; the test is gated (see BslShaderCompileTest) so it
+	// no-ops on hosts where the native glslang dylib cannot load.
+	testImplementation platform('org.junit:junit-bom:5.11.4')
+	testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+test {
+	useJUnitPlatform()
 }
 
 processResources {
