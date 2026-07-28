@@ -381,9 +381,27 @@ final class MetalFxMathTest {
         assertEquals(964, MetalFxConfig.scaledDimension(1708, 0.67F * frameGenerationScale));
         assertEquals(542, MetalFxConfig.scaledDimension(960, 0.67F * frameGenerationScale));
         assertEquals(1.0F, MetalFxConfig.frameGenerationOutputScale(3024, 0));
+        assertEquals(1152, MetalFxConfig.frameGenerationWorkWidth(1708, 1144, 1152));
+        assertEquals(2026, MetalFxConfig.frameGenerationWorkWidth(3024, 2026, 1152));
+        assertEquals(1512, MetalFxConfig.frameGenerationWorkWidth(
+                3024, 1512, MetalFxConfig.FRAME_GENERATION_FOLLOW_RENDER_WIDTH
+        ));
+        assertEquals(854, MetalFxConfig.frameGenerationWorkWidth(
+                1708, 854, MetalFxConfig.FRAME_GENERATION_FOLLOW_RENDER_WIDTH
+        ));
+        assertEquals(3024, MetalFxConfig.frameGenerationWorkWidth(3024, 2026, 0));
+        assertEquals(1000, MetalFxConfig.frameGenerationWorkWidth(1000, 670, 1152));
         assertEquals(0, MetalFxConfig.parseFrameGenerationOutputWidth("native", 1280));
         assertEquals(0, MetalFxConfig.parseFrameGenerationOutputWidth("display", 1280));
         assertEquals(0, MetalFxConfig.parseFrameGenerationOutputWidth("0", 1280));
+        assertEquals(
+                MetalFxConfig.FRAME_GENERATION_FOLLOW_RENDER_WIDTH,
+                MetalFxConfig.parseFrameGenerationOutputWidth("render", 1280)
+        );
+        assertEquals(
+                MetalFxConfig.FRAME_GENERATION_FOLLOW_RENDER_WIDTH,
+                MetalFxConfig.parseFrameGenerationOutputWidth("source", 1280)
+        );
         assertEquals(3024, MetalFxConfig.parseFrameGenerationOutputWidth("3024", 1280));
         assertEquals(1280, MetalFxConfig.parseFrameGenerationOutputWidth("invalid", 1280));
         assertEquals(0.0F, MetalFxConfig.textureLodBias(1708, 1708), 1.0E-6F);
@@ -435,5 +453,13 @@ final class MetalFxMathTest {
                 MetalFxManager.selectMode(MetalFxConfig.Mode.SPATIAL, false, false));
         assertEquals(MetalFxConfig.Mode.OFF,
                 MetalFxManager.selectMode(MetalFxConfig.Mode.OFF, true, true));
+    }
+
+    @Test
+    void handOverlayReactiveWeightDefaultsHighAndStaysKillSwitchable() {
+        assertEquals(0.9F, MetalFxManager.handOverlayReactiveBoost(null), 1.0E-6F);
+        assertEquals(0.35F, MetalFxManager.handOverlayReactiveBoost("0.35"), 1.0E-6F);
+        assertEquals(1.0F, MetalFxManager.handOverlayReactiveBoost("2"), 1.0E-6F);
+        assertEquals(0.9F, MetalFxManager.handOverlayReactiveBoost("invalid"), 1.0E-6F);
     }
 }

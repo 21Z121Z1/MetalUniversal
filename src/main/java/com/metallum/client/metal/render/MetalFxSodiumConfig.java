@@ -15,6 +15,7 @@ public final class MetalFxSodiumConfig implements ConfigEntryPoint {
     private static final Identifier SCALE_ID = Identifier.fromNamespaceAndPath("metallum", "metalfx_scale");
     private static final Identifier REACTIVE_MASK_ID = Identifier.fromNamespaceAndPath("metallum", "metalfx_transparency_reactive");
     private static final Identifier FRAME_GENERATION_ID = Identifier.fromNamespaceAndPath("metallum", "metalfx_frame_generation");
+    private static final Identifier METAL_HUD_ID = Identifier.fromNamespaceAndPath("metallum", "metal_hud");
 
     @Override
     public void registerConfigLate(final ConfigBuilder builder) {
@@ -22,40 +23,39 @@ public final class MetalFxSodiumConfig implements ConfigEntryPoint {
                 .setName("MetalUniversal")
                 .setVersion("1.0.1");
         OptionPageBuilder page = builder.createOptionPage()
-                .setName(Component.literal("MetalFX"));
+                .setName(Component.translatable("metallum.options.metalfx.page"));
 
         OptionGroupBuilder quality = builder.createOptionGroup()
-                .setName(Component.literal("MetalFX Rendering"));
+                .setName(Component.translatable("metallum.options.metalfx.group"));
         quality.addOption(modeOption(builder));
         quality.addOption(scaleOption(builder));
         quality.addOption(transparencyReactiveOption(builder));
         quality.addOption(frameGenerationOption(builder));
+        quality.addOption(metalHudOption(builder));
         page.addOptionGroup(quality);
         modOptions.addPage(page);
     }
 
     private static EnumOptionBuilder<MetalFxConfig.Mode> modeOption(final ConfigBuilder builder) {
         return builder.createEnumOption(MODE_ID, MetalFxConfig.Mode.class)
-                .setName(Component.literal("MetalFX mode"))
-                .setTooltip(Component.literal("Select native rendering, spatial upscaling, temporal upscaling, or automatic capability selection."))
+                .setName(Component.translatable("metallum.options.metalfx.mode"))
+                .setTooltip(Component.translatable("metallum.options.metalfx.mode.tooltip"))
                 .setElementNameProvider(MetalFxSodiumConfig::modeLabel)
                 .setDefaultValue(MetalFxConfig.Mode.OFF)
                 .setStorageHandler(MetalFxConfig::flushPersistent)
                 .setImpact(net.caffeinemc.mods.sodium.api.config.option.OptionImpact.VARIES)
-                .setFlags(net.caffeinemc.mods.sodium.api.config.option.OptionFlag.REQUIRES_GAME_RESTART)
                 .setEnabled(!MetalFxConfig.hasSystemPropertyOverride(MetalFxConfig.MODE_PROPERTY))
                 .setBinding(MetalFxConfig::setModeFromSodium, MetalFxConfig::configuredModeForSodium);
     }
 
     private static EnumOptionBuilder<MetalFxConfig.Scale> scaleOption(final ConfigBuilder builder) {
         return builder.createEnumOption(SCALE_ID, MetalFxConfig.Scale.class)
-                .setName(Component.literal("Internal render resolution"))
-                .setTooltip(Component.literal("Render the 3D scene at this fraction of the display resolution before MetalFX upscaling."))
+                .setName(Component.translatable("metallum.options.metalfx.scale"))
+                .setTooltip(Component.translatable("metallum.options.metalfx.scale.tooltip"))
                 .setElementNameProvider(value -> Component.literal(value.label))
                 .setDefaultValue(MetalFxConfig.Scale.QUALITY)
                 .setStorageHandler(MetalFxConfig::flushPersistent)
                 .setImpact(net.caffeinemc.mods.sodium.api.config.option.OptionImpact.VARIES)
-                .setFlags(net.caffeinemc.mods.sodium.api.config.option.OptionFlag.REQUIRES_GAME_RESTART)
                 .setEnabled(!MetalFxConfig.hasSystemPropertyOverride(MetalFxConfig.SCALE_PROPERTY))
                 .setBinding(MetalFxConfig::setScaleFromSodium, MetalFxConfig::configuredScaleForSodium);
     }
@@ -64,12 +64,11 @@ public final class MetalFxSodiumConfig implements ConfigEntryPoint {
             final ConfigBuilder builder
     ) {
         return builder.createBooleanOption(REACTIVE_MASK_ID)
-                .setName(Component.literal("Transparent reactive mask"))
-                .setTooltip(Component.literal("Reject history for glass, water, particles, weather, clouds, and other transparent targets."))
+                .setName(Component.translatable("metallum.options.metalfx.reactive_mask"))
+                .setTooltip(Component.translatable("metallum.options.metalfx.reactive_mask.tooltip"))
                 .setDefaultValue(true)
                 .setStorageHandler(MetalFxConfig::flushPersistent)
                 .setImpact(net.caffeinemc.mods.sodium.api.config.option.OptionImpact.MEDIUM)
-                .setFlags(net.caffeinemc.mods.sodium.api.config.option.OptionFlag.REQUIRES_GAME_RESTART)
                 .setEnabledProvider(
                         state -> {
                             MetalFxConfig.Mode mode = state.readEnumOption(MODE_ID, MetalFxConfig.Mode.class);
@@ -88,12 +87,11 @@ public final class MetalFxSodiumConfig implements ConfigEntryPoint {
             final ConfigBuilder builder
     ) {
         return builder.createBooleanOption(FRAME_GENERATION_ID)
-                .setName(Component.literal("Metal frame generation"))
-                .setTooltip(Component.literal("Generate an interpolated frame between rendered frames on supported macOS systems."))
+                .setName(Component.translatable("metallum.options.metalfx.frame_generation"))
+                .setTooltip(Component.translatable("metallum.options.metalfx.frame_generation.tooltip"))
                 .setDefaultValue(false)
                 .setStorageHandler(MetalFxConfig::flushPersistent)
                 .setImpact(net.caffeinemc.mods.sodium.api.config.option.OptionImpact.HIGH)
-                .setFlags(net.caffeinemc.mods.sodium.api.config.option.OptionFlag.REQUIRES_GAME_RESTART)
                 .setEnabledProvider(
                         state -> {
                             MetalFxConfig.Mode mode = state.readEnumOption(MODE_ID, MetalFxConfig.Mode.class);
@@ -108,12 +106,25 @@ public final class MetalFxSodiumConfig implements ConfigEntryPoint {
                 );
     }
 
+    private static net.caffeinemc.mods.sodium.api.config.structure.BooleanOptionBuilder metalHudOption(
+            final ConfigBuilder builder
+    ) {
+        return builder.createBooleanOption(METAL_HUD_ID)
+                .setName(Component.translatable("metallum.options.metal_hud"))
+                .setTooltip(Component.translatable("metallum.options.metal_hud.tooltip"))
+                .setDefaultValue(false)
+                .setStorageHandler(MetalFxConfig::flushPersistent)
+                .setImpact(net.caffeinemc.mods.sodium.api.config.option.OptionImpact.LOW)
+                .setEnabled(!MetalFxConfig.hasSystemPropertyOverride(MetalFxConfig.METAL_HUD_PROPERTY))
+                .setBinding(MetalFxConfig::setMetalHudFromSodium, MetalFxConfig::configuredMetalHudForSodium);
+    }
+
     private static Component modeLabel(final MetalFxConfig.Mode mode) {
-        return Component.literal(switch (mode) {
-            case OFF -> "Off";
-            case SPATIAL -> "Spatial";
-            case TEMPORAL -> "Temporal";
-            case AUTO -> "Auto";
+        return Component.translatable(switch (mode) {
+            case OFF -> "metallum.options.metalfx.mode.off";
+            case SPATIAL -> "metallum.options.metalfx.mode.spatial";
+            case TEMPORAL -> "metallum.options.metalfx.mode.temporal";
+            case AUTO -> "metallum.options.metalfx.mode.auto";
         });
     }
 }

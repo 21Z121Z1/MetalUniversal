@@ -216,9 +216,9 @@ because its WindowServer/launchd XPC state is returning error 141; Java and
 mixin compilation alone are not treated as runtime acceptance.
 
 Frame Generation uses a bounded scene-working resolution while keeping the
-drawable and GUI at native backing resolution. At the 1708x960 QA size with
-Temporal 67% and the default 1280-pixel Frame Generation output cap, the graph
-is:
+drawable and GUI at native backing resolution. The bounded path originally
+coupled 3D resolution to the Frame Generation cap.
+At a 1708x960 drawable, Temporal 67% and a 1280-pixel cap produced:
 
 ```text
 Minecraft 3D 858x482
@@ -233,13 +233,43 @@ The interpolator is linked to the active Temporal scaler through
 Temporal history. Reversing the order would either pollute Temporal history
 with synthetic frames or require running Temporal at the 120 Hz present rate.
 
-`metallum.metalfx.frameGenerationOutputWidth` controls the cap and defaults to
-1280 (bounded to 640...3840). The explicit values `native`, `display`, and `0`
-remove the cap so Temporal and Frame Generation output track the current
-drawable through fullscreen, resize, and display migration. It does not lock
-the persisted mode, Temporal percentage, reactive-mask or Frame Generation UI
-settings. Texture LOD bias is computed from the actual 3D/display ratio, so the
-extra work-resolution cap does not silently select softer mips.
+The hybrid implementation no longer lets that cap reduce Minecraft's 3D input.
+At a 3024x1734 fullscreen drawable with the required 50% mode, its graph is:
+
+```text
+Minecraft 3D 1512x867
+  -> MetalFX Temporal 3024x1734 native real scene
+  -> linear downsample 1280x734 FrameGen scene
+  -> conservative depth + nearest motion downsample 640x367
+  -> MTLFXFrameInterpolator 1280x734 generated scene
+  -> generated scene scales to 3024x1734 only during fused present
+  -> real scene presents directly at 3024x1734
+  -> premultiplied-alpha 3024x1734 GUI overlay on both
+```
+
+`metallum.metalfx.frameGenerationOutputWidth` controls only the generated-frame
+work cap and defaults to 1280 (bounded to 640...3840). FrameInterpolator gets
+its own half-work-resolution depth/motion inputs, so this cap never changes the
+exact-half Minecraft 3D render. The explicit values `native`, `display`, and `0`
+remove the cap. The setting does not lock the persisted mode, exact 50%
+Temporal ratio, reactive-mask or Frame Generation UI settings. This dual-scene
+topology has compile and lifecycle coverage; fullscreen performance and visual
+acceptance remain required before it replaces the last Launcher QA artifact.
+
+The 2026-07-27 hybrid microbenchmark measured these linked FrameInterpolator
+p95 values on the M1 Pro:
+
+| FG input -> output | FrameInterpolator p95 |
+| --- | ---: |
+| 854x490 -> 1708x980 | 7.52 ms |
+| 756x434 -> 1512x867 | 6.73 ms |
+| 640x367 -> 1280x734 | 5.45 ms |
+
+The 1708 path leaves no reliable 8.33 ms present slot after fullscreen
+composition. The 1280 path fits the generated-frame slot, but native Temporal,
+input preparation, both presents and Minecraft rendering still share the
+16.67 ms source budget. It therefore remains an experimental candidate rather
+than proof of stable 60-source/120-present operation or shader headroom.
 
 `metalFxPerformanceValidation` measures real GPU timestamps without a layer,
 drawable, window or Computer Use. Apple M1 Pro results (30 measured iterations

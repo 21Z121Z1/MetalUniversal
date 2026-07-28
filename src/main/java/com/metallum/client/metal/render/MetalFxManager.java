@@ -37,6 +37,7 @@ import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.IdentityHashMap;
@@ -62,6 +63,8 @@ public final class MetalFxManager {
     // changing what ships, and is the switch the acceptance run flips.
     private static final boolean OBJECT_MOTION_PRODUCER_OVERRIDE =
             Boolean.getBoolean("metallum.metalfx.objectMotionProducer");
+    private static final boolean NATIVE_DIRECT_FRAME_GENERATION =
+            Boolean.getBoolean("metallum.metalfx.nativeDirectFrameGeneration");
     private static final Vector4f UI_CLEAR = new Vector4f(0.0F);
     private static MetalFxManager active;
     // CAMetalDisplayLink is a vsync-on-only present loop, and every pacing
@@ -72,22 +75,35 @@ public final class MetalFxManager {
     private static volatile boolean immediatePresentMode;
 
     private final MetalDevice device;
-    private final MetalFxConfig config;
-    private final MetalFxConfig.Mode effectiveMode;
-    // Reactive weight for first-person overlay pixels: zero motion handles
-    // camera movement exactly; the residual swing/bob animation relies on a
-    // moderate history bias instead of per-vertex motion.
-    private static final float HAND_OVERLAY_REACTIVE_BOOST = 0.35F;
+    private MetalFxConfig config;
+    private MetalFxConfig.Mode effectiveMode;
+    private long configRevision;
+    // Hand depth provides exact coverage but not per-vertex motion. Camera-
+    // locked zero motion is correct for the base pose; swing/bob/equip motion
+    // is not, so reject most history instead of reprojecting it through the
+    // wrong location. The property keeps the previous 0.35 policy available
+    // for measured A/B without disabling Temporal or the hand-depth path.
+    private static final float HAND_OVERLAY_REACTIVE_BOOST = handOverlayReactiveBoost(
+            System.getProperty("metallum.metalfx.handReactiveWeight")
+    );
     private static final boolean LEGACY_MOTION_PASSES =
             "1".equals(System.getenv("METALLUM_METALFX_LEGACY_MOTION_PASSES"));
     // Validation thresholds for the CUTOUT reactive policy (see
     // docs/cutout-shimmer-remediation-2026-07-27.md). Interior CUTOUT pixels
     // may only carry residual reactivity (depth gradients read ~0-0.06
     // there); 48/255 ≈ 0.19 leaves margin while catching any interior flood.
-    // The edge band must reach at least 72/255 ≈ 0.28 (< default edge weight
-    // 0.35 and < depth-edge cap 0.5).
+    // EDGE_REACTIVE_MIN identifies exceptional reproject/disocclusion writes.
+    // Static CUTOUT and ordinary depth boundaries now default to zero reactive
+    // so MetalFX can accumulate jittered subpixel coverage.
     private static final int INTERIOR_REACTIVE_MAX = 48;
     private static final int EDGE_REACTIVE_MIN = 72;
+    // CUTOUT attachment counts alone do not prove that the material reached
+    // the final scene color. A malformed automated room once put the camera
+    // behind its stone shell while the MRT still contained leaves/grass
+    // coverage. The default validation textures are green, so require a small
+    // but material, screen-visible green-dominant population at the same
+    // covered pixels.
+    private static final int CUTOUT_VISIBLE_COLOR_MIN = 256;
     // Object-motion acceptance thresholds (item_spin / vehicle_turn). Both
     // scenarios hold the object at a fixed world position under a static
     // camera, so the expected motion is a per-pixel field rather than one
@@ -125,10 +141,12 @@ public final class MetalFxManager {
     private static final int OBJECT_MIN_VALID_PIXELS_THIN = 400;
     private static final double OBJECT_MIN_SPIN_SPREAD_X = 0.008;
     private static final double OBJECT_MAX_MOTION = 0.5;
+    private static final int FRAME_PACING_SAMPLE_CAPACITY = 240;
+    private static final long FRAME_PACING_REPORT_INTERVAL_NANOS = 2_000_000_000L;
     private final boolean motionPipelineV2Available;
     private final boolean cutoutReactivePipelineAvailable;
     private final boolean handOverlayPipelineAvailable;
-    private final int phaseCount;
+    private int phaseCount;
     private int phase;
     private boolean historyReset = true;
     private boolean previousMatrixValid;
@@ -149,12 +167,24 @@ public final class MetalFxManager {
     private int renderHeight;
     private int frameGenerationOutputWidth;
     private int frameGenerationOutputHeight;
+    private int frameGenerationInputWidth;
+    private int frameGenerationInputHeight;
     private boolean sceneFrame;
     private boolean frameUsesUpscaledTarget;
     private boolean uiTargetShaderWrite;
     private boolean objectMotionInputsCleared;
     private boolean frameGenerationEnabled;
     private int frameGenerationFramesQueued;
+    private long nativeOffFastPathFrames;
+    private boolean nativeOffReadbackRequested;
+    private boolean nativeOffReadbackPending;
+    private boolean nativeOffReadbackCompleted;
+    private boolean nativeOffReadbackPassed;
+    private int nativeOffReadbackWidth;
+    private int nativeOffReadbackHeight;
+    private long nativeOffReadbackNonZeroPixels;
+    private long nativeOffReadbackVaryingPixels;
+    private long nativeOffReadbackChecksum;
     // Set while a recoverable condition (an open GUI, an immediate present mode)
     // holds frame generation off. Unlike runtimeDisabled this is reversible and
     // beginFrameInternal re-enables the presenter once every gate clears.
@@ -169,6 +199,8 @@ public final class MetalFxManager {
     private double previousCameraY;
     private double previousCameraZ;
     private boolean loggedFirstSuccessfulFrame;
+    private boolean metalFxScalerEncodeObserved;
+    private boolean frameGenerationEncodeObserved;
     private boolean reactiveMaskPrepared;
     private boolean cutoutReactivePassObserved;
     private boolean cutoutReactivePrepared;
@@ -184,6 +216,11 @@ public final class MetalFxManager {
     // is a far more stable anchor than the native encode-enqueue wall clock.
     private long lastSceneFrameStartNanos;
     private float sceneFrameDeltaSeconds;
+    private final double[] framePacingIntervalsMillis = new double[FRAME_PACING_SAMPLE_CAPACITY];
+    private int framePacingSampleCount;
+    private int framePacingSampleCursor;
+    private long previousFrameStartNanos;
+    private long lastFramePacingReportNanos;
     @Nullable
     private ValidationFrame validationFrame;
     private int validationCapturesPending;
@@ -218,12 +255,42 @@ public final class MetalFxManager {
     @Nullable
     private boolean[] flickerSkyInteriorMask;
     private int flickerSkyInteriorPixels;
+    // Opaque terrain and its sky boundary are tracked independently from
+    // CUTOUT coverage. This is the distant-mip/horizon gate: the floor
+    // interior reveals unstable LOD selection, while the horizon subset
+    // catches the sky/ground seam the user reports shimmering.
+    @Nullable
+    private boolean[] flickerOpaqueMask;
+    private int flickerOpaquePixels;
+    @Nullable
+    private boolean[] flickerHorizonMask;
+    private int flickerHorizonPixels;
+    // Fixed central far-plane region in the controlled LOD scene. Unlike the
+    // full opaque mask, this excludes the nearby stone room and unlike the
+    // horizon mask it excludes foliage/sky silhouettes. It therefore measures
+    // the oblique, mipmapped block-atlas texels the LOD policy actually changes.
+    @Nullable
+    private boolean[] flickerDistantTerrainMask;
+    private int flickerDistantTerrainPixels;
+    private double flickerDistantTerrainSpatialGradient;
     @Nullable
     private byte[] flickerPreviousLuma;
     private final long[] flickerMaskedHistogram = new long[256];
     private final long[] flickerControlHistogram = new long[256];
     private final long[] flickerSkyEdgeHistogram = new long[256];
     private final long[] flickerSkyInteriorHistogram = new long[256];
+    private final long[] flickerOpaqueHistogram = new long[256];
+    private final long[] flickerHorizonHistogram = new long[256];
+    private final long[] flickerDistantTerrainHistogram = new long[256];
+    private final long[] flickerMotionReprojectedHistogram = new long[256];
+    private long flickerMotionReprojectedPixels;
+    private int flickerMinHandRenderPixels;
+    private int flickerMinHandDisplayPixels;
+    private int flickerMinHandVisibleFinalPixels;
+    private double flickerMinHandVisibleRatio;
+    private int flickerMinTransparencyReactivePixels;
+    private int flickerMinTransparencyVisibleFinalPixels;
+    private final long[] flickerTransparencyReactiveBuckets = new long[16];
     // 16 buckets of 16 reactive levels each, over the render-space silhouette
     // band. Identifies which policy writer owns the band's reactivity.
     private final long[] flickerSkyEdgeReactiveBuckets = new long[16];
@@ -234,6 +301,10 @@ public final class MetalFxManager {
     private TextureTarget uiTarget;
     @Nullable
     private TextureTarget sceneOutputTarget;
+    @Nullable
+    private TextureTarget nativeSceneTarget;
+    @Nullable
+    private MetalGpuTexture frameNativeSceneTexture;
     @Nullable
     private MetalGpuTexture motionTexture;
     @Nullable
@@ -272,6 +343,8 @@ public final class MetalFxManager {
     private MetalFxManager(final MetalDevice device) {
         this.device = device;
         this.config = MetalFxConfig.load();
+        this.configRevision = MetalFxConfig.runtimeRevision();
+        MetalNativeBridge.metallum_set_metal_hud(device.metalLayerHandle(), this.config.metalHud);
         MetalNativeBridge.metallum_metalfx_set_reactive_tuning(
                 this.config.cutoutReactiveEdgeWeight,
                 this.config.cutoutReactiveInteriorWeight,
@@ -292,6 +365,9 @@ public final class MetalFxManager {
                 && this.effectiveMode == MetalFxConfig.Mode.TEMPORAL
                 && objectMotionProducerConnected()
                 && MetalNativeBridge.metallum_metalfx_supports_frame_generation(device.metalDeviceHandle());
+        MetalEntityMotionCapture.setEnabled(
+                this.effectiveMode == MetalFxConfig.Mode.TEMPORAL && !this.runtimeDisabled
+        );
         if (this.config.frameGeneration && !this.frameGenerationEnabled) {
             Metallum.LOGGER.warn("MetalFX frame generation disabled: complete object-motion producer is not connected");
         }
@@ -301,7 +377,8 @@ public final class MetalFxManager {
                     this.config.requestedMode, this.effectiveMode, this.config.scale, this.phaseCount,
                     this.motionPipelineV2Available, this.cutoutReactivePipelineAvailable,
                     objectMotionProducerConnected(), this.frameGenerationEnabled,
-                    this.config.frameGenerationOutputWidth,
+                    this.config.frameGenerationOutputWidth == MetalFxConfig.FRAME_GENERATION_FOLLOW_RENDER_WIDTH
+                            ? "render" : Integer.toString(this.config.frameGenerationOutputWidth),
                     this.config.cutoutReactiveEdgeWeight, this.config.cutoutReactiveInteriorWeight,
                     this.config.depthEdgeReactiveCap, this.config.transparencyReactiveValue,
                     this.config.skyFarPlaneMotion, this.config.disocclusionReactiveCap,
@@ -507,6 +584,17 @@ public final class MetalFxManager {
         return manager != null && manager.flickerCompletedScenarios.contains(scenario);
     }
 
+    static float handOverlayReactiveBoost(final String value) {
+        if (value == null || value.isBlank()) {
+            return 0.9F;
+        }
+        try {
+            return Math.clamp(Float.parseFloat(value.trim()), 0.0F, 1.0F);
+        } catch (NumberFormatException ignored) {
+            return 0.9F;
+        }
+    }
+
     public static int validationCapturesPending() {
         MetalFxManager manager = active;
         return manager == null ? 0 : manager.validationCapturesPending;
@@ -522,6 +610,49 @@ public final class MetalFxManager {
         return manager == null ? 0 : manager.validationCaptureFailures;
     }
 
+    public static NativeOffDiagnostics nativeOffDiagnostics() {
+        MetalFxManager manager = active;
+        if (manager == null) {
+            return new NativeOffDiagnostics(false, 0L, 0, 0, false);
+        }
+        int auxiliaryTextures = manager.countAuxiliaryTextures();
+        int frameGenerationTargets = (manager.uiTarget == null ? 0 : 1)
+                + (manager.nativeSceneTarget == null ? 0 : 1)
+                + (manager.sceneOutputTarget == null ? 0 : 1);
+        return new NativeOffDiagnostics(
+                manager.effectiveMode == MetalFxConfig.Mode.OFF,
+                manager.nativeOffFastPathFrames,
+                auxiliaryTextures,
+                frameGenerationTargets,
+                MetalEntityMotionCapture.isEnabled()
+        );
+    }
+
+    public static void requestNativeOffReadback() {
+        MetalFxManager manager = active;
+        if (manager != null && !manager.nativeOffReadbackPending && !manager.nativeOffReadbackCompleted) {
+            manager.nativeOffReadbackRequested = true;
+        }
+    }
+
+    public static NativeOffReadbackDiagnostics nativeOffReadbackDiagnostics() {
+        MetalFxManager manager = active;
+        if (manager == null) {
+            return new NativeOffReadbackDiagnostics(false, false, false, false, 0, 0, 0L, 0L, 0L);
+        }
+        return new NativeOffReadbackDiagnostics(
+                manager.nativeOffReadbackRequested,
+                manager.nativeOffReadbackPending,
+                manager.nativeOffReadbackCompleted,
+                manager.nativeOffReadbackPassed,
+                manager.nativeOffReadbackWidth,
+                manager.nativeOffReadbackHeight,
+                manager.nativeOffReadbackNonZeroPixels,
+                manager.nativeOffReadbackVaryingPixels,
+                manager.nativeOffReadbackChecksum
+        );
+    }
+
     @Nullable
     static FrameGenerationInput frameGenerationInput(final MetalGpuTexture presentedUiTexture) {
         MetalFxManager manager = active;
@@ -532,6 +663,7 @@ public final class MetalFxManager {
         MetalFxManager manager = active;
         if (manager != null) {
             manager.frameGenerationFramesQueued++;
+            manager.frameGenerationEncodeObserved = true;
         }
     }
 
@@ -609,6 +741,13 @@ public final class MetalFxManager {
                 && manager.config.transparencyReactiveMask && !manager.runtimeDisabled;
     }
 
+    public static boolean usesTemporalUpscaling() {
+        MetalFxManager manager = active;
+        return manager != null
+                && manager.effectiveMode == MetalFxConfig.Mode.TEMPORAL
+                && !manager.runtimeDisabled;
+    }
+
     public static boolean usesCutoutReactiveTerrain() {
         MetalFxManager manager = active;
         return manager != null
@@ -672,26 +811,37 @@ public final class MetalFxManager {
         return frameGenerationEnabled || frameGenerationSuspended;
     }
 
-    private float frameGenerationOutputScale(final int width) {
-        return usesFrameGenerationWorkResolution()
-                ? MetalFxConfig.frameGenerationOutputScale(width, config.frameGenerationOutputWidth)
-                : 1.0F;
+    private boolean usesNativeDirectFrameGeneration() {
+        return NATIVE_DIRECT_FRAME_GENERATION && usesFrameGenerationWorkResolution();
     }
 
     private int sceneWidthInternal(final int width) {
+        if (usesNativeDirectFrameGeneration()) {
+            return width;
+        }
         return effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled
-                ? width : MetalFxConfig.scaledDimension(width, config.scale * frameGenerationOutputScale(width));
+                ? width : MetalFxConfig.scaledDimension(width, config.scale);
     }
 
     private int sceneHeightInternal(final int height, final int width) {
+        if (usesNativeDirectFrameGeneration()) {
+            return height;
+        }
         return effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled
-                ? height : MetalFxConfig.scaledDimension(
-                        height,
-                        config.scale * frameGenerationOutputScale(Math.max(1, width))
-                );
+                ? height : MetalFxConfig.scaledDimension(height, config.scale);
     }
 
     private void beginFrameInternal() {
+        reloadConfigIfRequested();
+        recordFramePacingDiagnostics();
+        if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
+            this.sceneFrame = false;
+            this.frameDepthTexture = null;
+            this.frameNativeSceneTexture = null;
+            this.frameUsesUpscaledTarget = false;
+            this.nativeOffFastPathFrames++;
+            return;
+        }
         if (frameGenerationEnabled && (hasActiveGui() || immediatePresentMode)) {
             suspendFrameGenerationInternal(
                     hasActiveGui() ? "a GUI screen or overlay is active" : "VSync is off"
@@ -700,6 +850,7 @@ public final class MetalFxManager {
         if (frameGenerationSuspended && !runtimeDisabled && !hasActiveGui() && !immediatePresentMode) {
             frameGenerationSuspended = false;
             frameGenerationEnabled = true;
+            frameGenerationEncodeObserved = false;
             resetHistoryInternal("frame generation resumed; suspend condition cleared");
         }
         this.sceneFrame = false;
@@ -708,11 +859,229 @@ public final class MetalFxManager {
         this.cutoutReactivePrepared = false;
         this.motionInputsPrepared = false;
         this.frameDepthTexture = null;
+        this.frameNativeSceneTexture = null;
         this.frameUsesUpscaledTarget = false;
         this.motionStateStore.beginFrame();
         MetalEntityMotionCapture.beginFrame();
         this.objectMotionReplays.clear();
         this.objectMotionInputsCleared = false;
+    }
+
+    private void recordFramePacingDiagnostics() {
+        if (!config.debug) {
+            previousFrameStartNanos = 0L;
+            framePacingSampleCount = 0;
+            framePacingSampleCursor = 0;
+            lastFramePacingReportNanos = 0L;
+            return;
+        }
+
+        long now = System.nanoTime();
+        if (previousFrameStartNanos != 0L) {
+            double intervalMillis = (now - previousFrameStartNanos) / 1_000_000.0;
+            if (intervalMillis > 0.0 && intervalMillis < 1_000.0 && Double.isFinite(intervalMillis)) {
+                framePacingIntervalsMillis[framePacingSampleCursor] = intervalMillis;
+                framePacingSampleCursor = (framePacingSampleCursor + 1) % FRAME_PACING_SAMPLE_CAPACITY;
+                framePacingSampleCount = Math.min(
+                        framePacingSampleCount + 1,
+                        FRAME_PACING_SAMPLE_CAPACITY
+                );
+            }
+        }
+        previousFrameStartNanos = now;
+
+        if (lastFramePacingReportNanos == 0L) {
+            lastFramePacingReportNanos = now;
+            return;
+        }
+        if (now - lastFramePacingReportNanos < FRAME_PACING_REPORT_INTERVAL_NANOS
+                || framePacingSampleCount < 30) {
+            return;
+        }
+        lastFramePacingReportNanos = now;
+
+        double[] frameIntervals = Arrays.copyOf(framePacingIntervalsMillis, framePacingSampleCount);
+        Arrays.sort(frameIntervals);
+        List<MetalGpuTimingRecorder.Sample> gpuSnapshot = MetalGpuTimingRecorder.snapshot();
+        int firstGpuSample = Math.max(0, gpuSnapshot.size() - FRAME_PACING_SAMPLE_CAPACITY);
+        List<Double> gpuSamples = gpuSnapshot.subList(firstGpuSample, gpuSnapshot.size()).stream()
+                .map(MetalGpuTimingRecorder.Sample::milliseconds)
+                .filter(value -> value > 0.0 && Double.isFinite(value))
+                .sorted()
+                .toList();
+        Minecraft minecraft = Minecraft.getInstance();
+        int configuredLimit = minecraft.options.framerateLimit().get();
+        int effectiveLimit = minecraft.getFramerateLimitTracker().getFramerateLimit();
+        double frameP50 = percentile(frameIntervals, 0.50);
+        double frameP95 = percentile(frameIntervals, 0.95);
+        double gpuP50 = percentile(gpuSamples, 0.50);
+        double gpuP95 = percentile(gpuSamples, 0.95);
+        Metallum.LOGGER.info(
+                "Metal frame pacing: actualFps={} sourceFpsP50={} frameIntervalMs(p50={}, p95={}) "
+                        + "mainGpuMs(p50={}, p95={}) configuredLimit={} effectiveLimit={} throttle={} "
+                        + "vsync={} refreshHz={} level={} mode={} scale={} frameGeneration={}",
+                minecraft.getFps(),
+                frameP50 > 0.0 ? 1_000.0 / frameP50 : 0.0,
+                frameP50,
+                frameP95,
+                gpuP50,
+                gpuP95,
+                configuredLimit,
+                effectiveLimit,
+                minecraft.getFramerateLimitTracker().getThrottleReason(),
+                minecraft.options.enableVsync().get(),
+                minecraft.getWindow().getRefreshRate(),
+                minecraft.level != null,
+                effectiveMode,
+                config.scale,
+                frameGenerationEnabled || frameGenerationSuspended
+        );
+    }
+
+    private static double percentile(final double[] sortedValues, final double fraction) {
+        if (sortedValues.length == 0) {
+            return 0.0;
+        }
+        int index = (int) Math.ceil((sortedValues.length - 1) * fraction);
+        return sortedValues[Math.max(0, Math.min(index, sortedValues.length - 1))];
+    }
+
+    private static double percentile(final List<Double> sortedValues, final double fraction) {
+        if (sortedValues.isEmpty()) {
+            return 0.0;
+        }
+        int index = (int) Math.ceil((sortedValues.size() - 1) * fraction);
+        return sortedValues.get(Math.max(0, Math.min(index, sortedValues.size() - 1)));
+    }
+
+    /**
+     * Applies Sodium-owned settings at the next whole-frame boundary. No
+     * command encoding for the new frame has begun here, so targets, native
+     * scaler caches, Temporal history, and the display-link presenter can be
+     * replaced as one transaction instead of requiring a process restart.
+     */
+    private void reloadConfigIfRequested() {
+        long revision = MetalFxConfig.runtimeRevision();
+        if (revision == this.configRevision) {
+            return;
+        }
+
+        MetalFxConfig previous = this.config;
+        MetalFxConfig next = MetalFxConfig.load();
+        MetalFxConfig.RuntimeSettings previousSettings = previous.runtimeSettings();
+        MetalFxConfig.RuntimeSettings nextSettings = next.runtimeSettings();
+        this.configRevision = revision;
+
+        if (previous.metalHud != next.metalHud) {
+            MetalNativeBridge.metallum_set_metal_hud(device.metalLayerHandle(), next.metalHud);
+        }
+
+        boolean renderSettingsChanged = nextSettings.requiresRenderRefreshComparedTo(previousSettings);
+        this.config = next;
+        if (!renderSettingsChanged) {
+            return;
+        }
+
+        MetalFxConfig.Mode previousEffectiveMode = this.effectiveMode;
+        boolean previousFrameGeneration = this.frameGenerationEnabled || this.frameGenerationSuspended;
+        if (previousFrameGeneration) {
+            MetalNativeBridge.metallum_metalfx_stop_frame_generation();
+        }
+
+        this.effectiveMode = chooseMode(device, next);
+        this.phaseCount = MetalFxConfig.phaseCount(next.scale);
+        boolean shaderSamplingChanged = nextSettings.requiresShaderRefreshComparedTo(previousSettings)
+                || previousEffectiveMode != this.effectiveMode;
+        this.runtimeDisabled = false;
+        this.frameUsesUpscaledTarget = false;
+        this.frameGenerationEnabled = false;
+        this.frameGenerationSuspended = false;
+        this.metalFxScalerEncodeObserved = false;
+        this.frameGenerationEncodeObserved = false;
+
+        boolean frameGenerationAvailable = next.frameGeneration
+                && this.effectiveMode == MetalFxConfig.Mode.TEMPORAL
+                && objectMotionProducerConnected()
+                && MetalNativeBridge.metallum_metalfx_supports_frame_generation(device.metalDeviceHandle());
+        if (frameGenerationAvailable) {
+            boolean suspend = hasActiveGui() || immediatePresentMode;
+            this.frameGenerationEnabled = !suspend;
+            this.frameGenerationSuspended = suspend;
+        } else if (next.frameGeneration) {
+            Metallum.LOGGER.warn(
+                    "MetalFX frame generation remains disabled after settings refresh: "
+                            + "Temporal mode, hardware support, and the complete object-motion producer are required"
+            );
+        }
+
+        MetalEntityMotionCapture.setEnabled(
+                this.effectiveMode == MetalFxConfig.Mode.TEMPORAL && !this.runtimeDisabled
+        );
+        MetalNativeBridge.metallum_metalfx_set_reactive_tuning(
+                next.cutoutReactiveEdgeWeight,
+                next.cutoutReactiveInteriorWeight,
+                next.depthEdgeReactiveCap,
+                next.transparencyReactiveValue,
+                next.skyFarPlaneMotion ? 1.0F : 0.0F,
+                next.disocclusionReactiveCap,
+                next.mergeDepthDilation ? 1.0F : 0.0F
+        );
+
+        // Resource wrappers are ref-counted, but their native MetalFX owners
+        // and cached PSOs are not safe to tear down while the previous frame
+        // can still reference them. This is a settings-screen transition, so
+        // one bounded drain is preferable to a use-after-free or stale PSO.
+        device.waitForSubmittedGpuWork();
+        closeRenderTargetsForReload();
+        closeAuxiliaryTextures();
+        MetalNativeBridge.metallum_metalfx_release_scalers();
+        if (shaderSamplingChanged) {
+            // The shader compiler injects a scale-dependent LOD bias and keys
+            // its disk cache by that value. Clear the live PSOs so a new mode
+            // or scale does not keep sampling with the previous bias.
+            device.clearPipelineCache();
+        }
+        resetHistoryInternal("MetalFX settings changed");
+
+        if (displayWidth > 0 && displayHeight > 0) {
+            RenderTarget mainTarget = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+            int targetWidth = sceneWidthInternal(displayWidth);
+            int targetHeight = sceneHeightInternal(displayHeight, displayWidth);
+            if (mainTarget.width != targetWidth || mainTarget.height != targetHeight) {
+                mainTarget.resize(targetWidth, targetHeight);
+            }
+            this.renderWidth = targetWidth;
+            this.renderHeight = targetHeight;
+        }
+
+        Metallum.LOGGER.info(
+                "MetalFX settings applied without restart: requested={} effective={} (was {}), "
+                        + "scale={}, transparencyReactive={}, frameGeneration={}, metalHud={}",
+                next.requestedMode,
+                this.effectiveMode,
+                previousEffectiveMode,
+                next.scale,
+                next.transparencyReactiveMask,
+                this.frameGenerationEnabled || this.frameGenerationSuspended,
+                next.metalHud
+        );
+    }
+
+    private void closeRenderTargetsForReload() {
+        if (uiTarget != null) {
+            uiTarget.destroyBuffers();
+            uiTarget = null;
+        }
+        if (sceneOutputTarget != null) {
+            sceneOutputTarget.destroyBuffers();
+            sceneOutputTarget = null;
+        }
+        if (nativeSceneTarget != null) {
+            nativeSceneTarget.destroyBuffers();
+            nativeSceneTarget = null;
+        }
+        frameNativeSceneTexture = null;
+        uiTargetShaderWrite = false;
     }
 
     private void captureEntityMotionInternal(final Entity entity, final EntityRenderState state) {
@@ -941,10 +1310,15 @@ public final class MetalFxManager {
         this.lastSceneFrameStartNanos = sceneFrameStartNanos;
 
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL) {
-            MetalFxMath.pixelJitter(this.pixelJitter, phase, phaseCount);
-            MetalFxMath.clipJitter(this.clipJitter, this.pixelJitter, renderWidth, renderHeight);
             projectionMatrix.set(this.currentProjection);
-            MetalFxMath.applyProjectionJitter(projectionMatrix, clipJitter);
+            if (usesNativeDirectFrameGeneration()) {
+                this.pixelJitter.zero();
+                this.clipJitter.zero();
+            } else {
+                MetalFxMath.pixelJitter(this.pixelJitter, phase, phaseCount);
+                MetalFxMath.clipJitter(this.clipJitter, this.pixelJitter, renderWidth, renderHeight);
+                MetalFxMath.applyProjectionJitter(projectionMatrix, clipJitter);
+            }
             // The depth buffer was produced with the jittered projection, so
             // reconstruction uses its inverse. The motion pass then projects
             // the reconstructed world position through current and previous
@@ -982,6 +1356,7 @@ public final class MetalFxManager {
     private void beforeGuiInternal(final GameRenderer renderer) {
         this.frameUsesUpscaledTarget = false;
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
+            captureNativeOffReadbackIfRequested(renderer);
             return;
         }
         int width = renderer.gameRenderState().windowRenderState.width;
@@ -1014,6 +1389,7 @@ public final class MetalFxManager {
 
         MetalCommandEncoder encoder = device.commandEncoder();
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
+                && !usesNativeDirectFrameGeneration()
                 && cutoutReactivePipelineAvailable
                 && cutoutReactiveTexture != null
                 && reactiveTexture != null) {
@@ -1078,16 +1454,26 @@ public final class MetalFxManager {
             }
         }
         boolean encoded = false;
+        boolean scalerEncodedThisFrame = false;
         boolean historyTransactionEncoded = false;
         if (sceneFrame && renderer.mainRenderTarget().getColorTexture() != null) {
             MetalGpuTexture color = (MetalGpuTexture) renderer.mainRenderTarget().getColorTexture();
             MetalGpuTexture depth = this.frameDepthTexture;
             this.frameDepthTexture = depth;
-            MetalGpuTexture output = usesFrameGenerationWorkResolution() && sceneOutputTarget != null
-                    ? (MetalGpuTexture) sceneOutputTarget.getColorTexture()
+            MetalGpuTexture output = usesFrameGenerationWorkResolution()
+                    && !usesNativeDirectFrameGeneration() && nativeSceneTarget != null
+                    ? (MetalGpuTexture) nativeSceneTarget.getColorTexture()
                     : (MetalGpuTexture) uiTarget.getColorTexture();
             this.frameResetForPresent = historyReset;
-            if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && depth != null && motionInputsPrepared
+            if (usesNativeDirectFrameGeneration() && depth != null && motionInputsPrepared
+                    && motionTexture != null) {
+                // The presenter snapshots this texture into its own ring buffer
+                // before the command buffer is committed. Avoid an otherwise
+                // redundant native-resolution shader copy into an intermediate
+                // target that is only required by Temporal output.
+                this.frameNativeSceneTexture = color;
+                encoded = true;
+            } else if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && depth != null && motionInputsPrepared
                     && cameraMotionTexture != null && objectMotionTexture != null
                     && objectValidityTexture != null && disocclusionTexture != null
                     && motionTexture != null && reactiveTexture != null) {
@@ -1115,6 +1501,7 @@ public final class MetalFxManager {
                                 || cutoutReactivePrepared,
                         emitMotionDiagnostics
                 );
+                scalerEncodedThisFrame = encoded;
             } else if (effectiveMode == MetalFxConfig.Mode.SPATIAL) {
                 encoded = encoder.encodeMetalFx(
                         effectiveMode,
@@ -1133,17 +1520,35 @@ public final class MetalFxManager {
                         true,
                         false
                 );
+                scalerEncodedThisFrame = encoded;
             }
+            if (encoded && usesFrameGenerationWorkResolution()
+                    && !usesNativeDirectFrameGeneration() && output != uiTarget.getColorTexture()) {
+                this.frameNativeSceneTexture = output;
+            }
+            // Native-direct skips the Temporal scaler, but it still needs the
+            // same successful-submit transaction for previous camera/object
+            // motion and reset ownership. Its phase remains zero because
+            // beginFrame disables jitter for this path.
             historyTransactionEncoded = encoded && effectiveMode == MetalFxConfig.Mode.TEMPORAL;
-            if (historyTransactionEncoded && depth != null) {
+            if (historyTransactionEncoded && depth != null && !usesNativeDirectFrameGeneration()) {
                 captureValidationFrameIfRequested(color, depth, output);
                 captureFlickerFrameIfRequested(output, depth);
             }
         }
 
-        boolean sceneOutputEncoded = encoded && sceneOutputTarget != null
-                && sceneOutputTarget.getColorTexture() != null
-                && sceneOutputTarget.getColorTexture() != uiTarget.getColorTexture();
+        boolean nativeSceneEncoded = encoded && frameNativeSceneTexture != null
+                && frameNativeSceneTexture != uiTarget.getColorTexture();
+        boolean frameGenerationSceneEncoded = false;
+        if (encoded && frameGenerationEnabled && nativeSceneEncoded && sceneOutputTarget != null) {
+            frameGenerationSceneEncoded = encoder.encodeTextureCopy(
+                    frameNativeSceneTexture,
+                    (MetalGpuTexture) sceneOutputTarget.getColorTexture(),
+                    true
+            );
+            encoded = frameGenerationSceneEncoded;
+        }
+        boolean scalerOutputAccepted = scalerEncodedThisFrame && encoded;
         if (!encoded) {
             this.motionStateStore.discardFrame();
             if (frameGenerationEnabled) {
@@ -1171,10 +1576,11 @@ public final class MetalFxManager {
             Metallum.LOGGER.warn("MetalFX encode failed; using fullscreen copy fallback for this frame");
         } else if (config.debug && !loggedFirstSuccessfulFrame) {
             loggedFirstSuccessfulFrame = true;
-            Metallum.LOGGER.info("MetalFX encode succeeded: mode={}, input={}x{}, output={}x{}, display={}x{}, reactiveMask={}",
+            Metallum.LOGGER.info("MetalFX encode succeeded: mode={}, input={}x{}, temporalOutput={}x{}, frameGenWork={}x{}, display={}x{}, reactiveMask={}",
                     effectiveMode, renderWidth, renderHeight,
-                    usesFrameGenerationWorkResolution() ? frameGenerationOutputWidth : width,
-                    usesFrameGenerationWorkResolution() ? frameGenerationOutputHeight : height,
+                    width, height,
+                    frameGenerationEnabled ? frameGenerationOutputWidth : width,
+                    frameGenerationEnabled ? frameGenerationOutputHeight : height,
                     width, height, reactiveMaskPrepared);
             if (effectiveMode == MetalFxConfig.Mode.TEMPORAL) {
                 Metallum.LOGGER.info(
@@ -1183,6 +1589,10 @@ public final class MetalFxManager {
                         renderWidth, renderHeight, frameFieldOfView
                 );
             }
+        }
+
+        if (scalerOutputAccepted) {
+            this.metalFxScalerEncodeObserved = true;
         }
 
         if (frameGenerationEnabled) {
@@ -1194,9 +1604,9 @@ public final class MetalFxManager {
                     uiTarget.getColorTexture(), UI_CLEAR, uiTarget.getDepthTexture(), 0.0
             );
         } else {
-            if (sceneOutputEncoded) {
+            if (nativeSceneEncoded) {
                 boolean copied = encoder.encodeTextureCopy(
-                        (MetalGpuTexture) sceneOutputTarget.getColorTexture(),
+                        frameNativeSceneTexture,
                         (MetalGpuTexture) uiTarget.getColorTexture(),
                         true
                 );
@@ -1329,6 +1739,134 @@ public final class MetalFxManager {
         return new ValidationReadback(name, texture, buffer, bytes);
     }
 
+    private void captureNativeOffReadbackIfRequested(final GameRenderer renderer) {
+        if (!nativeOffReadbackRequested) {
+            return;
+        }
+        nativeOffReadbackRequested = false;
+        if (!(renderer.mainRenderTarget().getColorTexture() instanceof MetalGpuTexture texture)) {
+            nativeOffReadbackCompleted = true;
+            nativeOffReadbackPassed = false;
+            return;
+        }
+
+        int width = Math.min(256, texture.getWidth(0));
+        int height = Math.min(256, texture.getHeight(0));
+        if (width <= 0 || height <= 0 || texture.pixelSize() != 4) {
+            nativeOffReadbackCompleted = true;
+            nativeOffReadbackPassed = false;
+            return;
+        }
+        int x = (texture.getWidth(0) - width) / 2;
+        int y = (texture.getHeight(0) - height) / 2;
+        int byteCount = Math.multiplyExact(Math.multiplyExact(width, height), texture.pixelSize());
+        MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
+                () -> "Native OFF main-render readback",
+                GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST,
+                byteCount
+        );
+        nativeOffReadbackPending = true;
+        device.commandEncoder().copyTextureToBuffer(
+                texture,
+                buffer,
+                0L,
+                () -> finishNativeOffReadback(buffer, width, height, byteCount),
+                0,
+                x,
+                y,
+                width,
+                height
+        );
+    }
+
+    private void finishNativeOffReadback(
+            final MetalGpuBuffer buffer,
+            final int width,
+            final int height,
+            final int byteCount
+    ) {
+        try {
+            ByteBuffer bytes = buffer.currentStorage().limit(byteCount);
+            byte[] copy = new byte[byteCount];
+            bytes.get(copy);
+            long nonZeroPixels = 0L;
+            long varyingPixels = 0L;
+            long opaquePixels = 0L;
+            long checksum = 0xcbf29ce484222325L;
+            int firstRgb = -1;
+            for (int offset = 0; offset < copy.length; offset += 4) {
+                int rgb = (copy[offset] & 0xff)
+                        | ((copy[offset + 1] & 0xff) << 8)
+                        | ((copy[offset + 2] & 0xff) << 16);
+                if (rgb != 0) {
+                    nonZeroPixels++;
+                }
+                if (firstRgb < 0) {
+                    firstRgb = rgb;
+                } else if (rgb != firstRgb) {
+                    varyingPixels++;
+                }
+                if ((copy[offset + 3] & 0xff) != 0) {
+                    opaquePixels++;
+                }
+                for (int channel = 0; channel < 4; channel++) {
+                    checksum ^= copy[offset + channel] & 0xffL;
+                    checksum *= 0x100000001b3L;
+                }
+            }
+            long pixelCount = (long) width * height;
+            nativeOffReadbackWidth = width;
+            nativeOffReadbackHeight = height;
+            nativeOffReadbackNonZeroPixels = nonZeroPixels;
+            nativeOffReadbackVaryingPixels = varyingPixels;
+            nativeOffReadbackChecksum = checksum;
+            nativeOffReadbackPassed = nonZeroPixels >= pixelCount / 100
+                    && varyingPixels >= pixelCount / 100
+                    && opaquePixels >= pixelCount / 2;
+
+            Path output = Path.of(System.getProperty(
+                    "metallum.validation.output",
+                    "build/metal-validation/minecraft-client-current"
+            )).toAbsolutePath().normalize();
+            Files.createDirectories(output);
+            Files.write(output.resolve("native-off-main-readback.bin"), copy);
+            Files.writeString(
+                    output.resolve("native-off-main-readback.json"),
+                    String.format(
+                            java.util.Locale.ROOT,
+                            "{\n  \"width\": %d,\n  \"height\": %d,\n"
+                                    + "  \"nonZeroRgbPixels\": %d,\n  \"varyingRgbPixels\": %d,\n"
+                                    + "  \"opaquePixels\": %d,\n  \"fnv1a64\": \"%016x\",\n"
+                                    + "  \"passed\": %s\n}\n",
+                            width,
+                            height,
+                            nonZeroPixels,
+                            varyingPixels,
+                            opaquePixels,
+                            checksum,
+                            nativeOffReadbackPassed
+                    ),
+                    StandardCharsets.UTF_8
+            );
+            Metallum.LOGGER.info(
+                    "Native OFF main-render GPU readback: {}x{}, nonZero={}, varying={}, checksum={}, passed={}",
+                    width,
+                    height,
+                    nonZeroPixels,
+                    varyingPixels,
+                    Long.toUnsignedString(checksum, 16),
+                    nativeOffReadbackPassed
+            );
+        } catch (IOException | RuntimeException exception) {
+            nativeOffReadbackPassed = false;
+            Metallum.LOGGER.error("Native OFF main-render GPU readback failed", exception);
+        } finally {
+            nativeOffReadbackPending = false;
+            nativeOffReadbackCompleted = true;
+            buffer.close();
+        }
+    }
+
     private void captureFlickerFrameIfRequested(
             final MetalGpuTexture temporalOutput,
             final MetalGpuTexture depth
@@ -1340,6 +1878,7 @@ public final class MetalFxManager {
             return;
         }
         this.flickerCapturePending = true;
+        boolean movingHandScene = "hand_translucent_motion_series".equals(requested.scenario);
         ValidationReadback outputReadback = validationReadback("flicker-output", temporalOutput);
         ValidationReadback coverageReadback = requested.first
                 ? validationReadback("flicker-coverage", cutoutReactiveTexture)
@@ -1352,8 +1891,14 @@ public final class MetalFxManager {
         // Attribution: the final reactive mask on the silhouette band, bucketed
         // so each policy writer is identifiable by its value (0.35 cutout edge
         // band, 0.5 depth-edge cap, 0.85 disocclusion cap, 0.9 transparency).
-        ValidationReadback reactiveReadback = requested.first && reactiveTexture != null
+        ValidationReadback reactiveReadback = (requested.first || movingHandScene) && reactiveTexture != null
                 ? validationReadback("flicker-reactive", reactiveTexture)
+                : null;
+        ValidationReadback validityReadback = movingHandScene && objectValidityTexture != null
+                ? validationReadback("flicker-object-validity", objectValidityTexture)
+                : null;
+        ValidationReadback motionReadback = movingHandScene && motionTexture != null
+                ? validationReadback("flicker-motion", motionTexture)
                 : null;
         if (coverageReadback != null) {
             device.commandEncoder().copyTextureToBuffer(
@@ -1367,12 +1912,21 @@ public final class MetalFxManager {
             device.commandEncoder().copyTextureToBuffer(
                     reactiveReadback.texture, reactiveReadback.buffer, 0L, () -> { }, 0);
         }
+        if (validityReadback != null) {
+            device.commandEncoder().copyTextureToBuffer(
+                    validityReadback.texture, validityReadback.buffer, 0L, () -> { }, 0);
+        }
+        if (motionReadback != null) {
+            device.commandEncoder().copyTextureToBuffer(
+                    motionReadback.texture, motionReadback.buffer, 0L, () -> { }, 0);
+        }
         device.commandEncoder().copyTextureToBuffer(
                 outputReadback.texture,
                 outputReadback.buffer,
                 0L,
                 () -> finishFlickerCapture(
-                        requested, outputReadback, coverageReadback, depthReadback, reactiveReadback),
+                        requested, outputReadback, coverageReadback, depthReadback,
+                        reactiveReadback, validityReadback, motionReadback),
                 0
         );
     }
@@ -1382,7 +1936,9 @@ public final class MetalFxManager {
             final ValidationReadback outputReadback,
             @Nullable final ValidationReadback coverageReadback,
             @Nullable final ValidationReadback depthReadback,
-            @Nullable final ValidationReadback reactiveReadback
+            @Nullable final ValidationReadback reactiveReadback,
+            @Nullable final ValidationReadback validityReadback,
+            @Nullable final ValidationReadback motionReadback
     ) {
         try {
             byte[] output = readbackBytes(outputReadback);
@@ -1392,9 +1948,12 @@ public final class MetalFxManager {
                 byte[] coverage = readbackBytes(coverageReadback);
                 byte[] depth = depthReadback == null ? null : readbackBytes(depthReadback);
                 byte[] reactive = reactiveReadback == null ? null : readbackBytes(reactiveReadback);
-                beginFlickerSeries(width, height, coverage, depth, reactive);
+                beginFlickerSeries(requested.scenario, width, height, coverage, depth, reactive);
             }
-            accumulateFlickerFrame(output, width, height);
+            byte[] reactive = reactiveReadback == null ? null : readbackBytes(reactiveReadback);
+            byte[] validity = validityReadback == null ? null : readbackBytes(validityReadback);
+            byte[] motion = motionReadback == null ? null : readbackBytes(motionReadback);
+            accumulateFlickerFrame(requested.scenario, output, width, height, reactive, validity, motion);
             // Requests already in flight when the series closes must not
             // rewrite the metric: the JSON is final on the first close.
             if (requested.last && flickerCompletedScenarios.add(requested.scenario)) {
@@ -1421,6 +1980,12 @@ public final class MetalFxManager {
             if (reactiveReadback != null) {
                 reactiveReadback.buffer.close();
             }
+            if (validityReadback != null) {
+                validityReadback.buffer.close();
+            }
+            if (motionReadback != null) {
+                motionReadback.buffer.close();
+            }
             this.flickerCapturePending = false;
         }
     }
@@ -1436,6 +2001,7 @@ public final class MetalFxManager {
     }
 
     private void beginFlickerSeries(
+            final String scenario,
             final int width,
             final int height,
             final byte[] coverage,
@@ -1450,6 +2016,19 @@ public final class MetalFxManager {
         java.util.Arrays.fill(this.flickerControlHistogram, 0L);
         java.util.Arrays.fill(this.flickerSkyEdgeHistogram, 0L);
         java.util.Arrays.fill(this.flickerSkyInteriorHistogram, 0L);
+        java.util.Arrays.fill(this.flickerOpaqueHistogram, 0L);
+        java.util.Arrays.fill(this.flickerHorizonHistogram, 0L);
+        java.util.Arrays.fill(this.flickerDistantTerrainHistogram, 0L);
+        java.util.Arrays.fill(this.flickerMotionReprojectedHistogram, 0L);
+        java.util.Arrays.fill(this.flickerTransparencyReactiveBuckets, 0L);
+        this.flickerMotionReprojectedPixels = 0L;
+        this.flickerMinHandRenderPixels = Integer.MAX_VALUE;
+        this.flickerMinHandDisplayPixels = Integer.MAX_VALUE;
+        this.flickerMinHandVisibleFinalPixels = Integer.MAX_VALUE;
+        this.flickerMinHandVisibleRatio = 1.0;
+        this.flickerMinTransparencyReactivePixels = Integer.MAX_VALUE;
+        this.flickerMinTransparencyVisibleFinalPixels = Integer.MAX_VALUE;
+        this.flickerDistantTerrainSpatialGradient = 0.0;
         // Reversed-Z: the cleared far plane is zero, so an untouched depth
         // pixel is sky. Same threshold as validDepth() in the motion kernels.
         boolean[] sky = null;
@@ -1474,15 +2053,42 @@ public final class MetalFxManager {
         boolean[] mask = new boolean[width * height];
         boolean[] skyEdge = new boolean[width * height];
         boolean[] skyInterior = new boolean[width * height];
+        boolean[] opaque = new boolean[width * height];
+        boolean[] horizon = new boolean[width * height];
+        boolean[] distantTerrain = new boolean[width * height];
         int maskPixels = 0;
         int skyEdgePixels = 0;
         int skyInteriorPixels = 0;
+        int opaquePixels = 0;
+        int horizonPixels = 0;
+        int distantTerrainPixels = 0;
+        boolean distantLodScene = "lod_horizon_hold".equals(scenario);
         for (int y = 0; y < height; y++) {
             int renderY = Math.min(renderHeight - 1, y * renderHeight / height);
             for (int x = 0; x < width; x++) {
                 int renderX = Math.min(renderWidth - 1, x * renderWidth / width);
                 boolean skyNear = sky != null
                         && hasSkyNeighbor(sky, renderX, renderY, renderWidth, renderHeight, 1);
+                boolean opaqueNear = sky != null
+                        && hasOpaqueNeighbor(sky, renderX, renderY, renderWidth, renderHeight, 1);
+                if (sky != null && !sky[renderY * renderWidth + renderX]) {
+                    opaque[y * width + x] = true;
+                    opaquePixels++;
+                }
+                if (skyNear && opaqueNear) {
+                    horizon[y * width + x] = true;
+                    horizonPixels++;
+                }
+                // Metal readbacks use the texture's native row order. In the
+                // validation scene the far half of the cobblestone plane is
+                // y=30..43% and x=20..80% of the temporal output.
+                if (distantLodScene
+                        && x >= width / 5 && x < width * 4 / 5
+                        && y >= height * 30 / 100 && y < height * 43 / 100
+                        && sky != null && !sky[renderY * renderWidth + renderX]) {
+                    distantTerrain[y * width + x] = true;
+                    distantTerrainPixels++;
+                }
                 if (hasCutoutCoverageNeighbor(coverage, renderX, renderY, renderWidth, renderHeight, 1)) {
                     mask[y * width + x] = true;
                     maskPixels++;
@@ -1505,6 +2111,12 @@ public final class MetalFxManager {
         this.flickerSkyPixels = skyPixels;
         this.flickerSkyInteriorMask = skyInterior;
         this.flickerSkyInteriorPixels = skyInteriorPixels;
+        this.flickerOpaqueMask = opaque;
+        this.flickerOpaquePixels = opaquePixels;
+        this.flickerHorizonMask = horizon;
+        this.flickerHorizonPixels = horizonPixels;
+        this.flickerDistantTerrainMask = distantTerrain;
+        this.flickerDistantTerrainPixels = distantTerrainPixels;
         buildReactiveAttribution(coverage, sky, reactive);
     }
 
@@ -1565,10 +2177,47 @@ public final class MetalFxManager {
         return false;
     }
 
-    private void accumulateFlickerFrame(final byte[] rgba, final int width, final int height) {
+    private static boolean hasOpaqueNeighbor(
+            final boolean[] sky,
+            final int x,
+            final int y,
+            final int width,
+            final int height,
+            final int radius
+    ) {
+        for (int dy = -radius; dy <= radius; dy++) {
+            int sampleY = y + dy;
+            if (sampleY < 0 || sampleY >= height) {
+                continue;
+            }
+            for (int dx = -radius; dx <= radius; dx++) {
+                int sampleX = x + dx;
+                if (sampleX < 0 || sampleX >= width) {
+                    continue;
+                }
+                if (!sky[sampleY * width + sampleX]) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private void accumulateFlickerFrame(
+            final String scenario,
+            final byte[] rgba,
+            final int width,
+            final int height,
+            @Nullable final byte[] reactive,
+            @Nullable final byte[] validity,
+            @Nullable final byte[] motion
+    ) {
         boolean[] mask = this.flickerMask;
         boolean[] skyEdge = this.flickerSkyEdgeMask;
         boolean[] skyInterior = this.flickerSkyInteriorMask;
+        boolean[] opaque = this.flickerOpaqueMask;
+        boolean[] horizon = this.flickerHorizonMask;
+        boolean[] distantTerrain = this.flickerDistantTerrainMask;
         if (mask == null || width != flickerDisplayWidth || height != flickerDisplayHeight
                 || rgba.length < width * height * 4) {
             throw new IllegalStateException("Flicker capture dimensions changed mid-series");
@@ -1583,7 +2232,89 @@ public final class MetalFxManager {
             luma[pixel] = (byte) ((54 * r + 183 * g + 19 * b) >> 8);
         }
         byte[] previous = this.flickerPreviousLuma;
+        boolean movingHandScene = "hand_translucent_motion_series".equals(scenario);
+        if (movingHandScene && reactive != null && validity != null
+                && reactive.length >= renderWidth * renderHeight
+                && validity.length >= renderWidth * renderHeight) {
+            int handRenderPixels = 0;
+            int transparencyReactivePixels = 0;
+            for (int pixel = 0; pixel < renderWidth * renderHeight; pixel++) {
+                if (Byte.toUnsignedInt(validity[pixel]) >= 128) {
+                    handRenderPixels++;
+                    continue;
+                }
+                int reactiveValue = Byte.toUnsignedInt(reactive[pixel]);
+                if (reactiveValue >= 24) {
+                    transparencyReactivePixels++;
+                    flickerTransparencyReactiveBuckets[reactiveValue >> 4]++;
+                }
+            }
+            int handDisplayPixels = 0;
+            int handVisibleFinalPixels = 0;
+            int transparencyVisibleFinalPixels = 0;
+            for (int y = 0; y < height; y++) {
+                int renderY = Math.min(renderHeight - 1, y * renderHeight / height);
+                for (int x = 0; x < width; x++) {
+                    int renderX = Math.min(renderWidth - 1, x * renderWidth / width);
+                    int renderPixel = renderY * renderWidth + renderX;
+                    int colorOffset = (y * width + x) * 4;
+                    int first = Byte.toUnsignedInt(rgba[colorOffset]);
+                    int green = Byte.toUnsignedInt(rgba[colorOffset + 1]);
+                    int third = Byte.toUnsignedInt(rgba[colorOffset + 2]);
+                    int highOuter = Math.max(first, third);
+                    int lowOuter = Math.min(first, third);
+                    if (Byte.toUnsignedInt(validity[renderPixel]) >= 128) {
+                        handDisplayPixels++;
+                        if (highOuter >= 96 && green >= 72
+                                && highOuter >= green && green >= lowOuter + 12) {
+                            handVisibleFinalPixels++;
+                        }
+                    } else if (Byte.toUnsignedInt(reactive[renderPixel]) >= 24
+                            && first >= green + 8 && third >= green + 8) {
+                        transparencyVisibleFinalPixels++;
+                    }
+                }
+            }
+            flickerMinHandRenderPixels = Math.min(flickerMinHandRenderPixels, handRenderPixels);
+            flickerMinHandDisplayPixels = Math.min(flickerMinHandDisplayPixels, handDisplayPixels);
+            flickerMinHandVisibleFinalPixels = Math.min(
+                    flickerMinHandVisibleFinalPixels, handVisibleFinalPixels);
+            if (handDisplayPixels > 0) {
+                flickerMinHandVisibleRatio = Math.min(
+                        flickerMinHandVisibleRatio,
+                        handVisibleFinalPixels / (double) handDisplayPixels
+                );
+            } else {
+                flickerMinHandVisibleRatio = 0.0;
+            }
+            flickerMinTransparencyReactivePixels = Math.min(
+                    flickerMinTransparencyReactivePixels, transparencyReactivePixels);
+            flickerMinTransparencyVisibleFinalPixels = Math.min(
+                    flickerMinTransparencyVisibleFinalPixels, transparencyVisibleFinalPixels);
+        }
+        if (previous == null && distantTerrain != null) {
+            long gradientSum = 0L;
+            long gradientSamples = 0L;
+            for (int y = 0; y + 1 < height; y++) {
+                for (int x = 0; x + 1 < width; x++) {
+                    int pixel = y * width + x;
+                    if (!distantTerrain[pixel]
+                            || !distantTerrain[pixel + 1]
+                            || !distantTerrain[pixel + width]) {
+                        continue;
+                    }
+                    int center = Byte.toUnsignedInt(luma[pixel]);
+                    gradientSum += Math.abs(center - Byte.toUnsignedInt(luma[pixel + 1]));
+                    gradientSum += Math.abs(center - Byte.toUnsignedInt(luma[pixel + width]));
+                    gradientSamples += 2;
+                }
+            }
+            this.flickerDistantTerrainSpatialGradient = gradientSamples == 0
+                    ? 0.0 : gradientSum / (double) gradientSamples;
+        }
         if (previous != null) {
+            ByteBuffer motionValues = motion == null
+                    ? null : ByteBuffer.wrap(motion).order(ByteOrder.nativeOrder());
             for (int pixel = 0; pixel < width * height; pixel++) {
                 int delta = Math.abs(
                         Byte.toUnsignedInt(luma[pixel]) - Byte.toUnsignedInt(previous[pixel]));
@@ -1600,10 +2331,68 @@ public final class MetalFxManager {
                         flickerSkyInteriorHistogram[delta]++;
                     }
                 }
+                if (opaque != null && opaque[pixel]) {
+                    flickerOpaqueHistogram[delta]++;
+                }
+                if (horizon != null && horizon[pixel]) {
+                    flickerHorizonHistogram[delta]++;
+                }
+                if (distantTerrain != null && distantTerrain[pixel]) {
+                    flickerDistantTerrainHistogram[delta]++;
+                }
+                if (movingHandScene && motionValues != null && validity != null
+                        && motion.length >= renderWidth * renderHeight * 4
+                        && validity.length >= renderWidth * renderHeight) {
+                    int x = pixel % width;
+                    int y = pixel / width;
+                    if (x >= width / 10 && x < width * 9 / 10
+                            && y >= height / 4 && y < height * 3 / 5) {
+                        int renderX = Math.min(renderWidth - 1, x * renderWidth / width);
+                        int renderY = Math.min(renderHeight - 1, y * renderHeight / height);
+                        int renderPixel = renderY * renderWidth + renderX;
+                        if (Byte.toUnsignedInt(validity[renderPixel]) < 128) {
+                            float motionX = Float.float16ToFloat(motionValues.getShort(renderPixel * 4));
+                            float motionY = Float.float16ToFloat(motionValues.getShort(renderPixel * 4 + 2));
+                            if (Float.isFinite(motionX) && Float.isFinite(motionY)) {
+                                double previousX = x + motionX * width * 0.5;
+                                double previousY = y + motionY * height * 0.5;
+                                if (previousX >= 0.0 && previousX <= width - 1.0
+                                        && previousY >= 0.0 && previousY <= height - 1.0) {
+                                    int reprojected = sampleLumaBilinear(
+                                            previous, width, height, previousX, previousY);
+                                    int reprojectedDelta = Math.abs(
+                                            Byte.toUnsignedInt(luma[pixel]) - reprojected);
+                                    flickerMotionReprojectedHistogram[reprojectedDelta]++;
+                                    flickerMotionReprojectedPixels++;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         this.flickerPreviousLuma = luma;
         this.flickerFramesAccumulated++;
+    }
+
+    private static int sampleLumaBilinear(
+            final byte[] luma,
+            final int width,
+            final int height,
+            final double x,
+            final double y
+    ) {
+        int x0 = Math.clamp((int) Math.floor(x), 0, width - 1);
+        int y0 = Math.clamp((int) Math.floor(y), 0, height - 1);
+        int x1 = Math.min(width - 1, x0 + 1);
+        int y1 = Math.min(height - 1, y0 + 1);
+        double fx = x - x0;
+        double fy = y - y0;
+        double top = Byte.toUnsignedInt(luma[y0 * width + x0]) * (1.0 - fx)
+                + Byte.toUnsignedInt(luma[y0 * width + x1]) * fx;
+        double bottom = Byte.toUnsignedInt(luma[y1 * width + x0]) * (1.0 - fx)
+                + Byte.toUnsignedInt(luma[y1 * width + x1]) * fx;
+        return Math.clamp((int) Math.round(top * (1.0 - fy) + bottom * fy), 0, 255);
     }
 
     private void writeFlickerMetrics(final String scenario) throws IOException {
@@ -1620,6 +2409,33 @@ public final class MetalFxManager {
         int skyEdgeP95 = histogramPercentile(flickerSkyEdgeHistogram, 0.95);
         double skyInteriorMean = histogramMean(flickerSkyInteriorHistogram);
         int skyInteriorP95 = histogramPercentile(flickerSkyInteriorHistogram, 0.95);
+        double opaqueMean = histogramMean(flickerOpaqueHistogram);
+        int opaqueP95 = histogramPercentile(flickerOpaqueHistogram, 0.95);
+        double horizonMean = histogramMean(flickerHorizonHistogram);
+        int horizonP95 = histogramPercentile(flickerHorizonHistogram, 0.95);
+        double distantTerrainMean = histogramMean(flickerDistantTerrainHistogram);
+        int distantTerrainP95 = histogramPercentile(flickerDistantTerrainHistogram, 0.95);
+        int distantTerrainP99 = histogramPercentile(flickerDistantTerrainHistogram, 0.99);
+        double motionReprojectedMean = histogramMean(flickerMotionReprojectedHistogram);
+        int motionReprojectedP95 = histogramPercentile(flickerMotionReprojectedHistogram, 0.95);
+        int motionReprojectedP99 = histogramPercentile(flickerMotionReprojectedHistogram, 0.99);
+        boolean movingHandScene = "hand_translucent_motion_series".equals(scenario);
+        int minHandRenderPixels = movingHandScene ? flickerMinHandRenderPixels : 0;
+        int minHandDisplayPixels = movingHandScene ? flickerMinHandDisplayPixels : 0;
+        int minHandVisibleFinalPixels = movingHandScene ? flickerMinHandVisibleFinalPixels : 0;
+        double minHandVisibleRatio = movingHandScene ? flickerMinHandVisibleRatio : 0.0;
+        int minTransparencyReactivePixels = movingHandScene
+                ? flickerMinTransparencyReactivePixels : 0;
+        int minTransparencyVisibleFinalPixels = movingHandScene
+                ? flickerMinTransparencyVisibleFinalPixels : 0;
+        boolean passed = !movingHandScene || (flickerFramesAccumulated >= 24
+                && minHandRenderPixels > 1_000
+                && minHandDisplayPixels > 1_000
+                && minHandVisibleFinalPixels > 256
+                && minHandVisibleRatio >= 0.50
+                && minTransparencyReactivePixels > 1_000
+                && minTransparencyVisibleFinalPixels > 1_000
+                && flickerMotionReprojectedPixels > 1_000);
         String json = String.format(
                 java.util.Locale.ROOT,
                 """
@@ -1640,26 +2456,80 @@ public final class MetalFxManager {
                   "skyInteriorPixels": %d,
                   "skyInteriorMeanDelta": %.6f,
                   "skyInteriorP95Delta": %d,
+                  "opaquePixels": %d,
+                  "opaqueMeanDelta": %.6f,
+                  "opaqueP95Delta": %d,
+                  "horizonPixels": %d,
+                  "horizonMeanDelta": %.6f,
+                  "horizonP95Delta": %d,
+                  "distantTerrainPixels": %d,
+                  "distantTerrainMeanDelta": %.6f,
+                  "distantTerrainP95Delta": %d,
+                  "distantTerrainP99Delta": %d,
+                  "distantTerrainSpatialMeanGradient": %.6f,
+                  "motionReprojectedPixels": %d,
+                  "motionReprojectedMeanDelta": %.6f,
+                  "motionReprojectedP95Delta": %d,
+                  "motionReprojectedP99Delta": %d,
+                  "minHandRenderPixels": %d,
+                  "minHandDisplayPixels": %d,
+                  "minHandVisibleFinalPixels": %d,
+                  "minHandVisibleRatio": %.6f,
+                  "minTransparencyReactivePixels": %d,
+                  "minTransparencyVisibleFinalPixels": %d,
+                  "transparencyReactiveBuckets": [%s],
                   "skyEdgeRenderPixels": %d,
-                  "skyEdgeReactiveBuckets": [%s]
+                  "skyEdgeReactiveBuckets": [%s],
+                  "passed": %s
                 }
                 """,
                 scenario, flickerFramesAccumulated, flickerDisplayWidth, flickerDisplayHeight,
                 flickerMaskPixels, maskedMean, maskedP95, controlMean, controlP95,
                 flickerSkyPixels, flickerSkyEdgePixels, skyEdgeMean, skyEdgeP95,
                 flickerSkyInteriorPixels, skyInteriorMean, skyInteriorP95,
+                flickerOpaquePixels, opaqueMean, opaqueP95,
+                flickerHorizonPixels, horizonMean, horizonP95,
+                flickerDistantTerrainPixels, distantTerrainMean,
+                distantTerrainP95, distantTerrainP99,
+                flickerDistantTerrainSpatialGradient,
+                flickerMotionReprojectedPixels, motionReprojectedMean,
+                motionReprojectedP95, motionReprojectedP99,
+                minHandRenderPixels, minHandDisplayPixels, minHandVisibleFinalPixels,
+                minHandVisibleRatio,
+                minTransparencyReactivePixels, minTransparencyVisibleFinalPixels,
+                bucketList(flickerTransparencyReactiveBuckets),
                 flickerSkyEdgeRenderPixels, bucketList(flickerSkyEdgeReactiveBuckets)
+                , passed
         );
         Files.writeString(root.resolve("flicker-" + scenario + ".json"), json, StandardCharsets.UTF_8);
+        if (!passed && !Boolean.getBoolean("metallum.validation.lenient")) {
+            validationCaptureFailures++;
+        }
         Metallum.LOGGER.info(
-                "MetalFX flicker metric: scenario={} frames={} maskPixels={} maskedMeanDelta={} maskedP95={} controlMeanDelta={} controlP95={} skyPixels={} skyEdgePixels={} skyEdgeMeanDelta={} skyEdgeP95={} skyInteriorPixels={} skyInteriorMeanDelta={} skyInteriorP95={}",
+                "MetalFX flicker metric: scenario={} frames={} maskPixels={} maskedMeanDelta={} maskedP95={} controlMeanDelta={} controlP95={} skyPixels={} skyEdgePixels={} skyEdgeMeanDelta={} skyEdgeP95={} skyInteriorPixels={} skyInteriorMeanDelta={} skyInteriorP95={} opaquePixels={} opaqueMeanDelta={} opaqueP95={} horizonPixels={} horizonMeanDelta={} horizonP95={} distantTerrainPixels={} distantTerrainMeanDelta={} distantTerrainP95={} distantTerrainP99={} distantTerrainSpatialMeanGradient={} motionReprojectedMeanDelta={} motionReprojectedP95={} minHandVisibleRatio={} passed={}",
                 scenario, flickerFramesAccumulated, flickerMaskPixels,
                 String.format(java.util.Locale.ROOT, "%.4f", maskedMean), maskedP95,
                 String.format(java.util.Locale.ROOT, "%.4f", controlMean), controlP95,
                 flickerSkyPixels, flickerSkyEdgePixels,
                 String.format(java.util.Locale.ROOT, "%.4f", skyEdgeMean), skyEdgeP95,
                 flickerSkyInteriorPixels,
-                String.format(java.util.Locale.ROOT, "%.4f", skyInteriorMean), skyInteriorP95
+                String.format(java.util.Locale.ROOT, "%.4f", skyInteriorMean), skyInteriorP95,
+                flickerOpaquePixels,
+                String.format(java.util.Locale.ROOT, "%.4f", opaqueMean), opaqueP95,
+                flickerHorizonPixels,
+                String.format(java.util.Locale.ROOT, "%.4f", horizonMean), horizonP95,
+                flickerDistantTerrainPixels,
+                String.format(java.util.Locale.ROOT, "%.4f", distantTerrainMean),
+                distantTerrainP95, distantTerrainP99,
+                String.format(
+                        java.util.Locale.ROOT,
+                        "%.4f",
+                        flickerDistantTerrainSpatialGradient
+                ),
+                String.format(java.util.Locale.ROOT, "%.4f", motionReprojectedMean),
+                motionReprojectedP95,
+                String.format(java.util.Locale.ROOT, "%.4f", minHandVisibleRatio),
+                passed
         );
     }
 
@@ -1735,12 +2605,14 @@ public final class MetalFxManager {
 
             MotionMetrics metrics = measureObjectMotion(
                     requested,
+                    bytesByName.get("input-color"),
                     bytesByName.get("depth"),
                     bytesByName.get("object-motion"),
                     bytesByName.get("object-validity"),
                     bytesByName.get("disocclusion"),
                     bytesByName.get("cutout-coverage"),
                     bytesByName.get("reactive"),
+                    bytesByName.get("temporal-output"),
                     submittedCurrent,
                     submittedPrevious,
                     submittedCutoutRadius,
@@ -1755,6 +2627,7 @@ public final class MetalFxManager {
                     "Minecraft validation GPU readback frame={} scenario={} validPixels={} "
                             + "depthValidPixels={} disocclusionPixels={} objectDisocclusionPixels={} "
                             + "cutoutCoveragePixels={} cutoutInteriorPixels={} "
+                            + "cutoutVisibleColorPixels={} "
                             + "cutoutInteriorViolations={} cutoutEdgeBandReactivePixels={} cutoutRadius={} "
                             + "motionMean=({}, {}) expected=({}, {}) error={} "
                             + "motionSpread=({}, {}) maxAbsMotion={} producer={}",
@@ -1766,6 +2639,7 @@ public final class MetalFxManager {
                     metrics.objectDisocclusionPixels,
                     metrics.cutoutCoveragePixels,
                     metrics.cutoutInteriorPixels,
+                    metrics.cutoutVisibleColorPixels,
                     metrics.cutoutInteriorViolations,
                     metrics.cutoutEdgeBandReactivePixels,
                     metrics.cutoutRadius,
@@ -1802,19 +2676,22 @@ public final class MetalFxManager {
 
     private MotionMetrics measureObjectMotion(
             final ValidationFrame requested,
+            final byte[] inputColor,
             final byte[] depth,
             final byte[] objectMotion,
             final byte[] validity,
             final byte[] disocclusion,
             final byte[] cutoutCoverage,
             final byte[] reactive,
+            final byte[] temporalOutput,
             final Matrix4f submittedCurrent,
             final Matrix4f submittedPrevious,
             final int cutoutRadius,
             final MetalEntityMotionCapture.Diagnostics producerDiagnostics
     ) {
         int pixelCount = renderWidth * renderHeight;
-        if (depth == null || depth.length != pixelCount * Float.BYTES
+        if (inputColor == null || inputColor.length != pixelCount * 4
+                || depth == null || depth.length != pixelCount * Float.BYTES
                 || objectMotion == null || objectMotion.length != pixelCount * 4
                 || validity == null || validity.length != pixelCount) {
             throw new IllegalStateException("Object motion validation readback size mismatch");
@@ -1921,9 +2798,13 @@ public final class MetalFxManager {
         // radius is covered, mirroring the kernel's window classification.
         int cutoutCoveragePixels = 0;
         int cutoutInteriorPixels = 0;
+        int cutoutVisibleColorPixels = 0;
         int cutoutInteriorViolations = 0;
         int cutoutEdgeBandReactivePixels = 0;
         int lowReactiveValidityPixels = 0;
+        int handPixels = 0;
+        int handReactivePixels = 0;
+        int transparencyReactivePixels = 0;
         int effectiveRadius = Math.clamp(cutoutRadius, 1, 3);
         for (int pixel = 0; pixel < pixelCount; pixel++) {
             boolean covered = Byte.toUnsignedInt(cutoutCoverage[pixel]) >= 128;
@@ -1936,10 +2817,30 @@ public final class MetalFxManager {
             if (objectValid && reactiveValue < EDGE_REACTIVE_MIN) {
                 lowReactiveValidityPixels++;
             }
+            if (requested.scenario.equals("hand_translucent_motion")) {
+                if (objectValid) {
+                    handPixels++;
+                    if (reactiveValue >= 200) {
+                        handReactivePixels++;
+                    }
+                } else if (!covered && reactiveValue >= 24
+                        && Byte.toUnsignedInt(disocclusion[pixel]) < 128) {
+                    transparencyReactivePixels++;
+                }
+            }
             int x = pixel % renderWidth;
             int y = pixel / renderWidth;
             if (covered) {
                 cutoutCoveragePixels++;
+                int colorOffset = pixel * 4;
+                int first = Byte.toUnsignedInt(inputColor[colorOffset]);
+                int green = Byte.toUnsignedInt(inputColor[colorOffset + 1]);
+                int third = Byte.toUnsignedInt(inputColor[colorOffset + 2]);
+                // Green is byte 1 in both RGBA and BGRA, so the check remains
+                // valid across the two 8-bit color layouts used by the client.
+                if (green >= first + 8 && green >= third + 8) {
+                    cutoutVisibleColorPixels++;
+                }
                 if (allCutoutNeighborsCovered(cutoutCoverage, x, y, renderWidth, renderHeight, effectiveRadius)) {
                     cutoutInteriorPixels++;
                     // Disoccluded pixels are legitimately fully reactive for
@@ -1960,6 +2861,36 @@ public final class MetalFxManager {
             } else if (reactiveValue >= EDGE_REACTIVE_MIN && hasCutoutCoverageNeighbor(
                     cutoutCoverage, x, y, renderWidth, renderHeight, effectiveRadius)) {
                 cutoutEdgeBandReactivePixels++;
+            }
+        }
+        int handVisibleFinalPixels = 0;
+        int transparencyVisibleFinalPixels = 0;
+        if (requested.scenario.equals("hand_translucent_motion")
+                && displayWidth > 0 && displayHeight > 0
+                && temporalOutput.length >= displayWidth * displayHeight * 4) {
+            for (int y = 0; y < displayHeight; y++) {
+                int renderY = Math.min(renderHeight - 1, y * renderHeight / displayHeight);
+                for (int x = 0; x < displayWidth; x++) {
+                    int renderX = Math.min(renderWidth - 1, x * renderWidth / displayWidth);
+                    int renderPixel = renderY * renderWidth + renderX;
+                    int colorOffset = (y * displayWidth + x) * 4;
+                    int first = Byte.toUnsignedInt(temporalOutput[colorOffset]);
+                    int green = Byte.toUnsignedInt(temporalOutput[colorOffset + 1]);
+                    int third = Byte.toUnsignedInt(temporalOutput[colorOffset + 2]);
+                    int highOuter = Math.max(first, third);
+                    int lowOuter = Math.min(first, third);
+                    if (Byte.toUnsignedInt(validity[renderPixel]) >= 128) {
+                        // Gold is channel-order invariant: R and G are bright,
+                        // B is low, so max(R/B) >= G >> min(R/B).
+                        if (highOuter >= green && green >= lowOuter + 12) {
+                            handVisibleFinalPixels++;
+                        }
+                    } else if (Byte.toUnsignedInt(reactive[renderPixel]) >= 24
+                            && first >= green + 8 && third >= green + 8) {
+                        // Purple remains R/B-dominant in either RGBA or BGRA.
+                        transparencyVisibleFinalPixels++;
+                    }
+                }
             }
         }
         boolean passed = switch (requested.scenario) {
@@ -2019,9 +2950,29 @@ public final class MetalFxManager {
                     && maxAbsMotion <= OBJECT_MAX_MOTION;
             case "cutout_leaves", "cutout_grass" -> depthContractPassed
                     && cutoutCoveragePixels > 32
+                    && cutoutVisibleColorPixels >= Math.max(
+                            CUTOUT_VISIBLE_COLOR_MIN,
+                            cutoutCoveragePixels / 100
+                    )
                     && cutoutInteriorPixels > 0
                     && cutoutInteriorViolations == 0
-                    && cutoutEdgeBandReactivePixels > 0;
+                    && cutoutEdgeBandReactivePixels <= Math.max(
+                            CUTOUT_VISIBLE_COLOR_MIN,
+                            cutoutCoveragePixels / 100
+                    );
+            // Pure distant-terrain/sky scene: the controlled entity and
+            // first-person hand are intentionally absent, so object validity
+            // must be empty. The separate 24-frame flicker metric owns the
+            // output-stability assertion; this capture verifies that the
+            // geometry/depth input feeding it is genuinely present.
+            case "lod_horizon", "lod_horizon_hold" -> depthContractPassed
+                    && depthValidPixels > pixelCount / 2;
+            case "hand_translucent_motion" -> depthContractPassed
+                    && handPixels > 1_000
+                    && handReactivePixels >= handPixels * 4 / 5
+                    && handVisibleFinalPixels > 256
+                    && transparencyReactivePixels > 1_000
+                    && transparencyVisibleFinalPixels > 1_000;
             default -> depthContractPassed
                     && validPixels > 0
                     && Double.isFinite(error)
@@ -2040,9 +2991,15 @@ public final class MetalFxManager {
                 lowReactiveValidityPixels,
                 cutoutCoveragePixels,
                 cutoutInteriorPixels,
+                cutoutVisibleColorPixels,
                 cutoutInteriorViolations,
                 cutoutEdgeBandReactivePixels,
                 cutoutRadius,
+                handPixels,
+                handReactivePixels,
+                handVisibleFinalPixels,
+                transparencyReactivePixels,
+                transparencyVisibleFinalPixels,
                 meanX,
                 meanY,
                 expectedX,
@@ -2064,16 +3021,17 @@ public final class MetalFxManager {
             final int height,
             final int radius
     ) {
+        // A window clipped by the framebuffer has unknown coverage outside
+        // the drawable. Match the Metal dilation kernel and classify it as an
+        // edge band rather than a fully covered interior.
+        if (x - radius < 0 || y - radius < 0
+                || x + radius >= width || y + radius >= height) {
+            return false;
+        }
         for (int offsetY = -radius; offsetY <= radius; offsetY++) {
             int sampleY = y + offsetY;
-            if (sampleY < 0 || sampleY >= height) {
-                continue;
-            }
             for (int offsetX = -radius; offsetX <= radius; offsetX++) {
                 int sampleX = x + offsetX;
-                if (sampleX < 0 || sampleX >= width) {
-                    continue;
-                }
                 if (Byte.toUnsignedInt(coverage[sampleY * width + sampleX]) < 128) {
                     return false;
                 }
@@ -2148,7 +3106,8 @@ public final class MetalFxManager {
                     || frame == 42 || frame == 46 || frame == 54 || frame == 62
                     || frame == 74 || frame == 82
                     || frame == 164 || frame == 176 || frame == 188
-                    || frame == 200 || frame == 212 || frame == 224;
+                    || frame == 200 || frame == 212 || frame == 224
+                    || frame == 276;
         }
     }
 
@@ -2160,9 +3119,15 @@ public final class MetalFxManager {
             int lowReactiveValidityPixels,
             int cutoutCoveragePixels,
             int cutoutInteriorPixels,
+            int cutoutVisibleColorPixels,
             int cutoutInteriorViolations,
             int cutoutEdgeBandReactivePixels,
             int cutoutRadius,
+            int handPixels,
+            int handReactivePixels,
+            int handVisibleFinalPixels,
+            int transparencyReactivePixels,
+            int transparencyVisibleFinalPixels,
             double meanX,
             double meanY,
             double expectedX,
@@ -2194,9 +3159,15 @@ public final class MetalFxManager {
                       "lowReactiveValidityPixels": %d,
                       "cutoutCoveragePixels": %d,
                       "cutoutInteriorPixels": %d,
+                      "cutoutVisibleColorPixels": %d,
                       "cutoutInteriorViolations": %d,
                       "cutoutEdgeBandReactivePixels": %d,
                       "cutoutReactiveRadius": %d,
+                      "handPixels": %d,
+                      "handReactivePixels": %d,
+                      "handVisibleFinalPixels": %d,
+                      "transparencyReactivePixels": %d,
+                      "transparencyVisibleFinalPixels": %d,
                       "meanObjectMotionNdc": [%.9f, %.9f],
                       "expectedObjectMotionNdc": [%.9f, %.9f],
                       "error": %.9f,
@@ -2221,9 +3192,15 @@ public final class MetalFxManager {
                     lowReactiveValidityPixels,
                     cutoutCoveragePixels,
                     cutoutInteriorPixels,
+                    cutoutVisibleColorPixels,
                     cutoutInteriorViolations,
                     cutoutEdgeBandReactivePixels,
                     cutoutRadius,
+                    handPixels,
+                    handReactivePixels,
+                    handVisibleFinalPixels,
+                    transparencyReactivePixels,
+                    transparencyVisibleFinalPixels,
                     meanX,
                     meanY,
                     expectedX,
@@ -2303,21 +3280,68 @@ public final class MetalFxManager {
         boolean keepFrameGenerationResources = usesFrameGenerationWorkResolution();
         int targetRenderWidth = sceneWidthInternal(width);
         int targetRenderHeight = sceneHeightInternal(height, width);
-        float frameGenerationScale = frameGenerationOutputScale(width);
         int targetFrameGenerationOutputWidth = keepFrameGenerationResources
-                ? MetalFxConfig.scaledDimension(width, frameGenerationScale) : width;
+                ? MetalFxConfig.frameGenerationWorkWidth(
+                        width, targetRenderWidth, config.frameGenerationOutputWidth
+                ) : width;
+        float frameGenerationScale = targetFrameGenerationOutputWidth / (float) Math.max(1, width);
         int targetFrameGenerationOutputHeight = keepFrameGenerationResources
                 ? MetalFxConfig.scaledDimension(height, frameGenerationScale) : height;
         boolean dimensionsChanged = this.displayWidth != width || this.displayHeight != height
                 || this.renderWidth != targetRenderWidth || this.renderHeight != targetRenderHeight
                 || this.frameGenerationOutputWidth != targetFrameGenerationOutputWidth
                 || this.frameGenerationOutputHeight != targetFrameGenerationOutputHeight;
+        if (dimensionsChanged
+                && this.displayWidth > 0 && this.displayHeight > 0
+                && this.renderWidth > 0 && this.renderHeight > 0) {
+            // release_scalers() drops native MetalFX objects immediately. A
+            // previous MTL4 command buffer may still be executing an encode
+            // through one of those objects, even though Java has advanced to
+            // the resized frame. Drain before replacing targets or releasing
+            // the old scaler/history; otherwise live resize can turn that
+            // encode into a GPU address fault and poison every later submit.
+            device.waitForSubmittedGpuWork();
+            if (config.debug) {
+                Metallum.LOGGER.info(
+                        "MetalFX resize synchronized: display={}x{} -> {}x{}, render={}x{} -> {}x{}",
+                        this.displayWidth,
+                        this.displayHeight,
+                        width,
+                        height,
+                        this.renderWidth,
+                        this.renderHeight,
+                        targetRenderWidth,
+                        targetRenderHeight
+                );
+            }
+        }
         this.displayWidth = width;
         this.displayHeight = height;
         this.renderWidth = targetRenderWidth;
         this.renderHeight = targetRenderHeight;
         this.frameGenerationOutputWidth = targetFrameGenerationOutputWidth;
         this.frameGenerationOutputHeight = targetFrameGenerationOutputHeight;
+        this.frameGenerationInputWidth = keepFrameGenerationResources
+                ? MetalFxConfig.scaledDimension(targetFrameGenerationOutputWidth, config.scale)
+                : targetRenderWidth;
+        this.frameGenerationInputHeight = keepFrameGenerationResources
+                ? MetalFxConfig.scaledDimension(targetFrameGenerationOutputHeight, config.scale)
+                : targetRenderHeight;
+        if (config.debug && dimensionsChanged && keepFrameGenerationResources) {
+            Metallum.LOGGER.info(
+                    "MetalFX target geometry: 3D={}x{}, temporal={}x{}, FG support={}x{}, generated={}x{}, present={}x{}",
+                    targetRenderWidth,
+                    targetRenderHeight,
+                    width,
+                    height,
+                    frameGenerationInputWidth,
+                    frameGenerationInputHeight,
+                    targetFrameGenerationOutputWidth,
+                    targetFrameGenerationOutputHeight,
+                    width,
+                    height
+            );
+        }
         boolean targetUiShaderWrite = !keepFrameGenerationResources;
         if (uiTarget == null || uiTarget.width != width || uiTarget.height != height
                 || uiTargetShaderWrite != targetUiShaderWrite) {
@@ -2341,19 +3365,34 @@ public final class MetalFxManager {
             uiTargetShaderWrite = targetUiShaderWrite;
             dimensionsChanged = true;
         }
+        if (keepFrameGenerationResources && !usesNativeDirectFrameGeneration()) {
+            if (nativeSceneTarget == null
+                    || nativeSceneTarget.width != width
+                    || nativeSceneTarget.height != height) {
+                if (nativeSceneTarget != null) nativeSceneTarget.destroyBuffers();
+                device.withExtraTextureUsage(MetalGpuTexture.USAGE_SHADER_WRITE, () ->
+                        nativeSceneTarget = new TextureTarget(
+                                "MetalFX Native Scene", width, height, false, GpuFormat.RGBA8_UNORM
+                        )
+                );
+                dimensionsChanged = true;
+            }
+        } else if (nativeSceneTarget != null) {
+            nativeSceneTarget.destroyBuffers();
+            nativeSceneTarget = null;
+            dimensionsChanged = true;
+        }
         if (keepFrameGenerationResources) {
             if (sceneOutputTarget == null
                     || sceneOutputTarget.width != targetFrameGenerationOutputWidth
                     || sceneOutputTarget.height != targetFrameGenerationOutputHeight) {
                 if (sceneOutputTarget != null) sceneOutputTarget.destroyBuffers();
-                device.withExtraTextureUsage(MetalGpuTexture.USAGE_SHADER_WRITE, () ->
-                        sceneOutputTarget = new TextureTarget(
-                                "MetalFX FrameGen Scene",
-                                targetFrameGenerationOutputWidth,
-                                targetFrameGenerationOutputHeight,
-                                false,
-                                GpuFormat.RGBA8_UNORM
-                        )
+                sceneOutputTarget = new TextureTarget(
+                        "MetalFX FrameGen Scene",
+                        targetFrameGenerationOutputWidth,
+                        targetFrameGenerationOutputHeight,
+                        false,
+                        GpuFormat.RGBA8_UNORM
                 );
                 dimensionsChanged = true;
             }
@@ -2364,6 +3403,8 @@ public final class MetalFxManager {
         }
         dimensionsChanged |= ensureAuxiliaryTextures();
         if (dimensionsChanged) {
+            this.metalFxScalerEncodeObserved = false;
+            this.frameGenerationEncodeObserved = false;
             // The native scaler cache is keyed by input/output dimensions, so
             // the entries for the previous size are unreachable from here on.
             // Dropping them keeps a drag-resize from stranding one fully
@@ -2489,6 +3530,8 @@ public final class MetalFxManager {
             return;
         }
         runtimeDisabled = true;
+        metalFxScalerEncodeObserved = false;
+        MetalEntityMotionCapture.setEnabled(false);
         frameUsesUpscaledTarget = false;
         disableFrameGenerationInternal(reason);
         Metallum.LOGGER.warn("MetalFX disabled for this session: {}; reverting to native render targets", reason);
@@ -2499,6 +3542,10 @@ public final class MetalFxManager {
         if (sceneOutputTarget != null) {
             sceneOutputTarget.destroyBuffers();
             sceneOutputTarget = null;
+        }
+        if (nativeSceneTarget != null) {
+            nativeSceneTarget.destroyBuffers();
+            nativeSceneTarget = null;
         }
         closeAuxiliaryTextures();
         MetalNativeBridge.metallum_metalfx_shutdown();
@@ -2516,9 +3563,14 @@ public final class MetalFxManager {
         }
         frameGenerationEnabled = false;
         frameGenerationSuspended = false;
+        frameGenerationEncodeObserved = false;
         if (sceneOutputTarget != null) {
             sceneOutputTarget.destroyBuffers();
             sceneOutputTarget = null;
+        }
+        if (nativeSceneTarget != null) {
+            nativeSceneTarget.destroyBuffers();
+            nativeSceneTarget = null;
         }
         MetalNativeBridge.metallum_metalfx_stop_frame_generation();
         if (config.debug) {
@@ -2556,6 +3608,17 @@ public final class MetalFxManager {
         motionInputsPrepared = false;
     }
 
+    private int countAuxiliaryTextures() {
+        return (motionTexture == null ? 0 : 1)
+                + (cameraMotionTexture == null ? 0 : 1)
+                + (objectMotionTexture == null ? 0 : 1)
+                + (objectValidityTexture == null ? 0 : 1)
+                + (disocclusionTexture == null ? 0 : 1)
+                + (reactiveTexture == null ? 0 : 1)
+                + (cutoutReactiveTexture == null ? 0 : 1)
+                + (sceneDepthTexture == null ? 0 : 1);
+    }
+
     private void closeInternal() {
         motionStateStore.reset();
         entityGenerations.clear();
@@ -2569,6 +3632,10 @@ public final class MetalFxManager {
         if (sceneOutputTarget != null) {
             sceneOutputTarget.destroyBuffers();
             sceneOutputTarget = null;
+        }
+        if (nativeSceneTarget != null) {
+            nativeSceneTarget.destroyBuffers();
+            nativeSceneTarget = null;
         }
         MetalNativeBridge.metallum_metalfx_shutdown();
     }
@@ -2591,7 +3658,7 @@ public final class MetalFxManager {
             suspendFrameGenerationInternal("the surface presents in immediate mode (VSync off)");
         }
         if (!frameGenerationEnabled || runtimeDisabled || !frameUsesUpscaledTarget
-                || sceneOutputTarget == null || uiTarget == null
+                || sceneOutputTarget == null || frameNativeSceneTexture == null || uiTarget == null
                 || uiTarget.getColorTexture() != presentedUiTexture
                 || frameDepthTexture == null || motionTexture == null || !motionInputsPrepared) {
             return null;
@@ -2602,11 +3669,12 @@ public final class MetalFxManager {
         }
         return new FrameGenerationInput(
                 sceneColor,
+                frameNativeSceneTexture,
                 presentedUiTexture,
                 frameDepthTexture,
                 motionTexture,
-                renderWidth,
-                renderHeight,
+                frameGenerationInputWidth,
+                frameGenerationInputHeight,
                 pixelJitter.x,
                 pixelJitter.y,
                 frameFieldOfView,
@@ -2629,6 +3697,7 @@ public final class MetalFxManager {
         }
         frameGenerationEnabled = false;
         frameGenerationSuspended = true;
+        frameGenerationEncodeObserved = false;
         // Keep sceneOutputTarget alive until this frame is submitted. The
         // current frame may already contain an encoded MetalFX write to it.
         MetalNativeBridge.metallum_metalfx_stop_frame_generation();
@@ -2639,6 +3708,7 @@ public final class MetalFxManager {
 
     record FrameGenerationInput(
             MetalGpuTexture sceneColor,
+            MetalGpuTexture nativeSceneColor,
             MetalGpuTexture uiColor,
             MetalGpuTexture depth,
             MetalGpuTexture motion,
@@ -2652,6 +3722,28 @@ public final class MetalFxManager {
             float aspectRatio,
             float deltaSeconds,
             boolean reset
+    ) {
+    }
+
+    public record NativeOffDiagnostics(
+            boolean modeOff,
+            long fastPathFrames,
+            int auxiliaryTextureCount,
+            int frameGenerationTargetCount,
+            boolean motionCaptureEnabled
+    ) {
+    }
+
+    public record NativeOffReadbackDiagnostics(
+            boolean requested,
+            boolean pending,
+            boolean completed,
+            boolean passed,
+            int width,
+            int height,
+            long nonZeroRgbPixels,
+            long varyingRgbPixels,
+            long checksum
     ) {
     }
 }

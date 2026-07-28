@@ -51,6 +51,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new ConcurrentHashMap<>();
     private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new ConcurrentHashMap<>();
     private final Map<MslFunctionKey, MemorySegment> functionCache = new ConcurrentHashMap<>();
+    private final Map<StableTerrainSamplerKey, MetalGpuSampler> stableTerrainSamplers = new HashMap<>();
     private final Map<Long, Deque<MemorySegment>> bufferPool = new HashMap<>();
     private static final int MAX_POOLED_BUFFERS_PER_SIZE = 16;
     private ShaderSource activeShaderSource;
@@ -61,6 +62,12 @@ final class MetalDevice implements GpuDeviceBackend {
     private String psoArchivePath;
     private static final boolean ASYNC_PRECOMPILE =
             Boolean.parseBoolean(System.getProperty("metallum.opt.asyncPrecompile", "false"));
+    private static final boolean STABLE_TERRAIN_SAMPLER =
+            !"false".equalsIgnoreCase(System.getProperty(
+                    "metallum.metalfx.stableTerrainSampler",
+                    "true"
+            ));
+    private boolean stableTerrainSamplerLogged;
     /**
      * Master kill switch for every Metal 4 path (migration spec M1, appendix C).
      * Metal 4 code is a parallel branch: the Metal 3 path stays byte-for-byte
@@ -82,8 +89,13 @@ final class MetalDevice implements GpuDeviceBackend {
      */
     private static final boolean METAL4_PRESENT =
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Present", "false"));
+    private static final boolean METAL4_MAIN_QUEUE_PILOT =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainQueuePilot", "false"));
+    private static final boolean METAL4_MAIN_RENDERER =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainRenderer", "false"));
     /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
     private final boolean metal4Available;
+    private final boolean metal4MainRenderer;
     /**
      * Explicit residency tracking (spec M3). MTLResidencySet is macOS 15 / iOS 18
      * and needs no Metal 4, so this switch is independent of the master one: the
@@ -153,10 +165,25 @@ final class MetalDevice implements GpuDeviceBackend {
         this.cocoaView = cocoaView;
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
+        this.metal4Available = METAL4_REQUESTED
+                && MetalNativeBridge.metallum_metal4_supported(metalDeviceHandle) != 0;
+        boolean metal4MainRenderer = this.metal4Available && METAL4_MAIN_RENDERER;
+        this.metal4MainRenderer = metal4MainRenderer;
         // Before metallum_init_pipelines and before any texture or buffer exists:
         // resources created earlier would never enter the set.
-        if (RESIDENCY_SET && !this.commandQueue.enableResidencySet(metalDeviceHandle)) {
+        if ((RESIDENCY_SET || metal4MainRenderer)
+                && !this.commandQueue.enableResidencySet(metalDeviceHandle)) {
+            if (metal4MainRenderer) {
+                throw new IllegalStateException("Metal 4 main renderer requires explicit residency");
+            }
             Metallum.LOGGER.warn("[metallum] residency set unavailable; residency stays automatic");
+        }
+        if (metal4MainRenderer
+                && MetalNativeBridge.metallum_metal4_main_renderer_enable(
+                        metalDeviceHandle,
+                        metalLayer
+                ) == 0) {
+            throw new IllegalStateException("Metal 4 main renderer initialization failed");
         }
         MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
         // Must agree with MetalCommandEncoder.DEFERRED_DEPTH_STORE before the
@@ -168,21 +195,32 @@ final class MetalDevice implements GpuDeviceBackend {
         // Metal 4 capability gate. Queried once here so every Metal 4 sub-switch
         // can just AND against it; the native side folds the compile-time
         // #available check into the same answer.
-        this.metal4Available = METAL4_REQUESTED
-                && MetalNativeBridge.metallum_metal4_supported(metalDeviceHandle) != 0;
-        boolean metal4Compiler = this.metal4Available && METAL4_COMPILER;
+        // MetalFX's Metal 4 scaler/interpolator factories require an
+        // MTL4Compiler. Enabling the main renderer therefore implies the
+        // compiler even when its independent pilot switch is absent.
+        boolean metal4Compiler = this.metal4Available && (METAL4_COMPILER || metal4MainRenderer);
         MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4Compiler ? 1 : 0);
         // Depends on the compiler switch: the MTL4 frame interpolator factory
         // takes an MTL4Compiler, so the present pilot cannot run without it.
-        boolean metal4Present = metal4Compiler && METAL4_PRESENT;
+        boolean metal4Present = metal4Compiler && (METAL4_PRESENT || metal4MainRenderer);
         MetalNativeBridge.metallum_set_metal4_present_enabled(metal4Present ? 1 : 0);
+        boolean metal4MainQueuePilot = this.metal4Available && METAL4_MAIN_QUEUE_PILOT;
+        if (metal4MainQueuePilot
+                && MetalNativeBridge.metallum_metal4_main_queue_pilot_validate(metalDeviceHandle) == 0) {
+            throw new IllegalStateException("Metal 4 main-queue pilot validation failed");
+        }
         MetalNativeBridge.metallum_set_metal4_barrier_enabled(METAL4_BARRIER ? 1 : 0);
+        MetalNativeBridge.metallum_set_gpu_encoder_timing_enabled(
+                Boolean.getBoolean("metallum.validation.gpuPassTiming") ? 1 : 0
+        );
         Metallum.LOGGER.info(
-                "[Metallum] Metal 4: requested={} available={} compiler={} present={} barrier={}",
+                "[Metallum] Metal 4: requested={} available={} compiler={} present={} mainQueuePilot={} mainRenderer={} barrier={}",
                 METAL4_REQUESTED,
                 this.metal4Available,
                 metal4Compiler,
                 metal4Present,
+                metal4MainQueuePilot,
+                metal4MainRenderer,
                 METAL4_BARRIER
         );
         if (PSO_ARCHIVE) {
@@ -222,6 +260,10 @@ final class MetalDevice implements GpuDeviceBackend {
         return new MetalSurface(this, this.metalLayer);
     }
 
+    MemorySegment metalLayerHandle() {
+        return this.metalLayer;
+    }
+
     @Override
     public @NonNull MetalCommandEncoder createCommandEncoder() {
         return this.commandEncoder;
@@ -237,6 +279,39 @@ final class MetalDevice implements GpuDeviceBackend {
             final @NonNull OptionalDouble maxLod
     ) {
         return new MetalGpuSampler(this, addressModeU, addressModeV, minFilter, magFilter, maxAnisotropy, maxLod);
+    }
+
+    MetalGpuSampler stableTerrainSampler(final MetalGpuSampler source) {
+        if (!STABLE_TERRAIN_SAMPLER
+                || source.getMinFilter() == FilterMode.LINEAR
+                && source.getMagFilter() == FilterMode.LINEAR) {
+            return source;
+        }
+        StableTerrainSamplerKey key = new StableTerrainSamplerKey(
+                source.getAddressModeU(),
+                source.getAddressModeV(),
+                source.getMaxAnisotropy(),
+                source.getMaxLod()
+        );
+        MetalGpuSampler derived = stableTerrainSamplers.computeIfAbsent(
+                key,
+                ignored -> new MetalGpuSampler(
+                        this,
+                        key.addressModeU(),
+                        key.addressModeV(),
+                        FilterMode.LINEAR,
+                        FilterMode.LINEAR,
+                        key.maxAnisotropy(),
+                        key.maxLod()
+                )
+        );
+        if (!stableTerrainSamplerLogged) {
+            stableTerrainSamplerLogged = true;
+            Metallum.LOGGER.info(
+                    "MetalFX stable terrain sampler engaged: min/mag=LINEAR, mip/address/aniso/LOD preserved"
+            );
+        }
+        return derived;
     }
 
     @Override
@@ -355,6 +430,10 @@ final class MetalDevice implements GpuDeviceBackend {
         return this.prewarmExecutor != null;
     }
 
+    boolean metal4MainRendererEnabled() {
+        return this.metal4MainRenderer;
+    }
+
     /**
      * Queues work on the prewarm thread; silently dropped once the executor
      * is shut down (device close), when the render thread finishes the work
@@ -387,6 +466,9 @@ final class MetalDevice implements GpuDeviceBackend {
     @Override
     public void clearPipelineCache() {
         this.waitForSubmittedGpuWork();
+        this.stableTerrainSamplers.values().forEach(MetalGpuSampler::closeImmediately);
+        this.stableTerrainSamplers.clear();
+        this.stableTerrainSamplerLogged = false;
         synchronized (COMPILE_CHAIN_LOCK) {
             this.pipelineCacheGeneration++;
             this.compiledPipelines.values().forEach(MetalCompiledRenderPipeline::close);
@@ -548,6 +630,14 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     private record ShaderCompilationKey(Identifier id, ShaderType type, ShaderDefines defines) {
+    }
+
+    private record StableTerrainSamplerKey(
+            AddressMode addressModeU,
+            AddressMode addressModeV,
+            int maxAnisotropy,
+            OptionalDouble maxLod
+    ) {
     }
 
     private record MslFunctionKey(String msl, String entryPoint) {

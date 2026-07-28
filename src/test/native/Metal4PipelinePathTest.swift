@@ -285,7 +285,9 @@ private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
         guard let commandBuffer = queue.makeCommandBuffer() else {
             try fail("could not allocate the \(label) command buffer")
         }
-        metallum_MTLCommandBuffer_commit(commandBuffer)
+        // The shipping export accepts the opaque pointer representation used
+        // by the Java FFM bridge, not Swift's protocol-typed command buffer.
+        metallum_MTLCommandBuffer_commit(Unmanaged.passUnretained(commandBuffer).toOpaque())
         commandBuffer.waitUntilCompleted()
     }
 
@@ -971,6 +973,215 @@ private func runBarrierAppendTest(device: MTLDevice, queue: MTLCommandQueue) thr
     try barrierAppendTest(device: device, queue: queue)
 }
 
+@available(macOS 26.0, *)
+private func shippingMetal4SpatialTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    metallum_set_metal4_compiler_enabled(1)
+    try check(metallum_metal4_main_renderer_enable(device, nil) != 0,
+              "the shipping Metal 4 main renderer could not be enabled for Spatial validation")
+
+    func makeShippingTexture(
+        format: MTLPixelFormat,
+        width: Int,
+        height: Int,
+        label: String
+    ) throws -> (UnsafeMutableRawPointer, MTLTexture) {
+        guard let pointer = label.withCString({ labelPointer in
+            metallum_create_texture_2d(
+                device,
+                format,
+                UInt64(width),
+                UInt64(height),
+                1,
+                1,
+                0,
+                [.shaderRead, .shaderWrite, .renderTarget],
+                .private,
+                labelPointer
+            )
+        }) else {
+            try fail("could not allocate \(label)")
+        }
+        guard let texture = Unmanaged<AnyObject>.fromOpaque(pointer)
+                .takeUnretainedValue() as? MTLTexture else {
+            metallum_release_object(pointer)
+            try fail("\(label) did not resolve to an MTLTexture")
+        }
+        return (pointer, texture)
+    }
+
+    let (inputPointer, input) = try makeShippingTexture(
+        format: .rgba8Unorm,
+        width: 64,
+        height: 64,
+        label: "shipping Metal 4 Spatial input"
+    )
+    let (outputPointer, output) = try makeShippingTexture(
+        format: .rgba8Unorm,
+        width: 128,
+        height: 128,
+        label: "shipping Metal 4 Spatial output"
+    )
+    defer {
+        metallum_release_object(inputPointer)
+        metallum_release_object(outputPointer)
+    }
+
+    guard let initialize = queue.makeCommandBuffer() else {
+        try fail("could not create the Spatial input initialization command buffer")
+    }
+    let renderPass = MTLRenderPassDescriptor()
+    renderPass.colorAttachments[0].texture = input
+    renderPass.colorAttachments[0].loadAction = .clear
+    renderPass.colorAttachments[0].clearColor = MTLClearColor(
+        red: 0.25,
+        green: 0.5,
+        blue: 0.75,
+        alpha: 1.0
+    )
+    renderPass.colorAttachments[0].storeAction = .store
+    guard let initializeEncoder = initialize.makeRenderCommandEncoder(descriptor: renderPass) else {
+        try fail("could not encode the Spatial input initialization")
+    }
+    initializeEncoder.endEncoding()
+    initialize.commit()
+    initialize.waitUntilCompleted()
+    try check(initialize.status == .completed,
+              "Spatial input initialization failed: \(String(describing: initialize.error))")
+
+    let leasePointer: UnsafeMutableRawPointer? = "shipping Metal 4 Spatial".withCString { label in
+        metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
+    }
+    guard let leasePointer else {
+        try fail("the shipping bridge did not provide a Metal 4 command-buffer lease")
+    }
+    defer { metallum_release_object(leasePointer) }
+    guard let fence = device.makeFence() else {
+        try fail("could not create the Spatial synchronization fence")
+    }
+    var auxiliaryBefore: UInt64 = 0
+    var spatialBefore: UInt64 = 0
+    var temporalBefore: UInt64 = 0
+    var frameGenerationInputBefore: UInt64 = 0
+    try check(metallum_metal4_metalfx_stats(
+        &auxiliaryBefore,
+        &spatialBefore,
+        &temporalBefore,
+        &frameGenerationInputBefore
+    ) != 0,
+              "the Metal 4 MetalFX counters were unavailable before the Spatial encode")
+    let rejectedWithoutFence = metallumMetalFxEncodeEntry(
+        leasePointer,
+        device,
+        input,
+        nil,
+        nil,
+        nil,
+        output,
+        nil,
+        nil,
+        nil,
+        nil,
+        0.0,
+        0.0,
+        64,
+        64,
+        1,
+        1,
+        0
+    )
+    try check(rejectedWithoutFence == 0,
+              "the shipping Metal 4 Spatial entry accepted a nil synchronization fence")
+    var auxiliaryAfterRejection: UInt64 = 0
+    var spatialAfterRejection: UInt64 = 0
+    var temporalAfterRejection: UInt64 = 0
+    var frameGenerationInputAfterRejection: UInt64 = 0
+    try check(metallum_metal4_metalfx_stats(
+        &auxiliaryAfterRejection,
+        &spatialAfterRejection,
+        &temporalAfterRejection,
+        &frameGenerationInputAfterRejection
+    ) != 0
+            && auxiliaryAfterRejection == auxiliaryBefore
+            && spatialAfterRejection == spatialBefore
+            && temporalAfterRejection == temporalBefore
+            && frameGenerationInputAfterRejection == frameGenerationInputBefore,
+              "a rejected nil-fence Spatial encode changed the Metal 4 path counters")
+    let encoded = metallumMetalFxEncodeEntry(
+        leasePointer,
+        device,
+        input,
+        nil,
+        nil,
+        nil,
+        output,
+        nil,
+        nil,
+        nil,
+        fence,
+        0.0,
+        0.0,
+        64,
+        64,
+        1,
+        1,
+        0
+    )
+    try check(encoded != 0,
+              "the shipping metallum_metalfx_encode entry did not select MTL4FXSpatialScaler")
+    metallum_MTLCommandBuffer_commit(leasePointer)
+    try check(metallum_MTLCommandBuffer_waitUntilCompleted(leasePointer, 5_000) == 0,
+              "the shipping Metal 4 Spatial command buffer did not complete")
+    try check(metallum_MTLCommandBuffer_completedSuccessfully(leasePointer) != 0,
+              "the shipping Metal 4 Spatial command buffer completed with an error")
+
+    var auxiliary: UInt64 = 0
+    var spatial: UInt64 = 0
+    var temporal: UInt64 = 0
+    var frameGenerationInput: UInt64 = 0
+    try check(metallum_metal4_metalfx_stats(
+        &auxiliary,
+        &spatial,
+        &temporal,
+        &frameGenerationInput
+    ) != 0 && spatial > 0,
+              "the Metal 4 MetalFX counters did not record a Spatial encode")
+
+    guard let readback = device.makeBuffer(length: output.width * output.height * 4,
+                                            options: .storageModeShared),
+          let readbackCommand = queue.makeCommandBuffer(),
+          let blit = readbackCommand.makeBlitCommandEncoder() else {
+        try fail("could not allocate the Spatial output readback")
+    }
+    blit.copy(
+        from: output,
+        sourceSlice: 0,
+        sourceLevel: 0,
+        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+        sourceSize: MTLSize(width: output.width, height: output.height, depth: 1),
+        to: readback,
+        destinationOffset: 0,
+        destinationBytesPerRow: output.width * 4,
+        destinationBytesPerImage: output.width * output.height * 4
+    )
+    blit.endEncoding()
+    readbackCommand.commit()
+    readbackCommand.waitUntilCompleted()
+    try check(readbackCommand.status == .completed,
+              "Spatial output readback failed: \(String(describing: readbackCommand.error))")
+    let bytes = readback.contents().assumingMemoryBound(to: UInt8.self)
+    try check(bytes[0] > 0 && bytes[1] > 0 && bytes[2] > 0 && bytes[3] > 0,
+              "the shipping Metal 4 Spatial output was blank")
+    print("Metal 4 Spatial path: shipping main-queue lease, MTL4FXSpatialScaler, residency and GPU readback all functional")
+}
+
+private func runShippingMetal4SpatialTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 26.0, *) else {
+        print("shipping Metal 4 Spatial test skipped: needs macOS 26")
+        return
+    }
+    try shippingMetal4SpatialTest(device: device, queue: queue)
+}
+
 private func runPathTest() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
         try fail("MTLCreateSystemDefaultDevice returned nil")
@@ -1123,7 +1334,11 @@ private func runPathTest() throws {
     // (9) M6-B: appended consumer barriers must not change rendering.
     try runBarrierAppendTest(device: device, queue: queue)
 
-    print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, an unregistered library falls back cleanly, the pipeline data set archive flushes on both a cold and a warm launch, and the residency set tracks native allocations")
+    // (10) The production Spatial export must accept the same opaque Metal 4
+    // lease as Minecraft and execute a real MTL4FXSpatialScaler encode.
+    try runShippingMetal4SpatialTest(device: device, queue: queue)
+
+    print("Metal 4 path test passed: MTL4Compiler pipelines render identically to Metal 3 through the shipping export, an unregistered library falls back cleanly, the pipeline data set archive flushes on both a cold and a warm launch, the residency set tracks native allocations, and the shipping MTL4FX Spatial path produces a nonblank GPU readback")
 }
 
 // Multi-file compile: no top-level code, so the entry point is explicit (same

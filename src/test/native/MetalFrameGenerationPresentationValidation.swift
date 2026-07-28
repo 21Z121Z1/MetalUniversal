@@ -146,6 +146,7 @@ private final class ValidationRunner {
         inputHeight: Int
     ) throws -> (
         scene: MTLTexture,
+        nativeScene: MTLTexture,
         ui: MTLTexture,
         depth: MTLTexture,
         motion: MTLTexture
@@ -155,6 +156,7 @@ private final class ValidationRunner {
             try makeTexture(
                 format: .bgra8Unorm, width: sceneWidth, height: sceneHeight, usage: colorUsage
             ),
+            try makeTexture(format: .bgra8Unorm, width: uiWidth, height: uiHeight, usage: colorUsage),
             try makeTexture(format: .bgra8Unorm, width: uiWidth, height: uiHeight, usage: colorUsage),
             try makeTexture(
                 format: .depth32Float,
@@ -172,7 +174,13 @@ private final class ValidationRunner {
     }
 
     private func clearInputs(
-        _ inputs: (scene: MTLTexture, ui: MTLTexture, depth: MTLTexture, motion: MTLTexture),
+        _ inputs: (
+            scene: MTLTexture,
+            nativeScene: MTLTexture,
+            ui: MTLTexture,
+            depth: MTLTexture,
+            motion: MTLTexture
+        ),
         frame: Int,
         commandBuffer: MTLCommandBuffer
     ) throws {
@@ -190,6 +198,18 @@ private final class ValidationRunner {
             throw PresentationValidationError.failed("Could not encode source clear")
         }
         sceneEncoder.endEncoding()
+
+        let nativeScenePass = MTLRenderPassDescriptor()
+        nativeScenePass.colorAttachments[0].texture = inputs.nativeScene
+        nativeScenePass.colorAttachments[0].loadAction = .clear
+        nativeScenePass.colorAttachments[0].storeAction = .store
+        nativeScenePass.colorAttachments[0].clearColor = scenePass.colorAttachments[0].clearColor
+        guard let nativeSceneEncoder = commandBuffer.makeRenderCommandEncoder(
+            descriptor: nativeScenePass
+        ) else {
+            throw PresentationValidationError.failed("Could not encode native source clear")
+        }
+        nativeSceneEncoder.endEncoding()
 
         let depthPass = MTLRenderPassDescriptor()
         depthPass.depthAttachment.texture = inputs.depth
@@ -234,44 +254,66 @@ private final class ValidationRunner {
 
     private func drivePresentation() throws {
         // Let WindowServer attach the newly ordered window before the first
-        // source is submitted. Drawables received during this startup edge can
-        // legitimately call their handler with presentedTime == 0 and must
-        // remain failures rather than being counted as warm-up successes.
+        // source is submitted.
         Thread.sleep(forTimeInterval: 0.5)
+        try primeLayerPresentation()
         var displayWidth = 1708
         var displayHeight = 960
         var sceneWidth = 1280
         var sceneHeight = 718
         var inputWidth = 858
         var inputHeight = 482
+        var sourceInputWidth = 1512
+        var sourceInputHeight = 867
         var inputs = try makeInputs(
             sceneWidth: sceneWidth,
             sceneHeight: sceneHeight,
             uiWidth: displayWidth,
             uiHeight: displayHeight,
-            inputWidth: inputWidth,
-            inputHeight: inputHeight
+            inputWidth: sourceInputWidth,
+            inputHeight: sourceInputHeight
         )
         guard let presenter = MetalFrameGenerationPresenter(
             device: device,
             layer: layer,
             sceneColor: inputs.scene,
+            nativeSceneColor: inputs.nativeScene,
             uiColor: inputs.ui,
             depth: inputs.depth,
-            motion: inputs.motion
+            motion: inputs.motion,
+            inputWidth: inputWidth,
+            inputHeight: inputHeight
         ) else {
             throw PresentationValidationError.failed("Could not create frame-generation presenter")
         }
         self.presenter = presenter
 
-        let warmupSourceCount = 10
-        let measuredSourceCount = 60
-        for sourceIndex in 0..<(warmupSourceCount + measuredSourceCount) {
-            let measuredFrame = sourceIndex - warmupSourceCount
-            if measuredFrame == measuredSourceCount / 2 {
+        let initialWarmupSourceCount = 10
+        let steadySourceCountPerPhase = 30
+        let resizeWarmupSourceCount = 10
+        let resizeSourceIndex = initialWarmupSourceCount + steadySourceCountPerPhase
+        let totalSourceCount = initialWarmupSourceCount
+                + steadySourceCountPerPhase
+                + resizeWarmupSourceCount
+                + steadySourceCountPerPhase
+        for sourceIndex in 0..<totalSourceCount {
+            if sourceIndex == resizeSourceIndex {
                 guard presenter.waitUntilIdle(timeout: 3.0) else {
                     throw PresentationValidationError.failed(
                         "Presenter did not drain before resize"
+                    )
+                }
+                // Ownership ends at real-present GPU completion, which can
+                // precede WindowServer's presented callback. Do not resize the
+                // layer under the last pre-resize drawable: that would turn a
+                // valid steady frame into a synthetic presentedTime==0 failure.
+                guard waitForPresentationCallbacks(
+                    presenter: presenter,
+                    throughSourceFrameID: UInt64(sourceIndex),
+                    timeout: 1.0
+                ) else {
+                    throw PresentationValidationError.failed(
+                        "Pre-resize presented callbacks did not settle"
                     )
                 }
                 displayWidth = 1600
@@ -280,13 +322,15 @@ private final class ValidationRunner {
                 sceneHeight = 720
                 inputWidth = 858
                 inputHeight = 482
+                sourceInputWidth = 1400
+                sourceInputHeight = 788
                 inputs = try makeInputs(
                     sceneWidth: sceneWidth,
                     sceneHeight: sceneHeight,
                     uiWidth: displayWidth,
                     uiHeight: displayHeight,
-                    inputWidth: inputWidth,
-                    inputHeight: inputHeight
+                    inputWidth: sourceInputWidth,
+                    inputHeight: sourceInputHeight
                 )
                 DispatchQueue.main.sync {
                     self.window.setContentSize(NSSize(width: displayWidth / 2, height: displayHeight / 2))
@@ -307,12 +351,18 @@ private final class ValidationRunner {
                 throw PresentationValidationError.failed("Could not create input command buffer")
             }
             try clearInputs(inputs, frame: sourceIndex, commandBuffer: commandBuffer)
+            let commandBufferPointer = UnsafeMutableRawPointer(
+                Unmanaged.passUnretained(commandBuffer).toOpaque()
+            )
             let accepted = presenter.encode(
-                commandBuffer: commandBuffer,
+                commandBufferPointer: commandBufferPointer,
                 sceneColor: inputs.scene,
+                nativeSceneColor: inputs.nativeScene,
                 uiColor: inputs.ui,
                 depth: inputs.depth,
                 motion: inputs.motion,
+                inputWidth: inputWidth,
+                inputHeight: inputHeight,
                 jitterX: 0.0,
                 jitterY: 0.0,
                 fieldOfView: 70.0,
@@ -320,7 +370,7 @@ private final class ValidationRunner {
                 farPlane: 1000.0,
                 aspectRatio: Float(displayWidth) / Float(displayHeight),
                 sourceDeltaSeconds: 1.0 / 60.0,
-                reset: sourceIndex == 0 || measuredFrame == 5,
+                reset: sourceIndex == 0 || sourceIndex == resizeSourceIndex,
                 globalFence: nil
             )
             guard accepted == 1 else {
@@ -331,6 +381,15 @@ private final class ValidationRunner {
         guard presenter.waitUntilIdle(timeout: 3.0) else {
             throw PresentationValidationError.failed(
                 "Final source frames did not reach terminal ownership states"
+            )
+        }
+        guard waitForPresentationCallbacks(
+            presenter: presenter,
+            throughSourceFrameID: UInt64(totalSourceCount),
+            timeout: 1.0
+        ) else {
+            throw PresentationValidationError.failed(
+                "Final presented callbacks did not settle"
             )
         }
 
@@ -345,13 +404,105 @@ private final class ValidationRunner {
         let shutdownStart = CACurrentMediaTime()
         presenter.shutdown()
         let shutdownDuration = CACurrentMediaTime() - shutdownStart
+        guard layer.displaySyncEnabled else {
+            throw PresentationValidationError.failed(
+                "Frame-generation shutdown did not restore the ordinary VSync present path"
+            )
+        }
+        guard !layer.allowsNextDrawableTimeout else {
+            throw PresentationValidationError.failed(
+                "Frame-generation shutdown retained presenter-owned drawable policy"
+            )
+        }
         self.presenter = nil
         try validateAndWrite(
             timeline: timeline,
-            warmupSourceCount: warmupSourceCount,
-            measuredSourceCount: measuredSourceCount,
+            initialWarmupSourceCount: initialWarmupSourceCount,
+            steadySourceCountPerPhase: steadySourceCountPerPhase,
+            resizeWarmupSourceCount: resizeWarmupSourceCount,
+            preferredFrameLatency: CFTimeInterval(
+                metalFrameGenerationPreferredFrameLatency
+            ),
             shutdownDuration: shutdownDuration
         )
+    }
+
+    /// Frame generation takes over a CAMetalLayer that Minecraft has already
+    /// presented menus and loading screens through. Reproduce that production
+    /// precondition and prove the window is actually composited before attaching
+    /// CAMetalDisplayLink; otherwise the first few drawables of a never-presented
+    /// test layer report presentedTime == 0 independently of the presenter path.
+    private func primeLayerPresentation() throws {
+        for attempt in 1...12 {
+            guard let drawable = layer.nextDrawable(),
+                  let commandBuffer = queue.makeCommandBuffer() else {
+                Thread.sleep(forTimeInterval: 1.0 / 120.0)
+                continue
+            }
+            let descriptor = MTLRenderPassDescriptor()
+            descriptor.colorAttachments[0].texture = drawable.texture
+            descriptor.colorAttachments[0].loadAction = .clear
+            descriptor.colorAttachments[0].storeAction = .store
+            descriptor.colorAttachments[0].clearColor = MTLClearColor(
+                red: 0.02,
+                green: 0.03,
+                blue: 0.05,
+                alpha: 1.0
+            )
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(
+                descriptor: descriptor
+            ) else {
+                throw PresentationValidationError.failed(
+                    "Could not encode CAMetalLayer priming frame"
+                )
+            }
+            encoder.endEncoding()
+            let presented = DispatchSemaphore(value: 0)
+            let resultLock = NSLock()
+            var presentedTime: CFTimeInterval = 0.0
+            drawable.addPresentedHandler { completedDrawable in
+                resultLock.lock()
+                presentedTime = completedDrawable.presentedTime
+                resultLock.unlock()
+                presented.signal()
+            }
+            commandBuffer.present(drawable)
+            commandBuffer.commit()
+            guard presented.wait(timeout: .now() + .seconds(1)) == .success else {
+                throw PresentationValidationError.failed(
+                    "CAMetalLayer priming present \(attempt) did not complete"
+                )
+            }
+            resultLock.lock()
+            let visible = presentedTime.isFinite && presentedTime > 0.0
+            resultLock.unlock()
+            if visible {
+                return
+            }
+            Thread.sleep(forTimeInterval: 1.0 / 120.0)
+        }
+        throw PresentationValidationError.failed(
+            "CAMetalLayer never produced a WindowServer-visible priming frame"
+        )
+    }
+
+    private func waitForPresentationCallbacks(
+        presenter: MetalFrameGenerationPresenter,
+        throughSourceFrameID: UInt64,
+        timeout: CFTimeInterval
+    ) -> Bool {
+        let deadline = CACurrentMediaTime() + timeout
+        repeat {
+            let entries = presenter.validationTimelineSnapshot().filter {
+                $0.sourceFrameID == throughSourceFrameID
+            }
+            if entries.contains(where: { $0.frameKind == "real" })
+                    && entries.allSatisfy({ $0.outcome != "submitted" }) {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.005)
+        } while CACurrentMediaTime() < deadline
+        return false
     }
 
     private func diagnosticRecord(_ item: MetalFrameGenerationDiagnosticSnapshot) -> [String: Any] {
@@ -396,26 +547,65 @@ private final class ValidationRunner {
 
     private func validateAndWrite(
         timeline: [MetalFrameGenerationDiagnosticSnapshot],
-        warmupSourceCount: Int,
-        measuredSourceCount: Int,
+        initialWarmupSourceCount: Int,
+        steadySourceCountPerPhase: Int,
+        resizeWarmupSourceCount: Int,
+        preferredFrameLatency: CFTimeInterval,
         shutdownDuration: CFTimeInterval
     ) throws {
+        let preResizeSteadyRange = UInt64(initialWarmupSourceCount + 1)
+                ... UInt64(initialWarmupSourceCount + steadySourceCountPerPhase)
+        let postResizeSteadyStart = initialWarmupSourceCount
+                + steadySourceCountPerPhase
+                + resizeWarmupSourceCount
+                + 1
+        let postResizeSteadyRange = UInt64(postResizeSteadyStart)
+                ... UInt64(postResizeSteadyStart + steadySourceCountPerPhase - 1)
+        let steadyRanges = [
+            ("pre-resize", preResizeSteadyRange),
+            ("post-resize", postResizeSteadyRange)
+        ]
+        let measuredSourceCount = steadySourceCountPerPhase * steadyRanges.count
+        func isMeasuredSource(_ sourceFrameID: UInt64) -> Bool {
+            steadyRanges.contains { $0.1.contains(sourceFrameID) }
+        }
+
+        let measuredTimeline = timeline.filter { isMeasuredSource($0.sourceFrameID) }
+        let nonPresentedMeasured = measuredTimeline.filter { $0.outcome != "presented" }
+        guard nonPresentedMeasured.isEmpty else {
+            let failures = nonPresentedMeasured.map {
+                "\($0.sourceFrameID)/\($0.frameKind)=\($0.outcome)"
+            }.joined(separator: ",")
+            throw PresentationValidationError.failed(
+                "Steady-state presentation failures: \(failures)"
+            )
+        }
         let presented = timeline.filter {
             $0.outcome == "presented"
-                && $0.sourceFrameID > UInt64(warmupSourceCount)
+                && isMeasuredSource($0.sourceFrameID)
         }
         let real = presented.filter { $0.frameKind == "real" }
         let generated = presented.filter { $0.frameKind == "generated" }
-        let minimumPresentedCount = Int(Double(measuredSourceCount) * 0.8)
-        guard real.count >= minimumPresentedCount else {
+        guard real.count == measuredSourceCount else {
             throw PresentationValidationError.failed(
-                "Expected at least \(minimumPresentedCount) presented real frames, found \(real.count)"
+                "Expected \(measuredSourceCount) steady real frames, found \(real.count)"
             )
         }
-        guard generated.count >= minimumPresentedCount else {
+        guard generated.count == measuredSourceCount else {
             throw PresentationValidationError.failed(
-                "Expected at least \(minimumPresentedCount) generated presentations, found \(generated.count)"
+                "Expected \(measuredSourceCount) steady generated frames, found \(generated.count)"
             )
+        }
+        for (_, range) in steadyRanges {
+            for sourceID in range {
+                let source = presented.filter { $0.sourceFrameID == sourceID }
+                guard source.filter({ $0.frameKind == "real" }).count == 1,
+                      source.filter({ $0.frameKind == "generated" }).count == 1 else {
+                    throw PresentationValidationError.failed(
+                        "Source \(sourceID) did not present exactly one generated/real pair"
+                    )
+                }
+            }
         }
         guard shutdownDuration < 2.0 else {
             throw PresentationValidationError.failed("Shutdown took \(shutdownDuration)s")
@@ -435,12 +625,15 @@ private final class ValidationRunner {
             )
         }
 
-        func averagePositiveInterval(_ values: [CFTimeInterval]) -> CFTimeInterval {
+        func positiveIntervals(_ values: [CFTimeInterval]) -> [CFTimeInterval] {
             let ordered = values.sorted()
-            let intervals = zip(ordered.dropFirst(), ordered).compactMap { current, previous in
+            return zip(ordered.dropFirst(), ordered).compactMap { current, previous in
                 let delta = current - previous
                 return delta.isFinite && delta > 0.0 ? delta : nil
             }
+        }
+
+        func averageInterval(_ intervals: [CFTimeInterval]) -> CFTimeInterval {
             return intervals.isEmpty ? 0.0 : intervals.reduce(0.0, +) / Double(intervals.count)
         }
 
@@ -451,24 +644,56 @@ private final class ValidationRunner {
             return ordered[min(max(index, 0), ordered.count - 1)]
         }
 
-        let sourceInterval = averagePositiveInterval(real.map(\.presentedTime))
-        let presentInterval = averagePositiveInterval(presented.map(\.presentedTime))
+        let sourceIntervals = steadyRanges.flatMap { _, range in
+            positiveIntervals(real.filter {
+                range.contains($0.sourceFrameID)
+            }.map(\.presentedTime))
+        }
+        let presentIntervals = steadyRanges.flatMap { _, range in
+            positiveIntervals(presented.filter {
+                range.contains($0.sourceFrameID)
+            }.map(\.presentedTime))
+        }
+        let sampledUpdateIntervals = steadyRanges.flatMap { _, range in
+            positiveIntervals(measuredTimeline.filter {
+                range.contains($0.sourceFrameID)
+            }.map(\.targetTimestamp))
+        }
+        let sourceInterval = averageInterval(sourceIntervals)
+        let presentInterval = averageInterval(presentIntervals)
         let sourceFramesPerSecond = sourceInterval > 0.0 ? 1.0 / sourceInterval : 0.0
         let presentedFramesPerSecond = presentInterval > 0.0 ? 1.0 / presentInterval : 0.0
-        let sampledUpdateInterval = averagePositiveInterval(timeline.map(\.targetTimestamp))
+        let sampledUpdateInterval = averageInterval(sampledUpdateIntervals)
         let sampledDisplayUpdatesPerSecond = sampledUpdateInterval > 0.0
             ? 1.0 / sampledUpdateInterval
             : 0.0
+        let steadyPhaseRates = steadyRanges.map { name, range in
+            let phaseReal = real.filter { range.contains($0.sourceFrameID) }
+            let phasePresented = presented.filter { range.contains($0.sourceFrameID) }
+            let phaseSourceInterval = averageInterval(
+                positiveIntervals(phaseReal.map(\.presentedTime))
+            )
+            let phasePresentInterval = averageInterval(
+                positiveIntervals(phasePresented.map(\.presentedTime))
+            )
+            return (
+                name,
+                phaseSourceInterval > 0.0 ? 1.0 / phaseSourceInterval : 0.0,
+                phasePresentInterval > 0.0 ? 1.0 / phasePresentInterval : 0.0
+            )
+        }
         if nominalDisplayUpdatesPerSecond >= 100.0 {
-            guard sourceFramesPerSecond >= 55.0 else {
-                throw PresentationValidationError.failed(
-                    "120 Hz source cadence regressed to \(sourceFramesPerSecond) FPS"
-                )
-            }
-            guard presentedFramesPerSecond >= 110.0 else {
-                throw PresentationValidationError.failed(
-                    "120 Hz present cadence regressed to \(presentedFramesPerSecond) FPS"
-                )
+            for (phase, phaseSourceFps, phasePresentFps) in steadyPhaseRates {
+                guard phaseSourceFps >= 58.0 else {
+                    throw PresentationValidationError.failed(
+                        "\(phase) 120 Hz source cadence regressed to \(phaseSourceFps) FPS"
+                    )
+                }
+                guard phasePresentFps >= 116.0 else {
+                    throw PresentationValidationError.failed(
+                        "\(phase) 120 Hz present cadence regressed to \(phasePresentFps) FPS"
+                    )
+                }
             }
         }
 
@@ -503,7 +728,7 @@ private final class ValidationRunner {
         }
 
         let measuredDiagnostics = timeline.filter {
-            $0.sourceFrameID > UInt64(warmupSourceCount)
+            isMeasuredSource($0.sourceFrameID)
                 && $0.gpuStartTime > 0.0
                 && $0.gpuEndTime > $0.gpuStartTime
         }
@@ -564,6 +789,36 @@ private final class ValidationRunner {
         let totalGpuP95 = percentile(totalGpuMilliseconds, 0.95)
         let sourceCpuIntervalP95 = percentile(sourceCpuIntervals, 0.95)
         let sourceCpuWaitP95 = percentile(sourceCpuWaitMilliseconds, 0.95)
+        let transitionTimeline = timeline.filter { !isMeasuredSource($0.sourceFrameID) }
+        let transitionNotPresented = transitionTimeline.filter { $0.outcome != "presented" }
+        guard transitionNotPresented.isEmpty else {
+            let failures = transitionNotPresented.map {
+                "\($0.sourceFrameID)/\($0.frameKind)=\($0.outcome)"
+            }.joined(separator: ",")
+            throw PresentationValidationError.failed(
+                "Transition presentation failures: \(failures)"
+            )
+        }
+        let resizeWarmupRange = UInt64(initialWarmupSourceCount + steadySourceCountPerPhase + 1)
+                ... UInt64(initialWarmupSourceCount + steadySourceCountPerPhase
+                    + resizeWarmupSourceCount)
+        let resizeFirstRealPresentedSourceID = resizeWarmupRange.first { sourceID in
+            timeline.contains {
+                $0.sourceFrameID == sourceID
+                    && $0.frameKind == "real"
+                    && $0.outcome == "presented"
+            }
+        }
+        let resizeFirstRealPresentedOffset = resizeFirstRealPresentedSourceID.map {
+            Int($0 - resizeWarmupRange.lowerBound)
+        }
+        let steadyPhaseRecords: [[String: Any]] = steadyPhaseRates.map {
+            [
+                "name": $0.0,
+                "sourceFramesPerSecond": $0.1,
+                "presentedFramesPerSecond": $0.2
+            ]
+        }
         let records = timeline.map(diagnosticRecord)
         let report: [String: Any] = [
             "status": "passed",
@@ -573,8 +828,15 @@ private final class ValidationRunner {
             "usedComputerUse": false,
             "usedSystemScreenshot": false,
             "presentPath": presentPath,
+            "maximumDrawableCount": layer.maximumDrawableCount,
+            "preferredFrameLatency": preferredFrameLatency,
             "sourceFrames": measuredSourceCount,
-            "warmupSourceFrames": warmupSourceCount,
+            "initialWarmupSourceFrames": initialWarmupSourceCount,
+            "resizeWarmupSourceFrames": resizeWarmupSourceCount,
+            "steadySourceFramesPerPhase": steadySourceCountPerPhase,
+            "steadyPhases": steadyPhaseRecords,
+            "transitionNotPresentedCount": transitionNotPresented.count,
+            "resizeFirstRealPresentedOffset": resizeFirstRealPresentedOffset ?? -1,
             "realPresented": real.count,
             "generatedPresented": generated.count,
             "nominalDisplayUpdatesPerSecond": nominalDisplayUpdatesPerSecond,

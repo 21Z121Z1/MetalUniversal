@@ -665,7 +665,15 @@ private final class PerformanceRunner {
         guard let standaloneInterpolator = interpolationDescriptor.makeFrameInterpolator(device: device) else {
             throw PerformanceFailure.message("Could not create standalone FrameInterpolator for \(item.name)")
         }
-        let metal4Benchmark = item.name == "fullscreen-half-scale-3024"
+        let metal4Benchmark = [
+            "hybrid-resampled-framegen-1280",
+            "hybrid-resampled-framegen-1512",
+            "fullscreen-half-scale-3024",
+            "adaptive-quality-fullscreen-2026",
+            "adaptive-quality67-resampled-2026",
+            "adaptive-quality67-half-input-2026",
+            "adaptive-half-fullscreen-1512",
+        ].contains(item.name)
                 ? try Metal4EffectsBenchmark(device: device, item: item)
                 : nil
         // macOS 26.5 crashes in the framework's MTL4FX teardown after successful
@@ -867,15 +875,30 @@ private final class PerformanceRunner {
     }
 
     func run() throws {
+        let requestedCase = ProcessInfo.processInfo.environment["METALLUM_PERFORMANCE_CASE"]
         let cases = [
             PerformanceCase(name: "headroom-1280", inputWidth: 858, inputHeight: 482, outputWidth: 1280, outputHeight: 720),
             PerformanceCase(name: "bounded-1440", inputWidth: 964, inputHeight: 542, outputWidth: 1440, outputHeight: 808),
             PerformanceCase(name: "qa-1708", inputWidth: 1144, inputHeight: 643, outputWidth: 1708, outputHeight: 960),
             PerformanceCase(name: "retina-3024", inputWidth: 2026, inputHeight: 1119, outputWidth: 3024, outputHeight: 1670),
-            PerformanceCase(name: "fullscreen-half-scale-3024", inputWidth: 1512, inputHeight: 839, outputWidth: 3024, outputHeight: 1678)
+            PerformanceCase(name: "hybrid-framegen-1708", inputWidth: 1512, inputHeight: 867, outputWidth: 1708, outputHeight: 980),
+            PerformanceCase(name: "hybrid-resampled-framegen-1708", inputWidth: 854, inputHeight: 490, outputWidth: 1708, outputHeight: 980),
+            PerformanceCase(name: "hybrid-resampled-framegen-1512", inputWidth: 756, inputHeight: 434, outputWidth: 1512, outputHeight: 867),
+            PerformanceCase(name: "hybrid-resampled-framegen-1280", inputWidth: 640, inputHeight: 367, outputWidth: 1280, outputHeight: 734),
+            PerformanceCase(name: "fullscreen-half-scale-3024", inputWidth: 1512, inputHeight: 839, outputWidth: 3024, outputHeight: 1678),
+            PerformanceCase(name: "adaptive-quality-fullscreen-2026", inputWidth: 2026, inputHeight: 1124, outputWidth: 2026, outputHeight: 1124),
+            PerformanceCase(name: "adaptive-quality67-resampled-2026", inputWidth: 1356, inputHeight: 752, outputWidth: 2026, outputHeight: 1124),
+            PerformanceCase(name: "adaptive-quality67-half-input-2026", inputWidth: 1013, inputHeight: 562, outputWidth: 2026, outputHeight: 1124),
+            PerformanceCase(name: "adaptive-half-fullscreen-1512", inputWidth: 1512, inputHeight: 839, outputWidth: 1512, outputHeight: 839)
         ]
         var results: [[String: Any]] = []
-        for item in cases {
+        let selectedCases = requestedCase == nil
+                ? cases
+                : cases.filter { $0.name == requestedCase }
+        if selectedCases.isEmpty {
+            throw PerformanceFailure.message("Unknown performance case: \(requestedCase ?? "")")
+        }
+        for item in selectedCases {
             print("[performance] \(item.name) \(item.inputWidth)x\(item.inputHeight) -> \(item.outputWidth)x\(item.outputHeight)")
             let result = try runCase(item)
             results.append(result)
@@ -922,7 +945,7 @@ private final class PerformanceRunner {
             )
         ]
         var presentationResults: [[String: Any]] = []
-        for item in presentationCases {
+        for item in requestedCase == nil ? presentationCases : [] {
             print("[performance] \(item.name) presentation overhead")
             let result = try runPresentationCase(item)
             presentationResults.append(result)
@@ -944,6 +967,7 @@ private final class PerformanceRunner {
             "measuredCount": measuredCount,
             "usesWindow": false,
             "usedComputerUse": false,
+            "requestedCase": requestedCase ?? "all",
             "cases": results,
             "presentationCases": presentationResults
         ]
