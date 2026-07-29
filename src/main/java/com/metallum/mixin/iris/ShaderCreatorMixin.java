@@ -2,6 +2,8 @@ package com.metallum.mixin.iris;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalCrossShaderCompiler;
+import com.metallum.client.metal.render.MetalIrisProgram;
+import com.metallum.client.metal.render.MetalIrisProgramRegistry;
 import net.irisshaders.iris.gl.shader.ShaderCompileException;
 import net.irisshaders.iris.pipeline.programs.PartialShader;
 import net.irisshaders.iris.pipeline.programs.ShaderCreator;
@@ -37,16 +39,22 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  *       {@code MetalDeviceRegistry};</li>
  *   <li>caches the pipeline under the program name in
  *       {@code MetalCrossShaderCompiler.SHADERPACK_PIPELINE_CACHE} for retrieval
- *       by the forthcoming render-dispatch step.</li>
+ *       by the render-dispatch step.</li>
  * </ul>
  *
- * <p>After successful pipeline construction the mixin returns a
- * {@link PartialShader} wrapping sentinel GL handles ({@code 0}). This allows
- * Iris's {@code ShaderCreator.create} to proceed to {@code ExtendedShader}
- * construction. The {@code ExtendedShader} constructor will still attempt GL
- * calls with the sentinel handle; intercepting that is the next integration
- * phase (the Metal render-dispatch path that retrieves the cached pipeline and
- * issues Metal draw calls instead of GL ones).
+ * <p>After successful pipeline construction the mixin constructs and
+ * {@link MetalIrisProgramRegistry#register}s a {@link MetalIrisProgram} under
+ * the program name. The Metal render-dispatch mixin (Task 5) retrieves that
+ * program by name during {@code MetalRenderPass.setPipeline} and invokes
+ * {@code iris$setupState}/{@code iris$clearState} on it to install the
+ * shaderpack pipeline and encode Metal state.
+ *
+ * <p>The mixin then returns a {@link PartialShader} wrapping sentinel GL
+ * handles ({@code 0}). This allows Iris's {@code ShaderCreator.create} to
+ * proceed to {@code ExtendedShader} construction. The {@code ExtendedShader}
+ * constructor will still attempt GL calls with the sentinel handle; the
+ * Metal render-dispatch mixin short-circuits those GL calls and drives the
+ * shaderpack pipeline through Metal instead.
  *
  * <p>If pipeline construction fails, the mixin wraps the blaze3d
  * {@code ShaderCompileException} (carrying glslang/SPIRV-Cross diagnostics) in
@@ -124,18 +132,41 @@ public class ShaderCreatorMixin {
             );
         }
 
+        // Construct and register a MetalIrisProgram for this shaderpack program.
+        // The Metal render-dispatch mixin (Task 5) retrieves it by name during
+        // MetalRenderPass.setPipeline to install the shaderpack pipeline and
+        // encode Metal state (iris$setupState / iris$clearState).
+        // The constructor reads the cached pipeline from
+        // MetalCrossShaderCompiler.SHADERPACK_PIPELINE_CACHE; it can only throw
+        // if the cache was not populated, which cannot happen here (compiled
+        // is true). The try/catch is defensive: a registration failure must
+        // not prevent the sentinel PartialShader from being returned, otherwise
+        // Iris's ExtendedShader construction would NPE before the dispatch
+        // mixin can recover.
+        try {
+            MetalIrisProgramRegistry.register(new MetalIrisProgram(name));
+        } catch (final Exception e) {
+            Metallum.LOGGER.error(
+                    "[MetalUniversal/Iris] Failed to register MetalIrisProgram for shaderpack program '{}': {}",
+                    name, e.getMessage(), e
+            );
+        }
+
         Metallum.LOGGER.info(
-                "[MetalUniversal/Iris] Constructed and cached Metal render pipeline for shaderpack program '{}'; "
-                        + "returning a no-op PartialShader. The Metal render-dispatch path is not yet wired, "
-                        + "so Iris ExtendedShader construction will fail next.",
+                "[MetalUniversal/Iris] Constructed and cached Metal render pipeline for shaderpack program '{}' "
+                        + "and registered MetalIrisProgram; returning a no-op PartialShader.",
                 name
         );
 
         // Return a PartialShader wrapping sentinel GL handles (0). The Metal
         // pipeline is cached in MetalCrossShaderCompiler.SHADERPACK_PIPELINE_CACHE
-        // for retrieval by the forthcoming render-dispatch step. The
-        // ExtendedShader constructor will still attempt GL calls with handle 0;
-        // intercepting that is the next integration phase.
+        // and a MetalIrisProgram has been registered under `name` in
+        // MetalIrisProgramRegistry. The Metal render-dispatch mixin (Task 5)
+        // retrieves that program by name and invokes iris$setupState to
+        // install the shaderpack pipeline onto the active MetalRenderPass.
+        // The ExtendedShader constructor will still attempt GL calls with
+        // handle 0; the dispatch mixin short-circuits those and drives the
+        // shaderpack pipeline through Metal instead.
         cir.setReturnValue(new PartialShader(0, 0, 0, -1, -1, -1));
     }
 }
