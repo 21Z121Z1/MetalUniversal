@@ -123,14 +123,19 @@ public final class MetalCrossShaderCompiler {
      * and Iris's {@code TransformPatcher} is expected to already emit
      * vertex/fragment interfaces that match.
      *
+     * <p>Resource bindings are reflected from the compiled vertex/fragment SPIR-V
+     * via SPIRV-Cross ({@link #reflectShaderpackResources}), merged into a single
+     * bind-group entry list ({@link #buildShaderpackBindGroupEntries}), and fed
+     * to {@link #spirvToMsl} (as the push-constant binding slot, mirroring the
+     * vanilla {@code layoutEntries.size()}) and {@link #buildResourceBindings}.
+     * This fills the otherwise-empty {@code resources()} of the resulting
+     * pipeline with the shaderpack program's real uniform/sampler declarations.
+     *
      * @param device                   the Metal device.
      * @param name                     logical name used in error messages.
      * @param vertexGlsl               vertex GLSL source (must declare its own {@code #version}).
      * @param fragmentGlsl             fragment GLSL source (must declare its own {@code #version}).
      * @param defines                  optional preprocessor defines forwarded to glslang.
-     * @param bindGroupEntries         resource bindings; its size selects the
-     *                                 push-constant binding slot (mirrors the
-     *                                 vanilla path's {@code layoutEntries.size()}).
      * @param vertexAttributeFormats   vertex attribute formats for integer-input
      *                                 conversion (may be empty).
      * @param enablePointSize          whether to emit Metal {@code [[point_size]]}
@@ -150,7 +155,6 @@ public final class MetalCrossShaderCompiler {
             final String vertexGlsl,
             final String fragmentGlsl,
             final String defines,
-            final List<VulkanBindGroupLayout.Entry> bindGroupEntries,
             final Map<String, GpuFormat> vertexAttributeFormats,
             final boolean enablePointSize,
             final boolean cull,
@@ -173,13 +177,22 @@ public final class MetalCrossShaderCompiler {
             throw wrapGlslangError("Failed to compile shaderpack fragment shader '" + name + "'", e);
         }
 
-        final int pushConstantBinding = bindGroupEntries.size();
+        // 反射 vertex/fragment SPIR-V，构造 shaderpack 真实资源绑定。shaderpack 路径
+        // 没有 IntermediaryShaderModule，故直接用 SPIRV-Cross 反射 glslang 产出的原始
+        // SPIR-V（替代原先由调用方传入的空 bindGroupEntries）。pushConstantBinding 必须
+        // 与反射后条目数一致，使 push-constant 落在最后一个资源槽之后（与 vanilla
+        // layoutEntries.size() 语义对齐）。
+        final ShaderpackReflection vertexReflection = reflectShaderpackResources(spirvWordsToByteBuffer(vertexSpvWords));
+        final ShaderpackReflection fragmentReflection = reflectShaderpackResources(spirvWordsToByteBuffer(fragmentSpvWords));
+        final List<VulkanBindGroupLayout.Entry> reflectedEntries = buildShaderpackBindGroupEntries(vertexReflection, fragmentReflection);
+
+        final int pushConstantBinding = reflectedEntries.size();
         final MslShader vertexMsl = spirvToMsl(spirvWordsToByteBuffer(vertexSpvWords), pushConstantBinding, vertexAttributeFormats, enablePointSize);
         final MslShader fragmentMsl = spirvToMsl(spirvWordsToByteBuffer(fragmentSpvWords), pushConstantBinding, Map.of(), true);
 
         final String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
         final String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
-        final List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(bindGroupEntries, vertexMsl, fragmentMsl);
+        final List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(reflectedEntries, vertexMsl, fragmentMsl);
 
         return new MetalCompiledRenderPipeline(
                 device,
@@ -236,8 +249,8 @@ public final class MetalCrossShaderCompiler {
      *       {@link #compileShaderpack} once the {@code VertexFormat} bindings
      *       are known.</li>
      *   <li>The push-constant binding slot defaults to {@code 0} (no bind-group
-     *       entries); {@link #compileShaderpack} derives it from
-     *       {@code bindGroupEntries.size()}.</li>
+     *       entries); {@link #compileShaderpack} derives it from the size of the
+     *       SPIR-V-reflected bind-group entry list.</li>
      *   <li>{@code enablePointSize} is {@code false} for the vertex stage in
      *       dry-compile (the actual topology is not known here).</li>
      * </ul>
@@ -361,16 +374,19 @@ public final class MetalCrossShaderCompiler {
      *       framebuffers)</li>
      *   <li>{@code colorTarget = null} (Iris manages color attachments via
      *       framebuffers)</li>
-     *   <li>{@code bindGroupEntries = empty} (resource bindings will be
-     *       populated by SPIR-V reflection in a future refinement; the pipeline
-     *       compiles but uniform/sampler bindings are not yet wired)</li>
+     *   <li>{@code bindGroupEntries} are reflected from the compiled vertex/fragment
+     *       SPIR-V inside {@link #compileShaderpack} (uniform buffers and sampled
+     *       images/samplers declared by the shaderpack are mapped to bind-group
+     *       entries); the push-constant binding slot follows the reflected entry
+     *       count</li>
      * </ul>
      *
      * <p><b>Limitations.</b> The returned pipeline compiles and links the MSL
-     * shaders into a Metal pipeline state object, but the resource bindings
-     * (uniform buffers, samplers) are not yet mapped from Iris's sampler/uniform
-     * model to Metal's bind-group slots. Rendering with this pipeline will
-     * require the forthcoming bind-group mapping step.
+     * shaders into a Metal pipeline state object, and resource <i>names and
+     * types</i> are now reflected from SPIR-V into the pipeline's resource list.
+     * The runtime mapping of Iris sampler/uniform objects to Metal bind-group
+     * slots is still forthcoming. Rendering with this pipeline will require that
+     * bind-group mapping step.
      *
      * @param name             logical program name (also the cache key).
      * @param vertexGlsl       vertex GLSL source (must be non-null).
@@ -410,7 +426,6 @@ public final class MetalCrossShaderCompiler {
                 vertexGlsl,
                 fragmentGlsl,
                 defines,
-                List.of(),
                 vertexAttributeFormats,
                 enablePointSize,
                 false,
@@ -843,6 +858,147 @@ public final class MetalCrossShaderCompiler {
         for (int i = 0; i < count; i++) {
             out.add(list.get(i).nameString());
         }
+    }
+
+    /**
+     * 反射一段 SPIR-V，提取 shaderpack 程序声明的 uniform buffer、sampled image
+     * （含 separate image）与 separate sampler 资源名。
+     *
+     * <p>本方法与 {@link #spirvToMsl} 共用同一套 SPIRV-Cross context/compiler
+     * 创建模式，但只做反射、不做 MSL 编译：创建 {@code SPVC_BACKEND_MSL} compiler
+     * 后直接调 {@code spvc_compiler_create_shader_resources} 取<b>全部声明资源</b>
+     * （非 active-only，以匹配 vanilla {@link #addToBindGroup} 反射所有声明
+     * uniform/sampler 的语义）。context 用完在 {@code finally} 中经
+     * {@code spvc_context_destroy} 释放，与 {@link #spirvToMsl} 对称。
+     *
+     * <p>shaderpack 路径没有 {@code IntermediaryShaderModule}，无法复用 vanilla
+     * 的 {@code shader.uniformBuffers()}/{@code samplers()}；本方法以 SPIRV-Cross
+     * 直接反射 glslang 产出的原始 SPIR-V，填补该缺口。反射本身不需要 Metal device。
+     *
+     * @param spirvBytes SPIR-V 字节流（little-endian 字序列，position 在 0）。
+     * @return 反射出的资源名分组。
+     * @throws ShaderCompileException 若 SPIRV-Cross 创建/反射失败。
+     */
+    private static ShaderpackReflection reflectShaderpackResources(final ByteBuffer spirvBytes) throws ShaderCompileException {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            final IntBuffer spirvWords = spirvBytes.asIntBuffer();
+            final int wordCount = spirvWords.remaining();
+            if (wordCount < 5) {
+                throw new ShaderCompileException(
+                        "SPIR-V is too small for shaderpack reflection: " + wordCount
+                                + " words (minimum 5 required)."
+                );
+            }
+
+            final PointerBuffer pContext = stack.mallocPointer(1);
+            checkSpvc(Spvc.spvc_context_create(pContext), "spvc_context_create");
+            final long context = pContext.get(0);
+            try {
+                final PointerBuffer pIr = stack.mallocPointer(1);
+                checkSpvc(Spvc.spvc_context_parse_spirv(context, spirvWords, wordCount, pIr), "spvc_context_parse_spirv");
+                final long ir = pIr.get(0);
+                if (ir == 0L) {
+                    final String lastError = Spvc.spvc_context_get_last_error_string(context);
+                    throw new ShaderCompileException(
+                            "spvc_context_parse_spirv returned SPVC_SUCCESS but parsed_ir is NULL during shaderpack reflection. "
+                                    + "This indicates a version mismatch between the loaded libspvc and LWJGL's Java bindings, "
+                                    + "or symbol interposition from another library. "
+                                    + "SPIR-V: " + wordCount + " words. Last error: " + lastError
+                    );
+                }
+
+                final PointerBuffer pCompiler = stack.mallocPointer(1);
+                checkSpvc(
+                        Spvc.spvc_context_create_compiler(context, Spvc.SPVC_BACKEND_MSL, ir, Spvc.SPVC_CAPTURE_MODE_COPY, pCompiler),
+                        "spvc_context_create_compiler"
+                );
+                final long compiler = pCompiler.get(0);
+
+                final PointerBuffer pResources = stack.mallocPointer(1);
+                checkSpvc(Spvc.spvc_compiler_create_shader_resources(compiler, pResources), "spvc_compiler_create_shader_resources");
+                final long resources = pResources.get(0);
+
+                // 用 LinkedHashSet 保留反射顺序并去重；sampledImages 同时收纳 separate
+                // image，故需去重。复用 collectResourceNames（其签名为 Set<String>，
+                // LinkedHashSet 即 Set<String> 的有序实现）。
+                final LinkedHashSet<String> uniformBuffers = new LinkedHashSet<>();
+                final LinkedHashSet<String> sampledImages = new LinkedHashSet<>();
+                final LinkedHashSet<String> separateSamplers = new LinkedHashSet<>();
+                collectResourceNames(stack, resources, Spvc.SPVC_RESOURCE_TYPE_UNIFORM_BUFFER, uniformBuffers);
+                collectResourceNames(stack, resources, Spvc.SPVC_RESOURCE_TYPE_SAMPLED_IMAGE, sampledImages);
+                // separate image（无采样器的纯纹理资源）在 Metal 端也是纹理绑定，
+                // 归入 sampledImages 一并映射为 SAMPLED_IMAGE。
+                collectResourceNames(stack, resources, Spvc.SPVC_RESOURCE_TYPE_SEPARATE_IMAGE, sampledImages);
+                collectResourceNames(stack, resources, Spvc.SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS, separateSamplers);
+
+                return new ShaderpackReflection(
+                        List.copyOf(uniformBuffers),
+                        List.copyOf(sampledImages),
+                        List.copyOf(separateSamplers)
+                );
+            } finally {
+                Spvc.spvc_context_destroy(context);
+            }
+        }
+    }
+
+    /**
+     * 合并 vertex 与 fragment 的反射结果，构造 shaderpack 的 bind-group 条目列表。
+     *
+     * <p>顺序与 vanilla {@link #addToBindGroup} 一致：先所有 uniform buffer，
+     * 再 sampled image（含 separate image），最后 separate sampler。vertex 与
+     * fragment 的同名资源经 {@link #addBindingIfAbsent} 去重，保留首次出现的顺序。
+     * 所有 sampler/image 统一映射为 {@link VulkanBindGroupEntryType#SAMPLED_IMAGE}
+     * （shaderpack 路径暂不区分 UTB/纹理缓冲，与 vanilla 的 texel-buffer 判定不同）。
+     *
+     * <p><b>TODO: 保留纹理槽对齐。</b> Iris 的
+     * {@code IrisSamplers.WORLD_RESERVED_TEXTURE_UNITS = {0, 1, 2}} 是 vanilla 占用
+     * 的 sampler slot（albedo/overlay/lightmap）。当前实现按反射顺序分配
+     * {@code bindingIndex}（uniform buffer 在前、sampler 在后），尚未与 vanilla 保留
+     * 槽精确错开。若后续 runtime 绑定阶段发现 shaderpack sampler 与 vanilla 抢占槽位，
+     * 需在此重排 sampler 条目使其 bindingIndex 跳过 {0,1,2}，或在
+     * {@code buildResourceBindings} 中按名查保留表赋槽。spec 接受此折衷。
+     *
+     * @param vertexReflection    vertex SPIR-V 反射结果。
+     * @param fragmentReflection  fragment SPIR-V 反射结果。
+     * @return 合并去重后的 bind-group 条目（uniform buffer 在前）。
+     */
+    private static List<VulkanBindGroupLayout.Entry> buildShaderpackBindGroupEntries(
+            final ShaderpackReflection vertexReflection,
+            final ShaderpackReflection fragmentReflection
+    ) {
+        final List<VulkanBindGroupLayout.Entry> entries = new ArrayList<>();
+        for (final String name : vertexReflection.uniformBuffers()) {
+            addBindingIfAbsent(entries, VulkanBindGroupEntryType.UNIFORM_BUFFER, name, null);
+        }
+        for (final String name : fragmentReflection.uniformBuffers()) {
+            addBindingIfAbsent(entries, VulkanBindGroupEntryType.UNIFORM_BUFFER, name, null);
+        }
+        for (final String name : vertexReflection.sampledImages()) {
+            addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
+        }
+        for (final String name : fragmentReflection.sampledImages()) {
+            addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
+        }
+        for (final String name : vertexReflection.separateSamplers()) {
+            addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
+        }
+        for (final String name : fragmentReflection.separateSamplers()) {
+            addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
+        }
+        return entries;
+    }
+
+    /**
+     * shaderpack SPIR-V 反射结果：按资源类别分组的声明资源名列表。用于在
+     * {@link #compileShaderpack} 中构造 bind-group 条目，替代 vanilla 路径中由
+     * {@code IntermediaryShaderModule} 提供的 uniform/sampler 名。
+     */
+    record ShaderpackReflection(
+            List<String> uniformBuffers,
+            List<String> sampledImages,
+            List<String> separateSamplers
+    ) {
     }
 
     private static void checkSpvc(final int result, final String stage) throws ShaderCompileException {
