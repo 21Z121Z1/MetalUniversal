@@ -245,6 +245,24 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
     }
 
+    /**
+     * Returns the currently-active {@link MetalRenderPass}, or {@code null} if
+     * no render pass is active (i.e. {@code createRenderPass} has not been
+     * called, or {@code submitRenderPass} has already finalized it).
+     *
+     * <p>Package-private accessor used by {@link MetalIrisProgram} (the Metal
+     * equivalent of Iris's {@code IrisProgram}) to reach the live render pass
+     * during {@code iris$setupState} so it can swap in a shaderpack's
+     * pre-compiled Metal render pipeline and bind samplers against the
+     * shaderpack's resource table.
+     *
+     * @return the active Metal render pass, or {@code null}.
+     */
+    @Nullable
+    MetalRenderPass currentRenderPass() {
+        return currentRenderPass;
+    }
+
     void presentTextureToDrawable(final MemorySegment drawable, final GpuTextureView textureView) {
         MetalGpuTexture source = (MetalGpuTexture) textureView.texture();
         flushPendingClear(source);

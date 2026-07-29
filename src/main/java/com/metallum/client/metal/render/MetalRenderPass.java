@@ -111,6 +111,36 @@ final class MetalRenderPass implements RenderPassBackend {
         }
     }
 
+    /**
+     * Swap in a pre-compiled shaderpack Metal render pipeline (bypassing the
+     * {@link RenderPipeline}&rarr;{@code getOrCompilePipeline} path) and mark
+     * all dependent state dirty so the next {@link #bindDrawState} re-pushes
+     * the pipeline state, vertex buffers, and every descriptor against the new
+     * pipeline's resource table.
+     *
+     * <p>Used by {@link MetalIrisProgram#iris$setupState} to install an Iris
+     * shaderpack program's Metal pipeline state object (previously compiled
+     * and cached by {@code MetalCrossShaderCompiler.compileShaderpackPipeline})
+     * onto the active render pass. Unlike {@link #setPipeline}, this accepts a
+     * {@link MetalCompiledRenderPipeline} directly because shaderpack
+     * pipelines are constructed outside the vanilla {@code RenderPipeline}
+     * code path and have no blaze3d {@code RenderPipeline} to key on.
+     *
+     * <p><b>Always marks dirty.</b> Unlike {@code setPipeline}, the comparison
+     * guard is intentionally skipped: when a shaderpack program sets up state
+     * the dispatch contract is "this pass now draws with my pipeline", even if
+     * the same pipeline object was already installed (e.g. a prior
+     * iris$clearState may have left stale descriptor bindings that must be
+     * re-pushed against the shaderpack resource table).
+     *
+     * @param pipeline the shaderpack Metal render pipeline to install.
+     */
+    void setCompiledPipeline(final MetalCompiledRenderPipeline pipeline) {
+        this.compiledPipeline = pipeline;
+        this.pipelineDirty = true;
+        this.vertexBuffersDirty = true;
+    }
+
     @Override
     public void bindTexture(final @NonNull String name, @Nullable final GpuTextureView textureView, @Nullable final GpuSampler sampler) {
         if (textureView != null && sampler != null) {
