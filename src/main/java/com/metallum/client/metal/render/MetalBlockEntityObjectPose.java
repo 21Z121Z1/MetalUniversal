@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.minecraft.client.renderer.block.MovingBlockRenderState;
 import net.minecraft.client.renderer.blockentity.state.PistonHeadRenderState;
 import net.minecraft.core.BlockPos;
 import org.joml.Matrix4f;
@@ -24,6 +25,8 @@ import org.joml.Matrix4f;
  */
 @Environment(EnvType.CLIENT)
 final class MetalBlockEntityObjectPose {
+    private static final long BLOCK_ENTITY_SALT = 0xD6E8FEB86659FD93L;
+
     /**
      * Which of the two moving blocks a piston submits.
      *
@@ -55,7 +58,10 @@ final class MetalBlockEntityObjectPose {
 
     /**
      * {@code PistonHeadRenderer.submit}: the moved block is translated by the
-     * progress-interpolated offset, the base is not.
+     * progress-interpolated offset, the base is not. The world origin is the
+     * dispatcher's {@code BlockEntityRenderState.blockPos}; the nested
+     * {@code MovingBlockRenderState.blockPos} is only the block's sampling/seed
+     * position used while tesselating its model.
      *
      * <p>Takes the fields rather than the render state so it can be exercised
      * directly. {@code PistonHeadRenderState} initialises a field from
@@ -83,11 +89,42 @@ final class MetalBlockEntityObjectPose {
         return out.identity().translate(x, y, z);
     }
 
+    /** Core overload for the world position already applied by the dispatcher. */
+    static Matrix4f piston(
+            final Matrix4f out,
+            final BlockPos dispatcherPosition,
+            final float xOffset,
+            final float yOffset,
+            final float zOffset,
+            final PistonPart part
+    ) {
+        if (dispatcherPosition == null) {
+            return out.identity();
+        }
+        return piston(out, dispatcherPosition.getX(), dispatcherPosition.getY(), dispatcherPosition.getZ(),
+                xOffset, yOffset, zOffset, part);
+    }
+
     /** Convenience for the render path; {@link #piston} above is the tested core. */
     static Matrix4f piston(final Matrix4f out, final PistonHeadRenderState state, final PistonPart part) {
-        BlockPos blockPos = state.blockPos;
-        return piston(out, blockPos.getX(), blockPos.getY(), blockPos.getZ(),
-                state.xOffset, state.yOffset, state.zOffset, part);
+        MovingBlockRenderState moving = part == PistonPart.MOVED_BLOCK ? state.block : state.base;
+        if (moving == null || state.blockPos == null) {
+            return out.identity();
+        }
+        // LevelRenderer has already translated the PoseStack by state.blockPos before
+        // PistonHeadRenderer.submit runs. moving.blockPos is used for lighting and
+        // random seeds by MovingBlockFeatureRenderer, not as a second world origin.
+        return piston(out, state.blockPos, state.xOffset, state.yOffset, state.zOffset, part);
+    }
+
+    /** Root transform for a block entity whose renderer adds no model-space translation. */
+    static Matrix4f generic(final Matrix4f out, final BlockPos blockPos) {
+        return out.identity().translate(blockPos.getX(), blockPos.getY(), blockPos.getZ());
+    }
+
+    /** Stable identity for a non-piston block entity at one block position. */
+    static long blockEntityObjectId(final BlockPos blockPos) {
+        return mix(blockPos.asLong() ^ BLOCK_ENTITY_SALT);
     }
 
     /**

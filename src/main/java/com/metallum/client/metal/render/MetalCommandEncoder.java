@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -23,6 +24,7 @@ import java.util.IdentityHashMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 
@@ -77,6 +79,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private boolean renderEncoderDeferredStore;
     private final Long2ObjectOpenHashMap<java.util.ArrayDeque<MemorySegment>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
     private final List<SubmitCallback> currentSubmitCallbacks = new ArrayList<>();
+    private final QueuedFrameGenerationFallbackState queuedFrameGenerationFallback =
+            new QueuedFrameGenerationFallbackState();
 
     MetalCommandEncoder(final MetalDevice device) {
         this.device = device;
@@ -221,7 +225,26 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         List<SubmitCallback> callbacks = List.copyOf(currentSubmitCallbacks);
         currentSubmitCallbacks.clear();
-        commandBuffer.commitWithSignal(completedSemaphore);
+        try {
+            commandBuffer.commitWithSignal(completedSemaphore);
+        } catch (RuntimeException | Error commitFailure) {
+            queuedFrameGenerationFallback.clear();
+            for (int index = callbacks.size() - 1; index >= 0; index--) {
+                try {
+                    callbacks.get(index).failed.run();
+                } catch (RuntimeException | Error cleanupFailure) {
+                    commitFailure.addSuppressed(cleanupFailure);
+                }
+            }
+            try {
+                commandBuffer.close();
+            } catch (RuntimeException | Error closeFailure) {
+                commitFailure.addSuppressed(closeFailure);
+            }
+            commandBuffer = null;
+            throw commitFailure;
+        }
+        queuedFrameGenerationFallback.clear();
         for (SubmitCallback callback : callbacks) {
             callback.committed.run();
         }
@@ -238,7 +261,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
      * Associates a frame transaction with the command buffer that currently
      * owns its encoded work. The commit callback runs only after Metal accepts
      * the command buffer; the failure callback runs if that submitted buffer
-     * completes in the error state or is abandoned during shutdown.
+     * completes in the error state or is abandoned during shutdown. Successful
+     * callbacks run in encode order; failure callbacks unwind in reverse encode
+     * order so later consumers release their dependencies before producers do.
      */
     void onCurrentSubmit(final Runnable committed, final Runnable failed) {
         if (commandBuffer == null) {
@@ -477,48 +502,136 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     void presentTextureToDrawable(final MemorySegment layer, final GpuTextureView textureView) {
         MetalGpuTexture source = (MetalGpuTexture) textureView.texture();
-        MetalFxManager.FrameGenerationInput frameInput = MetalFxManager.frameGenerationInput(source);
-        if (frameInput != null) {
-            flushPendingClear(source);
-            flushPendingClear(frameInput.sceneColor());
-            flushPendingClear(frameInput.nativeSceneColor());
-            flushPendingClear(frameInput.depth());
-            flushPendingClear(frameInput.motion());
+        MetalFxManager.FrameGenerationPresentationPlan presentation =
+                MetalFxManager.frameGenerationPresentationPlan(source);
+        if (presentation != null) {
+            MetalFxManager.FrameGenerationFallback fallback = presentation.fallback();
+            MetalFxManager.FrameGenerationInput frameInput = presentation.frameGenerationInput();
+            flushPendingClear(fallback.sceneColor());
+            flushPendingClear(fallback.uiColor());
+            if (frameInput != null) {
+                flushPendingClear(frameInput.sceneColor().texture());
+                flushPendingClear(frameInput.motionFrame().depth());
+                flushPendingClear(frameInput.motionFrame().motion());
+            }
             submitRenderPass();
             endEncoder();
             MTLCommandBuffer frameCommandBuffer = commandBuffer();
-            boolean queued = MetalNativeBridge.metallum_metalfx_frame_generation_encode(
-                    frameCommandBuffer.nativeHandle(),
-                    device.metalDeviceHandle(),
-                    layer,
-                    frameInput.sceneColor().nativeHandle(),
-                    frameInput.nativeSceneColor().nativeHandle(),
-                    frameInput.uiColor().nativeHandle(),
-                    frameInput.depth().nativeHandle(),
-                    frameInput.motion().nativeHandle(),
-                    frameInput.inputWidth(),
-                    frameInput.inputHeight(),
-                    frameInput.jitterX(),
-                    frameInput.jitterY(),
-                    frameInput.fieldOfView(),
-                    frameInput.nearPlane(),
-                    frameInput.farPlane(),
-                    frameInput.aspectRatio(),
-                    frameInput.deltaSeconds(),
-                    frameInput.reset(),
-                    fence
-            );
-            if (queued) {
-                MetalFxManager.recordFrameGenerationQueued();
-                return;
+            // Permanent disable closes Java wrappers for Frame Generation
+            // targets. Capture their retained Metal objects first; actual
+            // release is deferred past this command buffer's completion.
+            MemorySegment fallbackSceneHandle = fallback.sceneColor().nativeHandle();
+            MemorySegment fallbackUiHandle = fallback.uiColor().nativeHandle();
+            if (frameInput != null) {
+                FinalizedMotionFrame motionFrame = frameInput.motionFrame();
+                CameraFrameInput camera = frameInput.camera();
+                boolean queued = MetalNativeBridge.metallum_metalfx_frame_generation_encode_v3(
+                        frameCommandBuffer.nativeHandle(),
+                        device.metalDeviceHandle(),
+                        layer,
+                        frameInput.sceneColor().metalFxView().nativeHandle(),
+                        frameInput.nativeSceneColor().metalFxView().nativeHandle(),
+                        frameInput.uiColor().metalFxView().nativeHandle(),
+                        motionFrame.depth().nativeHandle(),
+                        motionFrame.motion().nativeHandle(),
+                        frameInput.inputWidth(),
+                        frameInput.inputHeight(),
+                        motionFrame.jitterPixels().x,
+                        motionFrame.jitterPixels().y,
+                        camera.fieldOfViewDegrees(),
+                        camera.nearPlane(),
+                        camera.farPlane(),
+                        camera.aspectRatio(),
+                        camera.deltaSeconds(),
+                        motionFrame.reset(),
+                        fence,
+                        frameInput.stamp().frameId(),
+                        frameInput.stamp().historyEpoch(),
+                        frameInput.scalerToken()
+                );
+                if (queued) {
+                    FrameStamp queuedStamp = frameInput.stamp();
+                    QueuedFrameGenerationFallback queuedFallback = new QueuedFrameGenerationFallback(
+                            queuedStamp,
+                            layer,
+                            fallbackSceneHandle,
+                            fallbackUiHandle
+                    );
+                    try {
+                        queuedFrameGenerationFallback.queue(queuedFallback);
+                        onCurrentSubmit(
+                                () -> {
+                                    if (queuedFallback.wasEncodedAsFallback()) {
+                                        return;
+                                    }
+                                    try {
+                                        MetalFxManager.recordFrameGenerationQueued(queuedStamp);
+                                    } catch (Throwable ignored) {
+                                        // Submit callbacks must not escape into command-buffer cleanup.
+                                    }
+                                },
+                                () -> {
+                                    try {
+                                        MetalNativeBridge.metallum_metalfx_frame_generation_abort_uncommitted_v3(
+                                                queuedStamp.frameId(), queuedStamp.historyEpoch()
+                                        );
+                                    } catch (Throwable ignored) {
+                                        // History rejection still runs in the motion transaction callback.
+                                    }
+                                }
+                        );
+                    } catch (RuntimeException | Error registrationFailure) {
+                        queuedFrameGenerationFallback.clear();
+                        try {
+                            MetalNativeBridge.metallum_metalfx_frame_generation_abort_uncommitted_v3(
+                                    queuedStamp.frameId(), queuedStamp.historyEpoch()
+                            );
+                        } catch (Throwable abortFailure) {
+                            registrationFailure.addSuppressed(abortFailure);
+                        }
+                        throw registrationFailure;
+                    }
+                    return;
+                }
+                MetalFxManager.disableFrameGeneration("native frame generation encode failed");
             }
-            MetalFxManager.disableFrameGeneration("native frame generation encode failed");
+            if (!frameCommandBuffer.encodePresentSceneAndUiToDrawable(
+                    layer,
+                    fallbackSceneHandle,
+                    fallbackUiHandle,
+                    fence
+            )) {
+                Metallum.LOGGER.error("MetalFX could not schedule the real-frame fallback presentation");
+            }
+            return;
         }
         flushPendingClear(source);
         submitRenderPass();
         endEncoder();
         MTLCommandBuffer commandBuffer = commandBuffer();
         commandBuffer.encodePresentTextureToDrawable(layer, source.nativeHandle(), fence);
+    }
+
+    boolean encodeQueuedFrameGenerationFallback(final FrameStamp stamp) {
+        if (commandBuffer == null) {
+            return false;
+        }
+        QueuedFrameGenerationFallback fallback = queuedFrameGenerationFallback.takeExact(stamp);
+        if (fallback == null) {
+            return false;
+        }
+        submitRenderPass();
+        endEncoder();
+        boolean scheduled = commandBuffer.encodePresentSceneAndUiToDrawable(
+                fallback.layer(),
+                fallback.sceneTexture(),
+                fallback.uiTexture(),
+                fence
+        );
+        if (!scheduled) {
+            Metallum.LOGGER.error("MetalFX could not schedule the queued real-frame fallback presentation");
+        }
+        return scheduled;
     }
 
     boolean clearMotionInputs(
@@ -654,6 +767,139 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 preserveReactiveMask,
                 emitMotionDiagnostics,
                 fence
+        );
+    }
+
+    boolean finalizeMetalFxMotionV3(
+            final MetalGpuTexture depth,
+            @Nullable final MetalGpuTexture handDepth,
+            final float handReactiveBoost,
+            final MetalGpuTexture cameraMotion,
+            final MetalGpuTexture objectMotion,
+            final MetalGpuTexture objectValidity,
+            final MetalGpuTexture disocclusion,
+            final MetalGpuTexture motion,
+            final MetalGpuTexture reactive,
+            final org.joml.Matrix4f currentViewProjection,
+            final org.joml.Matrix4f inverseCurrentViewProjection,
+            final org.joml.Matrix4f previousViewProjection,
+            final int inputWidth,
+            final int inputHeight,
+            final boolean reset,
+            final boolean depthReversed,
+            final boolean preserveReactiveMask,
+            final boolean emitMotionDiagnostics,
+            final FrameStamp stamp
+    ) {
+        flushPendingClear(depth);
+        if (handDepth != null) flushPendingClear(handDepth);
+        flushPendingClear(cameraMotion);
+        flushPendingClear(objectMotion);
+        flushPendingClear(objectValidity);
+        flushPendingClear(disocclusion);
+        flushPendingClear(motion);
+        flushPendingClear(reactive);
+        submitRenderPass();
+        endEncoder();
+        cameraMotion.markContentsDirty();
+        disocclusion.markContentsDirty();
+        motion.markContentsDirty();
+        reactive.markContentsDirty();
+        boolean finalized = MetalNativeBridge.metallum_metalfx_motion_finalize_v3(
+                commandBuffer().nativeHandle(),
+                device.metalDeviceHandle(),
+                depth.nativeHandle(),
+                handDepth == null ? MemorySegment.NULL : handDepth.nativeHandle(),
+                cameraMotion.nativeHandle(),
+                objectMotion.nativeHandle(),
+                objectValidity.nativeHandle(),
+                disocclusion.nativeHandle(),
+                motion.nativeHandle(),
+                reactive.nativeHandle(),
+                currentViewProjection.get(currentViewProjectionBuffer),
+                inverseCurrentViewProjection.get(inverseViewProjectionBuffer),
+                previousViewProjection.get(previousViewProjectionBuffer),
+                fence,
+                handReactiveBoost,
+                inputWidth,
+                inputHeight,
+                reset,
+                depthReversed,
+                preserveReactiveMask,
+                emitMotionDiagnostics,
+                stamp.frameId(),
+                stamp.historyEpoch()
+        );
+        if (!finalized) {
+            MetalNativeBridge.metallum_metalfx_history_discard_v3(
+                    stamp.frameId(), stamp.historyEpoch()
+            );
+        }
+        return finalized;
+    }
+
+    boolean commitMetalFxHistoryV3(final FrameStamp stamp) {
+        return MetalNativeBridge.metallum_metalfx_history_commit_v3(
+                stamp.frameId(), stamp.historyEpoch()
+        );
+    }
+
+    void discardMetalFxHistoryV3(final FrameStamp stamp) {
+        MetalNativeBridge.metallum_metalfx_history_discard_v3(
+                stamp.frameId(), stamp.historyEpoch()
+        );
+    }
+
+    long encodeMetalFxTemporalV3(
+            final SceneColorInput sourceColor,
+            final FinalizedMotionFrame finalizedMotion,
+            final ColorTextureRole output
+    ) {
+        MetalGpuTexture colorTexture = sourceColor.color().texture();
+        MetalGpuTexture depth = finalizedMotion.depth();
+        MetalGpuTexture motion = finalizedMotion.motion();
+        MetalGpuTexture reactive = finalizedMotion.reactive();
+        MetalGpuTexture exposure = sourceColor.exposure().texture();
+        flushPendingClear(colorTexture);
+        flushPendingClear(depth);
+        flushPendingClear(motion);
+        flushPendingClear(reactive);
+        if (exposure != null) flushPendingClear(exposure);
+        flushPendingClear(output.texture());
+        submitRenderPass();
+        endEncoder();
+        output.texture().markContentsDirty();
+        int colorEncoding = switch (sourceColor.encoding()) {
+            case FINAL_LDR_SRGB -> 1;
+            case SCENE_LINEAR -> 2;
+        };
+        int exposureMode = switch (sourceColor.exposure().mode()) {
+            case NONE -> 0;
+            case AUTO -> 1;
+            case MANUAL_R16F -> 2;
+        };
+        FrameStamp stamp = finalizedMotion.stamp();
+        return MetalNativeBridge.metallum_metalfx_temporal_encode_v3(
+                commandBuffer().nativeHandle(),
+                device.metalDeviceHandle(),
+                sourceColor.color().metalFxView().nativeHandle(),
+                depth.nativeHandle(),
+                motion.nativeHandle(),
+                reactive.nativeHandle(),
+                exposure == null ? MemorySegment.NULL : exposure.nativeHandle(),
+                output.metalFxView().nativeHandle(),
+                fence,
+                finalizedMotion.jitterPixels().x,
+                finalizedMotion.jitterPixels().y,
+                sourceColor.exposure().preExposure(),
+                finalizedMotion.inputWidth(),
+                finalizedMotion.inputHeight(),
+                finalizedMotion.reset(),
+                finalizedMotion.depthConvention() == DepthConvention.REVERSED_Z,
+                colorEncoding,
+                exposureMode,
+                stamp.frameId(),
+                stamp.historyEpoch()
         );
     }
 
@@ -1092,9 +1338,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     void close() {
         submitRenderPass();
         endEncoder();
-        for (SubmitCallback callback : currentSubmitCallbacks) {
-            callback.failed.run();
-        }
+        queuedFrameGenerationFallback.clear();
+        runFailureCallbacksInReverse(currentSubmitCallbacks);
         currentSubmitCallbacks.clear();
         for (int slot = 0; slot < inFlight.length; slot++) {
             InFlight f = inFlight[slot];
@@ -1239,10 +1484,105 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             completionHandled = true;
             MetalGpuTimingRecorder.record(index, buffer.gpuStartTime(), buffer.gpuEndTime());
             if (!buffer.completedSuccessfully()) {
-                for (SubmitCallback callback : callbacks) {
-                    callback.failed.run();
+                runFailureCallbacksInReverse(callbacks);
+            }
+        }
+    }
+
+    private static void runFailureCallbacksInReverse(final List<SubmitCallback> callbacks) {
+        Throwable firstFailure = null;
+        for (int index = callbacks.size() - 1; index >= 0; index--) {
+            try {
+                callbacks.get(index).failed.run();
+            } catch (RuntimeException | Error callbackFailure) {
+                if (firstFailure == null) {
+                    firstFailure = callbackFailure;
+                } else {
+                    firstFailure.addSuppressed(callbackFailure);
                 }
             }
+        }
+        if (firstFailure instanceof RuntimeException runtimeFailure) {
+            throw runtimeFailure;
+        }
+        if (firstFailure instanceof Error error) {
+            throw error;
+        }
+    }
+
+    static final class QueuedFrameGenerationFallback {
+        private final FrameStamp stamp;
+        private final MemorySegment layer;
+        private final MemorySegment sceneTexture;
+        private final MemorySegment uiTexture;
+        private boolean encodedAsFallback;
+
+        QueuedFrameGenerationFallback(
+                final FrameStamp stamp,
+                final MemorySegment layer,
+                final MemorySegment sceneTexture,
+                final MemorySegment uiTexture
+        ) {
+            this.stamp = Objects.requireNonNull(stamp, "stamp");
+            this.layer = Objects.requireNonNull(layer, "layer");
+            this.sceneTexture = Objects.requireNonNull(sceneTexture, "sceneTexture");
+            this.uiTexture = Objects.requireNonNull(uiTexture, "uiTexture");
+        }
+
+        FrameStamp stamp() {
+            return stamp;
+        }
+
+        MemorySegment layer() {
+            return layer;
+        }
+
+        MemorySegment sceneTexture() {
+            return sceneTexture;
+        }
+
+        MemorySegment uiTexture() {
+            return uiTexture;
+        }
+
+        boolean wasEncodedAsFallback() {
+            return encodedAsFallback;
+        }
+
+        private void markEncodedAsFallback() {
+            encodedAsFallback = true;
+        }
+    }
+
+    static final class QueuedFrameGenerationFallbackState {
+        @Nullable
+        private QueuedFrameGenerationFallback pending;
+
+        void queue(final QueuedFrameGenerationFallback fallback) {
+            Objects.requireNonNull(fallback, "fallback");
+            if (pending != null) {
+                throw new IllegalStateException("A Frame Generation fallback is already queued for this command buffer");
+            }
+            pending = fallback;
+        }
+
+        @Nullable
+        QueuedFrameGenerationFallback takeExact(final FrameStamp stamp) {
+            if (pending == null || !pending.stamp().equals(stamp)) {
+                return null;
+            }
+            QueuedFrameGenerationFallback exact = pending;
+            pending = null;
+            exact.markEncodedAsFallback();
+            return exact;
+        }
+
+        void clear() {
+            pending = null;
+        }
+
+        boolean hasPending() {
+            return pending != null;
         }
     }
 

@@ -30,6 +30,6 @@ public abstract class MovingBlockSubmitMetalFxMixin {
             final int outlineColor,
             final CallbackInfo ci
     ) {
-        MetalEntityMotionCapture.captureModelSubmit(movingBlockRenderState);
+        MetalEntityMotionCapture.captureMovingBlockSubmit(movingBlockRenderState);
     }
 }

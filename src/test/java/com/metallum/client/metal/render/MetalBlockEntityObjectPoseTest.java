@@ -66,6 +66,23 @@ final class MetalBlockEntityObjectPoseTest {
     }
 
     @Test
+    void theDispatcherOverloadUsesTheOuterOriginNotTheSamplingPosition() {
+        assertEquals(new Matrix4f().translate(16.25F, 63.5F, 16.75F),
+                MetalBlockEntityObjectPose.piston(new Matrix4f(), new BlockPos(16, 64, 16),
+                        0.25F, -0.5F, 0.75F, MetalBlockEntityObjectPose.PistonPart.MOVED_BLOCK),
+                "the outer dispatcher pose is rooted at the piston block entity position;"
+                        + " MovingBlockRenderState.blockPos remains a tesselation sample position");
+    }
+
+    @Test
+    void theDispatcherOverloadKeepsTheBaseAtTheOuterOrigin() {
+        assertEquals(new Matrix4f().translate(-8.0F, 70.0F, 23.0F),
+                MetalBlockEntityObjectPose.piston(new Matrix4f(), new BlockPos(-8, 70, 23),
+                        0.5F, 0.5F, 0.5F, MetalBlockEntityObjectPose.PistonPart.BASE),
+                "PistonHeadRenderer pops the offset before submitting the base");
+    }
+
+    @Test
     void theBaseIgnoresTheOffsetBecauseSubmitPopsItFirst() {
         Piston extending = state(new BlockPos(10, 64, -3), 0.75F, 0.0F, 0.0F);
         Matrix4f base = extending.pose(MetalBlockEntityObjectPose.PistonPart.BASE);
@@ -167,4 +184,5 @@ final class MetalBlockEntityObjectPoseTest {
                 "a NaN offset must remain detectable, so the store declines to record it and the"
                         + " previous transform survives");
     }
+
 }

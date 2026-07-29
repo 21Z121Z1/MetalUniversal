@@ -161,7 +161,7 @@ private func align(_ value: Int, to alignment: Int) -> Int {
 
 private func bytesPerPixel(_ format: MTLPixelFormat) throws -> Int {
     switch format {
-    case .rgba8Unorm:
+    case .rgba8Unorm, .rgba8Unorm_srgb:
         return 4
     case .rg16Float:
         return 4
@@ -644,7 +644,7 @@ private func rgbaVisualization(
 ) throws -> [UInt8] {
     var rgba = [UInt8](repeating: 0, count: width * height * 4)
     switch format {
-    case .rgba8Unorm:
+    case .rgba8Unorm, .rgba8Unorm_srgb:
         return bytes
     case .r8Unorm:
         for index in 0..<(width * height) {
@@ -1309,6 +1309,529 @@ private func runTransparencyAlphaContract(
     ]
 }
 
+private func runV3InputContract(
+    harness: OffscreenHarness,
+    root: URL
+) throws -> [String: Any] {
+    try require(
+        metallum_residency_set_enable(harness.device, harness.queue) == 1,
+        "could not enable the residency set for v3 history validation"
+    )
+    func residencyCount(_ label: String) throws -> UInt32 {
+        var allocations: UInt32 = 0
+        var bytes: UInt64 = 0
+        try require(
+            metallum_residency_set_stats(&allocations, &bytes) == 1,
+            "could not read residency count at \(label)"
+        )
+        return allocations
+    }
+    func flushResidency(_ label: String) throws {
+        guard let commandBuffer = harness.queue.makeCommandBuffer() else {
+            try fail("could not create \(label) residency flush command buffer")
+        }
+        metallum_MTLCommandBuffer_commit(Unmanaged.passUnretained(commandBuffer).toOpaque())
+        commandBuffer.waitUntilCompleted()
+        try require(
+            commandBuffer.status == .completed,
+            "\(label) residency flush failed: \(String(describing: commandBuffer.error))"
+        )
+    }
+    let residencyBaseline = try residencyCount("v3 baseline")
+
+    let scenario = Scenario(
+        name: "v3_input_contract",
+        start: Transform(center: SIMD2(112, 88), angle: 0),
+        middle: Transform(center: SIMD2(116, 88), angle: 0),
+        end: Transform(center: SIMD2(120, 88), angle: 0),
+        cameraPrevious: matrix_identity_float4x4
+    )
+    let frame = try harness.render(
+        current: scenario.middle,
+        previous: scenario.start,
+        scenario: scenario,
+        label: "v3 input contract source"
+    )
+    let color = try harness.makeWorkingTexture(
+        format: .rgba8Unorm_srgb, label: "v3 input contract sRGB color"
+    )
+    let output = try harness.makeWorkingTexture(
+        format: .rgba8Unorm_srgb, label: "v3 input contract sRGB output"
+    )
+    let cameraMotion = try harness.makeWorkingTexture(
+        format: .rg16Float, label: "v3 input contract camera motion"
+    )
+    let disocclusion = try harness.makeWorkingTexture(
+        format: .r8Unorm, label: "v3 input contract disocclusion"
+    )
+    let motion = try harness.makeWorkingTexture(
+        format: .rg16Float, label: "v3 input contract finalized motion"
+    )
+    let reactive = try harness.makeWorkingTexture(
+        format: .r8Unorm, label: "v3 input contract reactive"
+    )
+    try harness.clearColor(color, color: MTLClearColor(red: 0.2, green: 0.25, blue: 0.3, alpha: 1))
+    try harness.clearColor(output)
+    try harness.clearColor(cameraMotion)
+    try harness.clearColor(disocclusion)
+    try harness.clearColor(motion)
+    try harness.clearColor(reactive)
+    guard let fence = harness.device.makeFence() else {
+        try fail("could not create v3 input contract fence")
+    }
+    let frameID: UInt64 = 10_001
+    let historyEpoch: UInt64 = 701
+    let identity = matrixFloats(matrix_identity_float4x4)
+
+    guard let staleCommandBuffer = harness.queue.makeCommandBuffer() else {
+        try fail("could not create stale-motion contract command buffer")
+    }
+    let staleToken = metallum_metalfx_temporal_encode_v3(
+        staleCommandBuffer, harness.device, color, frame.depth, motion, reactive, nil, output, fence,
+        0, 0, .nan, Int32(harness.width), Int32(harness.height), 1, 1, 1, 0,
+        frameID, historyEpoch
+    )
+    try require(staleToken == 0, "v3 Temporal accepted motion that was never finalized")
+
+    guard let invalidExposureCommandBuffer = harness.queue.makeCommandBuffer() else {
+        try fail("could not create invalid-exposure contract command buffer")
+    }
+    let invalidExposureToken = metallum_metalfx_temporal_encode_v3(
+        invalidExposureCommandBuffer, harness.device, color, frame.depth, motion, reactive, nil, output, fence,
+        0, 0, .nan, Int32(harness.width), Int32(harness.height), 1, 1, 1, 1,
+        frameID, historyEpoch
+    )
+    try require(
+        invalidExposureToken == 0,
+        "v3 Temporal accepted AUTO exposure for FINAL_LDR_SRGB"
+    )
+
+    guard let commandBuffer = harness.queue.makeCommandBuffer() else {
+        try fail("could not create v3 split motion/Temporal command buffer")
+    }
+    let finalized = identity.withUnsafeBufferPointer { current in
+        identity.withUnsafeBufferPointer { inverse in
+            identity.withUnsafeBufferPointer { previous in
+                metallum_metalfx_motion_finalize_v3(
+                    commandBuffer, harness.device, frame.depth, nil, cameraMotion,
+                    frame.objectMotion, frame.validity, disocclusion, motion, reactive,
+                    current.baseAddress, inverse.baseAddress, previous.baseAddress, fence,
+                    0.35, Int32(harness.width), Int32(harness.height), 1, 1, 0, 1,
+                    frameID, historyEpoch
+                )
+            }
+        }
+    }
+    try require(finalized == 1, "v3 motion finalize was rejected")
+    let sceneLinearColor = try harness.makeWorkingTexture(
+        format: .rgba16Float,
+        label: "v3 scene-linear color"
+    )
+    let sceneLinearOutput = try harness.makeWorkingTexture(
+        format: .rgba16Float,
+        label: "v3 scene-linear output"
+    )
+    let invalidExposureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .r16Float,
+        width: 1,
+        height: 1,
+        mipmapped: false
+    )
+    invalidExposureDescriptor.textureType = .type2DArray
+    invalidExposureDescriptor.arrayLength = 2
+    invalidExposureDescriptor.storageMode = .private
+    invalidExposureDescriptor.usage = [.shaderRead]
+    guard let invalidArrayExposure = harness.device.makeTexture(
+        descriptor: invalidExposureDescriptor
+    ) else {
+        try fail("could not create the invalid manual-exposure array texture")
+    }
+    let invalidManualExposureToken = metallum_metalfx_temporal_encode_v3(
+        commandBuffer, harness.device, sceneLinearColor, frame.depth, motion, reactive,
+        invalidArrayExposure, sceneLinearOutput, fence,
+        0, 0, 1.0, Int32(harness.width), Int32(harness.height), 1, 1, 2, 2,
+        frameID, historyEpoch
+    )
+    try require(
+        invalidManualExposureToken == 0,
+        "v3 Temporal accepted an array texture for the 1x1 manual exposure contract"
+    )
+    let scalerToken = metallum_metalfx_temporal_encode_v3(
+        commandBuffer, harness.device, color, frame.depth, motion, reactive, nil, output, fence,
+        0, 0, .nan, Int32(harness.width), Int32(harness.height), 1, 1, 1, 0,
+        frameID, historyEpoch
+    )
+    try require(scalerToken != 0, "v3 Temporal rejected same-stamp finalized motion")
+    commandBuffer.label = "v3 split motion and Temporal"
+    commandBuffer.commit()
+    try require(
+        metallum_metalfx_history_commit_v3(frameID, historyEpoch) == 1,
+        "v3 history commit rejected the encoded frame"
+    )
+    commandBuffer.waitUntilCompleted()
+    try require(
+        commandBuffer.status == .completed,
+        "v3 split motion and Temporal failed: \(String(describing: commandBuffer.error))"
+    )
+    let outputBytes = try exportTexture(
+        harness: harness, texture: output, name: "v3_temporal_output", directory: root
+    )
+    try require(outputBytes.contains { $0 != 0 }, "v3 Temporal output was entirely zero")
+
+    guard let failureGate = harness.device.makeSharedEvent(),
+          let failureCommandBuffer = harness.queue.makeCommandBuffer() else {
+        try fail("could not create v3 submit/failure lifecycle resources")
+    }
+    failureCommandBuffer.encodeWaitForEvent(failureGate, value: 1)
+    let failureFrameID: UInt64 = 20_001
+    let failureEpoch: UInt64 = 702
+    let failureFinalized = identity.withUnsafeBufferPointer { current in
+        identity.withUnsafeBufferPointer { inverse in
+            identity.withUnsafeBufferPointer { previous in
+                metallum_metalfx_motion_finalize_v3(
+                    failureCommandBuffer, harness.device, frame.depth, nil, cameraMotion,
+                    frame.objectMotion, frame.validity, disocclusion, motion, reactive,
+                    current.baseAddress, inverse.baseAddress, previous.baseAddress, fence,
+                    0.35, Int32(harness.width), Int32(harness.height), 1, 1, 0, 0,
+                    failureFrameID, failureEpoch
+                )
+            }
+        }
+    }
+    try require(failureFinalized == 1, "v3 failure-lifecycle motion finalize was rejected")
+    failureCommandBuffer.commit()
+    try require(
+        metallum_metalfx_history_commit_v3(failureFrameID, failureEpoch) == 1,
+        "v3 failure-lifecycle submit acceptance was rejected"
+    )
+    try require(
+        metallum_metalfx_history_previous_is_valid_for_testing(
+            harness.device, frame.depth, failureFrameID + 1, failureEpoch
+        ),
+        "accepted v3 submit did not make previous depth available"
+    )
+    metallum_metalfx_history_discard_v3(failureFrameID, failureEpoch)
+    try require(
+        !metallum_metalfx_history_previous_is_valid_for_testing(
+            harness.device, frame.depth, failureFrameID + 1, failureEpoch
+        ),
+        "GPU failure discard left accepted previous-depth history valid"
+    )
+    guard let poisonedEpochBuffer = harness.queue.makeCommandBuffer() else {
+        try fail("could not create poisoned-epoch contract command buffer")
+    }
+    let poisonedEpochFinalize = identity.withUnsafeBufferPointer { current in
+        identity.withUnsafeBufferPointer { inverse in
+            identity.withUnsafeBufferPointer { previous in
+                metallum_metalfx_motion_finalize_v3(
+                    poisonedEpochBuffer, harness.device, frame.depth, nil, cameraMotion,
+                    frame.objectMotion, frame.validity, disocclusion, motion, reactive,
+                    current.baseAddress, inverse.baseAddress, previous.baseAddress, fence,
+                    0.35, Int32(harness.width), Int32(harness.height), 0, 1, 0, 0,
+                    failureFrameID + 1, failureEpoch
+                )
+            }
+        }
+    }
+    try require(
+        poisonedEpochFinalize == 0,
+        "motion finalize reopened an epoch after an accepted command buffer failed"
+    )
+    failureGate.signaledValue = 1
+    failureCommandBuffer.waitUntilCompleted()
+    try require(
+        failureCommandBuffer.status == .completed,
+        "v3 failure-lifecycle gated command buffer did not drain"
+    )
+    try require(
+        metallum_metalfx_history_tracking_count_for_testing() == 0,
+        "discard followed by GPU completion leaked v3 history transaction tracking"
+    )
+
+    guard let oldEpochGate = harness.device.makeSharedEvent(),
+          let oldEpochBuffer = harness.queue.makeCommandBuffer(),
+          let newEpochBuffer = harness.queue.makeCommandBuffer() else {
+        try fail("could not create cross-epoch history lifecycle resources")
+    }
+    oldEpochBuffer.encodeWaitForEvent(oldEpochGate, value: 1)
+    let oldStamp = (frame: UInt64(30_001), epoch: UInt64(703))
+    let newStamp = (frame: UInt64(30_002), epoch: UInt64(704))
+    func finalizeLifecycleBuffer(
+        _ buffer: MTLCommandBuffer,
+        frameID: UInt64,
+        epoch: UInt64
+    ) -> Int32 {
+        identity.withUnsafeBufferPointer { current in
+            identity.withUnsafeBufferPointer { inverse in
+                identity.withUnsafeBufferPointer { previous in
+                    metallum_metalfx_motion_finalize_v3(
+                        buffer, harness.device, frame.depth, nil, cameraMotion,
+                        frame.objectMotion, frame.validity, disocclusion, motion, reactive,
+                        current.baseAddress, inverse.baseAddress, previous.baseAddress, fence,
+                        0.35, Int32(harness.width), Int32(harness.height), 1, 1, 0, 0,
+                        frameID, epoch
+                    )
+                }
+            }
+        }
+    }
+    try require(
+        finalizeLifecycleBuffer(oldEpochBuffer, frameID: oldStamp.frame, epoch: oldStamp.epoch) == 1,
+        "old-epoch lifecycle finalize was rejected"
+    )
+    try require(
+        metallum_metalfx_history_reset_required_for_testing(oldStamp.frame, oldStamp.epoch),
+        "first frame after a poisoned epoch did not force MetalFX history reset"
+    )
+    oldEpochBuffer.commit()
+    try require(
+        metallum_metalfx_history_commit_v3(oldStamp.frame, oldStamp.epoch) == 1,
+        "old-epoch lifecycle commit was rejected"
+    )
+    try require(
+        finalizeLifecycleBuffer(newEpochBuffer, frameID: newStamp.frame, epoch: newStamp.epoch) == 1,
+        "new-epoch lifecycle finalize was rejected"
+    )
+    newEpochBuffer.commit()
+    try require(
+        metallum_metalfx_history_commit_v3(newStamp.frame, newStamp.epoch) == 1,
+        "new-epoch lifecycle commit was rejected"
+    )
+    metallum_metalfx_history_discard_v3(oldStamp.frame, oldStamp.epoch)
+    try require(
+        metallum_metalfx_history_previous_is_valid_for_testing(
+            harness.device, frame.depth, newStamp.frame + 1, newStamp.epoch
+        ),
+        "late old-epoch failure invalidated accepted new-epoch previous depth"
+    )
+    oldEpochGate.signaledValue = 1
+    oldEpochBuffer.waitUntilCompleted()
+    newEpochBuffer.waitUntilCompleted()
+    try require(
+        oldEpochBuffer.status == .completed && newEpochBuffer.status == .completed,
+        "cross-epoch lifecycle command buffers did not drain"
+    )
+    try require(
+        metallum_metalfx_history_tracking_count_for_testing() == 0,
+        "cross-epoch lifecycle leaked v3 transaction tracking"
+    )
+    try flushResidency("v3 history additions")
+    let residencyWithHistory = try residencyCount("v3 history allocated")
+    try require(
+        residencyWithHistory > residencyBaseline,
+        "v3 history allocation was not tracked by the residency set"
+    )
+    metallum_metalfx_release_scalers()
+    try flushResidency("v3 history release")
+    let residencyAfterRelease = try residencyCount("v3 history released")
+    try require(
+        residencyAfterRelease == residencyBaseline,
+        "releasing MetalFX history left stale residency allocations"
+    )
+    return [
+        "scenario": "v3_input_contract",
+        "stale_motion_rejected": true,
+        "invalid_exposure_rejected": true,
+        "invalid_manual_exposure_shape_rejected": true,
+        "scaler_token": scalerToken,
+        "history_commit_accepted": true,
+        "accepted_then_failed_history_invalidated": true,
+        "failed_epoch_rejected_until_advanced": true,
+        "post_failure_epoch_forced_reset": true,
+        "late_old_epoch_failure_preserved_new_epoch": true,
+        "history_residency_released": true
+    ]
+}
+
+private func runSrgbTextureViewContract(
+    harness: OffscreenHarness
+) throws -> [String: Any] {
+    let base = try harness.makeTexture(
+        format: .rgba8Unorm,
+        width: 8,
+        height: 8,
+        label: "sRGB view byte-preserving base",
+        usage: [.renderTarget, .shaderRead, .pixelFormatView]
+    )
+    try harness.clearColor(
+        base,
+        color: MTLClearColor(red: 0.25, green: 0.5, blue: 0.75, alpha: 1.0)
+    )
+    guard let viewPointer = metallum_create_texture_view_v2(base, .rgba8Unorm_srgb, 0, 1) else {
+        try fail("RGBA8Unorm_sRGB view creation was rejected")
+    }
+    let viewObject = Unmanaged<AnyObject>.fromOpaque(viewPointer).takeRetainedValue()
+    guard let srgbView = viewObject as? MTLTexture else {
+        try fail("sRGB view symbol did not return an MTLTexture")
+    }
+    try require(srgbView.pixelFormat == .rgba8Unorm_srgb, "sRGB view has the wrong pixel format")
+    let baseBytes = try harness.readback(base)
+    let viewBytes = try harness.readback(srgbView)
+    try require(
+        baseBytes == viewBytes,
+        "sRGB texture view changed stored bytes (double-gamma or copy conversion)"
+    )
+
+    guard let linearPresentView = metalLinearPresentTexture(
+        srgbView,
+        label: "linear present view"
+    ) else {
+        try fail("could not create the linear present view from the sRGB base")
+    }
+    try require(
+        linearPresentView.pixelFormat == .rgba8Unorm,
+        "linear present view has the wrong pixel format"
+    )
+    let linearViewBytes = try harness.readback(linearPresentView)
+    try require(
+        linearViewBytes == baseBytes,
+        "linear present view changed the sRGB base storage bytes"
+    )
+
+    let uiStorage = try harness.makeTexture(
+        format: .rgba8Unorm,
+        width: 8,
+        height: 8,
+        label: "transparent UI storage",
+        usage: [.renderTarget, .shaderRead, .pixelFormatView]
+    )
+    try harness.clearColor(uiStorage)
+    guard let uiViewPointer = metallum_create_texture_view_v2(
+        uiStorage, .rgba8Unorm_srgb, 0, 1
+    ) else {
+        try fail("could not create the sRGB UI view")
+    }
+    let uiViewObject = Unmanaged<AnyObject>.fromOpaque(uiViewPointer).takeRetainedValue()
+    guard let srgbUiView = uiViewObject as? MTLTexture,
+          let linearUiView = metalLinearPresentTexture(
+              srgbUiView,
+              label: "linear UI present view"
+          ) else {
+        try fail("could not create the linear UI present view")
+    }
+
+    func renderComposite(
+        scene: MTLTexture,
+        ui: MTLTexture,
+        destination: MTLTexture,
+        label: String
+    ) throws {
+        let library: MTLLibrary
+        do {
+            library = try harness.device.makeLibrary(source: presentMslSource(), options: nil)
+        } catch {
+            try fail("could not compile the production present shader: \(error)")
+        }
+        guard let vertex = library.makeFunction(name: "metallum_present_vs"),
+              let fragment = library.makeFunction(name: "metallum_present_composite_fs") else {
+            try fail("production present shader entry points are missing")
+        }
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.vertexFunction = vertex
+        pipelineDescriptor.fragmentFunction = fragment
+        pipelineDescriptor.colorAttachments[0].pixelFormat = destination.pixelFormat
+        guard let pipeline = try? harness.device.makeRenderPipelineState(
+                  descriptor: pipelineDescriptor
+              ),
+              let commandBuffer = harness.queue.makeCommandBuffer() else {
+            try fail("could not create \(label) pipeline resources")
+        }
+        let samplerDescriptor = MTLSamplerDescriptor()
+        samplerDescriptor.minFilter = .linear
+        samplerDescriptor.magFilter = .linear
+        samplerDescriptor.sAddressMode = .clampToEdge
+        samplerDescriptor.tAddressMode = .clampToEdge
+        guard let sampler = harness.device.makeSamplerState(descriptor: samplerDescriptor) else {
+            try fail("could not create \(label) sampler")
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = destination
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            try fail("could not create \(label) encoder")
+        }
+        encoder.label = label
+        encoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(destination.width),
+            height: Double(destination.height),
+            znear: 0,
+            zfar: 1
+        ))
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(scene, index: 0)
+        encoder.setFragmentTexture(ui, index: 1)
+        encoder.setFragmentSamplerState(sampler, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        try harness.commitAndWait(commandBuffer, label: label)
+    }
+
+    let decodedDestination = try harness.makeTexture(
+        format: .rgba8Unorm,
+        width: 8,
+        height: 8,
+        label: "incorrect decoded present target",
+        usage: [.renderTarget, .shaderRead]
+    )
+    try renderComposite(
+        scene: srgbView,
+        ui: srgbUiView,
+        destination: decodedDestination,
+        label: "sRGB sampled into plain UNORM target"
+    )
+    let decodedBytes = try harness.readback(decodedDestination)
+    try require(
+        decodedBytes != baseBytes,
+        "direct sRGB sampling unexpectedly preserved display-encoded bytes"
+    )
+
+    let bytePreservingDestination = try harness.makeTexture(
+        format: .rgba8Unorm,
+        width: 8,
+        height: 8,
+        label: "byte-preserving present target",
+        usage: [.renderTarget, .shaderRead]
+    )
+    try renderComposite(
+        scene: linearPresentView,
+        ui: linearUiView,
+        destination: bytePreservingDestination,
+        label: "linear view sampled into plain UNORM target"
+    )
+    let presentedBytes = try harness.readback(bytePreservingDestination)
+    try require(
+        presentedBytes == baseBytes,
+        "linear present views did not preserve bytes through the production composite shader"
+    )
+
+    let noViewUsage = try harness.makeTexture(
+        format: .rgba8Unorm,
+        width: 8,
+        height: 8,
+        label: "sRGB view missing usage",
+        usage: [.renderTarget, .shaderRead]
+    )
+    try require(
+        metallum_create_texture_view_v2(noViewUsage, .rgba8Unorm_srgb, 0, 1) == nil,
+        "format reinterpretation succeeded without PixelFormatView usage"
+    )
+    try require(
+        metallum_create_texture_view_v2(base, .bgra8Unorm_srgb, 0, 1) == nil,
+        "incompatible RGBA-to-BGRA texture view was accepted"
+    )
+    return [
+        "scenario": "srgb_texture_view_contract",
+        "byte_preserving": true,
+        "plain_unorm_composite_byte_preserving": true,
+        "direct_srgb_sample_changed_bytes": true,
+        "missing_usage_rejected": true,
+        "incompatible_format_rejected": true
+    ]
+}
+
 @main
 private enum MetalFXOffscreenValidationMain {
     static func main() {
@@ -1341,6 +1864,10 @@ private enum MetalFXOffscreenValidationMain {
             results.append(try runTransparencyAlphaContract(harness: harness, root: root))
             print("[offscreen] running hand_fusion_steady")
             results.append(try runHandFusionScenario(harness: harness, root: root))
+            print("[offscreen] running v3_input_contract")
+            results.append(try runV3InputContract(harness: harness, root: root))
+            print("[offscreen] running srgb_texture_view_contract")
+            results.append(try runSrgbTextureViewContract(harness: harness))
             let summary: [String: Any] = [
                 "status": "passed",
                 "device": harness.device.name,

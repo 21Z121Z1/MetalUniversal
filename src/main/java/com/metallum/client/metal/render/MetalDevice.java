@@ -3,6 +3,7 @@ package com.metallum.client.metal.render;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
+import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
@@ -369,6 +370,22 @@ final class MetalDevice implements GpuDeviceBackend {
     @Override
     public @NonNull GpuTextureView createTextureView(final @NonNull GpuTexture texture, final int baseMipLevel, final int mipLevels) {
         return new MetalGpuTextureView(texture, baseMipLevel, mipLevels);
+    }
+
+    MetalGpuTextureView createTextureView(
+            final @NonNull GpuTexture texture,
+            final @NonNull MTLPixelFormat pixelFormat
+    ) {
+        return this.createTextureView(texture, 0, texture.getMipLevels(), pixelFormat);
+    }
+
+    MetalGpuTextureView createTextureView(
+            final @NonNull GpuTexture texture,
+            final int baseMipLevel,
+            final int mipLevels,
+            final @NonNull MTLPixelFormat pixelFormat
+    ) {
+        return new MetalGpuTextureView(texture, baseMipLevel, mipLevels, pixelFormat);
     }
 
     @Override

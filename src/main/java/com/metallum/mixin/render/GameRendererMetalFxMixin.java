@@ -19,7 +19,7 @@ public abstract class GameRendererMetalFxMixin {
             at = @At(value = "NEW", target = "com/mojang/blaze3d/pipeline/MainTarget")
     )
     private MainTarget metallum$createSceneTarget(final int width, final int height) {
-        return new MainTarget(MetalFxManager.sceneWidth(width), MetalFxManager.sceneHeight(height));
+        return MetalFxManager.createSceneTarget(width, height);
     }
 
     @Redirect(
@@ -27,8 +27,7 @@ public abstract class GameRendererMetalFxMixin {
             at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/pipeline/RenderTarget;resize(II)V")
     )
     private void metallum$resizeSceneTarget(final RenderTarget target, final int width, final int height) {
-        target.resize(MetalFxManager.sceneWidth(width), MetalFxManager.sceneHeight(height));
-        MetalFxManager.resetHistory("resize");
+        MetalFxManager.resizeSceneTarget(target, width, height);
     }
 
     @Redirect(

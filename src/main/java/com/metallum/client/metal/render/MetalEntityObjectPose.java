@@ -2,14 +2,21 @@ package com.metallum.client.metal.render;
 
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.minecraft.client.renderer.entity.state.ArmorStandRenderState;
 import net.minecraft.client.renderer.entity.state.ArrowRenderState;
 import net.minecraft.client.renderer.entity.state.BoatRenderState;
+import net.minecraft.client.renderer.entity.state.DisplayEntityRenderState;
+import net.minecraft.client.renderer.entity.state.EndCrystalRenderState;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
+import net.minecraft.client.renderer.entity.state.ItemFrameRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
+import net.minecraft.client.renderer.entity.state.PaintingRenderState;
+import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
+import com.mojang.math.Transformation;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 
@@ -31,9 +38,33 @@ import org.joml.Quaternionf;
  * camera-relative pose stack.</p>
  */
 @Environment(EnvType.CLIENT)
-final class MetalEntityObjectPose {
+public final class MetalEntityObjectPose {
     /** {@code AbstractMinecartRenderer} and {@code AbstractBoatRenderer} both lift the hull by this much. */
     private static final float VEHICLE_HULL_LIFT = 0.375F;
+    private static final float ITEM_FRAME_PLANE_OFFSET = 0.46875F;
+    private static final float ITEM_FRAME_RENDER_OFFSET = 0.3F;
+    private static final float ITEM_FRAME_CONTENT_Z = 0.4375F;
+    private static final float ITEM_FRAME_INVISIBLE_CONTENT_Z = 0.5F;
+    private static final float MAP_PIXEL_SCALE = 0.0078125F;
+    private static final long ITEM_FRAME_BASE_SALT = 0x4F1BBCDCBFA54001L;
+    private static final long ITEM_FRAME_CONTENT_SALT = 0x91E10DA5C79E7B1DL;
+
+    public enum EntityPart {
+        ITEM_FRAME_BASE(ITEM_FRAME_BASE_SALT),
+        ITEM_FRAME_CONTENT(ITEM_FRAME_CONTENT_SALT),
+        END_CRYSTAL_MODEL(0xD6E8FEB86659FD93L),
+        END_CRYSTAL_BEAM(0xA5A3564E27F1C2B7L);
+
+        private final long salt;
+
+        EntityPart(final long salt) {
+            this.salt = salt;
+        }
+
+        long salt() {
+            return salt;
+        }
+    }
 
     private MetalEntityObjectPose() {
     }
@@ -45,8 +76,40 @@ final class MetalEntityObjectPose {
      */
     static Matrix4f compose(final EntityRenderState state) {
         Matrix4f out = new Matrix4f();
+        if (state instanceof DisplayEntityRenderState display) {
+            return display(out, display);
+        }
         if (state instanceof ItemEntityRenderState item) {
             return droppedItem(out, item.x, item.y, item.z, item.ageInTicks, item.bobOffset);
+        }
+        if (state instanceof ItemFrameRenderState itemFrame) {
+            return itemFrameContent(
+                    out,
+                    itemFrame.x,
+                    itemFrame.y,
+                    itemFrame.z,
+                    itemFrame.direction,
+                    itemFrame.rotation,
+                    itemFrame.mapId != null,
+                    itemFrame.isInvisible
+            );
+        }
+        if (state instanceof PaintingRenderState painting) {
+            return painting(out, painting.x, painting.y, painting.z, painting.direction);
+        }
+        if (state instanceof ArmorStandRenderState armorStand) {
+            return armorStand(
+                    out,
+                    armorStand.x,
+                    armorStand.y,
+                    armorStand.z,
+                    armorStand.scale,
+                    armorStand.yRot,
+                    armorStand.wiggle
+            );
+        }
+        if (state instanceof EndCrystalRenderState endCrystal) {
+            return endCrystal(out, endCrystal.x, endCrystal.y, endCrystal.z);
         }
         if (state instanceof MinecartRenderState cart) {
             return minecart(out, cart);
@@ -67,6 +130,225 @@ final class MetalEntityObjectPose {
             return living(out, living.x, living.y, living.z, living.bodyRot);
         }
         return out.translation((float) state.x, (float) state.y, (float) state.z);
+    }
+
+    static MetalEntityMotionCapture.Source sourceFor(final EntityRenderState state) {
+        if (state instanceof DisplayEntityRenderState) {
+            return MetalEntityMotionCapture.Source.DISPLAY;
+        }
+        if (state instanceof PaintingRenderState) {
+            return MetalEntityMotionCapture.Source.PAINTING;
+        }
+        if (state instanceof ArmorStandRenderState) {
+            return MetalEntityMotionCapture.Source.ARMOR_STAND;
+        }
+        if (state instanceof EndCrystalRenderState) {
+            return MetalEntityMotionCapture.Source.END_CRYSTAL;
+        }
+        return MetalEntityMotionCapture.Source.ENTITY;
+    }
+
+    /**
+     * {@code DisplayRenderer.submit}: billboard orientation followed by the
+     * interpolated renderer transformation. Both are part of the submitted
+     * root, so translation-only reconstruction would miss display turns and
+     * scale changes even when the entity never changes position.
+     */
+    static Matrix4f display(final Matrix4f out, final DisplayEntityRenderState state) {
+        out.translation((float) state.x, (float) state.y, (float) state.z);
+        net.minecraft.world.entity.Display.RenderState renderState = state.renderState;
+        if (renderState == null) {
+            return out;
+        }
+        out.rotate(displayOrientation(renderState, state));
+        Transformation transformation = renderState.transformation().get(state.interpolationProgress);
+        if (transformation != null) {
+            out.mul(transformation.getMatrix());
+        }
+        return out;
+    }
+
+    private static Quaternionf displayOrientation(
+            final net.minecraft.world.entity.Display.RenderState renderState,
+            final DisplayEntityRenderState state
+    ) {
+        float yRot;
+        float xRot;
+        switch (renderState.billboardConstraints()) {
+            case FIXED -> {
+                yRot = -state.entityYRot;
+                xRot = state.entityXRot;
+            }
+            case HORIZONTAL -> {
+                yRot = -state.entityYRot;
+                xRot = -state.cameraXRot;
+            }
+            case VERTICAL -> {
+                yRot = 180.0F - state.cameraYRot;
+                xRot = state.entityXRot;
+            }
+            case CENTER -> {
+                yRot = 180.0F - state.cameraYRot;
+                xRot = -state.cameraXRot;
+            }
+            default -> {
+                yRot = 0.0F;
+                xRot = 0.0F;
+            }
+        }
+        return new Quaternionf().rotationYXZ(
+                (float) Math.toRadians(yRot),
+                (float) Math.toRadians(xRot),
+                0.0F
+        );
+    }
+
+    /** Root used by the frame model, including the model's local half-block shift. */
+    static Matrix4f itemFrameFrame(
+            final Matrix4f out,
+            final double x,
+            final double y,
+            final double z,
+            final Direction direction
+    ) {
+        return itemFrameRoot(out, x, y, z, direction).translate(-0.5F, -0.5F, -0.5F);
+    }
+
+    /**
+     * Root used by the framed item or map. The frame model is popped before this
+     * content path, so its half-block shift must not be included here.
+     */
+    static Matrix4f itemFrameContent(
+            final Matrix4f out,
+            final double x,
+            final double y,
+            final double z,
+            final Direction direction,
+            final int rotation,
+            final boolean map,
+            final boolean invisible
+    ) {
+        itemFrameRoot(out, x, y, z, direction)
+                .translate(0.0F, 0.0F, invisible ? ITEM_FRAME_INVISIBLE_CONTENT_Z : ITEM_FRAME_CONTENT_Z);
+        if (map) {
+            out.rotateZ((float) Math.toRadians((rotation % 4) * 90.0F + 180.0F));
+            out.scale(MAP_PIXEL_SCALE, MAP_PIXEL_SCALE, MAP_PIXEL_SCALE);
+            out.translate(-64.0F, -64.0F, -1.0F);
+        } else {
+            out.rotateZ((float) Math.toRadians(rotation * 45.0F));
+            out.scale(0.5F, 0.5F, 0.5F);
+        }
+        return out;
+    }
+
+    private static Matrix4f itemFrameRoot(
+            final Matrix4f out,
+            final double x,
+            final double y,
+            final double z,
+            final Direction direction
+    ) {
+        out.translation((float) x, (float) y, (float) z);
+        if (direction == null) {
+            return out;
+        }
+        out.translate(
+                direction.getStepX() * ITEM_FRAME_RENDER_OFFSET,
+                -0.25F + direction.getStepY() * ITEM_FRAME_RENDER_OFFSET,
+                direction.getStepZ() * ITEM_FRAME_RENDER_OFFSET
+        ).translate(
+                direction.getStepX() * ITEM_FRAME_PLANE_OFFSET,
+                direction.getStepY() * ITEM_FRAME_PLANE_OFFSET,
+                direction.getStepZ() * ITEM_FRAME_PLANE_OFFSET
+        );
+        float xRot;
+        float yRot;
+        if (direction.getAxis().isHorizontal()) {
+            xRot = 0.0F;
+            yRot = 180.0F - direction.toYRot();
+        } else {
+            xRot = -90.0F * direction.getAxisDirection().getStep();
+            yRot = 180.0F;
+        }
+        out.rotateX((float) Math.toRadians(xRot));
+        out.rotateY((float) Math.toRadians(yRot));
+        return out;
+    }
+
+    /** {@code PaintingRenderer.submit}: a direction-dependent world yaw. */
+    static Matrix4f painting(
+            final Matrix4f out,
+            final double x,
+            final double y,
+            final double z,
+            final Direction direction
+    ) {
+        out.translation((float) x, (float) y, (float) z);
+        if (direction != null) {
+            out.rotateY((float) Math.toRadians(180.0F - direction.get2DDataValue() * 90.0F));
+        }
+        return out;
+    }
+
+    /** {@code ArmorStandRenderer.setupRotations} plus the living root scale. */
+    static Matrix4f armorStand(
+            final Matrix4f out,
+            final double x,
+            final double y,
+            final double z,
+            final float scale,
+            final float yRot,
+            final float wiggle
+    ) {
+        out.translation((float) x, (float) y, (float) z);
+        out.scale(scale, scale, scale);
+        out.rotateY((float) Math.toRadians(180.0F - yRot));
+        if (wiggle < 5.0F) {
+            out.rotateY((float) Math.toRadians(Mth.sin(wiggle / 1.5F * Mth.PI) * 3.0F));
+        }
+        return out;
+    }
+
+    /** {@code EndCrystalRenderer.submit}'s rigid root. Model-part animation is separate. */
+    static Matrix4f endCrystal(
+            final Matrix4f out,
+            final double x,
+            final double y,
+            final double z
+    ) {
+        out.translation((float) x, (float) y, (float) z);
+        out.scale(2.0F, 2.0F, 2.0F);
+        out.translate(0.0F, -0.5F, 0.0F);
+        return out;
+    }
+
+    /** Root left on the pose stack while {@code submitCrystalBeams} emits its geometry. */
+    static Matrix4f endCrystalBeam(
+            final Matrix4f out,
+            final double x,
+            final double y,
+            final double z,
+            final Vec3 beamOffset
+    ) {
+        out.translation((float) x, (float) y, (float) z);
+        if (beamOffset != null) {
+            out.translate((float) beamOffset.x, (float) beamOffset.y, (float) beamOffset.z);
+        }
+        return out;
+    }
+
+    static long objectId(final long entityObjectId, final EntityPart part) {
+        return mix(entityObjectId ^ part.salt());
+    }
+
+    private static long mix(final long value) {
+        long mixed = value;
+        mixed ^= mixed >>> 30;
+        mixed *= 0xBF58476D1CE4E5B9L;
+        mixed ^= mixed >>> 27;
+        mixed *= 0x94D049BB133111EBL;
+        mixed ^= mixed >>> 31;
+        return mixed;
     }
 
     /**

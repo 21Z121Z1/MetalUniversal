@@ -123,6 +123,24 @@ final class MetalFxMath {
                 ? fieldOfView : fallback;
     }
 
+    /**
+     * Extracts the physical near plane from Minecraft's reversed-Z perspective.
+     * Projection.getMatrix deliberately passes zFar as JOML's near argument and
+     * zNear as its far argument. For both zero-to-one and negative-one-to-one
+     * clip depth, the physical near plane is m32 / (m22 + 1).
+     */
+    static float reversedPerspectiveNearPlane(final Matrix4fc projection) {
+        if (projection == null || !isFinite(projection)
+                || Math.abs(projection.m23() + 1.0F) > 1.0E-4F
+                || Math.abs(projection.m33()) > 1.0E-6F
+                || projection.m22() < 0.0F) {
+            return Float.NaN;
+        }
+        float denominator = projection.m22() + 1.0F;
+        float nearPlane = projection.m32() / denominator;
+        return nearPlane > 0.0F && Float.isFinite(nearPlane) ? nearPlane : Float.NaN;
+    }
+
     static Matrix4f viewMatrix(final Matrix4fc viewRotation, final double cameraX, final double cameraY, final double cameraZ) {
         return viewMatrix(new Matrix4f(), viewRotation, cameraX, cameraY, cameraZ);
     }

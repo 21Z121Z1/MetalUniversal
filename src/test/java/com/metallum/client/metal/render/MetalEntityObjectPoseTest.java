@@ -1,6 +1,12 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.math.Transformation;
+import net.minecraft.client.renderer.entity.state.BlockDisplayEntityRenderState;
+import net.minecraft.client.renderer.entity.state.DisplayEntityRenderState;
+import net.minecraft.core.Direction;
+import net.minecraft.world.entity.Display;
 import org.joml.Matrix4f;
+import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.junit.jupiter.api.Test;
 
@@ -37,6 +43,32 @@ final class MetalEntityObjectPoseTest {
 
     private static Vector3f map(final Matrix4f transform, final float x, final float y, final float z) {
         return transform.transformPosition(new Vector3f(x, y, z));
+    }
+
+    private static DisplayEntityRenderState displayState(
+            final Display.BillboardConstraints billboard,
+            final float entityYRot,
+            final float entityXRot,
+            final Transformation transformation
+    ) {
+        BlockDisplayEntityRenderState state = new BlockDisplayEntityRenderState();
+        state.x = 8.0;
+        state.y = 70.0;
+        state.z = -4.0;
+        state.renderState = new Display.RenderState(
+                Display.GenericInterpolator.constant(transformation),
+                billboard,
+                -1,
+                Display.FloatInterpolator.constant(0.0F),
+                Display.FloatInterpolator.constant(0.0F),
+                0
+        );
+        state.interpolationProgress = 1.0F;
+        state.entityYRot = entityYRot;
+        state.entityXRot = entityXRot;
+        state.cameraYRot = 25.0F;
+        state.cameraXRot = -10.0F;
+        return state;
     }
 
     @Test
@@ -190,5 +222,88 @@ final class MetalEntityObjectPoseTest {
         );
         assertPoint(map(objectDelta, 0.0F, 0.0F, -1.0F), -1.0F, 0.0F, 0.0F);
         assertPoint(map(objectDelta, 0.0F, 0.0F, 0.0F), 0.0F, 0.0F, 0.0F);
+    }
+
+    @Test
+    void displayRootIncludesRendererBillboardRotationAndInterpolatedScale() {
+        Transformation previousTransform = new Transformation(
+                new Vector3f(), new Quaternionf(), new Vector3f(1.0F, 1.0F, 1.0F), new Quaternionf()
+        );
+        Transformation currentTransform = new Transformation(
+                new Vector3f(), new Quaternionf(), new Vector3f(2.0F, 1.5F, 0.75F), new Quaternionf()
+        );
+        Matrix4f previous = MetalEntityObjectPose.compose(displayState(
+                Display.BillboardConstraints.FIXED, 0.0F, 0.0F, previousTransform
+        ));
+        Matrix4f current = MetalEntityObjectPose.compose(displayState(
+                Display.BillboardConstraints.FIXED, 90.0F, 0.0F, currentTransform
+        ));
+
+        assertFalse(previous.equals(current, EPSILON), "display rotation and scale must reach the root pose");
+        assertEquals(2.0F, new Vector3f(current.m00(), current.m01(), current.m02()).length(), EPSILON);
+        assertTrue(delta(previous, current).transformPosition(new Vector3f(1.0F, 0.0F, 0.0F))
+                        .distance(new Vector3f(1.0F, 0.0F, 0.0F)) > EPSILON,
+                "a display turn must produce nonzero object motion");
+    }
+
+    @Test
+    void displayBillboardConstraintsFollowMinecraftsRendererOrder() {
+        Transformation identity = Transformation.IDENTITY;
+        Matrix4f horizontal = MetalEntityObjectPose.compose(displayState(
+                Display.BillboardConstraints.HORIZONTAL, 35.0F, 0.0F, identity
+        ));
+        Matrix4f vertical = MetalEntityObjectPose.compose(displayState(
+                Display.BillboardConstraints.VERTICAL, 35.0F, 0.0F, identity
+        ));
+
+        assertFalse(horizontal.equals(vertical, EPSILON),
+                "horizontal and vertical billboards must use their distinct vanilla branches");
+    }
+
+    @Test
+    void itemFrameBaseAndContentHaveIndependentRendererRoots() {
+        Matrix4f base = MetalEntityObjectPose.itemFrameFrame(
+                new Matrix4f(), 4.0, 65.0, 9.0, Direction.NORTH
+        );
+        Matrix4f content = MetalEntityObjectPose.itemFrameContent(
+                new Matrix4f(), 4.0, 65.0, 9.0, Direction.NORTH, 1, true, false
+        );
+
+        assertFalse(base.equals(content, EPSILON));
+        Matrix4f rotatedContent = MetalEntityObjectPose.itemFrameContent(
+                new Matrix4f(), 4.0, 65.0, 9.0, Direction.NORTH, 2, true, false
+        );
+        assertFalse(content.equals(rotatedContent, EPSILON),
+                "map rotation must be part of the content root");
+    }
+
+    @Test
+    void paintingArmorStandAndCrystalRootsPreserveRendererLocalTransforms() {
+        Matrix4f paintingNorth = MetalEntityObjectPose.painting(
+                new Matrix4f(), 0.0, 64.0, 0.0, Direction.NORTH
+        );
+        Matrix4f paintingEast = MetalEntityObjectPose.painting(
+                new Matrix4f(), 0.0, 64.0, 0.0, Direction.EAST
+        );
+        assertFalse(paintingNorth.equals(paintingEast, EPSILON));
+
+        Matrix4f armorSmall = MetalEntityObjectPose.armorStand(
+                new Matrix4f(), 0.0, 64.0, 0.0, 0.5F, 0.0F, 6.0F
+        );
+        Matrix4f armorTurned = MetalEntityObjectPose.armorStand(
+                new Matrix4f(), 0.0, 64.0, 0.0, 1.0F, 90.0F, 6.0F
+        );
+        assertFalse(armorSmall.equals(armorTurned, EPSILON));
+
+        Matrix4f crystalPrevious = MetalEntityObjectPose.endCrystal(
+                new Matrix4f(), 2.0, 70.0, -3.0
+        );
+        Matrix4f crystalCurrent = MetalEntityObjectPose.endCrystal(
+                new Matrix4f(), 2.0, 70.5, -3.0
+        );
+        assertTrue(delta(crystalPrevious, crystalCurrent).transformPosition(
+                        new Vector3f(2.0F, 69.5F, -3.0F)
+                ).distance(new Vector3f(2.0F, 69.5F, -3.0F)) > EPSILON,
+                "crystal root translation must reach the motion delta");
     }
 }

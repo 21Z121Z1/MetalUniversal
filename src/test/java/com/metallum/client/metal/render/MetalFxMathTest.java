@@ -99,6 +99,34 @@ final class MetalFxMathTest {
     }
 
     @Test
+    void reversedPerspectiveProvidesThePhysicalNearPlaneForMetalDepth() {
+        Matrix4f projection = new Matrix4f().setPerspective(
+                (float) Math.toRadians(70.0D), 16.0F / 9.0F, 1000.0F, 0.05F, true
+        );
+        assertEquals(0.05F, MetalFxMath.reversedPerspectiveNearPlane(projection), 1.0E-6F);
+    }
+
+    @Test
+    void reversedPerspectiveProvidesThePhysicalNearPlaneForLegacyClipDepth() {
+        Matrix4f projection = new Matrix4f().setPerspective(
+                (float) Math.toRadians(70.0D), 16.0F / 9.0F, 1000.0F, 0.05F, false
+        );
+        assertEquals(0.05F, MetalFxMath.reversedPerspectiveNearPlane(projection), 1.0E-6F);
+    }
+
+    @Test
+    void invalidOrForwardDepthProjectionHasNoFrameGenerationNearPlane() {
+        Matrix4f forward = new Matrix4f().setPerspective(
+                (float) Math.toRadians(70.0D), 16.0F / 9.0F, 0.05F, 1000.0F, true
+        );
+        assertTrue(Float.isNaN(MetalFxMath.reversedPerspectiveNearPlane(forward)));
+        assertTrue(Float.isNaN(MetalFxMath.reversedPerspectiveNearPlane(new Matrix4f())));
+        assertTrue(Float.isNaN(MetalFxMath.reversedPerspectiveNearPlane(
+                new Matrix4f().m22(Float.NaN).m23(-1.0F)
+        )));
+    }
+
+    @Test
     void invalidProjectionUsesTheFieldOfViewFallback() {
         Matrix4f invalid = new Matrix4f().m11(Float.NaN);
         assertEquals(55.0F, MetalFxMath.verticalFieldOfViewDegrees(invalid, 55.0F), 1.0E-6F);

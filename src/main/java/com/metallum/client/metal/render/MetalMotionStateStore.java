@@ -62,6 +62,33 @@ final class MetalMotionStateStore {
         return new Matrix4f(value);
     }
 
+    /**
+     * Returns history only when the object's translation stayed within the
+     * renderer's continuity bound. A large jump is a teleport/recreated scene,
+     * not a velocity that should be sent to the interpolator; the current value
+     * remains pending so the next frame can resume with a fresh previous pose.
+     */
+    @Nullable
+    Matrix4f previousIfContinuous(
+            final ObjectKey key,
+            final Matrix4fc currentTransform,
+            final float maxTranslationDelta
+    ) {
+        Matrix4f value = previous.get(key);
+        if (value == null) {
+            missingPreviousCount++;
+            return null;
+        }
+        if (currentTransform == null || !MetalFxMath.isFinite(currentTransform)
+                || !Float.isFinite(maxTranslationDelta) || maxTranslationDelta < 0.0F
+                || Math.abs(currentTransform.m30() - value.m30()) > maxTranslationDelta
+                || Math.abs(currentTransform.m31() - value.m31()) > maxTranslationDelta
+                || Math.abs(currentTransform.m32() - value.m32()) > maxTranslationDelta) {
+            return null;
+        }
+        return new Matrix4f(value);
+    }
+
     boolean hasPrevious(final ObjectKey key) {
         return previous.containsKey(key);
     }

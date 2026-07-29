@@ -16,6 +16,7 @@ import java.lang.foreign.MemorySegment;
 @Environment(EnvType.CLIENT)
 final class MetalGpuTexture extends GpuTexture {
     static final int USAGE_SHADER_WRITE = 1 << 5;
+    static final int USAGE_PIXEL_FORMAT_VIEW = 1 << 6;
     // Minimal usage flags keep Apple GPU lossless bandwidth compression alive:
     // MTLTextureUsage.ShaderWrite disables it on pre-M5 GPUs, so it is only
     // set for textures that explicitly request USAGE_SHADER_WRITE (MetalFX
@@ -56,7 +57,7 @@ final class MetalGpuTexture extends GpuTexture {
                 depthOrLayers,
                 mipLevels,
                 (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
-                toMtlTextureUsage(usage),
+                toMtlTextureUsage(usage, this.mtlPixelFormat),
                 MTLStorageMode.Private,
                 label
         );
@@ -140,7 +141,10 @@ final class MetalGpuTexture extends GpuTexture {
         return this.closed;
     }
 
-    private long toMtlTextureUsage(@GpuTexture.Usage final int usage) {
+    static long toMtlTextureUsage(
+            @GpuTexture.Usage final int usage,
+            final MTLPixelFormat pixelFormat
+    ) {
         long result = 0L;
         if ((usage & GpuTexture.USAGE_TEXTURE_BINDING) != 0 || (usage & GpuTexture.USAGE_COPY_DST) != 0 || (usage & GpuTexture.USAGE_COPY_SRC) != 0) {
             result |= MTLTextureUsage.ShaderRead.value;
@@ -156,13 +160,16 @@ final class MetalGpuTexture extends GpuTexture {
             // attachments must not receive ShaderWrite, because Metal does
             // not permit storage writes to every depth format.
             if (!MINIMAL_USAGE
-                    && !this.mtlPixelFormat.hasStencil() && this.mtlPixelFormat != MTLPixelFormat.Depth16Unorm
-                    && this.mtlPixelFormat != MTLPixelFormat.Depth32Float) {
+                    && !pixelFormat.hasStencil() && pixelFormat != MTLPixelFormat.Depth16Unorm
+                    && pixelFormat != MTLPixelFormat.Depth32Float) {
                 result |= MTLTextureUsage.ShaderWrite.value;
             }
         }
         if ((usage & USAGE_SHADER_WRITE) != 0) {
             result |= MTLTextureUsage.ShaderWrite.value;
+        }
+        if ((usage & USAGE_PIXEL_FORMAT_VIEW) != 0) {
+            result |= MTLTextureUsage.PixelFormatView.value;
         }
         return result == 0L ? MTLTextureUsage.ShaderRead.value : result;
     }

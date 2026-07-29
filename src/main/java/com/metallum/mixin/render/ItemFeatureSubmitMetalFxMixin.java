@@ -33,6 +33,6 @@ public abstract class ItemFeatureSubmitMetalFxMixin {
             final ItemStackRenderState.FoilType foilType,
             final CallbackInfo ci
     ) {
-        MetalEntityMotionCapture.captureModelSubmit(this);
+        MetalEntityMotionCapture.captureModelSubmit(this, pose);
     }
 }

@@ -648,7 +648,67 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			"metallum.opt.metal4Present", "false").toBoolean() ? "metal4" : "metal3"
 		def normalizedFrameGenerationOutputWidth = requestedFrameGenerationOutputWidth
 				.trim().toLowerCase(Locale.ROOT)
+	def prepareMinecraftValidationOptions = tasks.register("prepareMinecraftValidationOptions") {
+		doLast {
+			// A failed validation intentionally exits non-zero and can leave the dev
+			// instance marked as an interrupted startup. On the next run vanilla
+			// blocks on its generic "unsupported resolution / update drivers"
+			// recovery dialog before the validation driver can take control. This is
+			// an isolated automated run directory, so restore only that crash marker;
+			// preserve backend, fullscreen and every other user-tunable option.
+			def validationOptions = file("${projectDir}/run/options.txt").toPath()
+			if (java.nio.file.Files.isRegularFile(validationOptions)) {
+				def original = java.nio.file.Files.readString(validationOptions)
+				def cleanMarker = "startedCleanly:true"
+				def updated = original.replaceFirst(
+						/(?m)^startedCleanly:(?:true|false)\s*$/,
+						cleanMarker
+				)
+				if (updated == original && !original.readLines().any {
+					it.startsWith("startedCleanly:")
+				}) {
+					updated = original + (original.endsWith("\n") ? "" : "\n")
+							+ cleanMarker + "\n"
+				}
+				if (updated != original) {
+					def temporary = java.nio.file.Files.createTempFile(
+							validationOptions.parent,
+							"options.txt.",
+							".tmp"
+					)
+					try {
+						java.nio.file.Files.writeString(temporary, updated)
+						try {
+							java.nio.file.Files.move(
+									temporary,
+									validationOptions,
+									java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+									java.nio.file.StandardCopyOption.ATOMIC_MOVE
+							)
+						} catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+							java.nio.file.Files.move(
+									temporary,
+									validationOptions,
+									java.nio.file.StandardCopyOption.REPLACE_EXISTING
+							)
+						}
+					} finally {
+						java.nio.file.Files.deleteIfExists(temporary)
+					}
+					logger.lifecycle(
+							"Restored run/options.txt startedCleanly=true for unattended validation"
+					)
+				}
+				logger.lifecycle("Automated validation startup marker is startedCleanly=true")
+			}
+		}
+	}
 	tasks.named("runClient") {
+		dependsOn prepareMinecraftValidationOptions
+		// A prior interrupted startup may have persisted OpenGL after vanilla's
+		// crash recovery. Keep the options file untouched and override only this
+		// dedicated validation process; DEFAULT is where Metallum injects Metal.
+		args "--graphicsBackend", "default"
 		doFirst {
 			if (lockedBackpressureValidationRequested) {
 				def reason = lockedConsoleValidationReason()

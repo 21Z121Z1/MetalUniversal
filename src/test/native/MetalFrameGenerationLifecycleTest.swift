@@ -223,6 +223,20 @@ private func testRealSubmittedShutdown() throws {
 }
 
 private func testCommandBufferFailure() throws {
+    var uncommittedInput = MetalFrameGenerationLifecycle(sourceFrameID: 70)
+    _ = uncommittedInput.submitInput()
+    let inputActions = uncommittedInput.completeGPUWork(
+        .input,
+        succeeded: false,
+        reason: "commit rejected"
+    )
+    try expect(uncommittedInput.terminalPhase == .failed, "uncommitted input must fail source")
+    try expect(inputActions.contains(.releaseOwnership), "uncommitted input must release ownership")
+    try expect(
+        uncommittedInput.completeGPUWork(.input, succeeded: false).isEmpty,
+        "duplicate uncommitted-input abort must be idempotent"
+    )
+
     var generated = try makeReady(sourceFrameID: 7, interpolation: true)
     _ = generated.submitPresentation(.generated)
     let generatedActions = generated.completeGPUWork(.generated, succeeded: false, reason: "GPU error")

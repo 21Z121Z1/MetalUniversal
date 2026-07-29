@@ -282,7 +282,9 @@ private final class ValidationRunner {
             depth: inputs.depth,
             motion: inputs.motion,
             inputWidth: inputWidth,
-            inputHeight: inputHeight
+            inputHeight: inputHeight,
+            scalerToken: 0,
+            stamp: MetalFxFrameStamp(frameID: 1, historyEpoch: 1)
         ) else {
             throw PresentationValidationError.failed("Could not create frame-generation presenter")
         }
@@ -371,7 +373,11 @@ private final class ValidationRunner {
                 aspectRatio: Float(displayWidth) / Float(displayHeight),
                 sourceDeltaSeconds: 1.0 / 60.0,
                 reset: sourceIndex == 0 || sourceIndex == resizeSourceIndex,
-                globalFence: nil
+                globalFence: nil,
+                stamp: MetalFxFrameStamp(
+                    frameID: UInt64(sourceIndex + 1),
+                    historyEpoch: 1
+                )
             )
             guard accepted == 1 else {
                 throw PresentationValidationError.failed("Presenter rejected source frame \(sourceIndex)")

@@ -234,6 +234,43 @@ public final class MetalNativeBridge {
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                     FLOAT, FLOAT, FLOAT, INT, INT, INT, INT, INT, INT
             ));
+            metalfxMotionFinalizeV3 = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_motion_finalize_v3",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            FLOAT,
+                            INT, INT, INT, INT, INT, INT,
+                            LONG, LONG
+                    )
+            );
+            metalfxTemporalEncodeV3 = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_temporal_encode_v3",
+                    FunctionDescriptor.of(
+                            LONG,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            FLOAT, FLOAT, FLOAT,
+                            INT, INT, INT, INT, INT, INT,
+                            LONG, LONG
+                    )
+            );
+            metalfxHistoryCommitV3 = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_history_commit_v3",
+                    FunctionDescriptor.of(INT, LONG, LONG)
+            );
+            metalfxHistoryDiscardV3 = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_history_discard_v3",
+                    FunctionDescriptor.ofVoid(LONG, LONG)
+            );
             metalfxEncode = downcallWithoutCritical(lookup, "metallum_metalfx_encode", FunctionDescriptor.of(
                     INT,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
@@ -265,6 +302,25 @@ public final class MetalNativeBridge {
                             FLOAT, FLOAT, FLOAT, FLOAT, FLOAT, FLOAT, FLOAT,
                             INT, ValueLayout.ADDRESS
                     )
+            );
+            metalfxFrameGenerationEncodeV3 = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_frame_generation_encode_v3",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT, INT,
+                            FLOAT, FLOAT, FLOAT, FLOAT, FLOAT, FLOAT, FLOAT,
+                            INT, ValueLayout.ADDRESS,
+                            LONG, LONG, LONG
+                    )
+            );
+            metalfxFrameGenerationAbortUncommittedV3 = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_frame_generation_abort_uncommitted_v3",
+                    FunctionDescriptor.of(INT, LONG, LONG)
             );
 
             MTLDeviceMaxMemoryAllocationSize = downcall(lookup, "metallum_MTLDevice_maxMemoryAllocationSize", FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
@@ -420,6 +476,18 @@ public final class MetalNativeBridge {
                     "metallum_MTLCommandBuffer_encodePresentTextureToDrawable",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
+            MTLCommandBufferEncodePresentSceneAndUiToDrawable = downcallWithoutCritical(
+                    lookup,
+                    "metallum_MTLCommandBuffer_encodePresentSceneAndUiToDrawable",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS
+                    )
+            );
             createBuffer = downcall(lookup, "metallum_create_buffer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
             createTexture2d = downcall(
                     lookup,
@@ -427,6 +495,11 @@ public final class MetalNativeBridge {
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, ValueLayout.ADDRESS)
             );
             createTextureView = downcall(lookup, "metallum_create_texture_view", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
+            createTextureViewV2 = optionalDowncall(
+                    lookup,
+                    "metallum_create_texture_view_v2",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG)
+            );
             createBufferTextureView = downcall(
                     lookup,
                     "metallum_create_buffer_texture_view",
@@ -746,9 +819,12 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitivesIndirect;
     private static final MethodHandle MTLCommandBufferClearColorDepthTexturesRegion;
     private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawable;
+    private static final MethodHandle MTLCommandBufferEncodePresentSceneAndUiToDrawable;
     private static final MethodHandle createBuffer;
     private static final MethodHandle createTexture2d;
     private static final MethodHandle createTextureView;
+    @Nullable
+    private static final MethodHandle createTextureViewV2;
     private static final MethodHandle createBufferTextureView;
     private static final MethodHandle createSampler;
     private static final MethodHandle MTLVertexDescriptorCreate;
@@ -813,6 +889,14 @@ public final class MetalNativeBridge {
     private static final MethodHandle metalfxEncodeHandOverlay;
     @Nullable
     private static final MethodHandle metalfxEncodeV2;
+    @Nullable
+    private static final MethodHandle metalfxMotionFinalizeV3;
+    @Nullable
+    private static final MethodHandle metalfxTemporalEncodeV3;
+    @Nullable
+    private static final MethodHandle metalfxHistoryCommitV3;
+    @Nullable
+    private static final MethodHandle metalfxHistoryDiscardV3;
     private static final MethodHandle metalfxEncode;
     private static final MethodHandle metalfxTransparencyMask;
     private static final MethodHandle metalfxCopy;
@@ -820,6 +904,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle metalfxReleaseScalers;
     private static final MethodHandle metalfxStopFrameGeneration;
     private static final MethodHandle metalfxFrameGenerationEncode;
+    @Nullable
+    private static final MethodHandle metalfxFrameGenerationEncodeV3;
+    @Nullable
+    private static final MethodHandle metalfxFrameGenerationAbortUncommittedV3;
     private static final MethodHandle iosFindSurfaceView; // null on macOS
     private static final MethodHandle iosGetViewMetalLayer; // null on macOS
 
@@ -1235,6 +1323,128 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static boolean metallum_metalfx_input_contract_v3_available() {
+        return metalfxMotionFinalizeV3 != null
+                && metalfxTemporalEncodeV3 != null
+                && metalfxHistoryCommitV3 != null
+                && metalfxHistoryDiscardV3 != null
+                && metalfxFrameGenerationEncodeV3 != null
+                && metalfxFrameGenerationAbortUncommittedV3 != null;
+    }
+
+    public static boolean metallum_metalfx_motion_finalize_v3(
+            final MemorySegment commandBuffer,
+            final MemorySegment device,
+            final MemorySegment depth,
+            @Nullable final MemorySegment handDepth,
+            final MemorySegment cameraMotion,
+            final MemorySegment objectMotion,
+            final MemorySegment objectValidity,
+            final MemorySegment disocclusion,
+            final MemorySegment motion,
+            final MemorySegment reactive,
+            @Nullable final float[] currentViewProjection,
+            @Nullable final float[] inverseCurrentViewProjection,
+            @Nullable final float[] previousViewProjection,
+            final MemorySegment fence,
+            final float handReactiveBoost,
+            final int inputWidth,
+            final int inputHeight,
+            final boolean reset,
+            final boolean depthReversed,
+            final boolean preserveReactiveMask,
+            final boolean emitMotionDiagnostics,
+            final long frameId,
+            final long historyEpoch
+    ) {
+        if (metalfxMotionFinalizeV3 == null) {
+            return false;
+        }
+        try {
+            MetalFxMatrixScratch scratch = METALFX_MATRIX_SCRATCH.get();
+            MemorySegment current = scratch.copy(currentViewProjection, scratch.current);
+            MemorySegment inverse = scratch.copy(inverseCurrentViewProjection, scratch.inverse);
+            MemorySegment previous = scratch.copy(previousViewProjection, scratch.previous);
+            return (int) metalfxMotionFinalizeV3.invokeExact(
+                    segment(commandBuffer), segment(device), segment(depth), segment(handDepth),
+                    segment(cameraMotion), segment(objectMotion), segment(objectValidity),
+                    segment(disocclusion), segment(motion), segment(reactive),
+                    current, inverse, previous, segment(fence), handReactiveBoost,
+                    inputWidth, inputHeight, reset ? 1 : 0, depthReversed ? 1 : 0,
+                    preserveReactiveMask ? 1 : 0, emitMotionDiagnostics ? 1 : 0,
+                    frameId, historyEpoch
+            ) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_motion_finalize_v3", throwable);
+        }
+    }
+
+    public static long metallum_metalfx_temporal_encode_v3(
+            final MemorySegment commandBuffer,
+            final MemorySegment device,
+            final MemorySegment color,
+            final MemorySegment depth,
+            final MemorySegment motion,
+            final MemorySegment reactive,
+            @Nullable final MemorySegment exposure,
+            final MemorySegment output,
+            final MemorySegment fence,
+            final float jitterX,
+            final float jitterY,
+            final float preExposure,
+            final int inputWidth,
+            final int inputHeight,
+            final boolean reset,
+            final boolean depthReversed,
+            final int colorEncoding,
+            final int exposureMode,
+            final long frameId,
+            final long historyEpoch
+    ) {
+        if (metalfxTemporalEncodeV3 == null) {
+            return 0L;
+        }
+        try {
+            return (long) metalfxTemporalEncodeV3.invokeExact(
+                    segment(commandBuffer), segment(device), segment(color), segment(depth),
+                    segment(motion), segment(reactive), segment(exposure), segment(output),
+                    segment(fence), jitterX, jitterY, preExposure,
+                    inputWidth, inputHeight, reset ? 1 : 0, depthReversed ? 1 : 0,
+                    colorEncoding, exposureMode, frameId, historyEpoch
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_temporal_encode_v3", throwable);
+        }
+    }
+
+    public static boolean metallum_metalfx_history_commit_v3(
+            final long frameId,
+            final long historyEpoch
+    ) {
+        if (metalfxHistoryCommitV3 == null) {
+            return false;
+        }
+        try {
+            return (int) metalfxHistoryCommitV3.invokeExact(frameId, historyEpoch) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_history_commit_v3", throwable);
+        }
+    }
+
+    public static void metallum_metalfx_history_discard_v3(
+            final long frameId,
+            final long historyEpoch
+    ) {
+        if (metalfxHistoryDiscardV3 == null) {
+            return;
+        }
+        try {
+            metalfxHistoryDiscardV3.invokeExact(frameId, historyEpoch);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_history_discard_v3", throwable);
+        }
+    }
+
     public static boolean metallum_metalfx_frame_generation_encode(
             final MemorySegment commandBuffer,
             final MemorySegment device,
@@ -1267,6 +1477,67 @@ public final class MetalNativeBridge {
             ) != 0;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metalfx_frame_generation_encode", throwable);
+        }
+    }
+
+    public static boolean metallum_metalfx_frame_generation_encode_v3(
+            final MemorySegment commandBuffer,
+            final MemorySegment device,
+            final MemorySegment layer,
+            final MemorySegment sceneColor,
+            final MemorySegment nativeSceneColor,
+            final MemorySegment uiColor,
+            final MemorySegment depth,
+            final MemorySegment motion,
+            final int inputWidth,
+            final int inputHeight,
+            final float jitterX,
+            final float jitterY,
+            final float fieldOfView,
+            final float nearPlane,
+            final float farPlane,
+            final float aspectRatio,
+            final float sourceDeltaSeconds,
+            final boolean reset,
+            final MemorySegment fence,
+            final long frameId,
+            final long historyEpoch,
+            final long scalerToken
+    ) {
+        if (metalfxFrameGenerationEncodeV3 == null) {
+            return false;
+        }
+        try {
+            return (int) metalfxFrameGenerationEncodeV3.invokeExact(
+                    segment(commandBuffer), segment(device), segment(layer),
+                    segment(sceneColor), segment(nativeSceneColor), segment(uiColor),
+                    segment(depth), segment(motion), inputWidth, inputHeight,
+                    jitterX, jitterY, fieldOfView, nearPlane, farPlane, aspectRatio,
+                    sourceDeltaSeconds, reset ? 1 : 0, segment(fence),
+                    frameId, historyEpoch, scalerToken
+            ) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_frame_generation_encode_v3", throwable);
+        }
+    }
+
+    public static boolean metallum_metalfx_frame_generation_abort_uncommitted_v3(
+            final long frameId,
+            final long historyEpoch
+    ) {
+        if (metalfxFrameGenerationAbortUncommittedV3 == null) {
+            return false;
+        }
+        try {
+            return (int) metalfxFrameGenerationAbortUncommittedV3.invokeExact(
+                    frameId,
+                    historyEpoch
+            ) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure(
+                    "metallum_metalfx_frame_generation_abort_uncommitted_v3",
+                    throwable
+            );
         }
     }
 
@@ -1628,6 +1899,24 @@ public final class MetalNativeBridge {
             return (MemorySegment) createTextureView.invokeExact(segment(texture), baseMipLevel, mipLevelCount);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_texture_view", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_create_texture_view_v2(
+            final MemorySegment texture,
+            final MTLPixelFormat pixelFormat,
+            final long baseMipLevel,
+            final long mipLevelCount
+    ) {
+        if (createTextureViewV2 == null) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) createTextureViewV2.invokeExact(
+                    segment(texture), pixelFormat.value, baseMipLevel, mipLevelCount
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_create_texture_view_v2", throwable);
         }
     }
 
@@ -2340,6 +2629,26 @@ public final class MetalNativeBridge {
             MTLCommandBufferEncodePresentTextureToDrawable.invokeExact(segment(commandBuffer), segment(layer), segment(sourceTexture), segment(globalFence));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_encodePresentTextureToDrawable", throwable);
+        }
+    }
+
+    public static boolean MTLCommandBuffer_encodePresentSceneAndUiToDrawable(
+            final MemorySegment commandBuffer,
+            final MemorySegment layer,
+            final MemorySegment sceneTexture,
+            final MemorySegment uiTexture,
+            final MemorySegment globalFence
+    ) {
+        try {
+            return (int) MTLCommandBufferEncodePresentSceneAndUiToDrawable.invokeExact(
+                    segment(commandBuffer),
+                    segment(layer),
+                    segment(sceneTexture),
+                    segment(uiTexture),
+                    segment(globalFence)
+            ) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLCommandBuffer_encodePresentSceneAndUiToDrawable", throwable);
         }
     }
 

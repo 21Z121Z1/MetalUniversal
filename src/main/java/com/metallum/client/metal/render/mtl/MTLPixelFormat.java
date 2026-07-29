@@ -32,10 +32,12 @@ public enum MTLPixelFormat {
     RG16Float(65L),
 
     RGBA8Unorm(70L),
-    BGRA8Unorm(80L),
+    RGBA8Unorm_sRGB(71L),
     RGBA8Snorm(72L),
     RGBA8Uint(73L),
     RGBA8Sint(74L),
+    BGRA8Unorm(80L),
+    BGRA8Unorm_sRGB(81L),
 
     RGB10A2Unorm(90L),
     RG11B10Float(92L),
@@ -70,6 +72,25 @@ public enum MTLPixelFormat {
 
     public boolean hasStencil() {
         return this == Depth24Unorm_Stencil8 || this == Depth32Float_Stencil8;
+    }
+
+    /**
+     * Returns whether Metal permits a texture with this base format to be
+     * reinterpreted as {@code viewFormat} by the backend. Keep this allowlist
+     * narrow: the color-space aliases below have identical byte layouts, while
+     * channel-order or component-type changes do not.
+     */
+    public boolean isViewCompatibleWith(final MTLPixelFormat viewFormat) {
+        if (this == viewFormat) {
+            return true;
+        }
+        return switch (this) {
+            case RGBA8Unorm -> viewFormat == RGBA8Unorm_sRGB;
+            case RGBA8Unorm_sRGB -> viewFormat == RGBA8Unorm;
+            case BGRA8Unorm -> viewFormat == BGRA8Unorm_sRGB;
+            case BGRA8Unorm_sRGB -> viewFormat == BGRA8Unorm;
+            default -> false;
+        };
     }
 
     public static MTLPixelFormat from(final com.mojang.blaze3d.GpuFormat format) {
