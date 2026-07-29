@@ -839,7 +839,8 @@ public func metallum_create_buffer(
     _ options: MTLResourceOptions
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        retainedPointer(device.makeBuffer(length: length, options: options))
+        guard length > 0 else { return nil }
+        return retainedPointer(device.makeBuffer(length: length, options: options))
     }
 }
 
@@ -1223,6 +1224,14 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
     _ drawCount: Int,
     _ stride: UInt64
 ) {
+    if drawCount <= 0 { return }
+    let mul = Int(stride) * drawCount
+    if mul < 0 { return }
+    let needed = Int(indirectBufferOffset) + mul
+    if needed < 0 || needed > indirectBuffer.length {
+        return
+    }
+    if Int(indirectBufferOffset) < 0 { return }
     var offset = Int(indirectBufferOffset)
     for _ in 0..<drawCount {
         encoder.drawIndexedPrimitives(

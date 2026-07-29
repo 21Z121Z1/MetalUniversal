@@ -42,8 +42,20 @@ final class MetalDevice implements GpuDeviceBackend {
     private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new IdentityHashMap<>();
     private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new HashMap<>();
     private final Map<MslFunctionKey, MemorySegment> functionCache = new HashMap<>();
-    private final Map<Long, Deque<MemorySegment>> bufferPool = new HashMap<>();
-    private static final int MAX_POOLED_BUFFERS_PER_SIZE = 16;
+    private static final int MAX_POOLED_BUFFER_BUCKETS = 32;
+    private static final int MAX_POOLED_BUFFERS_PER_SIZE = 8;
+    private final Map<Long, Deque<MemorySegment>> bufferPool = new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<Long, Deque<MemorySegment>> eldest) {
+            if (size() <= MAX_POOLED_BUFFER_BUCKETS) {
+                return false;
+            }
+            for (MemorySegment handle : eldest.getValue()) {
+                MetalNativeBridge.metallum_release_object(handle);
+            }
+            return true;
+        }
+    };
     private ShaderSource activeShaderSource;
 
     MetalDevice(
@@ -126,11 +138,17 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull GpuBuffer createBuffer(@Nullable final Supplier<String> label, @GpuBuffer.Usage final int usage, final long size) {
+        if (size <= 0L) {
+            throw new IllegalArgumentException("Metal buffer size must be > 0 (got " + size + ")");
+        }
         return new MetalGpuBuffer(this, usage, size);
     }
 
     @Override
     public @NonNull GpuBuffer createBuffer(@Nullable final Supplier<String> label, @GpuBuffer.Usage final int usage, final ByteBuffer data) {
+        if (data == null || data.remaining() <= 0) {
+            throw new IllegalArgumentException("Cannot create buffer from empty ByteBuffer");
+        }
         MetalGpuBuffer buffer = (MetalGpuBuffer) this.createBuffer(label, usage | GpuBuffer.USAGE_COPY_DST, data.remaining());
         this.commandEncoder.writeToBuffer(buffer.slice(), data.duplicate());
         return buffer;
@@ -207,6 +225,10 @@ final class MetalDevice implements GpuDeviceBackend {
         return this.metalDeviceHandle;
     }
 
+    long maxBufferAllocationSize() {
+        return this.deviceInfo.limits().maxMemoryAllocationSize();
+    }
+
     void waitForSubmittedGpuWork() {
         this.commandEncoder.waitForSubmittedGpuWork();
     }
@@ -236,7 +258,7 @@ final class MetalDevice implements GpuDeviceBackend {
         });
     }
 
-    private static long composePoolKey(final long size, final long resourceOptions) {
+    static long composePoolKey(final long size, final long resourceOptions) {
         return (size << 12) | (resourceOptions & 0xFFFL);
     }
 
