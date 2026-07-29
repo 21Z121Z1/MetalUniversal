@@ -44,12 +44,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * 行为不变。{@code program/shader == 0} 在合法 GL 路径下永远不会被合法查询
  * （0 是"无对象"哨兵），守卫对非 Metal 零副作用，仍加 Metal 守卫作双重保险。
  *
- * <p><b>签名风险。</b>blaze3d 源不在仓库，方法描述符按 Iris 调用形式推断：
- * {@code _glGetUniformLocation(int,String)→int}、{@code glGetProgrami(int,int)→int}、
- * {@code glGetProgramInfoLog(int,int)→String}、{@code glDeleteShader(int)→void}。
- * {@code @Inject} 的 {@code method} 用方法名（与现有 {@code GlShaderMixin}/
- * {@code ShaderCreatorMixin} 风格一致，{@code remap=false}）；若 mixin 因重载
- * 解析失败，需改用带描述符的形式（如 {@code "_glGetUniformLocation(ILjava/lang/String;)I"}）。
+ * <p><b>签名。</b>经 javap 验证 blaze3d 实际描述符：
+ * {@code _glGetUniformLocation(int,CharSequence)→int}、
+ * {@code glGetProgrami(int,int)→int}、
+ * {@code glGetProgramInfoLog(int,int)→String}、
+ * {@code glDeleteShader(int)→void}。Mixin 运行时校验要求精确匹配，
+ * 不接受协变（{@code String} 是 {@code CharSequence} 子类但编译通过不代表运行时通过），
+ * 故 {@code _glGetUniformLocation} 用 {@code CharSequence} 而非 {@code String}。
  */
 @Environment(EnvType.CLIENT)
 @Mixin(GlStateManager.class)
@@ -57,7 +58,7 @@ public class GlStateManagerMixin {
     @Inject(method = "_glGetUniformLocation", at = @At("HEAD"), cancellable = true, remap = false)
     private static void metallum$noUniformLocationOnMetal(
             int program,
-            String name,
+            CharSequence name,
             CallbackInfoReturnable<Integer> cir
     ) {
         if (!MetalActive.isMetalActive()) {
