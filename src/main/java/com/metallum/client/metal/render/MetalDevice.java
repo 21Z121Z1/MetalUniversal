@@ -42,8 +42,20 @@ final class MetalDevice implements GpuDeviceBackend {
     private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new IdentityHashMap<>();
     private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new HashMap<>();
     private final Map<MslFunctionKey, MemorySegment> functionCache = new HashMap<>();
-    private final Map<Long, Deque<MemorySegment>> bufferPool = new HashMap<>();
-    private static final int MAX_POOLED_BUFFERS_PER_SIZE = 16;
+    private static final int MAX_POOLED_BUFFER_BUCKETS = 32;
+    private static final int MAX_POOLED_BUFFERS_PER_SIZE = 8;
+    private final Map<Long, Deque<MemorySegment>> bufferPool = new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<Long, Deque<MemorySegment>> eldest) {
+            if (size() <= MAX_POOLED_BUFFER_BUCKETS) {
+                return false;
+            }
+            for (MemorySegment handle : eldest.getValue()) {
+                MetalNativeBridge.metallum_release_object(handle);
+            }
+            return true;
+        }
+    };
     private ShaderSource activeShaderSource;
 
     MetalDevice(
