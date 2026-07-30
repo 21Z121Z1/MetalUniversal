@@ -1,6 +1,8 @@
 package com.metallum.mixin.iris;
 
+import com.metallum.client.metal.render.MetalActive;
 import com.metallum.client.metal.render.MetalIrisProgram;
+import com.metallum.client.metal.render.MetalIrisProgramsToClear;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.spongepowered.asm.mixin.Mixin;

@@ -1,4 +1,4 @@
-package com.metallum.mixin.iris;
+package com.metallum.client.metal.render;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 
@@ -23,14 +23,21 @@ import com.mojang.blaze3d.systems.RenderSystem;
  * initialized during very early bootstrap, before Iris shaderpack compilation
  * could run anyway) is treated as "not Metal" so the mixins never disrupt
  * Iris's normal GL path.
+ *
+ * <p><b>Placement.</b>This class deliberately lives outside the mixin package
+ * {@code com.metallum.mixin.*} declared by {@code metallum.mixins.json}. The
+ * Mixin transformer treats that package as a mixin namespace and refuses to
+ * load non-{@code @Mixin} classes referenced from mixins, raising
+ * {@code IllegalClassLoadError}. Keeping this helper in a normal Java package
+ * (here, alongside the rest of the Metal backend) avoids that.
  */
-final class MetalActive {
+public final class MetalActive {
     private static final String METAL_BACKEND_NAME = "Metal";
 
     private MetalActive() {
     }
 
-    static boolean isMetalActive() {
+    public static boolean isMetalActive() {
         try {
             var device = RenderSystem.getDevice();
             return device != null

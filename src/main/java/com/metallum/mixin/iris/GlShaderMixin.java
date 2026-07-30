@@ -1,6 +1,7 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.MetalActive;
 import net.irisshaders.iris.gl.shader.GlShader;
 import net.irisshaders.iris.gl.shader.ShaderType;
 import org.spongepowered.asm.mixin.Mixin;

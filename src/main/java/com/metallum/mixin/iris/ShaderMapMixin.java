@@ -1,5 +1,6 @@
 package com.metallum.mixin.iris;
 
+import com.metallum.client.metal.render.MetalActive;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.irisshaders.iris.pipeline.programs.ShaderKey;

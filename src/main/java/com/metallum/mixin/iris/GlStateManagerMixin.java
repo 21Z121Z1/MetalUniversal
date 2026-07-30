@@ -1,5 +1,6 @@
 package com.metallum.mixin.iris;
 
+import com.metallum.client.metal.render.MetalActive;
 import com.mojang.blaze3d.opengl.GlStateManager;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;

@@ -1,7 +1,9 @@
 package com.metallum.mixin.iris;
 
+import com.metallum.client.metal.render.MetalActive;
 import com.metallum.client.metal.render.MetalIrisProgram;
 import com.metallum.client.metal.render.MetalIrisProgramRegistry;
+import com.metallum.client.metal.render.MetalIrisProgramsToClear;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;

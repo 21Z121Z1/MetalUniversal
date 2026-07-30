@@ -1,6 +1,7 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.MetalActive;
 import com.metallum.client.metal.render.MetalCrossShaderCompiler;
 import com.metallum.client.metal.render.MetalIrisProgram;
 import com.metallum.client.metal.render.MetalIrisProgramRegistry;

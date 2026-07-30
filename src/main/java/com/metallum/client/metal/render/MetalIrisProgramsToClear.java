@@ -1,14 +1,12 @@
-package com.metallum.mixin.iris;
-
-import com.metallum.client.metal.render.MetalIrisProgram;
+package com.metallum.client.metal.render;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Process-wide pending-clear list shared between {@link MetalIrisPipelineMixin}
+ * Process-wide pending-clear list shared between {@code MetalIrisPipelineMixin}
  * (which appends a {@link MetalIrisProgram} after calling
- * {@code iris$setupState}) and {@link MetalIrisClearMixin} (which calls
+ * {@code iris$setupState}) and {@code MetalIrisClearMixin} (which calls
  * {@code iris$clearState} on each entry and empties the list when a render pass
  * is submitted).
  *
@@ -27,9 +25,15 @@ import java.util.List;
  * <p><b>Thread safety.</b> Both {@code setPipeline} and
  * {@code submitRenderPass} execute on the render thread, so an unsynchronized
  * {@link ArrayList} is sufficient.
+ *
+ * <p><b>Placement.</b>Like {@link MetalActive}, this class deliberately lives
+ * outside the mixin package {@code com.metallum.mixin.*} declared by
+ * {@code metallum.mixins.json} to avoid the Mixin transformer's
+ * {@code IllegalClassLoadError} on non-{@code @Mixin} classes referenced from
+ * mixins.
  */
-final class MetalIrisProgramsToClear {
-    static final List<MetalIrisProgram> PROGRAMS = new ArrayList<>();
+public final class MetalIrisProgramsToClear {
+    public static final List<MetalIrisProgram> PROGRAMS = new ArrayList<>();
 
     private MetalIrisProgramsToClear() {
     }
