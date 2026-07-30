@@ -44,6 +44,8 @@ test {
 	exclude "**/MetalComputeBackendIntegrationTest.class"
 	exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
 	exclude "**/IrisMetalPingPongTargetsIntegrationTest.class"
+	exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
+	exclude "**/MetalIrisNoiseTextureIntegrationTest.class"
 }
 
 processResources {
@@ -143,6 +145,25 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 	useJUnitPlatform()
 	filter {
 		includeTestsMatching "com.metallum.client.metal.render.IrisMetalPingPongTargetsIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+tasks.register("metalIrisTexturesIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS Iris custom/noise texture lifecycle and GPU readback suite."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", "1"
