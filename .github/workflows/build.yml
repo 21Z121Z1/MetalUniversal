@@ -21,9 +21,9 @@ permissions:
 
 jobs:
   build:
-    # MetalFX Frame Interpolator validation is a real part of `check` and is
-    # only available on macOS 26+. Keep CI on a host that can execute the gate
-    # instead of compiling it on 15 and failing before the assertions run.
+    # Keep release artifacts tied to the current macOS 26 SDK and arm64 ABI.
+    # Hosted runners cannot serve as a visual or physical-GPU acceptance gate;
+    # build.gradle keeps those executions local while CI compiles their code.
     runs-on: macos-26
     steps:
       - name: checkout repository
@@ -58,10 +58,10 @@ jobs:
           echo "=== MTLFXFrameInterpolator.h ==="
           cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXFrameInterpolator.h" 2>/dev/null
       - name: build
-        # GitHub's macOS 26 virtual device reports MTLFXTemporalScaler as
-        # unsupported and has no attended WindowServer surface. Both MetalFX
-        # GPU harnesses remain part of every local Apple Silicon `build`; CI
-        # still compiles them and runs lifecycle, Java and MRT validation.
+        # The hosted virtual GPU aborts in libMTLHud counter sampling even when
+        # Metal validation is disabled. CI therefore runs compilation and
+        # headless tests only; physical-GPU readbacks and CAMetalLayer visual
+        # acceptance are local release evidence.
         run: >-
           ./gradlew buildMacNative build
           -x metalFrameGenerationPresentationValidation

@@ -36,13 +36,17 @@ java {
 	}
 }
 
-// GitHub's hosted macOS 26 GPU cannot enable Metal shader-validation counter
-// sampling, and its debug layer requests the same unsupported counters even
-// when shader validation is disabled. Keep the functional GPU readback tests
-// there; local Apple Silicon runs retain the full Metal validation layers.
+// GitHub's hosted macOS 26 virtual GPU aborts when libMTLHud tries to enable
+// encoder counter sampling, even with both Metal validation layers disabled.
+// CI still compiles the native backend and GPU harnesses, but executes only
+// headless tests which do not create an MTLDevice. Real GPU/readback/window
+// validation remains part of every local Apple Silicon `build`.
 def hostedCi = "true".equalsIgnoreCase(System.getenv("CI"))
 def metalApiValidation = hostedCi ? "0" : "1"
 def metalShaderValidation = hostedCi ? "0" : "1"
+def hardwareMetalValidationAvailable = {
+	org.gradle.internal.os.OperatingSystem.current().isMacOsX() && !hostedCi
+}
 
 tasks.test {
 	useJUnitPlatform()
@@ -53,6 +57,12 @@ tasks.test {
 	exclude "**/IrisMetalCenterDepthSamplerTest.class"
 	exclude "**/MetalIrisShaderTranslationTest.class"
 	exclude "**/MetalIrisSodiumTerrainTest.class"
+	if (hostedCi) {
+		exclude "**/IrisMetalPostChainCompilationTest.class"
+		exclude "**/IrisMetalShadowPipelineTest.class"
+		exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
+		exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
+	}
 	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
 		environment "MTL_DEBUG_LAYER", metalApiValidation
@@ -183,7 +193,7 @@ tasks.register("compileMetalMrtSmokeTest", Exec) {
 
 tasks.register("metalMrtSmokeTest", Exec) {
 	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+		hardwareMetalValidationAvailable()
 	}
 	dependsOn "compileMetalMrtSmokeTest"
 	commandLine metalMrtSmokeBinary.absolutePath
@@ -432,6 +442,10 @@ tasks.register("metalFrameGenerationPresentationValidation", Exec) {
 	group = "verification"
 	description = "Runs an automatic visible-window CAMetalDisplayLink pacing, resize and shutdown validation."
 	onlyIf {
+		if (hostedCi) {
+			logger.lifecycle("metalFrameGenerationPresentationValidation SKIPPED: hosted CI has no attended WindowServer surface")
+			return false
+		}
 		def reason = presentationValidationSkipReason()
 		if (reason != null) {
 			logger.lifecycle("metalFrameGenerationPresentationValidation SKIPPED: ${reason}")
@@ -515,7 +529,7 @@ tasks.register("metalFxOffscreenValidation", Exec) {
 	group = "verification"
 	description = "Runs windowless MRT, motion, Temporal Scaler and Frame Interpolator GPU readback validation."
 	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+		hardwareMetalValidationAvailable()
 	}
 	dependsOn "compileMetalFxOffscreenValidation"
 	doFirst {
@@ -550,7 +564,7 @@ tasks.register("compileMetalFxPerformanceValidation", Exec) {
 tasks.register("metalFxPerformanceValidation", Exec) {
 	group = "verification"
 	description = "Measures Temporal and FrameInterpolator GPU cost across production resolutions."
-	onlyIf { presentationValidationSkipReason() == null }
+	onlyIf { !hostedCi && presentationValidationSkipReason() == null }
 	dependsOn "compileMetalFxPerformanceValidation"
 	doFirst { delete file("${buildDir}/metal-validation/performance-current") }
 	environment "MTL_SHADER_VALIDATION", "0"
@@ -562,7 +576,7 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Java RenderPass -> FFM -> Swift indexed MRT GPU readback integration suite."
 	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+		hardwareMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -580,7 +594,7 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS compute/SSBO/image/mipmap/compare-sampler GPU readback suite through the production backend."
 	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+		hardwareMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -598,7 +612,7 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Iris target framework (ping-pong/depthtex/center-depth/shadow) content-level GPU suite."
 	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+		hardwareMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
