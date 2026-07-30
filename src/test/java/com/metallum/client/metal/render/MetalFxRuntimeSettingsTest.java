@@ -16,7 +16,7 @@ final class MetalFxRuntimeSettingsTest {
             );
 
     @Test
-    void hudCanChangeWithoutRebuildingMetalFx() {
+    void hudIsPersistedForNextStartupWithoutRebuildingCurrentMetalFx() {
         var hudEnabled = new MetalFxConfig.RuntimeSettings(
                 BASE.mode(),
                 BASE.scale(),

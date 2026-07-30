@@ -7082,11 +7082,10 @@ private func writeIndexedTriangleFanIndices(
 public func metallum_create_system_default_device() -> UnsafeMutableRawPointer? {
     return autoreleasepool {
         #if os(macOS)
-        // CAMetalLayer.developerHUDProperties can show and hide the HUD at
-        // runtime only after Metal's HUD subsystem was enabled when the device
-        // was created. A mod cannot add MetalHUDEnabled to the host launcher's
-        // Info.plist, so prime the equivalent documented environment switch
-        // before the first MTLDevice exists. Every layer starts hidden below.
+        // Metal's HUD subsystem must be enabled before the device is created.
+        // A mod cannot add MetalHUDEnabled to the host launcher's Info.plist,
+        // so prime the equivalent documented environment switch here. The
+        // persisted Sodium option supplies the layer request at next startup.
         setenv("MTL_HUD_ENABLED", "1", 1)
         // MetalFX registers its Temporal and Frame Interpolator sections only
         // when this separate switch is present before the effects are built.
@@ -7242,6 +7241,20 @@ private func setMetalHudProperties(_ layer: CAMetalLayer, enabled: Bool) {
     if #available(macOS 13.0, iOS 16.0, *) {
         layer.developerHUDProperties = enabled ? ["mode": "default"] : [:]
     }
+}
+
+private func metalHudPropertiesEnabled(_ layer: CAMetalLayer) -> Bool {
+    if #available(macOS 13.0, iOS 16.0, *) {
+        return layer.developerHUDProperties?["mode"] as? String == "default"
+    }
+    return false
+}
+
+private func environmentFlagEnabled(_ name: String) -> Bool {
+    guard let value = getenv(name) else {
+        return false
+    }
+    return String(cString: value) == "1"
 }
 
 #if os(macOS)
@@ -7564,9 +7577,10 @@ public func metallum_ios_get_view_metal_layer(
 
 #endif
 
-/// Shows or hides Apple's Metal Performance HUD without recreating the layer.
-/// The HUD subsystem is primed before the MTLDevice is created; clearing the
-/// documented `mode` key keeps it hidden without stopping the game.
+/// Applies the Metal Performance HUD request to the CAMetalLayer. The native
+/// setter remains idempotent, but the game-facing setting is restart-owned:
+/// some host compositor lifecycles do not visibly refresh an attached layer
+/// after changing developerHUDProperties.
 @_cdecl("metallum_set_metal_hud")
 public func metallum_set_metal_hud(_ layer: CAMetalLayer, _ enabled: Int32) {
     let isEnabled = enabled != 0
@@ -7574,6 +7588,25 @@ public func metallum_set_metal_hud(_ layer: CAMetalLayer, _ enabled: Int32) {
     #if os(macOS)
     MetalFxNativeHudMetrics.setEnabled(isEnabled)
     #endif
+}
+
+/// Returns the observable Metal HUD contract as a bit mask:
+/// bit 0 = Metal HUD subsystem was primed through MTL_HUD_ENABLED,
+/// bit 1 = this CAMetalLayer currently requests the HUD,
+/// bit 2 = MetalFX HUD metrics were primed through MTLFX_HUD_ENABLED.
+@_cdecl("metallum_metal_hud_status")
+public func metallum_metal_hud_status(_ layer: CAMetalLayer) -> Int32 {
+    var status: Int32 = 0
+    if environmentFlagEnabled("MTL_HUD_ENABLED") {
+        status |= 1
+    }
+    if metalHudPropertiesEnabled(layer) {
+        status |= 2
+    }
+    if environmentFlagEnabled("MTLFX_HUD_ENABLED") {
+        status |= 4
+    }
+    return status
 }
 
 @_cdecl("metallum_NSView_setMetalLayer")

@@ -162,6 +162,7 @@ public final class MetalNativeBridge {
             NSWindowBackingScaleFactor = downcall(lookup, "metallum_NSWindow_backingScaleFactor", FunctionDescriptor.of(DOUBLE, ValueLayout.ADDRESS));
             createMetalLayer = downcall(lookup, "metallum_create_metal_layer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, DOUBLE));
             setMetalHud = downcall(lookup, "metallum_set_metal_hud", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT));
+            metalHudStatus = downcall(lookup, "metallum_metal_hud_status", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             NSViewSetMetalLayer = downcall(lookup, "metallum_NSView_setMetalLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setDebugLabelsEnabled = downcall(lookup, "metallum_set_debug_labels_enabled", FunctionDescriptor.ofVoid(INT));
@@ -848,6 +849,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle metal4MetalFxStats;
     private static final MethodHandle setMetal4CompilerEnabled;
     private static final MethodHandle setMetalHud;
+    private static final MethodHandle metalHudStatus;
     private static final MethodHandle residencySetEnable;
     private static final MethodHandle setMetal4PresentEnabled;
     private static final MethodHandle setMetal4BarrierEnabled;
@@ -958,6 +960,14 @@ public final class MetalNativeBridge {
             setMetalHud.invokeExact(segment(layer), enabled ? 1 : 0);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_metal_hud", throwable);
+        }
+    }
+
+    public static int metallum_metal_hud_status(final MemorySegment layer) {
+        try {
+            return (int) metalHudStatus.invokeExact(segment(layer));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metal_hud_status", throwable);
         }
     }
 

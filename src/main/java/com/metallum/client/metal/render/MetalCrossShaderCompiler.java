@@ -1006,7 +1006,7 @@ final class MetalCrossShaderCompiler {
                 targetLocations.add(index);
             }
         }
-        if (!shaderLocations.equals(targetLocations)) {
+        if (!targetLocations.containsAll(shaderLocations)) {
             throw new ShaderCompileException(
                     "Fragment output/color-target location mismatch for " + pipeline.getLocation()
                             + ": shader=" + shaderLocations + ", targets=" + targetLocations

@@ -42,6 +42,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 
 /**
  * Metal implementation of Iris's shadow target and shadow-composite state
@@ -606,11 +607,12 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                 () -> translationFailure(source, MetalIrisShaderCompiler.StageKind.VERTEX, "missing vertex source"));
         String fragment = source.getFragmentSource().orElseThrow(
                 () -> translationFailure(source, MetalIrisShaderCompiler.StageKind.FRAGMENT, "missing fragment source"));
+        var alpha = source.getDirectives().getAlphaTestOverride().orElse(key.getAlphaTest());
         Map<PatchShaderType, String> patched;
         if (key.patch == Patch.SODIUM) {
             patched = TransformPatcher.patchSodium(
                     source.getName(), vertex, null, null, null, fragment,
-                    source.getDirectives().getAlphaTestOverride().orElse(key.getAlphaTest()),
+                    alpha,
                     textureMap,
                     true
             );
@@ -621,13 +623,19 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
             );
             patched = TransformPatcher.patchVanilla(
                     source.getName(), vertex, null, null, null, fragment,
-                    source.getDirectives().getAlphaTestOverride().orElse(key.getAlphaTest()),
+                    alpha,
                     isLines, false, true, inputs, textureMap
             );
         } else {
             throw new IllegalStateException("Unsupported shadow patch family " + key.patch + " for " + key);
         }
-        return linkPatchedPair(source, patched, shadowDrawBuffers(source.getDirectives()));
+        return linkPatchedPair(
+                key,
+                source,
+                patched,
+                shadowDrawBuffers(source.getDirectives()),
+                OptionalDouble.of(alpha.reference())
+        );
     }
 
     /** Mirrors Iris 1.11.2's shadow linker: Sodium keys inherit the live extended chunk format. */
@@ -677,6 +685,26 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
     }
 
     private static MetalIrisShaderCompiler.GlslProgram linkPatchedPair(
+            final ShaderKey key,
+            final ProgramSource source,
+            final Map<PatchShaderType, String> patched,
+            final int[] drawBuffers,
+            final OptionalDouble alphaTestReference
+    ) {
+        String vertex = patched.get(PatchShaderType.VERTEX);
+        String fragment = patched.get(PatchShaderType.FRAGMENT);
+        if (vertex == null || fragment == null) {
+            throw new MetalIrisShaderCompiler.TranslationException(
+                    source.getName(), MetalIrisShaderCompiler.PHASE_PATCH, null,
+                    "patcher returned stages " + patched.keySet() + " (need VERTEX+FRAGMENT)"
+            );
+        }
+        return linkShadowPatchedPair(
+                key, source.getName(), vertex, fragment, drawBuffers, alphaTestReference
+        );
+    }
+
+    private static MetalIrisShaderCompiler.GlslProgram linkPatchedPair(
             final ProgramSource source,
             final Map<PatchShaderType, String> patched,
             final int[] drawBuffers
@@ -689,7 +717,39 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                     "patcher returned stages " + patched.keySet() + " (need VERTEX+FRAGMENT)"
             );
         }
-        return MetalIrisShaderCompiler.linkPatchedPair(source.getName(), vertex, fragment, drawBuffers);
+        return MetalIrisShaderCompiler.linkPatchedPair(
+                source.getName(), vertex, fragment, drawBuffers
+        );
+    }
+
+    static MetalIrisShaderCompiler.GlslProgram linkShadowPatchedPair(
+            final ShaderKey key,
+            final String name,
+            final String vertex,
+            final String fragment,
+            final int[] drawBuffers
+    ) {
+        return linkShadowPatchedPair(
+                key, name, vertex, fragment, drawBuffers, OptionalDouble.empty()
+        );
+    }
+
+    static MetalIrisShaderCompiler.GlslProgram linkShadowPatchedPair(
+            final ShaderKey key,
+            final String name,
+            final String vertex,
+            final String fragment,
+            final int[] drawBuffers,
+            final OptionalDouble alphaTestReference
+    ) {
+        if (key.patch == Patch.VANILLA) {
+            return MetalIrisShaderCompiler.linkVanillaPatchedPair(
+                    name, vertex, fragment, drawBuffers, alphaTestReference
+            );
+        }
+        return MetalIrisShaderCompiler.linkPatchedPair(
+                name, vertex, fragment, drawBuffers, alphaTestReference
+        );
     }
 
     private static void rejectUnsupportedStages(final ProgramSource source) {

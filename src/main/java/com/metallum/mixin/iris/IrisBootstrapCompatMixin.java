@@ -1,6 +1,7 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.IrisMetalVertexSerializerBootstrap;
 import com.metallum.client.metal.render.MetalIrisCompat;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.pbr.texture.PBRTextureManager;
@@ -12,13 +13,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /**
  * Holds Iris dormant on the Metal backend.
  *
- * <p>{@code Iris.onRenderSystemInit} calls {@code GL.getCapabilities()} and
- * registers pack machinery that assumes a GL context; {@code loadShaderpack}
- * would hand the pipeline factory a real pack whose programs compile through
- * {@code glShaderSource}. Cancelling both keeps {@code currentPack} empty so
- * {@code PipelineManager} serves Iris's own {@code VanillaRenderingPipeline}
- * (Metal-safe once its clip-control call is cancelled too, see
- * {@link IrisVanillaPipelineCompatMixin}).</p>
+ * <p>{@code Iris.onRenderSystemInit} starts with
+ * {@code GL.getCapabilities()}, so Metal cannot execute the method wholesale.
+ * The CPU-only defaults and vertex serializers in its remaining body are
+ * preserved here before the method is cancelled.</p>
  */
 @Mixin(value = Iris.class, remap = false)
 public abstract class IrisBootstrapCompatMixin {
@@ -43,21 +41,23 @@ public abstract class IrisBootstrapCompatMixin {
         if (!MetalIrisCompat.holdIrisDormant()) {
             return;
         }
-        if (MetalIrisCompat.semanticLayerEnabled()) {
-            try {
-                // The cancelled Iris GL bootstrap also normally initializes
-                // these CPU-backed defaults. PBRTextureManager.close() assumes
-                // they exist even when no PBR texture was loaded.
-                if (!metallum$pbrDefaultsInitialized) {
-                    PBRTextureManager.INSTANCE.init();
-                    metallum$pbrDefaultsInitialized = true;
-                }
-                Iris.loadShaderpack();
-            } catch (Throwable t) {
-                Metallum.LOGGER.error(
-                        "[metallum-iris] shader pack failed to load; continuing without one", t
-                );
+        try {
+            // Iris initializes these defaults on every backend before pack
+            // selection, and TextureManager.close() unconditionally closes
+            // them. Preserve that lifecycle even when shaders and the Metal
+            // semantic layer are both disabled.
+            if (!metallum$pbrDefaultsInitialized) {
+                PBRTextureManager.INSTANCE.init();
+                metallum$pbrDefaultsInitialized = true;
             }
+            if (MetalIrisCompat.semanticLayerEnabled()) {
+                IrisMetalVertexSerializerBootstrap.ensureRegistered();
+                Iris.loadShaderpack();
+            }
+        } catch (Throwable t) {
+            Metallum.LOGGER.error(
+                    "[metallum-iris] Metal-safe Iris bootstrap failed; continuing without a pack", t
+            );
         }
         ci.cancel();
     }

@@ -46,6 +46,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -76,6 +77,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 @EnabledOnOs(OS.MAC)
 final class MetalIrisSodiumTerrainTest {
     private MetalDevice device;
+    private IrisMetalWhitePixel sodiumTexture;
     /** Cleared per pack; the pre-prewarm guard is only meaningful once. */
     private boolean prewarmed;
     private final List<String> notes = new ArrayList<>();
@@ -93,6 +95,7 @@ final class MetalIrisSodiumTerrainTest {
                 "Iris sodium terrain device",
                 MemorySegment.NULL
         );
+        sodiumTexture = new IrisMetalWhitePixel(device);
     }
 
     @AfterEach
@@ -101,6 +104,9 @@ final class MetalIrisSodiumTerrainTest {
         IrisMetalPipelineOverrides.deactivate();
         WorldRenderingSettings.INSTANCE.setVertexFormat(null);
         MetalFxManager.close();
+        if (sodiumTexture != null) {
+            sodiumTexture.close();
+        }
         if (device != null) {
             device.close();
         }
@@ -172,6 +178,162 @@ final class MetalIrisSodiumTerrainTest {
             assertNull(IrisMetalPipelineOverrides.active(), "deactivate left the registry active");
             assertNull(second.uniformStaging(TerrainKind.SOLID),
                     "deactivate did not release the uniform block");
+        }
+    }
+
+    @Test
+    void lazyShaderKeyUniformBlockRequiresPostRegistrationPrewarm() {
+        ShaderKey key = ShaderKey.SHADOW_SODIUM_TERRAIN_CUTOUT;
+        int stage = net.irisshaders.iris.pipeline.WorldRenderingPhase.TERRAIN_CUTOUT.ordinal();
+        IrisMetalUniformValues values = new IrisMetalUniformValues(0.0F, () -> stage);
+        GlslProgram program = new GlslProgram(
+                "lazy-shadow-uniform",
+                "",
+                "",
+                "",
+                "",
+                List.of(new UniformMember("int", "renderStage", 0, 0, Integer.BYTES)),
+                16,
+                List.of(),
+                List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                new int[]{0},
+                java.util.OptionalDouble.empty()
+        );
+        try {
+            values.prewarm(device);
+            values.register(key, "lazy-shadow-uniform", program);
+            assertNull(
+                    values.slice(key),
+                    "a block registered after prewarm must not allocate from the live draw path"
+            );
+
+            values.prewarm(device);
+            assertNotNull(values.slice(key), "post-registration prewarm did not prepare the shadow block");
+            java.nio.ByteBuffer draw = java.nio.ByteBuffer.allocateDirect(16)
+                    .order(java.nio.ByteOrder.nativeOrder());
+            values.materializeDraw(key, draw, null, null);
+            assertEquals(stage, draw.getInt(0), "prepared shadow block lost its draw-time renderStage");
+        } finally {
+            values.close();
+        }
+    }
+
+    @Test
+    void sodiumShadowShaderKeyUsesFrameSampledMatricesWithoutMojangCoreBindings() {
+        ShaderKey key = ShaderKey.SHADOW_SODIUM_TERRAIN_SOLID;
+        int stage = net.irisshaders.iris.pipeline.WorldRenderingPhase.TERRAIN_SOLID.ordinal();
+        IrisMetalUniformValues values = new IrisMetalUniformValues(0.0F, () -> stage);
+        GlslProgram program = new GlslProgram(
+                "sodium-shadow-frame-matrices",
+                "",
+                "",
+                "",
+                "",
+                List.of(
+                        new UniformMember("mat4", "iris_ModelViewMatInverse", 0, 0, 64),
+                        new UniformMember("int", "renderStage", 0, 64, Integer.BYTES)
+                ),
+                80,
+                List.of(),
+                List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                new int[]{0},
+                java.util.OptionalDouble.empty()
+        );
+        try {
+            values.register(key, "sodium-shadow-frame-matrices", program);
+            values.prewarm(device);
+
+            java.nio.ByteBuffer sampled = values.lastUpload(key);
+            assertNotNull(sampled, "Sodium shadow frame block was not prepared");
+            sampled.putFloat(0, 1.0F);
+            sampled.putFloat(20, 1.0F);
+            java.nio.ByteBuffer draw = java.nio.ByteBuffer.allocateDirect(80)
+                    .order(java.nio.ByteOrder.nativeOrder());
+            values.materializeDraw(key, draw, null, null);
+            assertEquals(1.0F, draw.getFloat(0), 0.0F, "frame-sampled inverse model-view m00");
+            assertEquals(1.0F, draw.getFloat(20), 0.0F, "frame-sampled inverse model-view m11");
+            assertEquals(stage, draw.getInt(64), "Sodium shadow renderStage was not refreshed");
+        } finally {
+            values.close();
+        }
+    }
+
+    @Test
+    void programOwnedAlphaTestReferenceOverridesStaleCapturedState() {
+        float previous = net.irisshaders.iris.uniforms.CapturedRenderingState.INSTANCE
+                .getCurrentAlphaTest();
+        IrisMetalUniformValues values = new IrisMetalUniformValues(0.0F);
+        GlslProgram program = new GlslProgram(
+                "cutout-alpha-reference",
+                "",
+                "",
+                "",
+                "",
+                List.of(new UniformMember("float", "iris_currentAlphaTest", 0, 0, Float.BYTES)),
+                16,
+                List.of(),
+                List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                new int[]{0},
+                OptionalDouble.of(0.5)
+        );
+        try {
+            net.irisshaders.iris.uniforms.CapturedRenderingState.INSTANCE
+                    .setCurrentAlphaTest(0.0F);
+            values.register(TerrainKind.CUTOUT, program);
+            values.prewarm(device);
+
+            java.nio.ByteBuffer uploaded = values.lastUpload(TerrainKind.CUTOUT);
+            assertNotNull(uploaded, "cutout uniform block was not prepared");
+            assertEquals(
+                    0.5F,
+                    uploaded.getFloat(0),
+                    0.0F,
+                    "program-owned alpha reference was replaced by stale frame-global state"
+            );
+        } finally {
+            values.close();
+            net.irisshaders.iris.uniforms.CapturedRenderingState.INSTANCE
+                    .setCurrentAlphaTest(previous);
+        }
+    }
+
+    @Test
+    void translatedProgramsCarryFallbackAndPackOverrideAlphaReferences() throws IOException {
+        Path packZip = Path.of(System.getProperty(
+                "metallum.iris.bsl.path", "run/shaderpacks/bsl-shaders.zip"
+        )).toAbsolutePath();
+        assertTrue(Files.isRegularFile(packZip), "BSL shader pack is missing: " + packZip);
+
+        Iris.testing = true;
+        WorldRenderingSettings.INSTANCE.setVertexFormat(FormatAnalyzer.createFormat(true, true, true, true));
+        try (FileSystem fs = FileSystems.newFileSystem(packZip)) {
+            ProgramSet set = loadPack(packZip.getFileName().toString(), fs.getPath("/shaders"))
+                    .getProgramSet(new NamespacedId("minecraft", "overworld"));
+            IrisMetalPipelineOverrides.Instance instance = IrisMetalPipelineOverrides.activateForTests(
+                    set,
+                    set.getPackDirectives().getTextureMap()
+            );
+            try {
+                GlslProgram cutout = instance.program(TerrainKind.CUTOUT);
+                assertNotNull(cutout, "terrain cutout did not translate");
+                assertEquals(
+                        0.5,
+                        cutout.alphaTestReference().orElseThrow(),
+                        0.0,
+                        "Sodium cutout lost ShaderKey.HALF_ALPHA"
+                );
+
+                GlslProgram blockEntity = instance.coreProgram(ShaderKey.BLOCK_ENTITY);
+                assertNotNull(blockEntity, "gbuffers_block did not translate");
+                assertEquals(
+                        0.005,
+                        blockEntity.alphaTestReference().orElseThrow(),
+                        1.0e-8,
+                        "program alphaTest directive did not override the ShaderKey fallback"
+                );
+            } finally {
+                IrisMetalPipelineOverrides.deactivate();
+            }
         }
     }
 
@@ -412,7 +574,11 @@ final class MetalIrisSodiumTerrainTest {
             final GlslProgram program,
             final MetalCompiledRenderPipeline compiled
     ) {
-        Map<String, MetalRenderPass.TextureViewAndSampler> boundBySodium = Map.of();
+        MetalRenderPass.TextureViewAndSampler sodiumBinding = sodiumTexture.binding();
+        Map<String, MetalRenderPass.TextureViewAndSampler> boundBySodium = Map.of(
+                "u_BlockTex", sodiumBinding,
+                "u_LightTex", sodiumBinding
+        );
 
         // Regression guard for handoff §6 iteration 5: before prewarm, the
         // draw-path resolvers must be pure lookups. Allocating or uploading
@@ -452,9 +618,10 @@ final class MetalIrisSodiumTerrainTest {
                     MetalRenderPass.TextureViewAndSampler resolved = IrisMetalPipelineOverrides.fallbackTexture(
                             device, compiled, binding.name(), boundBySodium
                     );
-                    if (resolved == null && IrisMetalShadowPipeline.isShadowSamplerName(binding.name())) {
-                        // activateForTests intentionally omits the production shadow pipeline;
-                        // its typed bindings are covered by IrisMetalShadowPipelineTest.
+                    if (resolved == null && headlessLifecycleSampler(binding.name())) {
+                        // activateForTests intentionally omits the production render-target and
+                        // shadow lifecycles. Their typed bindings and GPU contents are covered by
+                        // MetalIrisTargetsIntegrationTest and IrisMetalShadowPipelineTest.
                         continue;
                     }
                     assertNotNull(
@@ -494,6 +661,12 @@ final class MetalIrisSodiumTerrainTest {
                         packName + " " + kind + ": gbufferModelView[" + column + "][" + row + "] not written");
             }
         }
+    }
+
+    private static boolean headlessLifecycleSampler(final String name) {
+        return IrisMetalShadowPipeline.isShadowSamplerName(name)
+                || name.startsWith("depthtex")
+                || IrisMetalPipelineOverrides.Instance.gbufferRenderTargetIndex(name) >= 0;
     }
 
     private void verifyStd140(final String packName, final TerrainKind kind, final GlslProgram program) {

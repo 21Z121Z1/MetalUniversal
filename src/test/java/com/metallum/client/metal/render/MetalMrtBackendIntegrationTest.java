@@ -350,6 +350,36 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void configuredTargetWithoutFragmentOutputRemainsClear() {
+        String shaderName = "mrt_unwritten_configured_target";
+        fragmentShaders.put(shaderName, """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() {
+                    color = vec4(0.25, 0.5, 0.75, 1.0);
+                }
+                """);
+        List<GpuFormat> formats = List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM);
+        RenderPipeline pipeline = pipeline(shaderName, formats, null, ColorTargetState.WRITE_ALL);
+        List<MetalGpuTexture> textures = createTextures(formats, "unwritten-configured-target");
+        render(pipeline, textures, List.of(
+                new Vector4f(0.0F, 0.0F, 0.0F, 1.0F),
+                new Vector4f(0.8F, 0.2F, 0.4F, 1.0F)
+        ));
+
+        ByteBuffer written = readback(textures.get(0));
+        assertByteNear(written.get(0), 64, "written target red");
+        assertByteNear(written.get(1), 128, "written target green");
+        assertByteNear(written.get(2), 191, "written target blue");
+        ByteBuffer unwritten = readback(textures.get(1));
+        assertByteNear(unwritten.get(0), 204, "unwritten target clear red");
+        assertByteNear(unwritten.get(1), 51, "unwritten target clear green");
+        assertByteNear(unwritten.get(2), 102, "unwritten target clear blue");
+        assertByteNear(unwritten.get(3), 255, "unwritten target clear alpha");
+        closeTextures(textures);
+    }
+
+    @Test
     void fragmentOutputFormatMismatchFailsClosed() {
         verifyFragmentOutputFormatMismatchFailsClosed();
     }

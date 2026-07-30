@@ -344,7 +344,7 @@ public final class MetalFxManager {
         this.device = device;
         this.config = MetalFxConfig.load();
         this.configRevision = MetalFxConfig.runtimeRevision();
-        MetalNativeBridge.metallum_set_metal_hud(device.metalLayerHandle(), this.config.metalHud);
+        applyMetalHud(this.config.metalHud, "startup");
         MetalNativeBridge.metallum_metalfx_set_reactive_tuning(
                 this.config.cutoutReactiveEdgeWeight,
                 this.config.cutoutReactiveInteriorWeight,
@@ -972,10 +972,6 @@ public final class MetalFxManager {
         MetalFxConfig.RuntimeSettings nextSettings = next.runtimeSettings();
         this.configRevision = revision;
 
-        if (previous.metalHud != next.metalHud) {
-            MetalNativeBridge.metallum_set_metal_hud(device.metalLayerHandle(), next.metalHud);
-        }
-
         boolean renderSettingsChanged = nextSettings.requiresRenderRefreshComparedTo(previousSettings);
         this.config = next;
         if (!renderSettingsChanged) {
@@ -1056,7 +1052,7 @@ public final class MetalFxManager {
 
         Metallum.LOGGER.info(
                 "MetalFX settings applied without restart: requested={} effective={} (was {}), "
-                        + "scale={}, transparencyReactive={}, frameGeneration={}, metalHud={}",
+                        + "scale={}, transparencyReactive={}, frameGeneration={}, metalHudNextStartup={}",
                 next.requestedMode,
                 this.effectiveMode,
                 previousEffectiveMode,
@@ -1065,6 +1061,38 @@ public final class MetalFxManager {
                 this.frameGenerationEnabled || this.frameGenerationSuspended,
                 next.metalHud
         );
+    }
+
+    private void applyMetalHud(final boolean requested, final String source) {
+        MetalNativeBridge.metallum_set_metal_hud(device.metalLayerHandle(), requested);
+        int status = MetalNativeBridge.metallum_metal_hud_status(device.metalLayerHandle());
+        boolean hudSubsystemPrimed = (status & 1) != 0;
+        boolean layerRequested = (status & 2) != 0;
+        boolean metalFxMetricsPrimed = (status & 4) != 0;
+        boolean enabled = hudSubsystemPrimed && layerRequested;
+
+        if (enabled == requested) {
+            Metallum.LOGGER.info(
+                    "Metal HUD state applied: source={} requested={} enabled={} "
+                            + "MTL_HUD_ENABLED={} MTLFX_HUD_ENABLED={}",
+                    source,
+                    requested,
+                    enabled,
+                    hudSubsystemPrimed,
+                    metalFxMetricsPrimed
+            );
+        } else {
+            Metallum.LOGGER.warn(
+                    "Metal HUD state mismatch: source={} requested={} enabled={} "
+                            + "layerRequested={} MTL_HUD_ENABLED={} MTLFX_HUD_ENABLED={}",
+                    source,
+                    requested,
+                    enabled,
+                    layerRequested,
+                    hudSubsystemPrimed,
+                    metalFxMetricsPrimed
+            );
+        }
     }
 
     private void closeRenderTargetsForReload() {

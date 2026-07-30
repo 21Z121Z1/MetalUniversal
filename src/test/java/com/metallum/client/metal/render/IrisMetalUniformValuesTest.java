@@ -1,7 +1,9 @@
 package com.metallum.client.metal.render;
 
+import net.irisshaders.iris.pipeline.WorldRenderingPhase;
 import net.irisshaders.iris.uniforms.CapturedRenderingState;
 import net.irisshaders.iris.uniforms.FrameUpdateNotifier;
+import net.irisshaders.iris.uniforms.SystemTimeUniforms;
 import net.irisshaders.iris.uniforms.custom.CustomUniforms;
 import org.junit.jupiter.api.Test;
 import org.joml.Matrix3f;
@@ -10,12 +12,118 @@ import org.joml.Matrix4f;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class IrisMetalUniformValuesTest {
+    @Test
+    void usesTheCanonicalIrisSystemTimerAndFrameCounter() {
+        SystemTimeUniforms.TIMER.reset();
+        SystemTimeUniforms.COUNTER.reset();
+        try {
+            SystemTimeUniforms.TIMER.beginFrame(1_000_000_000L);
+            SystemTimeUniforms.COUNTER.beginFrame();
+            SystemTimeUniforms.TIMER.beginFrame(1_050_000_000L);
+            SystemTimeUniforms.COUNTER.beginFrame();
+
+            IrisMetalUniformValues.SystemFrameTime time =
+                    IrisMetalUniformValues.systemFrameTime();
+
+            assertEquals(0.05f, time.frameTime(), 0.0f);
+            assertEquals(0.05f, time.frameTimeCounter(), 0.0f);
+            assertEquals(2, time.frameCounter());
+            assertEquals(2, new IrisMetalUniformValues(0.0f).frameCounter());
+        } finally {
+            SystemTimeUniforms.TIMER.reset();
+            SystemTimeUniforms.COUNTER.reset();
+        }
+    }
+
+    @Test
+    void distinguishesSodiumShaderKeysFromMojangCoreDraws() {
+        for (net.irisshaders.iris.pipeline.programs.ShaderKey key : List.of(
+                net.irisshaders.iris.pipeline.programs.ShaderKey.SODIUM_TERRAIN_SOLID,
+                net.irisshaders.iris.pipeline.programs.ShaderKey.SODIUM_TERRAIN_CUTOUT,
+                net.irisshaders.iris.pipeline.programs.ShaderKey.SODIUM_TERRAIN_TRANSLUCENT,
+                net.irisshaders.iris.pipeline.programs.ShaderKey.SHADOW_SODIUM_TERRAIN_SOLID,
+                net.irisshaders.iris.pipeline.programs.ShaderKey.SHADOW_SODIUM_TERRAIN_CUTOUT,
+                net.irisshaders.iris.pipeline.programs.ShaderKey.SHADOW_SODIUM_TERRAIN_TRANSLUCENT
+        )) {
+            assertFalse(
+                    IrisMetalUniformValues.usesMojangCoreTransforms(key),
+                    () -> key + " is a Sodium draw family, not a Mojang core draw"
+            );
+        }
+        assertTrue(IrisMetalUniformValues.usesMojangCoreTransforms(
+                net.irisshaders.iris.pipeline.programs.ShaderKey.TERRAIN_SOLID
+        ));
+    }
+
+    @Test
+    void writesRenderStageFromCurrentWorldRenderingPhase() {
+        AtomicReference<WorldRenderingPhase> phase =
+                new AtomicReference<>(WorldRenderingPhase.TERRAIN_SOLID);
+        IrisMetalUniformValues values =
+                new IrisMetalUniformValues(0.0f, () -> phase.get().ordinal());
+        ByteBuffer block = ByteBuffer.allocate(16).order(ByteOrder.nativeOrder());
+        MetalIrisShaderCompiler.UniformMember member =
+                new MetalIrisShaderCompiler.UniformMember("int", "renderStage", 0, 4, 4);
+
+        assertTrue(values.writeOfficialUniform(block, member));
+        assertEquals(WorldRenderingPhase.TERRAIN_SOLID.ordinal(), block.getInt(4));
+
+        phase.set(WorldRenderingPhase.ENTITIES);
+        assertTrue(values.writeOfficialUniform(block, member));
+        assertEquals(WorldRenderingPhase.ENTITIES.ordinal(), block.getInt(4));
+    }
+
+    @Test
+    void materializesRenderStageAtDrawTime() {
+        ByteBuffer base = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+        ByteBuffer output = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+        List<MetalIrisShaderCompiler.UniformMember> layout = List.of(
+                new MetalIrisShaderCompiler.UniformMember("int", "renderStage", 0, 8, 4)
+        );
+
+        IrisMetalUniformValues.materializeDrawUniforms(
+                base,
+                layout,
+                output,
+                null,
+                null,
+                WorldRenderingPhase.BLOCK_ENTITIES.ordinal()
+        );
+
+        assertEquals(WorldRenderingPhase.BLOCK_ENTITIES.ordinal(), output.getInt(8));
+    }
+
+    @Test
+    void terrainStageRefreshPreservesFrameSampledMatricesWithoutCoreBindings() {
+        ByteBuffer base = ByteBuffer.allocateDirect(96).order(ByteOrder.nativeOrder());
+        ByteBuffer output = ByteBuffer.allocateDirect(96).order(ByteOrder.nativeOrder());
+        base.putFloat(16, 3.25f);
+        List<MetalIrisShaderCompiler.UniformMember> layout = List.of(
+                new MetalIrisShaderCompiler.UniformMember("mat4", "iris_ModelViewMatInverse", 0, 16, 64),
+                new MetalIrisShaderCompiler.UniformMember("int", "renderStage", 0, 80, 4)
+        );
+
+        IrisMetalUniformValues.materializeDrawUniforms(
+                base,
+                layout,
+                output,
+                null,
+                null,
+                WorldRenderingPhase.TERRAIN_SOLID.ordinal()
+        );
+
+        assertEquals(3.25f, output.getFloat(16));
+        assertEquals(WorldRenderingPhase.TERRAIN_SOLID.ordinal(), output.getInt(80));
+    }
+
     @Test
     void writesCurrentAlphaTestFromIrisCapturedRenderingState() {
         float previous = CapturedRenderingState.INSTANCE.getCurrentAlphaTest();
@@ -61,7 +169,7 @@ final class IrisMetalUniformValuesTest {
         customUniforms.update();
 
         IrisMetalUniformValues values = new IrisMetalUniformValues(
-                0.0f, customUniforms, new FrameUpdateNotifier()
+                0.0f, customUniforms, new FrameUpdateNotifier(), () -> 0
         );
         ByteBuffer block = ByteBuffer.allocate(16).order(ByteOrder.nativeOrder());
         MetalIrisShaderCompiler.UniformMember member =
@@ -81,7 +189,7 @@ final class IrisMetalUniformValuesTest {
         customUniforms.update();
 
         IrisMetalUniformValues values = new IrisMetalUniformValues(
-                0.0f, customUniforms, new FrameUpdateNotifier()
+                0.0f, customUniforms, new FrameUpdateNotifier(), () -> 0
         );
         ByteBuffer block = ByteBuffer.allocate(32).order(ByteOrder.nativeOrder());
         MetalIrisShaderCompiler.UniformMember member =

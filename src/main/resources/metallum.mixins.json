@@ -8,6 +8,8 @@
   "client": [
     "render.PreferredGraphicsApiMixin",
     "render.BackendFrameComparisonMixin",
+    "render.BackendFrameComparisonGameRendererMixin",
+    "render.BackendFrameComparisonServerMixin",
     "render.MacRetinaFullscreenMixin",
     "render.GameRendererMetalFxMixin",
     "render.GameRenderStateMetalFxMixin",

@@ -70,15 +70,41 @@ tasks.test {
 	}
 }
 
-def runClientAllRequested = gradle.startParameter.taskNames.any {
-	it == "runClientAll" || it.endsWith(":runClientAll")
+def runClientIrisRequested = gradle.startParameter.taskNames.any {
+	it == "runClientIris" || it.endsWith(":runClientIris")
 }
-def runClientAllWorld = providers.gradleProperty("world").orNull
+def runClientMetalFxRequested = gradle.startParameter.taskNames.any {
+	it == "runClientMetalFx" || it.endsWith(":runClientMetalFx")
+}
+if (runClientIrisRequested && runClientMetalFxRequested) {
+	throw new GradleException(
+			"runClientIris and runClientMetalFx are isolated profiles and cannot run together."
+	)
+}
+def isolatedClientWorld = providers.gradleProperty("world").orNull
+def irisClientDefaults = [
+		"metallum.iris.semantic"                 : "true",
+		"metallum.metalfx.mode"                  : "OFF",
+		"metallum.metalfx.frameGeneration"       : "false",
+		"metallum.metalfx.objectMotionProducer"  : "false",
+		"metallum.metal.hud"                     : "false",
+]
+def metalFxClientDefaults = [
+		"metallum.iris.semantic"                 : "false",
+		"metallum.metalfx.mode"                  : "TEMPORAL",
+		"metallum.metalfx.frameGeneration"       : "false",
+		"metallum.metalfx.objectMotionProducer"  : "false",
+]
+def isolatedClientDefaults = runClientIrisRequested
+		? irisClientDefaults
+		: runClientMetalFxRequested
+		? metalFxClientDefaults
+		: [:]
 
 // Gradle system properties do not automatically reach Loom's forked
-// runClient JVM. Forward the optional MetalFX properties so a command such as
-// `./gradlew runClient -Dmetallum.metalfx.mode=SPATIAL` configures Minecraft,
-// rather than only the Gradle process.
+// runClient JVM. Forward explicit metallum properties, then apply one isolated
+// profile when runClientIris or runClientMetalFx was selected. There is
+// deliberately no supported task that implicitly enables both subsystems.
 tasks.withType(JavaExec).configureEach {
 	if (name == "runClient") {
 		// Forward every metallum.* property so launch-arg knobs (MetalFX mode,
@@ -90,24 +116,20 @@ tasks.withType(JavaExec).configureEach {
 				systemProperty(propertyName, value.toString())
 			}
 		}
-		if (runClientAllRequested) {
-			[
-				"metallum.metalfx.mode"            : "TEMPORAL",
-				"metallum.metalfx.frameGeneration" : "true",
-				"metallum.iris.semantic"           : "true",
-			].each { key, value ->
-				if (System.getProperty(key) == null) {
-					systemProperty(key, value)
-				}
+		isolatedClientDefaults.each { key, value ->
+			if (System.getProperty(key) == null) {
+				systemProperty(key, value)
 			}
+		}
+		if (!isolatedClientDefaults.isEmpty()) {
 			if (System.getProperty("metallum.validation.world") == null
-					&& runClientAllWorld != null && !runClientAllWorld.isBlank()) {
-				systemProperty("metallum.validation.world", runClientAllWorld)
+					&& isolatedClientWorld != null && !isolatedClientWorld.isBlank()) {
+				systemProperty("metallum.validation.world", isolatedClientWorld)
 			}
 		}
 		def validationWorld = System.getProperty("metallum.validation.world")
-		if (validationWorld == null && runClientAllRequested) {
-			validationWorld = runClientAllWorld
+		if (validationWorld == null && !isolatedClientDefaults.isEmpty()) {
+			validationWorld = isolatedClientWorld
 		}
 		def dedicatedValidation = gradle.startParameter.taskNames.any {
 			it == "minecraftMetalFxClientValidation" || it.endsWith(":minecraftMetalFxClientValidation")
@@ -318,7 +340,7 @@ tasks.register("compileMetalHudRuntimeTest", Exec) {
 
 tasks.register("metalHudRuntimeTest", Exec) {
 	group = "verification"
-	description = "Checks Apple Metal HUD runtime toggle plus MetalFX metric selector availability."
+	description = "Checks the Apple Metal HUD startup/layer request plus MetalFX metric selector availability."
 	onlyIf {
 		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
 	}
@@ -676,6 +698,7 @@ tasks.register("metalIrisShaderTranslationTest", Test) {
 }
 
 tasks.named("check") {
+	dependsOn "verifyIsolatedClientProfiles"
 	dependsOn "metalFrameGenerationLifecycleTest"
 	dependsOn "metalMrtBackendIntegrationTest"
 	dependsOn "metalComputeBackendIntegrationTest"
@@ -688,33 +711,62 @@ tasks.named("check") {
 	dependsOn "metalFrameGenerationPresentationValidation"
 }
 
-// One-shot debug configuration with EVERYTHING on at once: MetalFX TEMPORAL +
-// frame generation + the Iris-on-Metal semantic layer. This is the combination
-// no automated gate covers — the offline gates run the Iris lane with MetalFX
-// off, and the MetalFX validation runs with Iris dormant — so it is the one
-// that has to be driven by hand.
+// Supported manual profiles stay isolated until Iris final output, jitter,
+// motion and reactive-mask ownership have an explicit shared contract.
 //
-//   ./gradlew runClientAll                       (title screen)
-//   ./gradlew runClientAll -Pworld="New World"   (straight into a world)
+//   ./gradlew runClientIris -Pworld="New World"
+//   ./gradlew runClientMetalFx -Pworld="New World"
 //
-// Override any single knob from the command line; -D wins over the defaults
-// below, because runClient forwards every metallum.* system property.
-//
-// KNOWN INTERACTION (handoff §6 iteration 7): with MetalFX TEMPORAL on, its
-// reactive pipeline replaces sodium's cutout terrain program under the
-// "metallum" namespace, so the pack's CUTOUT program is bypassed. A one-shot
-// warning is logged when that happens. Use -Dmetallum.metalfx.mode=OFF to see
-// the pack's cutout shading.
-tasks.register("runClientAll") {
+// Explicit -D properties still win over these defaults for narrow diagnostics,
+// but no convenience task enables Iris and MetalFX together.
+tasks.register("runClientIris") {
 	group = "application"
-	description = "Runs the client with MetalFX TEMPORAL + frame generation + Iris shaders all enabled (manual debugging)."
+	description = "Runs Iris-on-Metal with MetalFX, frame generation and Metal HUD disabled."
 	dependsOn "runClient"
 	doFirst {
-		logger.lifecycle("runClientAll: runClient configured with MetalFX TEMPORAL + frame generation + Iris" +
-			(runClientAllWorld ? " world='${runClientAllWorld}'" : ""))
-		logger.lifecycle("runClientAll: enable a pack in run/config/iris.properties" +
+		logger.lifecycle("runClientIris: Iris semantic path enabled; MetalFX/FG/HUD disabled" +
+			(isolatedClientWorld ? " world='${isolatedClientWorld}'" : ""))
+		logger.lifecycle("runClientIris: enable a pack in run/config/iris.properties" +
 			" (shaderPack=<name>.zip + enableShaders=true); check options.txt has" +
 			" startedCleanly:true and preferredGraphicsBackend:\"default\" first.")
+	}
+}
+
+tasks.register("runClientMetalFx") {
+	group = "application"
+	description = "Runs MetalFX TEMPORAL with Iris semantic rendering and frame generation disabled."
+	dependsOn "runClient"
+	doFirst {
+		logger.lifecycle("runClientMetalFx: MetalFX TEMPORAL enabled; Iris semantic path and FG disabled" +
+				(isolatedClientWorld ? " world='${isolatedClientWorld}'" : ""))
+	}
+}
+
+tasks.register("verifyIsolatedClientProfiles") {
+	group = "verification"
+	description = "Verifies that supported Iris and MetalFX launch profiles cannot implicitly overlap."
+	doLast {
+		def failures = []
+		if (irisClientDefaults["metallum.iris.semantic"] != "true"
+				|| irisClientDefaults["metallum.metalfx.mode"] != "OFF"
+				|| irisClientDefaults["metallum.metalfx.frameGeneration"] != "false"
+				|| irisClientDefaults["metallum.metalfx.objectMotionProducer"] != "false"
+				|| irisClientDefaults["metallum.metal.hud"] != "false") {
+			failures << "runClientIris defaults do not isolate Iris correctness from MetalFX/FG/HUD"
+		}
+		if (metalFxClientDefaults["metallum.iris.semantic"] != "false"
+				|| metalFxClientDefaults["metallum.metalfx.mode"] == "OFF"
+				|| metalFxClientDefaults["metallum.metalfx.frameGeneration"] != "false"
+				|| metalFxClientDefaults["metallum.metalfx.objectMotionProducer"] != "false") {
+			failures << "runClientMetalFx defaults do not keep Iris and Frame Generation dormant"
+		}
+		if (tasks.findByName("runClientAll") != null) {
+			failures << "the unsupported implicit Iris + MetalFX runClientAll profile still exists"
+		}
+		if (!failures.isEmpty()) {
+			throw new GradleException(failures.join("; "))
+		}
+		logger.lifecycle("Isolated client profiles: PASS")
 	}
 }
 
@@ -1666,6 +1718,229 @@ tasks.register("backendFrameCompare") {
 			failures.each { logger.error("BACKEND FRAME DIFF ${it}") }
 			throw new GradleException("Metal/Vulkan final framebuffer comparison failed (${failures.size()} frame(s))")
 		}
+	}
+}
+
+def nonIrisControlCaptureRequested = gradle.startParameter.taskNames.any {
+	it == "minecraftNonIrisControlCapture" || it.endsWith(":minecraftNonIrisControlCapture")
+}
+def nonIrisTreatmentCaptureRequested = gradle.startParameter.taskNames.any {
+	it == "minecraftNonIrisTreatmentCapture" || it.endsWith(":minecraftNonIrisTreatmentCapture")
+}
+if (nonIrisControlCaptureRequested && nonIrisTreatmentCaptureRequested) {
+	throw new GradleException(
+			"Non-Iris control and treatment require separate isolated game directories and launches."
+	)
+}
+
+["minecraftNonIrisControlCapture", "minecraftNonIrisTreatmentCapture"].each { taskName ->
+	def lane = taskName.contains("Control") ? "control" : "treatment"
+	tasks.register(taskName) {
+		group = "verification"
+		description = "Captures the isolated shaders-off non-Iris ${lane} lane on native Metal."
+		if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+			dependsOn "runClient"
+		} else {
+			doLast {
+				logger.lifecycle("${taskName} SKIPPED: macOS Metal is required")
+			}
+		}
+		doLast {
+			if (!org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+				return
+			}
+			def root = file(findProperty("nonIrisRoot")
+					?: "${buildDir}/iris-runtime/non-iris-current")
+			def session = new File(new File(root, lane), "session.json")
+			if (!session.isFile()) {
+				throw new GradleException("${taskName} produced no session receipt at ${session}")
+			}
+			def receipt = new groovy.json.JsonSlurper().parse(session)
+			if (receipt.status != "passed" || receipt.failedCaptures != 0) {
+				throw new GradleException(
+						"${taskName} did not pass: status=${receipt.status},"
+								+ " failedCaptures=${receipt.failedCaptures}"
+				)
+			}
+			logger.lifecycle("${taskName}: PASS; evidence=${session.parentFile}")
+		}
+	}
+}
+
+def nonIrisCaptureRequested =
+		nonIrisControlCaptureRequested || nonIrisTreatmentCaptureRequested
+if (nonIrisCaptureRequested && org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+	def lane = nonIrisControlCaptureRequested ? "control" : "treatment"
+	def gameDirProperty = nonIrisControlCaptureRequested
+			? "nonIrisControlGameDir"
+			: "nonIrisTreatmentGameDir"
+	def requestedGameDir = findProperty(gameDirProperty)?.toString()
+	def gameDir = requestedGameDir == null ? null : new File(requestedGameDir)
+	def root = file(findProperty("nonIrisRoot")
+			?: "${buildDir}/iris-runtime/non-iris-current")
+	def laneOutput = new File(root, lane)
+	def worldName = (findProperty("nonIrisWorld") ?: "New World").toString()
+	def scenarioId = (findProperty("nonIrisScenario") ?: "non-iris-clear-dusk-v1").toString()
+	def frames = (findProperty("nonIrisFrames") ?: "160,220").toString()
+	def fixedClock = (findProperty("nonIrisClock") ?: "108500").toString()
+	def playerName = (findProperty("nonIrisPlayerName") ?: "MetalRegression").toString()
+	def playerUuid = (findProperty("nonIrisPlayerUuid")
+			?: "8f16930a-42ad-4f9b-9d59-02698f26b145").toString()
+	def fixedCamera = (findProperty("nonIrisCamera")
+			?: "579.4938336701937,90.45083448610046,-177.71662902161114,"
+			+ "-164.09991455078125,29.249996185302734").toString()
+
+	def hashWorldSnapshot = { File worldDirectory ->
+		def digest = java.security.MessageDigest.getInstance("SHA-256")
+		def files = []
+		worldDirectory.eachFileRecurse(groovy.io.FileType.FILES) { candidate ->
+			files << candidate
+		}
+		files.sort { left, right ->
+			def leftRelative = worldDirectory.toPath().relativize(left.toPath()).toString()
+			def rightRelative = worldDirectory.toPath().relativize(right.toPath()).toString()
+			leftRelative <=> rightRelative
+		}
+		def buffer = new byte[64 * 1024]
+		files.each { candidate ->
+			def relative = worldDirectory.toPath().relativize(candidate.toPath())
+					.toString().replace(File.separatorChar, '/' as char)
+			digest.update(relative.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+			digest.update((byte) 0)
+			candidate.withInputStream { input ->
+				int read
+				while ((read = input.read(buffer)) >= 0) {
+					if (read > 0) {
+						digest.update(buffer, 0, read)
+					}
+				}
+			}
+		}
+		java.util.HexFormat.of().formatHex(digest.digest())
+	}
+
+	if (gameDir != null) {
+		// Loom's AbstractRunTask overwrites JavaExec.workingDir from the run
+		// configuration immediately before launch. Configure that source of
+		// truth so Log4j and every other relative runtime path stay inside the
+		// same isolated directory as Minecraft's --gameDir.
+		loom.runs.named("client") {
+			runDir project.relativePath(gameDir)
+		}
+	}
+
+	tasks.named("runClient") {
+		doFirst {
+			if (gameDir == null || !gameDir.isAbsolute()) {
+				throw new GradleException(
+						"-P${gameDirProperty}=<absolute isolated game directory> is required."
+				)
+			}
+			if (playerName.isBlank() || playerName.length() > 16) {
+				throw new GradleException(
+						"nonIrisPlayerName must contain 1 to 16 characters, found '${playerName}'."
+				)
+			}
+			try {
+				java.util.UUID.fromString(playerUuid)
+			} catch (IllegalArgumentException invalidUuid) {
+				throw new GradleException(
+						"nonIrisPlayerUuid must be a canonical UUID, found '${playerUuid}'.",
+						invalidUuid
+				)
+			}
+			def worldDirectory = new File(new File(gameDir, "saves"), worldName)
+			if (!new File(worldDirectory, "level.dat").isFile()) {
+				throw new GradleException(
+						"${gameDirProperty} has no '${worldName}' save: ${worldDirectory}"
+				)
+			}
+			def irisConfig = new File(new File(gameDir, "config"), "iris.properties")
+			if (!irisConfig.isFile()) {
+				throw new GradleException("Missing shaders-off Iris config: ${irisConfig}")
+			}
+			def irisProperties = new Properties()
+			irisConfig.withInputStream { irisProperties.load(it) }
+			if (!"false".equalsIgnoreCase(irisProperties.getProperty("enableShaders", ""))) {
+				throw new GradleException(
+						"${irisConfig} must contain enableShaders=false for the non-Iris gate."
+				)
+			}
+			if (laneOutput.exists()) {
+				throw new GradleException(
+						"Refusing to overwrite existing non-Iris evidence: ${laneOutput}"
+				)
+			}
+			def snapshotSha256 = hashWorldSnapshot(worldDirectory)
+			systemProperty(
+					"metallum.backend.compare.world-snapshot-sha256",
+					snapshotSha256
+			)
+			logger.lifecycle(
+					"Non-Iris ${lane}: gameDir=${gameDir}, worldSnapshotSha256=${snapshotSha256}"
+			)
+		}
+		systemProperty "metallum.backend.compare.enabled", "true"
+		systemProperty "metallum.backend.compare.auto-stop", "true"
+		systemProperty "metallum.backend.compare.output", root.absolutePath
+		systemProperty "metallum.backend.compare.name", lane
+		systemProperty "metallum.backend.compare.scenario-id", scenarioId
+		systemProperty "metallum.backend.compare.world-name", worldName
+		systemProperty(
+				"metallum.backend.compare.game-directory",
+				gameDir == null ? "" : gameDir.absolutePath
+		)
+		systemProperty "metallum.backend.compare.player-name", playerName
+		systemProperty "metallum.backend.compare.player-uuid", playerUuid
+		systemProperty "metallum.backend.compare.frames", frames
+		systemProperty "metallum.backend.compare.fixed-clock-ticks", fixedClock
+		systemProperty "metallum.backend.compare.fixed-camera", fixedCamera
+		systemProperty "metallum.backend.compare.fixed-iris-frame-millis", "16"
+		systemProperty "metallum.backend.compare.freeze-simulation", "true"
+		systemProperty "metallum.backend.compare.fixed-weather", "clear"
+		systemProperty "metallum.backend.compare.stable-scene-frames", "240"
+		systemProperty "metallum.backend.compare.stable-scene-millis", "8000"
+		systemProperty "metallum.backend.compare.iris-reload-frame", "-1"
+		systemProperty(
+				"metallum.iris.semantic",
+				nonIrisTreatmentCaptureRequested ? "true" : "false"
+		)
+		systemProperty "metallum.metalfx.mode", "OFF"
+		systemProperty "metallum.metalfx.frameGeneration", "false"
+		systemProperty "metallum.metalfx.objectMotionProducer", "false"
+		systemProperty "metallum.metal.hud", "false"
+		// Loom's runDir does not set Minecraft's parsed gameDirectory. Pass the
+		// same directory through the real client option so both identities can
+		// be verified independently in the runtime receipt.
+		args "--gameDir", gameDir == null ? "" : gameDir.absolutePath
+		args "--username", playerName, "--uuid", playerUuid
+		args "--quickPlaySingleplayer", worldName, "--width", "854", "--height", "480"
+		environment "MTL_DEBUG_LAYER", "1"
+		environment "MTL_SHADER_VALIDATION", "0"
+	}
+}
+
+// Shaders-off safety gate. The two client lanes are launched deliberately and
+// stored as durable evidence; this task is an offline consumer and never
+// starts Minecraft or deletes a capture directory.
+tasks.register("nonIrisRegressionCompare", JavaExec) {
+	group = "verification"
+	description = "Fail-closed comparison of semantic-off and semantic-on/shaders-off native Metal captures."
+	dependsOn tasks.named("classes")
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "com.metallum.client.validation.NonIrisRegressionVerifier"
+	workingDir projectDir
+	doFirst {
+		def root = file(findProperty("nonIrisRoot")
+				?: "${buildDir}/iris-runtime/non-iris-current")
+		def control = file(findProperty("nonIrisControl") ?: new File(root, "control"))
+		def treatment = file(findProperty("nonIrisTreatment") ?: new File(root, "treatment"))
+		def report = file(findProperty("nonIrisReport") ?: new File(root, "comparison.json"))
+		setArgs([
+				control.absolutePath,
+				treatment.absolutePath,
+				report.absolutePath
+		])
 	}
 }
 

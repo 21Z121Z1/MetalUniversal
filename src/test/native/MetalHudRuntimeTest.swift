@@ -8,6 +8,9 @@ private func createSystemDefaultDevice() -> UnsafeMutableRawPointer?
 @_silgen_name("metallum_set_metal_hud")
 private func setMetalHud(_ layer: CAMetalLayer, _ enabled: Int32)
 
+@_silgen_name("metallum_metal_hud_status")
+private func metalHudStatus(_ layer: CAMetalLayer) -> Int32
+
 private func requireHudSelectors() {
     let instanceSelector = NSSelectorFromString("instance")
     guard let hudClass = NSClassFromString("_CADeveloperHUDProperties") as? NSObject.Type,
@@ -53,20 +56,29 @@ private struct MetalHudRuntimeTest {
         layer.device = device
         setMetalHud(layer, 1)
         guard layer.developerHUDProperties?["mode"] as? String == "default" else {
-            fatalError("Metal HUD did not become visible")
+            fatalError("Metal HUD layer request was not enabled")
+        }
+        guard metalHudStatus(layer) & 0b011 == 0b011 else {
+            fatalError("Metal HUD did not report a primed and requested layer")
         }
         requireHudSelectors()
 
         setMetalHud(layer, 0)
         guard layer.developerHUDProperties?.isEmpty == true else {
-            fatalError("Metal HUD did not become hidden")
+            fatalError("Metal HUD layer request was not cleared")
+        }
+        guard metalHudStatus(layer) & 0b011 == 0b001 else {
+            fatalError("Metal HUD did not report disabled")
         }
         setMetalHud(layer, 1)
         guard layer.developerHUDProperties?["mode"] as? String == "default" else {
-            fatalError("Metal HUD did not become visible after re-enabling")
+            fatalError("Metal HUD layer request was not restored")
+        }
+        guard metalHudStatus(layer) & 0b111 == 0b111 else {
+            fatalError("Metal HUD and MetalFX metrics did not report enabled after re-enabling")
         }
         setMetalHud(layer, 0)
 
-        print("Metal HUD runtime toggle and MetalFX selector validation passed")
+        print("Metal HUD startup/layer request and MetalFX selector validation passed")
     }
 }

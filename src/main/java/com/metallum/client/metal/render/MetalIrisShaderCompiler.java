@@ -26,7 +26,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -209,9 +211,10 @@ final class MetalIrisShaderCompiler {
     /** gbuffers_* / shadow family via the vanilla-format patcher. */
     static TranslatedProgram translateVanillaGbuffers(final String name, final ProgramSource source) {
         ShaderAttributeInputs inputs = new ShaderAttributeInputs(true, true, true, true, true);
+        AlphaTest alpha = source.getDirectives().getAlphaTestOverride().orElse(AlphaTest.ALWAYS);
         return translatePatchedPair(
                 name,
-                patchVanillaGbuffers(name, source, AlphaTest.ALWAYS, false, false, inputs, emptyTextureMap())
+                patchVanillaGbuffers(name, source, alpha, false, false, inputs, emptyTextureMap())
         );
     }
 
@@ -227,10 +230,13 @@ final class MetalIrisShaderCompiler {
             final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap
     ) {
         VanillaPatchSemantics semantics = vanillaPatchSemantics(key, nativeLineProgramPresent);
+        AlphaTest alpha = source.getDirectives()
+                .getAlphaTestOverride()
+                .orElse(semantics.fallbackAlpha());
         Map<PatchShaderType, String> patched = patchVanillaGbuffers(
                 name,
                 source,
-                semantics.fallbackAlpha(),
+                alpha,
                 semantics.lines(),
                 semantics.clouds(),
                 semantics.attributes(),
@@ -245,7 +251,11 @@ final class MetalIrisShaderCompiler {
             );
         }
         return linkVanillaPatchedPair(
-                name, patchedVertex, patchedFragment, source.getDirectives().getDrawBuffers()
+                name,
+                patchedVertex,
+                patchedFragment,
+                source.getDirectives().getDrawBuffers(),
+                OptionalDouble.of(alpha.reference())
         );
     }
 
@@ -276,7 +286,7 @@ final class MetalIrisShaderCompiler {
     private static Map<PatchShaderType, String> patchVanillaGbuffers(
             final String name,
             final ProgramSource source,
-            final AlphaTest fallbackAlpha,
+            final AlphaTest alpha,
             final boolean isLines,
             final boolean isClouds,
             final ShaderAttributeInputs inputs,
@@ -292,7 +302,6 @@ final class MetalIrisShaderCompiler {
                 () -> new TranslationException(name, PHASE_PATCH, StageKind.VERTEX, "missing vertex source"));
         String fragment = source.getFragmentSource().orElseThrow(
                 () -> new TranslationException(name, PHASE_PATCH, StageKind.FRAGMENT, "missing fragment source"));
-        AlphaTest alpha = source.getDirectives().getAlphaTestOverride().orElse(fallbackAlpha);
         try {
             return TransformPatcher.patchVanilla(
                     name, vertex, null, null, null, fragment,
@@ -794,8 +803,13 @@ final class MetalIrisShaderCompiler {
             int uniformBlockSize,
             List<SamplerDecl> samplers,
             List<String> uniformBlockNames,
-            int[] drawBuffers
+            int[] drawBuffers,
+            OptionalDouble alphaTestReference
     ) {
+        GlslProgram {
+            alphaTestReference = Objects.requireNonNull(alphaTestReference, "alphaTestReference");
+        }
+
         boolean hasUniformBlock() {
             return !uniformLayout.isEmpty();
         }
@@ -809,7 +823,7 @@ final class MetalIrisShaderCompiler {
     static GlslProgram translateSodiumTerrain(
             final String name,
             final ProgramSource source,
-            final AlphaTest alpha,
+            final AlphaTest fallbackAlpha,
             final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap
     ) {
         rejectUnsupportedStages(
@@ -822,6 +836,7 @@ final class MetalIrisShaderCompiler {
                 () -> new TranslationException(name, PHASE_PATCH, StageKind.VERTEX, "missing vertex source"));
         String fragment = source.getFragmentSource().orElseThrow(
                 () -> new TranslationException(name, PHASE_PATCH, StageKind.FRAGMENT, "missing fragment source"));
+        AlphaTest alpha = source.getDirectives().getAlphaTestOverride().orElse(fallbackAlpha);
         Map<PatchShaderType, String> patched;
         try {
             patched = TransformPatcher.patchSodium(name, vertex, null, null, null, fragment, alpha, textureMap, false);
@@ -836,7 +851,13 @@ final class MetalIrisShaderCompiler {
                     "patchSodium returned stages " + patched.keySet() + " (need VERTEX+FRAGMENT)"
             );
         }
-        return linkPatchedPair(name, patchedVertex, patchedFragment, source.getDirectives().getDrawBuffers());
+        return linkPatchedPair(
+                name,
+                patchedVertex,
+                patchedFragment,
+                source.getDirectives().getDrawBuffers(),
+                OptionalDouble.of(alpha.reference())
+        );
     }
 
     static GlslProgram linkPatchedPair(
@@ -844,6 +865,18 @@ final class MetalIrisShaderCompiler {
             final String patchedVertex,
             final String patchedFragment,
             final int[] drawBuffers
+    ) {
+        return linkPatchedPair(
+                name, patchedVertex, patchedFragment, drawBuffers, OptionalDouble.empty()
+        );
+    }
+
+    static GlslProgram linkPatchedPair(
+            final String name,
+            final String patchedVertex,
+            final String patchedFragment,
+            final int[] drawBuffers,
+            final OptionalDouble alphaTestReference
     ) {
         try {
             String vertexSrc = renameHostileIdentifiers(stripComments(patchedVertex));
@@ -895,7 +928,8 @@ final class MetalIrisShaderCompiler {
                     blockSize,
                     samplerList,
                     List.copyOf(blockNames),
-                    drawBuffers.clone()
+                    drawBuffers.clone(),
+                    alphaTestReference
             );
         } catch (TranslationException e) {
             throw e;
@@ -917,11 +951,24 @@ final class MetalIrisShaderCompiler {
             final String patchedFragment,
             final int[] drawBuffers
     ) {
+        return linkVanillaPatchedPair(
+                name, patchedVertex, patchedFragment, drawBuffers, OptionalDouble.empty()
+        );
+    }
+
+    static GlslProgram linkVanillaPatchedPair(
+            final String name,
+            final String patchedVertex,
+            final String patchedFragment,
+            final int[] drawBuffers,
+            final OptionalDouble alphaTestReference
+    ) {
         return linkPatchedPair(
                 name,
                 remapVanillaBuiltInUniformBlocks(patchedVertex),
                 remapVanillaBuiltInUniformBlocks(patchedFragment),
-                drawBuffers
+                drawBuffers,
+                alphaTestReference
         );
     }
 

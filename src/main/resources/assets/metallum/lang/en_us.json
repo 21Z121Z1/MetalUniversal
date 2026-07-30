@@ -15,5 +15,5 @@
   "metallum.options.metalfx.frame_generation": "Metal Frame Generation",
   "metallum.options.metalfx.frame_generation.tooltip": "Generate an interpolated frame between rendered frames on supported macOS systems. Changes apply when the settings screen closes.",
   "metallum.options.metal_hud": "Metal Performance HUD",
-  "metallum.options.metal_hud.tooltip": "Show Apple's live Metal performance overlay. This can be changed without restarting the game."
+  "metallum.options.metal_hud.tooltip": "Show Apple's Metal performance overlay. Restart the game after changing this option."
 }

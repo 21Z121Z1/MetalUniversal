@@ -15,5 +15,5 @@
   "metallum.options.metalfx.frame_generation": "Metal 帧生成",
   "metallum.options.metalfx.frame_generation.tooltip": "在受支持的 macOS 系统上，为相邻渲染帧生成一个插值帧。关闭设置界面后生效。",
   "metallum.options.metal_hud": "Metal 性能 HUD",
-  "metallum.options.metal_hud.tooltip": "显示 Apple 的实时 Metal 性能叠加层，无需重启游戏即可开关。"
+  "metallum.options.metal_hud.tooltip": "显示 Apple 的 Metal 性能叠加层。修改此选项后需要重启游戏。"
 }

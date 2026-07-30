@@ -31,6 +31,21 @@ import java.util.Optional;
  */
 @Mixin(value = Iris.class, remap = false)
 public abstract class IrisPipelineFactoryMixin {
+    /**
+     * Iris uses this concrete-pipeline identity as the common gate for shadow,
+     * hand, extended immediate vertices, and several captured-render-state
+     * hooks. The Metal semantic pipeline owns the same pack lifecycle and must
+     * therefore be visible through that generic gate.
+     */
+    @Inject(method = "isPackInUseQuick", at = @At("HEAD"), cancellable = true)
+    private static void metallum$recognizeSemanticPipeline(
+            final CallbackInfoReturnable<Boolean> cir
+    ) {
+        if (Iris.getPipelineManager().getPipelineNullable() instanceof MetalWorldRenderingPipeline) {
+            cir.setReturnValue(true);
+        }
+    }
+
     @Inject(method = "createPipeline", at = @At("HEAD"), cancellable = true)
     private static void metallum$createSemanticPipeline(
             final NamespacedId dimensionId, final CallbackInfoReturnable<WorldRenderingPipeline> cir

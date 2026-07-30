@@ -171,6 +171,53 @@ final class IrisMetalShadowPipelineTest {
     }
 
     @Test
+    void vanillaShadowProgramsRestoreMojangUniformBlockNames() {
+        String vertex = """
+                #version 450
+                layout(std140) uniform iris_DynamicTransforms {
+                    mat4 ModelViewMat;
+                } iris_transforms;
+                layout(std140) uniform iris_Fog {
+                    vec4 FogColor;
+                } iris_fogP;
+                void main() {
+                    gl_Position = iris_transforms.ModelViewMat * vec4(0.0, 0.0, 0.0, 1.0);
+                }
+                """;
+        String fragment = """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() {
+                    color = vec4(1.0);
+                }
+                """;
+
+        MetalIrisShaderCompiler.GlslProgram vanilla =
+                IrisMetalShadowPipeline.linkShadowPatchedPair(
+                        ShaderKey.SHADOW_ENTITIES_CUTOUT,
+                        "shadow-vanilla-block-remap",
+                        vertex,
+                        fragment,
+                        new int[]{0}
+                );
+        assertTrue(vanilla.uniformBlockNames().contains("DynamicTransforms"));
+        assertTrue(vanilla.uniformBlockNames().contains("Fog"));
+        assertFalse(vanilla.uniformBlockNames().contains("iris_DynamicTransforms"));
+        assertFalse(vanilla.uniformBlockNames().contains("iris_Fog"));
+
+        MetalIrisShaderCompiler.GlslProgram sodium =
+                IrisMetalShadowPipeline.linkShadowPatchedPair(
+                        ShaderKey.SHADOW_SODIUM_TERRAIN_SOLID,
+                        "shadow-sodium-block-names",
+                        vertex,
+                        fragment,
+                        new int[]{0}
+                );
+        assertTrue(sodium.uniformBlockNames().contains("iris_DynamicTransforms"));
+        assertTrue(sodium.uniformBlockNames().contains("iris_Fog"));
+    }
+
+    @Test
     void shadowFeatureExtractionMatchesIrisEntityAndLightFilters() {
         assertTrue(MetalWorldRenderingPipeline.shouldExtractGeneralShadowEntity(false));
         assertFalse(MetalWorldRenderingPipeline.shouldExtractGeneralShadowEntity(true));

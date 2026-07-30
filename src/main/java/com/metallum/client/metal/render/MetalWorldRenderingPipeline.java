@@ -164,7 +164,10 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         // PSO precompile observes the same immutable layout as the draw path.
         IrisMetalPipelineOverrides.setExtendedTerrainTargets(true);
         this.overrides = IrisMetalPipelineOverrides.activate(
-                programSet, directives.getTextureMap(), this.frameState.updateNotifier()
+                programSet,
+                directives.getTextureMap(),
+                this.frameState.updateNotifier(),
+                () -> this.frameState.phase().ordinal()
         );
         Metallum.LOGGER.info(
                 "[metallum-iris] semantic pipeline generation {} online for pack program set {}",

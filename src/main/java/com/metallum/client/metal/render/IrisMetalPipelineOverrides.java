@@ -64,6 +64,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.lang.reflect.Field;
+import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 /**
@@ -282,9 +283,10 @@ public final class IrisMetalPipelineOverrides {
     static Instance activate(
             final ProgramSet programSet,
             final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap,
-            final FrameUpdateNotifier updateNotifier
+            final FrameUpdateNotifier updateNotifier,
+            final IntSupplier renderStageSource
     ) {
-        return activate(programSet, textureMap, updateNotifier, true);
+        return activate(programSet, textureMap, updateNotifier, renderStageSource, true);
     }
 
     /**
@@ -297,20 +299,26 @@ public final class IrisMetalPipelineOverrides {
             final ProgramSet programSet,
             final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap
     ) {
-        return activate(programSet, textureMap, new FrameUpdateNotifier(), false);
+        return activate(programSet, textureMap, new FrameUpdateNotifier(), () -> 0, false);
     }
 
     private static Instance activate(
             final ProgramSet programSet,
             final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap,
             final FrameUpdateNotifier updateNotifier,
+            final IntSupplier renderStageSource,
             final boolean productionLifecycle
     ) {
         // Idempotent: a reload activates without anyone having deactivated, and
         // the previous instance owns its generation-scoped GPU resources.
         deactivate();
         Instance instance = new Instance(
-                GENERATIONS.incrementAndGet(), programSet, textureMap, updateNotifier, productionLifecycle
+                GENERATIONS.incrementAndGet(),
+                programSet,
+                textureMap,
+                updateNotifier,
+                renderStageSource,
+                productionLifecycle
         );
         active = instance;
         IrisMetalPassTrace.activate(programSet, instance.generation());
@@ -455,6 +463,17 @@ public final class IrisMetalPipelineOverrides {
     }
 
     /**
+     * Validation receipt only: {@code -1} means that the shaders-off path owns
+     * no Iris Metal generation. Returning the scalar generation rather than
+     * the mutable instance keeps diagnostics from becoming another draw-path
+     * owner.
+     */
+    public static int activeGenerationForDiagnostics() {
+        Instance instance = active;
+        return instance == null ? -1 : instance.generation();
+    }
+
+    /**
      * Pipeline-compile hook. Returns a compiled override for recognized sodium
      * terrain pipelines while a pack runtime is active, or {@code null} to let
      * the caller compile the pipeline natively.
@@ -535,6 +554,7 @@ public final class IrisMetalPipelineOverrides {
                 final ProgramSet programSet,
                 final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap,
                 final FrameUpdateNotifier updateNotifier,
+                final IntSupplier renderStageSource,
                 final boolean productionLifecycle
         ) {
             this.generation = generation;
@@ -554,7 +574,10 @@ public final class IrisMetalPipelineOverrides {
                         )
                 );
                 this.uniformValues = new IrisMetalUniformValues(
-                        this.packDirectives.getSunPathRotation(), customUniforms, updateNotifier
+                        this.packDirectives.getSunPathRotation(),
+                        customUniforms,
+                        updateNotifier,
+                        renderStageSource
                 );
             } else {
                 this.uniformValues = new IrisMetalUniformValues(this.packDirectives.getSunPathRotation());
@@ -869,6 +892,15 @@ public final class IrisMetalPipelineOverrides {
             MetalDevice currentDevice = this.device != null ? this.device : MetalDevice.current();
             if (currentDevice == null) {
                 throw new IllegalStateException("No Metal device while opening the Iris shadow terrain pass");
+            }
+            // Sodium creates its RenderPass before setPipeline. Resolve the
+            // matching lazy shadow program now so its ShaderKey uniform block
+            // is registered before prewarm; doing this from pipelineForTerrain
+            // would be too late because the render encoder is already live.
+            if (coreProgram(kind.shadowKey) != program.translated()) {
+                throw new IllegalStateException(
+                        "Shadow terrain program registration changed for " + kind.shadowKey
+                );
             }
             this.uniformValues.prewarm(currentDevice);
             return encoder.createRenderPass(shadows.createPersistentGbufferDescriptor(label.get(), program));
@@ -1767,26 +1799,28 @@ public final class IrisMetalPipelineOverrides {
                 return null;
             }
             TerrainKind kind = this.compiledKinds.get(pipeline);
-            if (kind != null) {
-                return this.uniformValues.slice(kind);
-            }
             ShaderKey coreKey = this.compiledCoreKeys.get(pipeline);
-            if (coreKey == null) {
+            Object token = kind != null ? kind : coreKey;
+            if (token == null) {
                 return null;
             }
-            GpuBufferSlice base = this.uniformValues.slice(coreKey);
-            int blockSize = this.uniformValues.coreDrawBlockSize(coreKey);
+            GpuBufferSlice base = this.uniformValues.slice(token);
+            int blockSize = this.uniformValues.drawBlockSize(token);
             if (blockSize == 0 || pass == null || bound == null) {
                 return base;
             }
 
-            ByteBuffer dynamicTransforms = readableUniformData(bound.get("DynamicTransforms"), "DynamicTransforms");
-            ByteBuffer projection = readableUniformData(bound.get("Projection"), "Projection");
+            ByteBuffer dynamicTransforms = this.uniformValues.requiresDynamicTransforms(token)
+                    ? readableUniformData(bound.get("DynamicTransforms"), "DynamicTransforms")
+                    : null;
+            ByteBuffer projection = this.uniformValues.requiresProjection(token)
+                    ? readableUniformData(bound.get("Projection"), "Projection")
+                    : null;
             try (GpuBufferSlice.MappedView mapped = pass.allocateTransient(
                     blockSize, 16L, GpuBuffer.USAGE_UNIFORM
             )) {
-                this.uniformValues.materializeCoreDraw(
-                        coreKey, mapped.data(), dynamicTransforms, projection
+                this.uniformValues.materializeDraw(
+                        token, mapped.data(), dynamicTransforms, projection
                 );
                 return mapped.slice();
             }

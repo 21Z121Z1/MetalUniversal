@@ -1,11 +1,13 @@
 package com.metallum.client.metal.render;
 
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
+import net.caffeinemc.mods.sodium.api.config.option.OptionFlag;
 import net.caffeinemc.mods.sodium.api.config.structure.ConfigBuilder;
 import net.caffeinemc.mods.sodium.api.config.structure.EnumOptionBuilder;
 import net.caffeinemc.mods.sodium.api.config.structure.ModOptionsBuilder;
 import net.caffeinemc.mods.sodium.api.config.structure.OptionGroupBuilder;
 import net.caffeinemc.mods.sodium.api.config.structure.OptionPageBuilder;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 
@@ -21,7 +23,10 @@ public final class MetalFxSodiumConfig implements ConfigEntryPoint {
     public void registerConfigLate(final ConfigBuilder builder) {
         ModOptionsBuilder modOptions = builder.registerOwnModOptions()
                 .setName("MetalUniversal")
-                .setVersion("1.0.1");
+                .setVersion(FabricLoader.getInstance()
+                        .getModContainer("metallum")
+                        .map(container -> container.getMetadata().getVersion().getFriendlyString())
+                        .orElse("unknown"));
         OptionPageBuilder page = builder.createOptionPage()
                 .setName(Component.translatable("metallum.options.metalfx.page"));
 
@@ -115,6 +120,7 @@ public final class MetalFxSodiumConfig implements ConfigEntryPoint {
                 .setDefaultValue(false)
                 .setStorageHandler(MetalFxConfig::flushPersistent)
                 .setImpact(net.caffeinemc.mods.sodium.api.config.option.OptionImpact.LOW)
+                .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
                 .setEnabled(!MetalFxConfig.hasSystemPropertyOverride(MetalFxConfig.METAL_HUD_PROPERTY))
                 .setBinding(MetalFxConfig::setMetalHudFromSodium, MetalFxConfig::configuredMetalHudForSodium);
     }
