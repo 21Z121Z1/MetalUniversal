@@ -23,7 +23,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Disk cache for the GLSL→SPIR-V→MSL translation result of one render
- * pipeline: the five-tuple consumed by
+ * pipeline: the translated stages, entry points, resource bindings, and
+ * generic-current vertex inputs consumed by
  * {@link MetalCompiledRenderPipeline}'s constructor. A hit skips shaderc and
  * SPIRV-Cross entirely; {@code makeLibrary} still runs (Metal's own shader
  * cache absorbs that) and PSO-level caching is the binary archive's job.
@@ -43,7 +44,7 @@ final class MetalMslDiskCache {
      * native), {@code applySampleLodBias} rewriting, entry-point
      * extraction, or binding assignment in {@code addToBindGroup}.
      */
-    static final String CACHE_SALT = "metallum-msl-v2-material-lod";
+    static final String CACHE_SALT = "metallum-msl-v4-generic-vertex-current";
 
     private static final boolean ENABLED =
             Boolean.parseBoolean(System.getProperty("metallum.opt.mslCache", "true"));
@@ -57,12 +58,17 @@ final class MetalMslDiskCache {
 
     private final Path directory;
 
-    private MetalMslDiskCache(final Path directory) {
+    MetalMslDiskCache(final Path directory) {
         this.directory = directory;
     }
 
     record Entry(String vertexMsl, String fragmentMsl, String vertexEntryPoint, String fragmentEntryPoint,
-                 List<MetalCompiledRenderPipeline.ResourceBinding> resources) {
+                 List<MetalCompiledRenderPipeline.ResourceBinding> resources,
+                 List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs) {
+        Entry {
+            resources = List.copyOf(resources);
+            genericVertexInputs = List.copyOf(genericVertexInputs);
+        }
     }
 
     /** Returns the shared cache, or {@code null} when disabled/unavailable. */
@@ -132,12 +138,22 @@ final class MetalMslDiskCache {
                         texelFormat == null || texelFormat.isJsonNull() ? null : GpuFormat.valueOf(texelFormat.getAsString())
                 ));
             }
+            List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs = new ArrayList<>();
+            for (JsonElement element : root.getAsJsonArray("genericVertexInputs")) {
+                JsonObject input = element.getAsJsonObject();
+                genericVertexInputs.add(new MetalCrossShaderCompiler.GenericVertexInput(
+                        input.get("location").getAsInt(),
+                        MetalCrossShaderCompiler.BaseType.valueOf(input.get("baseType").getAsString()),
+                        input.get("components").getAsInt()
+                ));
+            }
             return new Entry(
                     root.get("vertexMsl").getAsString(),
                     root.get("fragmentMsl").getAsString(),
                     root.get("vertexEntryPoint").getAsString(),
                     root.get("fragmentEntryPoint").getAsString(),
-                    List.copyOf(resources)
+                    resources,
+                    genericVertexInputs
             );
         } catch (Exception e) {
             // Corrupt or stale-schema entry: drop it and recompile.
@@ -170,6 +186,15 @@ final class MetalMslDiskCache {
             resources.add(serialized);
         }
         root.add("resources", resources);
+        JsonArray genericVertexInputs = new JsonArray();
+        for (MetalCrossShaderCompiler.GenericVertexInput input : entry.genericVertexInputs()) {
+            JsonObject serialized = new JsonObject();
+            serialized.addProperty("location", input.location());
+            serialized.addProperty("baseType", input.baseType().name());
+            serialized.addProperty("components", input.components());
+            genericVertexInputs.add(serialized);
+        }
+        root.add("genericVertexInputs", genericVertexInputs);
         Path file = this.directory.resolve(key + ".json");
         Path temp = this.directory.resolve(key + ".tmp");
         try {

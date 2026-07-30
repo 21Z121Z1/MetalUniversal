@@ -36,8 +36,8 @@ public final class MetalIrisCompat {
      *
      * <p>What B2-1 actually covers: a pack's {@code gbuffers_terrain} draws
      * sodium's solid and cutout terrain, with its uniform block filled from
-     * real frame state and its samplers resolved (block atlas and lightmap from
-     * sodium, placeholders for the rest). Terrain kinds whose DRAWBUFFERS name
+     * real frame state and its samplers resolved from their real Mojang or Iris
+     * resources. Terrain kinds whose DRAWBUFFERS name
      * more than the main target stay on sodium's own shader until the terrain
      * pass carries those attachments. There is no shadow pass and no
      * composite/final chain, so what reaches the screen is the raw gbuffer0
@@ -50,6 +50,11 @@ public final class MetalIrisCompat {
     private static volatile boolean semanticAnnounced;
 
     private MetalIrisCompat() {
+    }
+
+    /** True when the experimental semantic layer was requested at startup. */
+    public static boolean semanticLayerRequested() {
+        return SEMANTIC_LAYER;
     }
 
     /**

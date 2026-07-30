@@ -30,17 +30,32 @@ dependencies {
 	testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.12.2"
 }
 
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(25)
+	}
+}
+
 tasks.test {
 	useJUnitPlatform()
 	exclude "**/MetalMrtBackendIntegrationTest.class"
 	exclude "**/MetalComputeBackendIntegrationTest.class"
 	exclude "**/MetalIrisTargetsIntegrationTest.class"
+	exclude "**/MetalIrisNoiseTextureIntegrationTest.class"
+	exclude "**/IrisMetalCenterDepthSamplerTest.class"
+	exclude "**/MetalIrisShaderTranslationTest.class"
+	exclude "**/MetalIrisSodiumTerrainTest.class"
 	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
 		environment "MTL_DEBUG_LAYER", "1"
 		environment "MTL_SHADER_VALIDATION", "1"
 	}
 }
+
+def runClientAllRequested = gradle.startParameter.taskNames.any {
+	it == "runClientAll" || it.endsWith(":runClientAll")
+}
+def runClientAllWorld = providers.gradleProperty("world").orNull
 
 // Gradle system properties do not automatically reach Loom's forked
 // runClient JVM. Forward the optional MetalFX properties so a command such as
@@ -57,7 +72,25 @@ tasks.withType(JavaExec).configureEach {
 				systemProperty(propertyName, value.toString())
 			}
 		}
+		if (runClientAllRequested) {
+			[
+				"metallum.metalfx.mode"            : "TEMPORAL",
+				"metallum.metalfx.frameGeneration" : "true",
+				"metallum.iris.semantic"           : "true",
+			].each { key, value ->
+				if (System.getProperty(key) == null) {
+					systemProperty(key, value)
+				}
+			}
+			if (System.getProperty("metallum.validation.world") == null
+					&& runClientAllWorld != null && !runClientAllWorld.isBlank()) {
+				systemProperty("metallum.validation.world", runClientAllWorld)
+			}
+		}
 		def validationWorld = System.getProperty("metallum.validation.world")
+		if (validationWorld == null && runClientAllRequested) {
+			validationWorld = runClientAllWorld
+		}
 		def dedicatedValidation = gradle.startParameter.taskNames.any {
 			it == "minecraftMetalFxClientValidation" || it.endsWith(":minecraftMetalFxClientValidation")
 						|| it == "minecraftNativeFullscreenBaseline"
@@ -555,7 +588,7 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 
 tasks.register("metalIrisTargetsIntegrationTest", Test) {
 	group = "verification"
-	description = "Runs the macOS Iris target framework (ping-pong/depthtex/shadow) content-level GPU suite."
+	description = "Runs the macOS Iris target framework (ping-pong/depthtex/center-depth/shadow) content-level GPU suite."
 	onlyIf {
 		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
 	}
@@ -565,6 +598,8 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 	useJUnitPlatform()
 	filter {
 		includeTestsMatching "com.metallum.client.metal.render.MetalIrisTargetsIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", "1"
@@ -651,30 +686,14 @@ tasks.named("check") {
 tasks.register("runClientAll") {
 	group = "application"
 	description = "Runs the client with MetalFX TEMPORAL + frame generation + Iris shaders all enabled (manual debugging)."
+	dependsOn "runClient"
 	doFirst {
-		def defaults = [
-			"metallum.metalfx.mode"           : "TEMPORAL",
-			"metallum.metalfx.frameGeneration": "true",
-			"metallum.iris.semantic"          : "true",
-		]
-		defaults.each { key, value ->
-			if (System.getProperty(key) == null) {
-				System.setProperty(key, value)
-			}
-		}
-		def world = project.findProperty("world")
-		if (world != null && !world.toString().isBlank()) {
-			System.setProperty("metallum.validation.world", world.toString())
-		}
-		logger.lifecycle("runClientAll: metalfx.mode=${System.getProperty('metallum.metalfx.mode')}" +
-			" frameGeneration=${System.getProperty('metallum.metalfx.frameGeneration')}" +
-			" iris.semantic=${System.getProperty('metallum.iris.semantic')}" +
-			(world ? " world='${world}'" : ""))
+		logger.lifecycle("runClientAll: runClient configured with MetalFX TEMPORAL + frame generation + Iris" +
+			(runClientAllWorld ? " world='${runClientAllWorld}'" : ""))
 		logger.lifecycle("runClientAll: enable a pack in run/config/iris.properties" +
 			" (shaderPack=<name>.zip + enableShaders=true); check options.txt has" +
 			" startedCleanly:true and preferredGraphicsBackend:\"default\" first.")
 	}
-	finalizedBy "runClient"
 }
 
 tasks.register("minecraftMetalFxClientValidation") {
@@ -1532,6 +1551,99 @@ tasks.register("goldenFrameCompare") {
 			throw new GradleException("Golden frame regression: ${failures.size()} plane(s) differ")
 		}
 		logger.lifecycle("Golden frame compare: PASS (byte-identical)")
+	}
+}
+
+// Cross-backend final-target comparison. Each client run must explicitly set
+// metallum.backend.compare.name to `metal` or `vulkan`; the task compares the
+// common RGBA8 readback frames exactly and writes a machine-readable report.
+tasks.register("backendFrameCompare") {
+	group = "verification"
+	description = "Compares final RGBA8 framebuffer captures from Metal and Vulkan runs."
+	doLast {
+		def metalDir = file(findProperty("backendCompareMetal") ?: "${buildDir}/backend-compare/metal")
+		def vulkanDir = file(findProperty("backendCompareVulkan") ?: "${buildDir}/backend-compare/vulkan")
+		if (!metalDir.directory || !vulkanDir.directory) {
+			throw new GradleException("Need both capture directories: ${metalDir} and ${vulkanDir}")
+		}
+		def metalFrames = metalDir.listFiles().findAll { it.name ==~ /frame-\d+\.bin/ }
+				.collectEntries { [(it.name): it] }
+		def vulkanFrames = vulkanDir.listFiles().findAll { it.name ==~ /frame-\d+\.bin/ }
+				.collectEntries { [(it.name): it] }
+		def common = (metalFrames.keySet() as Set).intersect(vulkanFrames.keySet() as Set).sort()
+		def missingMetal = (vulkanFrames.keySet() as Set) - metalFrames.keySet()
+		def missingVulkan = (metalFrames.keySet() as Set) - vulkanFrames.keySet()
+		if (common.isEmpty() || !missingMetal.isEmpty() || !missingVulkan.isEmpty()) {
+			throw new GradleException(
+					"Frame sets do not match; common=${common}, missingMetal=${missingMetal}, missingVulkan=${missingVulkan}"
+			)
+		}
+		int maxAllowedDelta = Integer.parseInt((findProperty("backendCompareMaxChannelDelta") ?: "0").toString())
+		long maxAllowedPixels = Long.parseLong((findProperty("backendCompareMaxDifferingPixels") ?: "0").toString())
+		def results = []
+		def failures = []
+		common.each { name ->
+			byte[] metal = metalFrames[name].bytes
+			byte[] vulkan = vulkanFrames[name].bytes
+			if (metal.length != vulkan.length || metal.length % 4 != 0) {
+				failures << "${name}: byte lengths ${metal.length} vs ${vulkan.length}"
+				return
+			}
+			long differingPixels = 0
+			long differingChannels = 0
+			long absoluteDelta = 0
+			long squaredDelta = 0
+			int maxDelta = 0
+			for (int offset = 0; offset < metal.length; offset += 4) {
+				boolean pixelDiffers = false
+				for (int channel = 0; channel < 4; channel++) {
+					int delta = Math.abs((metal[offset + channel] & 0xff) - (vulkan[offset + channel] & 0xff))
+					if (delta != 0) {
+						pixelDiffers = true
+						differingChannels++
+					}
+					absoluteDelta += delta
+					squaredDelta += (long) delta * delta
+					maxDelta = Math.max(maxDelta, delta)
+				}
+				if (pixelDiffers) {
+					differingPixels++
+				}
+			}
+			long pixels = metal.length / 4
+			def result = [
+					frame: name,
+					pixels: pixels,
+					differingPixels: differingPixels,
+					differingChannels: differingChannels,
+					maxChannelDelta: maxDelta,
+					meanAbsoluteChannelDelta: metal.length == 0 ? 0.0 : absoluteDelta / (double) metal.length,
+					rmse: metal.length == 0 ? 0.0 : Math.sqrt(squaredDelta / (double) metal.length),
+					exact: differingChannels == 0
+			]
+			results << result
+			if (maxDelta > maxAllowedDelta || differingPixels > maxAllowedPixels) {
+				failures << "${name}: ${differingPixels}/${pixels} pixels differ, max channel delta ${maxDelta}"
+			}
+		}
+		def report = [
+				schema: 1,
+				metalDirectory: metalDir.absolutePath,
+				vulkanDirectory: vulkanDir.absolutePath,
+				frames: results,
+				maxAllowedChannelDelta: maxAllowedDelta,
+				maxAllowedDifferingPixels: maxAllowedPixels,
+				status: failures.isEmpty() ? "passed" : "failed",
+				failures: failures
+		]
+		def reportFile = file(findProperty("backendCompareReport") ?: "${buildDir}/backend-compare/comparison.json")
+		reportFile.parentFile.mkdirs()
+		reportFile.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(report)) + "\n"
+		logger.lifecycle("Backend frame compare: ${report.status}; frames=${results.size()}; report=${reportFile}")
+		if (!failures.isEmpty()) {
+			failures.each { logger.error("BACKEND FRAME DIFF ${it}") }
+			throw new GradleException("Metal/Vulkan final framebuffer comparison failed (${failures.size()} frame(s))")
+		}
 	}
 }
 

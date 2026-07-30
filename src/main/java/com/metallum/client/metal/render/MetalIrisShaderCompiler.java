@@ -8,6 +8,7 @@ import net.irisshaders.iris.gl.blending.AlphaTest;
 import net.irisshaders.iris.gl.state.ShaderAttributeInputs;
 import net.irisshaders.iris.gl.texture.TextureType;
 import net.irisshaders.iris.helpers.Tri;
+import net.irisshaders.iris.pipeline.programs.ShaderKey;
 import net.irisshaders.iris.pipeline.transform.PatchShaderType;
 import net.irisshaders.iris.pipeline.transform.TransformPatcher;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
@@ -207,6 +208,80 @@ final class MetalIrisShaderCompiler {
 
     /** gbuffers_* / shadow family via the vanilla-format patcher. */
     static TranslatedProgram translateVanillaGbuffers(final String name, final ProgramSource source) {
+        ShaderAttributeInputs inputs = new ShaderAttributeInputs(true, true, true, true, true);
+        return translatePatchedPair(
+                name,
+                patchVanillaGbuffers(name, source, AlphaTest.ALWAYS, false, false, inputs, emptyTextureMap())
+        );
+    }
+
+    /**
+     * Production vanilla gbuffer path. Parameters mirror Iris 1.11.2's
+     * {@code IrisRenderingPipeline#createShader} and {@code ShaderCreator#create}.
+     */
+    static GlslProgram translateVanillaGbuffers(
+            final String name,
+            final ProgramSource source,
+            final ShaderKey key,
+            final boolean nativeLineProgramPresent,
+            final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap
+    ) {
+        VanillaPatchSemantics semantics = vanillaPatchSemantics(key, nativeLineProgramPresent);
+        Map<PatchShaderType, String> patched = patchVanillaGbuffers(
+                name,
+                source,
+                semantics.fallbackAlpha(),
+                semantics.lines(),
+                semantics.clouds(),
+                semantics.attributes(),
+                textureMap
+        );
+        String patchedVertex = patched.get(PatchShaderType.VERTEX);
+        String patchedFragment = patched.get(PatchShaderType.FRAGMENT);
+        if (patchedVertex == null || patchedFragment == null) {
+            throw new TranslationException(
+                    name, PHASE_PATCH, null,
+                    "patchVanilla returned stages " + patched.keySet() + " (need VERTEX+FRAGMENT)"
+            );
+        }
+        return linkVanillaPatchedPair(
+                name, patchedVertex, patchedFragment, source.getDirectives().getDrawBuffers()
+        );
+    }
+
+    record VanillaPatchSemantics(
+            AlphaTest fallbackAlpha,
+            boolean lines,
+            boolean clouds,
+            ShaderAttributeInputs attributes
+    ) {
+    }
+
+    static VanillaPatchSemantics vanillaPatchSemantics(
+            final ShaderKey key,
+            final boolean nativeLineProgramPresent
+    ) {
+        boolean lines = key == ShaderKey.LINES && nativeLineProgramPresent;
+        ShaderAttributeInputs attributes = new ShaderAttributeInputs(
+                key.getVertexFormat(),
+                key.shouldIgnoreLightmap(),
+                lines,
+                key.isGlint(),
+                key.isText(),
+                false
+        );
+        return new VanillaPatchSemantics(key.getAlphaTest(), lines, key == ShaderKey.CLOUDS, attributes);
+    }
+
+    private static Map<PatchShaderType, String> patchVanillaGbuffers(
+            final String name,
+            final ProgramSource source,
+            final AlphaTest fallbackAlpha,
+            final boolean isLines,
+            final boolean isClouds,
+            final ShaderAttributeInputs inputs,
+            final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap
+    ) {
         rejectUnsupportedStages(
                 name,
                 source.getGeometrySource().orElse(null),
@@ -217,24 +292,17 @@ final class MetalIrisShaderCompiler {
                 () -> new TranslationException(name, PHASE_PATCH, StageKind.VERTEX, "missing vertex source"));
         String fragment = source.getFragmentSource().orElseThrow(
                 () -> new TranslationException(name, PHASE_PATCH, StageKind.FRAGMENT, "missing fragment source"));
-        AlphaTest alpha = source.getDirectives().getAlphaTestOverride().orElse(AlphaTest.ALWAYS);
-        // Attribute inputs mirror the fullest vanilla vertex layout (color, uv,
-        // overlay, light, normal); the exact per-ShaderKey inputs arrive with
-        // the B2 pipeline-override work. Booleans follow Iris's own call site:
-        // (isLines, isClouds, hasChunkOffset).
-        ShaderAttributeInputs inputs = new ShaderAttributeInputs(true, true, true, true, true);
-        Map<PatchShaderType, String> patched;
+        AlphaTest alpha = source.getDirectives().getAlphaTestOverride().orElse(fallbackAlpha);
         try {
-            patched = TransformPatcher.patchVanilla(
+            return TransformPatcher.patchVanilla(
                     name, vertex, null, null, null, fragment,
-                    alpha, false, false, true, inputs, emptyTextureMap()
+                    alpha, isLines, isClouds, true, inputs, textureMap
             );
         } catch (TranslationException e) {
             throw e;
         } catch (Throwable t) {
             throw new TranslationException(name, PHASE_PATCH, null, String.valueOf(t.getMessage()), t);
         }
-        return translatePatchedPair(name, patched);
     }
 
     /** setup / shadowcomp / per-stage compute arrays ({@code .csh}). */
@@ -834,6 +902,48 @@ final class MetalIrisShaderCompiler {
         } catch (RuntimeException e) {
             throw new TranslationException(name, PHASE_LINK, null, String.valueOf(e.getMessage()), e);
         }
+    }
+
+    /**
+     * Iris's vanilla transformer prefixes Mojang's built-in uniform blocks so
+     * its OpenGL program can manage them itself.  A Mojang GPU API draw already
+     * binds the same std140 payloads under their stock names, so the Metal path
+     * restores those names before resource reflection.  Pack-owned blocks are
+     * left untouched.
+     */
+    static GlslProgram linkVanillaPatchedPair(
+            final String name,
+            final String patchedVertex,
+            final String patchedFragment,
+            final int[] drawBuffers
+    ) {
+        return linkPatchedPair(
+                name,
+                remapVanillaBuiltInUniformBlocks(patchedVertex),
+                remapVanillaBuiltInUniformBlocks(patchedFragment),
+                drawBuffers
+        );
+    }
+
+    static String remapVanillaBuiltInUniformBlocks(final String source) {
+        String remapped = source;
+        remapped = renameUniformBlock(remapped, "iris_DynamicTransforms", "DynamicTransforms");
+        remapped = renameUniformBlock(remapped, "iris_Projection", "Projection");
+        remapped = renameUniformBlock(remapped, "iris_Fog", "Fog");
+        remapped = renameUniformBlock(remapped, "iris_Globals", "Globals");
+        remapped = renameUniformBlock(remapped, "iris_CloudInfo", "CloudInfo");
+        return remapped;
+    }
+
+    private static String renameUniformBlock(
+            final String source,
+            final String irisName,
+            final String mojangName
+    ) {
+        Pattern declaration = Pattern.compile(
+                "\\buniform\\s+" + Pattern.quote(irisName) + "\\s*\\{"
+        );
+        return declaration.matcher(source).replaceAll("uniform " + mojangName + " {");
     }
 
     // ------------------------------------------------------------------

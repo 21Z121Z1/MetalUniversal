@@ -3,6 +3,7 @@ package com.metallum.mixin.iris;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalIrisCompat;
 import net.irisshaders.iris.Iris;
+import net.irisshaders.iris.pbr.texture.PBRTextureManager;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -21,6 +22,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(value = Iris.class, remap = false)
 public abstract class IrisBootstrapCompatMixin {
+    private static boolean metallum$pbrDefaultsInitialized;
+
     /**
      * The method body is GL from its first statement ({@code GL.getCapabilities},
      * {@code glMaxShaderCompilerThreads}, {@code PBRTextureManager.init}), so it
@@ -42,6 +45,13 @@ public abstract class IrisBootstrapCompatMixin {
         }
         if (MetalIrisCompat.semanticLayerEnabled()) {
             try {
+                // The cancelled Iris GL bootstrap also normally initializes
+                // these CPU-backed defaults. PBRTextureManager.close() assumes
+                // they exist even when no PBR texture was loaded.
+                if (!metallum$pbrDefaultsInitialized) {
+                    PBRTextureManager.INSTANCE.init();
+                    metallum$pbrDefaultsInitialized = true;
+                }
                 Iris.loadShaderpack();
             } catch (Throwable t) {
                 Metallum.LOGGER.error(

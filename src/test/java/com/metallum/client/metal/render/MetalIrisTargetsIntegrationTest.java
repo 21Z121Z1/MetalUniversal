@@ -2,9 +2,11 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.IrisMetalRenderTargets.RenderPassDescriptorWithViews;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.mtl.MTLSamplerMipFilter;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.pipeline.BindGroupLayout;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
@@ -12,6 +14,7 @@ import com.mojang.blaze3d.platform.CompareOp;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.ShaderType;
+import com.mojang.blaze3d.textures.GpuTextureView;
 import org.joml.Vector4f;
 import org.joml.Vector4fc;
 import org.junit.jupiter.api.AfterEach;
@@ -27,6 +30,7 @@ import java.util.BitSet;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -106,6 +110,57 @@ final class MetalIrisTargetsIntegrationTest {
             runColorPass(targets, "iris_blue", new int[]{0});
             assertRgba(color.readTexture(0), 0, 255, 0, "read side unchanged without flip");
             assertRgba(color.writeTexture(0), 0, 0, 255, "write side holds pass3 output");
+        }
+    }
+
+    @Test
+    void gbufferWritesCurrentReadableSidesWithoutFlipping() {
+        fragmentShaders.put("iris_gbuffer_mrt", """
+                #version 450
+                layout(location=0) out vec4 colortex0;
+                layout(location=1) out vec4 colortex2;
+                void main() {
+                    colortex0 = vec4(1.0, 0.0, 0.0, 1.0);
+                    colortex2 = vec4(0.0, 1.0, 0.0, 1.0);
+                }
+                """);
+        try (IrisMetalRenderTargets targets = new IrisMetalRenderTargets(
+                device,
+                new GpuFormat[]{GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM},
+                WIDTH,
+                HEIGHT
+        )) {
+            IrisMetalPingPongTargets color = targets.colorTargets();
+            runGbufferPass(targets, "iris_gbuffer_mrt", new int[]{0, 2});
+
+            assertFalse(color.isFlipped(0), "gbuffer must not flip colortex0");
+            assertFalse(color.isFlipped(2), "gbuffer must not flip colortex2");
+            assertRgba(color.readTexture(0), 255, 0, 0, "gbuffer colortex0 current side");
+            assertRgba(color.readTexture(2), 0, 255, 0, "gbuffer colortex2 current side");
+        }
+    }
+
+    @Test
+    void singleTargetGbufferDescriptorUsesGenerationColortexZero() {
+        try (IrisMetalRenderTargets targets = new IrisMetalRenderTargets(
+                device,
+                new GpuFormat[]{GpuFormat.RGBA8_UNORM},
+                WIDTH,
+                HEIGHT
+        )) {
+            GpuTextureView sceneColor = targets.colorTargets().writeView(0);
+            var descriptor = targets.createTerrainWriteDescriptor(
+                    "single colortex0",
+                    new int[]{0},
+                    sceneColor,
+                    null,
+                    null,
+                    null
+            );
+            GpuTextureView attachment = descriptor.colorAttachments().getFirst().textureView();
+            assertSame(targets.colorTargets().readView(0), attachment);
+            assertNotSame(sceneColor, attachment,
+                    "single-target gbuffer must not bypass generation-owned colortex0");
         }
     }
 
@@ -191,7 +246,7 @@ final class MetalIrisTargetsIntegrationTest {
 
             assertDepth(shadow.shadowDepthTexture(), 0.1F, "shadowtex0 after translucents");
             assertDepth(shadow.shadowDepthNoTranslucentsTexture(), 0.3F, "shadowtex1 (no translucents)");
-            assertRgba(shadow.colorTargets().writeTexture(0), 255, 255, 255, "shadowcolor0 write side");
+            assertRgba(shadow.colorTargets().readTexture(0), 255, 255, 255, "shadowcolor0 main side");
 
             // Main targets must be untouched by shadow encoding (state isolation).
             assertRgba(main.colorTargets().writeTexture(0), 255, 0, 0, "main colortex isolated from shadow pass");
@@ -224,6 +279,108 @@ final class MetalIrisTargetsIntegrationTest {
             runColorPass(targets, "iris_resize_red", new int[]{0});
             color.flip(0);
             assertRgba(color.readTexture(0), 255, 0, 0, "post-resize render lands in fresh textures");
+        }
+    }
+
+    @Test
+    void postTargetRenderMipmapRenderFollowsPhysicalReadSide() {
+        fragmentShaders.put("iris_mip_source", """
+                #version 450
+                layout(location=0) out vec4 fragColor;
+                void main() {
+                    fragColor = gl_FragCoord.x < 16.0
+                            ? vec4(1.0, 0.0, 0.0, 1.0)
+                            : vec4(0.0, 0.0, 1.0, 1.0);
+                }
+                """);
+        fragmentShaders.put("iris_mip_sample", """
+                #version 450
+                uniform sampler2D SourceSampler;
+                layout(location=0) out vec4 fragColor;
+                void main() {
+                    fragColor = textureLod(SourceSampler, vec2(0.125, 0.5), 2.0);
+                }
+                """);
+
+        try (IrisMetalRenderTargets targets = new IrisMetalRenderTargets(
+                device,
+                new GpuFormat[]{GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM},
+                WIDTH,
+                HEIGHT,
+                Map.of(),
+                Set.of(0)
+        )) {
+            IrisMetalPingPongTargets color = targets.colorTargets();
+            assertEquals(6, color.mainTexture(0).getMipLevels());
+            assertEquals(6, color.altTexture(0).getMipLevels());
+            assertEquals(6, color.readView(0).mipLevels(), "sampled view must expose the complete chain");
+            assertEquals(1, color.mainTexture(1).getMipLevels(), "unrequested target must stay single-level");
+            assertEquals(
+                    MTLSamplerMipFilter.NotMipmapped,
+                    ((MetalGpuSampler) targets.colorSampler(0)).mipFilter()
+            );
+
+            RenderPipeline sourcePipeline = RenderPipeline.builder()
+                    .withLocation("metallum_iris/iris_mip_source")
+                    .withVertexShader("metallum_iris/fullscreen")
+                    .withFragmentShader("metallum_iris/iris_mip_source")
+                    .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                    .withCull(false)
+                    .withColorTargetState(0, new ColorTargetState(
+                            Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                    .build();
+            MetalRenderPass sourcePass = (MetalRenderPass) encoder.createRenderPass(
+                    targets.createTerrainWriteDescriptor(
+                            "iris mip source", new int[]{0}, color.writeView(0),
+                            new Vector4f(0.0F, 0.0F, 0.0F, 1.0F), null, null
+                    )
+            );
+            sourcePass.setPipeline(sourcePipeline);
+            sourcePass.draw(3, 1, 0, 0);
+            encoder.submitRenderPass();
+
+            encoder.generateMipmaps(color.readTexture(0));
+            targets.enableReadMipmaps(0);
+            assertEquals(
+                    MTLSamplerMipFilter.Linear,
+                    ((MetalGpuSampler) targets.colorSampler(0)).mipFilter()
+            );
+
+            BindGroupLayout sampleLayout = BindGroupLayout.builder()
+                    .withSampler("SourceSampler")
+                    .build();
+            RenderPipeline samplePipeline = RenderPipeline.builder()
+                    .withLocation("metallum_iris/iris_mip_sample")
+                    .withVertexShader("metallum_iris/fullscreen")
+                    .withFragmentShader("metallum_iris/iris_mip_sample")
+                    .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                    .withCull(false)
+                    .withBindGroupLayout(sampleLayout)
+                    .withColorTargetState(0, new ColorTargetState(
+                            Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                    .build();
+            try (RenderPassDescriptorWithViews descriptor = targets.createWriteDescriptor(
+                    "iris mip sample", new int[]{0}, null, false, null, null
+            )) {
+                MetalRenderPass samplePass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
+                samplePass.setPipeline(samplePipeline);
+                samplePass.bindTexture("SourceSampler", color.readView(0), targets.colorSampler(0));
+                samplePass.draw(3, 1, 0, 0);
+                encoder.submitRenderPass();
+            }
+
+            assertRgba(color.writeTexture(0), 255, 0, 0, "LOD2 sampled after render-to-mipmap ordering");
+
+            color.flip(0);
+            assertFalse(color.readMipmapsEnabled(0), "generating main mips must not enable alt sampling");
+            assertEquals(
+                    MTLSamplerMipFilter.NotMipmapped,
+                    ((MetalGpuSampler) targets.colorSampler(0)).mipFilter()
+            );
+            color.flip(0);
+            assertTrue(color.readMipmapsEnabled(0), "main side keeps Iris's within-frame stale-mip state");
+            targets.resetMipmaps();
+            assertFalse(color.readMipmapsEnabled(0), "final reset must clear both physical sides");
         }
     }
 
@@ -286,6 +443,40 @@ final class MetalIrisTargetsIntegrationTest {
             renderPass.draw(3, 1, 0, 0);
             encoder.submitRenderPass();
         }
+        encoder.submit();
+        device.waitForSubmittedGpuWork();
+    }
+
+    private void runGbufferPass(
+            final IrisMetalRenderTargets targets,
+            final String fragment,
+            final int[] drawBuffers
+    ) {
+        RenderPipeline.Builder builder = RenderPipeline.builder()
+                .withLocation("metallum_iris/" + fragment)
+                .withVertexShader("metallum_iris/fullscreen")
+                .withFragmentShader("metallum_iris/" + fragment)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withCull(false);
+        for (int slot = 0; slot < drawBuffers.length; slot++) {
+            builder.withColorTargetState(slot, new ColorTargetState(
+                    Optional.empty(),
+                    targets.colorTargets().format(drawBuffers[slot]),
+                    ColorTargetState.WRITE_ALL
+            ));
+        }
+        RenderPipeline pipeline = builder.build();
+        MetalRenderPass renderPass = (MetalRenderPass) encoder.createRenderPass(targets.createTerrainWriteDescriptor(
+                "iris gbuffer pass " + fragment,
+                drawBuffers,
+                targets.colorTargets().writeView(0),
+                new Vector4f(0.0F, 0.0F, 0.0F, 1.0F),
+                null,
+                null
+        ));
+        renderPass.setPipeline(pipeline);
+        renderPass.draw(3, 1, 0, 0);
+        encoder.submitRenderPass();
         encoder.submit();
         device.waitForSubmittedGpuWork();
     }

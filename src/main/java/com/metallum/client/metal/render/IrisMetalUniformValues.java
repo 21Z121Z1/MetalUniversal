@@ -3,10 +3,15 @@ package com.metallum.client.metal.render;
 import com.metallum.Metallum;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import kroppeb.stareval.function.FunctionReturn;
+import net.caffeinemc.mods.sodium.client.util.FogStorage;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.irisshaders.iris.uniforms.CapturedRenderingState;
 import net.irisshaders.iris.uniforms.CelestialUniforms;
+import net.irisshaders.iris.uniforms.FrameUpdateNotifier;
+import net.irisshaders.iris.uniforms.custom.CustomUniforms;
+import net.irisshaders.iris.pipeline.programs.ShaderKey;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -14,8 +19,14 @@ import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 import org.joml.Matrix3f;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
+import org.joml.Vector2f;
+import org.joml.Vector2i;
 import org.joml.Vector3d;
+import org.joml.Vector3f;
+import org.joml.Vector3i;
 import org.joml.Vector4f;
+import org.joml.Vector4i;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -23,6 +34,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -35,11 +47,12 @@ import java.util.Set;
  * against SPIR-V reflection by the offline gate), and this class writes values
  * into it by name.</p>
  *
- * <p><b>Coverage is deliberately partial.</b> The names below carry real
- * per-frame state; every other name a pack declares is zero-filled and reported
- * once at debug level. A zero uniform is a wrong value, not a crash — a pack
- * reading an unsupplied name renders that effect flat rather than killing the
- * client. The debug log is the worklist for widening coverage.</p>
+ * <p>The production constructor consumes Iris's own {@link CustomUniforms}
+ * graph. It contains both the official fixed inputs and the pack's
+ * {@code variable.*}/{@code uniform.*} expressions, so values such as
+ * {@code daytime}, {@code taaOffset} and {@code lightDirView} use the same
+ * suppliers and evaluation order as Iris. The switch below is only for values
+ * Iris marks externally managed by the active Mojang/Sodium draw.</p>
  *
  * <p>Values marked <i>exact</i> come from real game state; <i>approximate</i>
  * ones are documented at their case labels. Sodium's own per-draw values
@@ -51,8 +64,20 @@ final class IrisMetalUniformValues implements AutoCloseable {
     /** Iris wraps its frame counter here; matches {@code SystemTimeUniforms}. */
     private static final int FRAME_COUNTER_WRAP = 720720;
     private static final float NEAR_PLANE = 0.05f;
+    private static final Matrix4fc LIGHTMAP_TEXTURE_MATRIX = new Matrix4f(
+            1.0f / 256.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f / 256.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f / 256.0f, 0.0f,
+            1.0f / 32.0f, 1.0f / 32.0f, 1.0f / 32.0f, 1.0f
+    );
+    private static final String CORE_MODEL_VIEW_INVERSE = "iris_ModelViewMatInverse";
+    private static final String CORE_PROJECTION_INVERSE = "iris_ProjMatInverse";
+    private static final String CORE_NORMAL_MATRIX = "iris_NormalMat";
 
     private final float sunPathRotation;
+    private final @Nullable CustomUniforms customUniforms;
+    private final @Nullable FrameUpdateNotifier updateNotifier;
+    private final boolean strict;
     private final List<Block> blocks = new ArrayList<>();
     private final Set<String> unsupported = new HashSet<>();
     private final Matrix4f previousModelView = new Matrix4f();
@@ -70,7 +95,8 @@ final class IrisMetalUniformValues implements AutoCloseable {
      * never installs it on RenderSystem).
      */
     private static final class Block {
-        private final IrisMetalPipelineOverrides.TerrainKind kind;
+        private final Object token;
+        private final String label;
         private final List<MetalIrisShaderCompiler.UniformMember> layout;
         private final int size;
         private @Nullable GpuBuffer buffer;
@@ -78,11 +104,13 @@ final class IrisMetalUniformValues implements AutoCloseable {
         private @Nullable MetalDevice device;
 
         private Block(
-                final IrisMetalPipelineOverrides.TerrainKind kind,
+                final Object token,
+                final String label,
                 final List<MetalIrisShaderCompiler.UniformMember> layout,
                 final int size
         ) {
-            this.kind = kind;
+            this.token = token;
+            this.label = label;
             this.layout = layout;
             this.size = size;
         }
@@ -93,7 +121,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
             }
             this.device = device;
             this.buffer = device.createBuffer(
-                    () -> "metallum:iris_uniforms/" + this.kind.name().toLowerCase(Locale.ROOT),
+                    () -> "metallum:iris_uniforms/" + this.label,
                     GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_DST,
                     this.size
             );
@@ -104,7 +132,30 @@ final class IrisMetalUniformValues implements AutoCloseable {
     }
 
     IrisMetalUniformValues(final float sunPathRotation) {
+        this(sunPathRotation, null, null, false);
+    }
+
+    IrisMetalUniformValues(
+            final float sunPathRotation,
+            final CustomUniforms customUniforms,
+            final FrameUpdateNotifier updateNotifier
+    ) {
+        this(sunPathRotation, customUniforms, updateNotifier, true);
+    }
+
+    private IrisMetalUniformValues(
+            final float sunPathRotation,
+            final @Nullable CustomUniforms customUniforms,
+            final @Nullable FrameUpdateNotifier updateNotifier,
+            final boolean strict
+    ) {
+        if ((customUniforms == null) != (updateNotifier == null)) {
+            throw new IllegalArgumentException("Iris custom uniforms and frame notifier must be supplied together");
+        }
         this.sunPathRotation = sunPathRotation;
+        this.customUniforms = customUniforms;
+        this.updateNotifier = updateNotifier;
+        this.strict = strict;
     }
 
     /**
@@ -115,10 +166,26 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final IrisMetalPipelineOverrides.TerrainKind kind,
             final MetalIrisShaderCompiler.GlslProgram program
     ) {
+        register(kind, kind.name().toLowerCase(Locale.ROOT), program);
+    }
+
+    void register(
+            final Object token,
+            final String label,
+            final MetalIrisShaderCompiler.GlslProgram program
+    ) {
         if (!program.hasUniformBlock()) {
             return;
         }
-        this.blocks.add(new Block(kind, program.uniformLayout(), program.uniformBlockSize()));
+        for (Block block : this.blocks) {
+            if (block.token.equals(token)) {
+                if (block.size != program.uniformBlockSize() || !block.layout.equals(program.uniformLayout())) {
+                    throw new IllegalStateException("Iris uniform token was registered with two different layouts: " + token);
+                }
+                return;
+            }
+        }
+        this.blocks.add(new Block(token, label, program.uniformLayout(), program.uniformBlockSize()));
     }
 
     /**
@@ -128,11 +195,16 @@ final class IrisMetalUniformValues implements AutoCloseable {
      */
     @Nullable
     GpuBufferSlice slice(final IrisMetalPipelineOverrides.TerrainKind kind) {
+        return slice((Object) kind);
+    }
+
+    @Nullable
+    GpuBufferSlice slice(final Object token) {
         if (this.closed) {
             return null;
         }
         for (Block block : this.blocks) {
-            if (block.kind == kind && block.buffer != null) {
+            if (block.token.equals(token) && block.buffer != null) {
                 return block.buffer.slice();
             }
         }
@@ -166,7 +238,24 @@ final class IrisMetalUniformValues implements AutoCloseable {
      * draws terrain.
      */
     void updateFrame() {
-        if (this.closed || this.blocks.isEmpty()) {
+        if (this.closed) {
+            return;
+        }
+        if (this.customUniforms != null) {
+            try {
+                Objects.requireNonNull(this.updateNotifier).onNewFrame();
+                this.customUniforms.update();
+            } catch (Throwable failure) {
+                if (this.strict) {
+                    throw new IllegalStateException("Iris uniform graph failed to update", failure);
+                }
+                if (this.unsupported.add("<custom-uniform-frame>")) {
+                    Metallum.LOGGER.warn("[metallum-iris] Iris uniform graph failed to update", failure);
+                }
+            }
+        }
+        if (this.blocks.isEmpty()) {
+            this.frameCounter = (this.frameCounter + 1) % FRAME_COUNTER_WRAP;
             return;
         }
         Frame frame = sampleFrame();
@@ -181,6 +270,11 @@ final class IrisMetalUniformValues implements AutoCloseable {
         this.frameCounter = (this.frameCounter + 1) % FRAME_COUNTER_WRAP;
     }
 
+    /** Current Iris-compatible frame counter for diagnostics and pass tracing. */
+    int frameCounter() {
+        return this.frameCounter;
+    }
+
     /**
      * The CPU-side bytes last uploaded for a kind, or {@code null} if the block
      * has not been allocated. The uniform buffer itself is write-only on the
@@ -190,7 +284,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
     @Nullable
     ByteBuffer lastUpload(final IrisMetalPipelineOverrides.TerrainKind kind) {
         for (Block block : this.blocks) {
-            if (block.kind == kind) {
+            if (block.token == kind) {
                 return block.staging;
             }
         }
@@ -201,10 +295,125 @@ final class IrisMetalUniformValues implements AutoCloseable {
         ByteBuffer staging = block.staging;
         zero(staging);
         for (MetalIrisShaderCompiler.UniformMember member : block.layout) {
+            if (block.token instanceof ShaderKey && isCoreDrawUniform(member.name())) {
+                continue;
+            }
             write(staging, member, frame);
         }
         staging.rewind();
         block.device.createCommandEncoder().writeToBuffer(block.buffer.slice(), staging);
+    }
+
+    int coreDrawBlockSize(final ShaderKey key) {
+        Block block = findBlock(key);
+        return block != null && block.layout.stream().anyMatch(member -> isCoreDrawUniform(member.name()))
+                ? block.size
+                : 0;
+    }
+
+    void materializeCoreDraw(
+            final ShaderKey key,
+            final ByteBuffer output,
+            final @Nullable ByteBuffer dynamicTransforms,
+            final @Nullable ByteBuffer projection
+    ) {
+        Block block = findBlock(key);
+        if (block == null || block.staging == null) {
+            throw new IllegalStateException("Iris core uniform block is not prepared for " + key);
+        }
+        materializeCoreDrawUniforms(block.staging, block.layout, output, dynamicTransforms, projection);
+    }
+
+    static void materializeCoreDrawUniforms(
+            final ByteBuffer base,
+            final List<MetalIrisShaderCompiler.UniformMember> layout,
+            final ByteBuffer output,
+            final @Nullable ByteBuffer dynamicTransforms,
+            final @Nullable ByteBuffer projection
+    ) {
+        ByteBuffer destination = output.slice().order(output.order());
+        ByteBuffer source = base.duplicate().order(base.order());
+        source.clear();
+        if (destination.remaining() < source.remaining()) {
+            throw new IllegalArgumentException(
+                    "Iris core transient block is " + destination.remaining()
+                            + " bytes, expected at least " + source.remaining()
+            );
+        }
+        destination.put(source);
+
+        boolean needsModelView = layout.stream().anyMatch(member ->
+                CORE_MODEL_VIEW_INVERSE.equals(member.name()) || CORE_NORMAL_MATRIX.equals(member.name()));
+        boolean needsProjection = layout.stream().anyMatch(member -> CORE_PROJECTION_INVERSE.equals(member.name()));
+        Matrix4f modelViewInverse = needsModelView
+                ? readMat4(dynamicTransforms, "DynamicTransforms").invert()
+                : null;
+        Matrix4f projectionInverse = needsProjection
+                ? MetalIrisDepthConvention.packProjection(readMat4(projection, "Projection")).invert()
+                : null;
+        Matrix3f normalMatrix = modelViewInverse == null
+                ? null
+                : modelViewInverse.transpose3x3(new Matrix3f());
+
+        for (MetalIrisShaderCompiler.UniformMember member : layout) {
+            switch (member.name()) {
+                case CORE_MODEL_VIEW_INVERSE -> {
+                    requireCoreDrawType(member, "mat4");
+                    putMat4(destination, member.offset(), Objects.requireNonNull(modelViewInverse));
+                }
+                case CORE_PROJECTION_INVERSE -> {
+                    requireCoreDrawType(member, "mat4");
+                    putMat4(destination, member.offset(), Objects.requireNonNull(projectionInverse));
+                }
+                case CORE_NORMAL_MATRIX -> {
+                    requireCoreDrawType(member, "mat3");
+                    putMat3(destination, member.offset(), Objects.requireNonNull(normalMatrix));
+                }
+                default -> {
+                }
+            }
+        }
+    }
+
+    private @Nullable Block findBlock(final Object token) {
+        for (Block block : this.blocks) {
+            if (block.token.equals(token)) {
+                return block;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isCoreDrawUniform(final String name) {
+        return CORE_MODEL_VIEW_INVERSE.equals(name)
+                || CORE_PROJECTION_INVERSE.equals(name)
+                || CORE_NORMAL_MATRIX.equals(name);
+    }
+
+    private static Matrix4f readMat4(final @Nullable ByteBuffer source, final String blockName) {
+        if (source == null) {
+            throw new IllegalStateException("Iris core draw requires bound " + blockName + " uniform data");
+        }
+        ByteBuffer data = source.duplicate().order(source.order());
+        if (data.remaining() < 16 * Float.BYTES) {
+            throw new IllegalStateException(
+                    "Iris core draw " + blockName + " uniform is " + data.remaining()
+                            + " bytes, expected at least " + (16 * Float.BYTES)
+            );
+        }
+        return new Matrix4f().set(data.position(), data);
+    }
+
+    private static void requireCoreDrawType(
+            final MetalIrisShaderCompiler.UniformMember member,
+            final String expected
+    ) {
+        if (member.arrayCount() != 0 || !expected.equals(member.type())) {
+            throw new IllegalStateException(
+                    "Iris core draw uniform '" + member.name() + "' must be " + expected
+                            + ", got " + member.type() + (member.arrayCount() == 0 ? "" : "[]")
+            );
+        }
     }
 
     @Override
@@ -238,6 +447,8 @@ final class IrisMetalUniformValues implements AutoCloseable {
             Vector4f upPosition,
             Vector3d fogColor,
             float fogDensity,
+            float fogStart,
+            float fogEnd,
             float tickDelta,
             float sunAngle,
             float shadowAngle,
@@ -264,6 +475,9 @@ final class IrisMetalUniformValues implements AutoCloseable {
         try {
             return sampleLiveFrame();
         } catch (Throwable t) {
+            if (this.strict) {
+                throw new IllegalStateException("Could not sample Iris frame uniforms", t);
+            }
             if (this.unsupported.add("<frame>")) {
                 Metallum.LOGGER.warn(
                         "[metallum-iris] could not sample frame state for the pack uniform block;"
@@ -283,7 +497,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
                 new Vector4f(0.0f, -100.0f, 0.0f, 0.0f),
                 new Vector4f(0.0f, 100.0f, 0.0f, 0.0f),
                 new Vector4f(0.0f, 100.0f, 0.0f, 0.0f),
-                new Vector3d(), 0.0f, 0.0f, 0.25f, 0.25f, 0.0f, 1.0f,
+                new Vector3d(), 0.0f, 0.0f, 256.0f, 0.0f, 0.25f, 0.25f, 0.0f, 1.0f,
                 1.0f, 1.0f, 256.0f, 0.0f, 0, 0, this.frameCounter
         );
     }
@@ -294,7 +508,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
         ClientLevel level = minecraft.level;
 
         Matrix4f modelView = new Matrix4f(state.getGbufferModelView());
-        Matrix4f projection = new Matrix4f(state.getGbufferProjection());
+        Matrix4f projection = MetalIrisDepthConvention.packProjection(state.getGbufferProjection());
         warnIfUnfilled(modelView, projection);
 
         Matrix4f modelViewInverse = new Matrix4f(modelView).invert();
@@ -305,7 +519,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
         Vec3 cameraPos = camera == null ? Vec3.ZERO : camera.position();
         Vector3d cameraPosition = new Vector3d(cameraPos.x, cameraPos.y, cameraPos.z);
 
-        float sunAngle = CelestialUniforms.getSunAngle(false);
+        float sunAngle = CelestialUniforms.getSunAngle(true) / 360.0f;
         // getShadowLightPosition is the only celestial vector Iris exposes
         // publicly; the sun/moon pair is the same axis with the day/night sign,
         // which is exactly how CelestialUniforms derives them.
@@ -321,6 +535,8 @@ final class IrisMetalUniformValues implements AutoCloseable {
 
         float tickDelta = state.getTickDelta();
         int renderDistance = minecraft.options == null ? 8 : minecraft.options.getEffectiveRenderDistance();
+        var mainTarget = minecraft.gameRenderer.mainRenderTarget();
+        var fogParameters = ((FogStorage) minecraft.gameRenderer).sodium$getFogParameters();
 
         return new Frame(
                 modelView,
@@ -335,13 +551,15 @@ final class IrisMetalUniformValues implements AutoCloseable {
                 up,
                 state.getFogColor(),
                 state.getFogDensity(),
+                fogParameters.environmentalStart(),
+                fogParameters.environmentalEnd(),
                 tickDelta,
                 sunAngle,
-                sunAngle < 0.5f ? sunAngle : sunAngle - 0.5f,
+                CelestialUniforms.getSunAngle(day) / 360.0f,
                 level == null ? 0.0f : level.getRainLevel(tickDelta),
                 minecraft.options == null ? 1.0f : minecraft.options.gamma().get().floatValue(),
-                minecraft.getWindow().getWidth(),
-                minecraft.getWindow().getHeight(),
+                mainTarget.width,
+                mainTarget.height,
                 renderDistance * 16.0f,
                 (System.nanoTime() - this.startNanos) / 1.0e9f % 3600.0f,
                 level == null ? 0 : (int) (level.getDefaultClockTime() % 24000L),
@@ -367,6 +585,9 @@ final class IrisMetalUniformValues implements AutoCloseable {
     // ------------------------------------------------------------------
 
     private void write(final ByteBuffer out, final MetalIrisShaderCompiler.UniformMember member, final Frame frame) {
+        if (writeOfficialUniform(out, member)) {
+            return;
+        }
         int at = member.offset();
         switch (member.name()) {
             // --- matrices (exact) ---
@@ -378,7 +599,6 @@ final class IrisMetalUniformValues implements AutoCloseable {
                     putMat4(out, at, frame.projectionInverse());
             case "gbufferPreviousModelView" -> putMat4(out, at, this.previousModelView);
             case "gbufferPreviousProjection" -> putMat4(out, at, this.previousProjection);
-            case "iris_LightmapTextureMatrix" -> putMat4(out, at, new Matrix4f());
             case "iris_NormalMat", "normalMatrix" -> putMat3(out, at, frame.normalMatrix());
 
             // --- positions (exact) ---
@@ -391,16 +611,13 @@ final class IrisMetalUniformValues implements AutoCloseable {
                     putVec3(out, at, frame.shadowLightPosition().x, frame.shadowLightPosition().y, frame.shadowLightPosition().z);
             case "upPosition" -> putVec3(out, at, frame.upPosition().x, frame.upPosition().y, frame.upPosition().z);
 
-            // --- fog: Iris's replacements for the vanilla fog uniforms. Color
-            // and density are exact; the linear start/end are approximated from
-            // the render distance because sodium keeps the real pair inside its
-            // own u_Globals block, which we do not read.
+            // --- externally-managed Mojang/Sodium fog state ---
             case "fogColor", "skyColor" -> putVec3(out, at, frame.fogColor());
             case "iris_FogColor" ->
                     putVec4(out, at, (float) frame.fogColor().x, (float) frame.fogColor().y, (float) frame.fogColor().z, 1.0f);
             case "fogDensity", "iris_FogDensity" -> out.putFloat(at, frame.fogDensity());
-            case "fogStart", "iris_FogStart" -> out.putFloat(at, frame.far() * 0.75f);
-            case "fogEnd", "iris_FogEnd" -> out.putFloat(at, frame.far());
+            case "fogStart", "iris_FogStart" -> out.putFloat(at, frame.fogStart());
+            case "fogEnd", "iris_FogEnd" -> out.putFloat(at, frame.fogEnd());
 
             // --- time (exact) ---
             case "frameTimeCounter" -> out.putFloat(at, frame.frameTimeCounter());
@@ -435,8 +652,122 @@ final class IrisMetalUniformValues implements AutoCloseable {
         }
     }
 
+    /** Writes a value evaluated by Iris's own fixed/custom uniform graph. */
+    boolean writeOfficialUniform(
+            final ByteBuffer out,
+            final MetalIrisShaderCompiler.UniformMember member
+    ) {
+        if ("iris_currentAlphaTest".equals(member.name())) {
+            if (member.arrayCount() != 0 || !"float".equals(member.type())) {
+                throw new IllegalStateException(
+                        "Iris internal uniform 'iris_currentAlphaTest' must be float, got "
+                                + member.type() + (member.arrayCount() == 0 ? "" : "[]")
+                );
+            }
+            out.putFloat(member.offset(), CapturedRenderingState.INSTANCE.getCurrentAlphaTest());
+            return true;
+        }
+        if ("iris_LightmapTextureMatrix".equals(member.name())) {
+            if (member.arrayCount() != 0 || !"mat4".equals(member.type())) {
+                throw new IllegalStateException(
+                        "Iris built-in uniform 'iris_LightmapTextureMatrix' must be mat4, got "
+                                + member.type() + (member.arrayCount() == 0 ? "" : "[]")
+                );
+            }
+            // Sodium supplies unpacked light coordinates in [0, 240]. Iris's
+            // built-in replacement maps them to the centers of the 16 texels.
+            putMat4(out, member.offset(), LIGHTMAP_TEXTURE_MATRIX);
+            return true;
+        }
+        if (this.customUniforms == null || !this.customUniforms.hasVariable(member.name())) {
+            return false;
+        }
+        // UniformMember uses 0 for an ordinary scalar/vector/matrix and a
+        // positive value only for an explicit GLSL array declarator.
+        if (member.arrayCount() > 0) {
+            throw new IllegalStateException(
+                    "Iris uniform graph cannot supply array member '" + member.name()
+                            + "' (count=" + member.arrayCount() + ")"
+            );
+        }
+
+        FunctionReturn value = new FunctionReturn();
+        this.customUniforms.getVariable(member.name()).evaluateTo(this.customUniforms, value);
+        int at = member.offset();
+        switch (member.type()) {
+            case "bool" -> out.putInt(at, value.booleanReturn ? 1 : 0);
+            case "int" -> out.putInt(at, value.intReturn);
+            case "float" -> out.putFloat(at, value.floatReturn);
+            case "vec2" -> {
+                Vector2f vector = customObject(member, value, Vector2f.class);
+                putVec2(out, at, vector.x, vector.y);
+            }
+            case "vec3" -> {
+                Vector3f vector = customObject(member, value, Vector3f.class);
+                putVec3(out, at, vector.x, vector.y, vector.z);
+            }
+            case "vec4" -> {
+                Vector4f vector = customObject(member, value, Vector4f.class);
+                putVec4(out, at, vector.x, vector.y, vector.z, vector.w);
+            }
+            case "ivec2" -> {
+                Vector2i vector = customObject(member, value, Vector2i.class);
+                putIVec2(out, at, vector.x, vector.y);
+            }
+            case "ivec3" -> {
+                Vector3i vector = customObject(member, value, Vector3i.class);
+                putIVec3(out, at, vector.x, vector.y, vector.z);
+            }
+            case "ivec4" -> {
+                Vector4i vector = customObject(member, value, Vector4i.class);
+                putIVec4(out, at, vector.x, vector.y, vector.z, vector.w);
+            }
+            case "mat4" -> putMat4(
+                    out,
+                    at,
+                    packProjectionUniform(member.name(), customObject(member, value, Matrix4fc.class))
+            );
+            default -> throw new IllegalStateException(
+                    "Iris uniform graph produced unsupported GLSL type '" + member.type()
+                            + "' for '" + member.name() + "'"
+            );
+        }
+        return true;
+    }
+
+    private static Matrix4fc packProjectionUniform(final String name, final Matrix4fc value) {
+        return switch (name) {
+            case "gbufferProjection", "gbufferPreviousProjection", "iris_ProjectionMatrix" ->
+                    MetalIrisDepthConvention.packProjection(value);
+            case "gbufferProjectionInverse", "iris_ProjectionMatrixInverse" ->
+                    MetalIrisDepthConvention.packProjectionInverse(value);
+            default -> value;
+        };
+    }
+
+    private static <T> T customObject(
+            final MetalIrisShaderCompiler.UniformMember member,
+            final FunctionReturn value,
+            final Class<T> expected
+    ) {
+        if (!expected.isInstance(value.objectReturn)) {
+            throw new IllegalStateException(
+                    "Iris uniform '" + member.name() + "' (" + member.type() + ") evaluated to "
+                            + (value.objectReturn == null ? "null" : value.objectReturn.getClass().getName())
+                            + ", expected " + expected.getName()
+            );
+        }
+        return expected.cast(value.objectReturn);
+    }
+
     private void reportUnsupported(final ByteBuffer out, final MetalIrisShaderCompiler.UniformMember member) {
-        // The buffer is already zeroed; nothing to write.
+        if (this.strict) {
+            throw new IllegalStateException(
+                    "Iris uniform '" + member.name() + "' (" + member.type()
+                            + ") has no Metal or Iris value source"
+            );
+        }
+        // Translation-only tests deliberately use the legacy relaxed constructor.
         if (this.unsupported.add(member.name())) {
             Metallum.LOGGER.debug(
                     "[metallum-iris] uniform '{}' ({}) has no value source; zero-filled",
@@ -455,7 +786,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
     }
 
     /** std140 mat4: four column-major vec4s, 16 bytes each. */
-    private static void putMat4(final ByteBuffer out, final int offset, final Matrix4f matrix) {
+    private static void putMat4(final ByteBuffer out, final int offset, final Matrix4fc matrix) {
         float[] values = new float[16];
         matrix.get(values);
         for (int index = 0; index < 16; index++) {
@@ -478,6 +809,11 @@ final class IrisMetalUniformValues implements AutoCloseable {
         putVec3(out, offset, (float) value.x, (float) value.y, (float) value.z);
     }
 
+    private static void putVec2(final ByteBuffer out, final int offset, final float x, final float y) {
+        out.putFloat(offset, x);
+        out.putFloat(offset + 4, y);
+    }
+
     private static void putVec3(final ByteBuffer out, final int offset, final float x, final float y, final float z) {
         out.putFloat(offset, x);
         out.putFloat(offset + 4, y);
@@ -494,5 +830,28 @@ final class IrisMetalUniformValues implements AutoCloseable {
     private static void putIVec2(final ByteBuffer out, final int offset, final int x, final int y) {
         out.putInt(offset, x);
         out.putInt(offset + 4, y);
+    }
+
+    private static void putIVec3(
+            final ByteBuffer out,
+            final int offset,
+            final int x,
+            final int y,
+            final int z
+    ) {
+        putIVec2(out, offset, x, y);
+        out.putInt(offset + 8, z);
+    }
+
+    private static void putIVec4(
+            final ByteBuffer out,
+            final int offset,
+            final int x,
+            final int y,
+            final int z,
+            final int w
+    ) {
+        putIVec3(out, offset, x, y, z);
+        out.putInt(offset + 12, w);
     }
 }

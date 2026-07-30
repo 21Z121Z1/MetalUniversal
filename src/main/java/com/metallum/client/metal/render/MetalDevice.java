@@ -43,6 +43,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private final MemorySegment cocoaView;
     private final GpuDebugOptions debugOptions;
     private final MetalCommandEncoder commandEncoder;
+    private final MetalGpuBuffer genericVertexAttributeBuffer;
     private final DeviceInfo deviceInfo;
     public final MTLCommandQueue commandQueue;
     // ConcurrentHashMap gives identity semantics here only because
@@ -251,9 +252,19 @@ final class MetalDevice implements GpuDeviceBackend {
                 })
                 : null;
         this.commandEncoder = new MetalCommandEncoder(this);
+        this.genericVertexAttributeBuffer = (MetalGpuBuffer) this.createBuffer(
+                () -> "OpenGL generic vertex attribute defaults",
+                GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_DST,
+                genericVertexAttributeDefaults()
+        );
         this.deviceInfo = buildDeviceInfo(deviceName);
         current = this;
         MetalFxManager.initialize(this);
+    }
+
+    /** Current source chain used by lazy PSO compilation; package seam for generated Iris stages. */
+    ShaderSource activeShaderSource() {
+        return this.activeShaderSource;
     }
 
     /**
@@ -393,7 +404,20 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull GpuBuffer createBuffer(@Nullable final Supplier<String> label, @GpuBuffer.Usage final int usage, final ByteBuffer data) {
-        MetalGpuBuffer buffer = (MetalGpuBuffer) this.createBuffer(label, usage | GpuBuffer.USAGE_COPY_DST, data.remaining());
+        int effectiveUsage = usage | GpuBuffer.USAGE_COPY_DST;
+        if ((usage & GpuBuffer.USAGE_INDEX) != 0) {
+            /*
+             * Metal has no indexed triangle-fan primitive. Our generic fan
+             * emulation expands the source indices while encoding the draw,
+             * before an upload blit in that command buffer can execute. Keep
+             * initialized index data CPU-visible and publish it synchronously.
+             */
+            effectiveUsage |= GpuBuffer.USAGE_MAP_WRITE;
+            MetalGpuBuffer buffer = (MetalGpuBuffer) this.createBuffer(label, effectiveUsage, data.remaining());
+            buffer.sliceStorage(0L, data.remaining()).put(data.duplicate());
+            return buffer;
+        }
+        MetalGpuBuffer buffer = (MetalGpuBuffer) this.createBuffer(label, effectiveUsage, data.remaining());
         this.commandEncoder.writeToBuffer(buffer.slice(), data.duplicate());
         return buffer;
     }
@@ -530,6 +554,7 @@ final class MetalDevice implements GpuDeviceBackend {
             current = null;
         }
         this.waitForSubmittedGpuWork();
+        this.genericVertexAttributeBuffer.close();
         this.commandEncoder.close();
         if (this.prewarmExecutor != null) {
             // Stop background compiles before tearing down the caches they
@@ -577,6 +602,18 @@ final class MetalDevice implements GpuDeviceBackend {
 
     MetalCommandEncoder commandEncoder() {
         return this.commandEncoder;
+    }
+
+    MetalGpuBuffer genericVertexAttributeBuffer() {
+        return this.genericVertexAttributeBuffer;
+    }
+
+    static ByteBuffer genericVertexAttributeDefaults() {
+        ByteBuffer defaults = ByteBuffer.allocateDirect(
+                MetalCrossShaderCompiler.GENERIC_VERTEX_DEFAULT_VALUES_SIZE
+        );
+        MetalCrossShaderCompiler.writeGenericVertexDefaultValues(defaults);
+        return defaults;
     }
 
     void waitForSubmittedGpuWork() {

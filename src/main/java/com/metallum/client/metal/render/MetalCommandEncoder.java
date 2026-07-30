@@ -537,7 +537,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 renderArea,
                 hasColorClear ? clearColors : null,
                 depthClear.isPresent(),
-                depthClear.orElse(0.0)
+                depthClear.isPresent()
+                        ? MetalIrisDepthConvention.hardwareClear(depthClear.getAsDouble())
+                        : 0.0
         );
         currentRenderPass = renderPass;
         renderPass.pushDebugGroup(descriptor.label());
@@ -881,7 +883,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 clearColorCopy.z(),
                 clearColorCopy.w(),
                 depth.nativeHandle(),
-                clearDepth,
+                MetalIrisDepthConvention.hardwareClear(clearDepth),
                 regionX,
                 regionY,
                 regionWidth,
@@ -1274,7 +1276,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 colorClear != null ? colorClear.z() : 0.0F,
                 colorClear != null ? colorClear.w() : 0.0F,
                 depthClear != null ? 1 : 0,
-                depthClear != null ? depthClear : 1.0
+                depthClear != null ? MetalIrisDepthConvention.hardwareClear(depthClear) : 1.0
         );
         waitRenderFences(encoder);
         encoderGeneration++;

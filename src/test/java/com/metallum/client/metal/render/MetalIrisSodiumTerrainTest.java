@@ -23,6 +23,7 @@ import net.irisshaders.iris.shaderpack.IrisDefines;
 import net.irisshaders.iris.shaderpack.ShaderPack;
 import net.irisshaders.iris.shaderpack.materialmap.NamespacedId;
 import net.irisshaders.iris.shaderpack.materialmap.WorldRenderingSettings;
+import net.irisshaders.iris.pipeline.programs.ShaderKey;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.vertices.sodium.terrain.FormatAnalyzer;
 import net.minecraft.resources.Identifier;
@@ -40,6 +41,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -110,7 +112,7 @@ final class MetalIrisSodiumTerrainTest {
      *
      * <ul>
      *   <li>{@code activate} used to leave the previous instance open, leaking
-     *       its uniform buffers and placeholder textures on every pack reload;</li>
+     *       its generation-owned buffers and textures on every pack reload;</li>
      *   <li>{@code close} only dropped the pipeline cache when an override had
      *       actually compiled, so a pack whose overrides all failed left native
      *       PSOs cached forever — sodium's program map is a private static that
@@ -134,17 +136,24 @@ final class MetalIrisSodiumTerrainTest {
                     .getProgramSet(new NamespacedId("minecraft", "overworld"));
 
             IrisMetalPipelineOverrides.Instance first =
-                    IrisMetalPipelineOverrides.activate(set, new Object2ObjectOpenHashMap<>());
+                    IrisMetalPipelineOverrides.activateForTests(set, new Object2ObjectOpenHashMap<>());
             assertSame(first, IrisMetalPipelineOverrides.active(), "activate did not publish the instance");
             IrisMetalPipelineOverrides.updateFrame();
 
             // Reactivating without an explicit deactivate must retire the old
             // instance rather than orphan its GPU resources.
             IrisMetalPipelineOverrides.Instance second =
-                    IrisMetalPipelineOverrides.activate(set, new Object2ObjectOpenHashMap<>());
+                    IrisMetalPipelineOverrides.activateForTests(set, new Object2ObjectOpenHashMap<>());
             assertNotSame(first, second, "reload reused the previous instance");
             assertTrue(second.generation() > first.generation(), "generation did not advance across reload");
             assertSame(second, IrisMetalPipelineOverrides.active(), "reload did not publish the new instance");
+
+            // Iris may destroy the old WorldRenderingPipeline after its
+            // replacement has already activated. That late callback must not
+            // retire the replacement generation.
+            IrisMetalPipelineOverrides.deactivate(first);
+            assertSame(second, IrisMetalPipelineOverrides.active(),
+                    "destroying the old pipeline retired the replacement generation");
 
             // A retired instance must not keep serving the draw path.
             assertNull(first.uniformStaging(TerrainKind.SOLID),
@@ -159,7 +168,7 @@ final class MetalIrisSodiumTerrainTest {
                     "flipping the extended-target flag disturbed the live instance");
             IrisMetalPipelineOverrides.setExtendedTerrainTargets(false);
 
-            IrisMetalPipelineOverrides.deactivate();
+            IrisMetalPipelineOverrides.deactivate(second);
             assertNull(IrisMetalPipelineOverrides.active(), "deactivate left the registry active");
             assertNull(second.uniformStaging(TerrainKind.SOLID),
                     "deactivate did not release the uniform block");
@@ -190,6 +199,122 @@ final class MetalIrisSodiumTerrainTest {
         }
     }
 
+    @Test
+    void potatoWaterPreservesTranslucentBlendAcrossEveryDrawBuffer() throws IOException {
+        Path packZip = Path.of(System.getProperty(
+                "metallum.iris.potato.path", "run/shaderpacks/potato-shaders.zip"
+        )).toAbsolutePath();
+        assertTrue(Files.isRegularFile(packZip), "Potato shader pack is missing: " + packZip);
+
+        Iris.testing = true;
+        IrisMetalPipelineOverrides.setExtendedTerrainTargets(true);
+        WorldRenderingSettings.INSTANCE.setVertexFormat(FormatAnalyzer.createFormat(true, true, true, true));
+        try (FileSystem fs = FileSystems.newFileSystem(packZip)) {
+            ProgramSet set = loadPack(packZip.getFileName().toString(), fs.getPath("/shaders"))
+                    .getProgramSet(new NamespacedId("minecraft", "overworld"));
+            IrisMetalPipelineOverrides.Instance instance = IrisMetalPipelineOverrides.activateForTests(
+                    set,
+                    set.getPackDirectives().getTextureMap()
+            );
+            try {
+                GlslProgram program = instance.program(TerrainKind.TRANSLUCENT);
+                assertNotNull(program, "Potato gbuffers_water did not translate");
+                assertEquals(
+                        List.of(3, 4),
+                        Arrays.stream(program.drawBuffers()).boxed().toList(),
+                        "Potato water fixture no longer writes colortex3/4"
+                );
+
+                RenderPipeline source = fakeSodiumPipeline(TerrainKind.TRANSLUCENT);
+                RenderPipeline selected = IrisMetalPipelineOverrides.pipelineForTerrain(source);
+                assertNotSame(source, selected, "Potato water did not select its synthetic pipeline");
+                for (ColorTargetState target : selected.getColorTargetStates()) {
+                    assertNotNull(target, "Potato water synthetic pipeline has a null color target");
+                    assertEquals(
+                            Optional.of(BlendFunction.TRANSLUCENT),
+                            target.blendFunction(),
+                            "A Potato water DRAWBUFFERS attachment lost the source translucent blend"
+                    );
+                }
+                MetalCompiledRenderPipeline compiled = device.getOrCompilePipeline(selected);
+                assertTrue(compiled.isValid(), "Potato water MRT blend PSO is invalid");
+            } finally {
+                IrisMetalPipelineOverrides.deactivate();
+            }
+        }
+    }
+
+    @Test
+    void potatoCoreGbufferProgramsCompileToDevicePipelines() throws IOException {
+        Path packZip = Path.of(System.getProperty(
+                "metallum.iris.potato.path", "run/shaderpacks/potato-shaders.zip"
+        )).toAbsolutePath();
+        assertTrue(Files.isRegularFile(packZip), "Potato shader pack is missing: " + packZip);
+
+        Iris.testing = true;
+        try (FileSystem fs = FileSystems.newFileSystem(packZip)) {
+            ProgramSet set = loadPack(packZip.getFileName().toString(), fs.getPath("/shaders"))
+                    .getProgramSet(new NamespacedId("minecraft", "overworld"));
+            IrisMetalPipelineOverrides.Instance instance = IrisMetalPipelineOverrides.activateForTests(
+                    set,
+                    set.getPackDirectives().getTextureMap()
+            );
+            try {
+                List<IrisMetalCoreGbufferPipelines.RenderState> states = List.of(
+                        new IrisMetalCoreGbufferPipelines.RenderState(false, false, false, false),
+                        new IrisMetalCoreGbufferPipelines.RenderState(false, false, false, true),
+                        new IrisMetalCoreGbufferPipelines.RenderState(false, true, true, false),
+                        new IrisMetalCoreGbufferPipelines.RenderState(false, true, false, false)
+                );
+                List<RenderPipeline> sourcePipelines = IrisMetalCoreGbufferPipelines.mappedPipelines(false)
+                        .stream()
+                        .sorted(java.util.Comparator.comparing(pipeline -> pipeline.getLocation().toString()))
+                        .toList();
+                LinkedHashSet<CoreCase> cases = new LinkedHashSet<>();
+                for (RenderPipeline source : sourcePipelines) {
+                    for (IrisMetalCoreGbufferPipelines.RenderState state : states) {
+                        ShaderKey key = IrisMetalCoreGbufferPipelines.resolve(source, state);
+                        if (key != null && !key.isShadow()) {
+                            cases.add(new CoreCase(source, key));
+                        }
+                    }
+                }
+                assertFalse(cases.isEmpty(), "No Potato core gbuffer cases were resolved");
+
+                for (CoreCase coreCase : cases) {
+                    GlslProgram program = instance.coreProgram(coreCase.key());
+                    assertNotNull(program, () -> "Potato core translation failed for " + coreCase.label());
+                    RenderPipeline synthetic = instance.coreSyntheticPipeline(
+                            coreCase.source(), coreCase.key(), program
+                    );
+                    assertNotNull(synthetic, () -> "Potato synthetic pipeline failed for " + coreCase.label());
+                    assertNotSame(coreCase.source(), synthetic);
+                    if (coreCase.key() == ShaderKey.CLOUDS) {
+                        assertNull(
+                                synthetic.getVertexFormatBinding(0),
+                                "Procedural cloud PSO gained an unbound physical vertex stream"
+                        );
+                    }
+                    assertEquals(
+                            program.drawBuffers().length,
+                            synthetic.getColorTargetStates().length,
+                            () -> "Potato DRAWBUFFERS target count differs for " + coreCase.label()
+                    );
+                    MetalCompiledRenderPipeline compiled = device.getOrCompilePipeline(synthetic);
+                    assertTrue(compiled.isValid(), () -> "Potato Metal PSO is invalid for " + coreCase.label());
+                    assertSame(
+                            coreCase.key(),
+                            instance.compiledCoreKey(compiled),
+                            () -> "Potato core PSO lost its ShaderKey token for " + coreCase.label()
+                    );
+                }
+                notes.add("Potato core gbuffers: " + cases.size() + " source-pipeline/ShaderKey PSOs ok");
+            } finally {
+                IrisMetalPipelineOverrides.deactivate();
+            }
+        }
+    }
+
     private void runPack(final Path packZip) throws IOException {
         String packName = packZip.getFileName().toString();
         try (FileSystem fs = FileSystems.newFileSystem(packZip)) {
@@ -200,7 +325,7 @@ final class MetalIrisSodiumTerrainTest {
 
             this.prewarmed = false;
             IrisMetalPipelineOverrides.Instance instance =
-                    IrisMetalPipelineOverrides.activate(set, new Object2ObjectOpenHashMap<>());
+                    IrisMetalPipelineOverrides.activateForTests(set, new Object2ObjectOpenHashMap<>());
             try {
                 boolean anyKind = false;
                 for (TerrainKind kind : TerrainKind.values()) {
@@ -234,6 +359,20 @@ final class MetalIrisSodiumTerrainTest {
         RenderPipeline fake = fakeSodiumPipeline(kind);
         assertEquals(kind, IrisMetalPipelineOverrides.Instance.discriminate(fake),
                 packName + " " + kind + ": fake pipeline discrimination mismatch");
+        RenderPipeline selected = IrisMetalPipelineOverrides.pipelineForTerrain(fake);
+        assertNotSame(fake, selected, packName + " " + kind + ": synthetic pipeline was not selected");
+        ColorTargetState[] selectedTargets = selected.getColorTargetStates();
+        assertEquals(program.drawBuffers().length, selectedTargets.length,
+                packName + " " + kind + ": color-target count does not match DRAWBUFFERS");
+        for (int slot = 0; slot < program.drawBuffers().length; slot++) {
+            int logicalTarget = program.drawBuffers()[slot];
+            GpuFormat expectedFormat = instance.targetFormat(logicalTarget);
+            assertNotNull(selectedTargets[slot],
+                    packName + " " + kind + ": color-target state " + slot + " is null");
+            assertEquals(expectedFormat, selectedTargets[slot].format(),
+                    packName + " " + kind + ": slot " + slot + " for logical colortex"
+                            + logicalTarget + " declares the wrong format");
+        }
         MetalCompiledRenderPipeline compiled = IrisMetalPipelineOverrides.tryCompile(device, fake, null);
         assertNotNull(compiled,
                 packName + " " + kind + ": override compile returned null (fail-open path hit; see log + dumps)");
@@ -292,14 +431,41 @@ final class MetalIrisSodiumTerrainTest {
         // Everything the draw path needs is created here, off the encoder.
         IrisMetalPipelineOverrides.updateFrame();
 
+        if (program.samplers().stream().anyMatch(sampler -> sampler.name().equals("noisetex"))) {
+            MetalRenderPass.TextureViewAndSampler noise = IrisMetalPipelineOverrides.fallbackTexture(
+                    device, compiled, "noisetex", boundBySodium
+            );
+            assertNotNull(noise, packName + " " + kind + ": noisetex was not resolved after prewarm");
+            assertEquals(
+                    "metallum:iris_noisetex",
+                    noise.textureView().texture().getLabel(),
+                    packName + " " + kind + ": noisetex resolved to a placeholder instead of Iris noise"
+            );
+        }
+
         for (MetalCompiledRenderPipeline.ResourceBinding binding : compiled.resources()) {
             if (SODIUM_SUPPLIED_RESOURCES.contains(binding.name())) {
                 continue;
             }
             switch (binding.kind()) {
-                case SAMPLED_IMAGE -> assertNotNull(
-                        IrisMetalPipelineOverrides.fallbackTexture(device, compiled, binding.name(), boundBySodium),
-                        packName + " " + kind + ": nothing supplies sampler '" + binding.name() + "'");
+                case SAMPLED_IMAGE -> {
+                    MetalRenderPass.TextureViewAndSampler resolved = IrisMetalPipelineOverrides.fallbackTexture(
+                            device, compiled, binding.name(), boundBySodium
+                    );
+                    if (resolved == null && IrisMetalShadowPipeline.isShadowSamplerName(binding.name())) {
+                        // activateForTests intentionally omits the production shadow pipeline;
+                        // its typed bindings are covered by IrisMetalShadowPipelineTest.
+                        continue;
+                    }
+                    assertNotNull(
+                            resolved,
+                            packName + " " + kind + ": nothing supplies sampler '" + binding.name() + "'"
+                    );
+                    assertFalse(
+                            resolved.textureView().texture().getLabel().contains("placeholder"),
+                            packName + " " + kind + ": sampler '" + binding.name() + "' used a placeholder"
+                    );
+                }
                 case UNIFORM_BUFFER -> assertNotNull(
                         IrisMetalPipelineOverrides.fallbackUniform(device, compiled, binding.name()),
                         packName + " " + kind + ": nothing supplies uniform '" + binding.name() + "'");
@@ -467,5 +633,11 @@ final class MetalIrisSodiumTerrainTest {
             // pure-Iris replacements are additive; skip if unavailable headlessly
         }
         return builder.build();
+    }
+
+    private record CoreCase(RenderPipeline source, ShaderKey key) {
+        String label() {
+            return source.getLocation() + " -> " + key;
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.metallum.mixin.sodium;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalCutoutReactivePipeline;
+import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -33,6 +34,16 @@ public abstract class ShaderChunkRendererMetalFxMixin {
         MetalCutoutReactivePipeline.beginTerrainPass(pass);
     }
 
+    @Inject(method = "begin", at = @At("RETURN"), remap = false)
+    private void metallum$beginIrisTerrainPass(
+            final TerrainRenderPass pass,
+            final net.caffeinemc.mods.sodium.client.util.FogParameters parameters,
+            final com.mojang.blaze3d.textures.GpuSampler terrainSampler,
+            final CallbackInfo ci
+    ) {
+        IrisMetalPipelineOverrides.beginTerrainPass(pass);
+    }
+
     @Inject(method = "compileProgram", at = @At("HEAD"), cancellable = true, remap = false)
     private void metallum$compileCutoutReactivePipeline(
             final TerrainRenderPass pass,
@@ -59,6 +70,7 @@ public abstract class ShaderChunkRendererMetalFxMixin {
             final TerrainRenderPass pass,
             final CallbackInfo ci
     ) {
+        IrisMetalPipelineOverrides.endTerrainPass();
         MetalCutoutReactivePipeline.endTerrainPass();
     }
 }

@@ -148,6 +148,9 @@ final class MetalRenderPass implements RenderPassBackend {
     public void setUniform(final @NonNull String name, final @NonNull GpuBufferSlice value) {
         uniforms.put(name, value);
         markDescriptorDirty(name);
+        if ("DynamicTransforms".equals(name) || "Projection".equals(name)) {
+            markDescriptorDirty(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME);
+        }
     }
 
     @Override
@@ -476,6 +479,12 @@ final class MetalRenderPass implements RenderPassBackend {
             int metalSlot = firstSlot + slot;
             enc.setBuffer(nativeVertexBuffer.nativeHandle(), vertexBuffer.offset(), metalSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
         }
+
+        int genericSlot = compiledPipeline.genericVertexBufferSlot();
+        if (genericSlot >= 0) {
+            MetalGpuBuffer defaults = device.genericVertexAttributeBuffer();
+            enc.setBuffer(defaults.nativeHandle(), 0L, genericSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
+        }
     }
 
     private void drawTriangleFan(MTLRenderCommandEncoder encoder, final int firstVertex, final int vertexCount, final int instanceCount, final int baseInstance) {
@@ -683,7 +692,9 @@ final class MetalRenderPass implements RenderPassBackend {
         if (uniformSlice == null) {
             // The pack's uniform block (see fallbackTexture above for the
             // rationale); null for every non-override pipeline.
-            uniformSlice = IrisMetalPipelineOverrides.fallbackUniform(device, compiledPipeline, binding.name());
+            uniformSlice = IrisMetalPipelineOverrides.fallbackUniformForDraw(
+                    this, device, compiledPipeline, binding.name(), uniforms
+            );
         }
         if (uniformSlice == null) {
             throw new IllegalStateException("Missing uniform " + binding.name());

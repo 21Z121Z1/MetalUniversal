@@ -3,6 +3,7 @@ package com.metallum.client.metal.render;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.mojang.blaze3d.GpuFormat;
+import com.mojang.blaze3d.IndexType;
 import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.BlendFunction;
@@ -103,6 +104,62 @@ final class MetalMrtBackendIntegrationTest {
     @Test
     void fourAttachmentReadback() {
         runRgbaAttachmentCount(4);
+    }
+
+    @Test
+    void initializedIndexBufferSupportsIndexedTriangleFan() {
+        String shaderName = "indexed_triangle_fan";
+        vertexShaders.put(shaderName, """
+                #version 450
+                void main() {
+                    vec2 positions[4] = vec2[](
+                        vec2(-1.0, -1.0),
+                        vec2( 1.0, -1.0),
+                        vec2( 1.0,  1.0),
+                        vec2(-1.0,  1.0)
+                    );
+                    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
+                }
+                """);
+        fragmentShaders.put(shaderName, """
+                #version 450
+                layout(location=0) out vec4 color;
+                void main() { color = vec4(0.0, 1.0, 0.0, 1.0); }
+                """);
+        RenderPipeline pipeline = RenderPipeline.builder()
+                .withLocation("metallum_test/" + shaderName)
+                .withVertexShader("metallum_test/" + shaderName)
+                .withFragmentShader("metallum_test/" + shaderName)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLE_FAN)
+                .withCull(false)
+                .withColorTargetState(
+                        0,
+                        new ColorTargetState(
+                                Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL
+                        )
+                )
+                .build();
+        ByteBuffer indices = ByteBuffer.allocateDirect(4 * Short.BYTES).order(ByteOrder.nativeOrder());
+        indices.putShort((short) 0).putShort((short) 1).putShort((short) 2).putShort((short) 3).flip();
+
+        List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), "triangle-fan");
+        try (MetalGpuBuffer indexBuffer = (MetalGpuBuffer) device.createBuffer(
+                () -> "triangle fan source indices", GpuBuffer.USAGE_INDEX, indices
+        ); PassWithViews pass = createPass(textures, null, false)) {
+            assertTrue((indexBuffer.usage() & GpuBuffer.USAGE_MAP_WRITE) != 0);
+            pass.pass().setPipeline(pipeline);
+            pass.pass().setIndexBuffer(indexBuffer, IndexType.SHORT);
+            pass.pass().drawIndexed(4, 1, 0, 0, 0);
+            encoder.submitRenderPass();
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+
+            ByteBuffer rendered = readback(textures.get(0));
+            assertByteNear(rendered.get(0), 0, "triangle fan red");
+            assertByteNear(rendered.get(1), 255, "triangle fan green");
+            assertByteNear(rendered.get(2), 0, "triangle fan blue");
+        }
+        closeTextures(textures);
     }
 
     @Test
@@ -504,6 +561,10 @@ final class MetalMrtBackendIntegrationTest {
                 List.of(GpuFormat.RGBA8_UNORM), "legacy-single-attachment"
         );
         MetalGpuTexture texture = textures.getFirst();
+        // This test intentionally bypasses MetalCommandEncoder's render-pass
+        // path. End any batched device-initialization upload before creating
+        // the raw legacy render encoder on the same command buffer.
+        encoder.endEncoder();
         MTLRenderCommandEncoder legacyEncoder = encoder.commandBuffer().makeRenderCommandEncoder(
                 texture.nativeHandle(),
                 MemorySegment.NULL,

@@ -1,37 +1,70 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.mtl.MTLPixelFormat;
+import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.blaze3d.systems.CommandEncoder;
+import com.mojang.blaze3d.systems.RenderPass;
+import com.mojang.blaze3d.systems.RenderPassDescriptor;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
+import com.mojang.blaze3d.pipeline.BlendFunction;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.GpuFormat;
+import com.mojang.blaze3d.platform.BlendFactor;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.UniformType;
+import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.vertex.VertexFormat;
+import com.mojang.blaze3d.textures.GpuTextureView;
 import it.unimi.dsi.fastutil.objects.Object2ObjectMap;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.irisshaders.iris.gl.texture.TextureType;
+import net.irisshaders.iris.gl.blending.BlendMode;
+import net.irisshaders.iris.gl.blending.BlendModeFunction;
+import net.irisshaders.iris.gl.blending.BlendModeOverride;
 import net.irisshaders.iris.helpers.Tri;
+import net.irisshaders.iris.pipeline.WorldRenderingPipeline;
 import net.irisshaders.iris.pipeline.programs.ShaderKey;
+import net.irisshaders.iris.pipeline.transform.Patch;
+import net.irisshaders.iris.shaderpack.ShaderPack;
 import net.irisshaders.iris.shaderpack.loading.ProgramId;
 import net.irisshaders.iris.shaderpack.materialmap.WorldRenderingSettings;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
+import net.irisshaders.iris.shaderpack.programs.ProgramFallbackResolver;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
+import net.irisshaders.iris.shaderpack.properties.PackDirectives;
+import net.irisshaders.iris.shaderpack.properties.PackRenderTargetDirectives;
+import net.irisshaders.iris.shaderpack.properties.PackRenderTargetDirectives.RenderTargetSettings;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
+import net.irisshaders.iris.uniforms.CapturedRenderingState;
+import net.irisshaders.iris.uniforms.CommonUniforms;
+import net.irisshaders.iris.uniforms.FrameUpdateNotifier;
+import net.irisshaders.iris.uniforms.custom.CustomUniforms;
+import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
+import net.minecraft.client.Minecraft;
 import net.minecraft.resources.Identifier;
+import org.joml.Vector3d;
+import org.joml.Vector4f;
+import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
 
+import java.nio.ByteBuffer;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.lang.reflect.Field;
+import java.util.function.Supplier;
 
 /**
  * B2-1 pipeline-override registry: the Metal-side equivalent of Iris's
@@ -59,12 +92,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * terrain instead of a dead client.</p>
  */
 @Environment(EnvType.CLIENT)
-final class IrisMetalPipelineOverrides {
+public final class IrisMetalPipelineOverrides {
     /** Formats for extended (non-alias) DRAWBUFFERS targets; B2-1 fixes RGBA8, pack format directives are B2-3 scope. */
     static final GpuFormat EXTENDED_TARGET_FORMAT = GpuFormat.RGBA8_UNORM;
 
     private static final AtomicInteger GENERATIONS = new AtomicInteger();
     private static volatile @Nullable Instance active;
+    private static final ThreadLocal<TerrainKind> ACTIVE_TERRAIN_KIND = new ThreadLocal<>();
+    private static final Field IRIS_BLEND_MODE = irisBlendModeField();
 
     /**
      * Whether the sodium terrain render pass carries the pack's extra
@@ -91,39 +126,209 @@ final class IrisMetalPipelineOverrides {
         extendedTerrainTargets = supported;
     }
 
+    /** Called after Sodium has selected the program for the current terrain pass. */
+    public static void beginTerrainPass(final TerrainRenderPass pass) {
+        Instance instance = active;
+        TerrainKind kind = instance == null ? null : Instance.discriminate(pass.getPipeline());
+        ACTIVE_TERRAIN_KIND.set(kind);
+        if (instance != null && kind != null) {
+            IrisMetalPassTrace.observeTerrain(kind.name(), instance.drawBuffersFor(kind));
+        }
+    }
+
+    /** Clears the render-thread terrain discriminator at the matching end hook. */
+    public static void endTerrainPass() {
+        ACTIVE_TERRAIN_KIND.remove();
+    }
+
+    /**
+     * Replaces Sodium's descriptor for every translated program, including
+     * {@code DRAWBUFFERS:0}: colortex0 is generation-owned and only the final
+     * pass resolves it to Minecraft's scene target. A null return means the
+     * caller should keep its original descriptor path.
+     */
+    public static @Nullable RenderPass createTerrainRenderPass(
+            final CommandEncoder encoder,
+            final Supplier<String> label,
+            final GpuTextureView mainColor,
+            final Optional<Vector4fc> clearColor,
+            final GpuTextureView sceneDepth,
+            final java.util.OptionalDouble clearDepth
+    ) {
+        Instance instance = active;
+        TerrainKind kind = ACTIVE_TERRAIN_KIND.get();
+        if (instance == null || kind == null) {
+            return null;
+        }
+        if (isShadowPassActive()) {
+            return instance.createShadowTerrainRenderPass(encoder, label, kind);
+        }
+        int[] drawBuffers = instance.drawBuffersFor(kind);
+        RenderPass renderPass = instance.createTerrainRenderPass(
+                encoder, label, mainColor, clearColor.orElse(null), sceneDepth,
+                clearDepth.isPresent() ? clearDepth.getAsDouble() : null, kind
+        );
+        IrisMetalPassTrace.observeTerrainPath(
+                kind.name(), drawBuffers, drawBuffers.length, renderPass == null ? "native" : "extended"
+        );
+        return renderPass;
+    }
+
+    /**
+     * Replaces Sodium's active terrain program with the generation-owned
+     * synthetic program for every translated terrain kind. Both single- and
+     * multi-target programs use the generation-owned descriptor; otherwise the
+     * final pass would read a different colortex0 than terrain wrote.
+     */
+    public static RenderPipeline pipelineForTerrain(final RenderPipeline pipeline) {
+        Instance instance = active;
+        if (instance == null || !Instance.isSodiumPipeline(pipeline)) {
+            return pipeline;
+        }
+        TerrainKind kind = Instance.discriminate(pipeline);
+        if (isShadowPassActive()) {
+            RenderPipeline shadow = instance.shadowSyntheticPipeline(pipeline, kind.shadowKey);
+            if (shadow == null) {
+                throw new IllegalStateException(
+                        "Iris Metal shadow terrain has no atomic PSO for " + kind.shadowKey
+                );
+            }
+            return shadow;
+        }
+        int[] drawBuffers = instance.drawBuffersFor(kind);
+        String originalLocation = pipeline.getLocation().toString();
+        RenderPipeline synthetic = instance.syntheticPipeline(kind, pipeline);
+        if (synthetic == null) {
+            IrisMetalPassTrace.observeTerrainPipeline(
+                    kind.name(), drawBuffers, originalLocation, originalLocation,
+                    "native-fallback", false
+            );
+            return pipeline;
+        }
+        String status = drawBuffers.length <= 1
+                ? "synthetic-single-target"
+                : "synthetic-extended-targets";
+        IrisMetalPassTrace.observeTerrainPipeline(
+                kind.name(), drawBuffers, originalLocation, synthetic.getLocation().toString(),
+                status, true
+        );
+        return synthetic;
+    }
+
+    /** Atomic descriptor/PSO selection for Mojang's non-Sodium prepared draws. */
+    public static @Nullable CoreDrawOverride prepareCoreDraw(
+            final RenderPipeline source,
+            final @Nullable WorldRenderingPipeline worldPipeline,
+            final Supplier<String> label,
+            final GpuTextureView sceneColor,
+            final Optional<Vector4fc> clearColor,
+            final @Nullable GpuTextureView sceneDepth,
+            final java.util.OptionalDouble clearDepth
+    ) {
+        Instance instance = active;
+        if (instance == null || !(worldPipeline instanceof MetalWorldRenderingPipeline metalPipeline)) {
+            return null;
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.gameRenderer == null) {
+            return null;
+        }
+        RenderTarget mainTarget = minecraft.gameRenderer.mainRenderTarget();
+        boolean shadow = isShadowPassActive();
+        boolean writesMainTarget = sceneColor == mainTarget.getColorTextureView()
+                && sceneDepth == mainTarget.getDepthTextureView();
+        if (!shadow && !metalPipeline.shouldOverrideCoreShaders(writesMainTarget)) {
+            return null;
+        }
+        ShaderKey key = IrisMetalCoreGbufferPipelines.resolve(source, worldPipeline);
+        if (key == null || key.isShadow() != shadow) {
+            return null;
+        }
+        return instance.prepareCoreDraw(
+                source,
+                key,
+                label,
+                sceneColor,
+                clearColor.orElse(null),
+                sceneDepth,
+                clearDepth.isPresent() ? clearDepth.getAsDouble() : null
+        );
+    }
+
+    public record CoreDrawOverride(RenderPipeline pipeline, RenderPassDescriptor descriptor) {
+    }
+
     private IrisMetalPipelineOverrides() {
     }
 
+    static boolean isShadowPassActive() {
+        return net.irisshaders.iris.shadows.ShadowRenderingState.areShadowsCurrentlyBeingRendered();
+    }
+
     enum TerrainKind {
-        SOLID(ShaderKey.SODIUM_TERRAIN_SOLID),
-        CUTOUT(ShaderKey.SODIUM_TERRAIN_CUTOUT),
-        TRANSLUCENT(ShaderKey.SODIUM_TERRAIN_TRANSLUCENT);
+        SOLID(ShaderKey.SODIUM_TERRAIN_SOLID, ShaderKey.SHADOW_SODIUM_TERRAIN_SOLID),
+        CUTOUT(ShaderKey.SODIUM_TERRAIN_CUTOUT, ShaderKey.SHADOW_SODIUM_TERRAIN_CUTOUT),
+        TRANSLUCENT(ShaderKey.SODIUM_TERRAIN_TRANSLUCENT, ShaderKey.SHADOW_SODIUM_TERRAIN_TRANSLUCENT);
 
         final ShaderKey shaderKey;
+        final ShaderKey shadowKey;
 
-        TerrainKind(final ShaderKey shaderKey) {
+        TerrainKind(final ShaderKey shaderKey, final ShaderKey shadowKey) {
             this.shaderKey = shaderKey;
+            this.shadowKey = shadowKey;
         }
     }
 
     static Instance activate(
             final ProgramSet programSet,
+            final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap,
+            final FrameUpdateNotifier updateNotifier
+    ) {
+        return activate(programSet, textureMap, updateNotifier, true);
+    }
+
+    /**
+     * Headless compilation tests do not have a booted {@link Minecraft}
+     * singleton, which Iris's fixed world-uniform registration requires. Keep
+     * that limitation explicit instead of weakening the production uniform
+     * graph or branching on Iris's global testing flag.
+     */
+    static Instance activateForTests(
+            final ProgramSet programSet,
             final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap
     ) {
+        return activate(programSet, textureMap, new FrameUpdateNotifier(), false);
+    }
+
+    private static Instance activate(
+            final ProgramSet programSet,
+            final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap,
+            final FrameUpdateNotifier updateNotifier,
+            final boolean productionLifecycle
+    ) {
         // Idempotent: a reload activates without anyone having deactivated, and
-        // the previous instance owns GPU buffers and placeholder textures.
+        // the previous instance owns its generation-scoped GPU resources.
         deactivate();
-        Instance instance = new Instance(GENERATIONS.incrementAndGet(), programSet, textureMap);
+        Instance instance = new Instance(
+                GENERATIONS.incrementAndGet(), programSet, textureMap, updateNotifier, productionLifecycle
+        );
         active = instance;
+        IrisMetalPassTrace.activate(programSet, instance.generation());
         return instance;
     }
 
     static void deactivate() {
-        Instance previous = active;
-        active = null;
-        if (previous != null) {
-            previous.close();
+        deactivate(active);
+    }
+
+    /** Retires only the generation owned by the pipeline being destroyed. */
+    static void deactivate(final @Nullable Instance expected) {
+        if (expected == null || active != expected) {
+            return;
         }
+        active = null;
+        expected.close();
+        IrisMetalPassTrace.close();
     }
 
     /** Per-frame uniform refresh; driven by {@link MetalWorldRenderingPipeline#beginLevelRendering()}. */
@@ -138,7 +343,60 @@ final class IrisMetalPipelineOverrides {
         // writeToBuffer / clearDepthTexture all open a blit encoder), and the
         // caller then writes into a closed handle — see handoff §6 iteration 5.
         instance.prewarm(MetalDevice.current());
+        IrisMetalPassTrace.beginFrame(instance.uniformValues.frameCounter());
+        instance.beginFrame();
         instance.uniformValues.updateFrame();
+    }
+
+    /** Captures depthtex1 at Iris's opaque-to-translucent phase boundary. */
+    static void captureNoTranslucentsDepth() {
+        Instance instance = active;
+        if (instance != null) {
+            instance.captureNoTranslucentsDepth();
+        }
+    }
+
+    /** Captures depthtex2 at Iris's translucent-to-hand phase boundary. */
+    static void captureNoHandDepth() {
+        Instance instance = active;
+        if (instance != null) {
+            instance.captureNoHandDepth();
+        }
+    }
+
+    /** Samples Iris centerDepthSmooth from live scene depth before depthtex2 is captured. */
+    static void sampleCenterDepth() {
+        Instance instance = active;
+        if (instance != null) {
+            instance.sampleCenterDepth();
+        }
+    }
+
+    static void executePostStage(final IrisMetalPostChain.Stage stage) {
+        Instance instance = active;
+        if (instance != null) {
+            instance.executePostStage(stage);
+        }
+    }
+
+    static void executeFinal() {
+        Instance instance = active;
+        if (instance != null) {
+            instance.executeFinal();
+        }
+    }
+
+    static boolean shadowsEnabled() {
+        Instance instance = active;
+        return instance != null && instance.shadowsEnabled();
+    }
+
+    static void executeShadowFrame(final IrisMetalShadowPipeline.LevelRendererAdapter adapter) {
+        Instance instance = active;
+        if (instance == null) {
+            throw new IllegalStateException("Iris Metal shadow frame has no active pipeline generation");
+        }
+        instance.executeShadowFrame(adapter);
     }
 
     /**
@@ -175,7 +433,21 @@ final class IrisMetalPipelineOverrides {
         if (instance == null) {
             return null;
         }
-        return instance.resolveUniform(device, pipeline, name);
+        return instance.resolveUniform(device, pipeline, name, null, null);
+    }
+
+    static @Nullable GpuBufferSlice fallbackUniformForDraw(
+            final MetalRenderPass pass,
+            final MetalDevice device,
+            final MetalCompiledRenderPipeline pipeline,
+            final String name,
+            final Map<String, GpuBufferSlice> bound
+    ) {
+        Instance instance = active;
+        if (instance == null) {
+            return null;
+        }
+        return instance.resolveUniform(device, pipeline, name, pass, bound);
     }
 
     static @Nullable Instance active() {
@@ -201,10 +473,20 @@ final class IrisMetalPipelineOverrides {
 
     static final class Instance {
         private final int generation;
+        private final boolean productionLifecycle;
+        private final ProgramSet programSet;
+        private final ShaderPack pack;
+        private final ProgramFallbackResolver coreResolver;
+        private final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap;
         private final Map<TerrainKind, MetalIrisShaderCompiler.GlslProgram> programs = new EnumMap<>(TerrainKind.class);
         private final Map<TerrainKind, RenderPipeline> syntheticPipelines = new EnumMap<>(TerrainKind.class);
-        private final Map<Identifier, String> generatedGlsl = new HashMap<>();
+        private final Map<ShaderKey, MetalIrisShaderCompiler.GlslProgram> corePrograms = new EnumMap<>(ShaderKey.class);
+        private final Map<CorePipelineKey, RenderPipeline> coreSyntheticPipelines = new HashMap<>();
+        private final Map<RenderPipeline, ShaderKey> coreSyntheticKeys =
+                java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
+        private final Map<Identifier, String> generatedGlsl = new java.util.concurrent.ConcurrentHashMap<>();
         private final Set<TerrainKind> reportedFailures = EnumSet.noneOf(TerrainKind.class);
+        private final Set<CorePipelineKey> reportedCoreFailures = java.util.concurrent.ConcurrentHashMap.newKeySet();
         /**
          * Compiled override -> kind, so draw-time fallbacks know whose block to
          * bind. Concurrent because {@code MetalDevice} gained a background
@@ -213,7 +495,12 @@ final class IrisMetalPipelineOverrides {
          */
         private final Map<MetalCompiledRenderPipeline, TerrainKind> compiledKinds =
                 java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
+        private final Map<MetalCompiledRenderPipeline, ShaderKey> compiledCoreKeys =
+                java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
         private final IrisMetalUniformValues uniformValues;
+        private final GpuFormat[] targetFormats;
+        private final PackDirectives packDirectives;
+        private final IrisMetalPostChain postChain;
         /**
          * Which kinds may use their full DRAWBUFFERS layout, frozen at
          * construction.
@@ -227,20 +514,56 @@ final class IrisMetalPipelineOverrides {
          * decision has to be per-generation and immutable, never per-compile.</p>
          */
         private final Set<TerrainKind> extendedKinds;
-        private final Set<String> reportedPlaceholders = java.util.concurrent.ConcurrentHashMap.newKeySet();
-        private @Nullable IrisMetalPlaceholderTextures placeholders;
+        private @Nullable IrisMetalWhitePixel whitePixel;
+        private @Nullable IrisMetalNoiseTexture noiseTexture;
+        private @Nullable IrisMetalCustomTextures customTextures;
+        private @Nullable IrisMetalCenterDepthSampler centerDepthSampler;
+        private @Nullable IrisMetalRenderTargets renderTargets;
+        private @Nullable IrisMetalShadowPipeline shadowPipeline;
+        private boolean postPrepared;
         /** The device the overrides were compiled on; needed to drop them again on teardown. */
         private @Nullable MetalDevice device;
         private boolean reportedMissingVertexFormat;
         private boolean closed;
+        private int corePipelineSequence;
+
+        private record CorePipelineKey(RenderPipeline source, ShaderKey key) {
+        }
 
         private Instance(
                 final int generation,
                 final ProgramSet programSet,
-                final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap
+                final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap,
+                final FrameUpdateNotifier updateNotifier,
+                final boolean productionLifecycle
         ) {
             this.generation = generation;
-            this.uniformValues = new IrisMetalUniformValues(programSet.getPackDirectives().getSunPathRotation());
+            this.productionLifecycle = productionLifecycle;
+            this.programSet = programSet;
+            this.pack = programSet.getPack();
+            this.coreResolver = new ProgramFallbackResolver(programSet);
+            this.textureMap = textureMap;
+            this.packDirectives = programSet.getPackDirectives();
+            if (productionLifecycle) {
+                CustomUniforms customUniforms = this.pack.customUniforms.build(
+                        holder -> CommonUniforms.addNonDynamicUniforms(
+                                holder,
+                                this.pack.getIdMap(),
+                                this.packDirectives,
+                                updateNotifier
+                        )
+                );
+                this.uniformValues = new IrisMetalUniformValues(
+                        this.packDirectives.getSunPathRotation(), customUniforms, updateNotifier
+                );
+            } else {
+                this.uniformValues = new IrisMetalUniformValues(this.packDirectives.getSunPathRotation());
+            }
+            this.targetFormats = targetFormats(this.packDirectives);
+            this.postChain = IrisMetalPostChain.create(
+                    generation, programSet, this.targetFormats.length, new java.util.BitSet()
+            );
+            this.postChain.registerUniforms(this.uniformValues);
             this.extendedKinds = extendedTerrainTargets
                     ? EnumSet.allOf(TerrainKind.class)
                     : EnumSet.noneOf(TerrainKind.class);
@@ -277,6 +600,21 @@ final class IrisMetalPipelineOverrides {
             return this.generation;
         }
 
+        private boolean shadowsEnabled() {
+            IrisMetalShadowPipeline shadows = this.shadowPipeline;
+            return !this.closed && shadows != null && shadows.enabled();
+        }
+
+        private void executeShadowFrame(final IrisMetalShadowPipeline.LevelRendererAdapter adapter) {
+            IrisMetalShadowPipeline shadows = this.shadowPipeline;
+            MetalDevice currentDevice = this.device != null ? this.device : MetalDevice.current();
+            if (this.closed || shadows == null || currentDevice == null) {
+                throw new IllegalStateException("Iris Metal shadow resources were not prepared before renderShadows");
+            }
+            shadows.executeFrame(currentDevice, adapter);
+            IrisMetalPassTrace.observePhase("shadow", "executed");
+        }
+
         MetalIrisShaderCompiler.@Nullable GlslProgram program(final TerrainKind kind) {
             return this.programs.get(kind);
         }
@@ -288,6 +626,277 @@ final class IrisMetalPipelineOverrides {
                 return new int[]{0};
             }
             return program.drawBuffers();
+        }
+
+        /** Format of one logical Iris colortex target in this pack generation. */
+        GpuFormat targetFormat(final int logicalTarget) {
+            if (logicalTarget < 0 || logicalTarget >= this.targetFormats.length) {
+                throw new IllegalArgumentException(
+                        "Iris logical color target out of range: " + logicalTarget
+                                + " (count=" + this.targetFormats.length + ")"
+                );
+            }
+            return this.targetFormats[logicalTarget];
+        }
+
+        private @Nullable CoreDrawOverride prepareCoreDraw(
+                final RenderPipeline source,
+                final ShaderKey key,
+                final Supplier<String> label,
+                final GpuTextureView sceneColor,
+                final @Nullable Vector4fc clearColor,
+                final @Nullable GpuTextureView sceneDepth,
+                final @Nullable Double clearDepth
+        ) {
+            if (this.closed) {
+                return null;
+            }
+            MetalIrisShaderCompiler.GlslProgram program = coreProgram(key);
+            if (program == null) {
+                return null;
+            }
+            RenderPipeline synthetic = coreSyntheticPipeline(source, key, program);
+            if (synthetic == null) {
+                return null;
+            }
+            MetalDevice currentDevice = this.device != null ? this.device : MetalDevice.current();
+            if (currentDevice == null) {
+                return null;
+            }
+            CorePipelineKey token = new CorePipelineKey(source, key);
+            try {
+                // Core programs are translated lazily after the frame prewarm.
+                // Allocate their block before opening this draw's encoder.
+                this.uniformValues.prewarm(currentDevice);
+                MetalCompiledRenderPipeline compiled = currentDevice.getOrCompilePipeline(synthetic);
+                if (this.compiledCoreKeys.get(compiled) != key) {
+                    throw new IllegalStateException(
+                            "Synthetic core pipeline was compiled without its generation-owned ShaderKey token"
+                    );
+                }
+                RenderPassDescriptor descriptor;
+                if (key.isShadow()) {
+                    IrisMetalShadowPipeline shadows = this.shadowPipeline;
+                    IrisMetalShadowPipeline.ShadowProgram shadowProgram = shadows == null
+                            ? null
+                            : shadows.program(key).orElse(null);
+                    if (shadowProgram == null) {
+                        throw new IllegalStateException("No active Metal shadow program for " + key);
+                    }
+                    descriptor = shadows.createPersistentGbufferDescriptor(label.get(), shadowProgram);
+                } else {
+                    IrisMetalRenderTargets targets = this.renderTargets;
+                    if (targets == null) {
+                        return null;
+                    }
+                    descriptor = targets.createTerrainWriteDescriptor(
+                            label.get(), program.drawBuffers(), sceneColor, clearColor, sceneDepth, clearDepth
+                    );
+                }
+                verifyCorePipelineDescriptor(compiled, descriptor);
+                if (this.closed || active != this) {
+                    throw new IllegalStateException("Iris generation changed while preparing the core draw");
+                }
+                return new CoreDrawOverride(synthetic, descriptor);
+            } catch (Throwable t) {
+                if (this.reportedCoreFailures.add(token)) {
+                    Metallum.LOGGER.error(
+                            "[metallum-iris] core draw {} could not prepare an atomic PSO/descriptor pair; draw stays native",
+                            key, t
+                    );
+                }
+                return null;
+            }
+        }
+
+        private static void verifyCorePipelineDescriptor(
+                final MetalCompiledRenderPipeline compiled,
+                final RenderPassDescriptor descriptor
+        ) {
+            MTLPixelFormat[] pipelineFormats = compiled.colorAttachmentFormats();
+            java.util.List<RenderPassDescriptor.Attachment<Optional<Vector4fc>>> attachments =
+                    descriptor.colorAttachments();
+            if (pipelineFormats.length != attachments.size()) {
+                throw new IllegalStateException(
+                        "Core pipeline/render-pass color attachment count mismatch: pipeline="
+                                + pipelineFormats.length + ", pass=" + attachments.size()
+                );
+            }
+            for (int slot = 0; slot < pipelineFormats.length; slot++) {
+                RenderPassDescriptor.Attachment<Optional<Vector4fc>> attachment = attachments.get(slot);
+                MTLPixelFormat attachmentFormat = attachment == null
+                        ? MTLPixelFormat.Invalid
+                        : metalTexture(attachment.textureView()).mtlPixelFormat();
+                if (pipelineFormats[slot] != attachmentFormat) {
+                    throw new IllegalStateException(
+                            "Core pipeline/render-pass color attachment mismatch at slot " + slot
+                                    + ": pipeline=" + pipelineFormats[slot] + ", pass=" + attachmentFormat
+                    );
+                }
+            }
+
+            RenderPassDescriptor.Attachment<java.util.OptionalDouble> depthAttachment = descriptor.depthAttachment();
+            MTLPixelFormat depthFormat = MTLPixelFormat.Invalid;
+            MTLPixelFormat stencilFormat = MTLPixelFormat.Invalid;
+            if (depthAttachment != null) {
+                MetalGpuTexture texture = metalTexture(depthAttachment.textureView());
+                depthFormat = texture.mtlDepthPixelFormat();
+                stencilFormat = texture.mtlStencilPixelFormat();
+            }
+            compiled.getNativePipeline(depthFormat, stencilFormat);
+        }
+
+        private static MetalGpuTexture metalTexture(final GpuTextureView view) {
+            if (view.texture() instanceof MetalGpuTexture texture) {
+                return texture;
+            }
+            throw new IllegalStateException(
+                    "Iris core render pass contains a non-Metal attachment: " + view.texture().getClass().getName()
+            );
+        }
+
+        MetalIrisShaderCompiler.@Nullable GlslProgram coreProgram(final ShaderKey key) {
+            synchronized (this.corePrograms) {
+                MetalIrisShaderCompiler.GlslProgram existing = this.corePrograms.get(key);
+                if (existing != null) {
+                    return existing;
+                }
+                CorePipelineKey failureToken = new CorePipelineKey(null, key);
+                if (this.reportedCoreFailures.contains(failureToken)) {
+                    return null;
+                }
+                if (key.isShadow()) {
+                    IrisMetalShadowPipeline shadows = this.shadowPipeline;
+                    IrisMetalShadowPipeline.ShadowProgram shadow = shadows == null
+                            ? null
+                            : shadows.program(key).orElse(null);
+                    if (shadow == null) {
+                        this.reportedCoreFailures.add(failureToken);
+                        return null;
+                    }
+                    MetalIrisShaderCompiler.GlslProgram translated = shadow.translated();
+                    this.corePrograms.put(key, translated);
+                    this.uniformValues.register(key, "shadow_" + key.getName(), translated);
+                    return translated;
+                }
+                ProgramSource source = this.coreResolver.resolve(key.getProgram()).orElse(null);
+                if (source == null) {
+                    this.reportedCoreFailures.add(failureToken);
+                    Metallum.LOGGER.warn(
+                            "[metallum-iris] no pack program for core key {} (fallback chain of {} exhausted)",
+                            key, key.getProgram()
+                    );
+                    return null;
+                }
+                try {
+                    MetalIrisShaderCompiler.GlslProgram translated =
+                            MetalIrisShaderCompiler.translateVanillaGbuffers(
+                                    key.getName(),
+                                    source,
+                                    key,
+                                    this.coreResolver.has(ProgramId.Line),
+                                    this.textureMap
+                            );
+                    this.corePrograms.put(key, translated);
+                    this.uniformValues.register(key, "core_" + key.getName(), translated);
+                    Metallum.LOGGER.info(
+                            "[metallum-iris] translated core {} from pack program {} (drawBuffers={})",
+                            key, source.getName(), java.util.Arrays.toString(translated.drawBuffers())
+                    );
+                    return translated;
+                } catch (Throwable t) {
+                    this.reportedCoreFailures.add(failureToken);
+                    Metallum.LOGGER.error(
+                            "[metallum-iris] translation of core {} from {} failed; draw stays native",
+                            key, source.getName(), t
+                    );
+                    return null;
+                }
+            }
+        }
+
+        @Nullable RenderPipeline coreSyntheticPipeline(
+                final RenderPipeline source,
+                final ShaderKey key,
+                final MetalIrisShaderCompiler.GlslProgram program
+        ) {
+            CorePipelineKey token = new CorePipelineKey(source, key);
+            synchronized (this.coreSyntheticPipelines) {
+                RenderPipeline existing = this.coreSyntheticPipelines.get(token);
+                if (existing != null) {
+                    return existing;
+                }
+                if (this.reportedCoreFailures.contains(token)) {
+                    return null;
+                }
+                try {
+                    RenderPipeline synthetic = buildCoreSynthetic(source, key, program);
+                    this.coreSyntheticPipelines.put(token, synthetic);
+                    this.coreSyntheticKeys.put(synthetic, key);
+                    return synthetic;
+                } catch (Throwable t) {
+                    this.reportedCoreFailures.add(token);
+                    Metallum.LOGGER.error(
+                            "[metallum-iris] could not build core pipeline {} for {}; draw stays native",
+                            key, source.getLocation(), t
+                    );
+                    return null;
+                }
+            }
+        }
+
+        private @Nullable RenderPipeline shadowSyntheticPipeline(
+                final RenderPipeline source,
+                final ShaderKey key
+        ) {
+            MetalIrisShaderCompiler.GlslProgram program = coreProgram(key);
+            return program == null ? null : coreSyntheticPipeline(source, key, program);
+        }
+
+        private @Nullable RenderPass createShadowTerrainRenderPass(
+                final CommandEncoder encoder,
+                final Supplier<String> label,
+                final TerrainKind kind
+        ) {
+            IrisMetalShadowPipeline shadows = this.shadowPipeline;
+            if (this.closed || shadows == null) {
+                return null;
+            }
+            IrisMetalShadowPipeline.ShadowProgram program = shadows.program(kind.shadowKey).orElse(null);
+            if (program == null) {
+                throw new IllegalStateException("No pack shadow program for " + kind.shadowKey);
+            }
+            MetalDevice currentDevice = this.device != null ? this.device : MetalDevice.current();
+            if (currentDevice == null) {
+                throw new IllegalStateException("No Metal device while opening the Iris shadow terrain pass");
+            }
+            this.uniformValues.prewarm(currentDevice);
+            return encoder.createRenderPass(shadows.createPersistentGbufferDescriptor(label.get(), program));
+        }
+
+        private @Nullable RenderPass createTerrainRenderPass(
+                final CommandEncoder encoder,
+                final Supplier<String> label,
+                final GpuTextureView mainColor,
+                final @Nullable Vector4fc clearColor,
+                final GpuTextureView sceneDepth,
+                final @Nullable Double clearDepth,
+                final TerrainKind kind
+        ) {
+            IrisMetalRenderTargets targets = this.renderTargets;
+            if (targets == null) {
+                if (this.reportedFailures.add(kind)) {
+                    Metallum.LOGGER.warn(
+                            "[metallum-iris] terrain {} needs DRAWBUFFERS {} but Iris targets are not initialized;"
+                                    + " keeping Sodium's single-attachment pass",
+                            kind, java.util.Arrays.toString(drawBuffersFor(kind))
+                    );
+                }
+                return null;
+            }
+            return encoder.createRenderPass(targets.createTerrainWriteDescriptor(
+                    label.get(), drawBuffersFor(kind), mainColor, clearColor, sceneDepth, clearDepth
+            ));
         }
 
         static TerrainKind discriminate(final RenderPipeline pipeline) {
@@ -305,6 +914,58 @@ final class IrisMetalPipelineOverrides {
             return pipeline.getLocation().getNamespace().contains("sodium");
         }
 
+        private boolean isSyntheticPipeline(final RenderPipeline pipeline) {
+            String path = pipeline.getLocation().getPath();
+            return pipeline.getLocation().getNamespace().equals("metallum")
+                    && path.startsWith("iris/gen" + this.generation + "/sodium_terrain_");
+        }
+
+        private @Nullable TerrainKind syntheticKind(final RenderPipeline pipeline) {
+            if (!isSyntheticPipeline(pipeline)) {
+                return null;
+            }
+            String prefix = "iris/gen" + this.generation + "/sodium_terrain_";
+            String suffix = pipeline.getLocation().getPath().substring(prefix.length());
+            try {
+                return TerrainKind.valueOf(suffix.toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+        }
+
+        /**
+         * Returns the synthetic RenderPipeline for a translated terrain kind.
+         * The cache is synchronized because async Metal prewarm and the render
+         * thread can reach this method for the same generation concurrently.
+         */
+        private @Nullable RenderPipeline syntheticPipeline(
+                final TerrainKind kind,
+                final RenderPipeline source
+        ) {
+            if (this.closed || this.programs.get(kind) == null) {
+                return null;
+            }
+            int[] drawBuffers = drawBuffersFor(kind);
+            if (drawBuffers.length > 1 && !this.extendedKinds.contains(kind)) {
+                return null;
+            }
+            VertexFormat chunkFormat = chunkVertexFormat();
+            if (chunkFormat == null) {
+                if (!this.reportedMissingVertexFormat) {
+                    this.reportedMissingVertexFormat = true;
+                    Metallum.LOGGER.error(
+                            "[metallum-iris] WorldRenderingSettings has no chunk vertex format; terrain overrides disabled"
+                    );
+                }
+                return null;
+            }
+            synchronized (this.syntheticPipelines) {
+                return this.syntheticPipelines.computeIfAbsent(
+                        kind, k -> buildSynthetic(k, this.programs.get(k), source, chunkFormat)
+                );
+            }
+        }
+
         private @Nullable MetalCompiledRenderPipeline compileOverride(
                 final MetalDevice device,
                 final RenderPipeline pipeline,
@@ -313,20 +974,28 @@ final class IrisMetalPipelineOverrides {
             if (this.closed) {
                 return null;
             }
-            if (!isSodiumPipeline(pipeline)) {
+            ShaderKey coreKey = this.coreSyntheticKeys.get(pipeline);
+            if (coreKey != null) {
+                return compileCoreOverride(device, pipeline, coreKey, fallbackSource);
+            }
+            boolean synthetic = isSyntheticPipeline(pipeline);
+            if (!synthetic && !isSodiumPipeline(pipeline)) {
                 // The mainline ShaderChunkRendererMetalFxMixin owns the one-shot
                 // warning for the MetalFX CUTOUT namespace substitution. Keeping
                 // another warning here would report the same event twice after
                 // the Iris branch is merged.
                 return null;
             }
-            TerrainKind kind = discriminate(pipeline);
+            TerrainKind kind = synthetic ? syntheticKind(pipeline) : discriminate(pipeline);
+            if (kind == null) {
+                return null;
+            }
             MetalIrisShaderCompiler.GlslProgram program = this.programs.get(kind);
             if (program == null) {
                 return null;
             }
             int[] drawBuffers = drawBuffersFor(kind);
-            if (drawBuffers.length > 1 && !this.extendedKinds.contains(kind)) {
+            if (!synthetic && drawBuffers.length > 1 && !this.extendedKinds.contains(kind)) {
                 // The compiled PSO is looked up by the render pass's attachment
                 // signature, so a multi-target program can only be used once the
                 // sodium terrain pass actually carries those extra attachments
@@ -342,19 +1011,12 @@ final class IrisMetalPipelineOverrides {
                 return null;
             }
             try {
-                VertexFormat chunkFormat = chunkVertexFormat();
-                if (chunkFormat == null) {
-                    if (!this.reportedMissingVertexFormat) {
-                        this.reportedMissingVertexFormat = true;
-                        Metallum.LOGGER.error(
-                                "[metallum-iris] WorldRenderingSettings has no chunk vertex format; terrain overrides disabled"
-                        );
-                    }
+                RenderPipeline compilePipeline = synthetic
+                        ? pipeline
+                        : this.syntheticPipeline(kind, pipeline);
+                if (compilePipeline == null) {
                     return null;
                 }
-                RenderPipeline synthetic = this.syntheticPipelines.computeIfAbsent(
-                        kind, k -> buildSynthetic(k, program, pipeline, chunkFormat)
-                );
                 ShaderSource source = (id, type) -> {
                     String generated = this.generatedGlsl.get(id);
                     if (generated != null) {
@@ -364,9 +1026,9 @@ final class IrisMetalPipelineOverrides {
                 };
                 Metallum.LOGGER.info(
                         "[metallum-iris] compiling terrain override {} for {} via {}",
-                        kind, pipeline.getLocation(), synthetic.getLocation()
+                        kind, pipeline.getLocation(), compilePipeline.getLocation()
                 );
-                MetalCompiledRenderPipeline compiled = MetalCrossShaderCompiler.compile(device, synthetic, source);
+                MetalCompiledRenderPipeline compiled = MetalCrossShaderCompiler.compile(device, compilePipeline, source);
                 this.compiledKinds.put(compiled, kind);
                 this.device = device;
                 return compiled;
@@ -378,6 +1040,47 @@ final class IrisMetalPipelineOverrides {
                     );
                 }
                 return null;
+            }
+        }
+
+        private MetalCompiledRenderPipeline compileCoreOverride(
+                final MetalDevice device,
+                final RenderPipeline pipeline,
+                final ShaderKey key,
+                final @Nullable ShaderSource fallbackSource
+        ) {
+            MetalIrisShaderCompiler.GlslProgram program;
+            synchronized (this.corePrograms) {
+                program = this.corePrograms.get(key);
+            }
+            if (program == null) {
+                throw new IllegalStateException("No translated core program registered for " + key);
+            }
+            try {
+                ShaderSource source = (id, type) -> {
+                    String generated = this.generatedGlsl.get(id);
+                    if (generated != null) {
+                        return generated;
+                    }
+                    return fallbackSource == null ? null : fallbackSource.get(id, type);
+                };
+                Metallum.LOGGER.info(
+                        "[metallum-iris] compiling core override {} via {}",
+                        key, pipeline.getLocation()
+                );
+                MetalCompiledRenderPipeline compiled = MetalCrossShaderCompiler.compile(device, pipeline, source);
+                this.compiledCoreKeys.put(compiled, key);
+                this.device = device;
+                return compiled;
+            } catch (Throwable t) {
+                CorePipelineKey failureToken = new CorePipelineKey(pipeline, key);
+                if (this.reportedCoreFailures.add(failureToken)) {
+                    Metallum.LOGGER.error(
+                            "[metallum-iris] core override {} failed to compile; refusing ordinary synthetic-shader fallback",
+                            key, t
+                    );
+                }
+                throw new IllegalStateException("Failed to compile Iris core override " + key, t);
             }
         }
 
@@ -405,16 +1108,37 @@ final class IrisMetalPipelineOverrides {
             if (sourceTarget == null) {
                 throw new IllegalStateException("Sodium pipeline " + source.getLocation() + " has no color target");
             }
+            ProgramSource sourceProgram = resolveSource(this.programSet, kind.shaderKey.getProgram());
+            if (sourceProgram == null) {
+                throw new IllegalStateException("No pack program remains for terrain kind " + kind);
+            }
+            Optional<BlendFunction> globalBlend = sourceTarget.blendFunction();
+            BlendModeOverride globalOverride = sourceProgram.getDirectives().getBlendModeOverride()
+                    .orElse(kind.shaderKey.getProgram().getBlendModeOverride());
+            if (globalOverride != null) {
+                globalBlend = irisBlendFunction(globalOverride);
+            }
             int[] drawBuffers = drawBuffersFor(kind);
             for (int index = 0; index < drawBuffers.length; index++) {
-                if (drawBuffers[index] == 0) {
-                    // B2-1 display semantics: colortex0 aliases the main framebuffer.
-                    builder.withColorTargetState(index, sourceTarget);
-                } else {
-                    builder.withColorTargetState(index, new ColorTargetState(
-                            Optional.empty(), EXTENDED_TARGET_FORMAT, ColorTargetState.WRITE_ALL
-                    ));
+                int logicalTarget = drawBuffers[index];
+                Optional<BlendFunction> blend = globalBlend;
+                for (var bufferOverride : sourceProgram.getDirectives().getBufferBlendOverrides()) {
+                    if (bufferOverride.index() == logicalTarget) {
+                        blend = bufferOverride.blendMode() == null
+                                ? Optional.empty()
+                                : Optional.of(irisBlendFunction(bufferOverride.blendMode()));
+                    }
                 }
+                builder.withColorTargetState(
+                        index,
+                        new ColorTargetState(
+                                blend,
+                                targetFormat(logicalTarget),
+                                logicalTarget == 0
+                                        ? sourceTarget.writeMask()
+                                        : ColorTargetState.WRITE_ALL
+                        )
+                );
             }
 
             DepthStencilState depth = source.getDepthStencilState();
@@ -454,15 +1178,129 @@ final class IrisMetalPipelineOverrides {
             return builder.build();
         }
 
+        private RenderPipeline buildCoreSynthetic(
+                final RenderPipeline source,
+                final ShaderKey key,
+                final MetalIrisShaderCompiler.GlslProgram program
+        ) {
+            String base = "iris/gen" + this.generation + "/core_" + key.getName()
+                    + "_" + this.corePipelineSequence++;
+            Identifier vertexId = Identifier.fromNamespaceAndPath("metallum", base + "_v");
+            Identifier fragmentId = Identifier.fromNamespaceAndPath("metallum", base + "_f");
+            this.generatedGlsl.put(vertexId, program.vertexGlsl());
+            this.generatedGlsl.put(fragmentId, program.fragmentGlsl());
+
+            IrisMetalShadowPipeline.ShadowProgram shadowProgram = null;
+            IrisMetalShadowPipeline.ShadowRasterState shadowRaster = null;
+            if (key.isShadow()) {
+                IrisMetalShadowPipeline shadows = this.shadowPipeline;
+                shadowProgram = shadows == null ? null : shadows.program(key).orElse(null);
+                if (shadowProgram == null) {
+                    throw new IllegalStateException("No Metal shadow program for " + key);
+                }
+                shadowRaster = IrisMetalShadowPipeline.adaptRasterState(source.getDepthStencilState());
+            }
+            RenderPipeline.Builder builder = RenderPipeline.builder()
+                    .withLocation(Identifier.fromNamespaceAndPath("metallum", base))
+                    .withVertexShader(vertexId)
+                    .withFragmentShader(fragmentId)
+                    .withCull(shadowRaster == null ? source.isCull() : shadowRaster.cull())
+                    .withPolygonMode(source.getPolygonMode())
+                    .withPrimitiveTopology(source.getPrimitiveTopology());
+
+            ColorTargetState sourceTarget = source.getColorTargetState();
+            if (sourceTarget == null) {
+                throw new IllegalStateException("Core pipeline " + source.getLocation() + " has no color target");
+            }
+            ProgramSource sourceProgram = shadowProgram == null
+                    ? this.coreResolver.resolve(key.getProgram()).orElseThrow()
+                    : shadowProgram.source();
+            Optional<BlendFunction> globalBlend = sourceTarget.blendFunction();
+            BlendModeOverride globalOverride = sourceProgram.getDirectives().getBlendModeOverride()
+                    .orElse(key.getProgram().getBlendModeOverride());
+            if (globalOverride != null) {
+                globalBlend = irisBlendFunction(globalOverride);
+            }
+            int[] drawBuffers = program.drawBuffers();
+            for (int slot = 0; slot < drawBuffers.length; slot++) {
+                int logicalTarget = drawBuffers[slot];
+                Optional<BlendFunction> blend = globalBlend;
+                for (var bufferOverride : sourceProgram.getDirectives().getBufferBlendOverrides()) {
+                    if (bufferOverride.index() == logicalTarget) {
+                        blend = bufferOverride.blendMode() == null
+                                ? Optional.empty()
+                                : Optional.of(irisBlendFunction(bufferOverride.blendMode()));
+                    }
+                }
+                builder.withColorTargetState(
+                        slot,
+                        new ColorTargetState(
+                                blend,
+                                shadowProgram == null
+                                        ? targetFormat(logicalTarget)
+                                        : Objects.requireNonNull(this.shadowPipeline).targetFormat(logicalTarget),
+                                sourceTarget.writeMask()
+                        )
+                );
+            }
+
+            DepthStencilState depth = shadowRaster == null
+                    ? source.getDepthStencilState()
+                    : shadowRaster.depthStencil();
+            if (depth != null) {
+                builder.withDepthStencilState(depth);
+            }
+
+            Set<String> declared = new java.util.HashSet<>();
+            for (BindGroupLayout layout : source.getBindGroupLayouts()) {
+                builder.withBindGroupLayout(layout);
+                layout.getUniforms().forEach(uniform -> declared.add(uniform.name()));
+                declared.addAll(layout.getSamplers());
+            }
+            BindGroupLayout.Builder extras = BindGroupLayout.builder();
+            for (String blockName : program.uniformBlockNames()) {
+                if (declared.add(blockName)) {
+                    extras.withUniform(blockName, UniformType.UNIFORM_BUFFER);
+                }
+            }
+            for (MetalIrisShaderCompiler.SamplerDecl sampler : program.samplers()) {
+                if (!declared.add(sampler.name())) {
+                    continue;
+                }
+                if (sampler.glslType().toLowerCase(Locale.ROOT).contains("samplerbuffer")) {
+                    throw new IllegalStateException(
+                            "Pack sampler '" + sampler.name() + "' (" + sampler.glslType()
+                                    + ") is a texel buffer without a Metal format"
+                    );
+                }
+                extras.withSampler(sampler.name());
+            }
+            builder.withBindGroupLayout(extras.build());
+
+            VertexFormat[] sourceBindings = source.getVertexFormatBindings();
+            for (int binding = 0; binding < sourceBindings.length; binding++) {
+                if (sourceBindings[binding] != null) {
+                    builder.withVertexBinding(binding, sourceBindings[binding]);
+                }
+            }
+            VertexFormat physicalVertexFormat = shadowProgram == null
+                    ? IrisMetalCoreGbufferPipelines.physicalVertexFormat(source, key)
+                    : shadowProgram.vertexFormat();
+            if (physicalVertexFormat != null) {
+                builder.withVertexBinding(0, physicalVertexFormat);
+            }
+            return builder.build();
+        }
+
         /**
          * Resolves a sampler the pack declared but sodium never bound.
          *
          * <p>Two names map to real content: the pack's {@code gtexture} is the
          * block atlas sodium binds as {@code u_BlockTex}, and {@code lightmap}
-         * is its {@code u_LightTex}. Everything else — noise textures, shadow
-         * maps, previous-pass buffers — has no source until the shadow pass and
-         * composite chain exist, so it gets a 1×1 placeholder of the matching
-         * kind (depth+compare for {@code sampler2DShadow}, colour otherwise).</p>
+         * is its {@code u_LightTex}. Noise, render targets and completed shadow
+         * targets resolve from generation-owned resources. Every unresolved
+         * sampler fails closed; substituting a colour texture would silently
+         * change the pack's resource semantics.</p>
          */
         private MetalRenderPass.@Nullable TextureViewAndSampler resolveTexture(
                 final MetalDevice device,
@@ -470,44 +1308,169 @@ final class IrisMetalPipelineOverrides {
                 final String name,
                 final Map<String, MetalRenderPass.TextureViewAndSampler> bound
         ) {
-            if (this.closed || !this.compiledKinds.containsKey(pipeline)) {
+            TerrainKind terrainKind = this.compiledKinds.get(pipeline);
+            ShaderKey coreKey = this.compiledCoreKeys.get(pipeline);
+            if (this.closed || (terrainKind == null && coreKey == null)) {
                 return null;
             }
-            MetalRenderPass.TextureViewAndSampler alias = switch (name) {
-                case "gtexture", "tex", "texture" -> bound.get("u_BlockTex");
-                case "lightmap" -> bound.get("u_LightTex");
-                default -> null;
-            };
+            MetalIrisShaderCompiler.GlslProgram resourceProgram = coreKey == null
+                    ? this.programs.get(terrainKind)
+                    : this.corePrograms.get(coreKey);
+            IrisMetalCustomTextures customs = this.customTextures;
+            if (customs != null) {
+                java.util.List<String> aliases = gbufferCustomTextureAliases(
+                        coreKey, declaresSampler(resourceProgram, "watershadow"), name
+                );
+                if (!aliases.isEmpty()) {
+                    MetalRenderPass.TextureViewAndSampler custom = customs.resolve(
+                            TextureStage.GBUFFERS_AND_SHADOW, aliases.toArray(String[]::new)
+                    );
+                    if (custom != null) {
+                        IrisMetalPassTrace.observeSampler(name, "iris:custom-GBUFFERS_AND_SHADOW");
+                        return custom;
+                    }
+                }
+            }
+            if (coreKey != null && coreKey.patch != Patch.SODIUM && coreUsesWhitePixel(coreKey, name)) {
+                IrisMetalWhitePixel white = this.whitePixel;
+                if (white == null) {
+                    return null;
+                }
+                IrisMetalPassTrace.observeSampler(name, "iris:white-pixel");
+                return white.binding();
+            }
+            MetalRenderPass.TextureViewAndSampler alias;
+            String aliasSource;
+            if (coreKey != null && coreKey.patch != Patch.SODIUM) {
+                aliasSource = coreSamplerAlias(name);
+                alias = aliasSource == null ? null : bound.get(aliasSource);
+            } else {
+                alias = switch (name) {
+                    case "gtexture", "tex", "texture" -> bound.get("u_BlockTex");
+                    case "lightmap" -> bound.get("u_LightTex");
+                    default -> null;
+                };
+                aliasSource = name.equals("lightmap") ? "u_LightTex" : "u_BlockTex";
+            }
             if (alias != null) {
+                IrisMetalPassTrace.observeSampler(name, coreKey == null
+                        ? "sodium:" + aliasSource
+                        : "mojang:" + aliasSource);
                 return alias;
             }
-            IrisMetalPlaceholderTextures textures = this.placeholders;
-            if (textures == null) {
-                // Not prewarmed yet: creating them now would kill the live
-                // encoder. Fall through to the normal missing-resource error.
-                return null;
+
+            if ("noisetex".equals(name)) {
+                IrisMetalNoiseTexture noise = this.noiseTexture;
+                if (noise == null) {
+                    return null;
+                }
+                IrisMetalPassTrace.observeSampler(name, "iris:" + noise.source());
+                return noise.binding();
             }
-            boolean shadow = isShadowSampler(this.compiledKinds.get(pipeline), name);
-            if (this.reportedPlaceholders.add(name)) {
-                Metallum.LOGGER.info(
-                        "[metallum-iris] pack sampler '{}' has no source in B2-1; bound a 1x1 {} placeholder",
-                        name, shadow ? "shadow" : "colour"
+
+            MetalRenderPass.TextureViewAndSampler targetBinding = resolveRenderTargetSampler(name);
+            if (targetBinding != null) {
+                IrisMetalPassTrace.observeSampler(
+                        name,
+                        IrisMetalPostChain.renderTargetIndex(name) >= 0
+                                ? "iris:colortex-read"
+                                : "iris:depthtex-view"
                 );
+                return targetBinding;
             }
-            return shadow ? textures.shadow() : textures.color();
+            MetalIrisShaderCompiler.SamplerDecl sampler = declaredSampler(resourceProgram, name);
+            if (sampler != null && IrisMetalShadowPipeline.isShadowSamplerName(name)) {
+                IrisMetalShadowPipeline shadows = this.shadowPipeline;
+                if (shadows == null) {
+                    return null;
+                }
+                MetalRenderPass.TextureViewAndSampler shadow = coreKey != null && coreKey.isShadow()
+                        ? shadows.resolveShadowSampler(
+                                sampler, shadows.finalReadsFromAlt(), declaresSampler(resourceProgram, "watershadow")
+                        )
+                        : shadows.resolveWorldShadowSampler(
+                                sampler, declaresSampler(resourceProgram, "watershadow")
+                        );
+                if (shadow != null) {
+                    IrisMetalPassTrace.observeSampler(
+                            name,
+                            IrisMetalShadowPipeline.isComparisonSampler(sampler)
+                                    ? "iris:shadow-depth-compare"
+                                    : "iris:shadow-texture"
+                    );
+                }
+                return shadow;
+            }
+            return null;
         }
 
-        private boolean isShadowSampler(final TerrainKind kind, final String name) {
-            MetalIrisShaderCompiler.GlslProgram program = this.programs.get(kind);
+        /** Routes Iris sampler names to the generation's real target views. */
+        private MetalRenderPass.@Nullable TextureViewAndSampler resolveRenderTargetSampler(final String name) {
+            IrisMetalRenderTargets targets = this.renderTargets;
+            if (targets == null) {
+                return null;
+            }
+            int colorTarget = gbufferRenderTargetIndex(name);
+            if (colorTarget >= 0 && colorTarget < targets.colorTargets().targetCount()) {
+                return new MetalRenderPass.TextureViewAndSampler(
+                        targets.colorTargets().readView(colorTarget), targets.colorSampler(colorTarget)
+                );
+            }
+            if (name.startsWith("depthtex")) {
+                int index = parseTargetIndex(name, "depthtex");
+                MetalGpuTextureView view = switch (index) {
+                    case 0 -> null;
+                    case 1 -> targets.noTranslucentsDepthView();
+                    case 2 -> targets.noHandDepthView();
+                    default -> null;
+                };
+                Minecraft minecraft = Minecraft.getInstance();
+                if (index == 0 && minecraft != null && minecraft.gameRenderer != null
+                        && minecraft.gameRenderer.mainRenderTarget().getDepthTextureView()
+                        instanceof MetalGpuTextureView sceneDepth) {
+                    view = sceneDepth;
+                }
+                if (view != null) {
+                    return new MetalRenderPass.TextureViewAndSampler(view, targets.depthSampler());
+                }
+            }
+            return null;
+        }
+
+        private static int parseTargetIndex(final String name, final String prefix) {
+            try {
+                return Integer.parseInt(name.substring(prefix.length()));
+            } catch (RuntimeException ignored) {
+                return -1;
+            }
+        }
+
+        /** Mirrors IrisSamplers.addRenderTargetSamplers(..., fullscreen=false). */
+        static int gbufferRenderTargetIndex(final String name) {
+            int target = IrisMetalPostChain.renderTargetIndex(name);
+            return target >= 4 ? target : -1;
+        }
+
+        private static MetalIrisShaderCompiler.@Nullable SamplerDecl declaredSampler(
+                final MetalIrisShaderCompiler.@Nullable GlslProgram program,
+                final String name
+        ) {
             if (program == null) {
-                return false;
+                return null;
             }
             for (MetalIrisShaderCompiler.SamplerDecl sampler : program.samplers()) {
                 if (sampler.name().equals(name)) {
-                    return sampler.glslType().toLowerCase(Locale.ROOT).contains("shadow");
+                    return sampler;
                 }
             }
-            return false;
+            return null;
+        }
+
+        private static boolean declaresSampler(
+                final MetalIrisShaderCompiler.@Nullable GlslProgram program,
+                final String name
+        ) {
+            return declaredSampler(program, name) != null;
         }
 
         /**
@@ -519,32 +1482,345 @@ final class IrisMetalPipelineOverrides {
             if (this.closed || device == null) {
                 return;
             }
-            if (this.placeholders == null) {
-                this.placeholders = new IrisMetalPlaceholderTextures(device);
-                // Proves beginLevelRendering -> updateFrame actually runs. Without
-                // it, a missing Iris LevelRenderer hook and a genuinely absent
-                // resource both surface as "Missing sampler" — same symptom,
-                // completely different cause.
-                Metallum.LOGGER.info(
-                        "[metallum-iris] draw-path resources prewarmed for generation {}", this.generation
+            ensureRenderTargets(device);
+            if (this.whitePixel == null) {
+                this.whitePixel = new IrisMetalWhitePixel(device);
+            }
+            if (this.noiseTexture == null) {
+                this.noiseTexture = new IrisMetalNoiseTexture(
+                        device,
+                        this.packDirectives.getNoiseTextureResolution(),
+                        this.pack.getCustomNoiseTexture()
+                );
+            }
+            if (this.customTextures == null) {
+                this.customTextures = new IrisMetalCustomTextures(
+                        device, this.pack
+                );
+                this.customTextures.prewarmAll();
+            }
+            if (this.productionLifecycle && this.shadowPipeline == null) {
+                this.shadowPipeline = new IrisMetalShadowPipeline(device, this.programSet);
+            }
+            IrisMetalRenderTargets targets = this.renderTargets;
+            Minecraft minecraft = Minecraft.getInstance();
+            if (!this.postPrepared && targets != null && minecraft != null && minecraft.gameRenderer != null) {
+                GpuFormat finalFormat = minecraft.gameRenderer.mainRenderTarget().getColorTexture().getFormat();
+                this.postChain.prepare(device, targets, finalFormat, device.activeShaderSource());
+                this.postPrepared = true;
+            }
+            if (this.postPrepared
+                    && this.centerDepthSampler == null
+                    && this.postChain.requiresSampler(IrisMetalCenterDepthSampler.SAMPLER_NAME)) {
+                this.centerDepthSampler = new IrisMetalCenterDepthSampler(
+                        device,
+                        this.generation,
+                        this.packDirectives.getCenterDepthHalfLife(),
+                        device.activeShaderSource()
                 );
             }
             this.uniformValues.prewarm(device);
         }
 
+        /** Creates or resizes the generation-owned targets outside a live encoder. */
+        private void ensureRenderTargets(final MetalDevice device) {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft == null || minecraft.gameRenderer == null) {
+                return;
+            }
+            com.mojang.blaze3d.pipeline.RenderTarget mainTarget =
+                    minecraft.gameRenderer.mainRenderTarget();
+            int width = mainTarget.width;
+            int height = mainTarget.height;
+            if (width <= 0 || height <= 0) {
+                return;
+            }
+            if (this.renderTargets == null) {
+                this.renderTargets = new IrisMetalRenderTargets(
+                        device,
+                        this.targetFormats,
+                        width,
+                        height,
+                        this.packDirectives.getRenderTargetDirectives().getRenderTargetSettings(),
+                        this.postChain.mipmappedTargets()
+                );
+                IrisMetalPassTrace.observeTargets(
+                        "allocated", width, height, this.targetFormats.length, formatNames(this.targetFormats)
+                );
+                Metallum.LOGGER.info(
+                        "[metallum-iris] render targets allocated for generation {} at {}x{} ({} logical targets)",
+                        this.generation, width, height, this.targetFormats.length
+                );
+            } else if (this.renderTargets.width() != width || this.renderTargets.height() != height) {
+                this.renderTargets.resize(width, height);
+                IrisMetalPassTrace.observeTargets(
+                        "resized", width, height, this.targetFormats.length, formatNames(this.targetFormats)
+                );
+                Metallum.LOGGER.info(
+                        "[metallum-iris] render targets resized for generation {} to {}x{}",
+                        this.generation, width, height
+                );
+            }
+        }
+
+        private void beginFrame() {
+            if (!this.productionLifecycle) {
+                return;
+            }
+            IrisMetalRenderTargets targets = this.renderTargets;
+            MetalDevice device = MetalDevice.current();
+            if (targets == null || device == null || !this.postPrepared) {
+                throw new IllegalStateException("Iris Metal frame began before generation resources were prepared");
+            }
+            Vector3d fog = CapturedRenderingState.INSTANCE.getFogColor();
+            boolean fullClear = targets.clearForFrame(
+                    device.commandEncoder(),
+                    new Vector4f((float) fog.x, (float) fog.y, (float) fog.z, 1.0F)
+            );
+            targets.colorTargets().restore(this.postChain.stageInput(IrisMetalPostChain.Stage.DEFERRED));
+            IrisMetalPassTrace.observePhase("targets-clear", fullClear ? "full" : "directed");
+        }
+
+        private void captureNoTranslucentsDepth() {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (this.renderTargets == null || minecraft == null || minecraft.gameRenderer == null) {
+                return;
+            }
+            com.mojang.blaze3d.textures.GpuTexture depth =
+                    minecraft.gameRenderer.mainRenderTarget().getDepthTexture();
+            MetalDevice device = MetalDevice.current();
+            if (depth == null || device == null) {
+                return;
+            }
+            this.renderTargets.captureNoTranslucentsDepth(device.commandEncoder(), depth);
+            IrisMetalPassTrace.observeDepth("depthtex1");
+        }
+
+        private void captureNoHandDepth() {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (this.renderTargets == null || minecraft == null || minecraft.gameRenderer == null) {
+                return;
+            }
+            com.mojang.blaze3d.textures.GpuTexture depth =
+                    minecraft.gameRenderer.mainRenderTarget().getDepthTexture();
+            MetalDevice device = MetalDevice.current();
+            if (depth == null || device == null) {
+                return;
+            }
+            this.renderTargets.captureNoHandDepth(device.commandEncoder(), depth);
+            IrisMetalPassTrace.observeDepth("depthtex2");
+        }
+
+        private void sampleCenterDepth() {
+            IrisMetalCenterDepthSampler sampler = this.centerDepthSampler;
+            if (sampler == null) {
+                if (this.postChain.requiresSampler(IrisMetalCenterDepthSampler.SAMPLER_NAME)) {
+                    throw new IllegalStateException("Iris center-depth sampler was required but not prepared");
+                }
+                return;
+            }
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft == null || minecraft.gameRenderer == null) {
+                throw new IllegalStateException("Iris center-depth sampler has no live Minecraft depth target");
+            }
+            GpuTextureView depth = minecraft.gameRenderer.mainRenderTarget().getDepthTextureView();
+            if (depth == null) {
+                throw new IllegalStateException("Iris center-depth sampler has no live depth texture view");
+            }
+            sampler.sample(depth, net.irisshaders.iris.uniforms.SystemTimeUniforms.TIMER.getLastFrameTime());
+        }
+
+        private void executePostStage(final IrisMetalPostChain.Stage stage) {
+            MetalDevice device = MetalDevice.current();
+            IrisMetalRenderTargets targets = this.renderTargets;
+            if (device == null || targets == null || !this.postPrepared) {
+                throw new IllegalStateException("Iris Metal post stage ran before generation resources were prepared");
+            }
+            IrisMetalPostChain.ExecutionReceipt receipt = this.postChain.executeStage(
+                    stage, device, targets, this.postResources
+            );
+            IrisMetalPassTrace.observePhase(
+                    stage.name().toLowerCase(Locale.ROOT),
+                    receipt.passes().isEmpty() ? "empty" : "executed"
+            );
+        }
+
+        private void executeFinal() {
+            MetalDevice device = MetalDevice.current();
+            IrisMetalRenderTargets targets = this.renderTargets;
+            Minecraft minecraft = Minecraft.getInstance();
+            if (device == null || targets == null || minecraft == null || minecraft.gameRenderer == null
+                    || !this.postPrepared) {
+                throw new IllegalStateException("Iris Metal final stage ran before generation resources were prepared");
+            }
+            IrisMetalPostChain.FinalReceipt receipt = this.postChain.executeFinal(
+                    device,
+                    targets,
+                    minecraft.gameRenderer.mainRenderTarget().getColorTextureView(),
+                    this.postResources
+            );
+            IrisMetalPassTrace.observePhase(
+                    "final", receipt.mainTargetResolved() ? "executed" : "failed"
+            );
+        }
+
+        private final IrisMetalPostChain.ResourceProvider postResources =
+                new IrisMetalPostChain.ResourceProvider() {
+                    @Override
+                    public @Nullable GpuBufferSlice uniform(
+                            final IrisMetalPostChain.PassInfo pass,
+                            final String blockName
+                    ) {
+                        return MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME.equals(blockName)
+                                ? postChain.uniformSlice(uniformValues, pass)
+                                : null;
+                    }
+
+                    @Override
+                    public IrisMetalPostChain.@Nullable TextureBinding texture(
+                            final IrisMetalPostChain.PassInfo pass,
+                            final String samplerName
+                    ) {
+                        if (IrisMetalCenterDepthSampler.SAMPLER_NAME.equals(samplerName)) {
+                            IrisMetalCenterDepthSampler centerDepth = centerDepthSampler;
+                            if (centerDepth != null) {
+                                MetalRenderPass.TextureViewAndSampler binding = centerDepth.binding();
+                                IrisMetalPassTrace.observeSampler(samplerName, "iris:center-depth-smooth");
+                                return new IrisMetalPostChain.TextureBinding(
+                                        binding.textureView(), binding.sampler()
+                                );
+                            }
+                            return null;
+                        }
+                        TextureStage textureStage = pass.stage() == IrisMetalPostChain.Stage.DEFERRED
+                                ? TextureStage.DEFERRED
+                                : TextureStage.COMPOSITE_AND_FINAL;
+                        IrisMetalCustomTextures customs = customTextures;
+                        if (customs != null && pass.allowsCustomTextureOverride(samplerName)) {
+                            MetalRenderPass.TextureViewAndSampler custom = customs.resolve(textureStage, samplerName);
+                            if (custom != null) {
+                                IrisMetalPassTrace.observeSampler(samplerName, "iris:custom-" + textureStage.name());
+                                return new IrisMetalPostChain.TextureBinding(custom.textureView(), custom.sampler());
+                            }
+                        }
+                        if ("noisetex".equals(samplerName)) {
+                            IrisMetalNoiseTexture noise = noiseTexture;
+                            if (noise != null) {
+                                MetalRenderPass.TextureViewAndSampler binding = noise.binding();
+                                IrisMetalPassTrace.observeSampler(samplerName, "iris:" + noise.source());
+                                return new IrisMetalPostChain.TextureBinding(binding.textureView(), binding.sampler());
+                            }
+                        }
+                        if ("depthtex0".equals(samplerName)) {
+                            Minecraft minecraft = Minecraft.getInstance();
+                            if (minecraft != null && minecraft.gameRenderer != null) {
+                                GpuTextureView view = minecraft.gameRenderer.mainRenderTarget().getDepthTextureView();
+                                IrisMetalRenderTargets targets = renderTargets;
+                                if (view != null && targets != null) {
+                                    IrisMetalPassTrace.observeSampler(samplerName, "minecraft:live-depth");
+                                    return new IrisMetalPostChain.TextureBinding(view, targets.depthSampler());
+                                }
+                            }
+                        }
+                        return null;
+                    }
+
+                    @Override
+                    public IrisMetalPostChain.@Nullable TextureBinding texture(
+                            final IrisMetalPostChain.PassInfo pass,
+                            final MetalIrisShaderCompiler.SamplerDecl sampler
+                    ) {
+                        IrisMetalPostChain.TextureBinding external = texture(pass, sampler.name());
+                        if (external != null || !IrisMetalShadowPipeline.isShadowSamplerName(sampler.name())) {
+                            return external;
+                        }
+                        IrisMetalShadowPipeline shadows = shadowPipeline;
+                        if (shadows == null) {
+                            return null;
+                        }
+                        MetalRenderPass.TextureViewAndSampler binding = shadows.resolveWorldShadowSampler(
+                                sampler, pass.declaresSampler("watershadow")
+                        );
+                        if (binding == null) {
+                            return null;
+                        }
+                        IrisMetalPassTrace.observeSampler(
+                                sampler.name(),
+                                IrisMetalShadowPipeline.isComparisonSampler(sampler)
+                                        ? "iris:shadow-depth-compare"
+                                        : "iris:shadow-texture"
+                        );
+                        return new IrisMetalPostChain.TextureBinding(
+                                binding.textureView(), binding.sampler()
+                        );
+                    }
+                };
+
         private @Nullable GpuBufferSlice resolveUniform(
-                final MetalDevice device, final MetalCompiledRenderPipeline pipeline, final String name
+                final MetalDevice device,
+                final MetalCompiledRenderPipeline pipeline,
+                final String name,
+                final @Nullable MetalRenderPass pass,
+                final @Nullable Map<String, GpuBufferSlice> bound
         ) {
             if (this.closed || !MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME.equals(name)) {
                 return null;
             }
             TerrainKind kind = this.compiledKinds.get(pipeline);
-            return kind == null ? null : this.uniformValues.slice(kind);
+            if (kind != null) {
+                return this.uniformValues.slice(kind);
+            }
+            ShaderKey coreKey = this.compiledCoreKeys.get(pipeline);
+            if (coreKey == null) {
+                return null;
+            }
+            GpuBufferSlice base = this.uniformValues.slice(coreKey);
+            int blockSize = this.uniformValues.coreDrawBlockSize(coreKey);
+            if (blockSize == 0 || pass == null || bound == null) {
+                return base;
+            }
+
+            ByteBuffer dynamicTransforms = readableUniformData(bound.get("DynamicTransforms"), "DynamicTransforms");
+            ByteBuffer projection = readableUniformData(bound.get("Projection"), "Projection");
+            try (GpuBufferSlice.MappedView mapped = pass.allocateTransient(
+                    blockSize, 16L, GpuBuffer.USAGE_UNIFORM
+            )) {
+                this.uniformValues.materializeCoreDraw(
+                        coreKey, mapped.data(), dynamicTransforms, projection
+                );
+                return mapped.slice();
+            }
+        }
+
+        private static @Nullable ByteBuffer readableUniformData(
+                final @Nullable GpuBufferSlice slice,
+                final String blockName
+        ) {
+            if (slice == null) {
+                return null;
+            }
+            if (!(slice.buffer() instanceof MetalGpuBuffer buffer)) {
+                throw new IllegalStateException(
+                        "Iris core draw " + blockName + " is not backed by a Metal buffer"
+                );
+            }
+            try {
+                return buffer.sliceStorage(slice.offset(), slice.length());
+            } catch (IllegalStateException failure) {
+                throw new IllegalStateException(
+                        "Iris core draw " + blockName + " uniform data is not CPU-readable",
+                        failure
+                );
+            }
         }
 
         /** Offline-gate hook: the bytes last written for a kind's uniform block. */
         java.nio.@Nullable ByteBuffer uniformStaging(final TerrainKind kind) {
             return this.uniformValues.lastUpload(kind);
+        }
+
+        @Nullable ShaderKey compiledCoreKey(final MetalCompiledRenderPipeline pipeline) {
+            return this.compiledCoreKeys.get(pipeline);
         }
 
         private void close() {
@@ -569,12 +1845,165 @@ final class IrisMetalPipelineOverrides {
             }
             this.device = null;
             this.uniformValues.close();
-            if (this.placeholders != null) {
-                this.placeholders.close();
-                this.placeholders = null;
+            this.postChain.close();
+            if (this.whitePixel != null) {
+                this.whitePixel.close();
+                this.whitePixel = null;
+            }
+            if (this.noiseTexture != null) {
+                this.noiseTexture.close();
+                this.noiseTexture = null;
+            }
+            if (this.customTextures != null) {
+                this.customTextures.close();
+                this.customTextures = null;
+            }
+            if (this.centerDepthSampler != null) {
+                this.centerDepthSampler.close();
+                this.centerDepthSampler = null;
+            }
+            if (this.shadowPipeline != null) {
+                this.shadowPipeline.close();
+                this.shadowPipeline = null;
+            }
+            if (this.renderTargets != null) {
+                this.renderTargets.close();
+                this.renderTargets = null;
             }
             this.compiledKinds.clear();
+            this.compiledCoreKeys.clear();
+            this.coreSyntheticKeys.clear();
+            this.coreSyntheticPipelines.clear();
+            this.corePrograms.clear();
+            this.reportedCoreFailures.clear();
+            this.generatedGlsl.clear();
         }
+    }
+
+    private static Field irisBlendModeField() {
+        try {
+            Field field = BlendModeOverride.class.getDeclaredField("blendMode");
+            if (!field.trySetAccessible()) {
+                throw new IllegalStateException("Iris BlendModeOverride.blendMode is not accessible");
+            }
+            return field;
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(
+                    "Iris blend ABI changed: expected BlendModeOverride.blendMode from Iris 1.11.2",
+                    e
+            );
+        }
+    }
+
+    static @Nullable String coreSamplerAlias(final String name) {
+        return switch (name) {
+            // Iris's level sampler ABI reserves texture unit 0 for the draw's
+            // albedo texture. gcolor is normally renamed to gtexture by the
+            // common transformer; an active colortex0 declaration that survives
+            // a gbuffer transform still has GLSL's default sampler value 0. It
+            // must not read the generation-owned render target while that target
+            // is also being written by this draw. The no-UV case is intercepted
+            // by coreUsesWhitePixel before this alias is consulted.
+            case "gtexture", "tex", "texture", "u_MainSampler", "gcolor", "colortex0" ->
+                    "Sampler0";
+            case "iris_overlay", "overlay" -> "Sampler1";
+            case "lightmap" -> "Sampler2";
+            default -> null;
+        };
+    }
+
+    /**
+     * Alias groups intercepted by Iris's GBUFFERS_AND_SHADOW custom-texture holder.
+     * Core level samplers deliberately stay outside that interceptor in Iris 1.11.2;
+     * Sodium terrain level samplers are intercepted.
+     */
+    static java.util.List<String> gbufferCustomTextureAliases(
+            final @Nullable ShaderKey coreKey,
+            final boolean waterShadowDeclared,
+            final String name
+    ) {
+        int target = IrisMetalPostChain.renderTargetIndex(name);
+        if (target >= 4) {
+            String modern = "colortex" + target;
+            if (target < PackRenderTargetDirectives.LEGACY_RENDER_TARGETS.size()) {
+                return java.util.List.of(
+                        modern,
+                        PackRenderTargetDirectives.LEGACY_RENDER_TARGETS.get(target)
+                );
+            }
+            return java.util.List.of(modern);
+        }
+
+        java.util.List<String> standard = switch (name) {
+            case "dhDepthTex", "dhDepthTex0" -> java.util.List.of("dhDepthTex", "dhDepthTex0");
+            case "dhDepthTex1", "depthtex0", "depthtex1", "depthtex2", "noisetex",
+                    "shadowtex0HW", "shadowtex1HW", "shadowcolor" -> java.util.List.of(name);
+            case "shadowtex0", "watershadow" -> waterShadowDeclared
+                    ? java.util.List.of("shadowtex0", "watershadow")
+                    : java.util.List.of("shadowtex0", "shadow");
+            case "shadowtex1" -> waterShadowDeclared
+                    ? java.util.List.of("shadowtex1", "shadow")
+                    : java.util.List.of("shadowtex1");
+            case "shadow" -> waterShadowDeclared
+                    ? java.util.List.of("shadowtex1", "shadow")
+                    : java.util.List.of("shadowtex0", "shadow");
+            default -> name.startsWith("shadowcolor") && !name.startsWith("shadowcolorimg")
+                    ? java.util.List.of(name)
+                    : java.util.List.of();
+        };
+        if (!standard.isEmpty()) {
+            return standard;
+        }
+
+        boolean sodium = coreKey == null || coreKey.patch == Patch.SODIUM;
+        if (!sodium) {
+            return java.util.List.of();
+        }
+        return switch (name) {
+            case "tex", "texture", "gtexture", "u_MainSampler" ->
+                    java.util.List.of("tex", "texture", "gtexture", "u_MainSampler");
+            case "lightmap", "iris_overlay", "normals", "specular" -> java.util.List.of(name);
+            default -> java.util.List.of();
+        };
+    }
+
+    static boolean coreUsesWhitePixel(final ShaderKey key, final String name) {
+        MetalIrisShaderCompiler.VanillaPatchSemantics semantics =
+                MetalIrisShaderCompiler.vanillaPatchSemantics(key, false);
+        return switch (name) {
+            case "gtexture", "tex", "texture", "u_MainSampler", "gcolor", "colortex0" ->
+                    !semantics.attributes().hasTex();
+            case "lightmap" -> !semantics.attributes().hasLight();
+            case "iris_overlay", "overlay" -> !semantics.attributes().hasOverlay();
+            default -> false;
+        };
+    }
+
+    static Optional<BlendFunction> irisBlendFunction(final BlendModeOverride override) {
+        try {
+            BlendMode blendMode = (BlendMode) IRIS_BLEND_MODE.get(override);
+            return blendMode == null ? Optional.empty() : Optional.of(irisBlendFunction(blendMode));
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Could not read Iris blend override", e);
+        }
+    }
+
+    static BlendFunction irisBlendFunction(final BlendMode blendMode) {
+        return new BlendFunction(
+                irisBlendFactor(blendMode.srcRgb()),
+                irisBlendFactor(blendMode.dstRgb()),
+                irisBlendFactor(blendMode.srcAlpha()),
+                irisBlendFactor(blendMode.dstAlpha())
+        );
+    }
+
+    private static BlendFactor irisBlendFactor(final int glId) {
+        for (BlendModeFunction function : BlendModeFunction.values()) {
+            if (function.getGlId() == glId) {
+                return BlendFactor.valueOf(function.name());
+            }
+        }
+        throw new IllegalArgumentException("Unsupported Iris blend factor GL id " + glId);
     }
 
     private static @Nullable ProgramSource resolveSource(final ProgramSet programSet, final ProgramId start) {
@@ -593,5 +2022,93 @@ final class IrisMetalPipelineOverrides {
     static @Nullable VertexFormat chunkVertexFormat() {
         var chunkVertexType = WorldRenderingSettings.INSTANCE.getVertexFormat();
         return chunkVertexType == null ? null : chunkVertexType.getVertexFormat();
+    }
+
+    /**
+     * Converts Iris's logical render-target format declarations to the Metal
+     * formats used by the generation-owned texture set, including target zero.
+     */
+    private static GpuFormat[] targetFormats(final PackDirectives directives) {
+        int highest = 16;
+        for (Integer index : directives.getRenderTargetDirectives().getRenderTargetSettings().keySet()) {
+            if (index != null && index >= 0) {
+                highest = Math.max(highest, index);
+            }
+        }
+        GpuFormat[] formats = new GpuFormat[highest + 1];
+        java.util.Arrays.fill(formats, EXTENDED_TARGET_FORMAT);
+        for (Map.Entry<Integer, RenderTargetSettings> entry : directives.getRenderTargetDirectives().getRenderTargetSettings().entrySet()) {
+            int index = entry.getKey();
+            RenderTargetSettings settings = entry.getValue();
+            if (settings.getInternalFormat() != null) {
+                formats[index] = formatForInternalName(settings.getInternalFormat().name());
+            }
+        }
+        return formats;
+    }
+
+    private static String formatNames(final GpuFormat[] formats) {
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < formats.length; index++) {
+            if (index > 0) {
+                result.append(',');
+            }
+            result.append(formats[index]);
+        }
+        return result.toString();
+    }
+
+    static GpuFormat formatForInternalName(final String name) {
+        return switch (name) {
+            case "R8" -> GpuFormat.R8_UNORM;
+            case "RG8" -> GpuFormat.RG8_UNORM;
+            // Metal has no renderable three-channel RGB texture formats. Iris
+            // exposes RGB as a logical pack format, so retain the component
+            // precision in a four-channel attachment; GLSL vec3 reads/writes
+            // keep their original semantics and the unused alpha lane is
+            // ignored by the pack.
+            case "RGB8" -> GpuFormat.RGBA8_UNORM;
+            case "RGBA", "RGBA8" -> GpuFormat.RGBA8_UNORM;
+            case "R16" -> GpuFormat.R16_UNORM;
+            case "RG16" -> GpuFormat.RG16_UNORM;
+            case "RGB16" -> GpuFormat.RGBA16_UNORM;
+            case "RGBA16" -> GpuFormat.RGBA16_UNORM;
+            case "R16F" -> GpuFormat.R16_FLOAT;
+            case "RG16F" -> GpuFormat.RG16_FLOAT;
+            case "RGB16F" -> GpuFormat.RGBA16_FLOAT;
+            case "RGBA16F" -> GpuFormat.RGBA16_FLOAT;
+            case "R32F" -> GpuFormat.R32_FLOAT;
+            case "RG32F" -> GpuFormat.RG32_FLOAT;
+            case "RGB32F" -> GpuFormat.RGBA32_FLOAT;
+            case "RGBA32F" -> GpuFormat.RGBA32_FLOAT;
+            case "R8I" -> GpuFormat.R8_SINT;
+            case "RG8I" -> GpuFormat.RG8_SINT;
+            case "RGB8I" -> GpuFormat.RGBA8_SINT;
+            case "RGBA8I" -> GpuFormat.RGBA8_SINT;
+            case "R8UI" -> GpuFormat.R8_UINT;
+            case "RG8UI" -> GpuFormat.RG8_UINT;
+            case "RGB8UI" -> GpuFormat.RGBA8_UINT;
+            case "RGBA8UI" -> GpuFormat.RGBA8_UINT;
+            case "R16I" -> GpuFormat.R16_SINT;
+            case "RG16I" -> GpuFormat.RG16_SINT;
+            case "RGB16I" -> GpuFormat.RGBA16_SINT;
+            case "RGBA16I" -> GpuFormat.RGBA16_SINT;
+            case "R16UI" -> GpuFormat.R16_UINT;
+            case "RG16UI" -> GpuFormat.RG16_UINT;
+            case "RGB16UI" -> GpuFormat.RGBA16_UINT;
+            case "RGBA16UI" -> GpuFormat.RGBA16_UINT;
+            case "R32I" -> GpuFormat.R32_SINT;
+            case "RG32I" -> GpuFormat.RG32_SINT;
+            case "RGB32I" -> GpuFormat.RGBA32_SINT;
+            case "RGBA32I" -> GpuFormat.RGBA32_SINT;
+            case "R32UI" -> GpuFormat.R32_UINT;
+            case "RG32UI" -> GpuFormat.RG32_UINT;
+            case "RGB32UI" -> GpuFormat.RGBA32_UINT;
+            case "RGBA32UI" -> GpuFormat.RGBA32_UINT;
+            case "RGB10_A2" -> GpuFormat.RGB10A2_UNORM;
+            case "RGB10_A2UI" -> GpuFormat.RGB10A2_UINT;
+            case "R11F_G11F_B10F" -> GpuFormat.RG11B10_FLOAT;
+            default -> throw new IllegalArgumentException("Unsupported Iris render-target format " + name);
+        };
     }
 }

@@ -2,9 +2,11 @@ package com.metallum.mixin.sodium;
 
 import com.metallum.client.metal.render.MetalCutoutReactivePipeline;
 import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
+import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import net.caffeinemc.mods.sodium.client.render.chunk.DefaultChunkRenderer;
 import org.joml.Vector4fc;
@@ -40,6 +42,16 @@ public abstract class DefaultChunkRendererMetalFxMixin {
             final GpuTextureView depthTexture,
             final OptionalDouble clearDepth
     ) {
+        // Iris owns every gbuffer target, including the single [0] path. A
+        // shader-pack draw therefore takes precedence over the independent
+        // MetalFX coverage attachment; mixing both layouts would make final
+        // read a different colortex0 than terrain wrote.
+        RenderPass irisPass = IrisMetalPipelineOverrides.createTerrainRenderPass(
+                encoder, label, colorTexture, clearColor, depthTexture, clearDepth
+        );
+        if (irisPass != null) {
+            return irisPass;
+        }
         if (!MetalCutoutReactivePipeline.isActiveCutoutPass()) {
             return encoder.createRenderPass(label, colorTexture, clearColor, depthTexture, clearDepth);
         }
@@ -61,5 +73,21 @@ public abstract class DefaultChunkRendererMetalFxMixin {
                         colorTexture.getHeight(0)
                 ));
         return encoder.createRenderPass(descriptor);
+    }
+
+    @Redirect(
+            method = "render",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lcom/mojang/blaze3d/systems/RenderPass;setPipeline("
+                            + "Lcom/mojang/blaze3d/pipeline/RenderPipeline;)V"
+            ),
+            remap = false
+    )
+    private void metallum$useIrisTerrainPipeline(
+            final RenderPass renderPass,
+            final RenderPipeline pipeline
+    ) {
+        renderPass.setPipeline(IrisMetalPipelineOverrides.pipelineForTerrain(pipeline));
     }
 }
