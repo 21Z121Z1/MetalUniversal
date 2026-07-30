@@ -41,6 +41,8 @@ import java.util.regex.Pattern;
 @Environment(EnvType.CLIENT)
 public final class MetalCrossShaderCompiler {
     private static final Set<String> BUILT_IN_UNIFORMS = Set.of("Projection", "Lighting", "Fog", "Globals");
+    /** Sodium's stable per-region time buffer is a texel buffer, not a 2D sampler. */
+    private static final GpuFormat SODIUM_SECTION_TIME_FORMAT = GpuFormat.R32_SINT;
     private static final int MSL_VERSION_4_0 = 0x040000;
     private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     private static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
@@ -138,12 +140,10 @@ public final class MetalCrossShaderCompiler {
      * cache and compiles GLSL directly via {@link GlslangBridge} (GLSL&#8594;SPIR-V),
      * then reuses the existing SPIRV-Cross SPIR-V&#8594;MSL path ({@link #spirvToMsl}).
      *
-     * <p>The vertex&#8594;fragment input/output rebind tolerance applied in the
-     * vanilla path ({@code tolerateUnprovidedInputs} /
-     * {@code IntermediaryShaderModule.rebind}) is intentionally skipped: there is
-     * no {@code IntermediaryShaderModule} for the raw SPIR-V produced by glslang,
-     * and Iris's {@code TransformPatcher} is expected to already emit
-     * vertex/fragment interfaces that match.
+     * <p>The shaderpack path applies the same vertex-input contract as the
+     * vanilla path: Iris's OpenGL-style attribute names are mapped to the
+     * physical {@link VertexFormat} order, while unprovided inputs use the
+     * existing generic-attribute default buffer.
      *
      * <p>Resource bindings are reflected from the compiled vertex/fragment SPIR-V
      * via SPIRV-Cross ({@link #reflectShaderpackResources}), merged into a single
@@ -209,11 +209,12 @@ public final class MetalCrossShaderCompiler {
         final ShaderpackReflection fragmentReflection = reflectShaderpackResources(spirvWordsToByteBuffer(fragmentSpvWords));
         final List<VulkanBindGroupLayout.Entry> reflectedEntries = buildShaderpackBindGroupEntries(vertexReflection, fragmentReflection);
         final Map<String, Integer> resourceBindings = shaderpackResourceBindings(reflectedEntries);
+        final List<String> physicalInputNames = vertexInputNames(vertexFormatBindings);
 
         final int pushConstantBinding = reflectedEntries.size();
         final MslShader vertexMsl = spirvToMsl(
                 spirvWordsToByteBuffer(vertexSpvWords), pushConstantBinding,
-                vertexAttributeFormats, enablePointSize, Map.of(), resourceBindings
+                vertexAttributeFormats, enablePointSize, Map.of(), resourceBindings, physicalInputNames
         );
         final MslShader fragmentMsl = spirvToMsl(
                 spirvWordsToByteBuffer(fragmentSpvWords), pushConstantBinding,
@@ -238,7 +239,8 @@ public final class MetalCrossShaderCompiler {
                 primitiveTopology,
                 vertexFormatBindings,
                 depthStencilState,
-                colorTargets
+                colorTargets,
+                vertexMsl.genericVertexInputs()
         );
     }
 
@@ -726,6 +728,19 @@ public final class MetalCrossShaderCompiler {
     record VertexInputLayout(List<String> names, Map<String, GpuFormat> formats) {
     }
 
+    private static List<String> vertexInputNames(final VertexFormat[] bindings) {
+        List<String> names = new ArrayList<>();
+        for (VertexFormat binding : bindings) {
+            if (binding == null) {
+                continue;
+            }
+            for (VertexFormatElement element : binding.getElements()) {
+                names.add(element.name());
+            }
+        }
+        return List.copyOf(names);
+    }
+
     static void applyVertexInputLocations(
             final IntermediaryShaderModule shader,
             final VertexInputLayout physicalInputs
@@ -1099,6 +1114,25 @@ public final class MetalCrossShaderCompiler {
             final ByteBuffer spirvBytes,
             final int pushConstantBinding,
             final Map<String, GpuFormat> attributeFormats,
+            final boolean enablePointSize,
+            final Map<String, Integer> explicitFragmentOutputLocations,
+            final Map<String, Integer> explicitResourceBindings
+    ) throws ShaderCompileException {
+        return spirvToMsl(
+                spirvBytes,
+                pushConstantBinding,
+                attributeFormats,
+                enablePointSize,
+                explicitFragmentOutputLocations,
+                explicitResourceBindings,
+                null
+        );
+    }
+
+    private static MslShader spirvToMsl(
+            final ByteBuffer spirvBytes,
+            final int pushConstantBinding,
+            final Map<String, GpuFormat> attributeFormats,
             final boolean enablePointSize
     ) throws ShaderCompileException {
         return spirvToMsl(spirvBytes, pushConstantBinding, attributeFormats, enablePointSize, Map.of());
@@ -1117,7 +1151,8 @@ public final class MetalCrossShaderCompiler {
                 attributeFormats,
                 enablePointSize,
                 explicitFragmentOutputLocations,
-                Map.of()
+                Map.of(),
+                null
         );
     }
 
@@ -1127,7 +1162,8 @@ public final class MetalCrossShaderCompiler {
             final Map<String, GpuFormat> attributeFormats,
             final boolean enablePointSize,
             final Map<String, Integer> explicitFragmentOutputLocations,
-            final Map<String, Integer> explicitResourceBindings
+            final Map<String, Integer> explicitResourceBindings,
+            @Nullable final List<String> physicalInputNames
     ) throws ShaderCompileException {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             IntBuffer spirvWords = spirvBytes.asIntBuffer();
@@ -1180,6 +1216,9 @@ public final class MetalCrossShaderCompiler {
                 }
                 long compiler = pCompiler.get(0);
                 applyExplicitResourceBindings(stack, compiler, explicitResourceBindings);
+                List<GenericVertexInput> genericVertexInputs = physicalInputNames == null
+                        ? List.of()
+                        : applyShaderpackVertexInputLocations(stack, compiler, physicalInputNames);
 
                 PointerBuffer pOptions = stack.mallocPointer(1);
                 checkSpvc(Spvc.spvc_compiler_create_compiler_options(compiler, pOptions), "spvc_compiler_create_compiler_options");
@@ -1245,7 +1284,8 @@ public final class MetalCrossShaderCompiler {
                         MemoryUtil.memUTF8(pSource.get(0)),
                         hasPushConstants,
                         activeResources,
-                        stageOutputLocations
+                        stageOutputLocations,
+                        genericVertexInputs
                 );
             } finally {
                 Spvc.spvc_context_destroy(context);
@@ -1257,8 +1297,106 @@ public final class MetalCrossShaderCompiler {
             String source,
             boolean hasPushConstants,
             Set<String> activeResources,
-            Set<Integer> stageOutputLocations
+            Set<Integer> stageOutputLocations,
+            List<GenericVertexInput> genericVertexInputs
     ) {
+    }
+
+    private static List<GenericVertexInput> applyShaderpackVertexInputLocations(
+            final MemoryStack stack,
+            final long compiler,
+            final List<String> physicalInputNames
+    ) throws ShaderCompileException {
+        PointerBuffer pResources = stack.mallocPointer(1);
+        checkSpvc(
+                Spvc.spvc_compiler_create_shader_resources(compiler, pResources),
+                "spvc_compiler_create_shader_resources(vertex inputs)"
+        );
+        PointerBuffer pList = stack.mallocPointer(1);
+        PointerBuffer pCount = stack.mallocPointer(1);
+        checkSpvc(
+                Spvc.spvc_resources_get_resource_list_for_type(
+                        pResources.get(0), Spvc.SPVC_RESOURCE_TYPE_STAGE_INPUT, pList, pCount
+                ),
+                "spvc_resources_get_resource_list_for_type(STAGE_INPUT vertex inputs)"
+        );
+
+        int count = (int) pCount.get(0);
+        if (count == 0) {
+            return List.of();
+        }
+        SpvcReflectedResource.Buffer inputs = SpvcReflectedResource.create(pList.get(0), count);
+        Set<String> shaderNames = new HashSet<>();
+        for (int index = 0; index < count; index++) {
+            SpvcReflectedResource input = inputs.get(index);
+            if (!Spvc.spvc_compiler_has_decoration(compiler, input.id(), Spv.SpvDecorationBuiltIn)) {
+                shaderNames.add(input.nameString());
+            }
+        }
+
+        Set<String> physicalNameSet = new HashSet<>(physicalInputNames);
+        Map<String, Integer> locations = new LinkedHashMap<>();
+        for (int location = 0; location < physicalInputNames.size(); location++) {
+            String physicalName = physicalInputNames.get(location);
+            String resolvedName = physicalName;
+            String irisAlias = "iris_" + physicalName;
+            if (!shaderNames.contains(physicalName)
+                    && shaderNames.contains(irisAlias)
+                    && !physicalNameSet.contains(irisAlias)) {
+                resolvedName = irisAlias;
+            }
+            locations.putIfAbsent(resolvedName, location);
+        }
+
+        int genericLocation = physicalInputNames.size();
+        List<GenericVertexInput> genericInputs = new ArrayList<>();
+        Set<Integer> usedLocations = new HashSet<>();
+        for (int index = 0; index < count; index++) {
+            SpvcReflectedResource input = inputs.get(index);
+            if (Spvc.spvc_compiler_has_decoration(compiler, input.id(), Spv.SpvDecorationBuiltIn)) {
+                continue;
+            }
+
+            Integer physicalLocation = locations.get(input.nameString());
+            int location = physicalLocation == null ? genericLocation++ : physicalLocation;
+            if (!usedLocations.add(location)) {
+                throw new ShaderCompileException(
+                        "Vertex input " + input.nameString() + " reuses location " + location
+                );
+            }
+            Spvc.spvc_compiler_set_decoration(compiler, input.id(), Spv.SpvDecorationLocation, location);
+
+            if (physicalLocation == null) {
+                long type = Spvc.spvc_compiler_get_type_handle(compiler, input.type_id());
+                int columns = Spvc.spvc_type_get_columns(type);
+                int arrayDimensions = Spvc.spvc_type_get_num_array_dimensions(type);
+                if (columns != 1 || arrayDimensions != 0) {
+                    throw new ShaderCompileException(
+                            "Unsupported generic vertex input shape for " + input.nameString()
+                                    + ": columns=" + columns + ", arrayDimensions=" + arrayDimensions
+                    );
+                }
+
+                BaseType baseType = switch (Spvc.spvc_type_get_basetype(type)) {
+                    case Spvc.SPVC_BASETYPE_FP32 -> BaseType.FLOAT;
+                    case Spvc.SPVC_BASETYPE_INT32 -> BaseType.INT;
+                    case Spvc.SPVC_BASETYPE_UINT32 -> BaseType.UINT;
+                    default -> throw new ShaderCompileException(
+                            "Unsupported generic vertex input base type for " + input.nameString()
+                    );
+                };
+                int components = Spvc.spvc_type_get_vector_size(type);
+                if (components < 1 || components > 4) {
+                    throw new ShaderCompileException(
+                            "Unsupported generic vertex input vector size for " + input.nameString()
+                                    + ": " + components
+                    );
+                }
+                genericInputs.add(new GenericVertexInput(location, baseType, components));
+            }
+        }
+        genericInputs.sort(Comparator.comparingInt(GenericVertexInput::location));
+        return List.copyOf(genericInputs);
     }
 
     private static void applyExplicitResourceBindings(
@@ -1460,10 +1598,10 @@ public final class MetalCrossShaderCompiler {
             addBindingIfAbsent(entries, VulkanBindGroupEntryType.UNIFORM_BUFFER, name, null);
         }
         for (final String name : vertexReflection.sampledImages()) {
-            addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
+            addShaderpackSampledBinding(entries, name);
         }
         for (final String name : fragmentReflection.sampledImages()) {
-            addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
+            addShaderpackSampledBinding(entries, name);
         }
         for (final String name : vertexReflection.separateSamplers()) {
             addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
@@ -1472,6 +1610,17 @@ public final class MetalCrossShaderCompiler {
             addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
         }
         return entries;
+    }
+
+    private static void addShaderpackSampledBinding(
+            final List<VulkanBindGroupLayout.Entry> entries,
+            final String name
+    ) {
+        if ("u_SectionTimeInfo".equals(name)) {
+            addBindingIfAbsent(entries, VulkanBindGroupEntryType.TEXEL_BUFFER, name, SODIUM_SECTION_TIME_FORMAT);
+        } else {
+            addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
+        }
     }
 
     private static Map<String, Integer> shaderpackResourceBindings(

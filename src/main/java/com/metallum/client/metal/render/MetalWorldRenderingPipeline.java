@@ -17,6 +17,10 @@ import net.irisshaders.iris.shaderpack.properties.PackShadowDirectives;
 import net.irisshaders.iris.shaderpack.properties.ParticleRenderingSettings;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
 import net.irisshaders.iris.uniforms.FrameUpdateNotifier;
+import net.irisshaders.iris.uniforms.CommonUniforms;
+import net.irisshaders.iris.uniforms.custom.CustomUniforms;
+import net.irisshaders.iris.pipeline.programs.ShaderKey;
+import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import net.irisshaders.iris.vertices.sodium.terrain.FormatAnalyzer;
 import net.minecraft.client.Minecraft;
 
@@ -43,6 +47,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     private final PackDirectives directives;
     private final OptionalInt forcedShadowRenderDistanceChunks;
     private final IrisMetalFrameState frameState = new IrisMetalFrameState();
+    private final IrisMetalUniformValues uniformValues;
     private final IrisMetalWorldPrograms programs;
     private IrisMetalCompiledPrograms compiledPrograms;
     private IrisMetalWorldResources resources;
@@ -55,6 +60,20 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         this.directives = programSet.getPackDirectives();
         this.forcedShadowRenderDistanceChunks = forcedShadowDistance(
                 this.directives.getShadowDirectives()
+        );
+        CustomUniforms customUniforms = this.pack.customUniforms.build(holder ->
+                CommonUniforms.addNonDynamicUniforms(
+                        holder,
+                        this.pack.getIdMap(),
+                        this.directives,
+                        this.frameState.updateNotifier()
+                )
+        );
+        this.uniformValues = new IrisMetalUniformValues(
+                this.directives.getSunPathRotation(),
+                customUniforms,
+                this.frameState.updateNotifier(),
+                () -> this.frameState.phase().ordinal()
         );
         publishWorldSettings();
     }
@@ -114,6 +133,18 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         return this.resources;
     }
 
+    /** Returns the generation-owned pack uniform block for a terrain shader key. */
+    GpuBufferSlice uniformSlice(final ShaderKey key) {
+        GpuBufferSlice slice = this.uniformValues.slice(key);
+        if (slice == null) {
+            throw new IllegalStateException(
+                    "Iris Metal generation " + this.generation
+                            + " has no prepared uniform block for " + key
+            );
+        }
+        return slice;
+    }
+
     boolean shouldOverrideCoreShaders(final boolean writesMainTarget) {
         return this.frameState.shouldOverrideShaders(writesMainTarget);
     }
@@ -121,7 +152,29 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     @Override
     public void beginLevelRendering() {
         prepareResources();
+        prepareTerrainUniforms();
         this.frameState.beginWorldRendering();
+    }
+
+    private void prepareTerrainUniforms() {
+        for (ShaderKey key : new ShaderKey[]{
+                ShaderKey.SODIUM_TERRAIN_SOLID,
+                ShaderKey.SODIUM_TERRAIN_CUTOUT,
+                ShaderKey.SODIUM_TERRAIN_TRANSLUCENT,
+                ShaderKey.SHADOW_SODIUM_TERRAIN_SOLID,
+                ShaderKey.SHADOW_SODIUM_TERRAIN_CUTOUT,
+                ShaderKey.SHADOW_SODIUM_TERRAIN_TRANSLUCENT
+        }) {
+            this.programs.sodium(key.getProgram(), key.getAlphaTest()).ifPresent(
+                    linked -> this.uniformValues.register(key, "sodium_" + key.getName(), linked)
+            );
+        }
+        MetalDevice device = MetalDeviceRegistry.getActiveDevice();
+        if (device == null) {
+            throw new IllegalStateException("Iris Metal terrain uniforms have no active Metal device");
+        }
+        this.uniformValues.prewarm(device);
+        this.uniformValues.updateFrame();
     }
 
     private void prepareResources() {
@@ -183,6 +236,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             this.resources.close();
             this.resources = null;
         }
+        this.uniformValues.close();
         super.destroy();
     }
 

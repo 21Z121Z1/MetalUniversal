@@ -17,6 +17,7 @@ import java.util.regex.Pattern;
 @Environment(EnvType.CLIENT)
 public final class IrisMetalGlslLinker {
     public static final String UNIFORM_BLOCK_NAME = "MetallumIrisUniforms";
+    public static final String SODIUM_PUSH_CONSTANT_BLOCK_NAME = "MetallumSodiumPushConstants";
 
     private static final Pattern UNIFORM_STATEMENT =
             Pattern.compile("(?m)^[ \\t]*uniform\\b([^;{}]*);");

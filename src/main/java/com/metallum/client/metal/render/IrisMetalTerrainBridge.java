@@ -4,6 +4,7 @@ import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
+import com.mojang.blaze3d.systems.RenderPassBackend;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
 import net.irisshaders.iris.Iris;
@@ -14,6 +15,8 @@ import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
 
 import java.util.Arrays;
+import java.util.BitSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.function.Supplier;
@@ -99,6 +102,138 @@ public final class IrisMetalTerrainBridge {
                 .orElseThrow(() -> new IllegalStateException(
                         "Iris Metal terrain program disappeared during draw: " + context.key()
                 ));
+    }
+
+    /**
+     * Installs the generation-owned Sodium pipeline without going through
+     * RenderPass's vanilla format/count validation. Iris DRAWBUFFERS changes
+     * both the attachment count and formats, so that validation must happen
+     * against the linked Iris program instead of the original Sodium pipeline.
+     */
+    public static boolean installPipeline(
+            final RenderPassBackend backend,
+            final RenderPipeline source
+    ) {
+        if (!(backend instanceof MetalRenderPass metalPass)) {
+            return false;
+        }
+        TerrainContext context = currentContext();
+        if (context == null || !source.getLocation().getNamespace().contains("sodium")) {
+            return false;
+        }
+        MetalDevice device = MetalDeviceRegistry.getActiveDevice();
+        if (device == null) {
+            throw new IllegalStateException("Iris Metal terrain has no active Metal device");
+        }
+        MetalCompiledRenderPipeline compiled = compiledPipeline(device, source);
+        metalPass.setCompiledPipeline(compiled);
+        if (compiled.resource(IrisMetalGlslLinker.UNIFORM_BLOCK_NAME) != null) {
+            metalPass.setUniform(
+                    IrisMetalGlslLinker.UNIFORM_BLOCK_NAME,
+                    context.pipeline().uniformSlice(context.key())
+            );
+        }
+        return true;
+    }
+
+    static MetalRenderPass.@Nullable TextureViewAndSampler fallbackSampler(
+            final String name,
+            final Map<String, MetalRenderPass.TextureViewAndSampler> bound
+    ) {
+        TerrainContext context = currentContext();
+        if (context == null) {
+            return null;
+        }
+        MetalRenderPass.TextureViewAndSampler alias = switch (name) {
+            case "gtexture", "texture", "tex" -> bound.get("u_BlockTex");
+            case "lightmap" -> bound.get("u_LightTex");
+            default -> null;
+        };
+        if (alias != null) {
+            return alias;
+        }
+        if ("noisetex".equals(name)) {
+            return context.pipeline().resources().noiseTexture().binding();
+        }
+        IrisMetalRenderTargets renderTargets = context.pipeline().resources().renderTargets();
+        GpuTextureView depthView = switch (name) {
+            case "depthtex0" -> renderTargets.mainDepthView();
+            case "depthtex1" -> renderTargets.noTranslucentsDepthView();
+            case "depthtex2" -> renderTargets.noHandDepthView();
+            default -> null;
+        };
+        if (depthView != null) {
+            return new MetalRenderPass.TextureViewAndSampler(
+                    depthView,
+                    renderTargets.depthSampler()
+            );
+        }
+        int colorIndex = renderTargetIndex(name);
+        if (colorIndex >= 0) {
+            if (colorIndex >= renderTargets.colorTargets().targetCount()) {
+                throw new IllegalStateException(
+                        "Sampler " + name + " resolves to colortex" + colorIndex
+                                + " but this generation owns only "
+                                + renderTargets.colorTargets().targetCount() + " targets"
+                );
+            }
+            return new MetalRenderPass.TextureViewAndSampler(
+                    renderTargets.colorTargets().readView(colorIndex),
+                    renderTargets.colorSampler(colorIndex)
+            );
+        }
+        IrisMetalShadowTargets shadowTargets = context.pipeline().resources().shadowTargets();
+        if (shadowTargets == null) {
+            return null;
+        }
+        int depthIndex = switch (name) {
+            case "shadowtex0", "shadowtex0HW", "watershadow" -> 0;
+            case "shadowtex1", "shadowtex1HW" -> 1;
+            default -> -1;
+        };
+        if (depthIndex >= 0) {
+            boolean comparison = !name.endsWith("HW");
+            return new MetalRenderPass.TextureViewAndSampler(
+                    depthIndex == 0
+                            ? shadowTargets.shadowDepthView()
+                            : shadowTargets.shadowDepthNoTranslucentsView(),
+                    shadowTargets.depthSampler(depthIndex, comparison)
+            );
+        }
+        int shadowColorTarget = shadowColorIndex(name);
+        if (shadowColorTarget >= 0) {
+            return new MetalRenderPass.TextureViewAndSampler(
+                    shadowTargets.colorView(shadowColorTarget, new BitSet()),
+                    shadowTargets.colorSampler(shadowColorTarget)
+            );
+        }
+        return null;
+    }
+
+    private static int shadowColorIndex(final String name) {
+        if (name.equals("shadowcolor")) {
+            return 0;
+        }
+        if (!name.startsWith("shadowcolor") || name.startsWith("shadowcolorimg")) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(name.substring("shadowcolor".length()));
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
+    private static int renderTargetIndex(final String name) {
+        if (name.startsWith("colortex")) {
+            try {
+                return Integer.parseInt(name.substring("colortex".length()));
+            } catch (NumberFormatException ignored) {
+                return -1;
+            }
+        }
+        return net.irisshaders.iris.shaderpack.properties.PackRenderTargetDirectives
+                .LEGACY_RENDER_TARGETS.indexOf(name);
     }
 
     private static @Nullable TerrainContext currentContext() {

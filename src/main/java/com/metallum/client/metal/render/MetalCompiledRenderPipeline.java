@@ -204,7 +204,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this(
                 device, location, vertexMsl, fragmentMsl, vertexEntryPoint, fragmentEntryPoint,
                 resources, cull, polygonMode, primitiveTopology, vertexFormatBindings,
-                depthStencilState, new ColorTargetState[]{colorTarget}
+                depthStencilState, new ColorTargetState[]{colorTarget}, List.of()
         );
     }
 
@@ -223,6 +223,29 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final DepthStencilState depthStencilState,
             final ColorTargetState[] colorTargets
     ) {
+        this(
+                device, location, vertexMsl, fragmentMsl, vertexEntryPoint, fragmentEntryPoint,
+                resources, cull, polygonMode, primitiveTopology, vertexFormatBindings,
+                depthStencilState, colorTargets, List.of()
+        );
+    }
+
+    MetalCompiledRenderPipeline(
+            final MetalDevice device,
+            final String location,
+            final String vertexMsl,
+            final String fragmentMsl,
+            final String vertexEntryPoint,
+            final String fragmentEntryPoint,
+            final List<ResourceBinding> resources,
+            final boolean cull,
+            final PolygonMode polygonMode,
+            final PrimitiveTopology primitiveTopology,
+            final VertexFormat[] vertexFormatBindings,
+            final DepthStencilState depthStencilState,
+            final ColorTargetState[] colorTargets,
+            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs
+    ) {
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
 
@@ -238,12 +261,32 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.allResourceMask = resourceMask;
 
         this.firstAvailableVertexBufferSlot = firstAvailableVertexBufferSlot(resources);
-        this.genericVertexInputs = List.of();
-        this.genericVertexBufferSlot = -1;
+        this.vertexBufferCount = vertexFormatBindings.length;
+        this.genericVertexInputs = List.copyOf(genericVertexInputs);
+        this.genericVertexBufferSlot = resolveGenericVertexBufferSlot(
+                this.firstAvailableVertexBufferSlot,
+                this.vertexBufferCount,
+                !this.genericVertexInputs.isEmpty()
+        );
         this.cullMode = cull ? MTLCullMode.Back : MTLCullMode.None;
         this.fillMode = polygonMode == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(primitiveTopology);
-        this.vertexBufferCount = vertexFormatBindings.length;
+        boolean[] genericLocations = new boolean[MAX_METAL_VERTEX_SLOTS];
+        for (MetalCrossShaderCompiler.GenericVertexInput input : this.genericVertexInputs) {
+            if (input.location() >= MAX_METAL_VERTEX_SLOTS) {
+                throw new IllegalStateException(
+                        "Pipeline " + location + " needs generic vertex attribute location "
+                                + input.location() + ", limit is " + (MAX_METAL_VERTEX_SLOTS - 1)
+                );
+            }
+            if (genericLocations[input.location()]) {
+                throw new IllegalStateException(
+                        "Pipeline " + location + " has duplicate generic vertex attribute location "
+                                + input.location()
+                );
+            }
+            genericLocations[input.location()] = true;
+        }
 
         MTLCompareFunction depthCompareOp;
         int depthWrite;
@@ -273,7 +316,12 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         MemorySegment fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
 
         Map<PipelineSignature, MemorySegment> states = new HashMap<>();
-        try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(vertexFormatBindings, this.firstAvailableVertexBufferSlot)) {
+        try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(
+                vertexFormatBindings,
+                this.firstAvailableVertexBufferSlot,
+                this.genericVertexInputs,
+                this.genericVertexBufferSlot
+        )) {
             createPipelineVariants(
                     states, device, colorTargets, vertexFunction, fragmentFunction, vertexDescriptor, this.colorFormats
             );
@@ -514,8 +562,40 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         MTLVertexDescriptor vertexDesc = buildVertexDescriptor(
                 pipeline.getVertexFormatBindings(), firstMetalVertexBufferSlot
         );
+        return addGenericVertexInputs(
+                vertexDesc,
+                pipeline.getLocation().toString(),
+                pipeline.getVertexFormatBindings(),
+                genericVertexInputs,
+                genericVertexBufferSlot
+        );
+    }
+
+    private static MTLVertexDescriptor buildVertexDescriptor(
+            final VertexFormat[] bindings,
+            final int firstMetalVertexBufferSlot,
+            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs,
+            final int genericVertexBufferSlot
+    ) {
+        MTLVertexDescriptor vertexDesc = buildVertexDescriptor(bindings, firstMetalVertexBufferSlot);
+        return addGenericVertexInputs(
+                vertexDesc,
+                "shaderpack",
+                bindings,
+                genericVertexInputs,
+                genericVertexBufferSlot
+        );
+    }
+
+    private static MTLVertexDescriptor addGenericVertexInputs(
+            final MTLVertexDescriptor vertexDesc,
+            final String pipelineName,
+            final VertexFormat[] bindings,
+            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs,
+            final int genericVertexBufferSlot
+    ) {
         int physicalAttributeCount = 0;
-        for (VertexFormat binding : pipeline.getVertexFormatBindings()) {
+        for (VertexFormat binding : bindings) {
             if (binding != null) {
                 physicalAttributeCount += binding.getElements().size();
             }
@@ -530,8 +610,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             for (MetalCrossShaderCompiler.GenericVertexInput input : genericVertexInputs) {
                 if (input.location() < physicalAttributeCount) {
                     throw new IllegalStateException(
-                            "Generic vertex attribute location " + input.location()
-                                    + " overlaps the physical vertex layout of " + pipeline.getLocation()
+                        "Generic vertex attribute location " + input.location()
+                                    + " overlaps the physical vertex layout of " + pipelineName
                     );
                 }
                 vertexDesc.setAttribute(
