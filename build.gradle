@@ -43,6 +43,7 @@ test {
 	exclude "**/MetalMrtBackendIntegrationTest.class"
 	exclude "**/MetalComputeBackendIntegrationTest.class"
 	exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
+	exclude "**/IrisMetalPingPongTargetsIntegrationTest.class"
 }
 
 processResources {
@@ -124,6 +125,24 @@ tasks.register("metalGenericVertexAttributeIntegrationTest", Test) {
 	useJUnitPlatform()
 	filter {
 		includeTestsMatching "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+tasks.register("metalIrisTargetsIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS Iris generation-owned target lifecycle GPU readback suite."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalPingPongTargetsIntegrationTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", "1"

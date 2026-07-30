@@ -13,6 +13,7 @@ import net.fabricmc.api.Environment;
 import org.jspecify.annotations.NonNull;
 
 import java.lang.foreign.MemorySegment;
+import java.util.Objects;
 import java.util.OptionalDouble;
 
 @Environment(EnvType.CLIENT)
@@ -25,6 +26,7 @@ final class MetalGpuSampler extends GpuSampler {
     private final FilterMode magFilter;
     private final int maxAnisotropy;
     private final OptionalDouble maxLod;
+    private final MTLSamplerMipFilter mipFilter;
     private boolean closed;
 
     MetalGpuSampler(
@@ -36,7 +38,10 @@ final class MetalGpuSampler extends GpuSampler {
             final int maxAnisotropy,
             final OptionalDouble maxLod
     ) {
-        this(device, addressModeU, addressModeV, minFilter, magFilter, maxAnisotropy, maxLod, null);
+        this(
+                device, addressModeU, addressModeV, minFilter, magFilter,
+                maxAnisotropy, maxLod, null, toMtlMipFilter(maxLod)
+        );
     }
 
     /**
@@ -56,14 +61,32 @@ final class MetalGpuSampler extends GpuSampler {
             final OptionalDouble maxLod,
             @org.jspecify.annotations.Nullable final MTLCompareFunction compareFunction
     ) {
+        this(
+                device, addressModeU, addressModeV, minFilter, magFilter,
+                maxAnisotropy, maxLod, compareFunction, toMtlMipFilter(maxLod)
+        );
+    }
+
+    MetalGpuSampler(
+            final MetalDevice device,
+            final AddressMode addressModeU,
+            final AddressMode addressModeV,
+            final FilterMode minFilter,
+            final FilterMode magFilter,
+            final int maxAnisotropy,
+            final OptionalDouble maxLod,
+            @org.jspecify.annotations.Nullable final MTLCompareFunction compareFunction,
+            final MTLSamplerMipFilter mipFilter
+    ) {
         this.device = device;
+        this.mipFilter = Objects.requireNonNull(mipFilter, "mipFilter");
         this.nativeHandle = MetalNativeBridge.metallum_create_sampler_v2(
                 device.metalDeviceHandle(),
                 MTLSamplerAddressMode.from(addressModeU),
                 MTLSamplerAddressMode.from(addressModeV),
                 MTLSamplerMinMagFilter.from(minFilter),
                 MTLSamplerMinMagFilter.from(magFilter),
-                toMtlMipFilter(maxLod),
+                this.mipFilter,
                 Math.max(1, maxAnisotropy),
                 toMtlMaxLodClamp(maxLod),
                 compareFunction == null ? -1 : (int) compareFunction.value
@@ -121,6 +144,10 @@ final class MetalGpuSampler extends GpuSampler {
 
     MemorySegment nativeHandle() {
         return this.nativeHandle;
+    }
+
+    MTLSamplerMipFilter mipFilter() {
+        return this.mipFilter;
     }
 
     private static MTLSamplerMipFilter toMtlMipFilter(final OptionalDouble maxLod) {
