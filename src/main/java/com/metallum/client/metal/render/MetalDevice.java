@@ -38,6 +38,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private final MemorySegment cocoaView;
     private final GpuDebugOptions debugOptions;
     private final MetalCommandEncoder commandEncoder;
+    private final MetalGpuBuffer genericVertexAttributeBuffer;
     private final DeviceInfo deviceInfo;
     public final MTLCommandQueue commandQueue;
     private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new IdentityHashMap<>();
@@ -64,6 +65,11 @@ final class MetalDevice implements GpuDeviceBackend {
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
         MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
         this.commandEncoder = new MetalCommandEncoder(this);
+        this.genericVertexAttributeBuffer = (MetalGpuBuffer) this.createBuffer(
+                () -> "OpenGL generic vertex attribute defaults",
+                GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_DST,
+                genericVertexAttributeDefaults()
+        );
         this.deviceInfo = buildDeviceInfo(deviceName);
         // Publish this device as the process-wide active Metal device so that
         // the public MetalCrossShaderCompiler shaderpack entry points (called
@@ -183,6 +189,7 @@ final class MetalDevice implements GpuDeviceBackend {
     @Override
     public void close() {
         this.waitForSubmittedGpuWork();
+        this.genericVertexAttributeBuffer.close();
         this.commandEncoder.close();
         this.clearPipelineCache();
         this.drainBufferPool();
@@ -212,6 +219,18 @@ final class MetalDevice implements GpuDeviceBackend {
 
     MemorySegment metalDeviceHandle() {
         return this.metalDeviceHandle;
+    }
+
+    MetalGpuBuffer genericVertexAttributeBuffer() {
+        return this.genericVertexAttributeBuffer;
+    }
+
+    static ByteBuffer genericVertexAttributeDefaults() {
+        ByteBuffer defaults = ByteBuffer.allocateDirect(
+                MetalCrossShaderCompiler.GENERIC_VERTEX_DEFAULT_VALUES_SIZE
+        );
+        MetalCrossShaderCompiler.writeGenericVertexDefaultValues(defaults);
+        return defaults;
     }
 
     void waitForSubmittedGpuWork() {

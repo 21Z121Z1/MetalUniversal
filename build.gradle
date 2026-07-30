@@ -42,6 +42,7 @@ test {
 	useJUnitPlatform()
 	exclude "**/MetalMrtBackendIntegrationTest.class"
 	exclude "**/MetalComputeBackendIntegrationTest.class"
+	exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
 }
 
 processResources {
@@ -105,6 +106,24 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 	useJUnitPlatform()
 	filter {
 		includeTestsMatching "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+tasks.register("metalGenericVertexAttributeIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS generic-current vertex attribute GPU readback suite through the production backend."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", "1"

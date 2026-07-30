@@ -481,6 +481,12 @@ final class MetalRenderPass implements RenderPassBackend {
             int metalSlot = firstSlot + slot;
             enc.setBuffer(nativeVertexBuffer.nativeHandle(), vertexBuffer.offset(), metalSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
         }
+
+        int genericSlot = compiledPipeline.genericVertexBufferSlot();
+        if (genericSlot >= 0) {
+            MetalGpuBuffer defaults = device.genericVertexAttributeBuffer();
+            enc.setBuffer(defaults.nativeHandle(), 0L, genericSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
+        }
     }
 
     private void drawTriangleFan(MTLRenderCommandEncoder encoder, final int firstVertex, final int vertexCount, final int instanceCount, final int baseInstance) {

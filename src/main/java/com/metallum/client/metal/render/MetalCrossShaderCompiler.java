@@ -3,6 +3,7 @@ package com.metallum.client.metal.render;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.GlslangBridge;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.mtl.MTLVertexFormat;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
@@ -89,9 +90,16 @@ public final class MetalCrossShaderCompiler {
             addToBindGroup(layoutEntries, fragmentSpirv, pipeline);
             List<String> vertexOutputs = extractVariableNames(vertexSpirv.outputs());
 
-            vertexSpirv.rebind(tolerateUnprovidedInputs(MetalPipelineSupport.vertexAttributeNames(pipeline), vertexSpirv.inputs()), layoutEntries);
+            VertexInputLayout vertexInputs = vertexInputLayout(pipeline, vertexSpirv.inputs());
+            vertexSpirv.rebind(tolerateUnprovidedInputs(vertexInputs.names(), vertexSpirv.inputs()), layoutEntries);
+            applyVertexInputLocations(vertexSpirv, vertexInputs);
+            List<GenericVertexInput> genericVertexInputs = genericVertexInputs(
+                    vertexSpirv.spirv(), vertexInputs.names()
+            );
             boolean enablePointSize = pipeline.getPrimitiveTopology() == com.mojang.blaze3d.PrimitiveTopology.POINTS;
-            MslShader vertexMsl = spirvToMsl(vertexSpirv.spirv(), layoutEntries.size(), vertexAttributeFormats(pipeline), enablePointSize);
+            MslShader vertexMsl = spirvToMsl(
+                    vertexSpirv.spirv(), layoutEntries.size(), vertexInputs.formats(), enablePointSize
+            );
 
             fragmentSpirv.rebind(tolerateUnprovidedInputs(vertexOutputs, fragmentSpirv.inputs()), layoutEntries);
             String fragmentSource = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);
@@ -114,7 +122,8 @@ public final class MetalCrossShaderCompiler {
                     fragmentMsl.source(),
                     vertexEntryPoint,
                     fragmentEntryPoint,
-                    resources
+                    resources,
+                    genericVertexInputs
             );
         } catch (ShaderCompileException e) {
             throw new IllegalStateException("Failed to compile Metal cross shader for pipeline " + pipeline.getLocation(), e);
@@ -577,7 +586,7 @@ public final class MetalCrossShaderCompiler {
         entries.add(new VulkanBindGroupLayout.Entry(type, name, texelBufferFormat));
     }
 
-    private static List<String> tolerateUnprovidedInputs(final List<String> provided, final List<SpvVariable> shaderInputs) {
+    static List<String> tolerateUnprovidedInputs(final List<String> provided, final List<SpvVariable> shaderInputs) {
         List<String> result = null;
         for (SpvVariable input : shaderInputs) {
             String name = input.name();
@@ -656,16 +665,253 @@ public final class MetalCrossShaderCompiler {
         return mask;
     }
 
-    private static Map<String, GpuFormat> vertexAttributeFormats(final RenderPipeline pipeline) {
-        Map<String, GpuFormat> formats = new LinkedHashMap<>();
+    static VertexInputLayout vertexInputLayout(
+            final RenderPipeline pipeline,
+            final List<SpvVariable> shaderInputs
+    ) {
+        Set<String> shaderNames = new HashSet<>();
+        for (SpvVariable input : shaderInputs) {
+            shaderNames.add(input.name());
+        }
+
+        List<String> physicalNames = MetalPipelineSupport.vertexAttributeNames(pipeline);
+        Set<String> physicalNameSet = new HashSet<>(physicalNames);
+        List<String> resolvedNames = new ArrayList<>(physicalNames.size());
+        Map<String, GpuFormat> resolvedFormats = new LinkedHashMap<>();
         for (VertexFormat binding : pipeline.getVertexFormatBindings()) {
-            if (binding != null) {
-                for (VertexFormatElement element : binding.getElements()) {
-                    formats.putIfAbsent(element.name(), element.format());
+            if (binding == null) {
+                continue;
+            }
+            for (VertexFormatElement element : binding.getElements()) {
+                String physicalName = element.name();
+                String resolvedName = physicalName;
+                String irisAlias = "iris_" + physicalName;
+                if (!shaderNames.contains(physicalName)
+                        && shaderNames.contains(irisAlias)
+                        && !physicalNameSet.contains(irisAlias)) {
+                    resolvedName = irisAlias;
                 }
+                resolvedNames.add(resolvedName);
+                resolvedFormats.putIfAbsent(resolvedName, element.format());
             }
         }
-        return formats;
+
+        return new VertexInputLayout(List.copyOf(resolvedNames), Map.copyOf(resolvedFormats));
+    }
+
+    record VertexInputLayout(List<String> names, Map<String, GpuFormat> formats) {
+    }
+
+    static void applyVertexInputLocations(
+            final IntermediaryShaderModule shader,
+            final VertexInputLayout physicalInputs
+    ) {
+        Map<String, Integer> physicalLocations = new HashMap<>();
+        for (int location = 0; location < physicalInputs.names().size(); location++) {
+            physicalLocations.putIfAbsent(physicalInputs.names().get(location), location);
+        }
+
+        IntBuffer words = shader.spirv().asIntBuffer();
+        int genericLocation = physicalInputs.names().size();
+        for (SpvVariable input : shader.inputs()) {
+            Integer physicalLocation = physicalLocations.get(input.name());
+            words.put(input.locationOffset(), physicalLocation == null ? genericLocation++ : physicalLocation);
+        }
+    }
+
+    enum BaseType {
+        FLOAT(0),
+        INT(16),
+        UINT(32);
+
+        private final int defaultValueOffset;
+
+        BaseType(final int defaultValueOffset) {
+            this.defaultValueOffset = defaultValueOffset;
+        }
+
+        int defaultValueOffset() {
+            return this.defaultValueOffset;
+        }
+    }
+
+    record GenericVertexInput(int location, BaseType baseType, int components) {
+        GenericVertexInput {
+            if (location < 0) {
+                throw new IllegalArgumentException("Generic vertex input location must be non-negative");
+            }
+            Objects.requireNonNull(baseType, "baseType");
+            if (components < 1 || components > 4) {
+                throw new IllegalArgumentException("Generic vertex input components must be in 1..4");
+            }
+        }
+
+        MTLVertexFormat metalFormat() {
+            return switch (baseType) {
+                case FLOAT -> switch (components) {
+                    case 1 -> MTLVertexFormat.Float;
+                    case 2 -> MTLVertexFormat.Float2;
+                    case 3 -> MTLVertexFormat.Float3;
+                    case 4 -> MTLVertexFormat.Float4;
+                    default -> throw new AssertionError(components);
+                };
+                case INT -> switch (components) {
+                    case 1 -> MTLVertexFormat.Int;
+                    case 2 -> MTLVertexFormat.Int2;
+                    case 3 -> MTLVertexFormat.Int3;
+                    case 4 -> MTLVertexFormat.Int4;
+                    default -> throw new AssertionError(components);
+                };
+                case UINT -> switch (components) {
+                    case 1 -> MTLVertexFormat.UInt;
+                    case 2 -> MTLVertexFormat.UInt2;
+                    case 3 -> MTLVertexFormat.UInt3;
+                    case 4 -> MTLVertexFormat.UInt4;
+                    default -> throw new AssertionError(components);
+                };
+            };
+        }
+
+        int defaultValueOffset() {
+            return baseType.defaultValueOffset();
+        }
+    }
+
+    static final int GENERIC_VERTEX_DEFAULT_VALUES_SIZE = 48;
+
+    static void writeGenericVertexDefaultValues(final ByteBuffer destination) {
+        if (destination.remaining() < GENERIC_VERTEX_DEFAULT_VALUES_SIZE) {
+            throw new IllegalArgumentException(
+                    "Generic vertex default buffer requires " + GENERIC_VERTEX_DEFAULT_VALUES_SIZE + " bytes"
+            );
+        }
+        ByteBuffer values = destination.duplicate().order(ByteOrder.nativeOrder());
+        int start = values.position();
+        for (int index = 0; index < GENERIC_VERTEX_DEFAULT_VALUES_SIZE; index++) {
+            values.put(start + index, (byte) 0);
+        }
+        values.putFloat(start + BaseType.FLOAT.defaultValueOffset() + 12, 1.0F);
+        values.putInt(start + BaseType.INT.defaultValueOffset() + 12, 1);
+        values.putInt(start + BaseType.UINT.defaultValueOffset() + 12, 1);
+    }
+
+    static List<GenericVertexInput> genericVertexInputs(
+            final ByteBuffer spirvBytes,
+            final List<String> physicalInputNames
+    ) throws ShaderCompileException {
+        Set<String> physicalInputs = Set.copyOf(physicalInputNames);
+        List<GenericVertexInput> result = new ArrayList<>();
+        Map<Integer, String> namesByLocation = new HashMap<>();
+
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer spirvWords = spirvBytes.asIntBuffer();
+            if (spirvWords.remaining() < 5) {
+                throw new ShaderCompileException("SPIR-V is too small to reflect generic vertex inputs");
+            }
+
+            PointerBuffer pContext = stack.mallocPointer(1);
+            checkSpvc(Spvc.spvc_context_create(pContext), "spvc_context_create(generic vertex inputs)");
+            long context = pContext.get(0);
+            try {
+                PointerBuffer pIr = stack.mallocPointer(1);
+                checkSpvc(
+                        Spvc.spvc_context_parse_spirv(context, spirvWords, spirvWords.remaining(), pIr),
+                        "spvc_context_parse_spirv(generic vertex inputs)"
+                );
+                PointerBuffer pCompiler = stack.mallocPointer(1);
+                checkSpvc(
+                        Spvc.spvc_context_create_compiler(
+                                context, Spvc.SPVC_BACKEND_NONE, pIr.get(0),
+                                Spvc.SPVC_CAPTURE_MODE_COPY, pCompiler
+                        ),
+                        "spvc_context_create_compiler(generic vertex inputs)"
+                );
+                long compiler = pCompiler.get(0);
+
+                PointerBuffer pActiveSet = stack.mallocPointer(1);
+                checkSpvc(
+                        Spvc.spvc_compiler_get_active_interface_variables(compiler, pActiveSet),
+                        "spvc_compiler_get_active_interface_variables(generic vertex inputs)"
+                );
+                PointerBuffer pResources = stack.mallocPointer(1);
+                checkSpvc(
+                        Spvc.spvc_compiler_create_shader_resources_for_active_variables(
+                                compiler, pResources, pActiveSet.get(0)
+                        ),
+                        "spvc_compiler_create_shader_resources_for_active_variables(generic vertex inputs)"
+                );
+                PointerBuffer pList = stack.mallocPointer(1);
+                PointerBuffer pCount = stack.mallocPointer(1);
+                checkSpvc(
+                        Spvc.spvc_resources_get_resource_list_for_type(
+                                pResources.get(0), Spvc.SPVC_RESOURCE_TYPE_STAGE_INPUT, pList, pCount
+                        ),
+                        "spvc_resources_get_resource_list_for_type(STAGE_INPUT generic vertex inputs)"
+                );
+
+                int count = Math.toIntExact(pCount.get(0));
+                if (count == 0) {
+                    return List.of();
+                }
+                SpvcReflectedResource.Buffer inputs = SpvcReflectedResource.create(pList.get(0), count);
+                for (int index = 0; index < count; index++) {
+                    SpvcReflectedResource input = inputs.get(index);
+                    String name = input.nameString();
+                    if (physicalInputs.contains(name)
+                            || Spvc.spvc_compiler_has_decoration(compiler, input.id(), Spv.SpvDecorationBuiltIn)) {
+                        continue;
+                    }
+                    if (!Spvc.spvc_compiler_has_decoration(compiler, input.id(), Spv.SpvDecorationLocation)) {
+                        throw new ShaderCompileException(
+                                "Active generic vertex input " + name + " has no location"
+                        );
+                    }
+
+                    long type = Spvc.spvc_compiler_get_type_handle(compiler, input.type_id());
+                    int columns = Spvc.spvc_type_get_columns(type);
+                    int arrayDimensions = Spvc.spvc_type_get_num_array_dimensions(type);
+                    if (columns != 1 || arrayDimensions != 0) {
+                        throw new ShaderCompileException(
+                                "Unsupported generic vertex input shape for " + name
+                                        + ": columns=" + columns + ", arrayDimensions=" + arrayDimensions
+                        );
+                    }
+
+                    int spvcBaseType = Spvc.spvc_type_get_basetype(type);
+                    BaseType baseType = switch (spvcBaseType) {
+                        case Spvc.SPVC_BASETYPE_FP32 -> BaseType.FLOAT;
+                        case Spvc.SPVC_BASETYPE_INT32 -> BaseType.INT;
+                        case Spvc.SPVC_BASETYPE_UINT32 -> BaseType.UINT;
+                        default -> throw new ShaderCompileException(
+                                "Unsupported generic vertex input base type for " + name + ": " + spvcBaseType
+                        );
+                    };
+                    int components = Spvc.spvc_type_get_vector_size(type);
+                    if (components < 1 || components > 4) {
+                        throw new ShaderCompileException(
+                                "Unsupported generic vertex input vector size for " + name + ": " + components
+                        );
+                    }
+
+                    int location = Spvc.spvc_compiler_get_decoration(
+                            compiler, input.id(), Spv.SpvDecorationLocation
+                    );
+                    String conflict = namesByLocation.putIfAbsent(location, name);
+                    if (conflict != null) {
+                        throw new ShaderCompileException(
+                                "Generic vertex inputs " + conflict + " and " + name
+                                        + " both use location " + location
+                        );
+                    }
+                    result.add(new GenericVertexInput(location, baseType, components));
+                }
+            } finally {
+                Spvc.spvc_context_destroy(context);
+            }
+        }
+
+        result.sort(Comparator.comparingInt(GenericVertexInput::location));
+        return List.copyOf(result);
     }
 
     private static void registerIntegerInputConversions(

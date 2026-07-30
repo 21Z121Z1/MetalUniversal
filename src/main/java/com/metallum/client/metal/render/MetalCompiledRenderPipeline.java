@@ -27,6 +27,8 @@ import java.util.Set;
 
 @Environment(EnvType.CLIENT)
 final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoCloseable {
+    static final int MAX_METAL_VERTEX_SLOTS = 31;
+
     enum ResourceKind {
         UNIFORM_BUFFER,
         SAMPLED_IMAGE,
@@ -45,6 +47,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final Map<String, ResourceBinding> resourcesByName;
     private final long allResourceMask;
     private final int firstAvailableVertexBufferSlot;
+    private final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs;
+    private final int genericVertexBufferSlot;
     private final MTLCullMode cullMode;
     private final MTLTriangleFillMode fillMode;
     private final float depthBiasScaleFactor;
@@ -76,10 +80,12 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final String fragmentMsl,
             final String vertexEntryPoint,
             final String fragmentEntryPoint,
-            final List<ResourceBinding> resources
+            final List<ResourceBinding> resources,
+            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs
     ) {
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
+        this.genericVertexInputs = List.copyOf(genericVertexInputs);
 
         int maxBindingIndex = -1;
         long resourceMask = 0L;
@@ -97,6 +103,27 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
         this.vertexBufferCount = info.getVertexFormatBindings().length;
+        this.genericVertexBufferSlot = resolveGenericVertexBufferSlot(
+                this.firstAvailableVertexBufferSlot,
+                this.vertexBufferCount,
+                !this.genericVertexInputs.isEmpty()
+        );
+        boolean[] genericLocations = new boolean[MAX_METAL_VERTEX_SLOTS];
+        for (MetalCrossShaderCompiler.GenericVertexInput input : this.genericVertexInputs) {
+            if (input.location() >= MAX_METAL_VERTEX_SLOTS) {
+                throw new IllegalStateException(
+                        "Pipeline " + info.getLocation() + " needs generic vertex attribute location "
+                                + input.location() + ", limit is " + (MAX_METAL_VERTEX_SLOTS - 1)
+                );
+            }
+            if (genericLocations[input.location()]) {
+                throw new IllegalStateException(
+                        "Pipeline " + info.getLocation() + " has duplicate generic vertex attribute location "
+                                + input.location()
+                );
+            }
+            genericLocations[input.location()] = true;
+        }
 
         MTLCompareFunction depthCompareOp;
         int depthWrite;
@@ -128,7 +155,12 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         MemorySegment fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
 
         Map<PipelineSignature, MemorySegment> states = new HashMap<>();
-        try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(info, this.firstAvailableVertexBufferSlot)) {
+        try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(
+                info,
+                this.firstAvailableVertexBufferSlot,
+                this.genericVertexInputs,
+                this.genericVertexBufferSlot
+        )) {
             createPipelineVariants(
                     states, device, colorTargets, vertexFunction, fragmentFunction, vertexDescriptor, this.colorFormats
             );
@@ -184,6 +216,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.allResourceMask = resourceMask;
 
         this.firstAvailableVertexBufferSlot = firstAvailableVertexBufferSlot(resources);
+        this.genericVertexInputs = List.of();
+        this.genericVertexBufferSlot = -1;
         this.cullMode = cull ? MTLCullMode.Back : MTLCullMode.None;
         this.fillMode = polygonMode == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(primitiveTopology);
@@ -427,11 +461,66 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return this.vertexBufferCount;
     }
 
+    int genericVertexBufferSlot() {
+        return this.genericVertexBufferSlot;
+    }
+
+    static int resolveGenericVertexBufferSlot(
+            final int firstAvailableSlot,
+            final int physicalBindingCount,
+            final boolean required
+    ) {
+        if (!required) {
+            return -1;
+        }
+        long slot = (long) firstAvailableSlot + physicalBindingCount;
+        if (firstAvailableSlot < 0 || physicalBindingCount < 0 || slot >= MAX_METAL_VERTEX_SLOTS) {
+            throw new IllegalStateException(
+                    "Generic vertex buffer slot " + slot + " is outside Metal's 0.."
+                            + (MAX_METAL_VERTEX_SLOTS - 1) + " range"
+            );
+        }
+        return (int) slot;
+    }
+
     private static MTLVertexDescriptor buildVertexDescriptor(
             final RenderPipeline pipeline,
-            final int firstMetalVertexBufferSlot
+            final int firstMetalVertexBufferSlot,
+            final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs,
+            final int genericVertexBufferSlot
     ) {
-        return buildVertexDescriptor(pipeline.getVertexFormatBindings(), firstMetalVertexBufferSlot);
+        MTLVertexDescriptor vertexDesc = buildVertexDescriptor(
+                pipeline.getVertexFormatBindings(), firstMetalVertexBufferSlot
+        );
+        int physicalAttributeCount = 0;
+        for (VertexFormat binding : pipeline.getVertexFormatBindings()) {
+            if (binding != null) {
+                physicalAttributeCount += binding.getElements().size();
+            }
+        }
+        if (!genericVertexInputs.isEmpty()) {
+            vertexDesc.setLayout(
+                    genericVertexBufferSlot,
+                    MetalCrossShaderCompiler.GENERIC_VERTEX_DEFAULT_VALUES_SIZE,
+                    MTLVertexStepFunction.Constant,
+                    0
+            );
+            for (MetalCrossShaderCompiler.GenericVertexInput input : genericVertexInputs) {
+                if (input.location() < physicalAttributeCount) {
+                    throw new IllegalStateException(
+                            "Generic vertex attribute location " + input.location()
+                                    + " overlaps the physical vertex layout of " + pipeline.getLocation()
+                    );
+                }
+                vertexDesc.setAttribute(
+                        input.location(),
+                        input.metalFormat().value,
+                        input.defaultValueOffset(),
+                        genericVertexBufferSlot
+                );
+            }
+        }
+        return vertexDesc;
     }
 
     private static MTLVertexDescriptor buildVertexDescriptor(
