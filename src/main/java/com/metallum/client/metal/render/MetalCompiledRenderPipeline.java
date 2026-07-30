@@ -201,6 +201,28 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final DepthStencilState depthStencilState,
             final ColorTargetState colorTarget
     ) {
+        this(
+                device, location, vertexMsl, fragmentMsl, vertexEntryPoint, fragmentEntryPoint,
+                resources, cull, polygonMode, primitiveTopology, vertexFormatBindings,
+                depthStencilState, new ColorTargetState[]{colorTarget}
+        );
+    }
+
+    MetalCompiledRenderPipeline(
+            final MetalDevice device,
+            final String location,
+            final String vertexMsl,
+            final String fragmentMsl,
+            final String vertexEntryPoint,
+            final String fragmentEntryPoint,
+            final List<ResourceBinding> resources,
+            final boolean cull,
+            final PolygonMode polygonMode,
+            final PrimitiveTopology primitiveTopology,
+            final VertexFormat[] vertexFormatBindings,
+            final DepthStencilState depthStencilState,
+            final ColorTargetState[] colorTargets
+    ) {
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
 
@@ -244,7 +266,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 depthWrite
         );
 
-        ColorTargetState[] colorTargets = new ColorTargetState[]{colorTarget};
+        validateColorTargets(location, colorTargets);
         this.colorFormats = colorFormats(colorTargets);
 
         MemorySegment vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
@@ -263,10 +285,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     private static void validateColorTargets(final String location, final ColorTargetState[] colorTargets) {
-        if (colorTargets.length == 0 || colorTargets.length > ColorTargetState.MAX_COLOR_TARGETS) {
+        if (colorTargets.length > ColorTargetState.MAX_COLOR_TARGETS) {
             throw new IllegalArgumentException(
                     "Pipeline " + location + " has " + colorTargets.length
-                            + " color targets; supported range is 1.." + ColorTargetState.MAX_COLOR_TARGETS
+                            + " color targets; supported range is 0.." + ColorTargetState.MAX_COLOR_TARGETS
             );
         }
     }
@@ -394,7 +416,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     @Override
     public boolean isValid() {
-        return !MetalNativeBridge.isNullHandle(this.withoutDepthPipeline);
+        return this.pipelineStates.values().stream().anyMatch(state -> !MetalNativeBridge.isNullHandle(state));
     }
 
     List<ResourceBinding> resources() {

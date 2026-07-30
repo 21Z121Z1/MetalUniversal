@@ -228,17 +228,6 @@ final class IrisMetalPingPongTargetsIntegrationTest {
 
     @Test
     void shadowTargetsIsolateDepthColorFlipAndResize() {
-        assertThrows(
-                UnsupportedOperationException.class,
-                () -> new IrisMetalShadowTargets(
-                        device,
-                        new GpuFormat[]{GpuFormat.RGBA8_UNORM},
-                        32,
-                        new boolean[]{false},
-                        new boolean[]{true, false},
-                        new boolean[]{true, false}
-                )
-        );
         try (IrisMetalShadowTargets shadow = new IrisMetalShadowTargets(
                 device,
                 new GpuFormat[]{GpuFormat.RGBA8_UNORM},
@@ -300,6 +289,37 @@ final class IrisMetalPingPongTargetsIntegrationTest {
         }
     }
 
+    @Test
+    void shadowDepthMipmapsUseFilteredReductionAcrossLevels() {
+        try (IrisMetalShadowTargets shadow = new IrisMetalShadowTargets(
+                device,
+                new GpuFormat[]{GpuFormat.RGBA8_UNORM},
+                4,
+                new boolean[]{false},
+                new boolean[]{false, true},
+                new boolean[]{true, true}
+        )) {
+            assertEquals(3, shadow.shadowDepthTexture().getMipLevels());
+            writeDepthPattern(shadow.shadowDepthTexture(), 4, 4);
+            shadow.captureNoTranslucentsDepth(encoder);
+            shadow.generateDepthMipmaps(encoder);
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+
+            assertEquals(0.1F, readDepth(shadow.shadowDepthTexture(), 0), 0.001F);
+            assertEquals(0.1F, readDepth(shadow.shadowDepthNoTranslucentsTexture(), 0), 0.001F);
+            for (int level = 1; level < shadow.shadowDepthTexture().getMipLevels(); level++) {
+                assertEquals(0.45F, readDepth(shadow.shadowDepthTexture(), level), 0.001F, "shadowtex0 mip " + level);
+                assertEquals(
+                        0.45F,
+                        readDepth(shadow.shadowDepthNoTranslucentsTexture(), level),
+                        0.001F,
+                        "shadowtex1 mip " + level
+                );
+            }
+        }
+    }
+
     private RenderPipeline pipeline(final String name) {
         return RenderPipeline.builder()
                 .withLocation("metallum_test/" + name)
@@ -328,6 +348,39 @@ final class IrisMetalPingPongTargetsIntegrationTest {
         encoder.submitRenderPass();
         encoder.submit();
         device.waitForSubmittedGpuWork();
+    }
+
+    private void writeDepthPattern(
+            final MetalGpuTexture depth,
+            final int width,
+            final int height
+    ) {
+        try (MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                "depth-pattern-color",
+                com.mojang.blaze3d.textures.GpuTexture.USAGE_RENDER_ATTACHMENT,
+                GpuFormat.RGBA8_UNORM,
+                width,
+                height,
+                1,
+                1
+        )) {
+            float[] values = {0.1F, 0.3F, 0.5F, 0.9F};
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    float value = values[(y & 1) * 2 + (x & 1)];
+                    encoder.clearColorAndDepthTextures(
+                            color,
+                            new Vector4f(0.0F),
+                            depth,
+                            value,
+                            x,
+                            y,
+                            1,
+                            1
+                    );
+                }
+            }
+        }
     }
 
     private void assertPixel(final MetalGpuTexture texture, final int red, final int green) {
@@ -376,6 +429,22 @@ final class IrisMetalPingPongTargetsIntegrationTest {
             device.waitForSubmittedGpuWork();
             ByteBuffer data = buffer.currentStorage().limit(bytes).slice().order(ByteOrder.nativeOrder());
             assertEquals(expected, data.getFloat(0), 0.001F);
+        }
+    }
+
+    private float readDepth(final MetalGpuTexture texture, final int mipLevel) {
+        int width = texture.getWidth(mipLevel);
+        int height = texture.getHeight(mipLevel);
+        int bytes = width * height * texture.pixelSize();
+        try (MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
+                () -> "Iris depth mip readback",
+                GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST,
+                bytes
+        )) {
+            encoder.copyTextureToBuffer(texture, buffer, 0L, () -> {}, mipLevel);
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            return buffer.currentStorage().limit(bytes).slice().order(ByteOrder.nativeOrder()).getFloat(0);
         }
     }
 }

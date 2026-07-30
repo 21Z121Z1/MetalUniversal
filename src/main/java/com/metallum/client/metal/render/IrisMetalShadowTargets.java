@@ -34,6 +34,8 @@ final class IrisMetalShadowTargets implements AutoCloseable {
     private final MetalGpuSampler[] depthSamplers;
     private final MetalGpuSampler[] depthCompareSamplers;
     private final boolean[] depthMipmapped;
+    @Nullable
+    private final MetalDepthMipmapGenerator depthMipmapGenerator;
     private MetalGpuTexture shadowDepth;
     private MetalGpuTexture shadowDepthNoTranslucents;
     private MetalGpuTextureView shadowDepthView;
@@ -70,12 +72,6 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         if (nearestDepth.length != 2 || mipmappedDepth.length != 2) {
             throw new IllegalArgumentException("Exactly two shadow depth sampling and mipmap modes are required");
         }
-        if (mipmappedDepth[0] || mipmappedDepth[1]) {
-            throw new UnsupportedOperationException(
-                    "Metal shadow depth mipmaps require an explicit depth downsample pipeline; "
-                            + "MTLBlitCommandEncoder cannot generate mipmaps for Depth32Float"
-            );
-        }
         this.device = device;
         this.colorTargets = new IrisMetalPingPongTargets(
                 device, "iris-shadowcolor", shadowColorFormats, resolution, resolution
@@ -92,6 +88,9 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         this.depthSamplers = new MetalGpuSampler[2];
         this.depthCompareSamplers = new MetalGpuSampler[2];
         this.depthMipmapped = mipmappedDepth.clone();
+        this.depthMipmapGenerator = mipmappedDepth[0] || mipmappedDepth[1]
+                ? new MetalDepthMipmapGenerator(device)
+                : null;
         for (int index = 0; index < depthSamplers.length; index++) {
             depthSamplers[index] = createSampler(nearestDepth[index], mipmappedDepth[index], false);
             depthCompareSamplers[index] = createSampler(nearestDepth[index], mipmappedDepth[index], true);
@@ -214,10 +213,10 @@ final class IrisMetalShadowTargets implements AutoCloseable {
     void generateDepthMipmaps(final MetalCommandEncoder encoder) {
         ensureOpen();
         if (depthMipmapped[0]) {
-            encoder.generateMipmaps(shadowDepth);
+            depthMipmapGenerator.generate(encoder, shadowDepth);
         }
         if (depthMipmapped[1]) {
-            encoder.generateMipmaps(shadowDepthNoTranslucents);
+            depthMipmapGenerator.generate(encoder, shadowDepthNoTranslucents);
         }
     }
 
@@ -392,6 +391,9 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         }
         for (MetalGpuSampler sampler : depthCompareSamplers) {
             sampler.close();
+        }
+        if (depthMipmapGenerator != null) {
+            depthMipmapGenerator.close();
         }
     }
 }
