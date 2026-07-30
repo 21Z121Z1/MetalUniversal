@@ -18,9 +18,11 @@ import net.irisshaders.iris.shaderpack.properties.ParticleRenderingSettings;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
 import net.irisshaders.iris.uniforms.FrameUpdateNotifier;
 import net.irisshaders.iris.vertices.sodium.terrain.FormatAnalyzer;
+import net.minecraft.client.Minecraft;
 
 import java.util.Objects;
 import java.util.OptionalInt;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Backend-owned Iris world-pipeline generation.
@@ -33,13 +35,18 @@ import java.util.OptionalInt;
  */
 @Environment(EnvType.CLIENT)
 public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline {
+    private static final AtomicInteger GENERATIONS = new AtomicInteger();
+
+    private final int generation;
     private final ProgramSet programSet;
     private final ShaderPack pack;
     private final PackDirectives directives;
     private final OptionalInt forcedShadowRenderDistanceChunks;
     private final IrisMetalFrameState frameState = new IrisMetalFrameState();
+    private IrisMetalWorldResources resources;
 
     public MetalWorldRenderingPipeline(final ProgramSet programSet) {
+        this.generation = GENERATIONS.incrementAndGet();
         this.programSet = Objects.requireNonNull(programSet, "programSet");
         this.pack = programSet.getPack();
         this.directives = programSet.getPackDirectives();
@@ -78,13 +85,59 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         return this.programSet;
     }
 
+    int generation() {
+        return this.generation;
+    }
+
+    IrisMetalWorldResources resources() {
+        if (this.resources == null) {
+            throw new IllegalStateException(
+                    "Iris Metal generation " + this.generation + " has not prepared GPU resources"
+            );
+        }
+        return this.resources;
+    }
+
     boolean shouldOverrideCoreShaders(final boolean writesMainTarget) {
         return this.frameState.shouldOverrideShaders(writesMainTarget);
     }
 
     @Override
     public void beginLevelRendering() {
+        prepareResources();
         this.frameState.beginWorldRendering();
+    }
+
+    private void prepareResources() {
+        MetalDevice device = MetalDeviceRegistry.getActiveDevice();
+        if (device == null) {
+            throw new IllegalStateException("Iris Metal world pipeline has no active Metal device");
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.gameRenderer == null) {
+            throw new IllegalStateException("Iris Metal world pipeline has no game renderer");
+        }
+        var mainTarget = minecraft.gameRenderer.mainRenderTarget();
+        if (mainTarget.width <= 0 || mainTarget.height <= 0) {
+            throw new IllegalStateException(
+                    "Iris Metal main target has invalid extent "
+                            + mainTarget.width + "x" + mainTarget.height
+            );
+        }
+        if (this.resources == null) {
+            this.resources = new IrisMetalWorldResources(
+                    device,
+                    this.generation,
+                    this.programSet,
+                    mainTarget.width,
+                    mainTarget.height
+            );
+            return;
+        }
+        if (!this.resources.isOwnedBy(device)) {
+            throw new IllegalStateException("Iris Metal generation crossed Metal device ownership");
+        }
+        this.resources.resize(mainTarget.width, mainTarget.height);
     }
 
     @Override
@@ -95,6 +148,10 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     @Override
     public void destroy() {
         this.frameState.endWorldRendering();
+        if (this.resources != null) {
+            this.resources.close();
+            this.resources = null;
+        }
         super.destroy();
     }
 

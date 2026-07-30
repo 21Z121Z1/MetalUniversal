@@ -110,6 +110,38 @@ final class IrisMetalPingPongTargetsIntegrationTest {
     }
 
     @Test
+    void worldGenerationOwnsResizeAndRetiresAllTargets() {
+        IrisMetalWorldResources resources = new IrisMetalWorldResources(
+                device,
+                7,
+                new GpuFormat[]{GpuFormat.RGBA8_UNORM, GpuFormat.RGBA16_FLOAT},
+                WIDTH,
+                HEIGHT,
+                Map.of(),
+                Set.of(),
+                Map.of(),
+                8,
+                null
+        );
+        MetalGpuTexture oldColor = resources.renderTargets().colorTargets().mainTexture(0);
+        MetalGpuTexture oldDepth = resources.renderTargets().mainDepthTexture();
+        MetalGpuTexture noise = resources.noiseTexture().texture();
+
+        assertEquals(7, resources.generation());
+        assertTrue(resources.isOwnedBy(device));
+        resources.resize(WIDTH * 2, HEIGHT * 2);
+        assertTrue(oldColor.isClosed());
+        assertTrue(oldDepth.isClosed());
+        assertFalse(noise.isClosed());
+        assertEquals(WIDTH * 2, resources.renderTargets().width());
+
+        resources.close();
+        resources.close();
+        assertTrue(noise.isClosed());
+        assertThrows(IllegalStateException.class, resources::renderTargets);
+    }
+
+    @Test
     void snapshotRestoreAndFeedbackValidationFailClosed() {
         try (IrisMetalPingPongTargets targets = new IrisMetalPingPongTargets(
                 device, "iris-test-state", new GpuFormat[]{GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM},
