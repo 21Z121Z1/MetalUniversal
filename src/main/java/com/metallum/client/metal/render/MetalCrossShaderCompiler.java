@@ -43,6 +43,11 @@ public final class MetalCrossShaderCompiler {
     private static final int MSL_VERSION_4_0 = 0x040000;
     private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     private static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
+    private static final Pattern EXPLICIT_FRAGMENT_OUTPUT_PATTERN = Pattern.compile(
+            "\\blayout\\s*\\(\\s*location\\s*=\\s*(\\d+)[^)]*\\)\\s*"
+                    + "(?:(?:flat|smooth|noperspective|centroid|sample|invariant|precise)\\s+)*"
+                    + "out\\s+(?:lowp\\s+|mediump\\s+|highp\\s+)?\\w+\\s+(\\w+)\\b"
+    );
 
     /**
      * 在 iOS 上，Amethyst 启动器捆绑的 libMoltenVK.dylib 内部静态链接了 SPIRV-Cross，
@@ -89,7 +94,15 @@ public final class MetalCrossShaderCompiler {
             MslShader vertexMsl = spirvToMsl(vertexSpirv.spirv(), layoutEntries.size(), vertexAttributeFormats(pipeline), enablePointSize);
 
             fragmentSpirv.rebind(tolerateUnprovidedInputs(vertexOutputs, fragmentSpirv.inputs()), layoutEntries);
-            MslShader fragmentMsl = spirvToMsl(fragmentSpirv.spirv(), layoutEntries.size(), Map.of(), true);
+            String fragmentSource = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);
+            MslShader fragmentMsl = spirvToMsl(
+                    fragmentSpirv.spirv(),
+                    layoutEntries.size(),
+                    Map.of(),
+                    true,
+                    explicitFragmentOutputLocations(fragmentSource)
+            );
+            validateFragmentOutputSignature(pipeline, fragmentMsl.stageOutputLocations());
 
             String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
             String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
@@ -706,7 +719,117 @@ public final class MetalCrossShaderCompiler {
         }
     }
 
-    private static MslShader spirvToMsl(final ByteBuffer spirvBytes, final int pushConstantBinding, final Map<String, GpuFormat> attributeFormats, final boolean enablePointSize) throws ShaderCompileException {
+    static Map<String, Integer> explicitFragmentOutputLocations(@Nullable final String source)
+            throws ShaderCompileException {
+        if (source == null || source.isBlank()) {
+            return Map.of();
+        }
+
+        Map<String, Integer> locations = new HashMap<>();
+        Set<Integer> occupiedLocations = new HashSet<>();
+        Matcher matcher = EXPLICIT_FRAGMENT_OUTPUT_PATTERN.matcher(source);
+        while (matcher.find()) {
+            int location = Integer.parseInt(matcher.group(1));
+            String name = matcher.group(2);
+            if (location < 0 || location >= ColorTargetState.MAX_COLOR_TARGETS) {
+                throw new ShaderCompileException(
+                        "Fragment output " + name + " uses color location " + location
+                                + "; supported range is 0.." + (ColorTargetState.MAX_COLOR_TARGETS - 1)
+                );
+            }
+            Integer previous = locations.putIfAbsent(name, location);
+            if (previous != null && previous != location) {
+                throw new ShaderCompileException(
+                        "Fragment output " + name + " declares conflicting locations "
+                                + previous + " and " + location
+                );
+            }
+            if (previous == null && !occupiedLocations.add(location)) {
+                throw new ShaderCompileException("Multiple fragment outputs declare color location " + location);
+            }
+        }
+        return Map.copyOf(locations);
+    }
+
+    private static Set<Integer> applyExplicitFragmentOutputLocations(
+            final MemoryStack stack,
+            final long compiler,
+            final Map<String, Integer> explicitLocations
+    ) throws ShaderCompileException {
+        PointerBuffer pResources = stack.mallocPointer(1);
+        checkSpvc(
+                Spvc.spvc_compiler_create_shader_resources(compiler, pResources),
+                "spvc_compiler_create_shader_resources(fragment outputs)"
+        );
+        PointerBuffer pList = stack.mallocPointer(1);
+        PointerBuffer pCount = stack.mallocPointer(1);
+        checkSpvc(
+                Spvc.spvc_resources_get_resource_list_for_type(
+                        pResources.get(0), Spvc.SPVC_RESOURCE_TYPE_STAGE_OUTPUT, pList, pCount
+                ),
+                "spvc_resources_get_resource_list_for_type(STAGE_OUTPUT)"
+        );
+
+        int count = (int) pCount.get(0);
+        if (count == 0) {
+            return Set.of();
+        }
+        SpvcReflectedResource.Buffer outputs = SpvcReflectedResource.create(pList.get(0), count);
+        Set<Integer> activeLocations = new HashSet<>();
+        for (int index = 0; index < count; index++) {
+            SpvcReflectedResource output = outputs.get(index);
+            Integer location = explicitLocations.get(output.nameString());
+            if (location != null) {
+                Spvc.spvc_compiler_set_decoration(
+                        compiler, output.id(), Spv.SpvDecorationLocation, location
+                );
+            }
+            if (!Spvc.spvc_compiler_has_decoration(
+                    compiler, output.id(), Spv.SpvDecorationBuiltIn
+            )) {
+                activeLocations.add(Spvc.spvc_compiler_get_decoration(
+                        compiler, output.id(), Spv.SpvDecorationLocation
+                ));
+            }
+        }
+        return Set.copyOf(activeLocations);
+    }
+
+    static void validateFragmentOutputSignature(
+            final RenderPipeline pipeline,
+            final Set<Integer> shaderLocations
+    ) throws ShaderCompileException {
+        Set<Integer> targetLocations = new HashSet<>();
+        ColorTargetState[] targets = pipeline.getColorTargetStates();
+        for (int index = 0; index < targets.length; index++) {
+            if (targets[index] != null) {
+                targetLocations.add(index);
+            }
+        }
+        if (!targetLocations.containsAll(shaderLocations)) {
+            throw new ShaderCompileException(
+                    "Fragment output/color-target location mismatch for " + pipeline.getLocation()
+                            + ": shader=" + shaderLocations + ", targets=" + targetLocations
+            );
+        }
+    }
+
+    private static MslShader spirvToMsl(
+            final ByteBuffer spirvBytes,
+            final int pushConstantBinding,
+            final Map<String, GpuFormat> attributeFormats,
+            final boolean enablePointSize
+    ) throws ShaderCompileException {
+        return spirvToMsl(spirvBytes, pushConstantBinding, attributeFormats, enablePointSize, Map.of());
+    }
+
+    private static MslShader spirvToMsl(
+            final ByteBuffer spirvBytes,
+            final int pushConstantBinding,
+            final Map<String, GpuFormat> attributeFormats,
+            final boolean enablePointSize,
+            final Map<String, Integer> explicitFragmentOutputLocations
+    ) throws ShaderCompileException {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             IntBuffer spirvWords = spirvBytes.asIntBuffer();
             int wordCount = spirvWords.remaining();
@@ -792,6 +915,9 @@ public final class MetalCrossShaderCompiler {
                 checkSpvc(Spvc.spvc_compiler_install_compiler_options(compiler, options), "spvc_compiler_install_compiler_options");
 
                 registerIntegerInputConversions(stack, compiler, attributeFormats);
+                Set<Integer> stageOutputLocations = applyExplicitFragmentOutputLocations(
+                        stack, compiler, explicitFragmentOutputLocations
+                );
 
                 PointerBuffer pActiveSet = stack.mallocPointer(1);
                 checkSpvc(Spvc.spvc_compiler_get_active_interface_variables(compiler, pActiveSet), "spvc_compiler_get_active_interface_variables");
@@ -815,14 +941,24 @@ public final class MetalCrossShaderCompiler {
 
                 PointerBuffer pSource = stack.mallocPointer(1);
                 checkSpvc(Spvc.spvc_compiler_compile(compiler, pSource), "spvc_compiler_compile");
-                return new MslShader(MemoryUtil.memUTF8(pSource.get(0)), hasPushConstants, activeResources);
+                return new MslShader(
+                        MemoryUtil.memUTF8(pSource.get(0)),
+                        hasPushConstants,
+                        activeResources,
+                        stageOutputLocations
+                );
             } finally {
                 Spvc.spvc_context_destroy(context);
             }
         }
     }
 
-    record MslShader(String source, boolean hasPushConstants, Set<String> activeResources) {
+    record MslShader(
+            String source,
+            boolean hasPushConstants,
+            Set<String> activeResources,
+            Set<Integer> stageOutputLocations
+    ) {
     }
 
     private static Set<String> collectActiveResourceNames(final MemoryStack stack, final long compiler, final long activeSet) throws ShaderCompileException {

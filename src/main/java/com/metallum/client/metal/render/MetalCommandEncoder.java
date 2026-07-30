@@ -20,6 +20,7 @@ import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -42,7 +43,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MTLCommandBuffer commandBuffer;
     @Nullable
     private MTLCommandEncoder currentEncoder;
-    private MemorySegment renderColorAttachment = MemorySegment.NULL;
+    private MemorySegment[] renderColorAttachments = new MemorySegment[0];
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
     private final Long2ObjectOpenHashMap<java.util.ArrayDeque<MemorySegment>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
 
@@ -98,7 +99,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             currentEncoder.endEncoding();
             currentEncoder = null;
         }
-        renderColorAttachment = MemorySegment.NULL;
+        renderColorAttachments = new MemorySegment[0];
         renderDepthAttachment = MemorySegment.NULL;
     }
 
@@ -189,83 +190,173 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     MTLRenderCommandEncoder renderCommandEncoder(
-            final MetalGpuTextureView colorTextureView,
+            final MetalGpuTextureView[] colorTextureViews,
             @Nullable final MetalGpuTextureView depthTextureView,
             final int viewportWidth,
             final int viewportHeight,
-            final boolean clearColorEnabled,
-            final float clearColorRed,
-            final float clearColorGreen,
-            final float clearColorBlue,
-            final float clearColorAlpha,
+            final int[] clearColorEnabled,
+            final float[] clearColorValues,
             final boolean clearDepthEnabled,
             final double clearDepthValue
     ) {
-        MemorySegment colorAttachment = colorTextureView.nativeHandle();
+        if (colorTextureViews == null
+                || colorTextureViews.length > Math.min(
+                        com.mojang.blaze3d.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
+                        device.getDeviceInfo().limits().maxColorAttachments()
+                )
+                || clearColorEnabled == null || clearColorValues == null
+                || clearColorEnabled.length != colorTextureViews.length
+                || clearColorValues.length != colorTextureViews.length * 4) {
+            throw new IllegalArgumentException("Invalid Metal MRT attachment arrays");
+        }
+
+        MemorySegment[] colorAttachments = new MemorySegment[colorTextureViews.length];
+        for (int index = 0; index < colorTextureViews.length; index++) {
+            colorAttachments[index] = colorTextureViews[index] == null
+                    ? MemorySegment.NULL
+                    : colorTextureViews[index].nativeHandle();
+        }
         MemorySegment depthAttachment = depthTextureView == null ? MemorySegment.NULL : depthTextureView.nativeHandle();
-        if (currentEncoder instanceof MTLRenderCommandEncoder enc
-                && MetalPipelineSupport.sameHandle(renderColorAttachment, colorAttachment)
-                && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment)) {
-            if (clearColorEnabled || clearDepthEnabled) {
-                enc.clearDraw(
-                        colorAttachment,
-                        depthAttachment,
-                        viewportWidth,
-                        viewportHeight,
-                        clearColorEnabled,
-                        clearColorRed,
-                        clearColorGreen,
-                        clearColorBlue,
-                        clearColorAlpha,
-                        clearDepthEnabled,
-                        clearDepthValue
-                );
-            }
-            return enc;
+        boolean sameAttachments = currentEncoder instanceof MTLRenderCommandEncoder
+                && sameAttachmentHandles(renderColorAttachments, colorAttachments)
+                && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment);
+        if (sameAttachments && !clearDepthEnabled && !hasClearColor(clearColorEnabled)) {
+            return (MTLRenderCommandEncoder) currentEncoder;
         }
 
         endEncoder();
-        MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoder(
-                colorAttachment,
+        MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoderV2(
+                colorAttachments,
                 depthAttachment,
                 viewportWidth,
                 viewportHeight,
-                clearColorEnabled ? 1 : 0,
-                clearColorRed,
-                clearColorGreen,
-                clearColorBlue,
-                clearColorAlpha,
+                clearColorEnabled,
+                clearColorValues,
                 clearDepthEnabled ? 1 : 0,
                 clearDepthValue
         );
         encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
         currentEncoder = encoder;
-        renderColorAttachment = colorAttachment;
+        renderColorAttachments = colorAttachments;
         renderDepthAttachment = depthAttachment;
         return encoder;
     }
 
+    private static boolean hasClearColor(final int[] clearColorEnabled) {
+        for (int enabled : clearColorEnabled) {
+            if (enabled != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean sameAttachmentHandles(final MemorySegment[] first, final MemorySegment[] second) {
+        if (first.length != second.length) {
+            return false;
+        }
+        for (int index = 0; index < first.length; index++) {
+            if (!MetalPipelineSupport.sameHandle(first[index], second[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     @Override
     public @NonNull RenderPassBackend createRenderPass(final RenderPassDescriptor descriptor) {
-        RenderPassDescriptor.Attachment<Optional<Vector4fc>> colorAttachment = descriptor.colorAttachments().getFirst();
-        GpuTextureView colorTexture = colorAttachment.textureView();
-        Optional<Vector4fc> colorClear = colorAttachment.clearValue();
-        MetalGpuTexture colorTex = (MetalGpuTexture) colorTexture.texture();
-        Vector4fc pendingColor = pendingColorClears.get(colorTex);
-        if (pendingColor != null && isFullTextureView(colorTexture) && colorClear.isEmpty()) {
-            pendingColorClears.remove(colorTex);
-            colorClear = Optional.of(pendingColor);
-        } else if (pendingColor != null && colorClear.isEmpty()) {
-            flushPendingClear(colorTex);
-        } else {
-            pendingColorClears.remove(colorTex);
+        List<RenderPassDescriptor.Attachment<Optional<Vector4fc>>> colorAttachments = descriptor.colorAttachments();
+        int maxColorAttachments = Math.min(
+                com.mojang.blaze3d.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
+                device.getDeviceInfo().limits().maxColorAttachments()
+        );
+        if (colorAttachments.size() > maxColorAttachments) {
+            throw new IllegalArgumentException(
+                    "Metal render pass has " + colorAttachments.size()
+                            + " color slots but the backend limit is " + maxColorAttachments
+            );
         }
-        colorTex.markContentsDirty();
-
         RenderPassDescriptor.Attachment<OptionalDouble> depthAttachment = descriptor.depthAttachment();
+        if (colorAttachments.isEmpty() && depthAttachment == null) {
+            throw new IllegalArgumentException("Metal render pass has no color or depth attachment");
+        }
+
+        GpuTextureView extentTexture = null;
+        for (RenderPassDescriptor.Attachment<Optional<Vector4fc>> colorAttachment : colorAttachments) {
+            if (colorAttachment != null) {
+                extentTexture = colorAttachment.textureView();
+                break;
+            }
+        }
+        if (extentTexture == null && depthAttachment != null) {
+            extentTexture = depthAttachment.textureView();
+        }
+        if (extentTexture == null) {
+            throw new IllegalArgumentException("Metal render pass contains only unused color slots and no depth attachment");
+        }
+
+        MetalGpuTextureView[] colorTextureViews = new MetalGpuTextureView[colorAttachments.size()];
+        Vector4fc[] clearColors = new Vector4fc[colorAttachments.size()];
+        boolean hasColorClear = false;
+        for (int index = 0; index < colorAttachments.size(); index++) {
+            RenderPassDescriptor.Attachment<Optional<Vector4fc>> colorAttachment = colorAttachments.get(index);
+            if (colorAttachment == null) {
+                continue;
+            }
+            GpuTextureView colorTexture = colorAttachment.textureView();
+            if (colorTexture.isClosed()) {
+                throw new IllegalStateException("Color texture " + index + " is closed");
+            }
+            if ((colorTexture.texture().usage() & GpuTexture.USAGE_RENDER_ATTACHMENT) == 0) {
+                throw new IllegalStateException("Color texture " + index + " must have USAGE_RENDER_ATTACHMENT");
+            }
+            if (colorTexture.texture().getDepthOrLayers() > 1) {
+                throw new UnsupportedOperationException("Color texture " + index + " has multiple layers");
+            }
+            if (colorTexture.getWidth(0) != extentTexture.getWidth(0)
+                    || colorTexture.getHeight(0) != extentTexture.getHeight(0)) {
+                throw new IllegalArgumentException(
+                        "Color texture " + index + " dimensions do not match the first non-null attachment"
+                );
+            }
+
+            MetalGpuTexture colorTex = (MetalGpuTexture) colorTexture.texture();
+            Optional<Vector4fc> colorClear = colorAttachment.clearValue();
+            Vector4fc pendingColor = pendingColorClears.get(colorTex);
+            if (pendingColor != null && isFullTextureView(colorTexture) && colorClear.isEmpty()) {
+                pendingColorClears.remove(colorTex);
+                colorClear = Optional.of(pendingColor);
+            } else if (pendingColor != null && colorClear.isEmpty()) {
+                flushPendingClear(colorTex);
+            } else {
+                pendingColorClears.remove(colorTex);
+            }
+            if (colorClear.isPresent()) {
+                clearColors[index] = new Vector4f(colorClear.get());
+                hasColorClear = true;
+            }
+            colorTex.markContentsDirty();
+            colorTextureViews[index] = (MetalGpuTextureView) colorTexture;
+        }
+
         GpuTextureView depthTexture = depthAttachment == null ? null : depthAttachment.textureView();
         OptionalDouble depthClear = depthAttachment == null ? OptionalDouble.empty() : depthAttachment.clearValue();
         if (depthAttachment != null) {
+            if (depthTexture.isClosed()) {
+                throw new IllegalStateException("Depth texture is closed");
+            }
+            if ((depthTexture.texture().usage() & GpuTexture.USAGE_RENDER_ATTACHMENT) == 0) {
+                throw new IllegalStateException("Depth texture must have USAGE_RENDER_ATTACHMENT");
+            }
+            if (depthTexture.texture().getDepthOrLayers() > 1) {
+                throw new UnsupportedOperationException("Depth texture has multiple layers");
+            }
+            if (depthTexture.getWidth(0) != extentTexture.getWidth(0)
+                    || depthTexture.getHeight(0) != extentTexture.getHeight(0)) {
+                throw new IllegalArgumentException(
+                        "Depth texture dimensions do not match the first non-null color attachment"
+                );
+            }
             MetalGpuTexture metalDepth = (MetalGpuTexture) depthTexture.texture();
             Double pendingDepth = pendingDepthClears.get(metalDepth);
             if (pendingDepth != null && isFullTextureView(depthTexture) && depthClear.isEmpty()) {
@@ -281,14 +372,28 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         assert descriptor.renderArea != null;
         RenderPass.RenderArea renderArea = descriptor.renderArea;
+        if (renderArea == null) {
+            throw new IllegalArgumentException("RenderPassDescriptor.renderArea must be provided");
+        }
+        long renderRight = (long) renderArea.x() + renderArea.width();
+        long renderBottom = (long) renderArea.y() + renderArea.height();
+        if (renderArea.x() < 0 || renderArea.y() < 0
+                || renderArea.width() <= 0 || renderArea.height() <= 0
+                || renderRight > extentTexture.getWidth(0)
+                || renderBottom > extentTexture.getHeight(0)) {
+            throw new IllegalArgumentException(
+                    "Metal render area " + renderArea + " is outside attachment extent "
+                            + extentTexture.getWidth(0) + "x" + extentTexture.getHeight(0)
+            );
+        }
         MetalRenderPass renderPass = new MetalRenderPass(
                 device,
                 this,
                 descriptor.label(),
-                colorTexture,
+                colorTextureViews,
                 depthTexture,
                 renderArea,
-                colorClear.orElse(null),
+                hasColorClear ? clearColors : null,
                 depthClear.isPresent(),
                 depthClear.orElse(0.0)
         );

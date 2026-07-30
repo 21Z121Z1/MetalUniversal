@@ -40,6 +40,7 @@ dependencies {
 
 test {
 	useJUnitPlatform()
+	exclude "**/MetalMrtBackendIntegrationTest.class"
 	exclude "**/MetalComputeBackendIntegrationTest.class"
 }
 
@@ -86,6 +87,24 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 	useJUnitPlatform()
 	filter {
 		includeTestsMatching "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+tasks.register("metalMrtBackendIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS Java RenderPass -> FFM -> Swift MRT GPU readback integration suite."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", "1"

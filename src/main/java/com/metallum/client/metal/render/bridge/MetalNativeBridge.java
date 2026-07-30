@@ -301,6 +301,23 @@ public final class MetalNativeBridge {
                             DOUBLE
                     )
             );
+            MTLCommandBufferMakeRenderCommandEncoderV2 = optionalDowncall(
+                    lookup,
+                    "metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            ValueLayout.ADDRESS,
+                            DOUBLE,
+                            DOUBLE,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            DOUBLE
+                    )
+            );
             MTLRenderCommandEncoderSetRenderPipelineState = downcall(lookup, "metallum_MTLRenderCommandEncoder_setRenderPipelineState", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLRenderCommandEncoderSetDepthStencilState = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthStencilState", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLRenderCommandEncoderSetDepthBias = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthBias", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, FLOAT, FLOAT, FLOAT));
@@ -436,6 +453,33 @@ public final class MetalNativeBridge {
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setAttachmentFormats",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG)
+            );
+            MTLRenderPipelineDescriptorSetColorAttachmentFormat = optionalDowncall(
+                    lookup,
+                    "metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT, LONG)
+            );
+            MTLRenderPipelineDescriptorSetDepthStencilFormats = optionalDowncall(
+                    lookup,
+                    "metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG)
+            );
+            MTLRenderPipelineDescriptorSetColorAttachmentBlendState = optionalDowncall(
+                    lookup,
+                    "metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            LONG,
+                            LONG,
+                            LONG,
+                            LONG,
+                            LONG,
+                            LONG,
+                            LONG
+                    )
             );
             MTLRenderPipelineDescriptorSetBlendState = downcall(
                     lookup,
@@ -701,6 +745,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLBlitCommandEncoderCopyFromTextureToBuffer;
     private static final MethodHandle MTLDeviceMakeDepthStencilState;
     private static final MethodHandle MTLCommandBufferMakeRenderCommandEncoder;
+    private static final @Nullable MethodHandle MTLCommandBufferMakeRenderCommandEncoderV2;
     private static final MethodHandle MTLRenderCommandEncoderSetRenderPipelineState;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthStencilState;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthBias;
@@ -734,6 +779,9 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderPipelineDescriptorSetCompiledFunctions;
     private static final MethodHandle MTLRenderPipelineDescriptorSetVertexDescriptor;
     private static final MethodHandle MTLRenderPipelineDescriptorSetAttachmentFormats;
+    private static final @Nullable MethodHandle MTLRenderPipelineDescriptorSetColorAttachmentFormat;
+    private static final @Nullable MethodHandle MTLRenderPipelineDescriptorSetDepthStencilFormats;
+    private static final @Nullable MethodHandle MTLRenderPipelineDescriptorSetColorAttachmentBlendState;
     private static final MethodHandle MTLRenderPipelineDescriptorSetBlendState;
     private static final MethodHandle MTLDeviceMakeRenderPipelineState;
     private static final MethodHandle configureLayer;
@@ -1239,6 +1287,79 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static MemorySegment MTLCommandBuffer_makeRenderCommandEncoderV2(
+            final MemorySegment commandBuffer,
+            final MemorySegment[] colorTextures,
+            final MemorySegment depthTexture,
+            final double viewportWidth,
+            final double viewportHeight,
+            final int[] clearColorEnabled,
+            final float[] clearColors,
+            final int clearDepthEnabled,
+            final double clearDepth
+    ) {
+        if (colorTextures == null || clearColorEnabled == null || clearColors == null
+                || clearColorEnabled.length != colorTextures.length
+                || clearColors.length != colorTextures.length * 4) {
+            throw new IllegalArgumentException("MRT texture, clear flag and clear color arrays must have matching lengths");
+        }
+
+        if (MTLCommandBufferMakeRenderCommandEncoderV2 == null) {
+            if (colorTextures.length > 1) {
+                throw new IllegalStateException("Loaded native bridge does not support indexed MRT render encoders");
+            }
+            MemorySegment colorTexture = colorTextures.length == 0 ? MemorySegment.NULL : colorTextures[0];
+            int clearColor = colorTextures.length == 0 ? 0 : clearColorEnabled[0];
+            float red = colorTextures.length == 0 ? 0.0F : clearColors[0];
+            float green = colorTextures.length == 0 ? 0.0F : clearColors[1];
+            float blue = colorTextures.length == 0 ? 0.0F : clearColors[2];
+            float alpha = colorTextures.length == 0 ? 0.0F : clearColors[3];
+            return MTLCommandBuffer_makeRenderCommandEncoder(
+                    commandBuffer, colorTexture, depthTexture,
+                    viewportWidth, viewportHeight,
+                    clearColor, red, green, blue, alpha,
+                    clearDepthEnabled, clearDepth
+            );
+        }
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment textureArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(ValueLayout.ADDRESS, colorTextures.length);
+            MemorySegment clearFlagArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(INT, clearColorEnabled.length);
+            MemorySegment clearColorArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(FLOAT, clearColors.length);
+
+            for (int index = 0; index < colorTextures.length; index++) {
+                textureArray.setAtIndex(ValueLayout.ADDRESS, index, segment(colorTextures[index]));
+                clearFlagArray.setAtIndex(INT, index, clearColorEnabled[index]);
+            }
+            for (int index = 0; index < clearColors.length; index++) {
+                clearColorArray.setAtIndex(FLOAT, index, clearColors[index]);
+            }
+
+            try {
+                return (MemorySegment) MTLCommandBufferMakeRenderCommandEncoderV2.invokeExact(
+                        segment(commandBuffer),
+                        textureArray,
+                        colorTextures.length,
+                        segment(depthTexture),
+                        viewportWidth,
+                        viewportHeight,
+                        clearColorArray,
+                        clearFlagArray,
+                        clearDepthEnabled,
+                        clearDepth
+                );
+            } catch (Throwable throwable) {
+                throw bridgeFailure("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2", throwable);
+            }
+        }
+    }
+
     public static void MTLRenderCommandEncoder_clearDraw(
             final MemorySegment encoder,
             final MemorySegment colorTexture,
@@ -1645,6 +1766,84 @@ public final class MetalNativeBridge {
             MTLRenderPipelineDescriptorSetAttachmentFormats.invokeExact(segment(desc), colorFormat.value, depthFormat.value, stencilFormat.value);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLRenderPipelineDescriptor_setAttachmentFormats", throwable);
+        }
+    }
+
+    public static void metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat(
+            final MemorySegment desc,
+            final int index,
+            final MTLPixelFormat format
+    ) {
+        if (MTLRenderPipelineDescriptorSetColorAttachmentFormat == null) {
+            if (index != 0) {
+                throw new IllegalStateException("Loaded native bridge does not support indexed color attachment formats");
+            }
+            metallum_MTLRenderPipelineDescriptor_setAttachmentFormats(
+                    desc, format, MTLPixelFormat.Invalid, MTLPixelFormat.Invalid
+            );
+            return;
+        }
+        try {
+            int result = (int) MTLRenderPipelineDescriptorSetColorAttachmentFormat.invokeExact(
+                    segment(desc), index, format.value
+            );
+            if (result == 0) {
+                throw new IllegalArgumentException("Native bridge rejected color attachment index " + index);
+            }
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat", throwable);
+        }
+    }
+
+    public static void metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats(
+            final MemorySegment desc,
+            final MTLPixelFormat depthFormat,
+            final MTLPixelFormat stencilFormat
+    ) {
+        if (MTLRenderPipelineDescriptorSetDepthStencilFormats == null) {
+            throw new IllegalStateException("Loaded native bridge does not support independent depth/stencil formats");
+        }
+        try {
+            MTLRenderPipelineDescriptorSetDepthStencilFormats.invokeExact(
+                    segment(desc), depthFormat.value, stencilFormat.value
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats", throwable);
+        }
+    }
+
+    public static void metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState(
+            final MemorySegment desc,
+            final int index,
+            final boolean enabled,
+            final long srcRgb,
+            final long dstRgb,
+            final long opRgb,
+            final long srcAlpha,
+            final long dstAlpha,
+            final long opAlpha,
+            final long writeMask
+    ) {
+        if (MTLRenderPipelineDescriptorSetColorAttachmentBlendState == null) {
+            if (index != 0) {
+                throw new IllegalStateException("Loaded native bridge does not support indexed color attachment blend state");
+            }
+            metallum_MTLRenderPipelineDescriptor_setBlendState(
+                    desc, enabled ? 1 : 0,
+                    srcRgb, dstRgb, opRgb, srcAlpha, dstAlpha, opAlpha, writeMask
+            );
+            return;
+        }
+        try {
+            int result = (int) MTLRenderPipelineDescriptorSetColorAttachmentBlendState.invokeExact(
+                    segment(desc), index, enabled ? 1 : 0,
+                    srcRgb, dstRgb, opRgb, srcAlpha, dstAlpha, opAlpha, writeMask
+            );
+            if (result == 0) {
+                throw new IllegalArgumentException("Native bridge rejected color attachment index " + index);
+            }
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState", throwable);
         }
     }
 

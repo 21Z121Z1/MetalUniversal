@@ -4,6 +4,7 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.preprocessor.GlslPreprocessor;
@@ -308,7 +309,14 @@ final class MetalDevice implements GpuDeviceBackend {
                 true,
                 "Metal",
                 1.0F,
-                new DeviceLimits(16, 256, 16384, maxMemoryAllocationSize, 0, 1),
+                new DeviceLimits(
+                        16,
+                        256,
+                        16384,
+                        maxMemoryAllocationSize,
+                        0,
+                        ColorTargetState.MAX_COLOR_TARGETS
+                ),
                 new DeviceFeatures(false, false, true, true, true, false, true),
                 underlyingExtensions,
                 new HintsAndWorkarounds(false, false),

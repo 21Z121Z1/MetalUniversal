@@ -114,6 +114,12 @@ final class MetalGpuTexture extends GpuTexture {
         return this.mtlPixelFormat;
     }
 
+    MTLPixelFormat mtlDepthPixelFormat() {
+        return this.mtlPixelFormat == MTLPixelFormat.Stencil8
+                ? MTLPixelFormat.Invalid
+                : this.mtlPixelFormat;
+    }
+
     MTLPixelFormat mtlStencilPixelFormat() {
         return this.mtlPixelFormat.hasStencil() ? this.mtlPixelFormat : MTLPixelFormat.Invalid;
     }

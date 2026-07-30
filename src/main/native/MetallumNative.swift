@@ -58,6 +58,14 @@ private func unretainedPointer(_ object: AnyObject?) -> UnsafeMutableRawPointer?
 }
 
 @inline(__always)
+private func textureFromUnretainedPointer(_ pointer: UnsafeMutableRawPointer?) -> MTLTexture? {
+    guard let pointer else {
+        return nil
+    }
+    return Unmanaged<MTLTexture>.fromOpaque(pointer).takeUnretainedValue()
+}
+
+@inline(__always)
 private func objectAddress(_ object: AnyObject) -> UInt {
     UInt(bitPattern: Unmanaged.passUnretained(object).toOpaque())
 }
@@ -1052,6 +1060,102 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
     }
 }
 
+/// Array-preserving render-pass entry point. Null entries remain null so a
+/// logical Iris DRAWBUFFERS slot is never compacted into another attachment.
+@_cdecl("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2")
+public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
+    _ commandBuffer: MTLCommandBuffer,
+    _ colorTexturePointers: UnsafePointer<UnsafeMutableRawPointer?>?,
+    _ colorCount: Int32,
+    _ depthTexture: MTLTexture?,
+    _ viewportWidth: Double,
+    _ viewportHeight: Double,
+    _ clearColors: UnsafePointer<Float>?,
+    _ clearColorEnabled: UnsafePointer<Int32>?,
+    _ clearDepthEnabled: Int32,
+    _ clearDepth: Double
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
+        let count = Int(colorCount)
+        guard count >= 0 && count <= 8 else {
+            NSLog("[Metallum] rejected render pass with %d color slots", colorCount)
+            return nil
+        }
+        guard count == 0 || colorTexturePointers != nil else {
+            NSLog("[Metallum] render pass color slot count is non-zero but the texture array is null")
+            return nil
+        }
+        guard count == 0 || (clearColors != nil && clearColorEnabled != nil) else {
+            NSLog("[Metallum] render pass color slot count is non-zero but clear arrays are null")
+            return nil
+        }
+        guard count > 0 || depthTexture != nil else {
+            NSLog("[Metallum] rejected render pass with no color or depth attachment")
+            return nil
+        }
+
+        let depthFormat = depthTexture?.pixelFormat ?? .invalid
+        let stencilFormat = stencilPixelFormat(for: depthFormat)
+        let renderPass = MTLRenderPassDescriptor()
+
+        for index in 0..<count {
+            let rawTexture = colorTexturePointers?[index]
+            guard let attachment = renderPass.colorAttachments[index] else {
+                NSLog("[Metallum] color attachment descriptor %d is unavailable", index)
+                return nil
+            }
+            guard let texture = textureFromUnretainedPointer(rawTexture) else {
+                attachment.loadAction = .dontCare
+                attachment.storeAction = .dontCare
+                continue
+            }
+
+            attachment.texture = texture
+            if clearColorEnabled?[index] ?? 0 != 0 {
+                let base = index * 4
+                let colors = clearColors!
+                attachment.loadAction = .clear
+                attachment.clearColor = makeClearColor(
+                    red: colors[base],
+                    green: colors[base + 1],
+                    blue: colors[base + 2],
+                    alpha: colors[base + 3]
+                )
+            } else {
+                attachment.loadAction = .load
+            }
+            attachment.storeAction = .store
+        }
+
+        if let depthTexture {
+            if depthFormat != .stencil8 {
+                renderPass.depthAttachment.texture = depthTexture
+                renderPass.depthAttachment.loadAction = clearDepthEnabled != 0 ? .clear : .load
+                renderPass.depthAttachment.clearDepth = clearDepth
+                renderPass.depthAttachment.storeAction = .store
+            }
+            if stencilFormat != .invalid || depthFormat == .stencil8 {
+                renderPass.stencilAttachment.texture = depthTexture
+                renderPass.stencilAttachment.loadAction = .dontCare
+                renderPass.stencilAttachment.storeAction = .store
+            }
+        }
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+            return nil
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: viewportWidth,
+            height: viewportHeight,
+            znear: 0.0,
+            zfar: 1.0
+        ))
+        return retainedPointer(encoder)
+    }
+}
+
 @_cdecl("metallum_MTLRenderCommandEncoder_setRenderPipelineState")
 public func metallum_MTLRenderCommandEncoder_setRenderPipelineState(_ encoder: MTLRenderCommandEncoder, _ pipeline: MTLRenderPipelineState) {
     encoder.setRenderPipelineState(pipeline)
@@ -1846,9 +1950,71 @@ public func metallum_MTLRenderPipelineDescriptor_setAttachmentFormats(
 ) {
     autoreleasepool {
         desc.colorAttachments[0].pixelFormat = colorFormat
+        if depthFormat != .invalid {
+            desc.depthAttachmentPixelFormat = depthFormat
+        }
+        if stencilFormat != .invalid {
+            desc.stencilAttachmentPixelFormat = stencilFormat
+        }
+    }
+}
+
+@_cdecl("metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat")
+public func metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat(
+    _ desc: MTLRenderPipelineDescriptor,
+    _ index: Int32,
+    _ format: MTLPixelFormat
+) -> Int32 {
+    guard index >= 0 && index < 8,
+          let attachment = desc.colorAttachments[Int(index)] else {
+        return 0
+    }
+    attachment.pixelFormat = format
+    return 1
+}
+
+@_cdecl("metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats")
+public func metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats(
+    _ desc: MTLRenderPipelineDescriptor,
+    _ depthFormat: MTLPixelFormat,
+    _ stencilFormat: MTLPixelFormat
+) {
+    if depthFormat != .invalid {
         desc.depthAttachmentPixelFormat = depthFormat
+    }
+    if stencilFormat != .invalid {
         desc.stencilAttachmentPixelFormat = stencilFormat
     }
+}
+
+@_cdecl("metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState")
+public func metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState(
+    _ desc: MTLRenderPipelineDescriptor,
+    _ index: Int32,
+    _ enabled: Int32,
+    _ srcRgb: MTLBlendFactor,
+    _ dstRgb: MTLBlendFactor,
+    _ opRgb: MTLBlendOperation,
+    _ srcAlpha: MTLBlendFactor,
+    _ dstAlpha: MTLBlendFactor,
+    _ opAlpha: MTLBlendOperation,
+    _ writeMask: MTLColorWriteMask
+) -> Int32 {
+    guard index >= 0 && index < 8,
+          let attachment = desc.colorAttachments[Int(index)] else {
+        return 0
+    }
+    attachment.writeMask = writeMask
+    attachment.isBlendingEnabled = enabled != 0
+    if enabled != 0 {
+        attachment.sourceRGBBlendFactor = srcRgb
+        attachment.destinationRGBBlendFactor = dstRgb
+        attachment.rgbBlendOperation = opRgb
+        attachment.sourceAlphaBlendFactor = srcAlpha
+        attachment.destinationAlphaBlendFactor = dstAlpha
+        attachment.alphaBlendOperation = opAlpha
+    }
+    return 1
 }
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setBlendState")
