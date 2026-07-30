@@ -167,7 +167,8 @@ public final class MetalCrossShaderCompiler {
      * @param primitiveTopology        primitive topology.
      * @param vertexFormatBindings     vertex format bindings.
      * @param depthStencilState        depth/stencil state (nullable).
-     * @param colorTarget              color target state (nullable).
+     * @param colorTargets             compact physical color-target states in
+     *                                 the same order as Iris DRAWBUFFERS.
      * @return the compiled Metal render pipeline.
      * @throws ShaderCompileException if GLSL&#8594;SPIR-V or SPIR-V&#8594;MSL fails.
      */
@@ -184,7 +185,7 @@ public final class MetalCrossShaderCompiler {
             final PrimitiveTopology primitiveTopology,
             final VertexFormat[] vertexFormatBindings,
             final DepthStencilState depthStencilState,
-            final ColorTargetState colorTarget
+            final ColorTargetState[] colorTargets
     ) throws ShaderCompileException {
         final int[] vertexSpvWords;
         final int[] fragmentSpvWords;
@@ -218,6 +219,7 @@ public final class MetalCrossShaderCompiler {
                 spirvWordsToByteBuffer(fragmentSpvWords), pushConstantBinding,
                 Map.of(), true, Map.of(), resourceBindings
         );
+        validateFragmentOutputSignature(name, colorTargets, fragmentMsl.stageOutputLocations());
 
         final String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
         final String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
@@ -236,7 +238,7 @@ public final class MetalCrossShaderCompiler {
                 primitiveTopology,
                 vertexFormatBindings,
                 depthStencilState,
-                colorTarget
+                colorTargets
         );
     }
 
@@ -473,7 +475,7 @@ public final class MetalCrossShaderCompiler {
                 PrimitiveTopology.TRIANGLES,
                 new VertexFormat[]{vertexFormat},
                 null,
-                null
+                new ColorTargetState[]{ColorTargetState.DEFAULT}
         );
         SHADERPACK_PIPELINE_CACHE.put(name, pipeline);
         return true;
@@ -1067,8 +1069,19 @@ public final class MetalCrossShaderCompiler {
             final RenderPipeline pipeline,
             final Set<Integer> shaderLocations
     ) throws ShaderCompileException {
+        validateFragmentOutputSignature(
+                pipeline.getLocation().toString(),
+                pipeline.getColorTargetStates(),
+                shaderLocations
+        );
+    }
+
+    static void validateFragmentOutputSignature(
+            final String pipelineName,
+            final ColorTargetState[] targets,
+            final Set<Integer> shaderLocations
+    ) throws ShaderCompileException {
         Set<Integer> targetLocations = new HashSet<>();
-        ColorTargetState[] targets = pipeline.getColorTargetStates();
         for (int index = 0; index < targets.length; index++) {
             if (targets[index] != null) {
                 targetLocations.add(index);
@@ -1076,7 +1089,7 @@ public final class MetalCrossShaderCompiler {
         }
         if (!targetLocations.containsAll(shaderLocations)) {
             throw new ShaderCompileException(
-                    "Fragment output/color-target location mismatch for " + pipeline.getLocation()
+                    "Fragment output/color-target location mismatch for " + pipelineName
                             + ": shader=" + shaderLocations + ", targets=" + targetLocations
             );
         }

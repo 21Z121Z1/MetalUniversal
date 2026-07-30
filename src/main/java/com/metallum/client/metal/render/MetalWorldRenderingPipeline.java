@@ -44,6 +44,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     private final OptionalInt forcedShadowRenderDistanceChunks;
     private final IrisMetalFrameState frameState = new IrisMetalFrameState();
     private final IrisMetalWorldPrograms programs;
+    private IrisMetalCompiledPrograms compiledPrograms;
     private IrisMetalWorldResources resources;
 
     public MetalWorldRenderingPipeline(final ProgramSet programSet) {
@@ -95,6 +96,15 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         return this.programs;
     }
 
+    IrisMetalCompiledPrograms compiledPrograms() {
+        if (this.compiledPrograms == null) {
+            throw new IllegalStateException(
+                    "Iris Metal generation " + this.generation + " has not prepared compiled programs"
+            );
+        }
+        return this.compiledPrograms;
+    }
+
     IrisMetalWorldResources resources() {
         if (this.resources == null) {
             throw new IllegalStateException(
@@ -130,6 +140,16 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                             + mainTarget.width + "x" + mainTarget.height
             );
         }
+        if (this.compiledPrograms == null) {
+            this.compiledPrograms = new IrisMetalCompiledPrograms(
+                    device,
+                    this.generation,
+                    this.programs,
+                    IrisMetalRenderTargetFormats.from(this.directives)
+            );
+        } else if (!this.compiledPrograms.isOwnedBy(device)) {
+            throw new IllegalStateException("Iris Metal compiled generation crossed Metal device ownership");
+        }
         if (this.resources == null) {
             this.resources = new IrisMetalWorldResources(
                     device,
@@ -154,6 +174,10 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     @Override
     public void destroy() {
         this.frameState.endWorldRendering();
+        if (this.compiledPrograms != null) {
+            this.compiledPrograms.close();
+            this.compiledPrograms = null;
+        }
         this.programs.close();
         if (this.resources != null) {
             this.resources.close();
