@@ -37,9 +37,12 @@ java {
 }
 
 // GitHub's hosted macOS 26 GPU cannot enable Metal shader-validation counter
-// sampling. Keep API validation and the headless GPU tests there, while local
-// Apple Silicon runs retain full shader validation.
-def metalShaderValidation = "true".equalsIgnoreCase(System.getenv("CI")) ? "0" : "1"
+// sampling, and its debug layer requests the same unsupported counters even
+// when shader validation is disabled. Keep the functional GPU readback tests
+// there; local Apple Silicon runs retain the full Metal validation layers.
+def hostedCi = "true".equalsIgnoreCase(System.getenv("CI"))
+def metalApiValidation = hostedCi ? "0" : "1"
+def metalShaderValidation = hostedCi ? "0" : "1"
 
 tasks.test {
 	useJUnitPlatform()
@@ -52,7 +55,7 @@ tasks.test {
 	exclude "**/MetalIrisSodiumTerrainTest.class"
 	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
-		environment "MTL_DEBUG_LAYER", "1"
+		environment "MTL_DEBUG_LAYER", metalApiValidation
 		environment "MTL_SHADER_VALIDATION", metalShaderValidation
 	}
 }
@@ -569,7 +572,7 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
-	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_DEBUG_LAYER", metalApiValidation
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 }
 
@@ -587,7 +590,7 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
-	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_DEBUG_LAYER", metalApiValidation
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 }
 
@@ -607,7 +610,7 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
-	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_DEBUG_LAYER", metalApiValidation
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 }
 
@@ -651,7 +654,7 @@ tasks.register("metalIrisShaderTranslationTest", Test) {
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	systemProperty "metallum.iris.shaderpack.dir", "${projectDir}/run/shaderpacks"
-	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_DEBUG_LAYER", metalApiValidation
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 	testLogging {
 		showStandardStreams = true
