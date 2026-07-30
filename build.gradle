@@ -46,6 +46,7 @@ test {
 	exclude "**/IrisMetalPingPongTargetsIntegrationTest.class"
 	exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
 	exclude "**/MetalIrisNoiseTextureIntegrationTest.class"
+	exclude "**/IrisMetalCenterDepthSamplerTest.class"
 }
 
 processResources {
@@ -164,6 +165,7 @@ tasks.register("metalIrisTexturesIntegrationTest", Test) {
 	filter {
 		includeTestsMatching "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest"
 		includeTestsMatching "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", "1"
