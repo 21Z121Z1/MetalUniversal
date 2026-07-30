@@ -38,6 +38,29 @@ dependencies {
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+// Iris ships its preprocessing stack as Fabric nested jars. A plain JUnit
+// worker does not expand those jars, so expose the exact embedded binaries to
+// headless ShaderPack/TransformPatcher tests without adding parallel versions.
+tasks.register("extractIrisNestedJars", Copy) {
+	from({
+		def irisJar = configurations.compileClasspath.files.find {
+			it.name.startsWith("iris-") && it.name.endsWith(".jar")
+		}
+		irisJar != null ? zipTree(irisJar) : []
+	}) {
+		include "META-INF/jars/*.jar"
+	}
+	eachFile { it.path = it.name }
+	includeEmptyDirs = false
+	into layout.buildDirectory.dir("iris-nested-jars")
+}
+
+def irisNestedJars = fileTree("${buildDir}/iris-nested-jars") { include "*.jar" }
+irisNestedJars.builtBy("extractIrisNestedJars")
+dependencies {
+	testRuntimeOnly irisNestedJars
+}
+
 test {
 	useJUnitPlatform()
 	exclude "**/MetalMrtBackendIntegrationTest.class"
