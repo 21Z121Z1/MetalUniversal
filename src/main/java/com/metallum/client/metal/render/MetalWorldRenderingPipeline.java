@@ -43,11 +43,13 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     private final PackDirectives directives;
     private final OptionalInt forcedShadowRenderDistanceChunks;
     private final IrisMetalFrameState frameState = new IrisMetalFrameState();
+    private final IrisMetalWorldPrograms programs;
     private IrisMetalWorldResources resources;
 
     public MetalWorldRenderingPipeline(final ProgramSet programSet) {
         this.generation = GENERATIONS.incrementAndGet();
         this.programSet = Objects.requireNonNull(programSet, "programSet");
+        this.programs = new IrisMetalWorldPrograms(this.generation, this.programSet);
         this.pack = programSet.getPack();
         this.directives = programSet.getPackDirectives();
         this.forcedShadowRenderDistanceChunks = forcedShadowDistance(
@@ -87,6 +89,10 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
 
     int generation() {
         return this.generation;
+    }
+
+    IrisMetalWorldPrograms programs() {
+        return this.programs;
     }
 
     IrisMetalWorldResources resources() {
@@ -148,6 +154,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     @Override
     public void destroy() {
         this.frameState.endWorldRendering();
+        this.programs.close();
         if (this.resources != null) {
             this.resources.close();
             this.resources = null;

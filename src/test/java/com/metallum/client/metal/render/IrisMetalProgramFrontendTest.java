@@ -28,6 +28,9 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class IrisMetalProgramFrontendTest {
@@ -78,6 +81,34 @@ final class IrisMetalProgramFrontendTest {
             assertPatchedCoreSyntax(patchedFinal.vertexSource());
             assertPatchedCoreSyntax(patchedFinal.fragmentSource());
             assertCrossCompiles(IrisMetalGlslLinker.linkDefault(patchedFinal));
+
+            try (IrisMetalWorldPrograms first = new IrisMetalWorldPrograms(41, programs);
+                 IrisMetalWorldPrograms second = new IrisMetalWorldPrograms(42, programs)) {
+                IrisMetalGlslLinker.LinkedRasterProgram firstTerrain =
+                        first.sodium(ProgramId.TerrainSolid, AlphaTest.ALWAYS).orElseThrow();
+                assertSame(
+                        firstTerrain,
+                        first.sodium(ProgramId.TerrainSolid, AlphaTest.ALWAYS).orElseThrow(),
+                        "one generation did not cache its linked terrain program"
+                );
+                assertSame(
+                        first.composite(composite, TextureStage.COMPOSITE_AND_FINAL),
+                        first.composite(composite, TextureStage.COMPOSITE_AND_FINAL),
+                        "one generation did not cache its linked composite program"
+                );
+                assertTrue(first.cachedProgramCount() == 2);
+                assertNotSame(
+                        firstTerrain,
+                        second.sodium(ProgramId.TerrainSolid, AlphaTest.ALWAYS).orElseThrow(),
+                        "separate generations shared a linked program instance"
+                );
+                first.close();
+                assertTrue(first.cachedProgramCount() == 0);
+                assertThrows(
+                        IllegalStateException.class,
+                        () -> first.sodium(ProgramId.TerrainSolid, AlphaTest.ALWAYS)
+                );
+            }
         }
     }
 
