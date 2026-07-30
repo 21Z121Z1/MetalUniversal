@@ -1566,6 +1566,180 @@ public func MTLBlitCommandEncoder_waitForFence(
     encoder.waitForFence(fence)
 }
 
+// MARK: - Generic compute / mipmap / compare-sampler ABI (Iris backend B0)
+//
+// Vanilla Blaze3D 26.2 has no compute, storage-resource, mipmap-generation or
+// depth-compare-sampler concepts, so these exports are mod-private extensions
+// consumed by the Java layer through optional FFM downcalls. Compute encoders
+// participate in the same single-MTLFence hazard chain as render/blit encoders
+// (resources are allocated untracked): the Java owner must waitForFence on
+// begin and updateFence on end, exactly like MetalCommandEncoder does for the
+// other encoder kinds.
+
+@_cdecl("metallum_MTLCommandBuffer_makeComputeCommandEncoder")
+public func metallum_MTLCommandBuffer_makeComputeCommandEncoder(
+    _ commandBuffer: MTLCommandBuffer
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        retainedPointer(commandBuffer.makeComputeCommandEncoder())
+    }
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_setComputePipelineState")
+public func metallum_MTLComputeCommandEncoder_setComputePipelineState(
+    _ encoder: MTLComputeCommandEncoder,
+    _ pipelineState: MTLComputePipelineState
+) {
+    encoder.setComputePipelineState(pipelineState)
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_setBuffer")
+public func metallum_MTLComputeCommandEncoder_setBuffer(
+    _ encoder: MTLComputeCommandEncoder,
+    _ buffer: MTLBuffer?,
+    _ offset: Int,
+    _ index: Int32
+) {
+    encoder.setBuffer(buffer, offset: offset, index: Int(index))
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_setTexture")
+public func metallum_MTLComputeCommandEncoder_setTexture(
+    _ encoder: MTLComputeCommandEncoder,
+    _ texture: MTLTexture?,
+    _ index: Int32
+) {
+    encoder.setTexture(texture, index: Int(index))
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_setSamplerState")
+public func metallum_MTLComputeCommandEncoder_setSamplerState(
+    _ encoder: MTLComputeCommandEncoder,
+    _ sampler: MTLSamplerState?,
+    _ index: Int32
+) {
+    encoder.setSamplerState(sampler, index: Int(index))
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_dispatchThreadgroups")
+public func metallum_MTLComputeCommandEncoder_dispatchThreadgroups(
+    _ encoder: MTLComputeCommandEncoder,
+    _ groupsX: Int32,
+    _ groupsY: Int32,
+    _ groupsZ: Int32,
+    _ threadsPerGroupX: Int32,
+    _ threadsPerGroupY: Int32,
+    _ threadsPerGroupZ: Int32
+) {
+    encoder.dispatchThreadgroups(
+        MTLSize(width: Int(groupsX), height: Int(groupsY), depth: Int(groupsZ)),
+        threadsPerThreadgroup: MTLSize(
+            width: Int(threadsPerGroupX),
+            height: Int(threadsPerGroupY),
+            depth: Int(threadsPerGroupZ)
+        )
+    )
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect")
+public func metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
+    _ encoder: MTLComputeCommandEncoder,
+    _ indirectBuffer: MTLBuffer,
+    _ indirectOffset: Int,
+    _ threadsPerGroupX: Int32,
+    _ threadsPerGroupY: Int32,
+    _ threadsPerGroupZ: Int32
+) {
+    encoder.dispatchThreadgroups(
+        indirectBuffer: indirectBuffer,
+        indirectBufferOffset: indirectOffset,
+        threadsPerThreadgroup: MTLSize(
+            width: Int(threadsPerGroupX),
+            height: Int(threadsPerGroupY),
+            depth: Int(threadsPerGroupZ)
+        )
+    )
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_updateFence")
+public func metallum_MTLComputeCommandEncoder_updateFence(
+    _ encoder: MTLComputeCommandEncoder,
+    _ fence: MTLFence
+) {
+    encoder.updateFence(fence)
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_waitForFence")
+public func metallum_MTLComputeCommandEncoder_waitForFence(
+    _ encoder: MTLComputeCommandEncoder,
+    _ fence: MTLFence
+) {
+    encoder.waitForFence(fence)
+}
+
+@_cdecl("metallum_MTLDevice_makeComputePipelineState")
+public func metallum_MTLDevice_makeComputePipelineState(
+    _ device: MTLDevice,
+    _ function: MTLFunction
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        do {
+            return retainedPointer(try device.makeComputePipelineState(function: function))
+        } catch {
+            NSLog("[metallum] Failed to create compute pipeline state: %@", String(describing: error))
+            return nil
+        }
+    }
+}
+
+@_cdecl("metallum_MTLComputePipelineState_maxTotalThreadsPerThreadgroup")
+public func metallum_MTLComputePipelineState_maxTotalThreadsPerThreadgroup(
+    _ pipelineState: MTLComputePipelineState
+) -> Int32 {
+    return Int32(clamping: pipelineState.maxTotalThreadsPerThreadgroup)
+}
+
+@_cdecl("metallum_MTLBlitCommandEncoder_generateMipmaps")
+public func metallum_MTLBlitCommandEncoder_generateMipmaps(
+    _ encoder: MTLBlitCommandEncoder,
+    _ texture: MTLTexture
+) {
+    encoder.generateMipmaps(for: texture)
+}
+
+// Sampler creation with an optional depth-compare function. compareFunction
+// receives the MTLCompareFunction raw value, or -1 for an ordinary sampler.
+// Compare samplers additionally force normalized coordinates and are intended
+// for shadow2D-style lookups (MSL sample_compare).
+@_cdecl("metallum_create_sampler_v2")
+public func metallum_create_sampler_v2(
+    _ device: MTLDevice,
+    _ addressModeU: MTLSamplerAddressMode,
+    _ addressModeV: MTLSamplerAddressMode,
+    _ minFilter: MTLSamplerMinMagFilter,
+    _ magFilter: MTLSamplerMinMagFilter,
+    _ mipFilter: MTLSamplerMipFilter,
+    _ maxAnisotropy: Int32,
+    _ lodMaxClamp: Double,
+    _ compareFunction: Int32
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        let descriptor = MTLSamplerDescriptor()
+        descriptor.minFilter = minFilter
+        descriptor.magFilter = magFilter
+        descriptor.mipFilter = mipFilter
+        descriptor.sAddressMode = addressModeU
+        descriptor.tAddressMode = addressModeV
+        descriptor.maxAnisotropy = max(Int(maxAnisotropy), 1)
+        descriptor.lodMinClamp = 0.0
+        descriptor.lodMaxClamp = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
+        if compareFunction >= 0, let compare = MTLCompareFunction(rawValue: UInt(compareFunction)) {
+            descriptor.compareFunction = compare
+        }
+        return retainedPointer(device.makeSamplerState(descriptor: descriptor))
+    }
+}
+
 @_cdecl("metallum_release_object")
 public func metallum_release_object(_ obj: UnsafeMutableRawPointer?) {
     autoreleasepool {

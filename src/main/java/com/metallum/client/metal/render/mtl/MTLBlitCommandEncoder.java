@@ -77,6 +77,10 @@ public final class MTLBlitCommandEncoder extends MTLCommandEncoder {
         );
     }
 
+    public void generateMipmaps(final MemorySegment texture) {
+        MetalNativeBridge.MTLBlitCommandEncoder_generateMipmaps(handle(), texture);
+    }
+
     public void updateFence(final MemorySegment fence) {
         MetalNativeBridge.MTLBlitCommandEncoder_updateFence(handle(), fence);
     }

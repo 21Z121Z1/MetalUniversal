@@ -15,6 +15,12 @@ import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
 final class MetalGpuTexture extends GpuTexture {
+    /**
+     * Backend-private usage bit for textures written through a Metal compute
+     * shader. Blaze3D 26.2 does not expose a storage-texture usage flag.
+     */
+    static final int USAGE_SHADER_WRITE = 1 << 5;
+
     private final MetalDevice device;
     private final MTLPixelFormat mtlPixelFormat;
     private boolean closed;
@@ -134,6 +140,9 @@ final class MetalGpuTexture extends GpuTexture {
         if ((usage & GpuTexture.USAGE_RENDER_ATTACHMENT) != 0) {
             result |= MTLTextureUsage.RenderTarget.value;
             result |= MTLTextureUsage.ShaderRead.value;
+        }
+        if ((usage & USAGE_SHADER_WRITE) != 0) {
+            result |= MTLTextureUsage.ShaderWrite.value;
         }
         return result == 0L ? MTLTextureUsage.ShaderRead.value : result;
     }
