@@ -43,6 +43,44 @@ import java.nio.IntBuffer;
 @Environment(EnvType.CLIENT)
 @Mixin(IrisRenderSystem.class)
 public class IrisRenderSystemMixin {
+    @Inject(method = "initRenderer", at = @At("HEAD"), cancellable = true, remap = false)
+    private static void metallum$skipGlCapabilityProbe(final CallbackInfo ci) {
+        if (MetalActive.isMetalActive()) {
+            ci.cancel();
+        }
+    }
+
+    @Inject(
+            method = {
+                    "supportsSSBO",
+                    "supportsImageLoadStore",
+                    "supportsBufferBlending",
+                    "supportsCompute",
+                    "supportsTesselation"
+            },
+            at = @At("HEAD"),
+            cancellable = true,
+            remap = false
+    )
+    private static void metallum$unconnectedIrisFeaturesFailClosed(
+            final CallbackInfoReturnable<Boolean> cir
+    ) {
+        if (MetalActive.isMetalActive()) {
+            cir.setReturnValue(false);
+        }
+    }
+
+    @Inject(method = "getStringi", at = @At("HEAD"), cancellable = true, remap = false)
+    private static void metallum$skipGlExtensionQuery(
+            final int name,
+            final int index,
+            final CallbackInfoReturnable<String> cir
+    ) {
+        if (MetalActive.isMetalActive()) {
+            cir.setReturnValue("");
+        }
+    }
+
     @Inject(method = "detachShader", at = @At("HEAD"), cancellable = true, remap = false)
     private static void metallum$skipDetachShaderOnMetal(
             int program,

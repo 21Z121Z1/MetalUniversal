@@ -12,9 +12,12 @@ import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Environment(EnvType.CLIENT)
 final class MetalGpuTexture extends GpuTexture {
+    private static final AtomicInteger IRIS_SYNTHETIC_IDS = new AtomicInteger(1);
+
     /**
      * Backend-private usage bit for textures written through a Metal compute
      * shader. Blaze3D 26.2 does not expose a storage-texture usage flag.
@@ -29,6 +32,7 @@ final class MetalGpuTexture extends GpuTexture {
     @Nullable
     private Double materializedDepthClear;
     private int views = 1;
+    private int irisSyntheticId;
     @Nullable
     private MemorySegment nativeHandle;
 
@@ -136,6 +140,19 @@ final class MetalGpuTexture extends GpuTexture {
     @Override
     public boolean isClosed() {
         return this.closed;
+    }
+
+    /**
+     * Iris tracks every Mojang texture by an integer GL id. Metal textures do
+     * not have one, so its mixin default deliberately throws. A stable,
+     * process-local identity preserves the tracking contract without exposing
+     * or fabricating an OpenGL object.
+     */
+    public int iris$getGlId() {
+        if (this.irisSyntheticId == 0) {
+            this.irisSyntheticId = IRIS_SYNTHETIC_IDS.getAndIncrement();
+        }
+        return this.irisSyntheticId;
     }
 
     private static long toMtlTextureUsage(@GpuTexture.Usage final int usage) {
