@@ -276,6 +276,10 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {
+        MetalCompiledRenderPipeline irisPipeline = IrisMetalTerrainBridge.compiledPipeline(this, pipeline);
+        if (irisPipeline != null) {
+            return irisPipeline;
+        }
         return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, this.activeShaderSource));
     }
 
