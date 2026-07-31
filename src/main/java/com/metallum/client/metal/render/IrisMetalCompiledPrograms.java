@@ -256,7 +256,7 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
         }
     }
 
-    private static Optional<BlendFunction> irisBlendFunction(final BlendModeOverride override) {
+    static Optional<BlendFunction> irisBlendFunction(final BlendModeOverride override) {
         try {
             BlendMode blendMode = (BlendMode) IRIS_BLEND_MODE.get(override);
             return blendMode == null
@@ -267,7 +267,7 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
         }
     }
 
-    private static BlendFunction irisBlendFunction(final BlendMode blendMode) {
+    static BlendFunction irisBlendFunction(final BlendMode blendMode) {
         return new BlendFunction(
                 irisBlendFactor(blendMode.srcRgb()),
                 irisBlendFactor(blendMode.dstRgb()),

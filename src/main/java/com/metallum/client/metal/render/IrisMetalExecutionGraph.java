@@ -4,6 +4,7 @@ import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.blaze3d.pipeline.BlendFunction;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.systems.RenderPass;
@@ -15,12 +16,15 @@ import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.irisshaders.iris.features.FeatureFlags;
+import net.irisshaders.iris.gl.blending.BlendModeOverride;
 import net.irisshaders.iris.shaderpack.loading.ProgramArrayId;
 import net.irisshaders.iris.shaderpack.loading.ProgramId;
 import net.irisshaders.iris.shaderpack.programs.ComputeSource;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
+import net.irisshaders.iris.shaderpack.properties.ProgramDirectives;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
+import net.irisshaders.iris.pathways.colorspace.ColorSpace;
 import net.minecraft.resources.Identifier;
 import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
@@ -84,10 +88,15 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         }
     }
 
-    record FlipTransition(BitSet readsFromAlt, BitSet stateAfter) {
+    record FlipTransition(BitSet readsFromAlt, BitSet stateAfter, BitSet flippedAtLeastOnceAfter) {
         FlipTransition {
             readsFromAlt = (BitSet) readsFromAlt.clone();
             stateAfter = (BitSet) stateAfter.clone();
+            flippedAtLeastOnceAfter = (BitSet) flippedAtLeastOnceAfter.clone();
+        }
+
+        FlipTransition(final BitSet readsFromAlt, final BitSet stateAfter) {
+            this(readsFromAlt, stateAfter, new BitSet());
         }
 
         @Override
@@ -99,6 +108,50 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         public BitSet stateAfter() {
             return (BitSet) stateAfter.clone();
         }
+
+        @Override
+        public BitSet flippedAtLeastOnceAfter() {
+            return (BitSet) flippedAtLeastOnceAfter.clone();
+        }
+    }
+
+    enum LoadAction {
+        LOAD,
+        CLEAR,
+        DONT_CARE
+    }
+
+    enum StoreAction {
+        STORE,
+        DISCARD
+    }
+
+    /**
+     * Logical Iris attachment state. The physical slot is deliberately kept
+     * beside the logical target so DRAWBUFFERS order cannot be lost when the
+     * pass is lowered to Metal color attachments.
+     */
+    record AttachmentState(
+            int logicalTarget,
+            int physicalSlot,
+            GpuFormat format,
+            Optional<BlendFunction> blend,
+            int writeMask,
+            LoadAction load,
+            StoreAction store
+    ) {
+        AttachmentState {
+            if (logicalTarget < 0 || physicalSlot < 0) {
+                throw new IllegalArgumentException("Attachment indices must be non-negative");
+            }
+            Objects.requireNonNull(format, "format");
+            blend = Objects.requireNonNull(blend, "blend");
+            Objects.requireNonNull(load, "load");
+            Objects.requireNonNull(store, "store");
+            if ((writeMask & ~ColorTargetState.WRITE_ALL) != 0) {
+                throw new IllegalArgumentException("Invalid attachment write mask " + writeMask);
+            }
+        }
     }
 
     private record RasterPlan(
@@ -109,12 +162,20 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             int[] drawBuffers,
             BitSet readsFromAlt,
             BitSet stateAfter,
+            BitSet flippedAtLeastOnceBefore,
+            BitSet flippedAtLeastOnceAfter,
+            List<AttachmentState> attachments,
+            Set<Integer> mipmappedBuffers,
             String uniformToken
     ) {
         RasterPlan {
             drawBuffers = drawBuffers.clone();
             readsFromAlt = (BitSet) readsFromAlt.clone();
             stateAfter = (BitSet) stateAfter.clone();
+            flippedAtLeastOnceBefore = (BitSet) flippedAtLeastOnceBefore.clone();
+            flippedAtLeastOnceAfter = (BitSet) flippedAtLeastOnceAfter.clone();
+            attachments = List.copyOf(attachments);
+            mipmappedBuffers = Set.copyOf(mipmappedBuffers);
         }
     }
 
@@ -168,11 +229,16 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
     private final EnumMap<Stage, List<ComputePlan>> computePlans = new EnumMap<>(Stage.class);
     private final List<RasterPlan> shadowRasterPlans = new ArrayList<>();
     private final EnumMap<Stage, List<OrderedOperation>> orderedOperations = new EnumMap<>(Stage.class);
+    private final EnumMap<Stage, BitSet> stageInputs = new EnumMap<>(Stage.class);
+    private final EnumMap<Stage, BitSet> stageOutputs = new EnumMap<>(Stage.class);
     private final Map<RasterPlan, MetalCompiledRenderPipeline> rasterPipelines = new IdentityHashMap<>();
     private final Map<RasterPlan, MetalCompiledRenderPipeline> shadowRasterPipelines = new IdentityHashMap<>();
     private final Map<ComputePlan, MetalComputePipeline> computePipelines = new IdentityHashMap<>();
     private final List<ComputePlan> finalComputePlans = new ArrayList<>();
     private @Nullable RasterPlan finalPlan;
+    private BitSet finalSnapshot = new BitSet();
+    private BitSet finalFlippedAtLeastOnce = new BitSet();
+    private Set<Integer> finalHistoryTargets = Set.of();
     private @Nullable MetalCompiledRenderPipeline finalPipeline;
     private @Nullable IrisMetalCenterDepthSampler centerDepthSampler;
     private BitSet state = new BitSet();
@@ -205,6 +271,12 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
     }
 
     private void plan() {
+        GpuFormat[] targetFormats = IrisMetalRenderTargetFormats.from(programSet.getPackDirectives());
+        for (Stage stage : Stage.values()) {
+            stageInputs.put(stage, new BitSet(targetCount));
+            stageOutputs.put(stage, new BitSet(targetCount));
+        }
+
         for (ComputeSource source : programSet.getSetup()) {
             if (source != null && source.isValid()) {
                 computePlans.get(Stage.SETUP).add(planCompute(Stage.SETUP, -1, source));
@@ -212,6 +284,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         }
 
         BitSet current = new BitSet(targetCount);
+        BitSet flippedAtLeastOnce = new BitSet(targetCount);
+        stageInputs.put(Stage.SETUP, (BitSet) current.clone());
+        stageOutputs.put(Stage.SETUP, (BitSet) current.clone());
         for (Stage stage : new Stage[]{
                 Stage.BEGIN, Stage.PREPARE, Stage.DEFERRED, Stage.COMPOSITE
         }) {
@@ -219,6 +294,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 applyPreFlips(current, programSet.getPackDirectives()
                         .getExplicitFlips(stage.preFlipDirective), targetCount);
             }
+            stageInputs.put(stage, (BitSet) current.clone());
             ProgramSource[] sources = programSet.getComposite(stage.arrayId);
             ComputeSource[][] computes = programSet.getCompute(stage.arrayId);
             int count = Math.max(sources.length, computes.length);
@@ -242,6 +318,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 );
                 FlipTransition transition = transition(
                         current,
+                        flippedAtLeastOnce,
                         drawBuffers,
                         source.getDirectives().getExplicitFlips(),
                         targetCount
@@ -253,10 +330,23 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 );
                 rasterPlans.get(stage).add(new RasterPlan(
                         stage, index, source.getName(), linked, drawBuffers,
-                        transition.readsFromAlt(), transition.stateAfter(), token
+                        transition.readsFromAlt(), transition.stateAfter(),
+                        flippedAtLeastOnce, transition.flippedAtLeastOnceAfter(),
+                        attachmentStates(source.getDirectives(), drawBuffers, targetFormats),
+                        source.getDirectives().getMipmappedBuffers(), token
                 ));
+                flippedAtLeastOnce = transition.flippedAtLeastOnceAfter();
             }
+            stageOutputs.put(stage, (BitSet) current.clone());
         }
+        finalSnapshot = (BitSet) current.clone();
+        finalFlippedAtLeastOnce = (BitSet) flippedAtLeastOnce.clone();
+        finalHistoryTargets = finalHistoryTargets(
+                finalSnapshot, clearedEveryFrame(programSet.getPackDirectives()), targetCount
+        );
+        stageInputs.put(Stage.FINAL, finalSnapshot);
+        stageOutputs.put(Stage.FINAL, finalSnapshot);
+
         ComputeSource[] shadowComputes = programSet.getShadowCompute();
         for (int index = 0; index < shadowComputes.length; index++) {
             ComputeSource source = shadowComputes[index];
@@ -268,6 +358,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         }
         BitSet shadowCurrent = new BitSet();
         BitSet shadowHistory = new BitSet();
+        GpuFormat[] shadowFormats = shadowTargetFormats();
         ProgramSource[] shadowSources = programSet.getComposite(ProgramArrayId.ShadowComposite);
         for (int index = 0; index < shadowSources.length; index++) {
             ProgramSource source = shadowSources[index];
@@ -278,9 +369,12 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                     source.getName(), source.getDirectives().getDrawBuffers(), shadowTargetCount()
             );
             FlipTransition transition = transition(
-                    shadowCurrent, drawBuffers, source.getDirectives().getExplicitFlips(), shadowTargetCount()
+                    shadowCurrent, shadowHistory, drawBuffers,
+                    source.getDirectives().getExplicitFlips(), shadowTargetCount()
             );
+            BitSet historyBefore = shadowHistory;
             shadowCurrent = transition.stateAfter();
+            shadowHistory = transition.flippedAtLeastOnceAfter();
             String token = token(Stage.SHADOW_COMPOSITE, index, source.getName());
             shadowRasterPlans.add(new RasterPlan(
                     Stage.SHADOW_COMPOSITE,
@@ -290,9 +384,12 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                     drawBuffers,
                     transition.readsFromAlt(),
                     transition.stateAfter(),
+                    historyBefore,
+                    transition.flippedAtLeastOnceAfter(),
+                    attachmentStates(source.getDirectives(), drawBuffers, shadowFormats),
+                    source.getDirectives().getMipmappedBuffers(),
                     token
             ));
-            shadowHistory.or(transition.stateAfter());
         }
         shadowState = new BitSet();
         state = new BitSet();
@@ -306,8 +403,12 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 throw new IllegalStateException("Final program resolution disappeared during graph planning");
             }
             finalPlan = new RasterPlan(
-                    Stage.COMPOSITE, -1, source.getName(), linked, drawBuffers,
-                    current, current, token(Stage.COMPOSITE, -1, source.getName())
+                    Stage.FINAL, -1, source.getName(), linked, drawBuffers,
+                    finalSnapshot, finalSnapshot,
+                    finalFlippedAtLeastOnce, finalFlippedAtLeastOnce,
+                    attachmentStates(source.getDirectives(), drawBuffers, targetFormats),
+                    source.getDirectives().getMipmappedBuffers(),
+                    token(Stage.FINAL, -1, source.getName())
             );
         }
 
@@ -397,9 +498,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                     uniformValues.register(plan.uniformToken(), plan.name(), plan.program());
                     MetalCompiledRenderPipeline pipeline = stage == Stage.SHADOW_COMPOSITE
                             ? compileShadowRaster(
-                                    device, resources.shadowTargets(), plan.program(), plan.name()
+                                    device, resources.shadowTargets(), plan
                             )
-                            : compileRaster(device, targets, plan.program(), plan.name(), null);
+                            : compileRaster(device, targets, plan, null);
                     if (stage == Stage.SHADOW_COMPOSITE) {
                         shadowRasterPipelines.put(plan, pipeline);
                     } else {
@@ -417,7 +518,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 }
                 uniformValues.register(finalPlan.uniformToken(), finalPlan.name(), finalPlan.program());
                 finalPipeline = compileRaster(
-                        device, targets, finalPlan.program(), finalPlan.name(), mainColorFormat
+                        device, targets, finalPlan, mainColorFormat
                 );
             }
             prepared = true;
@@ -514,9 +615,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         ensurePrepared();
         IrisMetalRenderTargets targets = resources.renderTargets();
         IrisMetalPingPongTargets colors = targets.colorTargets();
-        colors.restore(state);
+        colors.restore(finalSnapshot);
         executeStage(Stage.FINAL, resources);
-        colors.restore(state);
+        colors.restore(finalSnapshot);
         if (finalPlan == null) {
             activeEncoder().copyTextureToTexture(
                     colors.readTexture(0), mainColor.texture(), 0, 0, 0, 0, 0,
@@ -526,7 +627,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             executeRaster(finalPlan, finalPipeline, resources, mainColor);
         }
         targets.resetMipmaps();
-        for (int target = state.nextSetBit(0); target >= 0; target = state.nextSetBit(target + 1)) {
+        for (int target : finalHistoryTargets) {
             MetalGpuTexture source = colors.readTexture(target);
             MetalGpuTexture destination = colors.mainTexture(target);
             if (source != destination) {
@@ -540,9 +641,13 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
 
     private void executeStage(final Stage stage, final IrisMetalWorldResources resources) {
         ensurePrepared();
-        if (stage.preFlipDirective != null) {
-            applyPreFlips(state, programSet.getPackDirectives().getExplicitFlips(stage.preFlipDirective), targetCount);
+        BitSet stageInput = stageInputs.get(stage);
+        BitSet stageOutput = stageOutputs.get(stage);
+        if (stageInput == null || stageOutput == null) {
+            throw new IllegalStateException("Iris stage has no planned flip boundary: " + stage);
         }
+        resources.renderTargets().colorTargets().restore(stageInput);
+        state = (BitSet) stageInput.clone();
         currentResourcesForDispatch = resources.renderTargets();
         try {
             for (OrderedOperation operation : orderedOperations.get(stage)) {
@@ -556,6 +661,8 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 resources.renderTargets().colorTargets().restore(plan.stateAfter());
                 state = plan.stateAfter();
             }
+            resources.renderTargets().colorTargets().restore(stageOutput);
+            state = (BitSet) stageOutput.clone();
         } finally {
             currentResourcesForDispatch = null;
         }
@@ -934,10 +1041,10 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
     private MetalCompiledRenderPipeline compileRaster(
             final MetalDevice device,
             final IrisMetalRenderTargets targets,
-            final IrisMetalGlslLinker.LinkedRasterProgram program,
-            final String role,
+            final RasterPlan plan,
             final @Nullable GpuFormat overrideFormat
     ) {
+        IrisMetalGlslLinker.LinkedRasterProgram program = plan.program();
         int[] buffers = validateDrawBuffers(program.name(), program.program().drawBuffers());
         ColorTargetState[] colorTargets = new ColorTargetState[buffers.length];
         Map<String, GpuFormat> vertexFormats = new HashMap<>();
@@ -945,16 +1052,17 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 vertexFormats.put(element.name(), element.format())
         );
         for (int index = 0; index < buffers.length; index++) {
+            AttachmentState attachment = plan.attachments().get(index);
             colorTargets[index] = new ColorTargetState(
-                    Optional.empty(),
-                    overrideFormat == null ? targets.colorTargets().format(buffers[index]) : overrideFormat,
-                    ColorTargetState.WRITE_ALL
+                    attachment.blend(),
+                    overrideFormat == null ? attachment.format() : overrideFormat,
+                    attachment.writeMask()
             );
         }
         try {
             MetalCompiledRenderPipeline pipeline = MetalCrossShaderCompiler.compileShaderpack(
                     device,
-                    "iris/gen" + generation + "/graph/" + role + "/" + program.name(),
+                    "iris/gen" + generation + "/graph/" + plan.stage().name().toLowerCase() + "/" + program.name(),
                     program.vertexGlsl(), program.fragmentGlsl(), null,
                     vertexFormats, false, false,
                     com.mojang.blaze3d.platform.PolygonMode.FILL,
@@ -976,11 +1084,11 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
     private MetalCompiledRenderPipeline compileShadowRaster(
             final MetalDevice device,
             final @Nullable IrisMetalShadowTargets shadows,
-            final IrisMetalGlslLinker.LinkedRasterProgram program,
-            final String role
+            final RasterPlan plan
     ) {
+        IrisMetalGlslLinker.LinkedRasterProgram program = plan.program();
         if (shadows == null) {
-            throw new IllegalStateException("Missing generation-owned shadow targets for " + role);
+            throw new IllegalStateException("Missing generation-owned shadow targets for " + plan.name());
         }
         int[] buffers = validateDrawBuffers(program.name(), program.program().drawBuffers(), shadowTargetCount());
         ColorTargetState[] colorTargets = new ColorTargetState[buffers.length];
@@ -989,14 +1097,16 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 vertexFormats.put(element.name(), element.format())
         );
         for (int index = 0; index < buffers.length; index++) {
+            AttachmentState attachment = plan.attachments().get(index);
             colorTargets[index] = new ColorTargetState(
-                    Optional.empty(), shadows.colorFormat(buffers[index]), ColorTargetState.WRITE_ALL
+                    attachment.blend(), shadows.colorFormat(buffers[index]), attachment.writeMask()
             );
         }
         try {
             return MetalCrossShaderCompiler.compileShaderpack(
                     device,
-                    "iris/gen" + generation + "/shadowcomp/" + role + "/" + program.name(),
+                    "iris/gen" + generation + "/shadowcomp/"
+                            + plan.stage().name().toLowerCase() + "/" + program.name(),
                     program.vertexGlsl(), program.fragmentGlsl(), null,
                     vertexFormats, false, false,
                     com.mojang.blaze3d.platform.PolygonMode.FILL,
@@ -1086,6 +1196,80 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         }
     }
 
+    private static List<AttachmentState> attachmentStates(
+            final ProgramDirectives directives,
+            final int[] drawBuffers,
+            final GpuFormat[] formats
+    ) {
+        Objects.requireNonNull(directives, "directives");
+        Objects.requireNonNull(formats, "formats");
+        Optional<BlendFunction> global = directives.getBlendModeOverride()
+                .flatMap(IrisMetalCompiledPrograms::irisBlendFunction);
+        Map<Integer, Optional<BlendFunction>> perTarget = new HashMap<>();
+        for (var override : directives.getBufferBlendOverrides()) {
+            if (override.index() < 0 || override.index() >= formats.length) {
+                throw new IllegalArgumentException(
+                        "Iris attachment blend target " + override.index()
+                                + " is outside 0.." + (formats.length - 1)
+                );
+            }
+            Optional<BlendFunction> blend = override.blendMode() == null
+                    ? Optional.empty()
+                    : Optional.of(IrisMetalCompiledPrograms.irisBlendFunction(override.blendMode()));
+            if (perTarget.put(override.index(), blend) != null) {
+                throw new IllegalArgumentException(
+                        "Iris attachment blend target is declared twice: colortex" + override.index()
+                );
+            }
+        }
+        List<AttachmentState> result = new ArrayList<>(drawBuffers.length);
+        for (int slot = 0; slot < drawBuffers.length; slot++) {
+            int logicalTarget = drawBuffers[slot];
+            if (logicalTarget < 0 || logicalTarget >= formats.length) {
+                throw new IllegalArgumentException(
+                        "Iris attachment target " + logicalTarget + " is outside 0.."
+                                + (formats.length - 1)
+                );
+            }
+            result.add(new AttachmentState(
+                    logicalTarget,
+                    slot,
+                    formats[logicalTarget],
+                    perTarget.getOrDefault(logicalTarget, global),
+                    ColorTargetState.WRITE_ALL,
+                    LoadAction.LOAD,
+                    StoreAction.STORE
+            ));
+        }
+        return List.copyOf(result);
+    }
+
+    private static Set<Integer> clearedEveryFrame(
+            final net.irisshaders.iris.shaderpack.properties.PackDirectives directives
+    ) {
+        Set<Integer> result = new LinkedHashSet<>();
+        for (Map.Entry<Integer, net.irisshaders.iris.shaderpack.properties.PackRenderTargetDirectives.RenderTargetSettings> entry
+                : directives.getRenderTargetDirectives().getRenderTargetSettings().entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null && entry.getValue().shouldClear()) {
+                result.add(entry.getKey());
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    private GpuFormat[] shadowTargetFormats() {
+        int count = shadowTargetCount();
+        GpuFormat[] formats = new GpuFormat[count];
+        for (int index = 0; index < count; index++) {
+            var settings = programSet.getPackDirectives().getShadowDirectives()
+                    .getColorSamplingSettings().get(index);
+            formats[index] = IrisMetalRenderTargetFormats.fromInternalName(
+                    settings == null ? "RGBA8" : settings.getFormat().name()
+            );
+        }
+        return formats;
+    }
+
     private int shadowTargetCount() {
         return programSet.getPack().hasFeature(FeatureFlags.HIGHER_SHADOWCOLOR)
                 ? net.irisshaders.iris.shaderpack.properties.PackShadowDirectives.MAX_SHADOW_COLOR_BUFFERS_IRIS
@@ -1125,14 +1309,26 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             final Map<Integer, Boolean> explicitFlips,
             final int targetCount
     ) {
+        return transition(before, new BitSet(targetCount), drawBuffers, explicitFlips, targetCount);
+    }
+
+    static FlipTransition transition(
+            final BitSet before,
+            final BitSet flippedAtLeastOnceBefore,
+            final int[] drawBuffers,
+            final Map<Integer, Boolean> explicitFlips,
+            final int targetCount
+    ) {
         BitSet reads = (BitSet) before.clone();
         BitSet after = (BitSet) before.clone();
+        BitSet history = (BitSet) flippedAtLeastOnceBefore.clone();
         for (int target : drawBuffers) {
             if (target < 0 || target >= targetCount) {
                 throw new IllegalArgumentException("DRAWBUFFERS target out of range: " + target);
             }
             if (explicitFlips.get(target) != Boolean.FALSE) {
                 after.flip(target);
+                history.set(target);
             }
         }
         explicitFlips.forEach((target, shouldFlip) -> {
@@ -1141,9 +1337,29 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             }
             if (Boolean.TRUE.equals(shouldFlip)) {
                 after.flip(target);
+                history.set(target);
             }
         });
-        return new FlipTransition(reads, after);
+        return new FlipTransition(reads, after, history);
+    }
+
+    static Set<Integer> finalHistoryTargets(
+            final BitSet finalSnapshot,
+            final Set<Integer> buffersClearedEveryFrame,
+            final int targetCount
+    ) {
+        if (finalSnapshot.length() > targetCount) {
+            throw new IllegalArgumentException("Final flip snapshot contains an out-of-range target");
+        }
+        Set<Integer> result = new LinkedHashSet<>();
+        for (int target = finalSnapshot.nextSetBit(0);
+             target >= 0;
+             target = finalSnapshot.nextSetBit(target + 1)) {
+            if (!buffersClearedEveryFrame.contains(target)) {
+                result.add(target);
+            }
+        }
+        return Set.copyOf(result);
     }
 
     static void applyPreFlips(
