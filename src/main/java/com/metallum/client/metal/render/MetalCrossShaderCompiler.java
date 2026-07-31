@@ -40,6 +40,7 @@ import java.util.regex.Pattern;
 
 @Environment(EnvType.CLIENT)
 public final class MetalCrossShaderCompiler {
+    private static final String IRIS_SSBO_DESCRIPTOR_PREFIX = "iris_ssbo/";
     private static final Set<String> BUILT_IN_UNIFORMS = Set.of("Projection", "Lighting", "Fog", "Globals");
     /** Sodium's stable per-region time buffer is a texel buffer, not a 2D sampler. */
     private static final GpuFormat SODIUM_SECTION_TIME_FORMAT = GpuFormat.R32_SINT;
@@ -77,6 +78,53 @@ public final class MetalCrossShaderCompiler {
     private MetalCrossShaderCompiler() {
     }
 
+    private enum RasterStorageKind {
+        BUFFER,
+        IMAGE
+    }
+
+    private record RasterStorageUse(
+            RasterStorageKind kind,
+            String resourceName,
+            String descriptorName,
+            int logicalBinding,
+            int stageMask,
+            ByteBuffer spirv,
+            int bindingWordOffset
+    ) {
+    }
+
+    private record RasterStorageResource(
+            RasterStorageKind kind,
+            String descriptorName,
+            int physicalBinding,
+            int stageMask
+    ) {
+    }
+
+    static String storageBufferDescriptorName(final int logicalBinding, final String resourceName) {
+        if (logicalBinding < 0) {
+            throw new IllegalArgumentException("SSBO binding must be non-negative: " + logicalBinding);
+        }
+        return IRIS_SSBO_DESCRIPTOR_PREFIX + logicalBinding + '/' + resourceName;
+    }
+
+    static int storageBufferLogicalBinding(final String descriptorName) {
+        if (!descriptorName.startsWith(IRIS_SSBO_DESCRIPTOR_PREFIX)) {
+            return -1;
+        }
+        int start = IRIS_SSBO_DESCRIPTOR_PREFIX.length();
+        int end = descriptorName.indexOf('/', start);
+        if (end < 0) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(descriptorName.substring(start, end));
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
     static MetalCompiledRenderPipeline compile(final MetalDevice device, final RenderPipeline pipeline, final ShaderSource shaderSource) {
         try {
             IntermediaryShaderModule vertexSpirv = device.getOrCompileShader(pipeline.getVertexShader(), ShaderType.VERTEX, pipeline.getShaderDefines(), shaderSource);
@@ -90,6 +138,9 @@ public final class MetalCrossShaderCompiler {
             List<VulkanBindGroupLayout.Entry> layoutEntries = new ArrayList<>();
             addToBindGroup(layoutEntries, vertexSpirv, pipeline);
             addToBindGroup(layoutEntries, fragmentSpirv, pipeline);
+            List<RasterStorageResource> storageResources = rebindRasterStorageResources(
+                    vertexSpirv, fragmentSpirv, layoutEntries.size()
+            );
             List<String> vertexOutputs = extractVariableNames(vertexSpirv.outputs());
 
             VertexInputLayout vertexInputs = vertexInputLayout(pipeline, vertexSpirv.inputs());
@@ -100,14 +151,15 @@ public final class MetalCrossShaderCompiler {
             );
             boolean enablePointSize = pipeline.getPrimitiveTopology() == com.mojang.blaze3d.PrimitiveTopology.POINTS;
             MslShader vertexMsl = spirvToMsl(
-                    vertexSpirv.spirv(), layoutEntries.size(), vertexInputs.formats(), enablePointSize
+                    vertexSpirv.spirv(), layoutEntries.size() + storageResources.size(),
+                    vertexInputs.formats(), enablePointSize
             );
 
             fragmentSpirv.rebind(tolerateUnprovidedInputs(vertexOutputs, fragmentSpirv.inputs()), layoutEntries);
             String fragmentSource = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);
             MslShader fragmentMsl = spirvToMsl(
                     fragmentSpirv.spirv(),
-                    layoutEntries.size(),
+                    layoutEntries.size() + storageResources.size(),
                     Map.of(),
                     true,
                     explicitFragmentOutputLocations(fragmentSource)
@@ -116,7 +168,9 @@ public final class MetalCrossShaderCompiler {
 
             String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
             String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
-            List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(layoutEntries, vertexMsl, fragmentMsl);
+            List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(
+                    layoutEntries, storageResources, vertexMsl, fragmentMsl
+            );
             return new MetalCompiledRenderPipeline(
                     device,
                     pipeline,
@@ -205,26 +259,33 @@ public final class MetalCrossShaderCompiler {
         // SPIR-V（替代原先由调用方传入的空 bindGroupEntries）。pushConstantBinding 必须
         // 与反射后条目数一致，使 push-constant 落在最后一个资源槽之后（与 vanilla
         // layoutEntries.size() 语义对齐）。
-        final ShaderpackReflection vertexReflection = reflectShaderpackResources(spirvWordsToByteBuffer(vertexSpvWords));
-        final ShaderpackReflection fragmentReflection = reflectShaderpackResources(spirvWordsToByteBuffer(fragmentSpvWords));
+        final ByteBuffer vertexSpirv = spirvWordsToByteBuffer(vertexSpvWords);
+        final ByteBuffer fragmentSpirv = spirvWordsToByteBuffer(fragmentSpvWords);
+        final ShaderpackReflection vertexReflection = reflectShaderpackResources(vertexSpirv);
+        final ShaderpackReflection fragmentReflection = reflectShaderpackResources(fragmentSpirv);
         final List<VulkanBindGroupLayout.Entry> reflectedEntries = buildShaderpackBindGroupEntries(vertexReflection, fragmentReflection);
+        final List<RasterStorageResource> storageResources = rebindRasterStorageResources(
+                vertexSpirv, fragmentSpirv, reflectedEntries.size()
+        );
         final Map<String, Integer> resourceBindings = shaderpackResourceBindings(reflectedEntries);
         final List<String> physicalInputNames = vertexInputNames(vertexFormatBindings);
 
-        final int pushConstantBinding = reflectedEntries.size();
+        final int pushConstantBinding = reflectedEntries.size() + storageResources.size();
         final MslShader vertexMsl = spirvToMsl(
-                spirvWordsToByteBuffer(vertexSpvWords), pushConstantBinding,
+                vertexSpirv, pushConstantBinding,
                 vertexAttributeFormats, enablePointSize, Map.of(), resourceBindings, physicalInputNames
         );
         final MslShader fragmentMsl = spirvToMsl(
-                spirvWordsToByteBuffer(fragmentSpvWords), pushConstantBinding,
+                fragmentSpirv, pushConstantBinding,
                 Map.of(), true, Map.of(), resourceBindings
         );
         validateFragmentOutputSignature(name, colorTargets, fragmentMsl.stageOutputLocations());
 
         final String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
         final String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
-        final List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(reflectedEntries, vertexMsl, fragmentMsl);
+        final List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(
+                reflectedEntries, storageResources, vertexMsl, fragmentMsl
+        );
 
         return new MetalCompiledRenderPipeline(
                 device,
@@ -588,6 +649,177 @@ public final class MetalCrossShaderCompiler {
         }
     }
 
+    /**
+     * Mojang's intermediary reflection exposes UBOs and sampled images, while
+     * Iris raster programs may also declare SSBOs and storage images. Reflect
+     * those declarations from the same SPIR-V and move them after the regular
+     * bind-group entries before SPIRV-Cross emits MSL.
+     */
+    private static List<RasterStorageResource> rebindRasterStorageResources(
+            final IntermediaryShaderModule vertex,
+            final IntermediaryShaderModule fragment,
+            final int firstPhysicalBinding
+    ) throws ShaderCompileException {
+        List<RasterStorageUse> uses = new ArrayList<>();
+        collectRasterStorageUses(vertex.spirv(), MetalCompiledRenderPipeline.STAGE_VERTEX, uses);
+        collectRasterStorageUses(fragment.spirv(), MetalCompiledRenderPipeline.STAGE_FRAGMENT, uses);
+        return rebindRasterStorageResources(uses, firstPhysicalBinding);
+    }
+
+    private static List<RasterStorageResource> rebindRasterStorageResources(
+            final ByteBuffer vertex,
+            final ByteBuffer fragment,
+            final int firstPhysicalBinding
+    ) throws ShaderCompileException {
+        List<RasterStorageUse> uses = new ArrayList<>();
+        collectRasterStorageUses(vertex, MetalCompiledRenderPipeline.STAGE_VERTEX, uses);
+        collectRasterStorageUses(fragment, MetalCompiledRenderPipeline.STAGE_FRAGMENT, uses);
+        return rebindRasterStorageResources(uses, firstPhysicalBinding);
+    }
+
+    private static List<RasterStorageResource> rebindRasterStorageResources(
+            final List<RasterStorageUse> uses,
+            final int firstPhysicalBinding
+    ) throws ShaderCompileException {
+        if (firstPhysicalBinding < 0) {
+            throw new IllegalArgumentException("First raster storage binding must be non-negative");
+        }
+        if (uses.isEmpty()) {
+            return List.of();
+        }
+
+        Map<String, Integer> physicalByDescriptor = new LinkedHashMap<>();
+        Map<String, Integer> stagesByDescriptor = new LinkedHashMap<>();
+        Map<String, RasterStorageKind> kindByDescriptor = new LinkedHashMap<>();
+        for (RasterStorageUse use : uses) {
+            int physical = physicalByDescriptor.computeIfAbsent(
+                    use.descriptorName(), ignored -> firstPhysicalBinding + physicalByDescriptor.size()
+            );
+            RasterStorageKind previousKind = kindByDescriptor.putIfAbsent(use.descriptorName(), use.kind());
+            if (previousKind != null && previousKind != use.kind()) {
+                throw new ShaderCompileException(
+                        "Raster resource '" + use.descriptorName() + "' is both "
+                                + previousKind + " and " + use.kind()
+                );
+            }
+            stagesByDescriptor.merge(use.descriptorName(), use.stageMask(), (left, right) -> left | right);
+            use.spirv().asIntBuffer().put(use.bindingWordOffset(), physical);
+        }
+
+        List<RasterStorageResource> resources = new ArrayList<>(physicalByDescriptor.size());
+        physicalByDescriptor.forEach((descriptor, physical) -> resources.add(new RasterStorageResource(
+                kindByDescriptor.get(descriptor), descriptor, physical, stagesByDescriptor.get(descriptor)
+        )));
+        return List.copyOf(resources);
+    }
+
+    private static void collectRasterStorageUses(
+            final ByteBuffer spirv,
+            final int stageMask,
+            final List<RasterStorageUse> output
+    ) throws ShaderCompileException {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer words = spirv.asIntBuffer();
+            PointerBuffer pointer = stack.callocPointer(1);
+            checkSpvc(Spvc.spvc_context_create(pointer), "spvc_context_create(raster storage)");
+            long context = pointer.get(0);
+            try {
+                checkSpvc(
+                        Spvc.spvc_context_parse_spirv(context, words, words.remaining(), pointer),
+                        "spvc_context_parse_spirv(raster storage)"
+                );
+                long ir = pointer.get(0);
+                checkSpvc(
+                        Spvc.spvc_context_create_compiler(
+                                context, Spvc.SPVC_BACKEND_NONE, ir,
+                                Spvc.SPVC_CAPTURE_MODE_COPY, pointer
+                        ),
+                        "spvc_context_create_compiler(raster storage)"
+                );
+                long compiler = pointer.get(0);
+                checkSpvc(
+                        Spvc.spvc_compiler_create_shader_resources(compiler, pointer),
+                        "spvc_compiler_create_shader_resources(raster storage)"
+                );
+                long resources = pointer.get(0);
+                collectRasterStorageType(
+                        stack, compiler, resources, spirv, stageMask,
+                        Spvc.SPVC_RESOURCE_TYPE_STORAGE_BUFFER, RasterStorageKind.BUFFER, output
+                );
+                collectRasterStorageType(
+                        stack, compiler, resources, spirv, stageMask,
+                        Spvc.SPVC_RESOURCE_TYPE_STORAGE_IMAGE, RasterStorageKind.IMAGE, output
+                );
+            } finally {
+                Spvc.spvc_context_destroy(context);
+            }
+        }
+    }
+
+    private static void collectRasterStorageType(
+            final MemoryStack stack,
+            final long compiler,
+            final long resources,
+            final ByteBuffer spirv,
+            final int stageMask,
+            final int resourceType,
+            final RasterStorageKind kind,
+            final List<RasterStorageUse> output
+    ) throws ShaderCompileException {
+        PointerBuffer listPointer = stack.callocPointer(1);
+        PointerBuffer countPointer = stack.callocPointer(1);
+        checkSpvc(
+                Spvc.spvc_resources_get_resource_list_for_type(
+                        resources, resourceType, listPointer, countPointer
+                ),
+                "spvc_resources_get_resource_list_for_type(raster storage " + resourceType + ')'
+        );
+        int count = Math.toIntExact(countPointer.get(0));
+        if (count == 0) {
+            return;
+        }
+        SpvcReflectedResource.Buffer reflected = SpvcReflectedResource.create(listPointer.get(0), count);
+        IntBuffer offset = stack.callocInt(1);
+        for (SpvcReflectedResource resource : reflected) {
+            if (!Spvc.spvc_compiler_has_decoration(compiler, resource.id(), Spv.SpvDecorationBinding)) {
+                throw new ShaderCompileException(
+                        "Raster storage resource '" + resource.nameString() + "' has no binding"
+                );
+            }
+            if (!Spvc.spvc_compiler_get_binary_offset_for_decoration(
+                    compiler, resource.id(), Spv.SpvDecorationBinding, offset
+            )) {
+                throw new ShaderCompileException(
+                        "Could not locate raster storage binding for '" + resource.nameString() + "'"
+                );
+            }
+            int logicalBinding = Spvc.spvc_compiler_get_decoration(
+                    compiler, resource.id(), Spv.SpvDecorationBinding
+            );
+            String resourceName = resource.nameString();
+            if (resourceName == null || resourceName.isBlank()) {
+                resourceName = "binding" + logicalBinding;
+            }
+            if (kind == RasterStorageKind.IMAGE) {
+                long type = Spvc.spvc_compiler_get_type_handle(compiler, resource.type_id());
+                int dimension = Spvc.spvc_type_get_image_dimension(type);
+                if (dimension != Spv.SpvDim2D && dimension != Spv.SpvDim3D) {
+                    throw new ShaderCompileException(
+                            "Raster storage image '" + resourceName + "' has unsupported SPIR-V dimension "
+                                    + dimension + "; only 2D and 3D are supported"
+                    );
+                }
+            }
+            String descriptorName = kind == RasterStorageKind.BUFFER
+                    ? storageBufferDescriptorName(logicalBinding, resourceName)
+                    : resourceName;
+            output.add(new RasterStorageUse(
+                    kind, resourceName, descriptorName, logicalBinding,
+                    stageMask, spirv, offset.get(0)
+            ));
+        }
+    }
+
     @Nullable
     private static UniformDescription findUniform(final List<UniformDescription> uniforms, final String name) {
         for (UniformDescription uniform : uniforms) {
@@ -643,10 +875,13 @@ public final class MetalCrossShaderCompiler {
 
     private static List<MetalCompiledRenderPipeline.ResourceBinding> buildResourceBindings(
             final List<VulkanBindGroupLayout.Entry> entries,
+            final List<RasterStorageResource> storageResources,
             final MslShader vertexMsl,
             final MslShader fragmentMsl
     ) {
-        List<MetalCompiledRenderPipeline.ResourceBinding> resources = new ArrayList<>(entries.size() + 1);
+        List<MetalCompiledRenderPipeline.ResourceBinding> resources = new ArrayList<>(
+                entries.size() + storageResources.size() + 1
+        );
         for (int index = 0; index < entries.size(); index++) {
             VulkanBindGroupLayout.Entry entry = entries.get(index);
             MetalCompiledRenderPipeline.ResourceKind kind = switch (entry.type()) {
@@ -658,13 +893,27 @@ public final class MetalCrossShaderCompiler {
             resources.add(new MetalCompiledRenderPipeline.ResourceBinding(kind, entry.name(), index, stageMask(entry.name(), vertexMsl, fragmentMsl), texelFormat));
         }
 
+        for (RasterStorageResource storage : storageResources) {
+            MetalCompiledRenderPipeline.ResourceKind kind = switch (storage.kind()) {
+                case BUFFER -> MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER;
+                case IMAGE -> MetalCompiledRenderPipeline.ResourceKind.STORAGE_IMAGE;
+            };
+            resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
+                    kind,
+                    storage.descriptorName(),
+                    storage.physicalBinding(),
+                    storage.stageMask(),
+                    null
+            ));
+        }
+
         int pushConstantStageMask = (vertexMsl.hasPushConstants() ? MetalCompiledRenderPipeline.STAGE_VERTEX : 0)
                 | (fragmentMsl.hasPushConstants() ? MetalCompiledRenderPipeline.STAGE_FRAGMENT : 0);
         if (pushConstantStageMask != 0) {
             resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
                     MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER,
                     "push_constants",
-                    entries.size(),
+                    entries.size() + storageResources.size(),
                     pushConstantStageMask,
                     null
             ));

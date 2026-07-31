@@ -50,4 +50,24 @@ final class IrisMetalExecutionGraphTest {
                 )
         );
     }
+
+    @Test
+    void rasterStorageBindingsKeepLogicalSsboIdentity() {
+        String descriptor = MetalCrossShaderCompiler.storageBufferDescriptorName(7, "voxelData");
+        assertEquals("iris_ssbo/7/voxelData", descriptor);
+        assertEquals(7, MetalCrossShaderCompiler.storageBufferLogicalBinding(descriptor));
+        assertEquals(-1, MetalCrossShaderCompiler.storageBufferLogicalBinding("voxelData"));
+    }
+
+    @Test
+    void linkerDistinguishesStorageImagesFromSampledSamplers() {
+        assertEquals(
+                true,
+                new IrisMetalGlslLinker.SamplerDecl("lightimg0", "image3D").storageImage()
+        );
+        assertEquals(
+                false,
+                new IrisMetalGlslLinker.SamplerDecl("voxeltex", "sampler3D").storageImage()
+        );
+    }
 }

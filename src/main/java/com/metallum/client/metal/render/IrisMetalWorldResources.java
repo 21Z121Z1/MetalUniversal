@@ -3,9 +3,12 @@ package com.metallum.client.metal.render;
 import com.mojang.blaze3d.GpuFormat;
 import net.irisshaders.iris.features.FeatureFlags;
 import net.irisshaders.iris.shaderpack.loading.ProgramId;
+import net.irisshaders.iris.shaderpack.loading.ProgramArrayId;
+import net.irisshaders.iris.shaderpack.ShaderPack;
 import net.irisshaders.iris.shaderpack.properties.PackDirectives;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.shaderpack.programs.ProgramFallbackResolver;
+import net.irisshaders.iris.shaderpack.programs.ProgramSource;
 import net.irisshaders.iris.shaderpack.properties.PackShadowDirectives;
 import net.irisshaders.iris.shaderpack.properties.PackRenderTargetDirectives.RenderTargetSettings;
 import net.irisshaders.iris.shaderpack.texture.CustomTextureData;
@@ -25,6 +28,8 @@ final class IrisMetalWorldResources implements AutoCloseable {
     private final IrisMetalShadowTargets shadowTargets;
     private final IrisMetalCustomTextures customTextures;
     private final IrisMetalNoiseTexture noiseTexture;
+    @Nullable
+    private final IrisMetalComputeResources computeResources;
     private boolean closed;
 
     IrisMetalWorldResources(
@@ -41,11 +46,12 @@ final class IrisMetalWorldResources implements AutoCloseable {
                 width,
                 height,
                 programSet.getPackDirectives().getRenderTargetDirectives().getRenderTargetSettings(),
-                Set.of(),
+                mipmappedTargets(programSet),
                 programSet.getPack().getCustomTextureDataMap(),
                 programSet.getPackDirectives().getNoiseTextureResolution(),
                 programSet.getPack().getCustomNoiseTexture(),
-                createShadowTargets(device, programSet)
+                createShadowTargets(device, programSet),
+                programSet.getPack()
         );
     }
 
@@ -72,6 +78,7 @@ final class IrisMetalWorldResources implements AutoCloseable {
                 customDefinitions,
                 noiseResolution,
                 customNoise,
+                null,
                 null
         );
     }
@@ -87,7 +94,8 @@ final class IrisMetalWorldResources implements AutoCloseable {
             final Map<TextureStage, ? extends Map<String, CustomTextureData>> customDefinitions,
             final int noiseResolution,
             final @Nullable CustomTextureData customNoise,
-            final @Nullable IrisMetalShadowTargets shadowTargets
+            final @Nullable IrisMetalShadowTargets shadowTargets,
+            final @Nullable ShaderPack computePack
     ) {
         this.device = Objects.requireNonNull(device, "device");
         if (generation <= 0) {
@@ -99,6 +107,7 @@ final class IrisMetalWorldResources implements AutoCloseable {
         IrisMetalShadowTargets newShadowTargets = shadowTargets;
         IrisMetalCustomTextures newCustomTextures = null;
         IrisMetalNoiseTexture newNoiseTexture = null;
+        IrisMetalComputeResources newComputeResources = null;
         try {
             newTargets = new IrisMetalRenderTargets(
                     device, formats, width, height, targetSettings, mipmappedTargets
@@ -106,14 +115,18 @@ final class IrisMetalWorldResources implements AutoCloseable {
             newCustomTextures = new IrisMetalCustomTextures(device, customDefinitions);
             newCustomTextures.prewarmAll();
             newNoiseTexture = new IrisMetalNoiseTexture(device, noiseResolution, customNoise);
+            if (computePack != null) {
+                newComputeResources = new IrisMetalComputeResources(device, computePack, width, height);
+            }
         } catch (RuntimeException | Error failure) {
-            closePartial(newTargets, newShadowTargets, newCustomTextures, newNoiseTexture);
+            closePartial(newTargets, newShadowTargets, newCustomTextures, newNoiseTexture, newComputeResources);
             throw failure;
         }
         this.renderTargets = newTargets;
         this.shadowTargets = newShadowTargets;
         this.customTextures = newCustomTextures;
         this.noiseTexture = newNoiseTexture;
+        this.computeResources = newComputeResources;
     }
 
     int generation() {
@@ -145,16 +158,26 @@ final class IrisMetalWorldResources implements AutoCloseable {
         return this.shadowTargets;
     }
 
+    @Nullable
+    IrisMetalComputeResources computeResources() {
+        ensureOpen();
+        return this.computeResources;
+    }
+
     void resize(final int width, final int height) {
         ensureOpen();
         this.renderTargets.resize(width, height);
+        if (this.computeResources != null) {
+            this.computeResources.resize(width, height);
+        }
     }
 
     private static void closePartial(
             final @Nullable IrisMetalRenderTargets targets,
             final @Nullable IrisMetalShadowTargets shadowTargets,
             final @Nullable IrisMetalCustomTextures customTextures,
-            final @Nullable IrisMetalNoiseTexture noiseTexture
+            final @Nullable IrisMetalNoiseTexture noiseTexture,
+            final @Nullable IrisMetalComputeResources computeResources
     ) {
         if (noiseTexture != null) {
             noiseTexture.close();
@@ -167,6 +190,9 @@ final class IrisMetalWorldResources implements AutoCloseable {
         }
         if (targets != null) {
             targets.close();
+        }
+        if (computeResources != null) {
+            computeResources.close();
         }
     }
 
@@ -182,7 +208,13 @@ final class IrisMetalWorldResources implements AutoCloseable {
             return;
         }
         this.closed = true;
-        closePartial(this.renderTargets, this.shadowTargets, this.customTextures, this.noiseTexture);
+        closePartial(
+                this.renderTargets,
+                this.shadowTargets,
+                this.customTextures,
+                this.noiseTexture,
+                this.computeResources
+        );
     }
 
     @Nullable
@@ -231,5 +263,33 @@ final class IrisMetalWorldResources implements AutoCloseable {
                 nearestDepth,
                 mipmappedDepth
         );
+    }
+
+    private static Set<Integer> mipmappedTargets(final ProgramSet programSet) {
+        java.util.HashSet<Integer> result = new java.util.HashSet<>();
+        for (ProgramArrayId arrayId : new ProgramArrayId[]{
+                ProgramArrayId.Setup, ProgramArrayId.Begin, ProgramArrayId.Prepare,
+                ProgramArrayId.Deferred, ProgramArrayId.Composite, ProgramArrayId.ShadowComposite
+        }) {
+            for (ProgramSource source : programSet.getComposite(arrayId)) {
+                if (source != null && source.isValid()) {
+                    result.addAll(source.getDirectives().getMipmappedBuffers());
+                }
+            }
+        }
+        programSet.get(ProgramId.Final).ifPresent(source -> {
+            if (source.isValid()) {
+                result.addAll(source.getDirectives().getMipmappedBuffers());
+            }
+        });
+        int targetCount = IrisMetalRenderTargetFormats.from(programSet.getPackDirectives()).length;
+        for (Integer target : result) {
+            if (target == null || target < 0 || target >= targetCount) {
+                throw new IllegalArgumentException(
+                        "Iris mipmap target out of range: " + target + " (count=" + targetCount + ")"
+                );
+            }
+        }
+        return Set.copyOf(result);
     }
 }

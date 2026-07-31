@@ -31,7 +31,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     enum ResourceKind {
         UNIFORM_BUFFER,
+        STORAGE_BUFFER,
         SAMPLED_IMAGE,
+        STORAGE_IMAGE,
         TEXEL_BUFFER
     }
 
@@ -661,7 +663,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private static int firstAvailableVertexBufferSlot(final List<ResourceBinding> resources) {
         int maxVertexBufferBinding = -1;
         for (ResourceBinding resource : resources) {
-            if (resource.kind() == ResourceKind.UNIFORM_BUFFER && (resource.stageMask() & STAGE_VERTEX) != 0) {
+            if ((resource.kind() == ResourceKind.UNIFORM_BUFFER
+                    || resource.kind() == ResourceKind.STORAGE_BUFFER)
+                    && (resource.stageMask() & STAGE_VERTEX) != 0) {
                 maxVertexBufferBinding = Math.max(maxVertexBufferBinding, resource.bindingIndex());
             }
         }

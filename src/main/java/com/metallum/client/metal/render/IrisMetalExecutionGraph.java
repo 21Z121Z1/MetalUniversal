@@ -3,6 +3,7 @@ package com.metallum.client.metal.render;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.systems.RenderPass;
@@ -51,8 +52,8 @@ import java.util.regex.Pattern;
 final class IrisMetalExecutionGraph implements AutoCloseable {
     private static final Pattern COMPUTE_BINDING = Pattern.compile(
             "layout\\s*\\(([^)]*\\bbinding\\s*=\\s*(\\d+)[^)]*)\\)\\s*"
-                    + "(?:readonly\\s+|writeonly\\s+|coherent\\s+)*uniform\\s+"
-                    + "([A-Za-z_]\\w*)(?:\\s*\\{)?\\s*([A-Za-z_]\\w*)?"
+                    + "(?:readonly\\s+|writeonly\\s+|coherent\\s+|volatile\\s+|restrict\\s+)*"
+                    + "(uniform|buffer)\\s+([A-Za-z_]\\w*)(?:\\s+([A-Za-z_]\\w*))?"
     );
     private static final Pattern COMPUTE_LOCAL_SIZE = Pattern.compile(
             "local_size_x\\s*=\\s*(\\d+).*?local_size_y\\s*=\\s*(\\d+).*?local_size_z\\s*=\\s*(\\d+)",
@@ -117,7 +118,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         }
     }
 
-    private record ComputeBinding(int binding, String type, String name) {
+    private record ComputeBinding(int binding, String declarationKind, String type, String name) {
         boolean image() {
             return type.contains("image");
         }
@@ -127,7 +128,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         }
 
         boolean buffer() {
-            return !image() && !sampler();
+            return declarationKind.equals("buffer") || (!image() && !sampler());
         }
     }
 
@@ -584,25 +585,58 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             final BitSet readsFromAlt
     ) {
         IrisMetalRenderTargets targets = resources.renderTargets();
+        IrisMetalComputeResources computeResources = resources.computeResources();
         for (ComputeBinding binding : plan.bindings()) {
             if (binding.buffer()) {
-                throw new IllegalStateException(
-                        "Iris compute " + plan.source().getName()
-                                + " requires unsupported buffer binding " + binding.binding()
-                );
-            }
-            MetalRenderPass.TextureViewAndSampler texture = textureBinding(
-                    binding.name(), plan.stage().textureStage, targets, resources, readsFromAlt
-            );
-            if (texture == null) {
-                throw new IllegalStateException(
-                        "Iris compute " + plan.source().getName()
-                                + " is missing required texture/image '" + binding.name() + "'"
-                );
+                if (computeResources == null) {
+                    throw new IllegalStateException(
+                            "Iris compute " + plan.source().getName()
+                                    + " requires generation-owned SSBO binding " + binding.binding()
+                                    + " but this resource set has no compute resources"
+                    );
+                }
+                GpuBufferSlice slice = computeResources.storageBuffer(binding.binding());
+                if (slice == null) {
+                    throw new IllegalStateException(
+                            "Iris compute " + plan.source().getName()
+                                    + " is missing SSBO binding " + binding.binding()
+                    );
+                }
+                pass.bindBuffer(binding.binding(), (MetalGpuBuffer) slice.buffer(), slice.offset());
+                continue;
             }
             if (binding.image()) {
-                pass.bindTextureView(binding.binding(), (MetalGpuTextureView) texture.textureView());
+                MetalGpuTextureView image = computeResources == null
+                        ? null
+                        : computeResources.storageImage(binding.name());
+                if (image == null) {
+                    MetalRenderPass.TextureViewAndSampler target = textureBinding(
+                            binding.name(), plan.stage().textureStage, targets, resources, readsFromAlt
+                    );
+                    image = target == null ? null : (MetalGpuTextureView) target.textureView();
+                }
+                if (image == null) {
+                    throw new IllegalStateException(
+                            "Iris compute " + plan.source().getName()
+                                    + " is missing required storage image '" + binding.name() + "'"
+                    );
+                }
+                pass.bindTextureView(binding.binding(), image);
             } else {
+                MetalRenderPass.TextureViewAndSampler texture = computeResources == null
+                        ? null
+                        : computeResources.sampledImage(binding.name());
+                if (texture == null) {
+                    texture = textureBinding(
+                            binding.name(), plan.stage().textureStage, targets, resources, readsFromAlt
+                    );
+                }
+                if (texture == null) {
+                    throw new IllegalStateException(
+                            "Iris compute " + plan.source().getName()
+                                    + " is missing required sampled image '" + binding.name() + "'"
+                    );
+                }
                 pass.bindTextureView(binding.binding(), (MetalGpuTextureView) texture.textureView());
                 pass.bindSampler(binding.binding(), ((MetalGpuSampler) texture.sampler()).nativeHandle());
             }
@@ -668,7 +702,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             try (descriptor) {
                 MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
                 pass.setCompiledPipeline(pipeline);
-                bindRaster(pass, plan, resources, targets);
+                bindRaster(pass, pipeline, plan, resources, targets);
                 GpuBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer(6);
                 pass.setIndexBuffer(indices, RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).type());
                 pass.setVertexBuffer(0, net.irisshaders.iris.pathways.FullScreenQuadRenderer.INSTANCE.getQuad().slice());
@@ -684,6 +718,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
 
     private void bindRaster(
             final MetalRenderPass pass,
+            final MetalCompiledRenderPipeline pipeline,
             final RasterPlan plan,
             final IrisMetalWorldResources resources,
             final IrisMetalRenderTargets targets
@@ -703,6 +738,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             }
         }
         for (IrisMetalGlslLinker.SamplerDecl sampler : plan.program().samplers()) {
+            if (!sampler.sampled()) {
+                continue;
+            }
             MetalRenderPass.TextureViewAndSampler binding = textureBinding(
                     sampler.name(), plan.stage().textureStage, targets, resources, plan.readsFromAlt()
             );
@@ -712,6 +750,34 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 );
             }
             pass.bindTexture(sampler.name(), binding.textureView(), binding.sampler());
+        }
+        IrisMetalComputeResources computeResources = resources.computeResources();
+        for (MetalCompiledRenderPipeline.ResourceBinding binding : pipeline.resources()) {
+            if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER) {
+                if (computeResources == null) {
+                    throw new IllegalStateException(
+                            "Iris pass " + plan.name() + " requires generation-owned SSBO resources"
+                    );
+                }
+                int logicalBinding = MetalCrossShaderCompiler.storageBufferLogicalBinding(binding.name());
+                GpuBufferSlice slice = computeResources.storageBuffer(logicalBinding);
+                if (slice == null) {
+                    throw new IllegalStateException(
+                            "Iris pass " + plan.name() + " is missing SSBO binding " + logicalBinding
+                    );
+                }
+                pass.bindStorageBuffer(logicalBinding, slice);
+            } else if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_IMAGE) {
+                GpuTextureView view = storageImageBinding(
+                        binding.name(), plan.stage().textureStage, targets, resources, plan.readsFromAlt()
+                );
+                if (view == null) {
+                    throw new IllegalStateException(
+                            "Iris pass " + plan.name() + " is missing storage image '" + binding.name() + "'"
+                    );
+                }
+                pass.bindStorageImage(binding.name(), view);
+            }
         }
     }
 
@@ -734,7 +800,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                      )) {
             MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
             pass.setCompiledPipeline(pipeline);
-            bindRaster(pass, plan, resources, resources.renderTargets());
+            bindRaster(pass, pipeline, plan, resources, resources.renderTargets());
             GpuBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer(6);
             pass.setIndexBuffer(indices, RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).type());
             pass.setVertexBuffer(0, net.irisshaders.iris.pathways.FullScreenQuadRenderer.INSTANCE.getQuad().slice());
@@ -767,6 +833,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             shadows.publishFlipState(shadowState);
         }
         resources.renderTargets().clearForFrame(activeEncoder(), fogColor);
+        if (resources.computeResources() != null) {
+            resources.computeResources().clearForFrame(activeEncoder());
+        }
     }
 
     private MetalRenderPass.TextureViewAndSampler textureBinding(
@@ -826,9 +895,32 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 }
             }
         }
+        if (standard == null && resources.computeResources() != null) {
+            standard = resources.computeResources().sampledImage(name);
+        }
         MetalRenderPass.TextureViewAndSampler override = resources.customTextures()
                 .resolve(stage, name);
         return override == null ? standard : override;
+    }
+
+    private @Nullable GpuTextureView storageImageBinding(
+            final String name,
+            final TextureStage stage,
+            final IrisMetalRenderTargets targets,
+            final IrisMetalWorldResources resources,
+            final BitSet readsFromAlt
+    ) {
+        IrisMetalComputeResources computeResources = resources.computeResources();
+        if (computeResources != null) {
+            MetalGpuTextureView custom = computeResources.storageImage(name);
+            if (custom != null) {
+                return custom;
+            }
+        }
+        MetalRenderPass.TextureViewAndSampler standard = textureBinding(
+                name, stage, targets, resources, readsFromAlt
+        );
+        return standard == null ? null : standard.textureView();
     }
 
     private MetalCompiledRenderPipeline compileRaster(
@@ -942,15 +1034,16 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         Set<Integer> used = new LinkedHashSet<>();
         while (matcher.find()) {
             int binding = Integer.parseInt(matcher.group(2));
-            String type = matcher.group(3);
-            String variable = matcher.group(4);
+            String declarationKind = matcher.group(3);
+            String type = matcher.group(4);
+            String variable = matcher.group(5);
             if (variable == null || variable.isBlank()) {
                 variable = type;
             }
             if (!used.add(binding)) {
                 throw new IllegalStateException("Iris compute " + name + " reuses binding " + binding);
             }
-            result.add(new ComputeBinding(binding, type, variable));
+            result.add(new ComputeBinding(binding, declarationKind, type, variable));
         }
         Matcher local = COMPUTE_LOCAL_SIZE.matcher(source);
         if (!local.find()) {

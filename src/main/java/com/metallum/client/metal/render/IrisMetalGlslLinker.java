@@ -439,6 +439,15 @@ public final class IrisMetalGlslLinker {
     }
 
     public record SamplerDecl(String name, String glslType) {
+        public boolean storageImage() {
+            return glslType.startsWith("image")
+                    || glslType.startsWith("iimage")
+                    || glslType.startsWith("uimage");
+        }
+
+        public boolean sampled() {
+            return !storageImage();
+        }
     }
 
     public record LinkedRasterProgram(
