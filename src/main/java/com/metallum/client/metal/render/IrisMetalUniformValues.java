@@ -265,7 +265,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
 
     /**
      * Allocates and fills every registered block. Must run outside any encoder
-     * — see {@link IrisMetalPipelineOverrides#updateFrame()}.
+     * at the generation frame boundary.
      */
     void prewarm(final MetalDevice device) {
         if (this.closed || this.blocks.isEmpty()) {

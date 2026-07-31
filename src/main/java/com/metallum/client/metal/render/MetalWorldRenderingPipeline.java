@@ -21,6 +21,7 @@ import net.irisshaders.iris.uniforms.CommonUniforms;
 import net.irisshaders.iris.uniforms.CapturedRenderingState;
 import net.irisshaders.iris.uniforms.custom.CustomUniforms;
 import net.irisshaders.iris.pipeline.programs.ShaderKey;
+import net.irisshaders.iris.gui.option.IrisVideoSettings;
 import net.irisshaders.iris.pathways.colorspace.ColorSpace;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.RenderTarget;
@@ -72,6 +73,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     private IrisMetalCompiledPrograms compiledPrograms;
     private IrisMetalWorldResources resources;
     private @Nullable IrisMetalCenterDepthSampler centerDepthSampler;
+    private @Nullable IrisMetalShadowSceneExecutor shadowSceneExecutor;
     private MetalDevice centerDepthDevice;
     private int receiptWidth = -1;
     private int receiptHeight = -1;
@@ -437,15 +439,41 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             this.receipts.recordEvent("prepare");
             this.executionGraph.executePrepare(this.resources());
         }
-        this.receipts.recordEvent("shadow.render.begin");
-        super.renderShadows(levelRenderer, camera, cameraRenderState);
-        this.receipts.recordEvent("shadow.render.end");
+        if (shouldRenderShadowScene()) {
+            if (this.shadowSceneExecutor == null) {
+                this.shadowSceneExecutor = new IrisMetalShadowSceneExecutor(
+                        Minecraft.getInstance(), this.frameState
+                );
+            }
+            this.receipts.recordEvent("shadow.render.begin");
+            this.shadowSceneExecutor.render(
+                    this.resources(),
+                    this.executionGraph,
+                    this.directives.getShadowDirectives(),
+                    this.directives.getSunPathRotation(),
+                    levelRenderer,
+                    camera,
+                    cameraRenderState
+            );
+            this.receipts.recordEvent("shadow.render.end");
+        } else {
+            this.receipts.recordEvent("shadow.render.empty");
+        }
         if (!this.directives.isPrepareBeforeShadow()) {
             this.receipts.recordEvent("prepare");
             this.executionGraph.executePrepare(this.resources());
         }
         this.receipts.recordEvent("shadow.composite");
         this.executionGraph.executeShadowComposite(this.resources());
+    }
+
+    private boolean shouldRenderShadowScene() {
+        if (this.resources == null || this.resources.shadowTargets() == null) {
+            return false;
+        }
+        PackShadowDirectives shadow = this.directives.getShadowDirectives();
+        return shadow.isShadowEnabled().orElse(true)
+                && IrisVideoSettings.getOverriddenShadowDistance(IrisVideoSettings.shadowDistance) != 0;
     }
 
     @Override
@@ -482,6 +510,10 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         }
         this.frameState.endWorldRendering();
         this.receipts.recordEvent("generation.destroy");
+        if (this.shadowSceneExecutor != null) {
+            this.shadowSceneExecutor.close();
+            this.shadowSceneExecutor = null;
+        }
         if (this.compiledPrograms != null) {
             this.compiledPrograms.close();
             this.compiledPrograms = null;

@@ -23,6 +23,7 @@ import net.irisshaders.iris.shaderpack.programs.ComputeSource;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
 import net.irisshaders.iris.shaderpack.properties.ProgramDirectives;
+import net.irisshaders.iris.shaderpack.properties.PackShadowDirectives;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
 import net.irisshaders.iris.pathways.colorspace.ColorSpace;
 import net.minecraft.resources.Identifier;
@@ -243,6 +244,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
     private @Nullable IrisMetalCenterDepthSampler centerDepthSampler;
     private BitSet state = new BitSet();
     private BitSet shadowState = new BitSet();
+    private boolean shadowFullClearRequired = true;
     private boolean prepared;
     private boolean closed;
 
@@ -542,6 +544,42 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
 
     void executeDeferred(final IrisMetalWorldResources resources) {
         executeStage(Stage.DEFERRED, resources);
+    }
+
+    /** Enters the generation-owned shadow scene before terrain or feature draws. */
+    void beginShadowScene(
+            final IrisMetalWorldResources resources,
+            final PackShadowDirectives directives
+    ) {
+        ensurePrepared();
+        IrisMetalShadowTargets shadows = resources.shadowTargets();
+        if (shadows == null) {
+            throw new IllegalStateException(
+                    "Iris generation " + generation + " has no shadow targets for a shadow scene"
+            );
+        }
+        MetalCommandEncoder encoder = activeEncoder();
+        encoder.clearDepthTexture(shadows.shadowDepthTexture(), 1.0);
+        encoder.clearDepthTexture(shadows.shadowDepthNoTranslucentsTexture(), 1.0);
+
+        BitSet main = new BitSet();
+        BitSet alternate = new BitSet();
+        alternate.set(0, shadows.colorTargets().targetCount());
+        for (int index = 0; index < shadows.colorTargets().targetCount(); index++) {
+            PackShadowDirectives.SamplingSettings settings =
+                    directives.getColorSamplingSettings().get(index);
+            if (settings == null) {
+                settings = new PackShadowDirectives.SamplingSettings();
+            }
+            if (this.shadowFullClearRequired || settings.getClear()) {
+                encoder.clearColorTexture(shadows.colorTexture(index, main), settings.getClearColor());
+                encoder.clearColorTexture(shadows.colorTexture(index, alternate), settings.getClearColor());
+            }
+        }
+        shadows.publishFlipState(main);
+        shadows.resetMipmaps();
+        this.shadowState = new BitSet();
+        this.shadowFullClearRequired = false;
     }
 
     void executeComposite(final IrisMetalWorldResources resources) {
