@@ -33,6 +33,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
     private final MetalGpuSampler[] colorSamplers;
     private final MetalGpuSampler[] depthSamplers;
     private final MetalGpuSampler[] depthCompareSamplers;
+    private final boolean[] colorMipmapped;
     private final boolean[] depthMipmapped;
     @Nullable
     private final MetalDepthMipmapGenerator depthMipmapGenerator;
@@ -53,6 +54,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
                 shadowColorFormats,
                 resolution,
                 new boolean[shadowColorFormats.length],
+                new boolean[shadowColorFormats.length],
                 new boolean[2],
                 new boolean[2]
         );
@@ -66,15 +68,39 @@ final class IrisMetalShadowTargets implements AutoCloseable {
             final boolean[] nearestDepth,
             final boolean[] mipmappedDepth
     ) {
-        if (nearestColor.length != shadowColorFormats.length) {
-            throw new IllegalArgumentException("One color sampling mode is required per shadowcolor target");
+        this(
+                device,
+                shadowColorFormats,
+                resolution,
+                nearestColor,
+                new boolean[shadowColorFormats.length],
+                nearestDepth,
+                mipmappedDepth
+        );
+    }
+
+    IrisMetalShadowTargets(
+            final MetalDevice device,
+            final GpuFormat[] shadowColorFormats,
+            final int resolution,
+            final boolean[] nearestColor,
+            final boolean[] colorMipmapped,
+            final boolean[] nearestDepth,
+            final boolean[] mipmappedDepth
+    ) {
+        if (nearestColor.length != shadowColorFormats.length
+                || colorMipmapped.length != shadowColorFormats.length) {
+            throw new IllegalArgumentException(
+                    "One color sampling and mipmap mode is required per shadowcolor target"
+            );
         }
         if (nearestDepth.length != 2 || mipmappedDepth.length != 2) {
             throw new IllegalArgumentException("Exactly two shadow depth sampling and mipmap modes are required");
         }
         this.device = device;
         this.colorTargets = new IrisMetalPingPongTargets(
-                device, "iris-shadowcolor", shadowColorFormats, resolution, resolution
+                device, "iris-shadowcolor", shadowColorFormats, resolution, resolution,
+                mipmappedIndices(colorMipmapped)
         );
         this.colorMain = new MetalGpuTexture[shadowColorFormats.length];
         this.colorAlt = new MetalGpuTexture[shadowColorFormats.length];
@@ -82,8 +108,9 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         this.colorAltViews = new MetalGpuTextureView[shadowColorFormats.length];
         refreshColorSides();
         this.colorSamplers = new MetalGpuSampler[shadowColorFormats.length];
+        this.colorMipmapped = colorMipmapped.clone();
         for (int index = 0; index < colorSamplers.length; index++) {
-            colorSamplers[index] = createSampler(nearestColor[index], false, false);
+            colorSamplers[index] = createSampler(nearestColor[index], colorMipmapped[index], false);
         }
         this.depthSamplers = new MetalGpuSampler[2];
         this.depthCompareSamplers = new MetalGpuSampler[2];
@@ -114,6 +141,16 @@ final class IrisMetalShadowTargets implements AutoCloseable {
                 mipmapped ? OptionalDouble.empty() : OptionalDouble.of(0.0),
                 comparison ? MTLCompareFunction.LessEqual : null
         );
+    }
+
+    private static java.util.Set<Integer> mipmappedIndices(final boolean[] mipmapped) {
+        java.util.Set<Integer> result = new java.util.HashSet<>();
+        for (int index = 0; index < mipmapped.length; index++) {
+            if (mipmapped[index]) {
+                result.add(index);
+            }
+        }
+        return result;
     }
 
     private void refreshColorSides() {
@@ -183,6 +220,27 @@ final class IrisMetalShadowTargets implements AutoCloseable {
     MetalGpuSampler colorSampler(final int index) {
         ensureOpen();
         return colorSamplers[checkColorIndex(index)];
+    }
+
+    void resetMipmaps() {
+        ensureOpen();
+        colorTargets.resetMipmaps();
+    }
+
+    void generateColorMipmaps(final MetalCommandEncoder encoder) {
+        ensureOpen();
+        for (int index = 0; index < colorMipmapped.length; index++) {
+            if (!colorMipmapped[index]) {
+                continue;
+            }
+            encoder.generateMipmaps(colorTargets.readTexture(index));
+            colorTargets.enableReadMipmaps(index);
+        }
+    }
+
+    GpuFormat colorFormat(final int index) {
+        ensureOpen();
+        return colorTargets.format(checkColorIndex(index));
     }
 
     MetalGpuTexture colorTexture(final int index, final BitSet readsFromAlt) {

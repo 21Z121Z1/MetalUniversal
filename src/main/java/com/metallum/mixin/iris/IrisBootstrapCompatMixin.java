@@ -35,9 +35,14 @@ public abstract class IrisBootstrapCompatMixin {
             }
         } catch (Throwable throwable) {
             Metallum.LOGGER.error(
-                    "[MetalUniversal/Iris] Metal-safe Iris bootstrap failed; continuing without a pack",
+                    "[MetalUniversal/Iris] Metal-safe Iris bootstrap failed",
                     throwable
             );
+            if (IrisMetalPackLifecycle.strictModeRequested()) {
+                throw throwable instanceof RuntimeException runtime
+                        ? runtime
+                        : new IllegalStateException("Metal Iris bootstrap failed", throwable);
+            }
         }
         ci.cancel();
     }
@@ -54,9 +59,9 @@ public abstract class IrisBootstrapCompatMixin {
         if (!MetalActive.isMetalActive()) {
             return;
         }
-        if (!IrisMetalPackLifecycle.shouldLoadConfiguredPack(
-                true, Iris.getIrisConfig().areShadersEnabled()
-        )) {
+        boolean shadersEnabled = Iris.getIrisConfig().areShadersEnabled();
+        if (!IrisMetalPackLifecycle.shouldLoadConfiguredPack(true, shadersEnabled)
+                && !IrisMetalPackLifecycle.consumeDisabledReloadTransition(true, shadersEnabled)) {
             ci.cancel();
         }
     }

@@ -15,7 +15,6 @@ import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
 
 import java.util.Arrays;
-import java.util.BitSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -64,6 +63,22 @@ public final class IrisMetalTerrainBridge {
         TerrainContext context = currentContext();
         if (context == null) {
             return null;
+        }
+        IrisMetalShadowTargets shadowTargets = context.pipeline().resources().shadowTargets();
+        if (ShadowRenderingState.areShadowsCurrentlyBeingRendered() && shadowTargets != null) {
+            Vector4fc[] shadowClearColors = null;
+            if (clearColor.isPresent()) {
+                shadowClearColors = new Vector4fc[context.drawBuffers().length];
+                shadowClearColors[0] = clearColor.orElseThrow();
+            }
+            IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor =
+                    shadowTargets.createShadowGbufferDescriptor(
+                            label.get(),
+                            context.drawBuffers(),
+                            shadowClearColors,
+                            clearDepth.isPresent() ? clearDepth.getAsDouble() : null
+                    );
+            return encoder.createRenderPass(descriptor.descriptor());
         }
         RenderPassDescriptor descriptor = context.pipeline().resources().renderTargets()
                 .createTerrainWriteDescriptor(
@@ -203,7 +218,7 @@ public final class IrisMetalTerrainBridge {
         int shadowColorTarget = shadowColorIndex(name);
         if (shadowColorTarget >= 0) {
             return new MetalRenderPass.TextureViewAndSampler(
-                    shadowTargets.colorView(shadowColorTarget, new BitSet()),
+                    shadowTargets.colorView(shadowColorTarget, context.pipeline().shadowReadSnapshot()),
                     shadowTargets.colorSampler(shadowColorTarget)
             );
         }

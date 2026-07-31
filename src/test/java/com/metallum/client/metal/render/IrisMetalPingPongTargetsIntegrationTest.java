@@ -155,8 +155,9 @@ final class IrisMetalPingPongTargetsIntegrationTest {
             assertFalse(targets.isFlipped(1));
             assertThrows(
                     IllegalStateException.class,
-                    () -> targets.checkNoFeedbackLoop(new int[]{0}, new int[]{0})
+                    () -> targets.checkNoFeedbackLoop(new int[]{0}, new int[]{0}, new BitSet())
             );
+            targets.checkNoFeedbackLoop(new int[]{0}, new int[]{0}, snapshot);
             assertThrows(
                     IllegalArgumentException.class,
                     () -> targets.checkNoFeedbackLoop(new int[]{2}, new int[]{1})
@@ -190,10 +191,20 @@ final class IrisMetalPingPongTargetsIntegrationTest {
                         mapped.descriptor().colorAttachments().get(1).textureView().texture()
                 );
             }
+            assertDoesNotThrow(
+                    () -> {
+                        try (IrisMetalRenderTargets.RenderPassDescriptorWithViews ignored =
+                                     targets.createWriteDescriptor(
+                                             "feedback", new int[]{0}, null, false, null, new int[]{0}
+                                     )) {
+                            // Same logical target is valid when the pass reads the other ping-pong side.
+                        }
+                    }
+            );
             assertThrows(
-                    IllegalStateException.class,
+                    IllegalArgumentException.class,
                     () -> targets.createWriteDescriptor(
-                            "feedback", new int[]{0}, null, false, null, new int[]{0}
+                            "out-of-range", new int[]{0}, null, false, null, new int[]{3}
                     )
             );
 

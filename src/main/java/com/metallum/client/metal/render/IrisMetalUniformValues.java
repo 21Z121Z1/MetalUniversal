@@ -188,7 +188,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final String label,
             final IrisMetalGlslLinker.LinkedRasterProgram program
     ) {
-        if (!!program.uniformLayout().isEmpty()) {
+        if (program.uniformLayout().isEmpty()) {
             return;
         }
         for (Block block : this.blocks) {

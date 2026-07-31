@@ -786,6 +786,35 @@ public func metallum_MTLBlitCommandEncoder_copyFromBufferToTexture(
     )
 }
 
+@_cdecl("metallum_MTLBlitCommandEncoder_copyFromBufferToTexture_3d")
+public func metallum_MTLBlitCommandEncoder_copyFromBufferToTexture_3d(
+    _ blit: MTLBlitCommandEncoder,
+    _ sourceBuffer: MTLBuffer,
+    _ sourceOffset: UInt64,
+    _ texture: MTLTexture,
+    _ mipLevel: UInt64,
+    _ x: UInt64,
+    _ y: UInt64,
+    _ z: UInt64,
+    _ width: UInt64,
+    _ height: UInt64,
+    _ depth: UInt64,
+    _ bytesPerRow: UInt64,
+    _ bytesPerImage: UInt64
+) {
+    blit.copy(
+        from: sourceBuffer,
+        sourceOffset: Int(sourceOffset),
+        sourceBytesPerRow: Int(bytesPerRow),
+        sourceBytesPerImage: Int(bytesPerImage),
+        sourceSize: MTLSize(width: Int(width), height: Int(height), depth: Int(depth)),
+        to: texture,
+        destinationSlice: 0,
+        destinationLevel: Int(mipLevel),
+        destinationOrigin: MTLOrigin(x: Int(x), y: Int(y), z: Int(z))
+    )
+}
+
 @_cdecl("metallum_MTLBlitCommandEncoder_copyFromTextureToTexture")
 public func metallum_MTLBlitCommandEncoder_copyFromTextureToTexture(
     _ blit: MTLBlitCommandEncoder,
@@ -840,6 +869,35 @@ public func metallum_MTLBlitCommandEncoder_copyFromTextureToBuffer(
     )
 }
 
+@_cdecl("metallum_MTLBlitCommandEncoder_copyFromTexture_3dToBuffer")
+public func metallum_MTLBlitCommandEncoder_copyFromTexture_3dToBuffer(
+    _ blit: MTLBlitCommandEncoder,
+    _ sourceTexture: MTLTexture,
+    _ destinationBuffer: MTLBuffer,
+    _ destinationOffset: UInt64,
+    _ mipLevel: UInt64,
+    _ x: UInt64,
+    _ y: UInt64,
+    _ z: UInt64,
+    _ width: UInt64,
+    _ height: UInt64,
+    _ depth: UInt64,
+    _ bytesPerRow: UInt64,
+    _ bytesPerImage: UInt64
+) {
+    blit.copy(
+        from: sourceTexture,
+        sourceSlice: 0,
+        sourceLevel: Int(mipLevel),
+        sourceOrigin: MTLOrigin(x: Int(x), y: Int(y), z: Int(z)),
+        sourceSize: MTLSize(width: Int(width), height: Int(height), depth: Int(depth)),
+        to: destinationBuffer,
+        destinationOffset: Int(destinationOffset),
+        destinationBytesPerRow: Int(bytesPerRow),
+        destinationBytesPerImage: Int(bytesPerImage)
+    )
+}
+
 @_cdecl("metallum_create_buffer")
 public func metallum_create_buffer(
     _ device: MTLDevice,
@@ -885,6 +943,40 @@ public func metallum_create_texture_2d(
             descriptor.arrayLength = Int(depthOrLayers)
         }
 
+        descriptor.mipmapLevelCount = max(Int(mipLevels), 1)
+        descriptor.usage = usage
+        descriptor.storageMode = storageMode
+        descriptor.hazardTrackingMode = .untracked
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        texture.label = stringFromOptionalCString(labelPtr)
+        return retainedPointer(texture)
+    }
+}
+
+@_cdecl("metallum_create_texture_3d")
+public func metallum_create_texture_3d(
+    _ device: MTLDevice,
+    _ pixelFormat: MTLPixelFormat,
+    _ width: UInt64,
+    _ height: UInt64,
+    _ depth: UInt64,
+    _ mipLevels: UInt64,
+    _ usage: MTLTextureUsage,
+    _ storageMode: MTLStorageMode,
+    _ labelPtr: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
+        guard width > 0, height > 0, depth > 0 else {
+            return nil
+        }
+        let descriptor = MTLTextureDescriptor()
+        descriptor.textureType = MTLTextureType.type3D
+        descriptor.pixelFormat = pixelFormat
+        descriptor.width = Int(width)
+        descriptor.height = Int(height)
+        descriptor.depth = Int(depth)
         descriptor.mipmapLevelCount = max(Int(mipLevels), 1)
         descriptor.usage = usage
         descriptor.storageMode = storageMode

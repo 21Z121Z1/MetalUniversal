@@ -233,18 +233,15 @@ final class IrisMetalWorldResources implements AutoCloseable {
                 ? PackShadowDirectives.MAX_SHADOW_COLOR_BUFFERS_IRIS
                 : PackShadowDirectives.MAX_SHADOW_COLOR_BUFFERS_OF;
         boolean[] nearestColor = new boolean[targetCount];
+        boolean[] mipmappedColor = new boolean[targetCount];
         GpuFormat[] colorFormats = new GpuFormat[targetCount];
         for (int index = 0; index < targetCount; index++) {
             PackShadowDirectives.SamplingSettings settings = shadow.getColorSamplingSettings().get(index);
             if (settings == null) {
                 settings = new PackShadowDirectives.SamplingSettings();
             }
-            if (settings.getMipmap()) {
-                throw new IllegalStateException(
-                        "Metal shadowcolor mipmaps require generation-owned mipmapped targets"
-                );
-            }
             nearestColor[index] = settings.getNearest();
+            mipmappedColor[index] = settings.getMipmap();
             colorFormats[index] = IrisMetalRenderTargetFormats.fromInternalName(settings.getFormat().name());
         }
 
@@ -260,6 +257,7 @@ final class IrisMetalWorldResources implements AutoCloseable {
                 colorFormats,
                 shadow.getResolution(),
                 nearestColor,
+                mipmappedColor,
                 nearestDepth,
                 mipmappedDepth
         );

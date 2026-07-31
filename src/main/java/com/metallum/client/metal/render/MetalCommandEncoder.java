@@ -600,22 +600,53 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         int pixelSize = metalDst.pixelSize();
         int rowBytes = width * pixelSize;
         int bytesPerImage = rowBytes * height;
-        GpuBufferSlice slice = transientMemory.uploadStaging(source.duplicate().limit(bytesPerImage), pixelSize, GpuBuffer.USAGE_COPY_SRC);
+        int depth = metalDst.isTexture3D()
+                ? Math.max(1, metalDst.getDepthOrLayers() >> mipLevel)
+                : 1;
+        long bytesRequired = Math.multiplyExact((long) bytesPerImage, depth);
+        ByteBuffer upload = source.duplicate();
+        if (upload.remaining() < bytesRequired) {
+            throw new IllegalArgumentException(
+                    "Texture upload has " + upload.remaining() + " bytes but requires " + bytesRequired
+            );
+        }
+        upload.limit(Math.toIntExact(upload.position() + bytesRequired));
+        GpuBufferSlice slice = transientMemory.uploadStaging(upload, pixelSize, GpuBuffer.USAGE_COPY_SRC);
 
         MTLBlitCommandEncoder blit = blitCommandEncoder();
-        blit.copyFromBufferToTexture(
-                ((MetalGpuBuffer) slice.buffer()).nativeHandle(),
-                slice.offset(),
-                metalDst.nativeHandle(),
-                mipLevel,
-                depthOrLayer,
-                destX,
-                destY,
-                width,
-                height,
-                rowBytes,
-                bytesPerImage
-        );
+        if (metalDst.isTexture3D()) {
+            if (depthOrLayer != 0) {
+                throw new IllegalArgumentException("3D texture uploads do not accept an array layer: " + depthOrLayer);
+            }
+            blit.copyFromBufferToTexture3d(
+                    ((MetalGpuBuffer) slice.buffer()).nativeHandle(),
+                    slice.offset(),
+                    metalDst.nativeHandle(),
+                    mipLevel,
+                    destX,
+                    destY,
+                    0,
+                    width,
+                    height,
+                    depth,
+                    rowBytes,
+                    bytesPerImage
+            );
+        } else {
+            blit.copyFromBufferToTexture(
+                    ((MetalGpuBuffer) slice.buffer()).nativeHandle(),
+                    slice.offset(),
+                    metalDst.nativeHandle(),
+                    mipLevel,
+                    depthOrLayer,
+                    destX,
+                    destY,
+                    width,
+                    height,
+                    rowBytes,
+                    bytesPerImage
+            );
+        }
         endEncoder();
     }
 
@@ -635,6 +666,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int arrayLayer
     ) {
         MetalGpuTexture metalDst = (MetalGpuTexture) destination;
+        if (metalDst.isTexture3D()) {
+            throw new UnsupportedOperationException(
+                    "copyBufferToTexture does not expose a 3D source extent; use writeToTexture"
+            );
+        }
         flushPendingClearForWrite(metalDst);
 
         int texelSize = destination.getFormat().blockSize();
@@ -683,19 +719,27 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         int bytesPerImage = rowBytes * height;
 
         MTLBlitCommandEncoder blit = blitCommandEncoder();
-        blit.copyFromTextureToBuffer(
-                texture.nativeHandle(),
-                buffer.nativeHandle(),
-                offset,
-                mipLevel,
-                0,
-                x,
-                y,
-                width,
-                height,
-                rowBytes,
-                bytesPerImage
-        );
+        if (texture.isTexture3D()) {
+            int depth = Math.max(1, texture.getDepthOrLayers() >> mipLevel);
+            blit.copyFromTexture3dToBuffer(
+                    texture.nativeHandle(), buffer.nativeHandle(), offset, mipLevel,
+                    x, y, 0, width, height, depth, rowBytes, bytesPerImage
+            );
+        } else {
+            blit.copyFromTextureToBuffer(
+                    texture.nativeHandle(),
+                    buffer.nativeHandle(),
+                    offset,
+                    mipLevel,
+                    0,
+                    x,
+                    y,
+                    width,
+                    height,
+                    rowBytes,
+                    bytesPerImage
+            );
+        }
 
         endEncoder();
         queueForDestroy(callback);
@@ -715,6 +759,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     ) {
         MetalGpuTexture srcTexture = (MetalGpuTexture) source;
         MetalGpuTexture dstTexture = (MetalGpuTexture) destination;
+        if (srcTexture.isTexture3D() || dstTexture.isTexture3D()) {
+            throw new UnsupportedOperationException(
+                    "copyTextureToTexture does not expose a 3D extent; use a dedicated 3D copy path"
+            );
+        }
         flushPendingClear(srcTexture);
         flushPendingClearForWrite(dstTexture);
         MTLBlitCommandEncoder blit = blitCommandEncoder();

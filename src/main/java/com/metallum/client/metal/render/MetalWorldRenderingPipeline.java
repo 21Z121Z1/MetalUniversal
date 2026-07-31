@@ -35,6 +35,7 @@ import org.jspecify.annotations.Nullable;
 import org.joml.Vector3d;
 import org.joml.Vector4f;
 
+import java.util.BitSet;
 import java.util.Objects;
 import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -61,10 +62,13 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     private final IrisMetalUniformValues uniformValues;
     private final IrisMetalWorldPrograms programs;
     private final IrisMetalExecutionGraph executionGraph;
+    private final IrisMetalRuntimeReceipts receipts;
     private IrisMetalCompiledPrograms compiledPrograms;
     private IrisMetalWorldResources resources;
     private @Nullable IrisMetalCenterDepthSampler centerDepthSampler;
     private MetalDevice centerDepthDevice;
+    private int receiptWidth = -1;
+    private int receiptHeight = -1;
 
     public MetalWorldRenderingPipeline(final ProgramSet programSet) {
         this.generation = GENERATIONS.incrementAndGet();
@@ -76,6 +80,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                 this.programs,
                 IrisMetalRenderTargetFormats.from(this.programSet.getPackDirectives()).length
         );
+        this.receipts = IrisMetalRuntimeReceipts.open(this.generation);
         this.pack = programSet.getPack();
         this.directives = programSet.getPackDirectives();
         this.forcedShadowRenderDistanceChunks = forcedShadowDistance(
@@ -97,6 +102,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         );
         this.executionGraph.attachUniformValues(this.uniformValues);
         publishWorldSettings();
+        IrisMetalPackLifecycle.onSemanticPipelineActivated();
     }
 
     private static OptionalInt forcedShadowDistance(final PackShadowDirectives shadow) {
@@ -170,8 +176,13 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         return this.frameState.shouldOverrideShaders(writesMainTarget);
     }
 
+    BitSet shadowReadSnapshot() {
+        return this.executionGraph.shadowReadSnapshot();
+    }
+
     @Override
     public void beginLevelRendering() {
+        this.receipts.recordEvent("frame.begin");
         prepareResources();
         prepareTerrainUniforms();
         Vector3d fog = CapturedRenderingState.INSTANCE.getFogColor();
@@ -179,7 +190,9 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                 this.resources(), new Vector4f((float) fog.x, (float) fog.y, (float) fog.z, 1.0F)
         );
         this.frameState.beginWorldRendering();
+        this.receipts.recordEvent("setup");
         this.executionGraph.executeSetup(this.resources());
+        this.receipts.recordEvent("begin");
         this.executionGraph.executeBegin(this.resources());
     }
 
@@ -220,6 +233,13 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                             + mainTarget.width + "x" + mainTarget.height
             );
         }
+        if (this.receiptWidth < 0) {
+            this.receipts.recordEvent("generation.allocate");
+        } else if (this.receiptWidth != mainTarget.width || this.receiptHeight != mainTarget.height) {
+            this.receipts.recordEvent("resize");
+        }
+        this.receiptWidth = mainTarget.width;
+        this.receiptHeight = mainTarget.height;
         if (this.compiledPrograms == null) {
             this.compiledPrograms = new IrisMetalCompiledPrograms(
                     device,
@@ -277,7 +297,9 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         if (depth == null) {
             throw new IllegalStateException("Iris translucent boundary has no main depth texture");
         }
+        this.receipts.recordEvent("depthtex1.capture");
         this.executionGraph.captureNoTranslucentsDepth(this.resources(), depth);
+        this.receipts.recordEvent("deferred");
         this.executionGraph.executeDeferred(this.resources());
     }
 
@@ -289,7 +311,9 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         if (depth == null || depthView == null) {
             throw new IllegalStateException("Iris hand boundary has no main depth texture view");
         }
+        this.receipts.recordEvent("center-depth.sample");
         this.executionGraph.sampleCenterDepth(depthView, 1.0F / 60.0F);
+        this.receipts.recordEvent("depthtex2.capture");
         this.executionGraph.captureNoHandDepth(this.resources(), depth);
     }
 
@@ -300,12 +324,17 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             final CameraRenderState cameraRenderState
     ) {
         if (this.directives.isPrepareBeforeShadow()) {
+            this.receipts.recordEvent("prepare");
             this.executionGraph.executePrepare(this.resources());
         }
+        this.receipts.recordEvent("shadow.render.begin");
         super.renderShadows(levelRenderer, camera, cameraRenderState);
+        this.receipts.recordEvent("shadow.render.end");
         if (!this.directives.isPrepareBeforeShadow()) {
+            this.receipts.recordEvent("prepare");
             this.executionGraph.executePrepare(this.resources());
         }
+        this.receipts.recordEvent("shadow.composite");
         this.executionGraph.executeShadowComposite(this.resources());
     }
 
@@ -317,15 +346,29 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         if (depth == null || colorView == null) {
             throw new IllegalStateException("Iris final boundary has no main target textures");
         }
+        this.receipts.recordEvent("depthtex0.capture");
         this.executionGraph.captureFinalDepth(this.resources(), depth);
+        this.receipts.recordEvent("composite");
         this.executionGraph.executeComposite(this.resources());
+        this.receipts.recordEvent("final");
         this.executionGraph.executeFinal(this.resources(), colorView);
+        MetalDevice device = MetalDeviceRegistry.getActiveDevice();
+        if (device == null) {
+            throw new IllegalStateException("Iris final readback has no active Metal device");
+        }
+        this.receipts.captureFinalTarget(
+                device,
+                device.createCommandEncoder(),
+                colorView
+        );
         this.frameState.endWorldRendering();
     }
 
     @Override
     public void destroy() {
+        IrisMetalPackLifecycle.onSemanticPipelineDestroyed();
         this.frameState.endWorldRendering();
+        this.receipts.recordEvent("generation.destroy");
         if (this.compiledPrograms != null) {
             this.compiledPrograms.close();
             this.compiledPrograms = null;
@@ -342,6 +385,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             this.resources = null;
         }
         this.uniformValues.close();
+        this.receipts.close();
         super.destroy();
     }
 

@@ -468,6 +468,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                     throw new IllegalStateException("Shadow raster plan has no shadow targets");
                 }
                 shadows.publishFlipState(plan.readsFromAlt());
+                shadowState = plan.readsFromAlt();
                 executeShadowRaster(
                         plan, shadowRasterPipelines.get(plan), resources, shadows
                 );
@@ -808,6 +809,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         } finally {
             encoder.submitRenderPass();
         }
+        shadows.generateColorMipmaps(encoder);
     }
 
     private com.mojang.blaze3d.buffers.GpuBufferSlice uniformSlice(final String token) {
@@ -821,6 +823,11 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         this.uniformValues = Objects.requireNonNull(values, "values");
     }
 
+    BitSet shadowReadSnapshot() {
+        ensureOpen();
+        return (BitSet) shadowState.clone();
+    }
+
     void beginFrame(final IrisMetalWorldResources resources, final Vector4fc fogColor) {
         ensureOpen();
         Objects.requireNonNull(resources, "resources");
@@ -831,6 +838,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         IrisMetalShadowTargets shadows = resources.shadowTargets();
         if (shadows != null) {
             shadows.publishFlipState(shadowState);
+            shadows.resetMipmaps();
         }
         resources.renderTargets().clearForFrame(activeEncoder(), fogColor);
         if (resources.computeResources() != null) {
@@ -870,7 +878,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 int shadowColor = name.equals("shadowcolor") ? 0 : parseSuffix(name, "shadowcolor");
                 if (shadowColor >= 0 && shadowColor < shadowTargetCount()) {
                     standard = new MetalRenderPass.TextureViewAndSampler(
-                            shadows.colorView(shadowColor, readsFromAlt), shadows.colorSampler(shadowColor)
+                            shadows.colorView(shadowColor, shadowState), shadows.colorSampler(shadowColor)
                     );
                 }
             }
