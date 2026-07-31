@@ -234,6 +234,12 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         encoder.copyTextureToTexture(sourceDepth, noTranslucentsDepth, 0, 0, 0, 0, 0, width, height);
     }
 
+    void captureMainDepth(final MetalCommandEncoder encoder, final GpuTexture sourceDepth) {
+        ensureOpen();
+        checkDepthExtent(sourceDepth);
+        encoder.copyTextureToTexture(sourceDepth, mainDepth, 0, 0, 0, 0, 0, width, height);
+    }
+
     void captureNoHandDepth(final MetalCommandEncoder encoder) {
         ensureOpen();
         encoder.copyTextureToTexture(mainDepth, noHandDepth, 0, 0, 0, 0, 0, width, height);

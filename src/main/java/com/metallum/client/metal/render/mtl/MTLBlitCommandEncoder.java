@@ -43,6 +43,26 @@ public final class MTLBlitCommandEncoder extends MTLCommandEncoder {
         );
     }
 
+    public void copyFromBufferToTexture3d(
+            final MemorySegment sourceBuffer,
+            final long sourceOffset,
+            final MemorySegment texture,
+            final long mipLevel,
+            final long x,
+            final long y,
+            final long z,
+            final long width,
+            final long height,
+            final long depth,
+            final long bytesPerRow,
+            final long bytesPerImage
+    ) {
+        MetalNativeBridge.MTLBlitCommandEncoder_copyFromBufferToTexture3d(
+                handle(), sourceBuffer, sourceOffset, texture, mipLevel, x, y, z,
+                width, height, depth, bytesPerRow, bytesPerImage
+        );
+    }
+
     public void copyFromTextureToTexture(
             final MemorySegment sourceTexture,
             final MemorySegment destinationTexture,
@@ -74,6 +94,26 @@ public final class MTLBlitCommandEncoder extends MTLCommandEncoder {
     ) {
         MetalNativeBridge.MTLBlitCommandEncoder_copyFromTextureToBuffer(
                 handle(), sourceTexture, destinationBuffer, destinationOffset, mipLevel, slice, x, y, width, height, bytesPerRow, bytesPerImage
+        );
+    }
+
+    public void copyFromTexture3dToBuffer(
+            final MemorySegment sourceTexture,
+            final MemorySegment destinationBuffer,
+            final long destinationOffset,
+            final long mipLevel,
+            final long x,
+            final long y,
+            final long z,
+            final long width,
+            final long height,
+            final long depth,
+            final long bytesPerRow,
+            final long bytesPerImage
+    ) {
+        MetalNativeBridge.MTLBlitCommandEncoder_copyFromTexture3dToBuffer(
+                handle(), sourceTexture, destinationBuffer, destinationOffset, mipLevel,
+                x, y, z, width, height, depth, bytesPerRow, bytesPerImage
         );
     }
 

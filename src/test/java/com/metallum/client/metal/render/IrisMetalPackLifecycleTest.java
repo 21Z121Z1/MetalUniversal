@@ -13,4 +13,15 @@ final class IrisMetalPackLifecycleTest {
         assertFalse(IrisMetalPackLifecycle.shouldLoadConfiguredPack(true, false));
         assertTrue(IrisMetalPackLifecycle.shouldLoadConfiguredPack(true, true));
     }
+
+    @Test
+    void consumesOnlyTheLiveGenerationDisabledTransition() {
+        IrisMetalPackLifecycle.onSemanticPipelineActivated();
+        assertFalse(IrisMetalPackLifecycle.consumeDisabledReloadTransition(true, false));
+
+        IrisMetalPackLifecycle.onSemanticPipelineDestroyed();
+        assertFalse(IrisMetalPackLifecycle.consumeDisabledReloadTransition(true, true));
+        assertTrue(IrisMetalPackLifecycle.consumeDisabledReloadTransition(true, false));
+        assertFalse(IrisMetalPackLifecycle.consumeDisabledReloadTransition(true, false));
+    }
 }

@@ -209,6 +209,33 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void vectorFragmentOutputsPadForRgba16Float() {
+        String shaderName = "mrt_vector_outputs_rgba16";
+        fragmentShaders.put(shaderName, """
+                #version 450
+                layout(location=0) out vec2 motion;
+                layout(location=1) out vec3 color;
+                void main() {
+                    motion = vec2(0.25, -0.5);
+                    color = vec3(0.125, 0.5, 0.875);
+                }
+                """);
+        List<GpuFormat> formats = List.of(GpuFormat.RGBA16_FLOAT, GpuFormat.RGBA16_FLOAT);
+        RenderPipeline pipeline = pipeline(shaderName, formats, null, ColorTargetState.WRITE_ALL);
+        List<MetalGpuTexture> textures = createTextures(formats, "vector-outputs-rgba16");
+        render(pipeline, textures, null);
+
+        ByteBuffer motion = readback(textures.get(0)).order(ByteOrder.nativeOrder());
+        assertEquals(0.25F, Float.float16ToFloat(motion.getShort(0)), 0.01F);
+        assertEquals(-0.5F, Float.float16ToFloat(motion.getShort(2)), 0.01F);
+        ByteBuffer color = readback(textures.get(1)).order(ByteOrder.nativeOrder());
+        assertEquals(0.125F, Float.float16ToFloat(color.getShort(0)), 0.01F);
+        assertEquals(0.5F, Float.float16ToFloat(color.getShort(2)), 0.01F);
+        assertEquals(0.875F, Float.float16ToFloat(color.getShort(4)), 0.01F);
+        closeTextures(textures);
+    }
+
+    @Test
     void resizeRecreatePathProducesFreshContent() {
         // Framebuffer-resize semantics: after destroying targets and creating
         // differently-sized replacements, rendering must land in the new

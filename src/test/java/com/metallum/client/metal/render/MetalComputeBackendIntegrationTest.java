@@ -240,6 +240,55 @@ final class MetalComputeBackendIntegrationTest {
     }
 
     @Test
+    void texture3dUploadAndReadbackPreservesDepthSlices() {
+        int width = 4;
+        int height = 2;
+        int depth = 3;
+        int pixelSize = GpuFormat.RGBA8_UNORM.blockSize();
+        ByteBuffer source = ByteBuffer.allocateDirect(width * height * depth * pixelSize);
+        for (int z = 0; z < depth; z++) {
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    source.put((byte) (z * 50 + x));
+                    source.put((byte) (y * 80));
+                    source.put((byte) (255 - z * 50));
+                    source.put((byte) 255);
+                }
+            }
+        }
+        source.flip();
+        try (MetalGpuTexture texture = new MetalGpuTexture(
+                device,
+                GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_SRC
+                        | GpuTexture.USAGE_COPY_DST | MetalGpuTexture.USAGE_SHADER_WRITE,
+                "caps-3d",
+                GpuFormat.RGBA8_UNORM,
+                width,
+                height,
+                depth,
+                1,
+                true
+        ); MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
+                () -> "caps-3d-readback",
+                GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST,
+                source.capacity()
+        )) {
+            encoder.writeToTexture(texture, source, 0, 0, 0, 0, width, height);
+            encoder.copyTextureToBuffer(texture, buffer, 0L, () -> {
+            }, 0);
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            ByteBuffer result = buffer.currentStorage().limit(source.capacity()).slice();
+            int secondSlice = (width * height) * pixelSize;
+            assertEquals(50, Byte.toUnsignedInt(result.get(secondSlice)), "z=1 red base");
+            assertEquals(80, Byte.toUnsignedInt(result.get(secondSlice + width * pixelSize + 1)), "z=1 green second row");
+            int thirdSlice = secondSlice * 2;
+            assertEquals(100, Byte.toUnsignedInt(result.get(thirdSlice)), "z=2 red base");
+            assertEquals(155, Byte.toUnsignedInt(result.get(thirdSlice + 2)), "z=2 blue base");
+        }
+    }
+
+    @Test
     void renderThenComputeImageLoadObservesFragmentOutput() {
         shaders.put("caps_fill.vert", FULLSCREEN_VERTEX);
         shaders.put("caps_fill.frag", """

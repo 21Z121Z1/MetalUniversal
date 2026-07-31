@@ -221,7 +221,9 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
     ) {
         List<String> missing = new ArrayList<>();
         for (String block : program.uniformBlockNames()) {
-            if (compiled.resource(block) == null) {
+            boolean pushConstantAlias = IrisMetalGlslLinker.SODIUM_PUSH_CONSTANT_BLOCK_NAME.equals(block)
+                    && compiled.resource("push_constants") != null;
+            if (compiled.resource(block) == null && !pushConstantAlias) {
                 missing.add("uniform block " + block);
             }
         }
@@ -326,6 +328,15 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
             Objects.requireNonNull(source, "source");
             Objects.requireNonNull(primaryVertexFormat, "primaryVertexFormat");
             ColorTargetState sourceTarget = source.getColorTargetState();
+            int sourceWriteMask = sourceTarget == null
+                    ? ColorTargetState.WRITE_ALL
+                    : sourceTarget.writeMask();
+            // Sodium uses -1 as its all-components sentinel for a few
+            // generated terrain pipelines; normalize it at the backend
+            // contract boundary before validating the four Metal channels.
+            if (sourceWriteMask == -1) {
+                sourceWriteMask = ColorTargetState.WRITE_ALL;
+            }
             return new RasterState(
                     source.isCull(),
                     source.getPolygonMode(),
@@ -333,7 +344,7 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
                     List.of(primaryVertexFormat),
                     source.getDepthStencilState(),
                     sourceTarget == null ? Optional.empty() : sourceTarget.blendFunction(),
-                    sourceTarget == null ? ColorTargetState.WRITE_ALL : sourceTarget.writeMask()
+                    sourceWriteMask
             );
         }
     }

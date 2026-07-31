@@ -49,7 +49,9 @@ final class MetalRenderPass implements RenderPassBackend {
     private final ScissorState scissorState = new ScissorState();
     private final GpuBufferSlice[] vertexBuffers = new GpuBufferSlice[MAX_VERTEX_BUFFERS];
     private final HashMap<String, GpuBufferSlice> uniforms = new HashMap<>();
+    private final HashMap<Integer, GpuBufferSlice> storageBuffers = new HashMap<>();
     private final HashMap<String, TextureViewAndSampler> samplers = new HashMap<>();
+    private final HashMap<String, GpuTextureView> storageImages = new HashMap<>();
     private long dirtyDescriptorMask;
     @Nullable
     private MetalCompiledRenderPipeline compiledPipeline;
@@ -169,6 +171,32 @@ final class MetalRenderPass implements RenderPassBackend {
             samplers.remove(name);
         } else {
             throw new IllegalArgumentException();
+        }
+    }
+
+    void bindStorageImage(final String name, final GpuTextureView textureView) {
+        if (!(textureView instanceof MetalGpuTextureView metalView)
+                || !(metalView.texture() instanceof MetalGpuTexture texture)) {
+            throw new IllegalArgumentException("Storage image " + name + " is not backed by Metal");
+        }
+        storageImages.put(name, textureView);
+        commandEncoder.flushPendingClear(texture);
+        texture.markContentsDirty();
+        markDescriptorDirty(name);
+    }
+
+    void bindStorageBuffer(final int binding, final GpuBufferSlice slice) {
+        if (binding < 0 || !(slice.buffer() instanceof MetalGpuBuffer)) {
+            throw new IllegalArgumentException("Invalid Metal storage buffer binding " + binding);
+        }
+        storageBuffers.put(binding, slice);
+        if (compiledPipeline != null) {
+            for (MetalCompiledRenderPipeline.ResourceBinding resource : compiledPipeline.resources()) {
+                if (resource.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER
+                        && MetalCrossShaderCompiler.storageBufferLogicalBinding(resource.name()) == binding) {
+                    dirtyDescriptorMask |= 1L << resource.bindingIndex();
+                }
+            }
         }
     }
 
@@ -661,6 +689,9 @@ final class MetalRenderPass implements RenderPassBackend {
         if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
             TextureViewAndSampler textureBinding = samplers.get(binding.name());
             if (textureBinding == null) {
+                textureBinding = IrisMetalTerrainBridge.fallbackSampler(binding.name(), samplers);
+            }
+            if (textureBinding == null) {
                 throw new IllegalStateException("Missing sampler " + binding.name());
             }
 
@@ -679,9 +710,32 @@ final class MetalRenderPass implements RenderPassBackend {
             return;
         }
 
+        if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_IMAGE) {
+            GpuTextureView view = storageImages.get(binding.name());
+            if (!(view instanceof MetalGpuTextureView metalView)
+                    || !(metalView.texture() instanceof MetalGpuTexture texture)
+                    || view.isClosed() || texture.isClosed()) {
+                throw new IllegalStateException("Missing or invalid storage image " + binding.name());
+            }
+            commandEncoder.flushPendingClear(texture);
+            texture.markContentsDirty();
+            enc.setTexture(metalView.nativeHandle(), binding.bindingIndex(), binding.stageMask());
+            return;
+        }
+
         GpuBufferSlice uniformSlice = uniforms.get(binding.name());
+        if (uniformSlice == null
+                && binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER) {
+            int logicalBinding = MetalCrossShaderCompiler.storageBufferLogicalBinding(binding.name());
+            uniformSlice = storageBuffers.get(logicalBinding);
+        }
         if (uniformSlice == null) {
-            throw new IllegalStateException("Missing uniform " + binding.name());
+            throw new IllegalStateException(
+                    "Missing "
+                            + (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER
+                            ? "storage buffer " : "uniform ")
+                            + binding.name()
+            );
         }
         if (VALIDATION && uniformSlice.buffer().isClosed()) {
             throw new IllegalStateException("Uniform " + binding.name() + " buffer has been closed");

@@ -5,6 +5,7 @@ import net.fabricmc.api.Environment;
 import net.irisshaders.iris.gl.blending.AlphaTest;
 import net.irisshaders.iris.gl.state.ShaderAttributeInputs;
 import net.irisshaders.iris.shaderpack.loading.ProgramId;
+import net.irisshaders.iris.shaderpack.programs.ComputeSource;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
@@ -24,6 +25,8 @@ final class IrisMetalWorldPrograms implements AutoCloseable {
     private final Map<VanillaKey, Optional<IrisMetalGlslLinker.LinkedRasterProgram>> vanillaPrograms =
             new HashMap<>();
     private final Map<CompositeKey, IrisMetalGlslLinker.LinkedRasterProgram> compositePrograms =
+            new HashMap<>();
+    private final Map<ComputeKey, IrisMetalProgramFrontend.ComputeProgram> computePrograms =
             new HashMap<>();
     private boolean closed;
 
@@ -97,10 +100,38 @@ final class IrisMetalWorldPrograms implements AutoCloseable {
         );
     }
 
+    synchronized IrisMetalGlslLinker.LinkedRasterProgram finalProgram() {
+        ensureOpen();
+        return this.frontend.resolve(ProgramId.Final)
+                .map(resolved -> IrisMetalGlslLinker.linkDefault(
+                        this.frontend.patchComposite(
+                                resolved.source(),
+                                TextureStage.COMPOSITE_AND_FINAL
+                        )
+                ))
+                .orElse(null);
+    }
+
+    synchronized IrisMetalProgramFrontend.ComputeProgram compute(
+            final ComputeSource source,
+            final TextureStage stage
+    ) {
+        ensureOpen();
+        ComputeKey key = new ComputeKey(
+                Objects.requireNonNull(source, "source"),
+                Objects.requireNonNull(stage, "stage")
+        );
+        return this.computePrograms.computeIfAbsent(
+                key,
+                ignored -> this.frontend.patchCompute(source, stage)
+        );
+    }
+
     synchronized int cachedProgramCount() {
         return this.sodiumPrograms.size()
                 + this.vanillaPrograms.size()
-                + this.compositePrograms.size();
+                + this.compositePrograms.size()
+                + this.computePrograms.size();
     }
 
     private void ensureOpen() {
@@ -120,6 +151,7 @@ final class IrisMetalWorldPrograms implements AutoCloseable {
         this.sodiumPrograms.clear();
         this.vanillaPrograms.clear();
         this.compositePrograms.clear();
+        this.computePrograms.clear();
     }
 
     private record SodiumKey(ProgramId requested, AlphaTest fallbackAlpha) {
@@ -135,5 +167,8 @@ final class IrisMetalWorldPrograms implements AutoCloseable {
     }
 
     private record CompositeKey(ProgramSource source, TextureStage stage) {
+    }
+
+    private record ComputeKey(ComputeSource source, TextureStage stage) {
     }
 }

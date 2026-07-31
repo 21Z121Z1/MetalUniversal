@@ -165,9 +165,9 @@ final class MetalDevice implements GpuDeviceBackend {
     @Override
     public @NonNull CompiledRenderPipeline precompilePipeline(final @NonNull RenderPipeline pipeline, @Nullable final ShaderSource shaderSource) {
         ShaderSource effectiveSource = shaderSource == null ? this.activeShaderSource : shaderSource;
-        if (shaderSource != null) {
-            this.activeShaderSource = shaderSource;
-        }
+        // A caller-supplied source belongs to this pipeline only. Persisting it
+        // as the lazy fallback would make a later vanilla pipeline resolve
+        // through an unrelated Iris-owned source chain.
         return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, effectiveSource));
     }
 
@@ -276,6 +276,10 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {
+        MetalCompiledRenderPipeline irisPipeline = IrisMetalTerrainBridge.compiledPipeline(this, pipeline);
+        if (irisPipeline != null) {
+            return irisPipeline;
+        }
         return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, this.activeShaderSource));
     }
 

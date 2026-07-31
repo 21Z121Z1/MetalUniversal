@@ -26,6 +26,7 @@ final class MetalGpuTexture extends GpuTexture {
 
     private final MetalDevice device;
     private final MTLPixelFormat mtlPixelFormat;
+    private final boolean texture3D;
     private boolean closed;
     @Nullable
     private Vector4fc materializedColorClear;
@@ -46,26 +47,62 @@ final class MetalGpuTexture extends GpuTexture {
             final int depthOrLayers,
             final int mipLevels
     ) {
+        this(device, usage, label, format, width, height, depthOrLayers, mipLevels, false);
+    }
+
+    MetalGpuTexture(
+            final MetalDevice device,
+            @GpuTexture.Usage final int usage,
+            final String label,
+            final GpuFormat format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevels,
+            final boolean texture3D
+    ) {
         super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
+        this.texture3D = texture3D;
         this.mtlPixelFormat = MTLPixelFormat.from(format);
 
-        this.nativeHandle = MetalNativeBridge.metallum_create_texture_2d(
-                device.metalDeviceHandle(),
-                this.mtlPixelFormat,
-                width,
-                height,
-                depthOrLayers,
-                mipLevels,
-                (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
-                toMtlTextureUsage(usage),
-                MTLStorageMode.Private,
-                label
-        );
+        this.nativeHandle = texture3D
+                ? MetalNativeBridge.metallum_create_texture_3d(
+                        device.metalDeviceHandle(),
+                        this.mtlPixelFormat,
+                        width,
+                        height,
+                        depthOrLayers,
+                        mipLevels,
+                        toMtlTextureUsage(usage),
+                        MTLStorageMode.Private,
+                        label
+                )
+                : MetalNativeBridge.metallum_create_texture_2d(
+                        device.metalDeviceHandle(),
+                        this.mtlPixelFormat,
+                        width,
+                        height,
+                        depthOrLayers,
+                        mipLevels,
+                        (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
+                        toMtlTextureUsage(usage),
+                        MTLStorageMode.Private,
+                        label
+                );
+        if (MetalNativeBridge.isNullHandle(this.nativeHandle)) {
+            throw new IllegalStateException(
+                    "Failed to create Metal " + (texture3D ? "3D" : "2D") + " texture '" + label + "'"
+            );
+        }
     }
 
     int pixelSize() {
         return this.getFormat().blockSize();
+    }
+
+    boolean isTexture3D() {
+        return this.texture3D;
     }
 
     void recordMaterializedClear(@Nullable final Vector4fc color, @Nullable final Double depth) {
