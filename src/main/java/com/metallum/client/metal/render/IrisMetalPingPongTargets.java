@@ -17,6 +17,7 @@ import java.util.Set;
 final class IrisMetalPingPongTargets implements AutoCloseable {
     static final int TEXTURE_USAGE = GpuTexture.USAGE_RENDER_ATTACHMENT
             | GpuTexture.USAGE_TEXTURE_BINDING
+            | MetalGpuTexture.USAGE_SHADER_WRITE
             | GpuTexture.USAGE_COPY_SRC
             | GpuTexture.USAGE_COPY_DST;
 
@@ -114,9 +115,25 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         return flipped.get(checkIndex(index)) ? alt[index] : main[index];
     }
 
+    /** Returns the read side selected by an execution-plan snapshot. */
+    MetalGpuTexture readTexture(final int index, final BitSet snapshot) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        validateSnapshot(snapshot);
+        return snapshot.get(checked) ? alt[checked] : main[checked];
+    }
+
     MetalGpuTexture writeTexture(final int index) {
         ensureOpen();
         return flipped.get(checkIndex(index)) ? main[index] : alt[index];
+    }
+
+    /** Returns the write side selected by an execution-plan snapshot. */
+    MetalGpuTexture writeTexture(final int index, final BitSet snapshot) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        validateSnapshot(snapshot);
+        return snapshot.get(checked) ? main[checked] : alt[checked];
     }
 
     MetalGpuTexture mainTexture(final int index) {
@@ -134,9 +151,23 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         return flipped.get(checkIndex(index)) ? altViews[index] : mainViews[index];
     }
 
+    MetalGpuTextureView readView(final int index, final BitSet snapshot) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        validateSnapshot(snapshot);
+        return snapshot.get(checked) ? altViews[checked] : mainViews[checked];
+    }
+
     MetalGpuTextureView writeView(final int index) {
         ensureOpen();
         return flipped.get(checkIndex(index)) ? mainViews[index] : altViews[index];
+    }
+
+    MetalGpuTextureView writeView(final int index, final BitSet snapshot) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        validateSnapshot(snapshot);
+        return snapshot.get(checked) ? mainViews[checked] : altViews[checked];
     }
 
     void enableReadMipmaps(final int index) {
@@ -190,25 +221,45 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
 
     void restore(final BitSet snapshot) {
         ensureOpen();
-        if (snapshot.length() > formats.length) {
-            throw new IllegalArgumentException("Flip snapshot contains an out-of-range logical target");
-        }
+        validateSnapshot(snapshot);
         flipped.clear();
         flipped.or(snapshot);
     }
 
     void checkNoFeedbackLoop(final int[] writeTargets, final int[] readTargets) {
+        checkNoFeedbackLoop(writeTargets, readTargets, snapshot());
+    }
+
+    /**
+     * Rejects only a physical side alias. Logical Iris feedback is valid when
+     * the pass reads one side and writes the other side of a target.
+     */
+    void checkNoFeedbackLoop(
+            final int[] writeTargets,
+            final int[] readTargets,
+            final BitSet readSide
+    ) {
+        validateSnapshot(readSide);
         for (int write : writeTargets) {
             checkIndex(write);
             for (int read : readTargets) {
                 checkIndex(read);
-                if (write == read) {
+                boolean writeFromAlt = !flipped.get(write);
+                boolean readFromAlt = readSide.get(read);
+                if (write == read && writeFromAlt == readFromAlt) {
                     throw new IllegalStateException(
-                            "Pass reads and writes logical target " + write
-                                    + " without an intervening flip (feedback loop)"
+                            "Pass reads and writes the same physical side of logical target " + write
+                                    + " (readFromAlt=" + readSide.get(read) + ")"
                     );
                 }
             }
+        }
+    }
+
+    private void validateSnapshot(final BitSet snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        if (snapshot.length() > formats.length) {
+            throw new IllegalArgumentException("Flip snapshot contains an out-of-range logical target");
         }
     }
 

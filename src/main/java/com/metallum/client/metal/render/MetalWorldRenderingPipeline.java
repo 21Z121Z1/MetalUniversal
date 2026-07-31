@@ -18,11 +18,22 @@ import net.irisshaders.iris.shaderpack.properties.ParticleRenderingSettings;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
 import net.irisshaders.iris.uniforms.FrameUpdateNotifier;
 import net.irisshaders.iris.uniforms.CommonUniforms;
+import net.irisshaders.iris.uniforms.CapturedRenderingState;
 import net.irisshaders.iris.uniforms.custom.CustomUniforms;
 import net.irisshaders.iris.pipeline.programs.ShaderKey;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.blaze3d.shaders.ShaderSource;
+import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.blaze3d.textures.GpuTextureView;
 import net.irisshaders.iris.vertices.sodium.terrain.FormatAnalyzer;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.Camera;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.irisshaders.iris.mixin.LevelRendererAccessor;
+import org.jspecify.annotations.Nullable;
+import org.joml.Vector3d;
+import org.joml.Vector4f;
 
 import java.util.Objects;
 import java.util.OptionalInt;
@@ -49,13 +60,22 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     private final IrisMetalFrameState frameState = new IrisMetalFrameState();
     private final IrisMetalUniformValues uniformValues;
     private final IrisMetalWorldPrograms programs;
+    private final IrisMetalExecutionGraph executionGraph;
     private IrisMetalCompiledPrograms compiledPrograms;
     private IrisMetalWorldResources resources;
+    private @Nullable IrisMetalCenterDepthSampler centerDepthSampler;
+    private MetalDevice centerDepthDevice;
 
     public MetalWorldRenderingPipeline(final ProgramSet programSet) {
         this.generation = GENERATIONS.incrementAndGet();
         this.programSet = Objects.requireNonNull(programSet, "programSet");
         this.programs = new IrisMetalWorldPrograms(this.generation, this.programSet);
+        this.executionGraph = new IrisMetalExecutionGraph(
+                this.generation,
+                this.programSet,
+                this.programs,
+                IrisMetalRenderTargetFormats.from(this.programSet.getPackDirectives()).length
+        );
         this.pack = programSet.getPack();
         this.directives = programSet.getPackDirectives();
         this.forcedShadowRenderDistanceChunks = forcedShadowDistance(
@@ -75,6 +95,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                 this.frameState.updateNotifier(),
                 () -> this.frameState.phase().ordinal()
         );
+        this.executionGraph.attachUniformValues(this.uniformValues);
         publishWorldSettings();
     }
 
@@ -153,7 +174,13 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     public void beginLevelRendering() {
         prepareResources();
         prepareTerrainUniforms();
+        Vector3d fog = CapturedRenderingState.INSTANCE.getFogColor();
+        this.executionGraph.beginFrame(
+                this.resources(), new Vector4f((float) fog.x, (float) fog.y, (float) fog.z, 1.0F)
+        );
         this.frameState.beginWorldRendering();
+        this.executionGraph.executeSetup(this.resources());
+        this.executionGraph.executeBegin(this.resources());
     }
 
     private void prepareTerrainUniforms() {
@@ -211,16 +238,88 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                     mainTarget.width,
                     mainTarget.height
             );
-            return;
+        } else {
+            if (!this.resources.isOwnedBy(device)) {
+                throw new IllegalStateException("Iris Metal generation crossed Metal device ownership");
+            }
+            this.resources.resize(mainTarget.width, mainTarget.height);
         }
-        if (!this.resources.isOwnedBy(device)) {
-            throw new IllegalStateException("Iris Metal generation crossed Metal device ownership");
+        if (this.centerDepthSampler == null) {
+            ShaderSource fallback = (identifier, type) -> {
+                throw new IllegalStateException(
+                        "Unexpected fallback shader lookup while creating Iris center-depth sampler: "
+                                + identifier + " / " + type
+                );
+            };
+            this.centerDepthSampler = new IrisMetalCenterDepthSampler(
+                    device,
+                    this.generation,
+                    Math.max(0.001F, this.directives.getCenterDepthHalfLife()),
+                    fallback
+            );
+            this.centerDepthDevice = device;
+            this.executionGraph.setCenterDepthSampler(this.centerDepthSampler);
+        } else if (this.centerDepthDevice != device) {
+            throw new IllegalStateException("Iris center-depth sampler crossed Metal device ownership");
         }
-        this.resources.resize(mainTarget.width, mainTarget.height);
+        this.executionGraph.prepare(
+                device,
+                this.resources,
+                this.uniformValues,
+                mainTarget.getColorTexture().getFormat()
+        );
+    }
+
+    @Override
+    public void beginTranslucents() {
+        RenderTarget target = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+        GpuTexture depth = target.getDepthTexture();
+        if (depth == null) {
+            throw new IllegalStateException("Iris translucent boundary has no main depth texture");
+        }
+        this.executionGraph.captureNoTranslucentsDepth(this.resources(), depth);
+        this.executionGraph.executeDeferred(this.resources());
+    }
+
+    @Override
+    public void beginHand() {
+        RenderTarget target = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+        GpuTexture depth = target.getDepthTexture();
+        GpuTextureView depthView = target.getDepthTextureView();
+        if (depth == null || depthView == null) {
+            throw new IllegalStateException("Iris hand boundary has no main depth texture view");
+        }
+        this.executionGraph.sampleCenterDepth(depthView, 1.0F / 60.0F);
+        this.executionGraph.captureNoHandDepth(this.resources(), depth);
+    }
+
+    @Override
+    public void renderShadows(
+            final LevelRendererAccessor levelRenderer,
+            final Camera camera,
+            final CameraRenderState cameraRenderState
+    ) {
+        if (this.directives.isPrepareBeforeShadow()) {
+            this.executionGraph.executePrepare(this.resources());
+        }
+        super.renderShadows(levelRenderer, camera, cameraRenderState);
+        if (!this.directives.isPrepareBeforeShadow()) {
+            this.executionGraph.executePrepare(this.resources());
+        }
+        this.executionGraph.executeShadowComposite(this.resources());
     }
 
     @Override
     public void finalizeLevelRendering() {
+        RenderTarget target = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+        GpuTexture depth = target.getDepthTexture();
+        GpuTextureView colorView = target.getColorTextureView();
+        if (depth == null || colorView == null) {
+            throw new IllegalStateException("Iris final boundary has no main target textures");
+        }
+        this.executionGraph.captureFinalDepth(this.resources(), depth);
+        this.executionGraph.executeComposite(this.resources());
+        this.executionGraph.executeFinal(this.resources(), colorView);
         this.frameState.endWorldRendering();
     }
 
@@ -231,6 +330,12 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             this.compiledPrograms.close();
             this.compiledPrograms = null;
         }
+        this.executionGraph.close();
+        if (this.centerDepthSampler != null) {
+            this.centerDepthSampler.close();
+            this.centerDepthSampler = null;
+        }
+        this.centerDepthDevice = null;
         this.programs.close();
         if (this.resources != null) {
             this.resources.close();
