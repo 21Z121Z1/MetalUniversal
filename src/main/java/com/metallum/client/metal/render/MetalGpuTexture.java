@@ -12,9 +12,18 @@ import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Environment(EnvType.CLIENT)
 final class MetalGpuTexture extends GpuTexture {
+    private static final AtomicInteger IRIS_SYNTHETIC_IDS = new AtomicInteger(1);
+
+    /**
+     * Backend-private usage bit for textures written through a Metal compute
+     * shader. Blaze3D 26.2 does not expose a storage-texture usage flag.
+     */
+    static final int USAGE_SHADER_WRITE = 1 << 5;
+
     private final MetalDevice device;
     private final MTLPixelFormat mtlPixelFormat;
     private boolean closed;
@@ -23,6 +32,7 @@ final class MetalGpuTexture extends GpuTexture {
     @Nullable
     private Double materializedDepthClear;
     private int views = 1;
+    private int irisSyntheticId;
     @Nullable
     private MemorySegment nativeHandle;
 
@@ -108,6 +118,12 @@ final class MetalGpuTexture extends GpuTexture {
         return this.mtlPixelFormat;
     }
 
+    MTLPixelFormat mtlDepthPixelFormat() {
+        return this.mtlPixelFormat == MTLPixelFormat.Stencil8
+                ? MTLPixelFormat.Invalid
+                : this.mtlPixelFormat;
+    }
+
     MTLPixelFormat mtlStencilPixelFormat() {
         return this.mtlPixelFormat.hasStencil() ? this.mtlPixelFormat : MTLPixelFormat.Invalid;
     }
@@ -126,6 +142,19 @@ final class MetalGpuTexture extends GpuTexture {
         return this.closed;
     }
 
+    /**
+     * Iris tracks every Mojang texture by an integer GL id. Metal textures do
+     * not have one, so its mixin default deliberately throws. A stable,
+     * process-local identity preserves the tracking contract without exposing
+     * or fabricating an OpenGL object.
+     */
+    public int iris$getGlId() {
+        if (this.irisSyntheticId == 0) {
+            this.irisSyntheticId = IRIS_SYNTHETIC_IDS.getAndIncrement();
+        }
+        return this.irisSyntheticId;
+    }
+
     private static long toMtlTextureUsage(@GpuTexture.Usage final int usage) {
         long result = 0L;
         if ((usage & GpuTexture.USAGE_TEXTURE_BINDING) != 0 || (usage & GpuTexture.USAGE_COPY_DST) != 0 || (usage & GpuTexture.USAGE_COPY_SRC) != 0) {
@@ -134,6 +163,9 @@ final class MetalGpuTexture extends GpuTexture {
         if ((usage & GpuTexture.USAGE_RENDER_ATTACHMENT) != 0) {
             result |= MTLTextureUsage.RenderTarget.value;
             result |= MTLTextureUsage.ShaderRead.value;
+        }
+        if ((usage & USAGE_SHADER_WRITE) != 0) {
+            result |= MTLTextureUsage.ShaderWrite.value;
         }
         return result == 0L ? MTLTextureUsage.ShaderRead.value : result;
     }

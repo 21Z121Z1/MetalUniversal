@@ -58,6 +58,14 @@ private func unretainedPointer(_ object: AnyObject?) -> UnsafeMutableRawPointer?
 }
 
 @inline(__always)
+private func textureFromUnretainedPointer(_ pointer: UnsafeMutableRawPointer?) -> MTLTexture? {
+    guard let pointer else {
+        return nil
+    }
+    return Unmanaged<MTLTexture>.fromOpaque(pointer).takeUnretainedValue()
+}
+
+@inline(__always)
 private func objectAddress(_ object: AnyObject) -> UInt {
     UInt(bitPattern: Unmanaged.passUnretained(object).toOpaque())
 }
@@ -1052,6 +1060,102 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
     }
 }
 
+/// Array-preserving render-pass entry point. Null entries remain null so a
+/// logical Iris DRAWBUFFERS slot is never compacted into another attachment.
+@_cdecl("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2")
+public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
+    _ commandBuffer: MTLCommandBuffer,
+    _ colorTexturePointers: UnsafePointer<UnsafeMutableRawPointer?>?,
+    _ colorCount: Int32,
+    _ depthTexture: MTLTexture?,
+    _ viewportWidth: Double,
+    _ viewportHeight: Double,
+    _ clearColors: UnsafePointer<Float>?,
+    _ clearColorEnabled: UnsafePointer<Int32>?,
+    _ clearDepthEnabled: Int32,
+    _ clearDepth: Double
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
+        let count = Int(colorCount)
+        guard count >= 0 && count <= 8 else {
+            NSLog("[Metallum] rejected render pass with %d color slots", colorCount)
+            return nil
+        }
+        guard count == 0 || colorTexturePointers != nil else {
+            NSLog("[Metallum] render pass color slot count is non-zero but the texture array is null")
+            return nil
+        }
+        guard count == 0 || (clearColors != nil && clearColorEnabled != nil) else {
+            NSLog("[Metallum] render pass color slot count is non-zero but clear arrays are null")
+            return nil
+        }
+        guard count > 0 || depthTexture != nil else {
+            NSLog("[Metallum] rejected render pass with no color or depth attachment")
+            return nil
+        }
+
+        let depthFormat = depthTexture?.pixelFormat ?? .invalid
+        let stencilFormat = stencilPixelFormat(for: depthFormat)
+        let renderPass = MTLRenderPassDescriptor()
+
+        for index in 0..<count {
+            let rawTexture = colorTexturePointers?[index]
+            guard let attachment = renderPass.colorAttachments[index] else {
+                NSLog("[Metallum] color attachment descriptor %d is unavailable", index)
+                return nil
+            }
+            guard let texture = textureFromUnretainedPointer(rawTexture) else {
+                attachment.loadAction = .dontCare
+                attachment.storeAction = .dontCare
+                continue
+            }
+
+            attachment.texture = texture
+            if clearColorEnabled?[index] ?? 0 != 0 {
+                let base = index * 4
+                let colors = clearColors!
+                attachment.loadAction = .clear
+                attachment.clearColor = makeClearColor(
+                    red: colors[base],
+                    green: colors[base + 1],
+                    blue: colors[base + 2],
+                    alpha: colors[base + 3]
+                )
+            } else {
+                attachment.loadAction = .load
+            }
+            attachment.storeAction = .store
+        }
+
+        if let depthTexture {
+            if depthFormat != .stencil8 {
+                renderPass.depthAttachment.texture = depthTexture
+                renderPass.depthAttachment.loadAction = clearDepthEnabled != 0 ? .clear : .load
+                renderPass.depthAttachment.clearDepth = clearDepth
+                renderPass.depthAttachment.storeAction = .store
+            }
+            if stencilFormat != .invalid || depthFormat == .stencil8 {
+                renderPass.stencilAttachment.texture = depthTexture
+                renderPass.stencilAttachment.loadAction = .dontCare
+                renderPass.stencilAttachment.storeAction = .store
+            }
+        }
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+            return nil
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: viewportWidth,
+            height: viewportHeight,
+            znear: 0.0,
+            zfar: 1.0
+        ))
+        return retainedPointer(encoder)
+    }
+}
+
 @_cdecl("metallum_MTLRenderCommandEncoder_setRenderPipelineState")
 public func metallum_MTLRenderCommandEncoder_setRenderPipelineState(_ encoder: MTLRenderCommandEncoder, _ pipeline: MTLRenderPipelineState) {
     encoder.setRenderPipelineState(pipeline)
@@ -1566,6 +1670,180 @@ public func MTLBlitCommandEncoder_waitForFence(
     encoder.waitForFence(fence)
 }
 
+// MARK: - Generic compute / mipmap / compare-sampler ABI (Iris backend B0)
+//
+// Vanilla Blaze3D 26.2 has no compute, storage-resource, mipmap-generation or
+// depth-compare-sampler concepts, so these exports are mod-private extensions
+// consumed by the Java layer through optional FFM downcalls. Compute encoders
+// participate in the same single-MTLFence hazard chain as render/blit encoders
+// (resources are allocated untracked): the Java owner must waitForFence on
+// begin and updateFence on end, exactly like MetalCommandEncoder does for the
+// other encoder kinds.
+
+@_cdecl("metallum_MTLCommandBuffer_makeComputeCommandEncoder")
+public func metallum_MTLCommandBuffer_makeComputeCommandEncoder(
+    _ commandBuffer: MTLCommandBuffer
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        retainedPointer(commandBuffer.makeComputeCommandEncoder())
+    }
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_setComputePipelineState")
+public func metallum_MTLComputeCommandEncoder_setComputePipelineState(
+    _ encoder: MTLComputeCommandEncoder,
+    _ pipelineState: MTLComputePipelineState
+) {
+    encoder.setComputePipelineState(pipelineState)
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_setBuffer")
+public func metallum_MTLComputeCommandEncoder_setBuffer(
+    _ encoder: MTLComputeCommandEncoder,
+    _ buffer: MTLBuffer?,
+    _ offset: Int,
+    _ index: Int32
+) {
+    encoder.setBuffer(buffer, offset: offset, index: Int(index))
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_setTexture")
+public func metallum_MTLComputeCommandEncoder_setTexture(
+    _ encoder: MTLComputeCommandEncoder,
+    _ texture: MTLTexture?,
+    _ index: Int32
+) {
+    encoder.setTexture(texture, index: Int(index))
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_setSamplerState")
+public func metallum_MTLComputeCommandEncoder_setSamplerState(
+    _ encoder: MTLComputeCommandEncoder,
+    _ sampler: MTLSamplerState?,
+    _ index: Int32
+) {
+    encoder.setSamplerState(sampler, index: Int(index))
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_dispatchThreadgroups")
+public func metallum_MTLComputeCommandEncoder_dispatchThreadgroups(
+    _ encoder: MTLComputeCommandEncoder,
+    _ groupsX: Int32,
+    _ groupsY: Int32,
+    _ groupsZ: Int32,
+    _ threadsPerGroupX: Int32,
+    _ threadsPerGroupY: Int32,
+    _ threadsPerGroupZ: Int32
+) {
+    encoder.dispatchThreadgroups(
+        MTLSize(width: Int(groupsX), height: Int(groupsY), depth: Int(groupsZ)),
+        threadsPerThreadgroup: MTLSize(
+            width: Int(threadsPerGroupX),
+            height: Int(threadsPerGroupY),
+            depth: Int(threadsPerGroupZ)
+        )
+    )
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect")
+public func metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
+    _ encoder: MTLComputeCommandEncoder,
+    _ indirectBuffer: MTLBuffer,
+    _ indirectOffset: Int,
+    _ threadsPerGroupX: Int32,
+    _ threadsPerGroupY: Int32,
+    _ threadsPerGroupZ: Int32
+) {
+    encoder.dispatchThreadgroups(
+        indirectBuffer: indirectBuffer,
+        indirectBufferOffset: indirectOffset,
+        threadsPerThreadgroup: MTLSize(
+            width: Int(threadsPerGroupX),
+            height: Int(threadsPerGroupY),
+            depth: Int(threadsPerGroupZ)
+        )
+    )
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_updateFence")
+public func metallum_MTLComputeCommandEncoder_updateFence(
+    _ encoder: MTLComputeCommandEncoder,
+    _ fence: MTLFence
+) {
+    encoder.updateFence(fence)
+}
+
+@_cdecl("metallum_MTLComputeCommandEncoder_waitForFence")
+public func metallum_MTLComputeCommandEncoder_waitForFence(
+    _ encoder: MTLComputeCommandEncoder,
+    _ fence: MTLFence
+) {
+    encoder.waitForFence(fence)
+}
+
+@_cdecl("metallum_MTLDevice_makeComputePipelineState")
+public func metallum_MTLDevice_makeComputePipelineState(
+    _ device: MTLDevice,
+    _ function: MTLFunction
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        do {
+            return retainedPointer(try device.makeComputePipelineState(function: function))
+        } catch {
+            NSLog("[metallum] Failed to create compute pipeline state: %@", String(describing: error))
+            return nil
+        }
+    }
+}
+
+@_cdecl("metallum_MTLComputePipelineState_maxTotalThreadsPerThreadgroup")
+public func metallum_MTLComputePipelineState_maxTotalThreadsPerThreadgroup(
+    _ pipelineState: MTLComputePipelineState
+) -> Int32 {
+    return Int32(clamping: pipelineState.maxTotalThreadsPerThreadgroup)
+}
+
+@_cdecl("metallum_MTLBlitCommandEncoder_generateMipmaps")
+public func metallum_MTLBlitCommandEncoder_generateMipmaps(
+    _ encoder: MTLBlitCommandEncoder,
+    _ texture: MTLTexture
+) {
+    encoder.generateMipmaps(for: texture)
+}
+
+// Sampler creation with an optional depth-compare function. compareFunction
+// receives the MTLCompareFunction raw value, or -1 for an ordinary sampler.
+// Compare samplers additionally force normalized coordinates and are intended
+// for shadow2D-style lookups (MSL sample_compare).
+@_cdecl("metallum_create_sampler_v2")
+public func metallum_create_sampler_v2(
+    _ device: MTLDevice,
+    _ addressModeU: MTLSamplerAddressMode,
+    _ addressModeV: MTLSamplerAddressMode,
+    _ minFilter: MTLSamplerMinMagFilter,
+    _ magFilter: MTLSamplerMinMagFilter,
+    _ mipFilter: MTLSamplerMipFilter,
+    _ maxAnisotropy: Int32,
+    _ lodMaxClamp: Double,
+    _ compareFunction: Int32
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        let descriptor = MTLSamplerDescriptor()
+        descriptor.minFilter = minFilter
+        descriptor.magFilter = magFilter
+        descriptor.mipFilter = mipFilter
+        descriptor.sAddressMode = addressModeU
+        descriptor.tAddressMode = addressModeV
+        descriptor.maxAnisotropy = max(Int(maxAnisotropy), 1)
+        descriptor.lodMinClamp = 0.0
+        descriptor.lodMaxClamp = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
+        if compareFunction >= 0, let compare = MTLCompareFunction(rawValue: UInt(compareFunction)) {
+            descriptor.compareFunction = compare
+        }
+        return retainedPointer(device.makeSamplerState(descriptor: descriptor))
+    }
+}
+
 @_cdecl("metallum_release_object")
 public func metallum_release_object(_ obj: UnsafeMutableRawPointer?) {
     autoreleasepool {
@@ -1672,9 +1950,71 @@ public func metallum_MTLRenderPipelineDescriptor_setAttachmentFormats(
 ) {
     autoreleasepool {
         desc.colorAttachments[0].pixelFormat = colorFormat
+        if depthFormat != .invalid {
+            desc.depthAttachmentPixelFormat = depthFormat
+        }
+        if stencilFormat != .invalid {
+            desc.stencilAttachmentPixelFormat = stencilFormat
+        }
+    }
+}
+
+@_cdecl("metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat")
+public func metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat(
+    _ desc: MTLRenderPipelineDescriptor,
+    _ index: Int32,
+    _ format: MTLPixelFormat
+) -> Int32 {
+    guard index >= 0 && index < 8,
+          let attachment = desc.colorAttachments[Int(index)] else {
+        return 0
+    }
+    attachment.pixelFormat = format
+    return 1
+}
+
+@_cdecl("metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats")
+public func metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats(
+    _ desc: MTLRenderPipelineDescriptor,
+    _ depthFormat: MTLPixelFormat,
+    _ stencilFormat: MTLPixelFormat
+) {
+    if depthFormat != .invalid {
         desc.depthAttachmentPixelFormat = depthFormat
+    }
+    if stencilFormat != .invalid {
         desc.stencilAttachmentPixelFormat = stencilFormat
     }
+}
+
+@_cdecl("metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState")
+public func metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState(
+    _ desc: MTLRenderPipelineDescriptor,
+    _ index: Int32,
+    _ enabled: Int32,
+    _ srcRgb: MTLBlendFactor,
+    _ dstRgb: MTLBlendFactor,
+    _ opRgb: MTLBlendOperation,
+    _ srcAlpha: MTLBlendFactor,
+    _ dstAlpha: MTLBlendFactor,
+    _ opAlpha: MTLBlendOperation,
+    _ writeMask: MTLColorWriteMask
+) -> Int32 {
+    guard index >= 0 && index < 8,
+          let attachment = desc.colorAttachments[Int(index)] else {
+        return 0
+    }
+    attachment.writeMask = writeMask
+    attachment.isBlendingEnabled = enabled != 0
+    if enabled != 0 {
+        attachment.sourceRGBBlendFactor = srcRgb
+        attachment.destinationRGBBlendFactor = dstRgb
+        attachment.rgbBlendOperation = opRgb
+        attachment.sourceAlphaBlendFactor = srcAlpha
+        attachment.destinationAlphaBlendFactor = dstAlpha
+        attachment.alphaBlendOperation = opAlpha
+    }
+    return 1
 }
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setBlendState")

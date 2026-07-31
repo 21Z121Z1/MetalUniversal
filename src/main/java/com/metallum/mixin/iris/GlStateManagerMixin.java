@@ -56,6 +56,57 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Environment(EnvType.CLIENT)
 @Mixin(GlStateManager.class)
 public class GlStateManagerMixin {
+    private static final int GL_VENDOR = 7936;
+    private static final int GL_RENDERER = 7937;
+    private static final int GL_VERSION = 7938;
+    private static final int GL_SHADING_LANGUAGE_VERSION = 35724;
+    private static final int GL_NUM_EXTENSIONS = 33309;
+    private static final int GL_MAX_TEXTURE_IMAGE_UNITS = 34930;
+    private static final int GL_MAX_DRAW_BUFFERS = 34852;
+
+    @Inject(method = "_getInteger", at = @At("HEAD"), cancellable = true, remap = false)
+    private static void metallum$metalCapabilityLimit(
+            final int pname, final CallbackInfoReturnable<Integer> cir
+    ) {
+        if (!MetalActive.isMetalActive()) {
+            return;
+        }
+        cir.setReturnValue(switch (pname) {
+            case GL_MAX_TEXTURE_IMAGE_UNITS -> 16;
+            case GL_MAX_DRAW_BUFFERS -> 8;
+            case GL_NUM_EXTENSIONS -> 0;
+            default -> 8;
+        });
+    }
+
+    @Inject(method = "_getString", at = @At("HEAD"), cancellable = true, remap = false)
+    private static void metallum$metalCapabilityString(
+            final int pname, final CallbackInfoReturnable<String> cir
+    ) {
+        if (!MetalActive.isMetalActive()) {
+            return;
+        }
+        cir.setReturnValue(switch (pname) {
+            case GL_VENDOR -> "MetalUniversal";
+            case GL_RENDERER -> "MetalUniversal Metal";
+            case GL_VERSION, GL_SHADING_LANGUAGE_VERSION -> "4.6.0";
+            default -> "";
+        });
+    }
+
+    @Inject(
+            method = {"_enableBlend", "_enableDepthTest", "_disableBlend", "_disableDepthTest"},
+            at = @At("HEAD"),
+            cancellable = true,
+            require = 0,
+            remap = false
+    )
+    private static void metallum$skipGlobalGlState(final CallbackInfo ci) {
+        if (MetalActive.isMetalActive()) {
+            ci.cancel();
+        }
+    }
+
     @Inject(method = "_glGetUniformLocation", at = @At("HEAD"), cancellable = true, remap = false)
     private static void metallum$noUniformLocationOnMetal(
             int program,

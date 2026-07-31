@@ -38,8 +38,38 @@ dependencies {
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+// Iris ships its preprocessing stack as Fabric nested jars. A plain JUnit
+// worker does not expand those jars, so expose the exact embedded binaries to
+// headless ShaderPack/TransformPatcher tests without adding parallel versions.
+tasks.register("extractIrisNestedJars", Copy) {
+	from({
+		def irisJar = configurations.compileClasspath.files.find {
+			it.name.startsWith("iris-") && it.name.endsWith(".jar")
+		}
+		irisJar != null ? zipTree(irisJar) : []
+	}) {
+		include "META-INF/jars/*.jar"
+	}
+	eachFile { it.path = it.name }
+	includeEmptyDirs = false
+	into layout.buildDirectory.dir("iris-nested-jars")
+}
+
+def irisNestedJars = fileTree("${buildDir}/iris-nested-jars") { include "*.jar" }
+irisNestedJars.builtBy("extractIrisNestedJars")
+dependencies {
+	testRuntimeOnly irisNestedJars
+}
+
 test {
 	useJUnitPlatform()
+	exclude "**/MetalMrtBackendIntegrationTest.class"
+	exclude "**/MetalComputeBackendIntegrationTest.class"
+	exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
+	exclude "**/IrisMetalPingPongTargetsIntegrationTest.class"
+	exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
+	exclude "**/MetalIrisNoiseTextureIntegrationTest.class"
+	exclude "**/IrisMetalCenterDepthSamplerTest.class"
 }
 
 processResources {
@@ -71,6 +101,98 @@ tasks.register("buildMacNative", Exec) {
 		"-framework", "QuartzCore",
 		"-o", "src/main/resources/natives/macos/libmetallum.dylib",
 		"src/main/native/MetallumNative.swift"
+}
+
+tasks.register("metalComputeBackendIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS compute/SSBO/image/mipmap/compare-sampler GPU readback suite through the production backend."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+tasks.register("metalMrtBackendIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS Java RenderPass -> FFM -> Swift MRT GPU readback integration suite."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+tasks.register("metalGenericVertexAttributeIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS generic-current vertex attribute GPU readback suite through the production backend."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+tasks.register("metalIrisTargetsIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS Iris generation-owned target lifecycle GPU readback suite."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalPingPongTargetsIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+tasks.register("metalIrisTexturesIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS Iris custom/noise texture lifecycle and GPU readback suite."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
 }
 
 // Builds the Metallum native bridge as a dylib targeting iOS arm64. The

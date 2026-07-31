@@ -93,6 +93,10 @@ public final class GlslangBridge {
     private static final int GLSLANG_MSG_DEFAULT_BIT = 0;
     private static final int GLSLANG_MSG_SPV_RULES_BIT = 1 << 3;
     private static final int GLSLANG_MSG_VULKAN_RULES_BIT = 1 << 4;
+    private static final int GLSLANG_SHADER_AUTO_MAP_BINDINGS = 1 << 0;
+    private static final int GLSLANG_SHADER_AUTO_MAP_LOCATIONS = 1 << 1;
+    private static final int SHADER_OPTIONS =
+            GLSLANG_SHADER_AUTO_MAP_BINDINGS | GLSLANG_SHADER_AUTO_MAP_LOCATIONS;
     /** Standard link-time messages for Vulkan SPIR-V generation (mirrors glslang's example.c). */
     private static final int LINK_MESSAGES = GLSLANG_MSG_SPV_RULES_BIT | GLSLANG_MSG_VULKAN_RULES_BIT;
 
@@ -118,9 +122,9 @@ public final class GlslangBridge {
 
     /**
      * {@code glslang_input_t} layout, mirroring the C struct in
-     * {@code glslang_c_interface.h}. FFM inserts the same natural-alignment
-     * padding as C (e.g. 4 bytes between {@code messages} and {@code resource}),
-     * so the computed offsets match the ABI exactly.
+     * {@code glslang_c_interface.h}. FFM struct layouts do not insert C ABI
+     * padding automatically, so the four bytes before {@code resource} are
+     * represented explicitly.
      */
     private static final MemoryLayout INPUT_LAYOUT = MemoryLayout.structLayout(
             INT.withName("language"),
@@ -135,6 +139,7 @@ public final class GlslangBridge {
             INT.withName("force_default_version_and_profile"),
             INT.withName("forward_compatible"),
             INT.withName("messages"),
+            MemoryLayout.paddingLayout(4),
             ValueLayout.ADDRESS.withName("resource"),
             MemoryLayout.structLayout(
                     ValueLayout.ADDRESS.withName("include_system"),
@@ -183,6 +188,7 @@ public final class GlslangBridge {
     private static final MethodHandle glslangDefaultResource;
     private static final MethodHandle glslangShaderCreate;
     private static final MethodHandle glslangShaderDelete;
+    private static final MethodHandle glslangShaderSetOptions;
     private static final MethodHandle glslangShaderPreprocess;
     private static final MethodHandle glslangShaderParse;
     private static final MethodHandle glslangShaderGetInfoLog;
@@ -270,6 +276,11 @@ public final class GlslangBridge {
             glslangDefaultResource = downcall(lookup, "glslang_default_resource", FunctionDescriptor.of(ValueLayout.ADDRESS));
             glslangShaderCreate = downcall(lookup, "glslang_shader_create", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             glslangShaderDelete = downcall(lookup, "glslang_shader_delete", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+            glslangShaderSetOptions = downcall(
+                    lookup,
+                    "glslang_shader_set_options",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT)
+            );
             glslangShaderPreprocess = downcall(lookup, "glslang_shader_preprocess", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             glslangShaderParse = downcall(lookup, "glslang_shader_parse", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             glslangShaderGetInfoLog = downcall(lookup, "glslang_shader_get_info_log", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -412,21 +423,21 @@ public final class GlslangBridge {
             }
             try (Arena arena = Arena.ofConfined()) {
                 final MemorySegment input = arena.allocate(INPUT_LAYOUT);
-                V_LANGUAGE.set(input, GLSLANG_SOURCE_GLSL);
-                V_STAGE.set(input, glslangStage);
-                V_CLIENT.set(input, GLSLANG_CLIENT_VULKAN);
-                V_CLIENT_VERSION.set(input, GLSLANG_TARGET_VULKAN_1_1);
-                V_TARGET_LANGUAGE.set(input, GLSLANG_TARGET_SPV);
-                V_TARGET_LANGUAGE_VERSION.set(input, GLSLANG_TARGET_SPV_1_3);
+                V_LANGUAGE.set(input, 0L, GLSLANG_SOURCE_GLSL);
+                V_STAGE.set(input, 0L, glslangStage);
+                V_CLIENT.set(input, 0L, GLSLANG_CLIENT_VULKAN);
+                V_CLIENT_VERSION.set(input, 0L, GLSLANG_TARGET_VULKAN_1_1);
+                V_TARGET_LANGUAGE.set(input, 0L, GLSLANG_TARGET_SPV);
+                V_TARGET_LANGUAGE_VERSION.set(input, 0L, GLSLANG_TARGET_SPV_1_3);
                 final MemorySegment code = arena.allocateFrom(fullSource);
-                V_CODE.set(input, code);
+                V_CODE.set(input, 0L, code);
                 // Force Vulkan-compatible 460 so shaderpack #version 120/330
                 // sources are accepted in Vulkan client mode.
-                V_DEFAULT_VERSION.set(input, FORCED_VULKAN_VERSION);
-                V_DEFAULT_PROFILE.set(input, GLSLANG_NO_PROFILE);
-                V_FORCE_DEFAULT.set(input, 1);
-                V_MESSAGES.set(input, GLSLANG_MSG_DEFAULT_BIT);
-                V_RESOURCE.set(input, defaultResource);
+                V_DEFAULT_VERSION.set(input, 0L, FORCED_VULKAN_VERSION);
+                V_DEFAULT_PROFILE.set(input, 0L, GLSLANG_NO_PROFILE);
+                V_FORCE_DEFAULT.set(input, 0L, 1);
+                V_MESSAGES.set(input, 0L, GLSLANG_MSG_DEFAULT_BIT);
+                V_RESOURCE.set(input, 0L, defaultResource);
 
                 // Wire include_local callback when a resolver is provided. The
                 // callbacks struct is a nested group inside glslang_input_t; we
@@ -445,6 +456,7 @@ public final class GlslangBridge {
                     if (isNull(shader)) {
                         throw new ShaderCompileException("glslang_shader_create returned null", "");
                     }
+                    glslangShaderSetOptions.invokeExact(shader, SHADER_OPTIONS);
 
                     int preprocessed = (int) glslangShaderPreprocess.invokeExact(shader, input);
                     if (preprocessed == 0) {
@@ -543,9 +555,9 @@ public final class GlslangBridge {
         // header_length is the byte count without the terminator, matching
         // glslang's expectation.
         MemorySegment dataSeg = arena.allocateFrom(contents);
-        V_IR_HEADER_NAME.set(result, nameSeg);
-        V_IR_HEADER_DATA.set(result, dataSeg);
-        V_IR_HEADER_LENGTH.set(result, (long) bytes.length);
+        V_IR_HEADER_NAME.set(result, 0L, nameSeg);
+        V_IR_HEADER_DATA.set(result, 0L, dataSeg);
+        V_IR_HEADER_LENGTH.set(result, 0L, (long) bytes.length);
         return result;
     }
 

@@ -22,6 +22,14 @@ public final class MTLCommandBuffer {
         return new MTLBlitCommandEncoder(encoder);
     }
 
+    public MTLComputeCommandEncoder makeComputeCommandEncoder() {
+        MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeComputeCommandEncoder(handle());
+        if (MetalNativeBridge.isNullHandle(encoder)) {
+            throw new IllegalStateException("Failed to create MTLComputeCommandEncoder");
+        }
+        return new MTLComputeCommandEncoder(encoder);
+    }
+
     public MTLRenderCommandEncoder makeRenderCommandEncoder(
             final MemorySegment colorTexture,
             final MemorySegment depthTexture,
@@ -51,6 +59,33 @@ public final class MTLCommandBuffer {
         );
         if (MetalNativeBridge.isNullHandle(encoder)) {
             throw new IllegalStateException("Failed to create MTLRenderCommandEncoder");
+        }
+        return new MTLRenderCommandEncoder(encoder);
+    }
+
+    public MTLRenderCommandEncoder makeRenderCommandEncoderV2(
+            final MemorySegment[] colorTextures,
+            final MemorySegment depthTexture,
+            final double viewportWidth,
+            final double viewportHeight,
+            final int[] clearColorEnabled,
+            final float[] clearColors,
+            final int clearDepthEnabled,
+            final double clearDepth
+    ) {
+        MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeRenderCommandEncoderV2(
+                handle(),
+                colorTextures,
+                depthTexture,
+                viewportWidth,
+                viewportHeight,
+                clearColorEnabled,
+                clearColors,
+                clearDepthEnabled,
+                clearDepth
+        );
+        if (MetalNativeBridge.isNullHandle(encoder)) {
+            throw new IllegalStateException("Failed to create indexed MTLRenderCommandEncoder");
         }
         return new MTLRenderCommandEncoder(encoder);
     }
