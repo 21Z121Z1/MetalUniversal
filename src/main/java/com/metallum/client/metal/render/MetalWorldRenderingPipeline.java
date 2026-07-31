@@ -24,7 +24,9 @@ import net.irisshaders.iris.pipeline.programs.ShaderKey;
 import net.irisshaders.iris.pathways.colorspace.ColorSpace;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.shaders.ShaderSource;
+import com.mojang.blaze3d.systems.RenderPassDescriptor;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import net.irisshaders.iris.vertices.sodium.terrain.FormatAnalyzer;
@@ -39,7 +41,10 @@ import org.joml.Vector4f;
 import java.util.BitSet;
 import java.util.Objects;
 import java.util.OptionalInt;
+import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 /**
  * Backend-owned Iris world-pipeline generation.
@@ -178,6 +183,71 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
 
     boolean shouldOverrideCoreShaders(final boolean writesMainTarget) {
         return this.frameState.shouldOverrideShaders(writesMainTarget);
+    }
+
+    int coreDrawBlockSize(final ShaderKey key) {
+        return this.uniformValues.coreDrawBlockSize(key);
+    }
+
+    void materializeCoreDrawUniforms(
+            final ShaderKey key,
+            final java.nio.ByteBuffer output,
+            final java.nio.@Nullable ByteBuffer dynamicTransforms,
+            final java.nio.@Nullable ByteBuffer projection,
+            final IrisMetalUniformValues.DrawUniformContext context
+    ) {
+        this.uniformValues.materializeCoreDraw(key, output, dynamicTransforms, projection, context);
+    }
+
+    IrisMetalCoreDrawBridge.CoreDrawOverride prepareCoreDraw(
+            final RenderPipeline source,
+            final ShaderKey key,
+            final Supplier<String> label,
+            final GpuTextureView sceneColor,
+            final Optional<org.joml.Vector4fc> clearColor,
+            final GpuTextureView sceneDepth,
+            final OptionalDouble clearDepth
+    ) {
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(label, "label");
+        Objects.requireNonNull(sceneColor, "sceneColor");
+        Objects.requireNonNull(clearColor, "clearColor");
+        Objects.requireNonNull(sceneDepth, "sceneDepth");
+        Objects.requireNonNull(clearDepth, "clearDepth");
+        MetalDevice device = MetalDeviceRegistry.getActiveDevice();
+        if (device == null) {
+            throw new IllegalStateException("Iris core draw has no active Metal device");
+        }
+        IrisMetalWorldResources generationResources = resources();
+        IrisMetalCompiledPrograms generationPrograms = compiledPrograms();
+        IrisMetalGlslLinker.LinkedRasterProgram linked = this.programs.core(key)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Iris core draw " + key + " has no resolved fixed-version program"
+                ));
+        this.uniformValues.register(key, "core_" + key.getName(), linked);
+        this.uniformValues.prewarm(device);
+        MetalCompiledRenderPipeline compiled = generationPrograms.core(key, source, linked);
+        RenderPassDescriptor descriptor = key.isShadow()
+                ? IrisMetalCorePipelineDescriptor.shadow(
+                        generationResources,
+                        label,
+                        linked,
+                        clearColor,
+                        clearDepth
+                )
+                : IrisMetalCorePipelineDescriptor.main(
+                        generationResources,
+                        label,
+                        linked,
+                        sceneColor,
+                        clearColor,
+                        sceneDepth,
+                        clearDepth
+                );
+        return new IrisMetalCoreDrawBridge.CoreDrawOverride(
+                this, source, key, linked, compiled, descriptor
+        );
     }
 
     BitSet shadowReadSnapshot() {

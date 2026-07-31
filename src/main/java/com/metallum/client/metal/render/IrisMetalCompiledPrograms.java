@@ -16,13 +16,16 @@ import net.irisshaders.iris.gl.blending.BlendMode;
 import net.irisshaders.iris.gl.blending.BlendModeFunction;
 import net.irisshaders.iris.gl.blending.BlendModeOverride;
 import net.irisshaders.iris.shaderpack.loading.ProgramId;
+import net.irisshaders.iris.pipeline.programs.ShaderKey;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,6 +43,8 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
     private final IrisMetalWorldPrograms sources;
     private final GpuFormat[] targetFormats;
     private final Map<SodiumKey, MetalCompiledRenderPipeline> sodiumPipelines = new HashMap<>();
+    private final Map<RenderPipeline, Map<ShaderKey, MetalCompiledRenderPipeline>> corePipelines =
+            new IdentityHashMap<>();
     private boolean closed;
 
     IrisMetalCompiledPrograms(
@@ -99,7 +104,36 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
     }
 
     synchronized int cachedPipelineCount() {
-        return this.sodiumPipelines.size();
+        return this.sodiumPipelines.size()
+                + this.corePipelines.values().stream().mapToInt(Map::size).sum();
+    }
+
+    synchronized MetalCompiledRenderPipeline core(
+            final ShaderKey key,
+            final RenderPipeline source,
+            final IrisMetalGlslLinker.LinkedRasterProgram linked
+    ) {
+        ensureOpen();
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(linked, "linked");
+        VertexFormat vertexFormat = source.getVertexFormatBinding(0);
+        if (vertexFormat == null) {
+            throw new IllegalStateException(
+                    "Iris core draw " + key + " has no physical vertex format on " + source.getLocation()
+            );
+        }
+        Map<ShaderKey, MetalCompiledRenderPipeline> byKey = this.corePipelines.computeIfAbsent(
+                source, ignored -> new EnumMap<>(ShaderKey.class)
+        );
+        return byKey.computeIfAbsent(
+                key,
+                ignored -> compile(
+                        "core_" + key.getName(),
+                        linked,
+                        RasterState.from(source, vertexFormat)
+                )
+        );
     }
 
     private MetalCompiledRenderPipeline compile(
@@ -303,6 +337,10 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
         this.device.waitForSubmittedGpuWork();
         this.sodiumPipelines.values().forEach(MetalCompiledRenderPipeline::close);
         this.sodiumPipelines.clear();
+        this.corePipelines.values().forEach(pipelines ->
+                pipelines.values().forEach(MetalCompiledRenderPipeline::close)
+        );
+        this.corePipelines.clear();
     }
 
     record RasterState(

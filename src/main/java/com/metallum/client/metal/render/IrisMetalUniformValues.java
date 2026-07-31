@@ -1,8 +1,11 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.mojang.blaze3d.pipeline.BlendFunction;
+import com.mojang.blaze3d.platform.BlendFactor;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.blaze3d.textures.GpuTextureView;
 import kroppeb.stareval.function.FunctionReturn;
 import net.caffeinemc.mods.sodium.client.util.FogStorage;
 import net.fabricmc.api.EnvType;
@@ -36,6 +39,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.function.IntSupplier;
@@ -87,6 +91,29 @@ final class IrisMetalUniformValues implements AutoCloseable {
     private final Vector3d previousCameraPosition = new Vector3d();
     private boolean warnedIdentityMatrices;
     private boolean closed;
+
+    /** Values whose Iris suppliers are evaluated at one core draw boundary. */
+    record DrawUniformContext(
+            @Nullable GpuTextureView gtexture,
+            int atlasWidth,
+            int atlasHeight,
+            Optional<BlendFunction> blendFunction
+    ) {
+        private static final DrawUniformContext EMPTY = new DrawUniformContext(
+                null, 0, 0, Optional.empty()
+        );
+
+        DrawUniformContext {
+            Objects.requireNonNull(blendFunction, "blendFunction");
+            if (atlasWidth < 0 || atlasHeight < 0) {
+                throw new IllegalArgumentException("Iris atlas dimensions must be non-negative");
+            }
+        }
+
+        static DrawUniformContext empty() {
+            return EMPTY;
+        }
+    }
 
     /**
      * A registered block. The GPU buffer is allocated lazily: registration
@@ -363,7 +390,38 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final @Nullable ByteBuffer dynamicTransforms,
             final @Nullable ByteBuffer projection
     ) {
-        materializeDraw(key, output, dynamicTransforms, projection);
+        materializeCoreDraw(
+                key,
+                output,
+                dynamicTransforms,
+                projection,
+                DrawUniformContext.empty()
+        );
+    }
+
+    void materializeCoreDraw(
+            final ShaderKey key,
+            final ByteBuffer output,
+            final @Nullable ByteBuffer dynamicTransforms,
+            final @Nullable ByteBuffer projection,
+            final DrawUniformContext context
+    ) {
+        Block block = findBlock(key);
+        if (block == null || block.staging == null) {
+            throw new IllegalStateException("Iris core uniform block is not prepared for " + key);
+        }
+        materializeDrawUniforms(
+                block.staging,
+                block.layout,
+                output,
+                dynamicTransforms,
+                projection,
+                this.renderStageSource.getAsInt(),
+                CapturedRenderingState.INSTANCE.getCurrentRenderedEntity(),
+                CapturedRenderingState.INSTANCE.getTextureReloadCount(),
+                context,
+                true
+        );
     }
 
     void materializeDraw(
@@ -383,6 +441,9 @@ final class IrisMetalUniformValues implements AutoCloseable {
                 dynamicTransforms,
                 projection,
                 this.renderStageSource.getAsInt(),
+                CapturedRenderingState.INSTANCE.getCurrentRenderedEntity(),
+                CapturedRenderingState.INSTANCE.getTextureReloadCount(),
+                DrawUniformContext.empty(),
                 usesMojangCoreTransforms(token)
         );
     }
@@ -394,7 +455,42 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final @Nullable ByteBuffer dynamicTransforms,
             final @Nullable ByteBuffer projection
     ) {
-        materializeDrawUniforms(base, layout, output, dynamicTransforms, projection, 0, true);
+        materializeCoreDrawUniforms(
+                base,
+                layout,
+                output,
+                dynamicTransforms,
+                projection,
+                0,
+                CapturedRenderingState.INSTANCE.getCurrentRenderedEntity(),
+                CapturedRenderingState.INSTANCE.getTextureReloadCount(),
+                DrawUniformContext.empty()
+        );
+    }
+
+    static void materializeCoreDrawUniforms(
+            final ByteBuffer base,
+            final List<IrisMetalGlslLinker.UniformMember> layout,
+            final ByteBuffer output,
+            final @Nullable ByteBuffer dynamicTransforms,
+            final @Nullable ByteBuffer projection,
+            final int renderStage,
+            final int entityId,
+            final int textureReloadCount,
+            final DrawUniformContext context
+    ) {
+        materializeDrawUniforms(
+                base,
+                layout,
+                output,
+                dynamicTransforms,
+                projection,
+                renderStage,
+                entityId,
+                textureReloadCount,
+                context,
+                true
+        );
     }
 
     static void materializeDrawUniforms(
@@ -406,7 +502,16 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final int renderStage
     ) {
         materializeDrawUniforms(
-                base, layout, output, dynamicTransforms, projection, renderStage, false
+                base,
+                layout,
+                output,
+                dynamicTransforms,
+                projection,
+                renderStage,
+                CapturedRenderingState.INSTANCE.getCurrentRenderedEntity(),
+                CapturedRenderingState.INSTANCE.getTextureReloadCount(),
+                DrawUniformContext.empty(),
+                false
         );
     }
 
@@ -417,8 +522,12 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final @Nullable ByteBuffer dynamicTransforms,
             final @Nullable ByteBuffer projection,
             final int renderStage,
+            final int entityId,
+            final int textureReloadCount,
+            final DrawUniformContext context,
             final boolean coreDraw
     ) {
+        Objects.requireNonNull(context, "context");
         ByteBuffer destination = output.slice().order(output.order());
         ByteBuffer source = base.duplicate().order(base.order());
         source.clear();
@@ -468,6 +577,37 @@ final class IrisMetalUniformValues implements AutoCloseable {
                     requireDynamicDrawType(member, "int");
                     destination.putInt(member.offset(), renderStage);
                 }
+                case "entityId" -> {
+                    requireDynamicDrawType(member, "int");
+                    destination.putInt(member.offset(), entityId);
+                }
+                case "atlasSize" -> {
+                    requireDynamicDrawType(member, "ivec2");
+                    putIVec2(destination, member.offset(), context.atlasWidth(), context.atlasHeight());
+                }
+                case "gtextureId" -> {
+                    requireDynamicDrawType(member, "int");
+                    destination.putInt(member.offset(), logicalTextureId(context.gtexture()));
+                }
+                case "textureReloadCount" -> {
+                    requireDynamicDrawType(member, "int");
+                    destination.putInt(member.offset(), textureReloadCount);
+                }
+                case "gtextureSize" -> {
+                    requireDynamicDrawType(member, "ivec2");
+                    GpuTextureView texture = context.gtexture();
+                    putIVec2(
+                            destination,
+                            member.offset(),
+                            texture == null ? 0 : texture.getWidth(0),
+                            texture == null ? 0 : texture.getHeight(0)
+                    );
+                }
+                case "blendFunc" -> {
+                    requireDynamicDrawType(member, "ivec4");
+                    int[] blend = irisBlendFunc(context.blendFunction());
+                    putIVec4(destination, member.offset(), blend[0], blend[1], blend[2], blend[3]);
+                }
                 default -> {
                 }
             }
@@ -507,7 +647,55 @@ final class IrisMetalUniformValues implements AutoCloseable {
     }
 
     private static boolean isDynamicDrawUniform(final String name) {
-        return isCoreDrawUniform(name) || "renderStage".equals(name);
+        return isCoreDrawUniform(name)
+                || switch (name) {
+                    case "entityId", "atlasSize", "gtextureId", "textureReloadCount",
+                            "gtextureSize", "blendFunc", "renderStage" -> true;
+                    default -> false;
+                };
+    }
+
+    private static int logicalTextureId(final @Nullable GpuTextureView view) {
+        if (view == null) {
+            return 0;
+        }
+        if (!(view.texture() instanceof MetalGpuTexture texture)) {
+            throw new IllegalStateException("Iris core draw texture is not backed by Metal");
+        }
+        return texture.iris$getGlId();
+    }
+
+    static int[] irisBlendFunc(final Optional<BlendFunction> blendFunction) {
+        if (blendFunction.isEmpty()) {
+            return new int[]{0, 0, 0, 0};
+        }
+        BlendFunction function = blendFunction.get();
+        return new int[]{
+                glBlendFactor(function.color().sourceFactor()),
+                glBlendFactor(function.color().destFactor()),
+                glBlendFactor(function.alpha().sourceFactor()),
+                glBlendFactor(function.alpha().destFactor())
+        };
+    }
+
+    private static int glBlendFactor(final BlendFactor factor) {
+        return switch (factor) {
+            case ZERO -> 0;
+            case ONE -> 1;
+            case SRC_COLOR -> 0x0300;
+            case ONE_MINUS_SRC_COLOR -> 0x0301;
+            case SRC_ALPHA -> 0x0302;
+            case ONE_MINUS_SRC_ALPHA -> 0x0303;
+            case DST_ALPHA -> 0x0304;
+            case ONE_MINUS_DST_ALPHA -> 0x0305;
+            case DST_COLOR -> 0x0306;
+            case ONE_MINUS_DST_COLOR -> 0x0307;
+            case SRC_ALPHA_SATURATE -> 0x0308;
+            case CONSTANT_COLOR -> 0x8001;
+            case ONE_MINUS_CONSTANT_COLOR -> 0x8002;
+            case CONSTANT_ALPHA -> 0x8003;
+            case ONE_MINUS_CONSTANT_ALPHA -> 0x8004;
+        };
     }
 
     private static Matrix4f readMat4(final @Nullable ByteBuffer source, final String blockName) {

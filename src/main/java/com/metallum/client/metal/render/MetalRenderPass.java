@@ -211,6 +211,16 @@ final class MetalRenderPass implements RenderPassBackend {
         markDescriptorDirty(name);
     }
 
+    @Nullable
+    GpuBufferSlice uniformSlice(final String name) {
+        return uniforms.get(name);
+    }
+
+    @Nullable
+    TextureViewAndSampler boundTexture(final String name) {
+        return samplers.get(name);
+    }
+
     @Override
     public void enableScissor(final int x, final int y, final int width, final int height) {
         if (scissorState.enabled()
@@ -690,6 +700,9 @@ final class MetalRenderPass implements RenderPassBackend {
             TextureViewAndSampler textureBinding = samplers.get(binding.name());
             if (textureBinding == null) {
                 textureBinding = IrisMetalTerrainBridge.fallbackSampler(binding.name(), samplers);
+            }
+            if (textureBinding == null) {
+                textureBinding = IrisMetalCoreDrawBridge.fallbackSampler(binding.name(), samplers);
             }
             if (textureBinding == null) {
                 throw new IllegalStateException("Missing sampler " + binding.name());

@@ -9,6 +9,7 @@ import net.irisshaders.iris.shaderpack.programs.ComputeSource;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
+import net.irisshaders.iris.pipeline.programs.ShaderKey;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -84,6 +85,24 @@ final class IrisMetalWorldPrograms implements AutoCloseable {
                                 )
                         ))
         );
+    }
+
+    /** Resolves a fixed-Iris core draw through the same frontend as terrain and post passes. */
+    synchronized Optional<IrisMetalGlslLinker.LinkedRasterProgram> core(final ShaderKey key) {
+        Objects.requireNonNull(key, "key");
+        boolean lines = key == ShaderKey.LINES && this.frontend.resolve(ProgramId.Line).isPresent();
+        boolean clouds = key == ShaderKey.CLOUDS || key == ShaderKey.CLOUDS_SODIUM;
+        ShaderAttributeInputs inputs = key.getVertexFormat() == null
+                ? new ShaderAttributeInputs(true, true, true, true, true)
+                : new ShaderAttributeInputs(
+                        key.getVertexFormat(),
+                        key.shouldIgnoreLightmap(),
+                        lines,
+                        key.isGlint(),
+                        key.isText(),
+                        false
+                );
+        return vanilla(key.getProgram(), key.getAlphaTest(), lines, clouds, inputs);
     }
 
     synchronized IrisMetalGlslLinker.LinkedRasterProgram composite(

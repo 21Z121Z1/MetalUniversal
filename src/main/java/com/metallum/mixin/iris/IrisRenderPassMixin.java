@@ -1,6 +1,7 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.client.metal.render.IrisMetalTerrainBridge;
+import com.metallum.client.metal.render.IrisMetalCoreDrawBridge;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassBackend;
@@ -22,6 +23,10 @@ public abstract class IrisRenderPassMixin {
             final CallbackInfo ci
     ) {
         if (IrisMetalTerrainBridge.installPipeline(this.backend, pipeline)) {
+            ci.cancel();
+            return;
+        }
+        if (IrisMetalCoreDrawBridge.installPipeline(this.backend, pipeline)) {
             ci.cancel();
         }
     }
