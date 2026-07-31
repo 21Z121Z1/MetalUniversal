@@ -21,6 +21,7 @@ import net.irisshaders.iris.uniforms.CommonUniforms;
 import net.irisshaders.iris.uniforms.CapturedRenderingState;
 import net.irisshaders.iris.uniforms.custom.CustomUniforms;
 import net.irisshaders.iris.pipeline.programs.ShaderKey;
+import net.irisshaders.iris.pathways.colorspace.ColorSpace;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.shaders.ShaderSource;
@@ -69,8 +70,13 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     private MetalDevice centerDepthDevice;
     private int receiptWidth = -1;
     private int receiptHeight = -1;
+    private boolean published;
 
     public MetalWorldRenderingPipeline(final ProgramSet programSet) {
+        // Admission must run before generation IDs, Iris world settings, or GPU
+        // resources become observable. A failed pack must not partially mutate
+        // the currently selected Metal generation.
+        IrisMetalPackAdmission.requireSupported(programSet, ColorSpace.SRGB);
         this.generation = GENERATIONS.incrementAndGet();
         this.programSet = Objects.requireNonNull(programSet, "programSet");
         this.programs = new IrisMetalWorldPrograms(this.generation, this.programSet);
@@ -101,8 +107,6 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                 () -> this.frameState.phase().ordinal()
         );
         this.executionGraph.attachUniformValues(this.uniformValues);
-        publishWorldSettings();
-        IrisMetalPackLifecycle.onSemanticPipelineActivated();
     }
 
     private static OptionalInt forcedShadowDistance(final PackShadowDirectives shadow) {
@@ -185,6 +189,14 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         this.receipts.recordEvent("frame.begin");
         prepareResources();
         prepareTerrainUniforms();
+        if (!this.published) {
+            // WorldRenderingSettings and lifecycle state become observable only
+            // after all generation-owned CPU/GPU preparation has succeeded.
+            publishWorldSettings();
+            IrisMetalPackLifecycle.onSemanticPipelineActivated();
+            this.published = true;
+            this.receipts.recordEvent("generation.publish");
+        }
         Vector3d fog = CapturedRenderingState.INSTANCE.getFogColor();
         this.executionGraph.beginFrame(
                 this.resources(), new Vector4f((float) fog.x, (float) fog.y, (float) fog.z, 1.0F)
@@ -233,61 +245,89 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                             + mainTarget.width + "x" + mainTarget.height
             );
         }
-        if (this.receiptWidth < 0) {
-            this.receipts.recordEvent("generation.allocate");
-        } else if (this.receiptWidth != mainTarget.width || this.receiptHeight != mainTarget.height) {
-            this.receipts.recordEvent("resize");
-        }
-        this.receiptWidth = mainTarget.width;
-        this.receiptHeight = mainTarget.height;
-        if (this.compiledPrograms == null) {
-            this.compiledPrograms = new IrisMetalCompiledPrograms(
-                    device,
-                    this.generation,
-                    this.programs,
-                    IrisMetalRenderTargetFormats.from(this.directives)
-            );
-        } else if (!this.compiledPrograms.isOwnedBy(device)) {
-            throw new IllegalStateException("Iris Metal compiled generation crossed Metal device ownership");
-        }
-        if (this.resources == null) {
-            this.resources = new IrisMetalWorldResources(
-                    device,
-                    this.generation,
-                    this.programSet,
-                    mainTarget.width,
-                    mainTarget.height
-            );
-        } else {
-            if (!this.resources.isOwnedBy(device)) {
-                throw new IllegalStateException("Iris Metal generation crossed Metal device ownership");
-            }
-            this.resources.resize(mainTarget.width, mainTarget.height);
-        }
-        if (this.centerDepthSampler == null) {
-            ShaderSource fallback = (identifier, type) -> {
-                throw new IllegalStateException(
-                        "Unexpected fallback shader lookup while creating Iris center-depth sampler: "
-                                + identifier + " / " + type
+        boolean firstAllocation = this.compiledPrograms == null;
+        boolean resizing = this.receiptWidth >= 0
+                && (this.receiptWidth != mainTarget.width || this.receiptHeight != mainTarget.height);
+        IrisMetalCompiledPrograms candidateCompiled = this.compiledPrograms;
+        IrisMetalWorldResources candidateResources = this.resources;
+        IrisMetalCenterDepthSampler candidateCenterDepth = this.centerDepthSampler;
+        boolean ownsCompiled = false;
+        boolean ownsResources = false;
+        boolean ownsCenterDepth = false;
+        try {
+            if (candidateCompiled == null) {
+                candidateCompiled = new IrisMetalCompiledPrograms(
+                        device,
+                        this.generation,
+                        this.programs,
+                        IrisMetalRenderTargetFormats.from(this.directives)
                 );
-            };
-            this.centerDepthSampler = new IrisMetalCenterDepthSampler(
+                ownsCompiled = true;
+            } else if (!candidateCompiled.isOwnedBy(device)) {
+                throw new IllegalStateException("Iris Metal compiled generation crossed Metal device ownership");
+            }
+            if (candidateResources == null) {
+                candidateResources = new IrisMetalWorldResources(
+                        device,
+                        this.generation,
+                        this.programSet,
+                        mainTarget.width,
+                        mainTarget.height
+                );
+                ownsResources = true;
+            } else {
+                if (!candidateResources.isOwnedBy(device)) {
+                    throw new IllegalStateException("Iris Metal generation crossed Metal device ownership");
+                }
+                candidateResources.resize(mainTarget.width, mainTarget.height);
+            }
+            if (candidateCenterDepth == null) {
+                ShaderSource fallback = (identifier, type) -> {
+                    throw new IllegalStateException(
+                            "Unexpected fallback shader lookup while creating Iris center-depth sampler: "
+                                    + identifier + " / " + type
+                    );
+                };
+                candidateCenterDepth = new IrisMetalCenterDepthSampler(
+                        device,
+                        this.generation,
+                        Math.max(0.001F, this.directives.getCenterDepthHalfLife()),
+                        fallback
+                );
+                ownsCenterDepth = true;
+            } else if (this.centerDepthDevice != device) {
+                throw new IllegalStateException("Iris center-depth sampler crossed Metal device ownership");
+            }
+            this.executionGraph.setCenterDepthSampler(candidateCenterDepth);
+            this.executionGraph.prepare(
                     device,
-                    this.generation,
-                    Math.max(0.001F, this.directives.getCenterDepthHalfLife()),
-                    fallback
+                    candidateResources,
+                    this.uniformValues,
+                    mainTarget.getColorTexture().getFormat()
             );
+
+            // Publish all candidate-owned objects only after graph preparation
+            // has completed. A failed candidate remains invisible to terrain.
+            this.compiledPrograms = candidateCompiled;
+            this.resources = candidateResources;
+            this.centerDepthSampler = candidateCenterDepth;
             this.centerDepthDevice = device;
-            this.executionGraph.setCenterDepthSampler(this.centerDepthSampler);
-        } else if (this.centerDepthDevice != device) {
-            throw new IllegalStateException("Iris center-depth sampler crossed Metal device ownership");
+            this.receiptWidth = mainTarget.width;
+            this.receiptHeight = mainTarget.height;
+            this.receipts.recordEvent(firstAllocation ? "generation.allocate" : resizing ? "resize" : "generation.ready");
+        } catch (RuntimeException | Error failure) {
+            if (ownsCenterDepth && candidateCenterDepth != null) {
+                candidateCenterDepth.close();
+                this.executionGraph.setCenterDepthSampler(null);
+            }
+            if (ownsResources && candidateResources != null) {
+                candidateResources.close();
+            }
+            if (ownsCompiled && candidateCompiled != null) {
+                candidateCompiled.close();
+            }
+            throw failure;
         }
-        this.executionGraph.prepare(
-                device,
-                this.resources,
-                this.uniformValues,
-                mainTarget.getColorTexture().getFormat()
-        );
     }
 
     @Override
@@ -366,7 +406,10 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
 
     @Override
     public void destroy() {
-        IrisMetalPackLifecycle.onSemanticPipelineDestroyed();
+        if (this.published) {
+            IrisMetalPackLifecycle.onSemanticPipelineDestroyed();
+            this.published = false;
+        }
         this.frameState.endWorldRendering();
         this.receipts.recordEvent("generation.destroy");
         if (this.compiledPrograms != null) {
