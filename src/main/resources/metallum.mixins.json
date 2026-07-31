@@ -13,6 +13,7 @@
     "iris.GlShaderMixin",
     "iris.IrisBootstrapCompatMixin",
     "iris.IrisPipelineFactoryMixin",
+    "iris.IrisPipelineManagerCompatMixin",
     "iris.IrisSamplersCompatMixin",
     "iris.IrisSodiumShaderChunkRendererMixin",
     "iris.IrisSodiumDefaultChunkRendererMixin",
@@ -23,6 +24,7 @@
     "iris.IrisRenderPassMixin",
     "iris.GlStateManagerMixin",
     "iris.GLDebugMixin",
+    "iris.IrisMetalValidationMixin",
     "iris.MetalIrisPipelineMixin",
     "iris.MetalIrisClearMixin"
   ],

@@ -1,0 +1,189 @@
+{
+  "schema": "iris-metal-opengl-semantic-matrix-v1",
+  "scope": "generation-owned-iris-execution-graph-phase2",
+  "oracle": "Iris-1.11.2-OpenGL-frame-semantics",
+  "threshold": 0.85,
+  "declaredTotal": 20,
+  "entries": [
+    {
+      "id": "planning.generation-owned-order",
+      "status": "verified",
+      "contract": "Iris setup/begin/prepare/deferred/composite/final operations retain source order per generation.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalExecutionGraph#plan"},
+        {"kind": "test", "id": "IrisMetalPingPongTargetsIntegrationTest"}
+      ]
+    },
+    {
+      "id": "compilation.raster-cache",
+      "status": "verified",
+      "contract": "Raster program translation, linking, compilation and cache ownership are generation-scoped.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalExecutionGraph#compileRaster"},
+        {"kind": "test", "id": "MetalMrtBackendIntegrationTest"}
+      ]
+    },
+    {
+      "id": "compilation.compute-cache",
+      "status": "verified",
+      "contract": "Compute programs are compiled, cached and dispatched through the generation-owned Metal backend.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalExecutionGraph#compileCompute"},
+        {"kind": "test", "id": "MetalComputeBackendIntegrationTest"}
+      ]
+    },
+    {
+      "id": "lifecycle.setup-begin",
+      "status": "verified",
+      "contract": "Each world frame clears generation-owned targets before setup and begin operations execute.",
+      "evidence": [
+        {"kind": "source", "id": "MetalWorldRenderingPipeline#beginLevelRendering"},
+        {"kind": "test", "id": "IrisMetalPingPongTargetsIntegrationTest"}
+      ]
+    },
+    {
+      "id": "shadow.raster-depth-targets",
+      "status": "verified",
+      "contract": "Shadow depth/color targets use independent generation-owned storage and raster descriptors.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalShadowTargets"},
+        {"kind": "test", "id": "IrisMetalPingPongTargetsIntegrationTest"}
+      ]
+    },
+    {
+      "id": "shadow.composite",
+      "status": "verified",
+      "contract": "Shadow composite raster and compute operations bind shadow resources and complete before main post passes.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalExecutionGraph#executeShadowComposite"},
+        {"kind": "test", "id": "IrisMetalPingPongTargetsIntegrationTest"}
+      ]
+    },
+    {
+      "id": "depth.pre-translucent-pre-hand",
+      "status": "verified",
+      "contract": "depthtex1 and depthtex2 are captured at their Iris lifecycle boundaries from the scene depth texture.",
+      "evidence": [
+        {"kind": "source", "id": "MetalWorldRenderingPipeline#beginTranslucents"},
+        {"kind": "test", "id": "IrisMetalPingPongTargetsIntegrationTest"}
+      ]
+    },
+    {
+      "id": "depth.center-history",
+      "status": "verified",
+      "contract": "center-depth current/history sampling is generation-owned and advances across frames.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalCenterDepthSampler"},
+        {"kind": "test", "id": "IrisMetalCenterDepthSamplerTest"}
+      ]
+    },
+    {
+      "id": "binding.sampler-uniform",
+      "status": "verified",
+      "contract": "Iris sampler aliases, uniform blocks and stage-local views bind to the correct generation resources.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalExecutionGraph#bindRaster"},
+        {"kind": "test", "id": "MetalIrisCustomTexturesIntegrationTest"}
+      ]
+    },
+    {
+      "id": "binding.image-ssbo",
+      "status": "verified",
+      "contract": "Storage images and SSBOs use explicit reflected bindings and fail when generation resources are absent.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalExecutionGraph#bindCompute"},
+        {"kind": "test", "id": "MetalComputeBackendIntegrationTest"}
+      ]
+    },
+    {
+      "id": "mrt.drawbuffers",
+      "status": "verified",
+      "contract": "DRAWBUFFERS maps logical outputs to indexed Metal attachments with unwritten slots preserved.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalExecutionGraph#validateDrawBuffers"},
+        {"kind": "test", "id": "MetalMrtBackendIntegrationTest"}
+      ]
+    },
+    {
+      "id": "targets.ping-pong",
+      "status": "verified",
+      "contract": "Main and shadow color flips preserve read/write identity across post passes.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalPingPongTargets"},
+        {"kind": "test", "id": "IrisMetalPingPongTargetsIntegrationTest"}
+      ]
+    },
+    {
+      "id": "targets.mipmap",
+      "status": "verified",
+      "contract": "Declared color/depth mipmaps are generated and reset at stage boundaries.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalExecutionGraph#executeRaster"},
+        {"kind": "test", "id": "IrisMetalPingPongTargetsIntegrationTest"}
+      ]
+    },
+    {
+      "id": "presentation.final-copy",
+      "status": "verified",
+      "contract": "Final output writes the Minecraft main target and copies active history back to generation-owned storage.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalExecutionGraph#executeFinal"},
+        {"kind": "test", "id": "IrisMetalRuntimeReceiptsTest"}
+      ]
+    },
+    {
+      "id": "lifecycle.resize",
+      "status": "verified",
+      "contract": "Resize recreates generation-owned target extents without retaining old storage views.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalWorldResources#resize"},
+        {"kind": "test", "id": "IrisMetalPingPongTargetsIntegrationTest"}
+      ]
+    },
+    {
+      "id": "lifecycle.generation-ownership",
+      "status": "verified",
+      "contract": "Closed generations cannot answer draw/resource lookups after retirement.",
+      "evidence": [
+        {"kind": "source", "id": "MetalWorldRenderingPipeline#destroy"},
+        {"kind": "test", "id": "IrisMetalRuntimeReceiptsTest"}
+      ]
+    },
+    {
+      "id": "failure.unsupported-resource",
+      "status": "verified",
+      "contract": "Missing or unsupported sampler/image/buffer contracts throw instead of substituting placeholders or disabling shaders.",
+      "evidence": [
+        {"kind": "source", "id": "IrisMetalExecutionGraph#textureBinding"},
+        {"kind": "source", "id": "IrisMetalPackLifecycle#strictModeRequested"}
+      ]
+    },
+    {
+      "id": "runtime.pass-order-and-contribution",
+      "status": "runtime",
+      "contract": "A physical run records setup, begin, shadow, depthtex, deferred, composite and final in Iris order with final readback.",
+      "receiptEvents": [
+        "setup", "begin", "shadow.render.begin", "shadow.composite", "depthtex1.capture",
+        "deferred", "depthtex2.capture", "composite", "final"
+      ]
+    },
+    {
+      "id": "runtime.reload-disable-enable",
+      "status": "runtime",
+      "contract": "A physical run retires a generation, reloads it, disables and re-enables shaders, and never binds a retired generation.",
+      "controlEvents": [
+        "reload.begin", "reload.end", "disable-enable.disable.begin",
+        "disable-enable.disable.end", "disable-enable.enable.begin", "disable-enable.enable.end"
+      ],
+      "receiptEvents": ["generation-retired"]
+    },
+    {
+      "id": "runtime.readback-dynamic-exit",
+      "status": "runtime",
+      "contract": "A physical Quick Play run enters a world, has non-black final frames, changed pixels across sustained frames, and a normal client exit.",
+      "controlEvents": ["world.entered"],
+      "receiptMetrics": ["nonBlackRgbPixels", "changedPixels", "meanAbsoluteByteDelta"],
+      "requiresExitStatus": 0
+    }
+  ]
+}
