@@ -294,6 +294,14 @@ public final class MetalNativeBridge {
                     "metallum_MTLBlitCommandEncoder_copyFromBufferToTexture",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG)
             );
+            MTLBlitCommandEncoderCopyFromBufferToTextureV2 = downcall(
+                    lookup,
+                    "metallum_MTLBlitCommandEncoder_copyFromBufferToTexture_v2",
+                    FunctionDescriptor.ofVoid(
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS,
+                            LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG
+                    )
+            );
             MTLBlitCommandEncoderCopyFromTextureToTexture = downcall(
                     lookup,
                     "metallum_MTLBlitCommandEncoder_copyFromTextureToTexture",
@@ -303,6 +311,14 @@ public final class MetalNativeBridge {
                     lookup,
                     "metallum_MTLBlitCommandEncoder_copyFromTextureToBuffer",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG)
+            );
+            MTLBlitCommandEncoderCopyFromTextureToBufferV2 = downcall(
+                    lookup,
+                    "metallum_MTLBlitCommandEncoder_copyFromTextureToBuffer_v2",
+                    FunctionDescriptor.ofVoid(
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG,
+                            LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG
+                    )
             );
             MTLDeviceMakeDepthStencilState = downcall(lookup, "metallum_MTLDevice_makeDepthStencilState", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, INT));
             MTLCommandBufferMakeRenderCommandEncoder = downcall(
@@ -427,7 +443,21 @@ public final class MetalNativeBridge {
                     "metallum_create_texture_2d",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, ValueLayout.ADDRESS)
             );
+            createTexture = downcall(
+                    lookup,
+                    "metallum_create_texture",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG,
+                            ValueLayout.ADDRESS
+                    )
+            );
             createTextureView = downcall(lookup, "metallum_create_texture_view", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
+            createTextureViewAlphaOne = downcall(
+                    lookup,
+                    "metallum_create_texture_view_alpha_one",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG)
+            );
             createBufferTextureView = downcall(
                     lookup,
                     "metallum_create_buffer_texture_view",
@@ -613,6 +643,14 @@ public final class MetalNativeBridge {
                     "metallum_create_sampler_v2",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, INT, DOUBLE, INT)
             );
+            createSamplerV3 = optionalDowncall(
+                    lookup,
+                    "metallum_create_sampler_v3",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            LONG, LONG, LONG, LONG, LONG, INT, DOUBLE, INT, INT
+                    )
+            );
             // metallum_ios_find_surface_view and metallum_ios_get_view_metal_layer
             // only exist in the iOS build of the dylib (guarded by #if os(iOS)
             // in Swift). Register them only on iOS so the macOS build does not
@@ -790,8 +828,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLCommandEncoderEndEncoding;
     private static final MethodHandle MTLBlitCommandEncoderCopyFromBufferToBuffer;
     private static final MethodHandle MTLBlitCommandEncoderCopyFromBufferToTexture;
+    private static final MethodHandle MTLBlitCommandEncoderCopyFromBufferToTextureV2;
     private static final MethodHandle MTLBlitCommandEncoderCopyFromTextureToTexture;
     private static final MethodHandle MTLBlitCommandEncoderCopyFromTextureToBuffer;
+    private static final MethodHandle MTLBlitCommandEncoderCopyFromTextureToBufferV2;
     private static final MethodHandle MTLDeviceMakeDepthStencilState;
     private static final MethodHandle MTLCommandBufferMakeRenderCommandEncoder;
     private static final MethodHandle MTLCommandBufferMakeRenderCommandEncoderV2;
@@ -817,7 +857,9 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawable;
     private static final MethodHandle createBuffer;
     private static final MethodHandle createTexture2d;
+    private static final MethodHandle createTexture;
     private static final MethodHandle createTextureView;
+    private static final MethodHandle createTextureViewAlphaOne;
     private static final MethodHandle createBufferTextureView;
     private static final MethodHandle createSampler;
     private static final MethodHandle MTLVertexDescriptorCreate;
@@ -876,6 +918,7 @@ public final class MetalNativeBridge {
     private static final @Nullable MethodHandle MTLComputePipelineStateMaxTotalThreadsPerThreadgroup;
     private static final @Nullable MethodHandle MTLBlitCommandEncoderGenerateMipmaps;
     private static final @Nullable MethodHandle createSamplerV2;
+    private static final @Nullable MethodHandle createSamplerV3;
     private static final MethodHandle initPipelines;
     private static final MethodHandle metalfxSupportsSpatial;
     private static final MethodHandle metalfxSupportsTemporal;
@@ -1612,6 +1655,32 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static void MTLBlitCommandEncoder_copyFromBufferToTextureV2(
+            final MemorySegment blitEncoder,
+            final MemorySegment sourceBuffer,
+            final long sourceOffset,
+            final MemorySegment texture,
+            final long mipLevel,
+            final long slice,
+            final long x,
+            final long y,
+            final long z,
+            final long width,
+            final long height,
+            final long depth,
+            final long bytesPerRow,
+            final long bytesPerImage
+    ) {
+        try {
+            MTLBlitCommandEncoderCopyFromBufferToTextureV2.invokeExact(
+                    segment(blitEncoder), segment(sourceBuffer), sourceOffset, segment(texture),
+                    mipLevel, slice, x, y, z, width, height, depth, bytesPerRow, bytesPerImage
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLBlitCommandEncoder_copyFromBufferToTexture_v2", throwable);
+        }
+    }
+
     public static void MTLBlitCommandEncoder_copyFromTextureToTexture(
             final MemorySegment blitEncoder,
             final MemorySegment sourceTexture,
@@ -1676,6 +1745,32 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static void MTLBlitCommandEncoder_copyFromTextureToBufferV2(
+            final MemorySegment blitEncoder,
+            final MemorySegment sourceTexture,
+            final MemorySegment destinationBuffer,
+            final long destinationOffset,
+            final long mipLevel,
+            final long slice,
+            final long x,
+            final long y,
+            final long z,
+            final long width,
+            final long height,
+            final long depth,
+            final long bytesPerRow,
+            final long bytesPerImage
+    ) {
+        try {
+            MTLBlitCommandEncoderCopyFromTextureToBufferV2.invokeExact(
+                    segment(blitEncoder), segment(sourceTexture), segment(destinationBuffer), destinationOffset,
+                    mipLevel, slice, x, y, z, width, height, depth, bytesPerRow, bytesPerImage
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLBlitCommandEncoder_copyFromTextureToBuffer_v2", throwable);
+        }
+    }
+
     public static MemorySegment metallum_create_buffer(final MemorySegment device, final long length, final long options) {
         try {
             return (MemorySegment) createBuffer.invokeExact(segment(device), length, options);
@@ -1714,11 +1809,48 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static MemorySegment metallum_create_texture(
+            final MemorySegment device,
+            final MTLPixelFormat pixelFormat,
+            final long width,
+            final long height,
+            final long depthOrLayers,
+            final long mipLevels,
+            final long dimension,
+            final long cubeCompatible,
+            final long usage,
+            final MTLStorageMode storageMode,
+            final String label
+    ) {
+        try (Arena arena = Arena.ofConfined()) {
+            return (MemorySegment) createTexture.invokeExact(
+                    segment(device), pixelFormat.value, width, height, depthOrLayers, mipLevels,
+                    dimension, cubeCompatible, usage, storageMode.value, toCString(arena, label)
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_create_texture", throwable);
+        }
+    }
+
     public static MemorySegment metallum_create_texture_view(final MemorySegment texture, final long baseMipLevel, final long mipLevelCount) {
         try {
             return (MemorySegment) createTextureView.invokeExact(segment(texture), baseMipLevel, mipLevelCount);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_texture_view", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_create_texture_view_alpha_one(
+            final MemorySegment texture,
+            final long baseMipLevel,
+            final long mipLevelCount
+    ) {
+        try {
+            return (MemorySegment) createTextureViewAlphaOne.invokeExact(
+                    segment(texture), baseMipLevel, mipLevelCount
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_create_texture_view_alpha_one", throwable);
         }
     }
 
@@ -2935,6 +3067,41 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_sampler_v2", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_create_sampler_v3(
+            final MemorySegment device,
+            final MTLSamplerAddressMode addressModeU,
+            final MTLSamplerAddressMode addressModeV,
+            final MTLSamplerMinMagFilter minFilter,
+            final MTLSamplerMinMagFilter magFilter,
+            final MTLSamplerMipFilter mipFilter,
+            final int maxAnisotropy,
+            final double lodMaxClamp,
+            final int compareFunction,
+            final boolean normalizedCoordinates
+    ) {
+        if (createSamplerV3 == null) {
+            if (!normalizedCoordinates) {
+                throw new IllegalStateException(
+                        "Loaded native bridge does not export metallum_create_sampler_v3; "
+                                + "rebuild libmetallum.dylib before creating unnormalized samplers"
+                );
+            }
+            return metallum_create_sampler_v2(
+                    device, addressModeU, addressModeV, minFilter, magFilter, mipFilter,
+                    maxAnisotropy, lodMaxClamp, compareFunction
+            );
+        }
+        try {
+            return (MemorySegment) createSamplerV3.invokeExact(
+                    segment(device), addressModeU.value, addressModeV.value,
+                    minFilter.value, magFilter.value, mipFilter.value,
+                    maxAnisotropy, lodMaxClamp, compareFunction, normalizedCoordinates ? 1 : 0
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_create_sampler_v3", throwable);
         }
     }
 

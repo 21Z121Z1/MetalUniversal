@@ -84,6 +84,7 @@ if (runClientIrisRequested && runClientMetalFxRequested) {
 def isolatedClientWorld = providers.gradleProperty("world").orNull
 def irisClientDefaults = [
 		"metallum.iris.semantic"                 : "true",
+		"metallum.iris.strict"                   : "true",
 		"metallum.metalfx.mode"                  : "OFF",
 		"metallum.metalfx.frameGeneration"       : "false",
 		"metallum.metalfx.objectMotionProducer"  : "false",
@@ -644,6 +645,7 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.MetalIrisTargetsIntegrationTest"
 		includeTestsMatching "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
 		includeTestsMatching "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalExternalLevelSamplerTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", metalApiValidation
@@ -748,6 +750,7 @@ tasks.register("verifyIsolatedClientProfiles") {
 	doLast {
 		def failures = []
 		if (irisClientDefaults["metallum.iris.semantic"] != "true"
+				|| irisClientDefaults["metallum.iris.strict"] != "true"
 				|| irisClientDefaults["metallum.metalfx.mode"] != "OFF"
 				|| irisClientDefaults["metallum.metalfx.frameGeneration"] != "false"
 				|| irisClientDefaults["metallum.metalfx.objectMotionProducer"] != "false"
@@ -1897,6 +1900,7 @@ if (nonIrisCaptureRequested && org.gradle.internal.os.OperatingSystem.current().
 		systemProperty "metallum.backend.compare.fixed-camera", fixedCamera
 		systemProperty "metallum.backend.compare.fixed-iris-frame-millis", "16"
 		systemProperty "metallum.backend.compare.freeze-simulation", "true"
+		systemProperty "metallum.backend.compare.freeze-atlas-animation", "true"
 		systemProperty "metallum.backend.compare.fixed-weather", "clear"
 		systemProperty "metallum.backend.compare.stable-scene-frames", "240"
 		systemProperty "metallum.backend.compare.stable-scene-millis", "8000"

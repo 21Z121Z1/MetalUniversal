@@ -11,6 +11,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class MetalIrisDepthConventionTest {
     @Test
+    void followsIrisPackInUseGate() {
+        assertEquals(false, MetalIrisDepthConvention.shouldAdaptDepth(false, false));
+        assertEquals(false, MetalIrisDepthConvention.shouldAdaptDepth(false, true));
+        assertEquals(false, MetalIrisDepthConvention.shouldAdaptDepth(true, false));
+        assertEquals(true, MetalIrisDepthConvention.shouldAdaptDepth(true, true));
+    }
+
+    @Test
     void reversesMojangDepthStateOnlyWhenEnabled() {
         Map.ofEntries(
                 Map.entry(CompareOp.ALWAYS_PASS, CompareOp.ALWAYS_PASS),

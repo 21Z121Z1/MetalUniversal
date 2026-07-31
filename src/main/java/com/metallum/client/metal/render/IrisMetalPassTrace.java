@@ -31,14 +31,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Unified Iris/Vulkan-oracle versus Metal execution trace.
+ * Unified fixed-Iris construction-plan versus Metal execution trace.
  *
- * <p>The oracle is derived from the same Iris {@link ProgramSet} and mirrors
+ * <p>The plan is derived from the same Iris {@link ProgramSet} and mirrors
  * Iris's {@code CompositeRenderer} construction rule: a pass samples the
  * buffer side captured before the pass, then flips every DRAWBUFFERS target
  * unless an explicit flip disables it. The trace deliberately labels this as
- * an Iris reference, not as raw Vulkan bytes; backend-specific handles and
- * formats are recorded separately by the Metal events.</p>
+ * an Iris construction plan, not as an OpenGL runtime trace; backend-specific
+ * handles and formats are recorded separately by the Metal events.</p>
  */
 final class IrisMetalPassTrace {
     private static final Pattern UNIFORM = Pattern.compile(
@@ -72,7 +72,7 @@ final class IrisMetalPassTrace {
             active = session;
             session.writeEvent("session", Map.of(
                     "status", "start",
-                    "oracle", "iris-vulkan-reference",
+                    "oracle", "iris-1.11.2-construction-plan",
                     "generation", generation,
                     "pack", programSet.getPack().getProfileInfo().toString()
             ));
@@ -249,7 +249,9 @@ final class IrisMetalPassTrace {
         PackDirectives directives = set.getPackDirectives();
         Set<Integer> flipped = new TreeSet<>();
 
-        addCompositeArray(passes, set, ProgramArrayId.Setup, TextureStage.SETUP, flipped, 0);
+        // Fixed Iris creates setup through createSetupComputes(getSetup()), not
+        // through CompositeRenderer/getComposite(ProgramArrayId.Setup).
+        addComputeGroup(passes, set.getSetup(), "setup", 0);
         addPreFlips(flipped, directives, "begin_pre");
         addCompositeArray(passes, set, ProgramArrayId.Begin, TextureStage.BEGIN, flipped, 0);
         addProgram(passes, set, ProgramId.Shadow, "shadow", 500);

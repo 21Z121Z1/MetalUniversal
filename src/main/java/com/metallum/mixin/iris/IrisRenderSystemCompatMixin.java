@@ -30,7 +30,7 @@ public abstract class IrisRenderSystemCompatMixin {
     @Inject(method = "supportsSSBO", at = @At("HEAD"), cancellable = true)
     private static void metallum$noGlSsboCaps(final CallbackInfoReturnable<Boolean> cir) {
         if (MetalIrisCompat.holdIrisDormant()) {
-            cir.setReturnValue(false);
+            cir.setReturnValue(MetalIrisCompat.semanticLayerEnabled());
         }
     }
 
@@ -41,19 +41,25 @@ public abstract class IrisRenderSystemCompatMixin {
      * declared feature flags, so they are on the pack-loading path, not just
      * the renderer-init path.
      *
-     * <p>All report unsupported for B2-1: the semantic layer implements the
-     * gbuffer terrain program and nothing else, so a pack must not take a code
-     * path that assumes compute, image load/store, per-buffer blending or
-     * tessellation is available. A pack that <i>requires</i> one of these is
-     * rejected by Iris with its normal "unsupported feature" message, which is
-     * the correct outcome rather than a broken render.</p>
+     * <p>The semantic path now owns compute, storage images and per-attachment
+     * blend state, so those probes must expose the implemented Metal
+     * capability before {@code ShaderPack} checks required feature flags.
+     * Tessellation remains unsupported and is rejected before generation
+     * state is published.</p>
      */
     @Inject(
-            method = {"supportsImageLoadStore", "supportsBufferBlending", "supportsCompute", "supportsTesselation"},
+            method = {"supportsImageLoadStore", "supportsBufferBlending", "supportsCompute"},
             at = @At("HEAD"),
             cancellable = true
     )
-    private static void metallum$noGlFeatureCaps(final CallbackInfoReturnable<Boolean> cir) {
+    private static void metallum$metalSemanticFeatureCaps(final CallbackInfoReturnable<Boolean> cir) {
+        if (MetalIrisCompat.holdIrisDormant()) {
+            cir.setReturnValue(MetalIrisCompat.semanticLayerEnabled());
+        }
+    }
+
+    @Inject(method = "supportsTesselation", at = @At("HEAD"), cancellable = true)
+    private static void metallum$noMetalTessellation(final CallbackInfoReturnable<Boolean> cir) {
         if (MetalIrisCompat.holdIrisDormant()) {
             cir.setReturnValue(false);
         }

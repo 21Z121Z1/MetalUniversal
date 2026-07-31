@@ -44,22 +44,46 @@ final class MetalGpuTexture extends GpuTexture {
             final int depthOrLayers,
             final int mipLevels
     ) {
+        this(
+                device, usage, label, format, width, height, depthOrLayers, mipLevels,
+                MetalTextureDimension.TWO_D
+        );
+    }
+
+    MetalGpuTexture(
+            final MetalDevice device,
+            @GpuTexture.Usage final int usage,
+            final String label,
+            final GpuFormat format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevels,
+            final MetalTextureDimension dimension
+    ) {
         super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
         this.mtlPixelFormat = MTLPixelFormat.from(format);
 
-        this.nativeHandle = MetalNativeBridge.metallum_create_texture_2d(
+        this.nativeHandle = MetalNativeBridge.metallum_create_texture(
                 device.metalDeviceHandle(),
                 this.mtlPixelFormat,
                 width,
                 height,
                 depthOrLayers,
                 mipLevels,
+                dimension.nativeValue,
                 (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
                 toMtlTextureUsage(usage),
                 MTLStorageMode.Private,
                 label
         );
+        if (MetalNativeBridge.isNullHandle(this.nativeHandle)) {
+            throw new IllegalStateException(
+                    "Failed to create Metal " + dimension + " texture " + label + " ("
+                            + width + 'x' + height + 'x' + depthOrLayers + ", " + format + ')'
+            );
+        }
     }
 
     int pixelSize() {
@@ -124,6 +148,10 @@ final class MetalGpuTexture extends GpuTexture {
         return this.mtlPixelFormat == MTLPixelFormat.Stencil8 || this.mtlPixelFormat.hasStencil()
                 ? this.mtlPixelFormat
                 : MTLPixelFormat.Invalid;
+    }
+
+    boolean isOwnedBy(final MetalDevice expected) {
+        return this.device == expected;
     }
 
     @Override

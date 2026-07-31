@@ -1,10 +1,24 @@
 package com.metallum.client.metal.render;
 
 import com.mojang.blaze3d.GpuFormat;
+import com.mojang.blaze3d.PrimitiveTopology;
+import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.blaze3d.pipeline.BindGroupLayout;
+import com.mojang.blaze3d.pipeline.BlendFunction;
+import com.mojang.blaze3d.pipeline.ColorTargetState;
+import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
+import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.platform.CompareOp;
+import com.mojang.blaze3d.shaders.ShaderSource;
+import com.mojang.blaze3d.shaders.UniformType;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.textures.GpuSampler;
+import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import it.unimi.dsi.fastutil.objects.Object2ObjectMap;
 import net.fabricmc.api.EnvType;
@@ -15,6 +29,7 @@ import net.irisshaders.iris.gl.state.ShaderAttributeInputs;
 import net.irisshaders.iris.gl.texture.TextureType;
 import net.irisshaders.iris.helpers.Tri;
 import net.irisshaders.iris.pipeline.programs.ShaderKey;
+import net.irisshaders.iris.pathways.FullScreenQuadRenderer;
 import net.irisshaders.iris.pipeline.transform.Patch;
 import net.irisshaders.iris.pipeline.transform.PatchShaderType;
 import net.irisshaders.iris.pipeline.transform.TransformPatcher;
@@ -28,8 +43,12 @@ import net.irisshaders.iris.shaderpack.programs.ProgramSource;
 import net.irisshaders.iris.shaderpack.properties.PackDirectives;
 import net.irisshaders.iris.shaderpack.properties.PackShadowDirectives;
 import net.irisshaders.iris.shaderpack.properties.ProgramDirectives;
+import net.irisshaders.iris.shaderpack.properties.IndirectPointer;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
+import net.minecraft.resources.Identifier;
 import org.joml.Vector4f;
+import org.joml.Vector2f;
+import org.joml.Vector3i;
 import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -43,6 +62,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.Set;
 
 /**
  * Metal implementation of Iris's shadow target and shadow-composite state
@@ -202,16 +222,62 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
             new IdentityHashMap<>();
     private final Map<ComputeSource, MetalIrisShaderCompiler.TranslatedProgram> computePrograms =
             new IdentityHashMap<>();
+    private final Map<ComputeSource, ShadowCompute> computeExecutables = new IdentityHashMap<>();
+    private final Map<ShadowCompositePass, RenderPipeline> compositePipelines = new IdentityHashMap<>();
+    private final Map<Identifier, String> generatedSources = new java.util.LinkedHashMap<>();
     private final List<ComputeSource> shadowComputes;
     private final List<ShadowCompositePass> compositePasses;
     private final BitSet finalReadsFromAlt;
     private final int targetCount;
+    private final int generation;
     private final boolean enabled;
     private boolean fullClearRequired = true;
+    private Set<Integer> activeShadowMipTargets = Set.of();
     private int nextCompositePass;
     private Phase phase = Phase.READY;
 
+    private static final class ShadowCompute {
+        private final ComputeSource source;
+        private final MetalIrisShaderCompiler.TranslatedStage translated;
+        private final MetalIrisShaderCompiler.ComputeReflection reflection;
+        private final IrisMetalPostChain.PassInfo info;
+        private final String uniformToken;
+        private @Nullable MetalComputePipeline pipeline;
+
+        private ShadowCompute(
+                final ComputeSource source,
+                final MetalIrisShaderCompiler.TranslatedStage translated,
+                final BitSet readsFromAlt,
+                final int targetCount
+        ) {
+            this.source = source;
+            this.translated = translated;
+            this.reflection = Objects.requireNonNull(
+                    translated.computeReflection(), "shadow compute reflection for " + source.getName()
+            );
+            this.info = new IrisMetalPostChain.PassInfo(
+                    IrisMetalPostChain.Stage.SHADOW_COMPOSITE,
+                    source.getName(),
+                    new int[0],
+                    readsFromAlt,
+                    readsFromAlt,
+                    new BitSet(targetCount),
+                    this.reflection.resources().stream()
+                            .filter(resource -> resource.kind()
+                                    == MetalIrisShaderCompiler.ComputeResourceKind.SAMPLED_IMAGE)
+                            .map(MetalIrisShaderCompiler.ComputeResource::name)
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet())
+            );
+            this.uniformToken = "shadow-compute:" + source.getName();
+        }
+    }
+
     IrisMetalShadowPipeline(final MetalDevice device, final ProgramSet programSet) {
+        this(device, programSet, 0);
+    }
+
+    IrisMetalShadowPipeline(final MetalDevice device, final ProgramSet programSet, final int generation) {
+        this.generation = generation;
         PackDirectives packDirectives = programSet.getPackDirectives();
         this.shadowDirectives = packDirectives.getShadowDirectives();
         this.resolver = new ProgramFallbackResolver(programSet);
@@ -221,20 +287,37 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
         this.targetCount = programSet.getPack().hasFeature(FeatureFlags.HIGHER_SHADOWCOLOR)
                 ? PackShadowDirectives.MAX_SHADOW_COLOR_BUFFERS_IRIS
                 : PackShadowDirectives.MAX_SHADOW_COLOR_BUFFERS_OF;
+        this.shadowComputes = nonNullComputes(programSet.getShadowCompute());
+        CompositePlan plan = buildCompositePlan(programSet, packDirectives, targetCount);
+        this.compositePasses = plan.passes();
+        this.finalReadsFromAlt = plan.finalReadsFromAlt();
+        boolean computeMayWriteShadowColor = !this.shadowComputes.isEmpty()
+                || this.compositePasses.stream().anyMatch(pass -> !pass.computes().isEmpty());
 
         boolean[] nearestColor = new boolean[targetCount];
+        boolean[] mipmappedColor = new boolean[targetCount];
         GpuFormat[] colorFormats = new GpuFormat[targetCount];
+        java.util.LinkedHashSet<Integer> alphaOneSampleTargets = new java.util.LinkedHashSet<>();
         for (int index = 0; index < targetCount; index++) {
             PackShadowDirectives.SamplingSettings settings =
                     shadowDirectives.getColorSamplingSettings().computeIfAbsent(
                             index, ignored -> new PackShadowDirectives.SamplingSettings());
-            if (settings.getMipmap()) {
-                throw new IllegalStateException(
-                        "Metal shadowcolor mipmaps are not available without mipmapped ping-pong targets"
-                );
-            }
             nearestColor[index] = settings.getNearest();
-            colorFormats[index] = formatForInternalName(settings.getFormat().name());
+            mipmappedColor[index] = settings.getMipmap();
+            String formatName = settings.getFormat().name();
+            colorFormats[index] = formatForInternalName(formatName);
+            if (IrisMetalRenderTargets.logicalRgbBackedByRgba(formatName)) {
+                alphaOneSampleTargets.add(index);
+            }
+        }
+        for (ShadowCompositePass pass : this.compositePasses) {
+            if (!pass.hasRenderProgram()) {
+                continue;
+            }
+            for (int target : pass.source().getDirectives().getMipmappedBuffers()) {
+                checkTarget(target, targetCount, "shadow composite mipmap");
+                mipmappedColor[target] = true;
+            }
         }
         boolean[] nearestDepth = new boolean[2];
         boolean[] mipmappedDepth = new boolean[2];
@@ -249,13 +332,173 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                 colorFormats,
                 shadowDirectives.getResolution(),
                 nearestColor,
+                mipmappedColor,
                 nearestDepth,
-                mipmappedDepth
+                mipmappedDepth,
+                computeMayWriteShadowColor,
+                alphaOneSampleTargets
         );
-        this.shadowComputes = nonNullComputes(programSet.getShadowCompute());
-        CompositePlan plan = buildCompositePlan(programSet, packDirectives, targetCount);
-        this.compositePasses = plan.passes();
-        this.finalReadsFromAlt = plan.finalReadsFromAlt();
+    }
+
+    void prepare(final MetalDevice device, final ShaderSource fallback) {
+        ensureOpen();
+        for (ComputeSource source : this.shadowComputes) {
+            prepareCompute(device, compute(source, new BitSet(this.targetCount)));
+        }
+        for (ShadowCompositePass pass : this.compositePasses) {
+            for (ComputeSource source : pass.computes()) {
+                prepareCompute(device, compute(source, pass.readsFromAlt()));
+            }
+            if (pass.hasRenderProgram()) {
+                RenderPipeline pipeline = this.compositePipelines.computeIfAbsent(
+                        pass, this::buildCompositePipeline
+                );
+                ShaderSource source = (identifier, type) -> {
+                    String generated = this.generatedSources.get(identifier);
+                    return generated != null ? generated : fallback.get(identifier, type);
+                };
+                CompiledRenderPipeline compiled = device.precompilePipeline(pipeline, source);
+                if (!device.asyncPrewarmEnabled() && !compiled.isValid()) {
+                    throw new IllegalStateException(
+                            "Metal shadow composite pipeline is invalid for " + pass.name()
+                    );
+                }
+            }
+        }
+    }
+
+    void registerUniforms(final IrisMetalUniformValues values) {
+        Objects.requireNonNull(values, "values");
+        for (ComputeSource source : this.shadowComputes) {
+            registerComputeUniforms(values, compute(source, new BitSet(this.targetCount)));
+        }
+        for (ShadowCompositePass pass : this.compositePasses) {
+            for (ComputeSource source : pass.computes()) {
+                registerComputeUniforms(values, compute(source, pass.readsFromAlt()));
+            }
+            if (pass.hasRenderProgram()) {
+                IrisMetalPostChain.PassInfo info = passInfo(pass);
+                values.register(
+                        IrisMetalPostChain.uniformToken(info),
+                        "shadow_composite_" + pass.name(),
+                        translatedComposite(pass)
+                );
+            }
+        }
+    }
+
+    private static void registerComputeUniforms(
+            final IrisMetalUniformValues values,
+            final ShadowCompute compute
+    ) {
+        values.registerCompute(
+                compute.uniformToken,
+                "shadow_compute_" + compute.info.name(),
+                compute.reflection
+        );
+    }
+
+    private static void prepareCompute(final MetalDevice device, final ShadowCompute compute) {
+        if (compute.pipeline == null) {
+            compute.pipeline = MetalComputePipeline.compileTranslated(
+                    device, "iris/shadow/compute/" + compute.source.getName(), compute.translated
+            );
+        }
+    }
+
+    private ShadowCompute compute(final ComputeSource source, final BitSet readsFromAlt) {
+        ShadowCompute existing = this.computeExecutables.get(source);
+        if (existing != null) {
+            return existing;
+        }
+        MetalIrisShaderCompiler.TranslatedProgram translated = this.computePrograms.computeIfAbsent(
+                source, this::translateComputeProgram
+        );
+        ShadowCompute created = new ShadowCompute(
+                source,
+                translated.compute().orElseThrow(() -> new IllegalStateException(
+                        "Translated shadow compute has no compute stage: " + source.getName()
+                )),
+                readsFromAlt,
+                this.targetCount
+        );
+        this.computeExecutables.put(source, created);
+        return created;
+    }
+
+    private IrisMetalPostChain.PassInfo passInfo(final ShadowCompositePass pass) {
+        MetalIrisShaderCompiler.GlslProgram program = translatedComposite(pass);
+        return new IrisMetalPostChain.PassInfo(
+                IrisMetalPostChain.Stage.SHADOW_COMPOSITE,
+                pass.name(),
+                pass.drawBuffers(),
+                pass.readsFromAlt(),
+                pass.readsFromAlt(),
+                pass.flippedAtLeastOnce(),
+                program.samplers().stream()
+                        .map(MetalIrisShaderCompiler.SamplerDecl::name)
+                        .collect(java.util.stream.Collectors.toUnmodifiableSet())
+        );
+    }
+
+    private RenderPipeline buildCompositePipeline(final ShadowCompositePass pass) {
+        MetalIrisShaderCompiler.GlslProgram program = translatedComposite(pass);
+        String base = "iris/gen" + this.generation + "/shadowcomp/" + pass.index();
+        Identifier vertexId = Identifier.fromNamespaceAndPath("metallum", base + "_v");
+        Identifier fragmentId = Identifier.fromNamespaceAndPath("metallum", base + "_f");
+        this.generatedSources.put(vertexId, program.vertexGlsl());
+        this.generatedSources.put(fragmentId, program.fragmentGlsl());
+        BindGroupLayout.Builder bindings = BindGroupLayout.builder();
+        Set<String> names = new java.util.HashSet<>();
+        for (String block : program.uniformBlockNames()) {
+            if (!names.add(block)) {
+                throw new IllegalStateException("Duplicate shadow composite resource '" + block + "'");
+            }
+            bindings.withUniform(block, UniformType.UNIFORM_BUFFER);
+        }
+        for (MetalIrisShaderCompiler.SamplerDecl sampler : program.samplers()) {
+            if (!names.add(sampler.name())) {
+                throw new IllegalStateException("Duplicate shadow composite resource '" + sampler.name() + "'");
+            }
+            if (sampler.isStorageImage()) {
+                continue;
+            }
+            if (sampler.isTexelBuffer()) {
+                throw new UnsupportedOperationException(
+                        "Shadow composite sampler buffer '" + sampler.name() + "' has no typed Metal binding"
+                );
+            }
+            bindings.withSampler(sampler.name());
+        }
+        RenderPipeline.Builder builder = RenderPipeline.builder()
+                .withLocation(Identifier.fromNamespaceAndPath("metallum", base))
+                .withVertexShader(vertexId)
+                .withFragmentShader(fragmentId)
+                .withVertexBinding(0, DefaultVertexFormat.POSITION_TEX)
+                .withPrimitiveTopology(PrimitiveTopology.QUADS)
+                .withCull(false);
+        if (!names.isEmpty()) {
+            builder.withBindGroupLayout(bindings.build());
+        }
+        ProgramDirectives directives = pass.source().getDirectives();
+        Optional<BlendFunction> global = directives.getBlendModeOverride()
+                .flatMap(IrisMetalPipelineOverrides::irisBlendFunction);
+        for (int slot = 0; slot < pass.drawBuffers().length; slot++) {
+            int logicalTarget = pass.drawBuffers()[slot];
+            Optional<BlendFunction> blend = global;
+            for (var override : directives.getBufferBlendOverrides()) {
+                if (override.index() == logicalTarget) {
+                    blend = override.blendMode() == null
+                            ? Optional.empty()
+                            : Optional.of(IrisMetalPipelineOverrides.irisBlendFunction(override.blendMode()));
+                }
+            }
+            builder.withColorTargetState(
+                    slot,
+                    new ColorTargetState(blend, this.targetFormat(logicalTarget), ColorTargetState.WRITE_ALL)
+            );
+        }
+        return builder.build();
     }
 
     boolean enabled() {
@@ -365,27 +608,406 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
     }
 
     /** Executes a frame only when every declared shadow stage has a connected Metal implementation. */
-    void executeFrame(final MetalDevice device, final LevelRendererAdapter adapter) {
+    void executeFrame(
+            final MetalDevice device,
+            final LevelRendererAdapter adapter,
+            final IrisMetalPostChain.ResourceProvider resources
+    ) {
         Objects.requireNonNull(device, "device");
         Objects.requireNonNull(adapter, "adapter");
+        Objects.requireNonNull(resources, "resources");
         if (!enabled) {
             return;
         }
-        if (!shadowComputes.isEmpty()) {
-            throw new IllegalStateException(
-                    "The pack declares standalone shadow compute programs but no Metal compute dispatcher is connected"
-            );
-        }
-        if (!compositePasses.isEmpty()) {
-            throw new IllegalStateException(
-                    "The pack declares " + compositePasses.size()
-                            + " shadow composite pass(es), but Metal shadowcomp execution is not connected"
-            );
-        }
         MetalCommandEncoder encoder = device.commandEncoder();
-        beginFrame(encoder, null);
+        beginFrame(encoder, (source, translated, width, height) ->
+                executeCompute(device, compute(source, new BitSet(this.targetCount)), resources));
         renderGeometry(encoder, adapter);
+        for (ShadowCompositePass pass : this.compositePasses) {
+            for (ComputeSource source : pass.computes()) {
+                executeCompute(device, compute(source, pass.readsFromAlt()), resources);
+            }
+            if (pass.hasRenderProgram()) {
+                executeCompositeRaster(device, pass, resources);
+            }
+            completeCompositePass(pass);
+        }
         finishComposites();
+    }
+
+    private void executeCompositeRaster(
+            final MetalDevice device,
+            final ShadowCompositePass pass,
+            final IrisMetalPostChain.ResourceProvider resources
+    ) {
+        IrisMetalPostChain.PassInfo info = passInfo(pass);
+        int viewportX = (int) (this.resolution() * pass.viewport().viewportX());
+        int viewportY = (int) (this.resolution() * pass.viewport().viewportY());
+        int viewportWidth = (int) (this.resolution() * pass.viewport().scale());
+        int viewportHeight = (int) (this.resolution() * pass.viewport().scale());
+        Set<Integer> mipmapped = pass.source().getDirectives().getMipmappedBuffers();
+        this.targets.generatePassColorMipmaps(device.commandEncoder(), pass.readsFromAlt(), mipmapped);
+        this.activeShadowMipTargets = Set.copyOf(mipmapped);
+        try (IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor = this.targets.createShadowCompositeDescriptor(
+                "iris shadowcomp " + pass.name(),
+                pass.drawBuffers(),
+                pass.readsFromAlt(),
+                viewportX,
+                viewportY,
+                viewportWidth,
+                viewportHeight
+        )) {
+            MetalCommandEncoder encoder = device.commandEncoder();
+            MetalRenderPass renderPass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
+            try {
+                RenderPipeline pipeline = Objects.requireNonNull(
+                        this.compositePipelines.get(pass), "shadow composite pipeline"
+                );
+                MetalIrisShaderCompiler.GlslProgram program = compositeProgram(pass);
+                Optional<BlendFunction> globalBlend = pass.source().getDirectives().getBlendModeOverride()
+                        .flatMap(IrisMetalPipelineOverrides::irisBlendFunction);
+                IrisMetalUniformValues.DrawUniformContext uniformContext =
+                        IrisMetalUniformValues.requiresDrawContext(program.uniformLayout())
+                                ? shadowUniformContext(info, pass.readsFromAlt(), resources, globalBlend)
+                                : IrisMetalUniformValues.DrawUniformContext.empty();
+                renderPass.setPipeline(pipeline);
+                for (MetalIrisShaderCompiler.StorageBufferDecl storage : program.storageBuffers()) {
+                    GpuBufferSlice slice = resources.storageBuffer(storage.binding());
+                    if (slice == null) {
+                        throw new IllegalStateException(
+                                "Shadow composite " + pass.name() + " is missing SSBO binding "
+                                        + storage.binding()
+                        );
+                    }
+                    renderPass.bindStorageBuffer(storage.binding(), slice);
+                }
+                for (String block : program.uniformBlockNames()) {
+                    GpuBufferSlice slice = resources.uniform(
+                            info,
+                            block,
+                            IrisMetalPostChain.uniformToken(info),
+                            uniformContext
+                    );
+                    if (slice == null) {
+                        throw new IllegalStateException(
+                                "Shadow composite " + pass.name() + " is missing uniform block '" + block + "'"
+                        );
+                    }
+                    renderPass.setUniform(block, slice);
+                }
+                for (MetalIrisShaderCompiler.SamplerDecl sampler : program.samplers()) {
+                    if (sampler.isStorageImage()) {
+                        int shadowTarget = shadowColorImageIndex(sampler.name());
+                        GpuTextureView image;
+                        if (shadowTarget >= 0) {
+                            if (shadowTarget >= this.targetCount) {
+                                throw new IllegalStateException(
+                                        "Shadow composite storage image '" + sampler.name()
+                                                + "' exceeds target count " + this.targetCount
+                                );
+                            }
+                            image = this.targets.colorView(shadowTarget, pass.readsFromAlt());
+                        } else {
+                            image = resources.storageImage(info, sampler.name());
+                        }
+                        if (image == null) {
+                            throw new IllegalStateException(
+                                    "Shadow composite " + pass.name() + " is missing storage image '"
+                                            + sampler.name() + "'"
+                            );
+                        }
+                        renderPass.bindStorageImage(sampler.name(), image);
+                        continue;
+                    }
+                    IrisMetalPostChain.TextureBinding binding = resources.texture(info, sampler);
+                    if (binding == null) {
+                        MetalRenderPass.TextureViewAndSampler shadow = resolveShadowSampler(
+                                sampler, pass.readsFromAlt(), info.declaresSampler("watershadow")
+                        );
+                        if (shadow != null) {
+                            binding = new IrisMetalPostChain.TextureBinding(
+                                    shadow.textureView(), shadow.sampler()
+                            );
+                        }
+                    }
+                    if (binding == null) {
+                        throw new IllegalStateException(
+                                "Shadow composite " + pass.name() + " is missing sampler '" + sampler.name() + "'"
+                        );
+                    }
+                    renderPass.bindTexture(sampler.name(), binding.view(), binding.sampler());
+                }
+                GpuBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer(6);
+                renderPass.setIndexBuffer(indices, RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).type());
+                renderPass.setVertexBuffer(0, FullScreenQuadRenderer.INSTANCE.getQuad().slice());
+                renderPass.drawIndexed(6, 1, 0, 0, 0);
+            } finally {
+                encoder.submitRenderPass();
+            }
+        } finally {
+            this.activeShadowMipTargets = Set.of();
+        }
+    }
+
+    private void executeCompute(
+            final MetalDevice device,
+            final ShadowCompute compute,
+            final IrisMetalPostChain.ResourceProvider resources
+    ) {
+        try (MetalComputePass pass = device.commandEncoder().createComputePass()) {
+            pass.setPipeline(Objects.requireNonNull(compute.pipeline, "shadow compute pipeline"));
+            bindComputeResources(pass, compute, resources);
+            dispatchCompute(pass, compute, resources);
+        }
+    }
+
+    private void bindComputeResources(
+            final MetalComputePass pass,
+            final ShadowCompute compute,
+            final IrisMetalPostChain.ResourceProvider resources
+    ) {
+        IrisMetalUniformValues.DrawUniformContext uniformContext =
+                IrisMetalUniformValues.requiresDrawContext(compute.reflection.uniformLayout())
+                        ? shadowUniformContext(
+                                compute.info, compute.info.readsFromAlt(), resources, Optional.empty()
+                        )
+                        : IrisMetalUniformValues.DrawUniformContext.empty();
+        for (MetalIrisShaderCompiler.ComputeResource resource : compute.reflection.resources()) {
+            switch (resource.kind()) {
+                case UNIFORM_BUFFER -> bindBuffer(
+                        pass,
+                        resource.binding(),
+                        requireBuffer(
+                                resources.uniform(
+                                        compute.info,
+                                        resource.name(),
+                                        compute.uniformToken,
+                                        uniformContext
+                                ),
+                                compute, "uniform block", resource.name()
+                        )
+                );
+                case STORAGE_BUFFER -> bindBuffer(
+                        pass,
+                        resource.binding(),
+                        requireBuffer(
+                                resources.storageBuffer(resource.binding()),
+                                compute, "SSBO binding", Integer.toString(resource.binding())
+                        )
+                );
+                case SAMPLED_IMAGE -> {
+                    IrisMetalPostChain.TextureBinding binding = requireTexture(compute, resource.name(), resources);
+                    MetalGpuTextureView view = metalView(binding.view(), compute, resource.name());
+                    pass.bindTextureView(resource.binding(), view);
+                    pass.bindSampler(
+                            resource.binding(), metalSampler(binding.sampler(), compute, resource.name()).nativeHandle()
+                    );
+                }
+                case SEPARATE_SAMPLER -> {
+                    IrisMetalPostChain.TextureBinding binding = requireTexture(compute, resource.name(), resources);
+                    pass.bindSampler(
+                            resource.binding(), metalSampler(binding.sampler(), compute, resource.name()).nativeHandle()
+                    );
+                }
+                case STORAGE_IMAGE -> {
+                    GpuTextureView view = storageImage(compute, resource.name(), resources);
+                    MetalGpuTextureView metal = metalView(view, compute, resource.name());
+                    ((MetalGpuTexture) metal.texture()).markContentsDirty();
+                    pass.bindTextureView(resource.binding(), metal);
+                }
+                case TEXEL_BUFFER, STORAGE_TEXEL_BUFFER, ATOMIC_COUNTER -> throw new IllegalStateException(
+                        "Unsupported shadow compute resource survived admission: "
+                                + resource.kind() + " " + resource.name()
+                );
+            }
+        }
+    }
+
+    private IrisMetalUniformValues.DrawUniformContext shadowUniformContext(
+            final IrisMetalPostChain.PassInfo info,
+            final BitSet readsFromAlt,
+            final IrisMetalPostChain.ResourceProvider resources,
+            final Optional<BlendFunction> globalBlend
+    ) {
+        MetalIrisShaderCompiler.SamplerDecl sampler =
+                new MetalIrisShaderCompiler.SamplerDecl("shadowcolor0", "sampler2D");
+        IrisMetalPostChain.TextureBinding primary = resources.texture(info, sampler);
+        if (primary == null) {
+            MetalRenderPass.TextureViewAndSampler shadow = resolveShadowSampler(
+                    sampler, readsFromAlt, info.declaresSampler("watershadow")
+            );
+            if (shadow != null) {
+                primary = new IrisMetalPostChain.TextureBinding(
+                        shadow.textureView(), shadow.sampler()
+                );
+            }
+        }
+        if (primary == null) {
+            throw new IllegalStateException(
+                    "Iris shadow pass " + info.name() + " has no logical texture-unit-0 shadowcolor0 binding"
+            );
+        }
+        return new IrisMetalUniformValues.DrawUniformContext(
+                primary.view(), 0, 0, globalBlend
+        );
+    }
+
+    private IrisMetalPostChain.TextureBinding requireTexture(
+            final ShadowCompute compute,
+            final String name,
+            final IrisMetalPostChain.ResourceProvider resources
+    ) {
+        MetalIrisShaderCompiler.SamplerDecl sampler =
+                new MetalIrisShaderCompiler.SamplerDecl(name, "sampler2D");
+        IrisMetalPostChain.TextureBinding binding = resources.texture(compute.info, sampler);
+        if (binding == null) {
+            MetalRenderPass.TextureViewAndSampler shadow = resolveShadowSampler(
+                    sampler, compute.info.readsFromAlt(), compute.info.declaresSampler("watershadow")
+            );
+            if (shadow != null) {
+                binding = new IrisMetalPostChain.TextureBinding(shadow.textureView(), shadow.sampler());
+            }
+        }
+        if (binding == null) {
+            throw new IllegalStateException(
+                    "Iris shadow compute " + compute.info.name() + " is missing sampled texture '" + name + "'"
+            );
+        }
+        return binding;
+    }
+
+    private GpuTextureView storageImage(
+            final ShadowCompute compute,
+            final String name,
+            final IrisMetalPostChain.ResourceProvider resources
+    ) {
+        int shadowTarget = shadowColorImageIndex(name);
+        if (shadowTarget >= 0) {
+            if (shadowTarget >= this.targetCount) {
+                throw new IllegalStateException(
+                        "Shadow storage image '" + name + "' exceeds target count " + this.targetCount
+                );
+            }
+            return this.targets.colorView(shadowTarget, compute.info.readsFromAlt());
+        }
+        GpuTextureView view = resources.storageImage(compute.info, name);
+        if (view == null) {
+            throw new IllegalStateException(
+                    "Iris shadow compute " + compute.info.name() + " is missing storage image '" + name + "'"
+            );
+        }
+        return view;
+    }
+
+    private static int shadowColorImageIndex(final String name) {
+        String prefix = "shadowcolorimg";
+        if (!name.startsWith(prefix)) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(name.substring(prefix.length()));
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
+    @Nullable GpuTextureView resolveStorageImage(final String name) {
+        int target = shadowColorImageIndex(name);
+        if (target < 0 || target >= this.targetCount || this.targets == null) {
+            return null;
+        }
+        return this.targets.colorTargets().sampleReadView(target);
+    }
+
+    private static GpuBufferSlice requireBuffer(
+            final @Nullable GpuBufferSlice slice,
+            final ShadowCompute compute,
+            final String kind,
+            final String identity
+    ) {
+        if (slice == null) {
+            throw new IllegalStateException(
+                    "Iris shadow compute " + compute.info.name() + " is missing " + kind + " '" + identity + "'"
+            );
+        }
+        return slice;
+    }
+
+    private static void bindBuffer(
+            final MetalComputePass pass,
+            final int binding,
+            final GpuBufferSlice slice
+    ) {
+        if (!(slice.buffer() instanceof MetalGpuBuffer buffer)) {
+            throw new IllegalStateException("Iris shadow compute resource is not a Metal buffer");
+        }
+        pass.bindBuffer(binding, buffer, slice.offset());
+    }
+
+    private static MetalGpuTextureView metalView(
+            final GpuTextureView view,
+            final ShadowCompute compute,
+            final String name
+    ) {
+        if (!(view instanceof MetalGpuTextureView metal)) {
+            throw new IllegalStateException(
+                    "Iris shadow compute " + compute.info.name() + " resource '" + name
+                            + "' is not a Metal texture view"
+            );
+        }
+        return metal;
+    }
+
+    private static MetalGpuSampler metalSampler(
+            final GpuSampler sampler,
+            final ShadowCompute compute,
+            final String name
+    ) {
+        if (!(sampler instanceof MetalGpuSampler metal)) {
+            throw new IllegalStateException(
+                    "Iris shadow compute " + compute.info.name() + " resource '" + name
+                            + "' is not a Metal sampler"
+            );
+        }
+        return metal;
+    }
+
+    private void dispatchCompute(
+            final MetalComputePass pass,
+            final ShadowCompute compute,
+            final IrisMetalPostChain.ResourceProvider resources
+    ) {
+        IndirectPointer indirect = compute.source.getIndirectPointer();
+        if (indirect != null) {
+            GpuBufferSlice slice = requireBuffer(
+                    resources.storageBuffer(indirect.buffer()),
+                    compute,
+                    "indirect SSBO binding",
+                    Integer.toString(indirect.buffer())
+            );
+            if (indirect.offset() < 0L || indirect.offset() > slice.length() - 12L) {
+                throw new IllegalStateException(
+                        "Iris shadow compute " + compute.info.name() + " indirect range exceeds SSBO "
+                                + indirect.buffer()
+                );
+            }
+            if (!(slice.buffer() instanceof MetalGpuBuffer buffer)) {
+                throw new IllegalStateException("Iris shadow indirect buffer is not backed by Metal");
+            }
+            pass.dispatchIndirect(buffer, Math.addExact(slice.offset(), indirect.offset()));
+            return;
+        }
+        Vector3i absolute = compute.source.getWorkGroups();
+        if (absolute != null) {
+            pass.dispatchGroups(absolute.x(), absolute.y(), absolute.z());
+            return;
+        }
+        Vector2f relative = compute.source.getWorkGroupRelative();
+        float scaleX = relative == null ? 1.0F : relative.x();
+        float scaleY = relative == null ? 1.0F : relative.y();
+        int threadsX = Math.max(1, (int) Math.ceil(this.resolution() * scaleX));
+        int threadsY = Math.max(1, (int) Math.ceil(this.resolution() * scaleY));
+        pass.dispatchThreadsCovering(threadsX, threadsY, 1);
     }
 
     IrisMetalRenderTargets.RenderPassDescriptorWithViews createGbufferDescriptor(
@@ -420,11 +1042,16 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
     void finishGeometry(final MetalCommandEncoder encoder) {
         requirePhase(Phase.TRANSLUCENT);
         targets.generateDepthMipmaps(encoder);
+        targets.generateConfiguredColorMipmaps(encoder);
         phase = Phase.COMPOSITE;
     }
 
     MetalIrisShaderCompiler.GlslProgram compositeProgram(final ShadowCompositePass pass) {
         ensureExpectedCompositePass(pass);
+        return translatedComposite(pass);
+    }
+
+    private MetalIrisShaderCompiler.GlslProgram translatedComposite(final ShadowCompositePass pass) {
         ProgramSource source = pass.source();
         if (source == null) {
             throw new IllegalArgumentException("Shadow composite pass " + pass.index() + " is compute-only");
@@ -450,12 +1077,6 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
         ensureExpectedCompositePass(pass);
         if (!pass.hasRenderProgram()) {
             throw new IllegalArgumentException("Shadow composite pass " + pass.index() + " is compute-only");
-        }
-        if (!pass.source().getDirectives().getMipmappedBuffers().isEmpty()) {
-            throw new IllegalStateException(
-                    "Shadow composite pass " + pass.name()
-                            + " requests shadowcolor mipmaps, but its ping-pong targets are not mipmapped"
-            );
         }
         ViewportData viewport = pass.viewport();
         int x = (int) (resolution() * viewport.viewportX());
@@ -566,7 +1187,8 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                 );
             }
             return new MetalRenderPass.TextureViewAndSampler(
-                    targets.colorView(color, readsFromAlt), targets.colorSampler(color)
+                    targets.colorView(color, readsFromAlt),
+                    targets.colorSampler(color, this.activeShadowMipTargets.contains(color))
             );
         }
         return null;

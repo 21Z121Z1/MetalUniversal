@@ -97,11 +97,59 @@ final class MetalComputePipeline implements AutoCloseable {
         }
         ByteBuffer spirv = compileGlslToSpirv(label, glslSource);
         MslKernel kernel = spirvToMslKernel(label, spirv);
-        MemorySegment function = device.getOrCompileFunction(kernel.source(), kernel.entryPoint());
+        return compileMsl(
+                device,
+                label,
+                kernel.source(),
+                kernel.entryPoint(),
+                kernel.localSizeX(),
+                kernel.localSizeY(),
+                kernel.localSizeZ()
+        );
+    }
+
+    static MetalComputePipeline compileTranslated(
+            final MetalDevice device,
+            final String label,
+            final MetalIrisShaderCompiler.TranslatedStage stage
+    ) {
+        if (stage.kind() != MetalIrisShaderCompiler.StageKind.COMPUTE) {
+            throw new IllegalArgumentException("Translated stage is not compute: " + stage.kind());
+        }
+        MetalIrisShaderCompiler.ComputeReflection reflection = stage.computeReflection();
+        if (reflection == null) {
+            throw new IllegalStateException("Translated compute stage has no reflection: " + label);
+        }
+        if (!MetalNativeBridge.supportsComputeAbi()) {
+            throw new IllegalStateException(
+                    "Native bridge lacks the compute ABI; rebuild libmetallum.dylib (gradle buildMacNative)"
+            );
+        }
+        return compileMsl(
+                device,
+                label,
+                stage.msl(),
+                stage.entryPoint(),
+                reflection.localSizeX(),
+                reflection.localSizeY(),
+                reflection.localSizeZ()
+        );
+    }
+
+    private static MetalComputePipeline compileMsl(
+            final MetalDevice device,
+            final String label,
+            final String msl,
+            final String entryPoint,
+            final int localSizeX,
+            final int localSizeY,
+            final int localSizeZ
+    ) {
+        MemorySegment function = device.getOrCompileFunction(msl, entryPoint);
         if (MetalNativeBridge.isNullHandle(function)) {
             throw new IllegalStateException(
                     "Failed to compile MSL kernel for compute shader " + label
-                            + " (entry " + kernel.entryPoint() + ")"
+                            + " (entry " + entryPoint + ")"
             );
         }
         MemorySegment pipelineState = MetalNativeBridge.MTLDevice_makeComputePipelineState(
@@ -114,9 +162,9 @@ final class MetalComputePipeline implements AutoCloseable {
                 device,
                 label,
                 pipelineState,
-                kernel.localSizeX(),
-                kernel.localSizeY(),
-                kernel.localSizeZ()
+                localSizeX,
+                localSizeY,
+                localSizeZ
         );
     }
 

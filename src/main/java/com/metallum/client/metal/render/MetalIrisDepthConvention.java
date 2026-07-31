@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.mojang.blaze3d.platform.CompareOp;
+import net.irisshaders.iris.Iris;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 
@@ -19,16 +20,41 @@ public final class MetalIrisDepthConvention {
     }
 
     /**
-     * Metal-only code can use the startup request directly: reaching these
-     * classes already proves that the selected backend is Metal.
+     * Metal-only code can use the startup request for the backend half of the
+     * gate: reaching these classes already proves that the selected backend is
+     * Metal. Iris's own UndoReverseZ mixins additionally require
+     * {@link Iris#isPackInUseQuick()}, so shaders-off rendering must retain
+     * Mojang's reverse-Z convention even when the semantic layer was requested.
      */
     static boolean enabledForMetalBackend() {
-        return MetalIrisCompat.semanticLayerRequested();
+        return shouldAdaptDepth(
+                MetalIrisCompat.semanticLayerRequested(), packInUseQuick()
+        );
     }
 
     /** Runtime guard for mixins which can also execute on a fallback backend. */
     public static boolean active() {
-        return MetalIrisCompat.semanticLayerEnabled();
+        return shouldAdaptDepth(
+                MetalIrisCompat.semanticLayerEnabled(), packInUseQuick()
+        );
+    }
+
+    /**
+     * Iris exposes this method in the fixed 1.11.2 runtime, but focused tests
+     * can run against an un-mixed nested Iris class. Treat that classpath
+     * mismatch as "no pack" instead of linking the whole depth adapter to an
+     * optional method and failing before a render pass is created.
+     */
+    private static boolean packInUseQuick() {
+        try {
+            return (boolean) Iris.class.getMethod("isPackInUseQuick").invoke(null);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    static boolean shouldAdaptDepth(final boolean semanticEnabled, final boolean packInUse) {
+        return semanticEnabled && packInUse;
     }
 
     static CompareOp hardwareCompare(final CompareOp mojangReverseCompare) {

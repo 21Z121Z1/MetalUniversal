@@ -8011,6 +8011,50 @@ public func metallum_MTLBlitCommandEncoder_copyFromBufferToTexture(
     )
 }
 
+@_cdecl("metallum_MTLBlitCommandEncoder_copyFromBufferToTexture_v2")
+public func metallum_MTLBlitCommandEncoder_copyFromBufferToTexture_v2(
+    _ pointer: UnsafeMutableRawPointer,
+    _ sourceBuffer: MTLBuffer,
+    _ sourceOffset: UInt64,
+    _ texture: MTLTexture,
+    _ mipLevel: UInt64,
+    _ slice: UInt64,
+    _ x: UInt64,
+    _ y: UInt64,
+    _ z: UInt64,
+    _ width: UInt64,
+    _ height: UInt64,
+    _ depth: UInt64,
+    _ bytesPerRow: UInt64,
+    _ bytesPerImage: UInt64
+) {
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4BlitBridge(pointer) {
+        bridge.encoder.copy(
+            sourceBuffer: sourceBuffer,
+            sourceOffset: Int(sourceOffset),
+            sourceBytesPerRow: Int(bytesPerRow),
+            sourceBytesPerImage: Int(bytesPerImage),
+            sourceSize: MTLSize(width: Int(width), height: Int(height), depth: Int(depth)),
+            destinationTexture: texture,
+            destinationSlice: Int(slice),
+            destinationLevel: Int(mipLevel),
+            destinationOrigin: MTLOrigin(x: Int(x), y: Int(y), z: Int(z))
+        )
+        return
+    }
+    metal3BlitEncoder(pointer).copy(
+        from: sourceBuffer,
+        sourceOffset: Int(sourceOffset),
+        sourceBytesPerRow: Int(bytesPerRow),
+        sourceBytesPerImage: Int(bytesPerImage),
+        sourceSize: MTLSize(width: Int(width), height: Int(height), depth: Int(depth)),
+        to: texture,
+        destinationSlice: Int(slice),
+        destinationLevel: Int(mipLevel),
+        destinationOrigin: MTLOrigin(x: Int(x), y: Int(y), z: Int(z))
+    )
+}
+
 @_cdecl("metallum_MTLBlitCommandEncoder_copyFromTextureToTexture")
 public func metallum_MTLBlitCommandEncoder_copyFromTextureToTexture(
     _ pointer: UnsafeMutableRawPointer,
@@ -8095,6 +8139,50 @@ public func metallum_MTLBlitCommandEncoder_copyFromTextureToBuffer(
     )
 }
 
+@_cdecl("metallum_MTLBlitCommandEncoder_copyFromTextureToBuffer_v2")
+public func metallum_MTLBlitCommandEncoder_copyFromTextureToBuffer_v2(
+    _ pointer: UnsafeMutableRawPointer,
+    _ sourceTexture: MTLTexture,
+    _ destinationBuffer: MTLBuffer,
+    _ destinationOffset: UInt64,
+    _ mipLevel: UInt64,
+    _ slice: UInt64,
+    _ x: UInt64,
+    _ y: UInt64,
+    _ z: UInt64,
+    _ width: UInt64,
+    _ height: UInt64,
+    _ depth: UInt64,
+    _ bytesPerRow: UInt64,
+    _ bytesPerImage: UInt64
+) {
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4BlitBridge(pointer) {
+        bridge.encoder.copy(
+            sourceTexture: sourceTexture,
+            sourceSlice: Int(slice),
+            sourceLevel: Int(mipLevel),
+            sourceOrigin: MTLOrigin(x: Int(x), y: Int(y), z: Int(z)),
+            sourceSize: MTLSize(width: Int(width), height: Int(height), depth: Int(depth)),
+            destinationBuffer: destinationBuffer,
+            destinationOffset: Int(destinationOffset),
+            destinationBytesPerRow: Int(bytesPerRow),
+            destinationBytesPerImage: Int(bytesPerImage)
+        )
+        return
+    }
+    metal3BlitEncoder(pointer).copy(
+        from: sourceTexture,
+        sourceSlice: Int(slice),
+        sourceLevel: Int(mipLevel),
+        sourceOrigin: MTLOrigin(x: Int(x), y: Int(y), z: Int(z)),
+        sourceSize: MTLSize(width: Int(width), height: Int(height), depth: Int(depth)),
+        to: destinationBuffer,
+        destinationOffset: Int(destinationOffset),
+        destinationBytesPerRow: Int(bytesPerRow),
+        destinationBytesPerImage: Int(bytesPerImage)
+    )
+}
+
 @_cdecl("metallum_create_buffer")
 public func metallum_create_buffer(
     _ device: MTLDevice,
@@ -8157,6 +8245,60 @@ public func metallum_create_texture_2d(
     }
 }
 
+@_cdecl("metallum_create_texture")
+public func metallum_create_texture(
+    _ device: MTLDevice,
+    _ pixelFormat: MTLPixelFormat,
+    _ width: UInt64,
+    _ height: UInt64,
+    _ depthOrLayers: UInt64,
+    _ mipLevels: UInt64,
+    _ dimension: UInt64,
+    _ cubeCompatible: UInt64,
+    _ usage: MTLTextureUsage,
+    _ storageMode: MTLStorageMode,
+    _ labelPtr: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        let descriptor = MTLTextureDescriptor()
+        descriptor.pixelFormat = pixelFormat
+        descriptor.width = Int(width)
+        descriptor.height = dimension == 1 ? 1 : Int(height)
+        descriptor.depth = dimension == 3 ? Int(depthOrLayers) : 1
+        descriptor.arrayLength = 1
+        descriptor.mipmapLevelCount = max(Int(mipLevels), 1)
+        descriptor.sampleCount = 1
+
+        if dimension == 1 {
+            descriptor.textureType = .type1D
+        } else if dimension == 3 {
+            descriptor.textureType = .type3D
+        } else if cubeCompatible != 0 {
+            if depthOrLayers > 6 {
+                descriptor.textureType = .typeCubeArray
+                descriptor.arrayLength = Int(depthOrLayers) / 6
+            } else {
+                descriptor.textureType = .typeCube
+            }
+        } else if depthOrLayers > 1 {
+            descriptor.textureType = .type2DArray
+            descriptor.arrayLength = Int(depthOrLayers)
+        } else {
+            descriptor.textureType = .type2D
+        }
+
+        descriptor.usage = usage
+        descriptor.storageMode = storageMode
+        descriptor.hazardTrackingMode = .untracked
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        texture.label = stringFromOptionalCString(labelPtr)
+        residencyTrackCreated(texture)
+        return retainedPointer(texture)
+    }
+}
+
 @_cdecl("metallum_create_texture_view")
 public func metallum_create_texture_view(_ texture: MTLTexture, _ baseMipLevel: UInt64, _ mipLevelCount: UInt64) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
@@ -8177,6 +8319,44 @@ public func metallum_create_texture_view(_ texture: MTLTexture, _ baseMipLevel: 
             slices: NSRange(location: 0, length: textureSliceCount(texture))
         )
 
+        return retainedPointer(view)
+    }
+}
+
+@_cdecl("metallum_create_texture_view_alpha_one")
+public func metallum_create_texture_view_alpha_one(
+    _ texture: MTLTexture,
+    _ baseMipLevel: UInt64,
+    _ mipLevelCount: UInt64
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        guard mipLevelCount > 0 else {
+            return nil
+        }
+
+        let baseLevel = Int(baseMipLevel)
+        let levelCount = Int(mipLevelCount)
+        guard baseLevel < texture.mipmapLevelCount, baseLevel + levelCount <= texture.mipmapLevelCount else {
+            return nil
+        }
+
+        let swizzle = MTLTextureSwizzleChannels(
+            red: .red,
+            green: .green,
+            blue: .blue,
+            alpha: .one
+        )
+        let view = texture.__newTextureView(
+            with: texture.pixelFormat,
+            textureType: texture.textureType,
+            levels: NSRange(location: baseLevel, length: levelCount),
+            slices: NSRange(location: 0, length: textureSliceCount(texture)),
+            swizzle: swizzle
+        )
+
+        guard let view else {
+            return nil
+        }
         return retainedPointer(view)
     }
 }
@@ -9568,6 +9748,37 @@ public func metallum_create_sampler_v2(
         descriptor.maxAnisotropy = max(Int(maxAnisotropy), 1)
         descriptor.lodMinClamp = 0.0
         descriptor.lodMaxClamp = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
+        if compareFunction >= 0, let compare = MTLCompareFunction(rawValue: UInt(compareFunction)) {
+            descriptor.compareFunction = compare
+        }
+        return retainedPointer(device.makeSamplerState(descriptor: descriptor))
+    }
+}
+
+@_cdecl("metallum_create_sampler_v3")
+public func metallum_create_sampler_v3(
+    _ device: MTLDevice,
+    _ addressModeU: MTLSamplerAddressMode,
+    _ addressModeV: MTLSamplerAddressMode,
+    _ minFilter: MTLSamplerMinMagFilter,
+    _ magFilter: MTLSamplerMinMagFilter,
+    _ mipFilter: MTLSamplerMipFilter,
+    _ maxAnisotropy: Int32,
+    _ lodMaxClamp: Double,
+    _ compareFunction: Int32,
+    _ normalizedCoordinates: Int32
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        let descriptor = MTLSamplerDescriptor()
+        descriptor.minFilter = minFilter
+        descriptor.magFilter = magFilter
+        descriptor.mipFilter = mipFilter
+        descriptor.sAddressMode = addressModeU
+        descriptor.tAddressMode = addressModeV
+        descriptor.maxAnisotropy = max(Int(maxAnisotropy), 1)
+        descriptor.lodMinClamp = 0.0
+        descriptor.lodMaxClamp = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
+        descriptor.normalizedCoordinates = normalizedCoordinates != 0
         if compareFunction >= 0, let compare = MTLCompareFunction(rawValue: UInt(compareFunction)) {
             descriptor.compareFunction = compare
         }

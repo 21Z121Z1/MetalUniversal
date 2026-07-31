@@ -36,6 +36,7 @@ import java.util.regex.Pattern;
 
 @Environment(EnvType.CLIENT)
 final class MetalCrossShaderCompiler {
+    private static final String IRIS_SSBO_DESCRIPTOR_PREFIX = "iris_ssbo/";
     private static final Set<String> BUILT_IN_UNIFORMS = Set.of("Projection", "Lighting", "Fog", "Globals");
     private static final int MSL_VERSION_4_0 = 0x040000;
     static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
@@ -71,6 +72,53 @@ final class MetalCrossShaderCompiler {
     }
 
     private MetalCrossShaderCompiler() {
+    }
+
+    private enum RasterStorageKind {
+        BUFFER,
+        IMAGE
+    }
+
+    private record RasterStorageUse(
+            RasterStorageKind kind,
+            String resourceName,
+            String descriptorName,
+            int logicalBinding,
+            int stageMask,
+            ByteBuffer spirv,
+            int bindingWordOffset
+    ) {
+    }
+
+    private record RasterStorageResource(
+            RasterStorageKind kind,
+            String descriptorName,
+            int physicalBinding,
+            int stageMask
+    ) {
+    }
+
+    static String storageBufferDescriptorName(final int logicalBinding, final String resourceName) {
+        if (logicalBinding < 0) {
+            throw new IllegalArgumentException("SSBO binding must be non-negative: " + logicalBinding);
+        }
+        return IRIS_SSBO_DESCRIPTOR_PREFIX + logicalBinding + '/' + resourceName;
+    }
+
+    static int storageBufferLogicalBinding(final String descriptorName) {
+        if (!descriptorName.startsWith(IRIS_SSBO_DESCRIPTOR_PREFIX)) {
+            return -1;
+        }
+        int start = IRIS_SSBO_DESCRIPTOR_PREFIX.length();
+        int end = descriptorName.indexOf('/', start);
+        if (end < 0) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(descriptorName.substring(start, end));
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
     }
 
     static MetalCompiledRenderPipeline compile(final MetalDevice device, final RenderPipeline pipeline, final ShaderSource shaderSource) {
@@ -128,28 +176,39 @@ final class MetalCrossShaderCompiler {
             List<VulkanBindGroupLayout.Entry> layoutEntries = new ArrayList<>();
             addToBindGroup(layoutEntries, vertexSpirv, pipeline);
             addToBindGroup(layoutEntries, fragmentSpirv, pipeline);
+            List<RasterStorageResource> storageResources = rebindRasterStorageResources(
+                    vertexSpirv, fragmentSpirv, layoutEntries.size()
+            );
             List<String> vertexOutputs = extractVariableNames(vertexSpirv.outputs());
             VaryingLayout varyings = relocateVertexOutputs(vertexSpirv);
 
             VertexInputLayout vertexInputs = vertexInputLayout(pipeline, vertexSpirv.inputs());
-            vertexSpirv.rebind(tolerateUnprovidedInputs(vertexInputs.names(), vertexSpirv.inputs()), layoutEntries);
+            rebind(
+                    vertexSpirv,
+                    tolerateUnprovidedInputs(vertexInputs.names(), vertexSpirv.inputs()),
+                    layoutEntries
+            );
             applyVertexInputLocations(vertexSpirv, vertexInputs);
             List<GenericVertexInput> genericVertexInputs = genericVertexInputs(
                     vertexSpirv.spirv(), vertexInputs.names()
             );
             MslShader vertexMsl = spirvToMsl(
                     vertexSpirv.spirv(),
-                    layoutEntries.size(),
+                    layoutEntries.size() + storageResources.size(),
                     vertexInputs.formats(),
                     Map.of()
             );
 
-            fragmentSpirv.rebind(tolerateUnprovidedInputs(vertexOutputs, fragmentSpirv.inputs()), layoutEntries);
+            rebind(
+                    fragmentSpirv,
+                    tolerateUnprovidedInputs(vertexOutputs, fragmentSpirv.inputs()),
+                    layoutEntries
+            );
             relocateFragmentInputs(pipeline, fragmentSpirv, varyings);
             String fragmentSource = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);
             MslShader fragmentMsl = spirvToMsl(
                     fragmentSpirv.spirv(),
-                    layoutEntries.size(),
+                    layoutEntries.size() + storageResources.size(),
                     Map.of(),
                     explicitFragmentOutputLocations(fragmentSource)
             );
@@ -167,7 +226,9 @@ final class MetalCrossShaderCompiler {
                         pipeline.getLocation(), fragmentEntryPoint, fragmentMslSource
                 );
             }
-            List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(layoutEntries, vertexMsl, fragmentMsl);
+            List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(
+                    layoutEntries, storageResources, vertexMsl, fragmentMsl
+            );
             MetalMslDiskCache.recordMiss(System.nanoTime() - translateStart);
             if (cacheKey != null) {
                 diskCache.store(cacheKey, new MetalMslDiskCache.Entry(
@@ -277,11 +338,258 @@ final class MetalCrossShaderCompiler {
                 if (!samplers.contains(name)) {
                     throw new ShaderCompileException("Unable to find shader defined uniform (" + name + ")");
                 }
-                if (dimensions != Spv.SpvDim2D && dimensions != Spv.SpvDimCube) {
-                    throw new ShaderCompileException("Sampled texture (" + name + ") must have type of SpvDim2D or SpvDimCube");
+                if (dimensions == Spv.SpvDimBuffer || dimensions == Spv.SpvDimSubpassData) {
+                    throw new ShaderCompileException(
+                            "Sampled texture (" + name + ") has unsupported SPIR-V dimension " + dimensions
+                    );
                 }
                 addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
             }
+        }
+    }
+
+    /**
+     * Mojang's rebind helper rejects every sampled image except 2D/Cube.
+     * Preserve its exact location/binding rewrite and missing-resource checks,
+     * while allowing the additional sampled dimensions exposed by fixed Iris.
+     */
+    private static void rebind(
+            final IntermediaryShaderModule shader,
+            final List<String> providedInputs,
+            final List<VulkanBindGroupLayout.Entry> entries
+    ) throws ShaderCompileException {
+        boolean needsExtendedDimensions = shader.samplers().stream().anyMatch(sampler ->
+                sampler.dimensions() != Spv.SpvDim2D
+                        && sampler.dimensions() != Spv.SpvDimCube
+                        && sampler.dimensions() != Spv.SpvDimBuffer
+        );
+        if (!needsExtendedDimensions) {
+            shader.rebind(providedInputs, entries);
+            return;
+        }
+        IntBuffer spirv = shader.spirv().asIntBuffer();
+        Set<String> missingInputs = new HashSet<>();
+        Set<String> missingSamplers = new HashSet<>();
+        Set<String> missingUniforms = new HashSet<>();
+        shader.inputs().forEach(input -> missingInputs.add(input.name()));
+        shader.samplers().forEach(sampler -> missingSamplers.add(sampler.name()));
+        shader.uniformBuffers().forEach(uniform -> missingUniforms.add(uniform.name()));
+
+        String previous = null;
+        int location = 0;
+        for (String name : providedInputs) {
+            SpvVariable input = shader.inputs().stream()
+                    .filter(candidate -> candidate.name().equals(name))
+                    .findFirst()
+                    .orElse(null);
+            if (input != null) {
+                if (!name.equals(previous)) {
+                    spirv.put(input.locationOffset(), location);
+                    missingInputs.remove(name);
+                }
+                location++;
+                previous = name;
+            }
+        }
+
+        for (int binding = 0; binding < entries.size(); binding++) {
+            int bindingIndex = binding;
+            VulkanBindGroupLayout.Entry entry = entries.get(binding);
+            switch (entry.type()) {
+                case UNIFORM_BUFFER -> shader.uniformBuffers().stream()
+                        .filter(candidate -> candidate.name().equals(entry.name()))
+                        .findFirst()
+                        .ifPresent(uniform -> {
+                            spirv.put(uniform.bindingOffset(), bindingIndex);
+                            missingUniforms.remove(entry.name());
+                        });
+                case SAMPLED_IMAGE -> shader.samplers().stream()
+                        .filter(candidate -> candidate.name().equals(entry.name()))
+                        .findFirst()
+                        .ifPresent(sampler -> {
+                            if (sampler.dimensions() == Spv.SpvDimBuffer
+                                    || sampler.dimensions() == Spv.SpvDimSubpassData) {
+                                throw new IllegalArgumentException(
+                                        "Sampler " + entry.name() + " is not a sampled texture dimension: "
+                                                + sampler.dimensions()
+                                );
+                            }
+                            spirv.put(sampler.bindingOffset(), bindingIndex);
+                            missingSamplers.remove(entry.name());
+                        });
+                case TEXEL_BUFFER -> shader.samplers().stream()
+                        .filter(candidate -> candidate.name().equals(entry.name()))
+                        .findFirst()
+                        .ifPresent(sampler -> {
+                            if (sampler.dimensions() != Spv.SpvDimBuffer) {
+                                throw new IllegalArgumentException(
+                                        "Texel buffer " + entry.name() + " has SPIR-V dimension "
+                                                + sampler.dimensions()
+                                );
+                            }
+                            spirv.put(sampler.bindingOffset(), bindingIndex);
+                            missingSamplers.remove(entry.name());
+                        });
+            }
+        }
+
+        if (!missingInputs.isEmpty()) {
+            throw new ShaderCompileException("Missing inputs " + missingInputs);
+        }
+        if (!missingUniforms.isEmpty()) {
+            throw new ShaderCompileException("Missing uniform buffers " + missingUniforms);
+        }
+        if (!missingSamplers.isEmpty()) {
+            throw new ShaderCompileException("Missing samplers " + missingSamplers);
+        }
+    }
+
+    /**
+     * Mojang's intermediary module only exposes UBOs and sampled images. Iris
+     * raster shaders also use SSBOs and storage images, so reflect those from
+     * the same SPIR-V and assign collision-free Metal slots before MSL export.
+     */
+    private static List<RasterStorageResource> rebindRasterStorageResources(
+            final IntermediaryShaderModule vertex,
+            final IntermediaryShaderModule fragment,
+            final int firstPhysicalBinding
+    ) throws ShaderCompileException {
+        List<RasterStorageUse> uses = new ArrayList<>();
+        collectRasterStorageUses(vertex.spirv(), MetalCompiledRenderPipeline.STAGE_VERTEX, uses);
+        collectRasterStorageUses(fragment.spirv(), MetalCompiledRenderPipeline.STAGE_FRAGMENT, uses);
+        if (uses.isEmpty()) {
+            return List.of();
+        }
+
+        Map<String, Integer> physicalByDescriptor = new LinkedHashMap<>();
+        Map<String, Integer> stagesByDescriptor = new LinkedHashMap<>();
+        Map<String, RasterStorageKind> kindByDescriptor = new LinkedHashMap<>();
+        for (RasterStorageUse use : uses) {
+            int physical = physicalByDescriptor.computeIfAbsent(
+                    use.descriptorName(), ignored -> firstPhysicalBinding + physicalByDescriptor.size()
+            );
+            RasterStorageKind previousKind = kindByDescriptor.putIfAbsent(use.descriptorName(), use.kind());
+            if (previousKind != null && previousKind != use.kind()) {
+                throw new ShaderCompileException(
+                        "Raster resource '" + use.descriptorName() + "' is both "
+                                + previousKind + " and " + use.kind()
+                );
+            }
+            stagesByDescriptor.merge(use.descriptorName(), use.stageMask(), (left, right) -> left | right);
+            use.spirv().asIntBuffer().put(use.bindingWordOffset(), physical);
+        }
+
+        List<RasterStorageResource> resources = new ArrayList<>(physicalByDescriptor.size());
+        physicalByDescriptor.forEach((descriptor, physical) -> resources.add(new RasterStorageResource(
+                kindByDescriptor.get(descriptor), descriptor, physical, stagesByDescriptor.get(descriptor)
+        )));
+        return List.copyOf(resources);
+    }
+
+    private static void collectRasterStorageUses(
+            final ByteBuffer spirv,
+            final int stageMask,
+            final List<RasterStorageUse> output
+    ) throws ShaderCompileException {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer words = spirv.asIntBuffer();
+            PointerBuffer pointer = stack.callocPointer(1);
+            checkSpvc(Spvc.spvc_context_create(pointer), "spvc_context_create(raster storage)");
+            long context = pointer.get(0);
+            try {
+                checkSpvc(
+                        Spvc.spvc_context_parse_spirv(context, words, words.remaining(), pointer),
+                        "spvc_context_parse_spirv(raster storage)"
+                );
+                long ir = pointer.get(0);
+                checkSpvc(
+                        Spvc.spvc_context_create_compiler(
+                                context, Spvc.SPVC_BACKEND_NONE, ir,
+                                Spvc.SPVC_CAPTURE_MODE_COPY, pointer
+                        ),
+                        "spvc_context_create_compiler(raster storage)"
+                );
+                long compiler = pointer.get(0);
+                checkSpvc(
+                        Spvc.spvc_compiler_create_shader_resources(compiler, pointer),
+                        "spvc_compiler_create_shader_resources(raster storage)"
+                );
+                long resources = pointer.get(0);
+                collectRasterStorageType(
+                        stack, compiler, resources, spirv, stageMask,
+                        Spvc.SPVC_RESOURCE_TYPE_STORAGE_BUFFER, RasterStorageKind.BUFFER, output
+                );
+                collectRasterStorageType(
+                        stack, compiler, resources, spirv, stageMask,
+                        Spvc.SPVC_RESOURCE_TYPE_STORAGE_IMAGE, RasterStorageKind.IMAGE, output
+                );
+            } finally {
+                Spvc.spvc_context_destroy(context);
+            }
+        }
+    }
+
+    private static void collectRasterStorageType(
+            final MemoryStack stack,
+            final long compiler,
+            final long resources,
+            final ByteBuffer spirv,
+            final int stageMask,
+            final int resourceType,
+            final RasterStorageKind kind,
+            final List<RasterStorageUse> output
+    ) throws ShaderCompileException {
+        PointerBuffer listPointer = stack.callocPointer(1);
+        PointerBuffer countPointer = stack.callocPointer(1);
+        checkSpvc(
+                Spvc.spvc_resources_get_resource_list_for_type(
+                        resources, resourceType, listPointer, countPointer
+                ),
+                "spvc_resources_get_resource_list_for_type(raster storage " + resourceType + ')'
+        );
+        int count = Math.toIntExact(countPointer.get(0));
+        if (count == 0) {
+            return;
+        }
+        SpvcReflectedResource.Buffer reflected = SpvcReflectedResource.create(listPointer.get(0), count);
+        IntBuffer offset = stack.callocInt(1);
+        for (SpvcReflectedResource resource : reflected) {
+            if (!Spvc.spvc_compiler_has_decoration(compiler, resource.id(), Spv.SpvDecorationBinding)) {
+                throw new ShaderCompileException(
+                        "Raster storage resource '" + resource.nameString() + "' has no binding"
+                );
+            }
+            if (!Spvc.spvc_compiler_get_binary_offset_for_decoration(
+                    compiler, resource.id(), Spv.SpvDecorationBinding, offset
+            )) {
+                throw new ShaderCompileException(
+                        "Could not locate raster storage binding for '" + resource.nameString() + "'"
+                );
+            }
+            int logicalBinding = Spvc.spvc_compiler_get_decoration(
+                    compiler, resource.id(), Spv.SpvDecorationBinding
+            );
+            String resourceName = resource.nameString();
+            if (resourceName == null || resourceName.isBlank()) {
+                resourceName = "binding" + logicalBinding;
+            }
+            if (kind == RasterStorageKind.IMAGE) {
+                long type = Spvc.spvc_compiler_get_type_handle(compiler, resource.type_id());
+                int dimension = Spvc.spvc_type_get_image_dimension(type);
+                if (dimension != Spv.SpvDim2D) {
+                    throw new ShaderCompileException(
+                            "Raster storage image '" + resourceName + "' is not 2D (SPIR-V dim="
+                                    + dimension + ')'
+                    );
+                }
+            }
+            String descriptorName = kind == RasterStorageKind.BUFFER
+                    ? storageBufferDescriptorName(logicalBinding, resourceName)
+                    : resourceName;
+            output.add(new RasterStorageUse(
+                    kind, resourceName, descriptorName, logicalBinding,
+                    stageMask, spirv, offset.get(0)
+            ));
         }
     }
 
@@ -505,10 +813,12 @@ final class MetalCrossShaderCompiler {
 
     static List<MetalCompiledRenderPipeline.ResourceBinding> buildResourceBindings(
             final List<VulkanBindGroupLayout.Entry> entries,
+            final List<RasterStorageResource> storageResources,
             final MslShader vertexMsl,
             final MslShader fragmentMsl
     ) {
-        List<MetalCompiledRenderPipeline.ResourceBinding> resources = new ArrayList<>(entries.size() + 1);
+        List<MetalCompiledRenderPipeline.ResourceBinding> resources =
+                new ArrayList<>(entries.size() + storageResources.size() + 1);
         for (int index = 0; index < entries.size(); index++) {
             VulkanBindGroupLayout.Entry entry = entries.get(index);
             MetalCompiledRenderPipeline.ResourceKind kind = switch (entry.type()) {
@@ -520,13 +830,27 @@ final class MetalCrossShaderCompiler {
             resources.add(new MetalCompiledRenderPipeline.ResourceBinding(kind, entry.name(), index, stageMask(entry.name(), vertexMsl, fragmentMsl), texelFormat));
         }
 
+        for (RasterStorageResource storage : storageResources) {
+            MetalCompiledRenderPipeline.ResourceKind kind = switch (storage.kind()) {
+                case BUFFER -> MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER;
+                case IMAGE -> MetalCompiledRenderPipeline.ResourceKind.STORAGE_IMAGE;
+            };
+            resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
+                    kind,
+                    storage.descriptorName(),
+                    storage.physicalBinding(),
+                    storage.stageMask(),
+                    null
+            ));
+        }
+
         int pushConstantStageMask = (vertexMsl.hasPushConstants() ? MetalCompiledRenderPipeline.STAGE_VERTEX : 0)
                 | (fragmentMsl.hasPushConstants() ? MetalCompiledRenderPipeline.STAGE_FRAGMENT : 0);
         if (pushConstantStageMask != 0) {
             resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
                     MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER,
                     "push_constants",
-                    entries.size(),
+                    entries.size() + storageResources.size(),
                     pushConstantStageMask,
                     null
             ));
@@ -1111,6 +1435,9 @@ final class MetalCrossShaderCompiler {
                 PointerBuffer pResources = stack.mallocPointer(1);
                 checkSpvc(Spvc.spvc_compiler_create_shader_resources(compiler, pResources), "spvc_compiler_create_shader_resources");
                 long resources = pResources.get(0);
+                boolean hasRectangleSampler = hasSampledImageDimension(
+                        stack, compiler, resources, Spv.SpvDimRect
+                );
 
                 PointerBuffer pList = stack.mallocPointer(1);
                 PointerBuffer pCount = stack.mallocPointer(1);
@@ -1123,8 +1450,17 @@ final class MetalCrossShaderCompiler {
 
                 PointerBuffer pSource = stack.mallocPointer(1);
                 checkSpvc(Spvc.spvc_compiler_compile(compiler, pSource), "spvc_compiler_compile");
+                String mslSource = MemoryUtil.memUTF8(pSource.get(0));
+                if (hasRectangleSampler) {
+                    mslSource = mslSource.replace("unknown_texture_type<", "texture2d<");
+                    if (mslSource.contains("unknown_texture_type")) {
+                        throw new ShaderCompileException(
+                                "SPIRV-Cross emitted an unlowered rectangle texture type"
+                        );
+                    }
+                }
                 return new MslShader(
-                        MemoryUtil.memUTF8(pSource.get(0)),
+                        mslSource,
                         hasPushConstants,
                         activeResources,
                         stageOutputLocations
@@ -1133,6 +1469,34 @@ final class MetalCrossShaderCompiler {
                 Spvc.spvc_context_destroy(context);
             }
         }
+    }
+
+    private static boolean hasSampledImageDimension(
+            final MemoryStack stack,
+            final long compiler,
+            final long resources,
+            final int expectedDimension
+    ) throws ShaderCompileException {
+        PointerBuffer listPointer = stack.mallocPointer(1);
+        PointerBuffer countPointer = stack.mallocPointer(1);
+        checkSpvc(
+                Spvc.spvc_resources_get_resource_list_for_type(
+                        resources, Spvc.SPVC_RESOURCE_TYPE_SAMPLED_IMAGE, listPointer, countPointer
+                ),
+                "spvc_resources_get_resource_list_for_type(sampled image dimensions)"
+        );
+        int count = Math.toIntExact(countPointer.get(0));
+        if (count == 0) {
+            return false;
+        }
+        SpvcReflectedResource.Buffer sampled = SpvcReflectedResource.create(listPointer.get(0), count);
+        for (SpvcReflectedResource resource : sampled) {
+            long type = Spvc.spvc_compiler_get_type_handle(compiler, resource.type_id());
+            if (Spvc.spvc_type_get_image_dimension(type) == expectedDimension) {
+                return true;
+            }
+        }
+        return false;
     }
 
     record MslShader(

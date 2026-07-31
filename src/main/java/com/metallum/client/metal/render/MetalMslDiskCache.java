@@ -44,7 +44,7 @@ final class MetalMslDiskCache {
      * native), {@code applySampleLodBias} rewriting, entry-point
      * extraction, or binding assignment in {@code addToBindGroup}.
      */
-    static final String CACHE_SALT = "metallum-msl-v4-generic-vertex-current";
+    static final String CACHE_SALT = "metallum-msl-v5-raster-storage-resources";
 
     private static final boolean ENABLED =
             Boolean.parseBoolean(System.getProperty("metallum.opt.mslCache", "true"));

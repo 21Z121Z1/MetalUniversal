@@ -302,6 +302,14 @@ final class IrisMetalCoreGbufferPipelinesTest {
         assertEquals(GpuFormat.RGBA16_FLOAT, IrisMetalPipelineOverrides.formatForInternalName("RGB16F"));
         assertEquals(GpuFormat.RGBA16_UNORM, IrisMetalPipelineOverrides.formatForInternalName("RGB16"));
         assertEquals(GpuFormat.RGBA16_UNORM, IrisMetalPipelineOverrides.formatForInternalName("RGBA16"));
+        assertEquals(GpuFormat.R8_SNORM, IrisMetalPipelineOverrides.formatForInternalName("R8_SNORM"));
+        assertEquals(GpuFormat.RG8_SNORM, IrisMetalPipelineOverrides.formatForInternalName("RG8_SNORM"));
+        assertEquals(GpuFormat.RGBA8_SNORM, IrisMetalPipelineOverrides.formatForInternalName("RGB8_SNORM"));
+        assertEquals(GpuFormat.RGBA8_SNORM, IrisMetalPipelineOverrides.formatForInternalName("RGBA8_SNORM"));
+        assertEquals(GpuFormat.R16_SNORM, IrisMetalPipelineOverrides.formatForInternalName("R16_SNORM"));
+        assertEquals(GpuFormat.RG16_SNORM, IrisMetalPipelineOverrides.formatForInternalName("RG16_SNORM"));
+        assertEquals(GpuFormat.RGBA16_SNORM, IrisMetalPipelineOverrides.formatForInternalName("RGB16_SNORM"));
+        assertEquals(GpuFormat.RGBA16_SNORM, IrisMetalPipelineOverrides.formatForInternalName("RGBA16_SNORM"));
         assertThrows(
                 IllegalArgumentException.class,
                 () -> IrisMetalPipelineOverrides.formatForInternalName("NOT_A_REAL_IRIS_FORMAT")
@@ -319,6 +327,26 @@ final class IrisMetalCoreGbufferPipelinesTest {
         assertEquals("Sampler1", IrisMetalPipelineOverrides.coreSamplerAlias("overlay"));
         assertEquals("Sampler2", IrisMetalPipelineOverrides.coreSamplerAlias("lightmap"));
         assertNull(IrisMetalPipelineOverrides.coreSamplerAlias("shadowtex0"));
+    }
+
+    @Test
+    void externalOverlaySelectionMatchesIrisUv1Contract() {
+        assertTrue(IrisMetalPipelineOverrides.coreUsesMojangExternalOverlay(
+                ShaderKey.SHADOW_ENTITIES_CUTOUT, "iris_overlay"
+        ));
+        assertTrue(IrisMetalPipelineOverrides.coreUsesMojangExternalOverlay(
+                ShaderKey.ENTITIES_CUTOUT_DIFFUSE, "overlay"
+        ));
+
+        assertFalse(IrisMetalPipelineOverrides.coreUsesMojangExternalOverlay(
+                ShaderKey.TEXTURED, "iris_overlay"
+        ));
+        assertFalse(IrisMetalPipelineOverrides.coreUsesMojangExternalOverlay(
+                ShaderKey.SHADOW_ENTITIES_CUTOUT, "lightmap"
+        ));
+        assertFalse(IrisMetalPipelineOverrides.coreUsesMojangExternalOverlay(
+                ShaderKey.SHADOW_SODIUM_TERRAIN_CUTOUT, "iris_overlay"
+        ));
     }
 
     @Test

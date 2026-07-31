@@ -1018,6 +1018,59 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         );
     }
 
+    void writeToTextureVolume(
+            final MetalGpuTexture destination,
+            final ByteBuffer source,
+            final int mipLevel,
+            final int destX,
+            final int destY,
+            final int destZ,
+            final int width,
+            final int height,
+            final int depth
+    ) {
+        flushPendingClearForWrite(destination);
+        if (!source.isDirect()) {
+            throw new IllegalArgumentException("writeToTextureVolume requires a direct ByteBuffer");
+        }
+        int pixelSize = destination.pixelSize();
+        int rowBytes = Math.multiplyExact(width, pixelSize);
+        int bytesPerImage = Math.multiplyExact(rowBytes, height);
+        int byteCount = Math.multiplyExact(bytesPerImage, depth);
+        GpuBufferSlice slice = transientMemory.uploadStaging(
+                source.duplicate().limit(byteCount), pixelSize, GpuBuffer.USAGE_COPY_SRC
+        );
+        blitCommandEncoder().copyFromBufferToTextureVolume(
+                ((MetalGpuBuffer) slice.buffer()).nativeHandle(), slice.offset(), destination.nativeHandle(),
+                mipLevel, 0, destX, destY, destZ, width, height, depth, rowBytes, bytesPerImage
+        );
+    }
+
+    void copyTextureVolumeToBuffer(
+            final MetalGpuTexture source,
+            final MetalGpuBuffer destination,
+            final long destinationOffset,
+            final int mipLevel,
+            final int x,
+            final int y,
+            final int z,
+            final int width,
+            final int height,
+            final int depth,
+            final Runnable callback
+    ) {
+        endEncoder();
+        flushPendingClear(source);
+        int rowBytes = Math.multiplyExact(width, source.pixelSize());
+        int bytesPerImage = Math.multiplyExact(rowBytes, height);
+        blitCommandEncoder().copyFromTextureToBufferVolume(
+                source.nativeHandle(), destination.nativeHandle(), destinationOffset,
+                mipLevel, 0, x, y, z, width, height, depth, rowBytes, bytesPerImage
+        );
+        endEncoder();
+        queueForDestroy(callback);
+    }
+
     @Override
     public void copyBufferToTexture(
             final @NonNull GpuBufferSlice source,

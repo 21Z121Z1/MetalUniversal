@@ -1,6 +1,7 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.IrisMetalPackLifecycle;
 import com.metallum.client.metal.render.IrisMetalVertexSerializerBootstrap;
 import com.metallum.client.metal.render.MetalIrisCompat;
 import net.irisshaders.iris.Iris;
@@ -50,11 +51,25 @@ public abstract class IrisBootstrapCompatMixin {
                 PBRTextureManager.INSTANCE.init();
                 metallum$pbrDefaultsInitialized = true;
             }
-            if (MetalIrisCompat.semanticLayerEnabled()) {
+            boolean semanticEnabled = MetalIrisCompat.semanticLayerEnabled();
+            if (semanticEnabled) {
                 IrisMetalVertexSerializerBootstrap.ensureRegistered();
-                Iris.loadShaderpack();
+                if (IrisMetalPackLifecycle.shouldLoadConfiguredPack(
+                        semanticEnabled, Iris.getIrisConfig().areShadersEnabled()
+                )) {
+                    Iris.loadShaderpack();
+                }
             }
         } catch (Throwable t) {
+            if (IrisMetalPackLifecycle.strictModeRequested()
+                    && IrisMetalPackLifecycle.shouldLoadConfiguredPack(
+                    MetalIrisCompat.semanticLayerEnabled(),
+                    Iris.getIrisConfig().areShadersEnabled()
+            )) {
+                throw new IllegalStateException(
+                        "Iris Metal strict pack admission failed during bootstrap", t
+                );
+            }
             Metallum.LOGGER.error(
                     "[metallum-iris] Metal-safe Iris bootstrap failed; continuing without a pack", t
             );
@@ -76,17 +91,32 @@ public abstract class IrisBootstrapCompatMixin {
     }
 
     /**
-     * With the semantic layer active this must NOT be cancelled: the whole
-     * point of B2-1 is that Iris parses a real pack, so
+     * With the semantic layer and shaders active this must NOT be cancelled:
+     * Iris parses the configured pack so
      * {@code IrisMetalPipelineOverrides} can translate its
      * {@code gbuffers_terrain} programs. Pack loading itself is CPU-side
      * (zip/properties/preprocessor); the only GL it reaches is
      * {@code StandardMacros}, which {@link GlStateManagerCompatMixin} and
      * {@link IrisRenderSystemCompatMixin} answer with pinned constants.
+     *
+     * <p>When shaders are disabled, entering this method only calls Iris's
+     * private {@code setShadersDisabled()}, mutating global pack state even
+     * though no pack or semantic pipeline exists. Keep that transition
+     * dormant so requesting the Metal semantic layer cannot perturb vanilla
+     * rendering. A later enable/reload passes this gate and loads normally.</p>
      */
     @Inject(method = "loadShaderpack", at = @At("HEAD"), cancellable = true)
     private static void metallum$keepPackUnloaded(final CallbackInfo ci) {
-        if (MetalIrisCompat.holdIrisDormant() && !MetalIrisCompat.semanticLayerEnabled()) {
+        if (!MetalIrisCompat.holdIrisDormant()) {
+            return;
+        }
+        boolean semanticEnabled = MetalIrisCompat.semanticLayerEnabled();
+        boolean shadersEnabled = semanticEnabled
+                && Iris.getIrisConfig().areShadersEnabled();
+        if (!IrisMetalPackLifecycle.shouldLoadConfiguredPack(semanticEnabled, shadersEnabled)
+                && !IrisMetalPackLifecycle.consumeDisabledReloadTransition(
+                semanticEnabled, shadersEnabled
+        )) {
             ci.cancel();
         }
     }

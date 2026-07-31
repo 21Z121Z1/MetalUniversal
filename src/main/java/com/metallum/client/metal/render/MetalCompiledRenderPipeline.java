@@ -33,7 +33,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     enum ResourceKind {
         UNIFORM_BUFFER,
+        STORAGE_BUFFER,
         SAMPLED_IMAGE,
+        STORAGE_IMAGE,
         TEXEL_BUFFER
     }
 
@@ -133,9 +135,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         if (device.metal4MainRendererEnabled()) {
             for (ResourceBinding binding : resources) {
                 int limit = switch (binding.kind()) {
-                    case UNIFORM_BUFFER -> 31;
+                    case UNIFORM_BUFFER, STORAGE_BUFFER -> 31;
                     case SAMPLED_IMAGE -> 16;
-                    case TEXEL_BUFFER -> 128;
+                    case STORAGE_IMAGE, TEXEL_BUFFER -> 128;
                 };
                 if (binding.bindingIndex() >= limit) {
                     throw new IllegalStateException(
@@ -533,7 +535,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private static int firstAvailableVertexBufferSlot(final List<ResourceBinding> resources) {
         int maxVertexBufferBinding = -1;
         for (ResourceBinding resource : resources) {
-            if (resource.kind() == ResourceKind.UNIFORM_BUFFER && (resource.stageMask() & STAGE_VERTEX) != 0) {
+            if ((resource.kind() == ResourceKind.UNIFORM_BUFFER
+                    || resource.kind() == ResourceKind.STORAGE_BUFFER)
+                    && (resource.stageMask() & STAGE_VERTEX) != 0) {
                 maxVertexBufferBinding = Math.max(maxVertexBufferBinding, resource.bindingIndex());
             }
         }

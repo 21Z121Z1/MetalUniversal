@@ -1,11 +1,14 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.client.metal.render.MetalIrisCompat;
+import com.metallum.client.metal.render.MetalWorldRenderingPipeline;
 import net.irisshaders.iris.pipeline.PipelineManager;
+import net.irisshaders.iris.pipeline.WorldRenderingPipeline;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * {@code PipelineManager.destroyPipeline} unbinds all sixteen texture units
@@ -27,6 +30,16 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(value = PipelineManager.class, remap = false)
 public abstract class IrisPipelineManagerCompatMixin {
+    /** Re-selects the generation when Iris returns a cached dimension pipeline. */
+    @Inject(method = "preparePipeline", at = @At("RETURN"))
+    private void metallum$selectCachedDimensionGeneration(
+            final CallbackInfoReturnable<WorldRenderingPipeline> cir
+    ) {
+        if (cir.getReturnValue() instanceof MetalWorldRenderingPipeline pipeline) {
+            pipeline.activateDimensionGeneration();
+        }
+    }
+
     @Inject(method = "resetTextureState", at = @At("HEAD"), cancellable = true)
     private void metallum$skipGlTextureUnitReset(final CallbackInfo ci) {
         if (MetalIrisCompat.holdIrisDormant()) {

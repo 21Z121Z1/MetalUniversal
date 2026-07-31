@@ -14,6 +14,7 @@ import com.mojang.blaze3d.platform.CompareOp;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.ShaderType;
+import com.mojang.blaze3d.systems.RenderPassDescriptor;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import org.joml.Vector4f;
 import org.joml.Vector4fc;
@@ -313,7 +314,7 @@ final class MetalIrisTargetsIntegrationTest {
             IrisMetalPingPongTargets color = targets.colorTargets();
             assertEquals(6, color.mainTexture(0).getMipLevels());
             assertEquals(6, color.altTexture(0).getMipLevels());
-            assertEquals(6, color.readView(0).mipLevels(), "sampled view must expose the complete chain");
+            assertEquals(6, color.sampleReadView(0).mipLevels(), "sampled view must expose the complete chain");
             assertEquals(1, color.mainTexture(1).getMipLevels(), "unrequested target must stay single-level");
             assertEquals(
                     MTLSamplerMipFilter.NotMipmapped,
@@ -364,7 +365,7 @@ final class MetalIrisTargetsIntegrationTest {
             )) {
                 MetalRenderPass samplePass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
                 samplePass.setPipeline(samplePipeline);
-                samplePass.bindTexture("SourceSampler", color.readView(0), targets.colorSampler(0));
+                samplePass.bindTexture("SourceSampler", color.sampleReadView(0), targets.colorSampler(0));
                 samplePass.draw(3, 1, 0, 0);
                 encoder.submitRenderPass();
             }
@@ -381,6 +382,86 @@ final class MetalIrisTargetsIntegrationTest {
             assertTrue(color.readMipmapsEnabled(0), "main side keeps Iris's within-frame stale-mip state");
             targets.resetMipmaps();
             assertFalse(color.readMipmapsEnabled(0), "final reset must clear both physical sides");
+        }
+    }
+
+    @Test
+    void logicalRgbTargetSamplingForcesOpenGlAlphaOne() {
+        registerConstantFragment("iris_rgb_physical", "vec4(0.25, 0.5, 0.75, 0.0)");
+        fragmentShaders.put("iris_rgb_sample", """
+                #version 450
+                uniform sampler2D SourceSampler;
+                layout(location=0) out vec4 fragColor;
+                void main() {
+                    fragColor = texture(SourceSampler, vec2(0.5));
+                }
+                """);
+
+        try (IrisMetalPingPongTargets source = new IrisMetalPingPongTargets(
+                device,
+                "iris-logical-rgb",
+                new GpuFormat[]{GpuFormat.RGBA8_UNORM},
+                WIDTH,
+                HEIGHT,
+                Set.of(),
+                Set.of(),
+                Set.of(0)
+        ); IrisMetalRenderTargets output = new IrisMetalRenderTargets(
+                device,
+                new GpuFormat[]{GpuFormat.RGBA8_UNORM},
+                WIDTH,
+                HEIGHT
+        )) {
+            RenderPipeline sourcePipeline = RenderPipeline.builder()
+                    .withLocation("metallum_iris/iris_rgb_physical")
+                    .withVertexShader("metallum_iris/fullscreen")
+                    .withFragmentShader("metallum_iris/iris_rgb_physical")
+                    .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                    .withCull(false)
+                    .withColorTargetState(0, new ColorTargetState(
+                            Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                    .build();
+            RenderPassDescriptor sourceDescriptor = RenderPassDescriptor.create(
+                    () -> "logical RGB physical write"
+            ).withColorAttachment(
+                    source.readView(0),
+                    Optional.of(new Vector4f(0.0F, 0.0F, 0.0F, 0.0F))
+            ).withRenderArea(new com.mojang.blaze3d.systems.RenderPass.RenderArea(
+                    0, 0, WIDTH, HEIGHT
+            ));
+            MetalRenderPass sourcePass = (MetalRenderPass) encoder.createRenderPass(sourceDescriptor);
+            sourcePass.setPipeline(sourcePipeline);
+            sourcePass.draw(3, 1, 0, 0);
+            encoder.submitRenderPass();
+
+            BindGroupLayout sampleLayout = BindGroupLayout.builder()
+                    .withSampler("SourceSampler")
+                    .build();
+            RenderPipeline samplePipeline = RenderPipeline.builder()
+                    .withLocation("metallum_iris/iris_rgb_sample")
+                    .withVertexShader("metallum_iris/fullscreen")
+                    .withFragmentShader("metallum_iris/iris_rgb_sample")
+                    .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                    .withCull(false)
+                    .withBindGroupLayout(sampleLayout)
+                    .withColorTargetState(0, new ColorTargetState(
+                            Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                    .build();
+            try (RenderPassDescriptorWithViews descriptor = output.createWriteDescriptor(
+                    "logical RGB sample", new int[]{0}, null, false, null, null
+            )) {
+                MetalRenderPass samplePass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
+                samplePass.setPipeline(samplePipeline);
+                samplePass.bindTexture("SourceSampler", source.sampleReadView(0), output.colorSampler());
+                samplePass.draw(3, 1, 0, 0);
+                encoder.submitRenderPass();
+            }
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+
+            assertRgba(source.readTexture(0), 64, 128, 191, 0, "physical RGBA backing");
+            assertRgba(output.colorTargets().writeTexture(0), 64, 128, 191, 255,
+                    "logical RGB sampled value");
         }
     }
 
@@ -540,10 +621,24 @@ final class MetalIrisTargetsIntegrationTest {
     }
 
     private void assertRgba(final MetalGpuTexture texture, final int red, final int green, final int blue, final String label) {
+        assertRgba(texture, red, green, blue, -1, label);
+    }
+
+    private void assertRgba(
+            final MetalGpuTexture texture,
+            final int red,
+            final int green,
+            final int blue,
+            final int alpha,
+            final String label
+    ) {
         ByteBuffer data = readback(texture);
         assertByteNear(data.get(0), red, label + " red");
         assertByteNear(data.get(1), green, label + " green");
         assertByteNear(data.get(2), blue, label + " blue");
+        if (alpha >= 0) {
+            assertByteNear(data.get(3), alpha, label + " alpha");
+        }
     }
 
     private void assertDepth(final MetalGpuTexture texture, final float expected, final String label) {

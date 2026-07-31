@@ -27,6 +27,7 @@ final class MetalGpuSampler extends GpuSampler {
     private final int maxAnisotropy;
     private final OptionalDouble maxLod;
     private final MTLSamplerMipFilter mipFilter;
+    private final boolean normalizedCoordinates;
     private boolean closed;
 
     MetalGpuSampler(
@@ -82,9 +83,28 @@ final class MetalGpuSampler extends GpuSampler {
             @org.jspecify.annotations.Nullable final MTLCompareFunction compareFunction,
             final MTLSamplerMipFilter mipFilter
     ) {
+        this(
+                device, addressModeU, addressModeV, minFilter, magFilter,
+                maxAnisotropy, maxLod, compareFunction, mipFilter, true
+        );
+    }
+
+    MetalGpuSampler(
+            final MetalDevice device,
+            final AddressMode addressModeU,
+            final AddressMode addressModeV,
+            final FilterMode minFilter,
+            final FilterMode magFilter,
+            final int maxAnisotropy,
+            final OptionalDouble maxLod,
+            @org.jspecify.annotations.Nullable final MTLCompareFunction compareFunction,
+            final MTLSamplerMipFilter mipFilter,
+            final boolean normalizedCoordinates
+    ) {
         this.device = device;
         this.mipFilter = Objects.requireNonNull(mipFilter, "mipFilter");
-        this.nativeHandle = MetalNativeBridge.metallum_create_sampler_v2(
+        this.normalizedCoordinates = normalizedCoordinates;
+        this.nativeHandle = MetalNativeBridge.metallum_create_sampler_v3(
                 device.metalDeviceHandle(),
                 MTLSamplerAddressMode.from(addressModeU),
                 MTLSamplerAddressMode.from(addressModeV),
@@ -93,7 +113,8 @@ final class MetalGpuSampler extends GpuSampler {
                 this.mipFilter,
                 Math.max(1, maxAnisotropy),
                 toMtlMaxLodClamp(maxLod),
-                compareFunction == null ? -1 : (int) compareFunction.value
+                compareFunction == null ? -1 : (int) compareFunction.value,
+                normalizedCoordinates
         );
         this.addressModeU = addressModeU;
         this.addressModeV = addressModeV;
@@ -133,6 +154,10 @@ final class MetalGpuSampler extends GpuSampler {
         return this.maxLod;
     }
 
+    boolean usesNormalizedCoordinates() {
+        return this.normalizedCoordinates;
+    }
+
     @Override
     public void close() {
         if (this.closed) {
@@ -152,6 +177,10 @@ final class MetalGpuSampler extends GpuSampler {
 
     boolean isClosed() {
         return this.closed;
+    }
+
+    boolean isOwnedBy(final MetalDevice expected) {
+        return this.device == expected;
     }
 
     MemorySegment nativeHandle() {

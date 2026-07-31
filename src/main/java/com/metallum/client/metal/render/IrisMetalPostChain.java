@@ -5,6 +5,7 @@ import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
+import com.mojang.blaze3d.pipeline.BlendFunction;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
@@ -13,7 +14,10 @@ import com.mojang.blaze3d.shaders.UniformType;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.textures.AddressMode;
+import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
+import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import it.unimi.dsi.fastutil.objects.Object2ObjectMap;
@@ -22,11 +26,15 @@ import net.fabricmc.api.Environment;
 import net.irisshaders.iris.gl.framebuffer.ViewportData;
 import net.irisshaders.iris.gl.texture.TextureType;
 import net.irisshaders.iris.helpers.Tri;
+import net.irisshaders.iris.helpers.StringPair;
 import net.irisshaders.iris.pathways.FullScreenQuadRenderer;
+import net.irisshaders.iris.pathways.colorspace.ColorSpace;
 import net.irisshaders.iris.pipeline.transform.PatchShaderType;
 import net.irisshaders.iris.pipeline.transform.TransformPatcher;
+import net.irisshaders.iris.shaderpack.preprocessor.JcppProcessor;
 import net.irisshaders.iris.shaderpack.loading.ProgramArrayId;
 import net.irisshaders.iris.shaderpack.loading.ProgramId;
+import net.irisshaders.iris.shaderpack.properties.IndirectPointer;
 import net.irisshaders.iris.shaderpack.programs.ComputeSource;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
@@ -36,7 +44,12 @@ import net.irisshaders.iris.shaderpack.properties.ProgramDirectives;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
 import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
+import org.joml.Vector2f;
+import org.joml.Vector3i;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.EnumMap;
@@ -54,7 +67,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Metal executor for Iris's deferred, composite and final full-screen passes.
+ * Metal executor for Iris's setup, begin, prepare, deferred, composite and
+ * final full-screen passes.
  *
  * <p>The state transition is intentionally the one used by Iris 1.11.2's
  * {@code CompositeRenderer}, {@code FinalPassRenderer} and
@@ -81,7 +95,21 @@ import java.util.regex.Pattern;
 final class IrisMetalPostChain implements AutoCloseable {
     static final String IRIS_ORACLE_COMMIT = "20e226b14fd2c3ba192e16ae2c8af4a27987767c";
 
+    private static final String COLOR_SPACE_VERTEX = """
+            #version 450 core
+
+            layout(location = 0) in vec3 Position;
+            layout(location = 1) in vec2 UV0;
+            layout(location = 0) out vec2 uv;
+
+            void main() {
+                gl_Position = vec4(Position.xy * 2.0 - 1.0, Position.z, 1.0);
+                uv = UV0;
+            }
+            """;
+
     private static final Pattern COLORTEX_NAME = Pattern.compile("colortex(\\d+)");
+    private static final Pattern COLOR_IMAGE_NAME = Pattern.compile("colorimg(\\d+)");
     private static final Pattern FRAGMENT_OUTPUT_DECLARATION = Pattern.compile(
             "(?m)^(\\h*)((?:layout\\h*\\([^\\r\\n)]*\\)\\h*)?)"
                     + "(?:(?:flat|smooth|noperspective|centroid|sample|invariant|precise)\\h+)*"
@@ -90,18 +118,52 @@ final class IrisMetalPostChain implements AutoCloseable {
     private static final Pattern MAIN_FUNCTION = Pattern.compile("\\bvoid\\h+main\\h*\\(\\h*\\)\\h*\\{");
     private static final Pattern VOID_RETURN = Pattern.compile("\\breturn\\h*;");
 
+    private static final class PlannedColorSpacePass {
+        private final ColorSpace colorSpace;
+        private final PassInfo info;
+        private final MetalIrisShaderCompiler.GlslProgram program;
+        private final Identifier vertexId;
+        private final Identifier fragmentId;
+        private @Nullable RenderPipeline pipeline;
+
+        private PlannedColorSpacePass(
+                final ColorSpace colorSpace,
+                final MetalIrisShaderCompiler.GlslProgram program,
+                final Identifier vertexId,
+                final Identifier fragmentId
+        ) {
+            this.colorSpace = colorSpace;
+            this.info = new PassInfo(
+                    Stage.COMPOSITE,
+                    "iris-color-space-" + colorSpace.name().toLowerCase(Locale.ROOT),
+                    new int[]{0},
+                    new BitSet(),
+                    new BitSet(),
+                    new BitSet(),
+                    samplerNames(program)
+            );
+            this.program = program;
+            this.vertexId = vertexId;
+            this.fragmentId = fragmentId;
+        }
+    }
+
     enum Stage {
+        SETUP(null, TextureStage.SETUP, null),
+        BEGIN(ProgramArrayId.Begin, TextureStage.BEGIN, "begin_pre"),
+        SHADOW_COMPOSITE(null, TextureStage.SHADOWCOMP, null),
+        PREPARE(ProgramArrayId.Prepare, TextureStage.PREPARE, "prepare_pre"),
         DEFERRED(ProgramArrayId.Deferred, TextureStage.DEFERRED, "deferred_pre"),
         COMPOSITE(ProgramArrayId.Composite, TextureStage.COMPOSITE_AND_FINAL, "composite_pre");
 
-        final ProgramArrayId arrayId;
+        final @Nullable ProgramArrayId arrayId;
         final TextureStage textureStage;
-        final String preFlipDirective;
+        final @Nullable String preFlipDirective;
 
         Stage(
-                final ProgramArrayId arrayId,
+                final @Nullable ProgramArrayId arrayId,
                 final TextureStage textureStage,
-                final String preFlipDirective
+                final @Nullable String preFlipDirective
         ) {
             this.arrayId = arrayId;
             this.textureStage = textureStage;
@@ -184,6 +246,20 @@ final class IrisMetalPostChain implements AutoCloseable {
         }
     }
 
+    private record TargetBlendState(
+            Optional<BlendFunction> global,
+            Map<Integer, Optional<BlendFunction>> perTarget
+    ) {
+        TargetBlendState {
+            Objects.requireNonNull(global, "global");
+            perTarget = Map.copyOf(perTarget);
+        }
+
+        Optional<BlendFunction> forTarget(final int logicalTarget) {
+            return perTarget.getOrDefault(logicalTarget, global);
+        }
+    }
+
     /**
      * Supplies resources that are not owned by {@link IrisMetalRenderTargets}.
      * A provider may intentionally override a standard sampler name to honor
@@ -192,6 +268,23 @@ final class IrisMetalPostChain implements AutoCloseable {
      */
     interface ResourceProvider {
         @Nullable GpuBufferSlice uniform(PassInfo pass, String blockName);
+
+        default @Nullable GpuBufferSlice uniform(
+                final PassInfo pass,
+                final String blockName,
+                final Object token
+        ) {
+            return uniform(pass, blockName);
+        }
+
+        default @Nullable GpuBufferSlice uniform(
+                final PassInfo pass,
+                final String blockName,
+                final Object token,
+                final IrisMetalUniformValues.DrawUniformContext context
+        ) {
+            return uniform(pass, blockName, token);
+        }
 
         @Nullable TextureBinding texture(PassInfo pass, String samplerName);
 
@@ -207,6 +300,18 @@ final class IrisMetalPostChain implements AutoCloseable {
                 final MetalIrisShaderCompiler.SamplerDecl sampler
         ) {
             return texture(pass, sampler.name());
+        }
+
+        default @Nullable GpuTextureView storageImage(final PassInfo pass, final String imageName) {
+            return null;
+        }
+
+        default @Nullable GpuBufferSlice storageBuffer(final int binding) {
+            return null;
+        }
+
+        default @Nullable GpuBufferSlice texelBuffer(final PassInfo pass, final String samplerName) {
+            return null;
         }
     }
 
@@ -268,28 +373,64 @@ final class IrisMetalPostChain implements AutoCloseable {
     }
 
     private static final class PlannedPass {
+        private final int arrayIndex;
         private final PassInfo info;
         private final MetalIrisShaderCompiler.GlslProgram program;
         private final ViewportData viewport;
         private final Set<Integer> mipmappedBuffers;
+        private final TargetBlendState blendState;
         private final Identifier vertexId;
         private final Identifier fragmentId;
         private @Nullable RenderPipeline pipeline;
 
         private PlannedPass(
+                final int arrayIndex,
                 final PassInfo info,
                 final MetalIrisShaderCompiler.GlslProgram program,
                 final ViewportData viewport,
                 final Set<Integer> mipmappedBuffers,
+                final TargetBlendState blendState,
                 final Identifier vertexId,
                 final Identifier fragmentId
         ) {
+            this.arrayIndex = arrayIndex;
             this.info = info;
             this.program = program;
             this.viewport = viewport;
             this.mipmappedBuffers = Set.copyOf(mipmappedBuffers);
+            this.blendState = blendState;
             this.vertexId = vertexId;
             this.fragmentId = fragmentId;
+        }
+    }
+
+    private static final class PlannedCompute {
+        private final String token;
+        private final PassInfo info;
+        private final ComputeSource source;
+        private final MetalIrisShaderCompiler.TranslatedStage translated;
+        private final MetalIrisShaderCompiler.ComputeReflection reflection;
+        private @Nullable MetalComputePipeline pipeline;
+
+        private PlannedCompute(
+                final String token,
+                final PassInfo info,
+                final ComputeSource source,
+                final MetalIrisShaderCompiler.TranslatedStage translated
+        ) {
+            this.token = token;
+            this.info = info;
+            this.source = source;
+            this.translated = translated;
+            this.reflection = Objects.requireNonNull(
+                    translated.computeReflection(), "compute reflection for " + source.getName()
+            );
+        }
+    }
+
+    private record PlannedComputeGroup(int arrayIndex, List<PlannedCompute> computes) {
+        PlannedComputeGroup {
+            computes = List.copyOf(computes);
         }
     }
 
@@ -337,13 +478,23 @@ final class IrisMetalPostChain implements AutoCloseable {
     private final int generation;
     private final int targetCount;
     private final EnumMap<Stage, List<PlannedPass>> passes;
+    private final EnumMap<Stage, List<PlannedComputeGroup>> computeGroups;
+    private final List<PlannedCompute> setupComputes;
+    private final List<PlannedCompute> finalComputes;
     private final EnumMap<Stage, BitSet> stageInputs;
     private final EnumMap<Stage, BitSet> stageOutputs;
     private final BitSet finalSnapshot;
     private final Set<Integer> finalHistoryTargets;
     private final Set<Integer> mipmappedTargets;
+    private final Set<Integer> storageImageTargets;
     private final Map<Identifier, String> generatedSources;
+    private final boolean concurrentCompute;
+    private final boolean packOwnsColorCorrection;
+    private final EnumMap<ColorSpace, PlannedColorSpacePass> colorSpacePasses;
     private final @Nullable PlannedFinal finalPass;
+    private @Nullable MetalGpuTexture colorSpaceSwap;
+    private @Nullable MetalGpuTextureView colorSpaceSwapView;
+    private @Nullable MetalGpuSampler colorSpaceSampler;
     private boolean prepared;
     private @Nullable GpuFormat preparedFinalFormat;
     private boolean closed;
@@ -352,23 +503,37 @@ final class IrisMetalPostChain implements AutoCloseable {
             final int generation,
             final int targetCount,
             final EnumMap<Stage, List<PlannedPass>> passes,
+            final EnumMap<Stage, List<PlannedComputeGroup>> computeGroups,
+            final List<PlannedCompute> setupComputes,
+            final List<PlannedCompute> finalComputes,
             final EnumMap<Stage, BitSet> stageInputs,
             final EnumMap<Stage, BitSet> stageOutputs,
             final BitSet finalSnapshot,
             final Set<Integer> finalHistoryTargets,
             final Set<Integer> mipmappedTargets,
+            final Set<Integer> storageImageTargets,
             final Map<Identifier, String> generatedSources,
+            final boolean concurrentCompute,
+            final boolean packOwnsColorCorrection,
+            final EnumMap<ColorSpace, PlannedColorSpacePass> colorSpacePasses,
             final @Nullable PlannedFinal finalPass
     ) {
         this.generation = generation;
         this.targetCount = targetCount;
         this.passes = passes;
+        this.computeGroups = computeGroups;
+        this.setupComputes = List.copyOf(setupComputes);
+        this.finalComputes = List.copyOf(finalComputes);
         this.stageInputs = stageInputs;
         this.stageOutputs = stageOutputs;
         this.finalSnapshot = copy(finalSnapshot);
         this.finalHistoryTargets = Set.copyOf(finalHistoryTargets);
         this.mipmappedTargets = Set.copyOf(mipmappedTargets);
+        this.storageImageTargets = Set.copyOf(storageImageTargets);
         this.generatedSources = Map.copyOf(generatedSources);
+        this.concurrentCompute = concurrentCompute;
+        this.packOwnsColorCorrection = packOwnsColorCorrection;
+        this.colorSpacePasses = colorSpacePasses;
         this.finalPass = finalPass;
     }
 
@@ -389,35 +554,67 @@ final class IrisMetalPostChain implements AutoCloseable {
         Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap =
                 packDirectives.getTextureMap();
         EnumMap<Stage, List<PlannedPass>> stages = new EnumMap<>(Stage.class);
+        EnumMap<Stage, List<PlannedComputeGroup>> computeStages = new EnumMap<>(Stage.class);
         EnumMap<Stage, BitSet> inputs = new EnumMap<>(Stage.class);
         EnumMap<Stage, BitSet> outputs = new EnumMap<>(Stage.class);
         Map<Identifier, String> generated = new LinkedHashMap<>();
         BitSet state = copy(initialFlipState);
         BitSet compositeFlippedAtLeastOnce = new BitSet(targetCount);
         int ordinal = 0;
+        int computeOrdinal = 0;
+        List<PlannedCompute> setupComputes = planComputes(
+                programSet.getSetup(),
+                Stage.SETUP,
+                -1,
+                state,
+                textureMap,
+                targetCount,
+                computeOrdinal
+        );
+        computeOrdinal += setupComputes.size();
 
         for (Stage stage : Stage.values()) {
-            state = applyPreFlips(
-                    state,
-                    packDirectives.getExplicitFlips(stage.preFlipDirective),
-                    targetCount
-            );
+            if (stage.preFlipDirective != null) {
+                state = applyPreFlips(
+                        state,
+                        packDirectives.getExplicitFlips(stage.preFlipDirective),
+                        targetCount
+                );
+            }
             inputs.put(stage, copy(state));
             BitSet flippedAtLeastOnce = new BitSet(targetCount);
             List<PlannedPass> stagePasses = new ArrayList<>();
-            ProgramSource[] sources = programSet.getComposite(stage.arrayId);
-            ComputeSource[][] computes = programSet.getCompute(stage.arrayId);
+            List<PlannedComputeGroup> stageComputes = new ArrayList<>();
+            ProgramSource[] sources = stage.arrayId == null
+                    ? new ProgramSource[0]
+                    : programSet.getComposite(stage.arrayId);
+            ComputeSource[][] computes = stage.arrayId == null
+                    ? new ComputeSource[0][]
+                    : programSet.getCompute(stage.arrayId);
 
-            for (int index = 0; index < sources.length; index++) {
+            int slotCount = Math.max(sources.length, computes.length);
+            for (int index = 0; index < slotCount; index++) {
                 ComputeSource[] computeGroup = index < computes.length ? computes[index] : null;
-                rejectComputes(stage.name().toLowerCase(Locale.ROOT), computeGroup);
-                ProgramSource source = sources[index];
+                List<PlannedCompute> plannedComputes = planComputes(
+                        computeGroup,
+                        stage,
+                        index,
+                        state,
+                        textureMap,
+                        targetCount,
+                        computeOrdinal
+                );
+                computeOrdinal += plannedComputes.size();
+                if (!plannedComputes.isEmpty()) {
+                    stageComputes.add(new PlannedComputeGroup(index, plannedComputes));
+                }
+                ProgramSource source = index < sources.length ? sources[index] : null;
                 if (source == null || !source.isValid()) {
                     continue;
                 }
 
                 ProgramDirectives directives = source.getDirectives();
-                rejectUnsupportedBlend(source.getName(), directives);
+                TargetBlendState blendState = blendState(directives, targetCount);
                 int[] drawBuffers = validatedDrawBuffers(
                         source.getName(), directives.getDrawBuffers(), targetCount
                 );
@@ -431,6 +628,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                 MetalIrisShaderCompiler.GlslProgram program = translate(
                         source, stage.textureStage, textureMap, drawBuffers
                 );
+                validateRasterResources(source.getName(), program);
                 String base = "iris/gen" + generation + "/post/"
                         + stage.name().toLowerCase(Locale.ROOT) + "/" + ordinal++;
                 Identifier vertexId = Identifier.fromNamespaceAndPath("metallum", base + "_v");
@@ -438,6 +636,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                 generated.put(vertexId, program.vertexGlsl());
                 generated.put(fragmentId, program.fragmentGlsl());
                 stagePasses.add(new PlannedPass(
+                        index,
                         new PassInfo(
                                 stage,
                                 source.getName(),
@@ -450,6 +649,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                         program,
                         directives.getViewportScale(),
                         directives.getMipmappedBuffers(),
+                        blendState,
                         vertexId,
                         fragmentId
                 ));
@@ -460,20 +660,29 @@ final class IrisMetalPostChain implements AutoCloseable {
                 compositeFlippedAtLeastOnce = copy(flippedAtLeastOnce);
             }
             stages.put(stage, List.copyOf(stagePasses));
+            computeStages.put(stage, List.copyOf(stageComputes));
             outputs.put(stage, copy(state));
         }
 
-        rejectComputes("final", programSet.getFinalCompute());
+        List<PlannedCompute> finalComputes = planComputes(
+                programSet.getFinalCompute(),
+                Stage.COMPOSITE,
+                -1,
+                state,
+                textureMap,
+                targetCount,
+                computeOrdinal
+        );
         PlannedFinal finalPass = null;
         Optional<ProgramSource> maybeFinal = programSet.get(ProgramId.Final);
         if (maybeFinal.isPresent() && maybeFinal.get().isValid()) {
             ProgramSource source = maybeFinal.get();
             ProgramDirectives directives = source.getDirectives();
-            rejectUnsupportedBlend(source.getName(), directives);
             int[] declared = validatedDrawBuffers(source.getName(), directives.getDrawBuffers(), targetCount);
             MetalIrisShaderCompiler.GlslProgram program = translate(
                     source, TextureStage.COMPOSITE_AND_FINAL, textureMap, declared
             );
+            validateRasterResources(source.getName(), program);
             String base = "iris/gen" + generation + "/post/final";
             Identifier vertexId = Identifier.fromNamespaceAndPath("metallum", base + "_v");
             Identifier fragmentId = Identifier.fromNamespaceAndPath("metallum", base + "_f");
@@ -496,16 +705,45 @@ final class IrisMetalPostChain implements AutoCloseable {
         );
         Set<Integer> histories = finalHistoryTargets(state, cleared, targetCount);
         Set<Integer> mipmappedTargets = collectMipmappedTargets(stages, finalPass, targetCount);
+        Set<Integer> storageImageTargets = collectStorageImageTargets(
+                computeStages, setupComputes, finalComputes, targetCount
+        );
+        EnumMap<ColorSpace, PlannedColorSpacePass> colorSpacePasses = new EnumMap<>(ColorSpace.class);
+        if (!packDirectives.supportsColorCorrection()) {
+            for (ColorSpace colorSpace : ColorSpace.values()) {
+                if (colorSpace == ColorSpace.SRGB) {
+                    continue;
+                }
+                String base = "iris/gen" + generation + "/presentation/"
+                        + colorSpace.name().toLowerCase(Locale.ROOT);
+                Identifier vertexId = Identifier.fromNamespaceAndPath("metallum", base + "_v");
+                Identifier fragmentId = Identifier.fromNamespaceAndPath("metallum", base + "_f");
+                MetalIrisShaderCompiler.GlslProgram program = colorSpaceProgram(colorSpace);
+                generated.put(vertexId, program.vertexGlsl());
+                generated.put(fragmentId, program.fragmentGlsl());
+                colorSpacePasses.put(
+                        colorSpace,
+                        new PlannedColorSpacePass(colorSpace, program, vertexId, fragmentId)
+                );
+            }
+        }
         return new IrisMetalPostChain(
                 generation,
                 targetCount,
                 stages,
+                computeStages,
+                setupComputes,
+                finalComputes,
                 inputs,
                 outputs,
                 state,
                 histories,
                 mipmappedTargets,
+                storageImageTargets,
                 generated,
+                packDirectives.getConcurrentCompute(),
+                packDirectives.supportsColorCorrection(),
+                colorSpacePasses,
                 finalPass
         );
     }
@@ -544,6 +782,15 @@ final class IrisMetalPostChain implements AutoCloseable {
             );
         }
         ShaderSource source = shaderSource(fallback);
+        for (PlannedCompute compute : allComputes()) {
+            if (compute.pipeline == null) {
+                compute.pipeline = MetalComputePipeline.compileTranslated(
+                        device,
+                        "iris/gen" + this.generation + "/compute/" + compute.source.getName(),
+                        compute.translated
+                );
+            }
+        }
         for (Stage stage : Stage.values()) {
             for (PlannedPass pass : this.passes.get(stage)) {
                 if (pass.pipeline == null) {
@@ -562,6 +809,25 @@ final class IrisMetalPostChain implements AutoCloseable {
                     this.finalPass.name
             );
         }
+        if (!this.colorSpacePasses.isEmpty()) {
+            if (finalColorFormat != GpuFormat.RGBA8_UNORM) {
+                throw new UnsupportedOperationException(
+                        "Iris color-space conversion requires the fixed-Iris RGBA8 MainTarget contract, got "
+                                + finalColorFormat
+                );
+            }
+            for (PlannedColorSpacePass pass : this.colorSpacePasses.values()) {
+                if (pass.pipeline == null) {
+                    pass.pipeline = buildColorSpacePipeline(pass, finalColorFormat);
+                }
+                verifyPrecompile(
+                        device,
+                        device.precompilePipeline(pass.pipeline, source),
+                        pass.info.name()
+                );
+            }
+            ensureColorSpaceResources(device, targets.width(), targets.height());
+        }
         this.preparedFinalFormat = finalColorFormat;
         this.prepared = true;
     }
@@ -578,10 +844,34 @@ final class IrisMetalPostChain implements AutoCloseable {
         IrisMetalPingPongTargets colors = targets.colorTargets();
         colors.restore(this.stageInputs.get(stage));
         List<String> executed = new ArrayList<>();
-        for (PlannedPass pass : this.passes.get(stage)) {
-            executePass(device, targets, resources, pass);
-            colors.restore(pass.info.stateAfter());
-            executed.add(pass.info.name());
+        if (stage == Stage.SETUP) {
+            executeComputeGroup(device, targets, resources, this.setupComputes, executed);
+        } else {
+            List<PlannedPass> raster = this.passes.get(stage);
+            List<PlannedComputeGroup> computes = this.computeGroups.get(stage);
+            int rasterCursor = 0;
+            int computeCursor = 0;
+            while (rasterCursor < raster.size() || computeCursor < computes.size()) {
+                int rasterIndex = rasterCursor < raster.size()
+                        ? raster.get(rasterCursor).arrayIndex
+                        : Integer.MAX_VALUE;
+                int computeIndex = computeCursor < computes.size()
+                        ? computes.get(computeCursor).arrayIndex()
+                        : Integer.MAX_VALUE;
+                int index = Math.min(rasterIndex, computeIndex);
+                if (computeIndex == index) {
+                    executeComputeGroup(
+                            device, targets, resources,
+                            computes.get(computeCursor++).computes(), executed
+                    );
+                }
+                if (rasterIndex == index) {
+                    PlannedPass pass = raster.get(rasterCursor++);
+                    executePass(device, targets, resources, pass);
+                    colors.restore(pass.info.stateAfter());
+                    executed.add(pass.info.name());
+                }
+            }
         }
         BitSet expected = this.stageOutputs.get(stage);
         colors.restore(expected);
@@ -614,6 +904,7 @@ final class IrisMetalPostChain implements AutoCloseable {
         try {
             IrisMetalPingPongTargets colors = targets.colorTargets();
             colors.restore(this.finalSnapshot);
+            executeComputeGroup(device, targets, resources, this.finalComputes, null);
             MetalCommandEncoder encoder = device.commandEncoder();
             boolean shaderExecuted = this.finalPass != null;
             boolean resolved;
@@ -630,6 +921,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                             Objects.requireNonNull(this.finalPass.pipeline, "final pipeline"),
                             this.finalPass.info(),
                             this.finalPass.program,
+                            Optional.empty(),
                             targets,
                             resources
                     );
@@ -671,6 +963,87 @@ final class IrisMetalPostChain implements AutoCloseable {
         }
     }
 
+    boolean executeColorSpace(
+            final MetalDevice device,
+            final IrisMetalRenderTargets targets,
+            final GpuTextureView mainColor,
+            final ColorSpace colorSpace
+    ) {
+        ensurePrepared();
+        Objects.requireNonNull(device, "device");
+        validateTargets(targets);
+        Objects.requireNonNull(mainColor, "mainColor");
+        Objects.requireNonNull(colorSpace, "colorSpace");
+        if (this.packOwnsColorCorrection || colorSpace == ColorSpace.SRGB) {
+            return false;
+        }
+        PlannedColorSpacePass pass = this.colorSpacePasses.get(colorSpace);
+        if (pass == null) {
+            throw new IllegalStateException("No fixed-Iris Metal color-space lowering for " + colorSpace);
+        }
+        if (mainColor.texture().getFormat() != GpuFormat.RGBA8_UNORM) {
+            throw new IllegalStateException(
+                    "Iris color-space conversion requires RGBA8 MainTarget, got "
+                            + mainColor.texture().getFormat()
+            );
+        }
+        ensureColorSpaceResources(device, mainColor.getWidth(0), mainColor.getHeight(0));
+        MetalGpuTexture swap = Objects.requireNonNull(this.colorSpaceSwap, "color-space swap texture");
+        MetalGpuTextureView swapView = Objects.requireNonNull(this.colorSpaceSwapView, "color-space swap view");
+        MetalGpuSampler sampler = Objects.requireNonNull(this.colorSpaceSampler, "color-space sampler");
+        RenderPassDescriptor descriptor = RenderPassDescriptor
+                .create(() -> "Iris color space: " + colorSpace)
+                .withColorAttachment(swapView, Optional.empty())
+                .withRenderArea(new RenderPass.RenderArea(
+                        0, 0, mainColor.getWidth(0), mainColor.getHeight(0)
+                ));
+        MetalCommandEncoder encoder = device.commandEncoder();
+        MetalRenderPass renderPass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+        try {
+            renderFullscreen(
+                    renderPass,
+                    Objects.requireNonNull(pass.pipeline, "color-space pipeline"),
+                    pass.info,
+                    pass.program,
+                    Optional.empty(),
+                    targets,
+                    new ResourceProvider() {
+                        @Override
+                        public @Nullable GpuBufferSlice uniform(
+                                final PassInfo ignoredPass,
+                                final String blockName
+                        ) {
+                            return null;
+                        }
+
+                        @Override
+                        public @Nullable TextureBinding texture(
+                                final PassInfo ignoredPass,
+                                final String samplerName
+                        ) {
+                            return "readImage".equals(samplerName)
+                                    ? new TextureBinding(mainColor, sampler)
+                                    : null;
+                        }
+                    }
+            );
+        } finally {
+            encoder.submitRenderPass();
+        }
+        encoder.copyTextureToTexture(
+                swap,
+                mainColor.texture(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                mainColor.getWidth(0),
+                mainColor.getHeight(0)
+        );
+        return true;
+    }
+
     BitSet stageInput(final Stage stage) {
         return copy(this.stageInputs.get(stage));
     }
@@ -692,6 +1065,11 @@ final class IrisMetalPostChain implements AutoCloseable {
         return this.mipmappedTargets;
     }
 
+    /** Logical colortex targets that need Metal shader-write usage. */
+    Set<Integer> storageImageTargets() {
+        return this.storageImageTargets;
+    }
+
     List<PassInfo> passInfos(final Stage stage) {
         return this.passes.get(stage).stream().map(pass -> pass.info).toList();
     }
@@ -710,6 +1088,14 @@ final class IrisMetalPostChain implements AutoCloseable {
                 }
             }
         }
+        for (PlannedCompute compute : allComputes()) {
+            if (compute.reflection.resources().stream().anyMatch(resource ->
+                    resource.name().equals(samplerName)
+                            && (resource.kind() == MetalIrisShaderCompiler.ComputeResourceKind.SAMPLED_IMAGE
+                            || resource.kind() == MetalIrisShaderCompiler.ComputeResourceKind.SEPARATE_SAMPLER))) {
+                return true;
+            }
+        }
         return this.finalPass != null && declaresSampler(this.finalPass.program, samplerName);
     }
 
@@ -724,6 +1110,13 @@ final class IrisMetalPostChain implements AutoCloseable {
         }
         if (this.finalPass != null) {
             collectSamplerTypes(this.finalPass.program, samplerName, result);
+        }
+        for (PlannedCompute compute : allComputes()) {
+            compute.reflection.resources().stream()
+                    .filter(resource -> resource.name().equals(samplerName))
+                    .filter(resource -> resource.kind() == MetalIrisShaderCompiler.ComputeResourceKind.SAMPLED_IMAGE
+                            || resource.kind() == MetalIrisShaderCompiler.ComputeResourceKind.SEPARATE_SAMPLER)
+                    .forEach(resource -> result.add("sampler2D"));
         }
         return Set.copyOf(result);
     }
@@ -765,6 +1158,9 @@ final class IrisMetalPostChain implements AutoCloseable {
             PassInfo info = this.finalPass.info();
             values.register(uniformToken(info), "post_final_" + info.name(), this.finalPass.program);
         }
+        for (PlannedCompute compute : allComputes()) {
+            values.registerCompute(compute.token, "post_compute_" + compute.info.name(), compute.reflection);
+        }
     }
 
     @Nullable GpuBufferSlice uniformSlice(
@@ -774,8 +1170,247 @@ final class IrisMetalPostChain implements AutoCloseable {
         return values.slice(uniformToken(pass));
     }
 
-    private static String uniformToken(final PassInfo pass) {
+    static String uniformToken(final PassInfo pass) {
         return "post:" + pass.stage().name() + ':' + pass.name();
+    }
+
+    private List<PlannedCompute> allComputes() {
+        List<PlannedCompute> result = new ArrayList<>(this.setupComputes.size() + this.finalComputes.size());
+        result.addAll(this.setupComputes);
+        for (Stage stage : Stage.values()) {
+            for (PlannedComputeGroup group : this.computeGroups.get(stage)) {
+                result.addAll(group.computes());
+            }
+        }
+        result.addAll(this.finalComputes);
+        return result;
+    }
+
+    private void executeComputeGroup(
+            final MetalDevice device,
+            final IrisMetalRenderTargets targets,
+            final ResourceProvider resources,
+            final List<PlannedCompute> computes,
+            final @Nullable List<String> executed
+    ) {
+        if (computes.isEmpty()) {
+            return;
+        }
+        if (this.concurrentCompute) {
+            try (MetalComputePass pass = device.commandEncoder().createComputePass()) {
+                for (PlannedCompute compute : computes) {
+                    executeCompute(pass, compute, targets, resources, executed);
+                }
+            }
+            return;
+        }
+
+        // Fixed Iris issues image/texture-fetch/SSBO barriers before every
+        // dispatch unless the pack explicitly opts into concurrent compute.
+        // An encoder boundary on the shared Metal fence is the conservative
+        // native equivalent for hazard-untracked resources.
+        for (PlannedCompute compute : computes) {
+            try (MetalComputePass pass = device.commandEncoder().createComputePass()) {
+                executeCompute(pass, compute, targets, resources, executed);
+            }
+        }
+    }
+
+    private void executeCompute(
+            final MetalComputePass pass,
+            final PlannedCompute compute,
+            final IrisMetalRenderTargets targets,
+            final ResourceProvider resources,
+            final @Nullable List<String> executed
+    ) {
+        pass.setPipeline(Objects.requireNonNull(compute.pipeline, "compute pipeline"));
+        bindComputeResources(pass, compute, targets, resources);
+        dispatchCompute(pass, compute, targets, resources);
+        if (executed != null) {
+            executed.add(compute.info.name());
+        }
+    }
+
+    private void bindComputeResources(
+            final MetalComputePass pass,
+            final PlannedCompute compute,
+            final IrisMetalRenderTargets targets,
+            final ResourceProvider resources
+    ) {
+        IrisMetalUniformValues.DrawUniformContext uniformContext =
+                IrisMetalUniformValues.requiresDrawContext(compute.reflection.uniformLayout())
+                        ? fullscreenUniformContext(compute.info, targets, resources, Optional.empty())
+                        : IrisMetalUniformValues.DrawUniformContext.empty();
+        for (MetalIrisShaderCompiler.ComputeResource resource : compute.reflection.resources()) {
+            switch (resource.kind()) {
+                case UNIFORM_BUFFER -> bindComputeBuffer(
+                        pass,
+                        resource.binding(),
+                        requireBuffer(
+                                resources.uniform(
+                                        compute.info, resource.name(), compute.token, uniformContext
+                                ),
+                                compute, "uniform block", resource.name()
+                        )
+                );
+                case STORAGE_BUFFER -> bindComputeBuffer(
+                        pass,
+                        resource.binding(),
+                        requireBuffer(
+                                resources.storageBuffer(resource.binding()),
+                                compute, "SSBO binding", Integer.toString(resource.binding())
+                        )
+                );
+                case SAMPLED_IMAGE -> {
+                    TextureBinding binding = requireComputeTexture(compute, resource.name(), targets, resources);
+                    pass.bindTextureView(resource.binding(), metalView(binding.view(), compute, resource.name()));
+                    pass.bindSampler(resource.binding(), metalSampler(binding.sampler(), compute, resource.name()).nativeHandle());
+                }
+                case SEPARATE_SAMPLER -> {
+                    TextureBinding binding = requireComputeTexture(compute, resource.name(), targets, resources);
+                    pass.bindSampler(resource.binding(), metalSampler(binding.sampler(), compute, resource.name()).nativeHandle());
+                }
+                case STORAGE_IMAGE -> {
+                    GpuTextureView view = storageImage(compute, resource.name(), targets, resources);
+                    MetalGpuTextureView metalView = metalView(view, compute, resource.name());
+                    ((MetalGpuTexture) metalView.texture()).markContentsDirty();
+                    pass.bindTextureView(resource.binding(), metalView);
+                }
+                case TEXEL_BUFFER, STORAGE_TEXEL_BUFFER, ATOMIC_COUNTER -> throw new IllegalStateException(
+                        "Unsupported compute resource survived admission: " + resource.kind() + " " + resource.name()
+                );
+            }
+        }
+    }
+
+    private static GpuBufferSlice requireBuffer(
+            final @Nullable GpuBufferSlice slice,
+            final PlannedCompute compute,
+            final String kind,
+            final String identity
+    ) {
+        if (slice == null) {
+            throw new IllegalStateException(
+                    "Iris compute " + compute.info.name() + " is missing required " + kind + " '" + identity + "'"
+            );
+        }
+        return slice;
+    }
+
+    private static void bindComputeBuffer(
+            final MetalComputePass pass,
+            final int binding,
+            final GpuBufferSlice slice
+    ) {
+        if (!(slice.buffer() instanceof MetalGpuBuffer buffer)) {
+            throw new IllegalStateException("Iris compute resource is not backed by a Metal buffer");
+        }
+        pass.bindBuffer(binding, buffer, slice.offset());
+    }
+
+    private static TextureBinding requireComputeTexture(
+            final PlannedCompute compute,
+            final String name,
+            final IrisMetalRenderTargets targets,
+            final ResourceProvider resources
+    ) {
+        MetalIrisShaderCompiler.SamplerDecl sampler =
+                new MetalIrisShaderCompiler.SamplerDecl(name, "sampler2D");
+        TextureBinding binding = externalTexture(resources, compute.info, sampler);
+        if (binding == null) {
+            binding = standardTexture(compute.info, name, targets);
+        }
+        if (binding == null) {
+            throw new IllegalStateException(
+                    "Iris compute " + compute.info.name() + " is missing required sampled texture '" + name + "'"
+            );
+        }
+        return binding;
+    }
+
+    private static GpuTextureView storageImage(
+            final PlannedCompute compute,
+            final String name,
+            final IrisMetalRenderTargets targets,
+            final ResourceProvider resources
+    ) {
+        int target = colorImageIndex(name);
+        if (target >= 0) {
+            return targets.colorTargets().sampleReadView(target);
+        }
+        GpuTextureView view = resources.storageImage(compute.info, name);
+        if (view == null) {
+            throw new IllegalStateException(
+                    "Iris compute " + compute.info.name() + " is missing required storage image '" + name + "'"
+            );
+        }
+        return view;
+    }
+
+    private static MetalGpuTextureView metalView(
+            final GpuTextureView view,
+            final PlannedCompute compute,
+            final String name
+    ) {
+        if (!(view instanceof MetalGpuTextureView metalView)) {
+            throw new IllegalStateException(
+                    "Iris compute " + compute.info.name() + " resource '" + name + "' is not a Metal texture view"
+            );
+        }
+        return metalView;
+    }
+
+    private static MetalGpuSampler metalSampler(
+            final GpuSampler sampler,
+            final PlannedCompute compute,
+            final String name
+    ) {
+        if (!(sampler instanceof MetalGpuSampler metalSampler)) {
+            throw new IllegalStateException(
+                    "Iris compute " + compute.info.name() + " resource '" + name + "' is not a Metal sampler"
+            );
+        }
+        return metalSampler;
+    }
+
+    private static void dispatchCompute(
+            final MetalComputePass pass,
+            final PlannedCompute compute,
+            final IrisMetalRenderTargets targets,
+            final ResourceProvider resources
+    ) {
+        IndirectPointer indirect = compute.source.getIndirectPointer();
+        if (indirect != null) {
+            GpuBufferSlice slice = requireBuffer(
+                    resources.storageBuffer(indirect.buffer()),
+                    compute,
+                    "indirect SSBO binding",
+                    Integer.toString(indirect.buffer())
+            );
+            long relativeOffset = indirect.offset();
+            if (relativeOffset < 0 || relativeOffset > slice.length() - 12L) {
+                throw new IllegalStateException(
+                        "Iris compute " + compute.info.name() + " indirect range " + relativeOffset + "+12 exceeds "
+                                + slice.length() + " bytes at SSBO binding " + indirect.buffer()
+                );
+            }
+            if (!(slice.buffer() instanceof MetalGpuBuffer buffer)) {
+                throw new IllegalStateException("Iris indirect dispatch buffer is not backed by Metal");
+            }
+            pass.dispatchIndirect(buffer, Math.addExact(slice.offset(), relativeOffset));
+            return;
+        }
+        Vector3i absolute = compute.source.getWorkGroups();
+        if (absolute != null) {
+            pass.dispatchGroups(absolute.x(), absolute.y(), absolute.z());
+            return;
+        }
+        Vector2f relative = compute.source.getWorkGroupRelative();
+        float scaleX = relative == null ? 1.0F : relative.x();
+        float scaleY = relative == null ? 1.0F : relative.y();
+        int threadsX = Math.max(1, (int) Math.ceil(targets.width() * scaleX));
+        int threadsY = Math.max(1, (int) Math.ceil(targets.height() * scaleY));
+        pass.dispatchThreadsCovering(threadsX, threadsY, 1);
     }
 
     private void executePass(
@@ -805,6 +1440,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                         Objects.requireNonNull(pass.pipeline, "post pipeline"),
                         pass.info,
                         pass.program,
+                        pass.blendState.global(),
                         targets,
                         resources
                 );
@@ -819,11 +1455,12 @@ final class IrisMetalPostChain implements AutoCloseable {
             final RenderPipeline pipeline,
             final PassInfo info,
             final MetalIrisShaderCompiler.GlslProgram program,
+            final Optional<BlendFunction> globalBlend,
             final IrisMetalRenderTargets targets,
             final ResourceProvider resources
     ) {
         renderPass.setPipeline(pipeline);
-        bindResources(renderPass, info, program, targets, resources);
+        bindResources(renderPass, info, program, globalBlend, targets, resources);
         GpuBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer(6);
         renderPass.setIndexBuffer(indices, RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).type());
         renderPass.setVertexBuffer(0, FullScreenQuadRenderer.INSTANCE.getQuad().slice());
@@ -834,11 +1471,28 @@ final class IrisMetalPostChain implements AutoCloseable {
             final MetalRenderPass renderPass,
             final PassInfo info,
             final MetalIrisShaderCompiler.GlslProgram program,
+            final Optional<BlendFunction> globalBlend,
             final IrisMetalRenderTargets targets,
             final ResourceProvider resources
     ) {
+        IrisMetalUniformValues.DrawUniformContext uniformContext =
+                IrisMetalUniformValues.requiresDrawContext(program.uniformLayout())
+                        ? fullscreenUniformContext(info, targets, resources, globalBlend)
+                        : IrisMetalUniformValues.DrawUniformContext.empty();
+        for (MetalIrisShaderCompiler.StorageBufferDecl storage : program.storageBuffers()) {
+            GpuBufferSlice slice = resources.storageBuffer(storage.binding());
+            if (slice == null) {
+                throw new IllegalStateException(
+                        "Iris pass " + info.name() + " is missing required SSBO binding "
+                                + storage.binding()
+                );
+            }
+            renderPass.bindStorageBuffer(storage.binding(), slice);
+        }
         for (String block : program.uniformBlockNames()) {
-            GpuBufferSlice slice = resources.uniform(info, block);
+            GpuBufferSlice slice = resources.uniform(
+                    info, block, uniformToken(info), uniformContext
+            );
             if (slice == null) {
                 throw new IllegalStateException(
                         "Iris pass " + info.name() + " is missing required uniform block '" + block + "'"
@@ -847,6 +1501,11 @@ final class IrisMetalPostChain implements AutoCloseable {
             renderPass.setUniform(block, slice);
         }
         for (MetalIrisShaderCompiler.SamplerDecl sampler : program.samplers()) {
+            if (sampler.isStorageImage()) {
+                GpuTextureView image = rasterStorageImage(info, sampler.name(), targets, resources);
+                renderPass.bindStorageImage(sampler.name(), image);
+                continue;
+            }
             TextureBinding binding = externalTexture(resources, info, sampler);
             if (binding == null) {
                 binding = standardTexture(info, sampler.name(), targets);
@@ -859,6 +1518,53 @@ final class IrisMetalPostChain implements AutoCloseable {
             }
             renderPass.bindTexture(sampler.name(), binding.view(), binding.sampler());
         }
+    }
+
+    private static IrisMetalUniformValues.DrawUniformContext fullscreenUniformContext(
+            final PassInfo info,
+            final IrisMetalRenderTargets targets,
+            final ResourceProvider resources,
+            final Optional<BlendFunction> globalBlend
+    ) {
+        MetalIrisShaderCompiler.SamplerDecl sampler =
+                new MetalIrisShaderCompiler.SamplerDecl("colortex0", "sampler2D");
+        TextureBinding primary = externalTexture(resources, info, sampler);
+        if (primary == null) {
+            primary = standardTexture(info, "colortex0", targets);
+        }
+        if (primary == null) {
+            throw new IllegalStateException(
+                    "Iris pass " + info.name() + " has no logical texture-unit-0 colortex0 binding"
+            );
+        }
+        return new IrisMetalUniformValues.DrawUniformContext(
+                primary.view(), 0, 0, globalBlend
+        );
+    }
+
+    private static GpuTextureView rasterStorageImage(
+            final PassInfo info,
+            final String name,
+            final IrisMetalRenderTargets targets,
+            final ResourceProvider resources
+    ) {
+        int target = colorImageIndex(name);
+        if (target >= 0) {
+            if (target >= targets.colorTargets().targetCount()) {
+                throw new IllegalStateException(
+                        "Iris pass " + info.name() + " storage image '" + name
+                                + "' exceeds generation target count"
+                );
+            }
+            return targets.colorTargets().sampleReadView(target);
+        }
+        GpuTextureView view = resources.storageImage(info, name);
+        if (view == null) {
+            throw new IllegalStateException(
+                    "Iris pass " + info.name() + " is missing required storage image '" + name + "'"
+            );
+        }
+        return view;
     }
 
     static @Nullable TextureBinding externalTexture(
@@ -883,7 +1589,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                 );
             }
             return new TextureBinding(
-                    targets.colorTargets().readView(target),
+                    targets.colorTargets().sampleReadView(target),
                     targets.colorSampler(target)
             );
         }
@@ -905,6 +1611,18 @@ final class IrisMetalPostChain implements AutoCloseable {
             }
         }
         return PackRenderTargetDirectives.LEGACY_RENDER_TARGETS.indexOf(name);
+    }
+
+    static int colorImageIndex(final String name) {
+        Matcher matcher = COLOR_IMAGE_NAME.matcher(name);
+        if (!matcher.matches()) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(matcher.group(1));
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
     }
 
     private static void generateMipmaps(
@@ -940,7 +1658,7 @@ final class IrisMetalPostChain implements AutoCloseable {
         int[] drawBuffers = pass.info.drawBuffers();
         for (int slot = 0; slot < drawBuffers.length; slot++) {
             builder.withColorTargetState(slot, new ColorTargetState(
-                    Optional.empty(),
+                    pass.blendState.forTarget(drawBuffers[slot]),
                     targets.colorTargets().format(drawBuffers[slot]),
                     ColorTargetState.WRITE_ALL
             ));
@@ -956,6 +1674,23 @@ final class IrisMetalPostChain implements AutoCloseable {
                 pass.vertexId,
                 pass.fragmentId,
                 Identifier.fromNamespaceAndPath("metallum", "iris/gen/post/final"),
+                pass.program
+        ).withColorTargetState(new ColorTargetState(
+                Optional.empty(), finalColorFormat, ColorTargetState.WRITE_ALL
+        )).build();
+    }
+
+    private static RenderPipeline buildColorSpacePipeline(
+            final PlannedColorSpacePass pass,
+            final GpuFormat finalColorFormat
+    ) {
+        return basePipeline(
+                pass.vertexId,
+                pass.fragmentId,
+                Identifier.fromNamespaceAndPath(
+                        "metallum",
+                        "iris/presentation/" + pass.colorSpace.name().toLowerCase(Locale.ROOT)
+                ),
                 pass.program
         ).withColorTargetState(new ColorTargetState(
                 Optional.empty(), finalColorFormat, ColorTargetState.WRITE_ALL
@@ -980,7 +1715,10 @@ final class IrisMetalPostChain implements AutoCloseable {
             if (!names.add(sampler.name())) {
                 throw new IllegalStateException("Duplicate post resource '" + sampler.name() + "'");
             }
-            if (sampler.glslType().toLowerCase(Locale.ROOT).contains("samplerbuffer")) {
+            if (sampler.isStorageImage()) {
+                continue;
+            }
+            if (sampler.isTexelBuffer()) {
                 throw new UnsupportedOperationException(
                         "Post sampler buffer '" + sampler.name() + "' needs a typed texel-buffer binding"
                 );
@@ -998,6 +1736,21 @@ final class IrisMetalPostChain implements AutoCloseable {
             builder.withBindGroupLayout(bindings.build());
         }
         return builder;
+    }
+
+    /** Rejects resources for which fixed Iris has no backend-neutral supplier before generation publish. */
+    private static void validateRasterResources(
+            final String programName,
+            final MetalIrisShaderCompiler.GlslProgram program
+    ) {
+        for (MetalIrisShaderCompiler.SamplerDecl sampler : program.samplers()) {
+            if (sampler.isTexelBuffer()) {
+                throw new UnsupportedOperationException(
+                        "Iris raster program " + programName + " declares samplerBuffer '"
+                                + sampler.name() + "'; fixed Iris provides no pack-owned texel-buffer supplier"
+                );
+            }
+        }
     }
 
     private static RenderPass.RenderArea renderArea(
@@ -1047,6 +1800,87 @@ final class IrisMetalPostChain implements AutoCloseable {
         return MetalIrisShaderCompiler.linkPatchedPair(
                 source.getName(), vertex, fragment, drawBuffers
         );
+    }
+
+    private static MetalIrisShaderCompiler.GlslProgram colorSpaceProgram(final ColorSpace colorSpace) {
+        List<StringPair> defines = new ArrayList<>();
+        defines.add(new StringPair("CURRENT_COLOR_SPACE", Integer.toString(colorSpace.ordinal())));
+        for (ColorSpace value : ColorSpace.values()) {
+            defines.add(new StringPair(value.name(), Integer.toString(value.ordinal())));
+        }
+        String fragment = JcppProcessor.glslPreprocessSource(colorSpaceFragmentSource(), defines)
+                .replaceFirst("(?m)^\\s*#version\\s+330(?:\\s+core)?", "#version 450 core")
+                .replace("in vec2 uv;", "layout(location = 0) in vec2 uv;")
+                .replace("out vec4 outColor;", "layout(location = 0) out vec4 outColor;");
+        return MetalIrisShaderCompiler.linkPatchedPair(
+                "iris-color-space-" + colorSpace.name().toLowerCase(Locale.ROOT),
+                COLOR_SPACE_VERTEX,
+                fragment,
+                new int[]{0}
+        );
+    }
+
+    private static String colorSpaceFragmentSource() {
+        try (InputStream stream = Objects.requireNonNull(
+                net.irisshaders.iris.pathways.colorspace.ColorSpaceFragmentConverter.class
+                        .getResourceAsStream("/colorSpace.csh"),
+                "Iris 1.11.2 colorSpace.csh"
+        )) {
+            return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to read fixed-Iris color-space shader", e);
+        }
+    }
+
+    private void ensureColorSpaceResources(
+            final MetalDevice device,
+            final int width,
+            final int height
+    ) {
+        if (width <= 0 || height <= 0) {
+            throw new IllegalArgumentException("Invalid Iris color-space extent " + width + 'x' + height);
+        }
+        if (this.colorSpaceSwap != null
+                && this.colorSpaceSwap.getWidth(0) == width
+                && this.colorSpaceSwap.getHeight(0) == height) {
+            return;
+        }
+        closeColorSpaceSwap();
+        this.colorSpaceSwap = (MetalGpuTexture) device.createTexture(
+                () -> "metallum:iris_color_space_swap",
+                GpuTexture.USAGE_RENDER_ATTACHMENT
+                        | GpuTexture.USAGE_TEXTURE_BINDING
+                        | GpuTexture.USAGE_COPY_SRC
+                        | GpuTexture.USAGE_COPY_DST,
+                GpuFormat.RGBA8_UNORM,
+                width,
+                height,
+                1,
+                1
+        );
+        this.colorSpaceSwapView = new MetalGpuTextureView(this.colorSpaceSwap, 0, 1);
+        if (this.colorSpaceSampler == null) {
+            this.colorSpaceSampler = new MetalGpuSampler(
+                    device,
+                    AddressMode.CLAMP_TO_EDGE,
+                    AddressMode.CLAMP_TO_EDGE,
+                    FilterMode.NEAREST,
+                    FilterMode.NEAREST,
+                    1,
+                    java.util.OptionalDouble.empty()
+            );
+        }
+    }
+
+    private void closeColorSpaceSwap() {
+        if (this.colorSpaceSwapView != null) {
+            this.colorSpaceSwapView.close();
+            this.colorSpaceSwapView = null;
+        }
+        if (this.colorSpaceSwap != null) {
+            this.colorSpaceSwap.close();
+            this.colorSpaceSwap = null;
+        }
     }
 
     /**
@@ -1191,36 +2025,156 @@ final class IrisMetalPostChain implements AutoCloseable {
         }
     }
 
-    private static void rejectComputes(final String group, final ComputeSource @Nullable [] computes) {
-        if (computes == null) {
-            return;
+    private static List<PlannedCompute> planComputes(
+            final ComputeSource @Nullable [] sources,
+            final Stage stage,
+            final int arrayIndex,
+            final BitSet readsFromAlt,
+            final Object2ObjectMap<Tri<String, TextureType, TextureStage>, String> textureMap,
+            final int targetCount,
+            final int firstOrdinal
+    ) {
+        if (sources == null || sources.length == 0) {
+            return List.of();
         }
-        for (ComputeSource compute : computes) {
-            if (compute != null && compute.isValid()) {
-                throw new UnsupportedOperationException(
-                        "Iris " + group + " compute program " + compute.getName()
-                                + " has no Metal post-chain executor yet"
+        List<PlannedCompute> result = new ArrayList<>();
+        int ordinal = firstOrdinal;
+        for (ComputeSource source : sources) {
+            if (source == null || !source.isValid()) {
+                continue;
+            }
+            String patched = TransformPatcher.patchCompute(
+                    source.getName(),
+                    source.getSource().orElseThrow(),
+                    stage.textureStage,
+                    textureMap
+            );
+            MetalIrisShaderCompiler.TranslatedStage translated = MetalIrisShaderCompiler.translateStage(
+                    source.getName(), MetalIrisShaderCompiler.StageKind.COMPUTE, patched
+            );
+            MetalIrisShaderCompiler.ComputeReflection reflection = Objects.requireNonNull(
+                    translated.computeReflection(), "compute reflection for " + source.getName()
+            );
+            validateComputeResources(source.getName(), reflection, targetCount);
+            Set<String> sampledNames = reflection.resources().stream()
+                    .filter(resource -> resource.kind() == MetalIrisShaderCompiler.ComputeResourceKind.SAMPLED_IMAGE
+                            || resource.kind() == MetalIrisShaderCompiler.ComputeResourceKind.SEPARATE_SAMPLER)
+                    .map(MetalIrisShaderCompiler.ComputeResource::name)
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+            String token = "compute:" + stage.name() + ':' + arrayIndex + ':' + ordinal++;
+            result.add(new PlannedCompute(
+                    token,
+                    new PassInfo(
+                            stage,
+                            source.getName(),
+                            new int[0],
+                            readsFromAlt,
+                            readsFromAlt,
+                            new BitSet(targetCount),
+                            sampledNames
+                    ),
+                    source,
+                    translated
+            ));
+        }
+        return List.copyOf(result);
+    }
+
+    private static void validateComputeResources(
+            final String programName,
+            final MetalIrisShaderCompiler.ComputeReflection reflection,
+            final int targetCount
+    ) {
+        for (MetalIrisShaderCompiler.ComputeResource resource : reflection.resources()) {
+            switch (resource.kind()) {
+                case UNIFORM_BUFFER -> {
+                    if (!MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME.equals(resource.name())) {
+                        throw new UnsupportedOperationException(
+                                "Iris compute program " + programName + " declares unmanaged UBO '"
+                                        + resource.name() + "'"
+                        );
+                    }
+                }
+                case STORAGE_IMAGE -> {
+                    if (resource.imageDimension() != org.lwjgl.util.spvc.Spv.SpvDim2D) {
+                        throw new UnsupportedOperationException(
+                                "Iris compute image '" + resource.name() + "' in " + programName
+                                        + " is not 2D (SPIR-V dim=" + resource.imageDimension() + ')'
+                        );
+                    }
+                    int target = colorImageIndex(resource.name());
+                    if (target >= targetCount) {
+                        throw new IllegalArgumentException(
+                                "Iris compute image '" + resource.name() + "' references colortex" + target
+                                        + " but this generation has only " + targetCount + " targets"
+                        );
+                    }
+                }
+                case TEXEL_BUFFER, STORAGE_TEXEL_BUFFER -> throw new UnsupportedOperationException(
+                        "Iris compute program " + programName + " declares typed texel buffer '"
+                                + resource.name() + "'; the Metal compute texel-buffer binding is not connected"
                 );
+                case ATOMIC_COUNTER -> throw new UnsupportedOperationException(
+                        "Iris compute program " + programName + " declares atomic counter '"
+                                + resource.name() + "'; no Iris Metal atomic-counter resource exists"
+                );
+                default -> {
+                }
             }
         }
     }
 
-    private static void rejectUnsupportedBlend(
-            final String name,
-            final ProgramDirectives directives
+    private static Set<Integer> collectStorageImageTargets(
+            final EnumMap<Stage, List<PlannedComputeGroup>> stages,
+            final List<PlannedCompute> setup,
+            final List<PlannedCompute> finals,
+            final int targetCount
     ) {
-        if (directives.getBlendModeOverride().isPresent()) {
-            throw new UnsupportedOperationException(
-                    "Iris post program " + name + " declares a blend override;"
-                            + " Metal post blending must be mapped before this pass can execute"
-            );
+        Set<Integer> result = new LinkedHashSet<>();
+        List<PlannedCompute> computes = new ArrayList<>(setup.size() + finals.size());
+        computes.addAll(setup);
+        stages.values().forEach(groups -> groups.forEach(group -> computes.addAll(group.computes())));
+        computes.addAll(finals);
+        for (PlannedCompute compute : computes) {
+            for (MetalIrisShaderCompiler.ComputeResource resource : compute.reflection.resources()) {
+                if (resource.kind() != MetalIrisShaderCompiler.ComputeResourceKind.STORAGE_IMAGE) {
+                    continue;
+                }
+                int target = colorImageIndex(resource.name());
+                if (target >= 0) {
+                    validateTarget(target, targetCount, "compute storage image " + resource.name());
+                    result.add(target);
+                }
+            }
         }
-        if (!directives.getBufferBlendOverrides().isEmpty()) {
-            throw new UnsupportedOperationException(
-                    "Iris post program " + name + " declares per-buffer blend overrides;"
-                            + " Metal post blending must be mapped before this pass can execute"
-            );
+        return Set.copyOf(result);
+    }
+
+    private static TargetBlendState blendState(
+            final ProgramDirectives directives,
+            final int targetCount
+    ) {
+        Optional<BlendFunction> global = directives.getBlendModeOverride()
+                .flatMap(IrisMetalPipelineOverrides::irisBlendFunction);
+        Map<Integer, Optional<BlendFunction>> perTarget = new LinkedHashMap<>();
+        for (var override : directives.getBufferBlendOverrides()) {
+            if (override.index() < 0 || override.index() >= targetCount) {
+                throw new IllegalArgumentException(
+                        "Iris post directives declare blend target " + override.index()
+                                + " outside 0.." + (targetCount - 1)
+                );
+            }
+            Optional<BlendFunction> blend = override.blendMode() == null
+                    ? Optional.empty()
+                    : Optional.of(IrisMetalPipelineOverrides.irisBlendFunction(override.blendMode()));
+            Optional<BlendFunction> previous = perTarget.put(override.index(), blend);
+            if (previous != null) {
+                throw new IllegalArgumentException(
+                        "Iris post directives repeat blend override for colortex" + override.index()
+                );
+            }
         }
+        return new TargetBlendState(global, perTarget);
     }
 
     private static int[] validatedDrawBuffers(
@@ -1389,6 +2343,20 @@ final class IrisMetalPostChain implements AutoCloseable {
 
     @Override
     public void close() {
+        if (this.closed) {
+            return;
+        }
         this.closed = true;
+        closeColorSpaceSwap();
+        if (this.colorSpaceSampler != null) {
+            this.colorSpaceSampler.close();
+            this.colorSpaceSampler = null;
+        }
+        for (PlannedCompute compute : allComputes()) {
+            if (compute.pipeline != null) {
+                compute.pipeline.close();
+                compute.pipeline = null;
+            }
+        }
     }
 }

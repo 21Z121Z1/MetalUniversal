@@ -1,6 +1,7 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.IrisMetalPackLifecycle;
 import com.metallum.client.metal.render.MetalIrisCompat;
 import com.metallum.client.metal.render.MetalWorldRenderingPipeline;
 import net.irisshaders.iris.Iris;
@@ -62,6 +63,12 @@ public abstract class IrisPipelineFactoryMixin {
         try {
             cir.setReturnValue(new MetalWorldRenderingPipeline(pack.get().getProgramSet(dimensionId)));
         } catch (Throwable t) {
+            if (IrisMetalPackLifecycle.strictModeRequested()) {
+                throw new IllegalStateException(
+                        "Iris Metal strict pipeline admission failed for dimension " + dimensionId,
+                        t
+                );
+            }
             Metallum.LOGGER.error(
                     "[metallum-iris] failed to build the semantic pipeline for dimension {};"
                             + " falling back to shaders-off rendering", dimensionId, t

@@ -97,11 +97,30 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             final Map<Integer, RenderTargetSettings> targetSettings,
             final Set<Integer> mipmappedTargets
     ) {
+        this(device, colorFormats, width, height, targetSettings, mipmappedTargets, Set.of());
+    }
+
+    IrisMetalRenderTargets(
+            final MetalDevice device,
+            final GpuFormat[] colorFormats,
+            final int width,
+            final int height,
+            final Map<Integer, RenderTargetSettings> targetSettings,
+            final Set<Integer> mipmappedTargets,
+            final Set<Integer> storageImageTargets
+    ) {
         this.device = device;
-        this.colorTargets = new IrisMetalPingPongTargets(
-                device, "iris-colortex", colorFormats, width, height, mipmappedTargets
-        );
         this.targetSettings = Map.copyOf(targetSettings);
+        this.colorTargets = new IrisMetalPingPongTargets(
+                device,
+                "iris-colortex",
+                colorFormats,
+                width,
+                height,
+                mipmappedTargets,
+                storageImageTargets,
+                alphaOneSampleTargets(colorFormats.length, this.targetSettings)
+        );
         this.colorSampler = new MetalGpuSampler(
                 device,
                 AddressMode.CLAMP_TO_EDGE,
@@ -147,6 +166,33 @@ final class IrisMetalRenderTargets implements AutoCloseable {
                 MTLSamplerMipFilter.Linear
         );
         createDepthTextures(width, height);
+    }
+
+    private static Set<Integer> alphaOneSampleTargets(
+            final int targetCount,
+            final Map<Integer, RenderTargetSettings> settings
+    ) {
+        java.util.LinkedHashSet<Integer> targets = new java.util.LinkedHashSet<>();
+        for (Map.Entry<Integer, RenderTargetSettings> entry : settings.entrySet()) {
+            Integer target = entry.getKey();
+            RenderTargetSettings targetSettings = entry.getValue();
+            if (target == null || target < 0 || target >= targetCount
+                    || targetSettings == null || targetSettings.getInternalFormat() == null) {
+                continue;
+            }
+            if (logicalRgbBackedByRgba(targetSettings.getInternalFormat().name())) {
+                targets.add(target);
+            }
+        }
+        return Set.copyOf(targets);
+    }
+
+    static boolean logicalRgbBackedByRgba(final String internalFormat) {
+        return switch (internalFormat) {
+            case "RGB8", "RGB8_SNORM", "RGB16", "RGB16_SNORM", "RGB16F", "RGB32F",
+                    "RGB8I", "RGB8UI", "RGB16I", "RGB16UI", "RGB32I", "RGB32UI" -> true;
+            default -> false;
+        };
     }
 
     /**

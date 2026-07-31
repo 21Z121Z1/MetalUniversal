@@ -23,6 +23,7 @@ import net.irisshaders.iris.gl.texture.TextureType;
 import net.irisshaders.iris.helpers.Tri;
 import net.irisshaders.iris.pipeline.VanillaRenderingPipeline;
 import net.irisshaders.iris.pipeline.WorldRenderingPhase;
+import net.irisshaders.iris.pbr.texture.PBRTextureManager;
 import net.irisshaders.iris.mixin.LevelRendererAccessor;
 import net.irisshaders.iris.mixinterface.ShadowRenderListAccess;
 import net.irisshaders.iris.pathways.HorizonRenderer;
@@ -71,6 +72,7 @@ import org.joml.Vector3d;
 import org.joml.Vector4f;
 
 import java.util.ArrayList;
+import java.util.Objects;
 import java.util.OptionalInt;
 
 /**
@@ -118,6 +120,10 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     private boolean initializedBlockIds;
 
     public MetalWorldRenderingPipeline(final ProgramSet programSet) {
+        IrisMetalPackAdmission.requireSupported(
+                programSet,
+                Objects.requireNonNull(IrisVideoSettings.colorSpace, "Iris color space")
+        );
         this.programSet = programSet;
         this.pack = programSet.getPack();
         this.directives = programSet.getPackDirectives();
@@ -133,46 +139,101 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             this.forcedShadowRenderDistanceChunks = OptionalInt.empty();
         }
 
-        Minecraft client = Minecraft.getInstance();
-        this.shadowRenderBuffers = new RenderBuffers(Runtime.getRuntime().availableProcessors());
-        this.shadowFeatureRenderDispatcher = new FeatureRenderDispatcher(
-                this.shadowRenderBuffers,
-                client.getModelManager(),
-                client.getAtlasManager(),
-                client.font,
-                client.gameRenderer.gameRenderState()
-        );
-        this.horizonRenderer = new HorizonRenderer();
-
-        // Mirrors IrisRenderingPipeline's constructor. The vertex format is the
-        // load-bearing one: FormatAnalyzer.createFormat(true, true, true, true)
-        // is the extended (XHFP) chunk format whose extra attributes Iris's own
-        // sodium mesh mixins write, and which the patched terrain shader reads.
-        WorldRenderingSettings settings = WorldRenderingSettings.INSTANCE;
-        settings.setVertexFormat(FormatAnalyzer.createFormat(true, true, true, true));
-        settings.setEntityIds(this.pack.getIdMap().getEntityIdMap());
-        settings.setItemIds(this.pack.getIdMap().getItemIdMap());
-        settings.setAmbientOcclusionLevel(directives.getAmbientOcclusionLevel());
-        settings.setDisableDirectionalShading(!directives.isOldLighting());
-        settings.setUseSeparateAo(directives.shouldUseSeparateAo());
-        settings.setBreaksAnisotropy(directives.breaksAnisotropy());
-        settings.setVoxelizeLightBlocks(directives.shouldVoxelizeLightBlocks());
-        settings.setSeparateEntityDraws(directives.shouldUseSeparateEntityDraws());
-
-        // This pipeline owns the one generation in which Sodium render passes
-        // are extended. The decision is published before activation so async
-        // PSO precompile observes the same immutable layout as the draw path.
+        // Build every CPU execution plan before mutating renderer-global state.
+        // Unsupported declarations therefore fail admission without leaving
+        // Sodium configured for a generation that was never published.
         IrisMetalPipelineOverrides.setExtendedTerrainTargets(true);
-        this.overrides = IrisMetalPipelineOverrides.activate(
+        this.overrides = IrisMetalPipelineOverrides.prepare(
                 programSet,
                 directives.getTextureMap(),
                 this.frameState.updateNotifier(),
                 () -> this.frameState.phase().ordinal()
         );
-        Metallum.LOGGER.info(
-                "[metallum-iris] semantic pipeline generation {} online for pack program set {}",
-                this.overrides.generation(), this.pack.getProfileInfo()
-        );
+
+        RenderBuffers preparedShadowBuffers = null;
+        FeatureRenderDispatcher preparedFeatureDispatcher = null;
+        HorizonRenderer preparedHorizonRenderer = null;
+        try {
+            Minecraft client = Minecraft.getInstance();
+            preparedShadowBuffers = new RenderBuffers(Runtime.getRuntime().availableProcessors());
+            preparedFeatureDispatcher = new FeatureRenderDispatcher(
+                    preparedShadowBuffers,
+                    client.getModelManager(),
+                    client.getAtlasManager(),
+                    client.font,
+                    client.gameRenderer.gameRenderState()
+            );
+            preparedHorizonRenderer = new HorizonRenderer();
+            this.shadowRenderBuffers = preparedShadowBuffers;
+            this.shadowFeatureRenderDispatcher = preparedFeatureDispatcher;
+            this.horizonRenderer = preparedHorizonRenderer;
+
+            // Mirrors IrisRenderingPipeline's constructor. The vertex format is the
+            // load-bearing one: FormatAnalyzer.createFormat(true, true, true, true)
+            // is the extended (XHFP) chunk format whose extra attributes Iris's own
+            // sodium mesh mixins write, and which the patched terrain shader reads.
+            WorldRenderingSettings settings = WorldRenderingSettings.INSTANCE;
+            settings.setVertexFormat(FormatAnalyzer.createFormat(true, true, true, true));
+            settings.setEntityIds(this.pack.getIdMap().getEntityIdMap());
+            settings.setItemIds(this.pack.getIdMap().getItemIdMap());
+            settings.setAmbientOcclusionLevel(directives.getAmbientOcclusionLevel());
+            settings.setDisableDirectionalShading(!directives.isOldLighting());
+            settings.setUseSeparateAo(directives.shouldUseSeparateAo());
+            settings.setBreaksAnisotropy(directives.breaksAnisotropy());
+            settings.setVoxelizeLightBlocks(directives.shouldVoxelizeLightBlocks());
+            settings.setSeparateEntityDraws(directives.shouldUseSeparateEntityDraws());
+
+            // Publish only after the generation and its non-GPU renderer resources
+            // are complete. Cached dimensions remain selected if construction fails.
+            IrisMetalPipelineOverrides.select(this.overrides);
+            IrisMetalPackLifecycle.onSemanticPipelineActivated();
+            Metallum.LOGGER.info(
+                    "[metallum-iris] semantic pipeline generation {} online for pack program set {}",
+                    this.overrides.generation(), this.pack.getProfileInfo()
+            );
+        } catch (RuntimeException | Error failure) {
+            closeConstructionResources(
+                    preparedHorizonRenderer,
+                    preparedFeatureDispatcher,
+                    preparedShadowBuffers,
+                    failure
+            );
+            throw failure;
+        }
+    }
+
+    private void closeConstructionResources(
+            final HorizonRenderer preparedHorizonRenderer,
+            final FeatureRenderDispatcher preparedFeatureDispatcher,
+            final RenderBuffers preparedShadowBuffers,
+            final Throwable failure
+    ) {
+        try {
+            if (preparedHorizonRenderer != null) {
+                preparedHorizonRenderer.destroy();
+            }
+        } catch (RuntimeException | Error cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
+        try {
+            if (preparedFeatureDispatcher != null) {
+                preparedFeatureDispatcher.close();
+            }
+        } catch (RuntimeException | Error cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
+        try {
+            if (preparedShadowBuffers != null) {
+                preparedShadowBuffers.close();
+            }
+        } catch (RuntimeException | Error cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
+        try {
+            IrisMetalPipelineOverrides.deactivate(this.overrides);
+        } catch (RuntimeException | Error cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
     }
 
     /**
@@ -188,9 +249,14 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
      */
     @Override
     public void beginLevelRendering() {
+        activateDimensionGeneration();
         this.frameState.beginWorldRendering();
+        // Iris advances queued PBR resource aliases once per world frame
+        // before any program asks their dynamic TextureWrapper suppliers.
+        PBRTextureManager.INSTANCE.onNewFrame();
         // Refresh the pack's uniform block before sodium draws terrain.
         IrisMetalPipelineOverrides.updateFrame();
+        IrisMetalPipelineOverrides.executePostStage(IrisMetalPostChain.Stage.BEGIN);
         IrisMetalPassTrace.observePhase("gbuffer", "executing");
         if (this.initializedBlockIds) {
             return;
@@ -255,6 +321,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         if (!IrisMetalPipelineOverrides.shadowsEnabled()
                 || IrisVideoSettings.getOverriddenShadowDistance(IrisVideoSettings.shadowDistance) == 0) {
             IrisMetalPassTrace.observePhase("shadow", "empty");
+            IrisMetalPipelineOverrides.executePostStage(IrisMetalPostChain.Stage.PREPARE);
             return;
         }
         PackShadowDirectives shadow = this.directives.getShadowDirectives();
@@ -407,6 +474,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                 culling.restoreState();
             }
         }
+        IrisMetalPipelineOverrides.executePostStage(IrisMetalPostChain.Stage.PREPARE);
     }
 
     private void renderShadowFeatures(
@@ -591,9 +659,11 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
 
     @Override
     public void finalizeGameRendering() {
-        // Iris runs final at finalizeLevelRendering. This later boundary is
-        // reserved for output colour-space conversion, which Metal does not
-        // currently expose as a separate pack stage.
+        // Fixed Iris runs its output color-space converter after the pack final
+        // pass, preserving the intermediate RGBA8 quantization before display.
+        IrisMetalPipelineOverrides.executeColorSpace(
+                Objects.requireNonNull(IrisVideoSettings.colorSpace, "Iris color space")
+        );
         super.finalizeGameRendering();
     }
 
@@ -697,6 +767,11 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         return this.directives.supportsEndFlash();
     }
 
+    /** Mirrors fixed Iris's concrete-pipeline-only skipAllRendering contract. */
+    public boolean shouldSkipAllRendering() {
+        return this.directives.skipAllRendering();
+    }
+
     @Override
     public WorldRenderingPhase getPhase() {
         return this.frameState.phase();
@@ -743,6 +818,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     public void destroy() {
         this.frameState.endWorldRendering();
         IrisMetalPipelineOverrides.deactivate(this.overrides);
+        IrisMetalPackLifecycle.onSemanticPipelineDestroyed();
         this.horizonRenderer.destroy();
         this.shadowFeatureRenderDispatcher.close();
         this.shadowRenderBuffers.close();
@@ -750,6 +826,11 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                 "[metallum-iris] semantic pipeline generation {} destroyed", this.overrides.generation()
         );
         super.destroy();
+    }
+
+    /** Called by PipelineManager for both newly-created and cached dimensions. */
+    public void activateDimensionGeneration() {
+        IrisMetalPipelineOverrides.select(this.overrides);
     }
 
     /** Render-thread state kept independently of the GL-backed Iris pipeline. */

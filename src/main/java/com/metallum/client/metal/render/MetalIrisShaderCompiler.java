@@ -18,7 +18,9 @@ import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.util.shaderc.Shaderc;
+import org.lwjgl.util.spvc.Spv;
 import org.lwjgl.util.spvc.Spvc;
+import org.lwjgl.util.spvc.SpvcReflectedResource;
 
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
@@ -83,8 +85,19 @@ final class MetalIrisShaderCompiler {
      * make it a uniform block, left untouched).
      */
     private static final Pattern UNIFORM_STATEMENT_PATTERN = Pattern.compile("(?m)^[ \\t]*uniform\\b([^;{}]*);");
+    private static final Pattern OPAQUE_UNIFORM_STATEMENT_PATTERN = Pattern.compile(
+            "(?m)^[ \\t]*(?:layout\\s*\\([^;{}]*\\)\\s*)?uniform\\b([^;{}]*);"
+    );
+    private static final Pattern STORAGE_BUFFER_BLOCK_PATTERN = Pattern.compile(
+            "(?s)(?:layout\\s*\\(([^)]*)\\)\\s*)?"
+                    + "(?:(?:coherent|volatile|restrict|readonly|writeonly)\\s+)*"
+                    + "buffer\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\{"
+    );
+    private static final Pattern BINDING_QUALIFIER_PATTERN = Pattern.compile("\\bbinding\\s*=\\s*(\\d+)\\b");
     private static final Pattern OPAQUE_TYPE_PATTERN = Pattern.compile("[iu]?(sampler|image|texture)\\w*|atomic_uint");
-    private static final Set<String> PRECISION_QUALIFIERS = Set.of("lowp", "mediump", "highp");
+    private static final Set<String> PRECISION_QUALIFIERS = Set.of(
+            "lowp", "mediump", "highp", "readonly", "writeonly", "coherent", "volatile", "restrict"
+    );
     static final String UNIFORM_BLOCK_NAME = "MetallumIrisUniforms";
     /**
      * Identifiers that are legal in GL-dialect GLSL but collide with keywords
@@ -133,8 +146,42 @@ final class MetalIrisShaderCompiler {
             String msl,
             String entryPoint,
             List<String> blockedUniforms,
-            boolean forcedVersion450
+            boolean forcedVersion450,
+            @Nullable ComputeReflection computeReflection
     ) {
+    }
+
+    enum ComputeResourceKind {
+        UNIFORM_BUFFER,
+        STORAGE_BUFFER,
+        SAMPLED_IMAGE,
+        STORAGE_IMAGE,
+        TEXEL_BUFFER,
+        STORAGE_TEXEL_BUFFER,
+        SEPARATE_SAMPLER,
+        ATOMIC_COUNTER
+    }
+
+    record ComputeResource(
+            ComputeResourceKind kind,
+            String name,
+            int binding,
+            int imageDimension
+    ) {
+    }
+
+    record ComputeReflection(
+            int localSizeX,
+            int localSizeY,
+            int localSizeZ,
+            List<ComputeResource> resources,
+            List<UniformMember> uniformLayout,
+            int uniformBlockSize
+    ) {
+        ComputeReflection {
+            resources = List.copyOf(resources);
+            uniformLayout = List.copyOf(uniformLayout);
+        }
     }
 
     record TranslatedProgram(
@@ -343,7 +390,7 @@ final class MetalIrisShaderCompiler {
     static TranslatedStage translateStage(final String name, final StageKind kind, final String patchedGlsl) {
         WrappedGlsl wrapped;
         try {
-            wrapped = wrapLooseUniforms(patchedGlsl);
+            wrapped = wrapLooseUniforms(name, patchedGlsl);
         } catch (RuntimeException e) {
             TranslationException te = new TranslationException(name, PHASE_WRAP, kind, String.valueOf(e.getMessage()), e);
             te.sourceDump = patchedGlsl;
@@ -360,9 +407,12 @@ final class MetalIrisShaderCompiler {
         }
         Matcher entry = kind.entryPattern.matcher(msl);
         String entryPoint = entry.find() ? entry.group(1) : "main0";
+        ComputeReflection computeReflection = kind == StageKind.COMPUTE
+                ? reflectCompute(name, spirv.spirv(), wrapped)
+                : null;
         return new TranslatedStage(
                 kind, patchedGlsl, wrapped.source(), msl, entryPoint,
-                wrapped.blockedUniforms(), spirv.forcedVersion450()
+                wrapped.blockedUniforms(), spirv.forcedVersion450(), computeReflection
         );
     }
 
@@ -390,18 +440,34 @@ final class MetalIrisShaderCompiler {
     // Loose-uniform wrapping
     // ------------------------------------------------------------------
 
-    record WrappedGlsl(String source, List<String> blockedUniforms) {
+    record WrappedGlsl(
+            String source,
+            List<String> blockedUniforms,
+            List<UniformMember> uniformLayout,
+            int uniformBlockSize
+    ) {
     }
 
     static WrappedGlsl wrapLooseUniforms(final String glsl) {
+        return wrapLooseUniforms("wrapped-compute", glsl);
+    }
+
+    private static WrappedGlsl wrapLooseUniforms(final String name, final String glsl) {
         String src = renameHostileIdentifiers(stripComments(glsl));
         LooseExtraction extraction = extractLooseUniforms(src);
         List<LooseUniform> deduped = dedupeByName(List.of(extraction.uniforms()));
         if (deduped.isEmpty()) {
-            return new WrappedGlsl(src, List.of());
+            return new WrappedGlsl(src, List.of(), List.of(), 0);
         }
+        List<UniformMember> layout = computeStd140Layout(name, deduped);
+        int blockSize = alignUp(layout.getLast().offset() + layout.getLast().byteSize(), 16);
         String out = insertUniformBlock(extraction.body(), renderUniformBlock(deduped));
-        return new WrappedGlsl(out, deduped.stream().map(LooseUniform::name).toList());
+        return new WrappedGlsl(
+                out,
+                deduped.stream().map(LooseUniform::name).toList(),
+                layout,
+                blockSize
+        );
     }
 
     /** One loose default-block uniform declarator, initializer already dropped. */
@@ -686,6 +752,190 @@ final class MetalIrisShaderCompiler {
         }
     }
 
+    private static ComputeReflection reflectCompute(
+            final String name,
+            final ByteBuffer spirvBytes,
+            final WrappedGlsl wrapped
+    ) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer spirvWords = spirvBytes.asIntBuffer();
+            PointerBuffer pContext = stack.mallocPointer(1);
+            checkSpvc(name, StageKind.COMPUTE, Spvc.spvc_context_create(pContext), "spvc_context_create(reflect)");
+            long context = pContext.get(0);
+            try {
+                PointerBuffer pIr = stack.mallocPointer(1);
+                checkSpvc(
+                        name,
+                        StageKind.COMPUTE,
+                        Spvc.spvc_context_parse_spirv(context, spirvWords, spirvWords.remaining(), pIr),
+                        "spvc_context_parse_spirv(reflect)"
+                );
+                PointerBuffer pCompiler = stack.mallocPointer(1);
+                checkSpvc(
+                        name,
+                        StageKind.COMPUTE,
+                        Spvc.spvc_context_create_compiler(
+                                context,
+                                Spvc.SPVC_BACKEND_NONE,
+                                pIr.get(0),
+                                Spvc.SPVC_CAPTURE_MODE_COPY,
+                                pCompiler
+                        ),
+                        "spvc_context_create_compiler(reflect)"
+                );
+                long compiler = pCompiler.get(0);
+                int localSizeX = Math.max(1, Spvc.spvc_compiler_get_execution_mode_argument_by_index(
+                        compiler, Spv.SpvExecutionModeLocalSize, 0
+                ));
+                int localSizeY = Math.max(1, Spvc.spvc_compiler_get_execution_mode_argument_by_index(
+                        compiler, Spv.SpvExecutionModeLocalSize, 1
+                ));
+                int localSizeZ = Math.max(1, Spvc.spvc_compiler_get_execution_mode_argument_by_index(
+                        compiler, Spv.SpvExecutionModeLocalSize, 2
+                ));
+
+                PointerBuffer pResources = stack.mallocPointer(1);
+                checkSpvc(
+                        name,
+                        StageKind.COMPUTE,
+                        Spvc.spvc_compiler_create_shader_resources(compiler, pResources),
+                        "spvc_compiler_create_shader_resources(reflect)"
+                );
+                long resources = pResources.get(0);
+                List<ComputeResource> reflected = new ArrayList<>();
+                collectComputeResources(
+                        stack, compiler, resources, Spvc.SPVC_RESOURCE_TYPE_UNIFORM_BUFFER,
+                        ComputeResourceKind.UNIFORM_BUFFER, false, reflected, name
+                );
+                collectComputeResources(
+                        stack, compiler, resources, Spvc.SPVC_RESOURCE_TYPE_STORAGE_BUFFER,
+                        ComputeResourceKind.STORAGE_BUFFER, false, reflected, name
+                );
+                collectComputeResources(
+                        stack, compiler, resources, Spvc.SPVC_RESOURCE_TYPE_SAMPLED_IMAGE,
+                        ComputeResourceKind.SAMPLED_IMAGE, true, reflected, name
+                );
+                collectComputeResources(
+                        stack, compiler, resources, Spvc.SPVC_RESOURCE_TYPE_SEPARATE_IMAGE,
+                        ComputeResourceKind.SAMPLED_IMAGE, true, reflected, name
+                );
+                collectComputeResources(
+                        stack, compiler, resources, Spvc.SPVC_RESOURCE_TYPE_STORAGE_IMAGE,
+                        ComputeResourceKind.STORAGE_IMAGE, true, reflected, name
+                );
+                collectComputeResources(
+                        stack, compiler, resources, Spvc.SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS,
+                        ComputeResourceKind.SEPARATE_SAMPLER, false, reflected, name
+                );
+                collectComputeResources(
+                        stack, compiler, resources, Spvc.SPVC_RESOURCE_TYPE_ATOMIC_COUNTER,
+                        ComputeResourceKind.ATOMIC_COUNTER, false, reflected, name
+                );
+
+                List<ComputeResource> normalized = new ArrayList<>(reflected.size());
+                for (ComputeResource resource : reflected) {
+                    ComputeResourceKind kind = resource.kind();
+                    if (resource.imageDimension() == Spv.SpvDimBuffer) {
+                        kind = kind == ComputeResourceKind.STORAGE_IMAGE
+                                ? ComputeResourceKind.STORAGE_TEXEL_BUFFER
+                                : ComputeResourceKind.TEXEL_BUFFER;
+                    }
+                    normalized.add(new ComputeResource(
+                            kind, resource.name(), resource.binding(), resource.imageDimension()
+                    ));
+                }
+                validateComputeBindings(name, normalized);
+                return new ComputeReflection(
+                        localSizeX,
+                        localSizeY,
+                        localSizeZ,
+                        normalized,
+                        wrapped.uniformLayout(),
+                        wrapped.uniformBlockSize()
+                );
+            } finally {
+                Spvc.spvc_context_destroy(context);
+            }
+        }
+    }
+
+    private static void collectComputeResources(
+            final MemoryStack stack,
+            final long compiler,
+            final long resources,
+            final int resourceType,
+            final ComputeResourceKind kind,
+            final boolean image,
+            final List<ComputeResource> output,
+            final String programName
+    ) {
+        PointerBuffer pList = stack.mallocPointer(1);
+        PointerBuffer pCount = stack.mallocPointer(1);
+        checkSpvc(
+                programName,
+                StageKind.COMPUTE,
+                Spvc.spvc_resources_get_resource_list_for_type(resources, resourceType, pList, pCount),
+                "spvc_resources_get_resource_list_for_type(" + resourceType + ")"
+        );
+        int count = Math.toIntExact(pCount.get(0));
+        if (count == 0) {
+            return;
+        }
+        SpvcReflectedResource.Buffer list = SpvcReflectedResource.create(pList.get(0), count);
+        for (SpvcReflectedResource resource : list) {
+            if (!Spvc.spvc_compiler_has_decoration(compiler, resource.id(), Spv.SpvDecorationBinding)) {
+                throw new TranslationException(
+                        programName,
+                        PHASE_SPIRV_TO_MSL,
+                        StageKind.COMPUTE,
+                        "resource '" + resource.nameString() + "' has no reflected binding"
+                );
+            }
+            int dimension = image
+                    ? Spvc.spvc_type_get_image_dimension(
+                            Spvc.spvc_compiler_get_type_handle(compiler, resource.type_id())
+                    )
+                    : -1;
+            output.add(new ComputeResource(
+                    kind,
+                    resource.nameString(),
+                    Spvc.spvc_compiler_get_decoration(compiler, resource.id(), Spv.SpvDecorationBinding),
+                    dimension
+            ));
+        }
+    }
+
+    private static void validateComputeBindings(
+            final String programName,
+            final List<ComputeResource> resources
+    ) {
+        Map<Integer, String> buffers = new java.util.HashMap<>();
+        Map<Integer, String> textures = new java.util.HashMap<>();
+        Map<Integer, String> samplers = new java.util.HashMap<>();
+        Set<String> names = new java.util.HashSet<>();
+        for (ComputeResource resource : resources) {
+            if (!names.add(resource.kind() + ":" + resource.name())) {
+                throw new TranslationException(
+                        programName, PHASE_SPIRV_TO_MSL, StageKind.COMPUTE,
+                        "duplicate reflected resource '" + resource.name() + "'"
+                );
+            }
+            Map<Integer, String> namespace = switch (resource.kind()) {
+                case UNIFORM_BUFFER, STORAGE_BUFFER, ATOMIC_COUNTER -> buffers;
+                case SEPARATE_SAMPLER -> samplers;
+                case SAMPLED_IMAGE, STORAGE_IMAGE, TEXEL_BUFFER, STORAGE_TEXEL_BUFFER -> textures;
+            };
+            String previous = namespace.putIfAbsent(resource.binding(), resource.name());
+            if (previous != null && !previous.equals(resource.name())) {
+                throw new TranslationException(
+                        programName, PHASE_SPIRV_TO_MSL, StageKind.COMPUTE,
+                        "resources '" + previous + "' and '" + resource.name()
+                                + "' share Metal binding " + resource.binding()
+                );
+            }
+        }
+    }
+
     private static void checkSpvc(final String name, final StageKind kind, final int result, final String stage) {
         if (result != Spvc.SPVC_SUCCESS) {
             throw new TranslationException(name, PHASE_SPIRV_TO_MSL, kind, stage + " -> " + result);
@@ -791,6 +1041,16 @@ final class MetalIrisShaderCompiler {
     }
 
     record SamplerDecl(String name, String glslType) {
+        boolean isStorageImage() {
+            return glslType.toLowerCase(java.util.Locale.ROOT).matches("[iu]?image.*");
+        }
+
+        boolean isTexelBuffer() {
+            return glslType.toLowerCase(java.util.Locale.ROOT).contains("samplerbuffer");
+        }
+    }
+
+    record StorageBufferDecl(int binding) {
     }
 
     record GlslProgram(
@@ -802,6 +1062,7 @@ final class MetalIrisShaderCompiler {
             List<UniformMember> uniformLayout,
             int uniformBlockSize,
             List<SamplerDecl> samplers,
+            List<StorageBufferDecl> storageBuffers,
             List<String> uniformBlockNames,
             int[] drawBuffers,
             OptionalDouble alphaTestReference
@@ -911,6 +1172,13 @@ final class MetalIrisShaderCompiler {
                     .map(e -> new SamplerDecl(e.getKey(), e.getValue()))
                     .toList();
 
+            Set<Integer> storageBindings = new LinkedHashSet<>();
+            collectStorageBufferDecls(name, vertexOut, storageBindings);
+            collectStorageBufferDecls(name, fragmentOut, storageBindings);
+            List<StorageBufferDecl> storageBuffers = storageBindings.stream()
+                    .map(StorageBufferDecl::new)
+                    .toList();
+
             Set<String> blockNames = new LinkedHashSet<>();
             collectUniformBlockNames(vertexOut, blockNames);
             collectUniformBlockNames(fragmentOut, blockNames);
@@ -927,6 +1195,7 @@ final class MetalIrisShaderCompiler {
                     layout,
                     blockSize,
                     samplerList,
+                    storageBuffers,
                     List.copyOf(blockNames),
                     drawBuffers.clone(),
                     alphaTestReference
@@ -1082,7 +1351,7 @@ final class MetalIrisShaderCompiler {
     // ------------------------------------------------------------------
 
     private static void collectSamplerDecls(final String source, final Map<String, String> out) {
-        Matcher matcher = UNIFORM_STATEMENT_PATTERN.matcher(source);
+        Matcher matcher = OPAQUE_UNIFORM_STATEMENT_PATTERN.matcher(source);
         while (matcher.find()) {
             String statement = matcher.group(1).trim();
             List<String> tokens = leadingTokens(statement);
@@ -1110,6 +1379,27 @@ final class MetalIrisShaderCompiler {
                     );
                 }
             }
+        }
+    }
+
+    private static void collectStorageBufferDecls(
+            final String programName,
+            final String source,
+            final Set<Integer> output
+    ) {
+        Matcher matcher = STORAGE_BUFFER_BLOCK_PATTERN.matcher(source);
+        while (matcher.find()) {
+            String layout = matcher.group(1);
+            Matcher binding = layout == null
+                    ? BINDING_QUALIFIER_PATTERN.matcher("")
+                    : BINDING_QUALIFIER_PATTERN.matcher(layout);
+            if (!binding.find()) {
+                throw new TranslationException(
+                        programName, PHASE_LINK, null,
+                        "raster SSBO block has no explicit layout(binding=N) contract"
+                );
+            }
+            output.add(Integer.parseInt(binding.group(1)));
         }
     }
 

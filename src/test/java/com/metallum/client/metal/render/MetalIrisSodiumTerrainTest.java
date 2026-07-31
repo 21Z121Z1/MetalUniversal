@@ -55,6 +55,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -117,8 +118,9 @@ final class MetalIrisSodiumTerrainTest {
      * live in the tree and that no gate would have caught:
      *
      * <ul>
-     *   <li>{@code activate} used to leave the previous instance open, leaking
-     *       its generation-owned buffers and textures on every pack reload;</li>
+     *   <li>a pack reload must retire all cached dimension generations before
+     *       publishing the replacement, while ordinary dimension switches keep
+     *       those generations independently selectable;</li>
      *   <li>{@code close} only dropped the pipeline cache when an override had
      *       actually compiled, so a pack whose overrides all failed left native
      *       PSOs cached forever — sodium's program map is a private static that
@@ -146,24 +148,22 @@ final class MetalIrisSodiumTerrainTest {
             assertSame(first, IrisMetalPipelineOverrides.active(), "activate did not publish the instance");
             IrisMetalPipelineOverrides.updateFrame();
 
-            // Reactivating without an explicit deactivate must retire the old
-            // instance rather than orphan its GPU resources.
+            // A pack reload destroys every cached dimension before constructing
+            // the replacement generation.
+            IrisMetalPipelineOverrides.deactivate(first);
+            assertNull(first.uniformStaging(TerrainKind.SOLID),
+                    "the retired instance still holds its uniform block");
             IrisMetalPipelineOverrides.Instance second =
                     IrisMetalPipelineOverrides.activateForTests(set, new Object2ObjectOpenHashMap<>());
             assertNotSame(first, second, "reload reused the previous instance");
             assertTrue(second.generation() > first.generation(), "generation did not advance across reload");
             assertSame(second, IrisMetalPipelineOverrides.active(), "reload did not publish the new instance");
 
-            // Iris may destroy the old WorldRenderingPipeline after its
-            // replacement has already activated. That late callback must not
-            // retire the replacement generation.
+            // A late idempotent callback for the old pipeline must not retire
+            // the replacement generation.
             IrisMetalPipelineOverrides.deactivate(first);
             assertSame(second, IrisMetalPipelineOverrides.active(),
                     "destroying the old pipeline retired the replacement generation");
-
-            // A retired instance must not keep serving the draw path.
-            assertNull(first.uniformStaging(TerrainKind.SOLID),
-                    "the retired instance still holds its uniform block");
 
             // The extended-target decision is frozen per generation: flipping the
             // flag mid-life must not change the live instance. Reading it at
@@ -182,6 +182,90 @@ final class MetalIrisSodiumTerrainTest {
     }
 
     @Test
+    void cachedDimensionGenerationsRemainSelectableUntilIndividuallyDestroyed() throws IOException {
+        Path packZip = discoverPacks().getFirst();
+        Iris.testing = true;
+        WorldRenderingSettings.INSTANCE.setVertexFormat(FormatAnalyzer.createFormat(true, true, true, true));
+
+        try (FileSystem fs = FileSystems.newFileSystem(packZip)) {
+            ProgramSet set = loadPack(packZip.getFileName().toString(), fs.getPath("/shaders"))
+                    .getProgramSet(new NamespacedId("minecraft", "overworld"));
+            IrisMetalPipelineOverrides.Instance overworld =
+                    IrisMetalPipelineOverrides.activateForTests(set, new Object2ObjectOpenHashMap<>());
+            IrisMetalPipelineOverrides.Instance secondDimension =
+                    IrisMetalPipelineOverrides.activateForTests(set, new Object2ObjectOpenHashMap<>());
+
+            assertSame(secondDimension, IrisMetalPipelineOverrides.active());
+            IrisMetalPipelineOverrides.select(overworld);
+            assertSame(overworld, IrisMetalPipelineOverrides.active(),
+                    "returning to a cached dimension did not select its retained generation");
+
+            IrisMetalPipelineOverrides.deactivate(secondDimension);
+            assertSame(overworld, IrisMetalPipelineOverrides.active(),
+                    "destroying an inactive cached dimension retired the selected generation");
+            IrisMetalPipelineOverrides.deactivate(overworld);
+            assertNull(IrisMetalPipelineOverrides.active());
+        }
+    }
+
+    @Test
+    void preparedGenerationIsInvisibleUntilAtomicallySelected() throws IOException {
+        Path packZip = discoverPacks().getFirst();
+        Iris.testing = true;
+        WorldRenderingSettings.INSTANCE.setVertexFormat(FormatAnalyzer.createFormat(true, true, true, true));
+
+        try (FileSystem fs = FileSystems.newFileSystem(packZip)) {
+            ProgramSet set = loadPack(packZip.getFileName().toString(), fs.getPath("/shaders"))
+                    .getProgramSet(new NamespacedId("minecraft", "overworld"));
+            IrisMetalPipelineOverrides.Instance selected =
+                    IrisMetalPipelineOverrides.activateForTests(set, new Object2ObjectOpenHashMap<>());
+            IrisMetalPipelineOverrides.Instance prepared =
+                    IrisMetalPipelineOverrides.prepareForTests(set, new Object2ObjectOpenHashMap<>(), false);
+
+            assertSame(selected, IrisMetalPipelineOverrides.active(),
+                    "constructing a candidate generation changed the active dimension");
+            IrisMetalPipelineOverrides.deactivate(prepared);
+            assertSame(selected, IrisMetalPipelineOverrides.active(),
+                    "retiring an unpublished candidate changed the active dimension");
+
+            IrisMetalPipelineOverrides.deactivate(selected);
+            assertNull(IrisMetalPipelineOverrides.active());
+        }
+    }
+
+    @Test
+    void strictModeRejectsAnActivePackTerrainFallback() throws IOException {
+        Path packZip = Path.of(System.getProperty(
+                "metallum.iris.potato.path", "run/shaderpacks/potato-shaders.zip"
+        )).toAbsolutePath();
+        assertTrue(Files.isRegularFile(packZip), "Potato shader pack is missing: " + packZip);
+
+        Iris.testing = true;
+        IrisMetalPipelineOverrides.setExtendedTerrainTargets(false);
+        WorldRenderingSettings.INSTANCE.setVertexFormat(FormatAnalyzer.createFormat(true, true, true, true));
+        try (FileSystem fs = FileSystems.newFileSystem(packZip)) {
+            ProgramSet set = loadPack(packZip.getFileName().toString(), fs.getPath("/shaders"))
+                    .getProgramSet(new NamespacedId("minecraft", "overworld"));
+            IrisMetalPipelineOverrides.Instance instance = IrisMetalPipelineOverrides.activateForTests(
+                    set,
+                    set.getPackDirectives().getTextureMap(),
+                    true
+            );
+            try {
+                RenderPipeline source = fakeSodiumPipeline(TerrainKind.TRANSLUCENT);
+                IllegalStateException failure = assertThrows(
+                        IllegalStateException.class,
+                        () -> IrisMetalPipelineOverrides.pipelineForTerrain(source)
+                );
+                assertTrue(failure.getMessage().contains("strict mode rejected generation"));
+                assertTrue(failure.getMessage().contains("DRAWBUFFERS [3, 4]"));
+            } finally {
+                IrisMetalPipelineOverrides.deactivate(instance);
+            }
+        }
+    }
+
+    @Test
     void lazyShaderKeyUniformBlockRequiresPostRegistrationPrewarm() {
         ShaderKey key = ShaderKey.SHADOW_SODIUM_TERRAIN_CUTOUT;
         int stage = net.irisshaders.iris.pipeline.WorldRenderingPhase.TERRAIN_CUTOUT.ordinal();
@@ -194,6 +278,7 @@ final class MetalIrisSodiumTerrainTest {
                 "",
                 List.of(new UniformMember("int", "renderStage", 0, 0, Integer.BYTES)),
                 16,
+                List.of(),
                 List.of(),
                 List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
                 new int[]{0},
@@ -235,6 +320,7 @@ final class MetalIrisSodiumTerrainTest {
                 ),
                 80,
                 List.of(),
+                List.of(),
                 List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
                 new int[]{0},
                 java.util.OptionalDouble.empty()
@@ -271,6 +357,7 @@ final class MetalIrisSodiumTerrainTest {
                 "",
                 List.of(new UniformMember("float", "iris_currentAlphaTest", 0, 0, Float.BYTES)),
                 16,
+                List.of(),
                 List.of(),
                 List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
                 new int[]{0},
