@@ -55,6 +55,8 @@ tasks.test {
 	exclude "**/MetalIrisTargetsIntegrationTest.class"
 	exclude "**/MetalIrisNoiseTextureIntegrationTest.class"
 	exclude "**/IrisMetalCenterDepthSamplerTest.class"
+	exclude "**/IrisMetalComputeConformanceTest.class"
+	exclude "**/IrisMetalExternalLevelSamplerTest.class"
 	exclude "**/MetalIrisShaderTranslationTest.class"
 	exclude "**/MetalIrisSodiumTerrainTest.class"
 	if (hostedCi) {
@@ -615,7 +617,7 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 
 tasks.register("metalComputeBackendIntegrationTest", Test) {
 	group = "verification"
-	description = "Runs the macOS compute/SSBO/image/mipmap/compare-sampler GPU readback suite through the production backend."
+	description = "Runs the macOS backend and Iris compute/SSBO/image/mipmap GPU readback suites."
 	onlyIf {
 		hardwareMetalValidationAvailable()
 	}
@@ -625,6 +627,7 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 	useJUnitPlatform()
 	filter {
 		includeTestsMatching "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalComputeConformanceTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", metalApiValidation
