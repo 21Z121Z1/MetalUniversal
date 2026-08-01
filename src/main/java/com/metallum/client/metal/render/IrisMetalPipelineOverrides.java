@@ -711,21 +711,28 @@ public final class IrisMetalPipelineOverrides {
             this.textureMap = textureMap;
             this.packDirectives = programSet.getPackDirectives();
             if (productionLifecycle) {
-                CustomUniformFixedInputUniformsHolder.Builder fixedInputs =
+                CustomUniforms customUniforms = this.pack.customUniforms.build(uniformHolder ->
+                        CommonUniforms.addNonDynamicUniforms(
+                                uniformHolder,
+                                this.pack.getIdMap(),
+                                this.packDirectives,
+                                updateNotifier
+                        )
+                );
+                CustomUniformFixedInputUniformsHolder.Builder programFixedInputs =
                         new CustomUniformFixedInputUniformsHolder.Builder();
                 CommonUniforms.addNonDynamicUniforms(
-                        fixedInputs,
+                        programFixedInputs,
                         this.pack.getIdMap(),
                         this.packDirectives,
                         updateNotifier
                 );
-                CustomUniformFixedInputUniformsHolder fixedInputGraph = fixedInputs.build();
-                CustomUniforms customUniforms = this.pack.customUniforms.build(fixedInputGraph);
+                CustomUniformFixedInputUniformsHolder programFixedInputGraph = programFixedInputs.build();
                 IrisMetalDynamicUniforms dynamicUniformGraph = IrisMetalDynamicUniforms.create(renderStageSource);
                 this.uniformValues = new IrisMetalUniformValues(
                         this.packDirectives.getSunPathRotation(),
                         customUniforms,
-                        fixedInputGraph,
+                        programFixedInputGraph,
                         dynamicUniformGraph,
                         updateNotifier,
                         renderStageSource

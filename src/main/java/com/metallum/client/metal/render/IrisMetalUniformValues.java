@@ -18,6 +18,7 @@ import net.irisshaders.iris.uniforms.SystemTimeUniforms;
 import net.irisshaders.iris.uniforms.custom.CustomUniforms;
 import net.irisshaders.iris.uniforms.custom.CustomUniformFixedInputUniformsHolder;
 import net.irisshaders.iris.uniforms.custom.cached.CachedUniform;
+import net.irisshaders.iris.gl.uniform.UniformUpdateFrequency;
 import net.irisshaders.iris.pipeline.programs.ShaderKey;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
@@ -44,13 +45,16 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalDouble;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.IntSupplier;
+import java.util.function.LongSupplier;
 
 /**
  * Fills the generated {@code MetallumIrisUniforms} block once per frame.
@@ -87,16 +91,19 @@ final class IrisMetalUniformValues implements AutoCloseable {
 
     private final float sunPathRotation;
     private final @Nullable CustomUniforms customUniforms;
-    private final @Nullable CustomUniformFixedInputUniformsHolder fixedInputs;
+    /** Fixed inputs registered by each real Iris ProgramUniforms instance. */
+    private final @Nullable CustomUniformFixedInputUniformsHolder programFixedInputs;
     private final @Nullable IrisMetalDynamicUniforms dynamicUniforms;
     private final @Nullable FrameUpdateNotifier updateNotifier;
     private final IntSupplier renderStageSource;
+    private final LongSupplier gameTimeSource;
     private final boolean strict;
     private final List<Block> blocks = new ArrayList<>();
     private final Set<String> unsupported = new HashSet<>();
     private final Matrix4f previousModelView = new Matrix4f();
     private final Matrix4f previousProjection = new Matrix4f();
     private final Vector3d previousCameraPosition = new Vector3d();
+    private @Nullable Frame currentFrame;
     private HistoryState historyState = HistoryState.UNINITIALIZED;
     private boolean warnedIdentityMatrices;
     private boolean closed;
@@ -106,6 +113,58 @@ final class IrisMetalUniformValues implements AutoCloseable {
         PREWARMED_NO_HISTORY,
         FIRST_FRAME_ACTIVE,
         HISTORY_VALID
+    }
+
+    private enum UniformPhase {
+        FRAME,
+        HISTORY,
+        ONCE,
+        PER_TICK,
+        PER_FRAME,
+        CUSTOM,
+        PROGRAM_DRAW,
+        DRAW
+    }
+
+    private record PlanEntry(
+            MetalIrisShaderCompiler.UniformMember member,
+            UniformPhase phase,
+            @Nullable CachedUniform cachedUniform
+    ) {
+    }
+
+    private static final class ProgramPlan {
+        private final List<PlanEntry> entries;
+        private final List<MetalIrisShaderCompiler.UniformMember> dynamicMembers;
+        private final Set<CachedUniform> cachedUniforms;
+        private final Map<String, PlanEntry> byName;
+
+        private ProgramPlan(final List<PlanEntry> entries) {
+            this.entries = List.copyOf(entries);
+            this.dynamicMembers = this.entries.stream()
+                    .filter(entry -> entry.phase() == UniformPhase.PROGRAM_DRAW)
+                    .map(PlanEntry::member)
+                    .toList();
+            this.cachedUniforms = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (PlanEntry entry : this.entries) {
+                if (entry.cachedUniform() != null) {
+                    this.cachedUniforms.add(entry.cachedUniform());
+                }
+            }
+            Map<String, PlanEntry> byName = new java.util.LinkedHashMap<>();
+            for (PlanEntry entry : this.entries) {
+                byName.putIfAbsent(entry.member().name(), entry);
+            }
+            this.byName = Map.copyOf(byName);
+        }
+
+        private @Nullable PlanEntry entry(final String name) {
+            return this.byName.get(name);
+        }
+
+        private boolean requiresMaterialization() {
+            return !this.cachedUniforms.isEmpty() || !this.dynamicMembers.isEmpty();
+        }
     }
 
     /** Backend-neutral values whose Iris suppliers observe the active draw. */
@@ -142,6 +201,13 @@ final class IrisMetalUniformValues implements AutoCloseable {
         private final List<MetalIrisShaderCompiler.UniformMember> layout;
         private final int size;
         private final OptionalDouble alphaTestReference;
+        private final ProgramPlan plan;
+        private final Set<CachedUniform> onceUpdated = Collections.newSetFromMap(new IdentityHashMap<>());
+        private final Map<CachedUniform, Long> lastTick = new IdentityHashMap<>();
+        private final Map<CachedUniform, Integer> lastFrame = new IdentityHashMap<>();
+        private boolean programInitialized;
+        private long programUpdateCount;
+        private long uploadedBytes;
         private @Nullable GpuBuffer buffer;
         private @Nullable ByteBuffer staging;
         private @Nullable MetalDevice device;
@@ -151,13 +217,15 @@ final class IrisMetalUniformValues implements AutoCloseable {
                 final String label,
                 final List<MetalIrisShaderCompiler.UniformMember> layout,
                 final int size,
-                final OptionalDouble alphaTestReference
+                final OptionalDouble alphaTestReference,
+                final ProgramPlan plan
         ) {
             this.token = token;
             this.label = label;
             this.layout = layout;
             this.size = size;
             this.alphaTestReference = alphaTestReference;
+            this.plan = plan;
         }
 
         private void allocate(final MetalDevice device) {
@@ -207,6 +275,20 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final float sunPathRotation,
             final CustomUniforms customUniforms,
             final CustomUniformFixedInputUniformsHolder fixedInputs,
+            final FrameUpdateNotifier updateNotifier,
+            final IntSupplier renderStageSource,
+            final LongSupplier gameTimeSource
+    ) {
+        this(
+                sunPathRotation, customUniforms, fixedInputs, null, updateNotifier,
+                renderStageSource, true, gameTimeSource
+        );
+    }
+
+    IrisMetalUniformValues(
+            final float sunPathRotation,
+            final CustomUniforms customUniforms,
+            final CustomUniformFixedInputUniformsHolder fixedInputs,
             final IrisMetalDynamicUniforms dynamicUniforms,
             final FrameUpdateNotifier updateNotifier,
             final IntSupplier renderStageSource
@@ -223,15 +305,32 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final IntSupplier renderStageSource,
             final boolean strict
     ) {
+        this(
+                sunPathRotation, customUniforms, fixedInputs, dynamicUniforms, updateNotifier,
+                renderStageSource, strict, IrisMetalUniformValues::currentGameTime
+        );
+    }
+
+    private IrisMetalUniformValues(
+            final float sunPathRotation,
+            final @Nullable CustomUniforms customUniforms,
+            final @Nullable CustomUniformFixedInputUniformsHolder fixedInputs,
+            final @Nullable IrisMetalDynamicUniforms dynamicUniforms,
+            final @Nullable FrameUpdateNotifier updateNotifier,
+            final IntSupplier renderStageSource,
+            final boolean strict,
+            final LongSupplier gameTimeSource
+    ) {
         if ((customUniforms == null) != (updateNotifier == null)) {
             throw new IllegalArgumentException("Iris custom uniforms and frame notifier must be supplied together");
         }
         this.sunPathRotation = sunPathRotation;
         this.customUniforms = customUniforms;
-        this.fixedInputs = fixedInputs;
+        this.programFixedInputs = fixedInputs;
         this.dynamicUniforms = dynamicUniforms;
         this.updateNotifier = updateNotifier;
         this.renderStageSource = Objects.requireNonNull(renderStageSource, "renderStageSource");
+        this.gameTimeSource = Objects.requireNonNull(gameTimeSource, "gameTimeSource");
         this.strict = strict;
     }
 
@@ -305,8 +404,73 @@ final class IrisMetalUniformValues implements AutoCloseable {
                 label,
                 layout,
                 size,
-                alphaTestReference
+                alphaTestReference,
+                buildPlan(token, layout)
         ));
+    }
+
+    private ProgramPlan buildPlan(
+            final Object token,
+            final List<MetalIrisShaderCompiler.UniformMember> layout
+    ) {
+        List<PlanEntry> entries = new ArrayList<>(layout.size());
+        for (MetalIrisShaderCompiler.UniformMember member : layout) {
+            CachedUniform cached = null;
+            UniformPhase phase;
+            if (this.programFixedInputs != null && this.programFixedInputs.containsKey(member.name())) {
+                cached = this.programFixedInputs.getUniform(member.name());
+                phase = cachedPhase(cached);
+            } else if (this.customUniforms != null && this.customUniforms.hasVariable(member.name())) {
+                cached = this.customUniforms.getVariable(member.name()) instanceof CachedUniform value
+                        ? value
+                        : null;
+                if (cached == null) {
+                    throw new IllegalStateException(
+                            "Iris custom uniform '" + member.name() + "' is not a CachedUniform"
+                    );
+                }
+                phase = cachedPhase(cached);
+            } else if (this.dynamicUniforms != null && this.dynamicUniforms.canMaterialize(member)) {
+                phase = UniformPhase.PROGRAM_DRAW;
+            } else {
+                phase = backendPhase(token, member);
+            }
+            entries.add(new PlanEntry(member, phase, cached));
+        }
+        return new ProgramPlan(entries);
+    }
+
+    private static UniformPhase cachedPhase(final CachedUniform uniform) {
+        return switch (uniform.getUpdateFrequency()) {
+            case ONCE -> UniformPhase.ONCE;
+            case PER_TICK -> UniformPhase.PER_TICK;
+            case PER_FRAME -> UniformPhase.PER_FRAME;
+            case CUSTOM -> UniformPhase.CUSTOM;
+        };
+    }
+
+    private static UniformPhase backendPhase(
+            final Object token,
+            final MetalIrisShaderCompiler.UniformMember member
+    ) {
+        if ("gbufferPreviousModelView".equals(member.name())
+                || "gbufferPreviousProjection".equals(member.name())
+                || "previousCameraPosition".equals(member.name())) {
+            return UniformPhase.HISTORY;
+        }
+        if (isLiveFogUniform(member.name())
+                || (isCoreDrawUniform(member.name()) && usesMojangCoreTransforms(token))
+                || ("iris_currentAlphaTest".equals(member.name())
+                && !isFrameOwnedDynamicUniformName(member))) {
+            return UniformPhase.DRAW;
+        }
+        return UniformPhase.FRAME;
+    }
+
+    private static boolean isFrameOwnedDynamicUniformName(
+            final MetalIrisShaderCompiler.UniformMember member
+    ) {
+        return "iris_currentAlphaTest".equals(member.name()) && "float".equals(member.type());
     }
 
     /**
@@ -351,6 +515,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
             }
             upload(block, frame);
         }
+        this.currentFrame = frame;
         if (this.historyState == HistoryState.UNINITIALIZED) {
             this.historyState = HistoryState.PREWARMED_NO_HISTORY;
         }
@@ -368,14 +533,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
         if (this.customUniforms != null) {
             try {
                 Objects.requireNonNull(this.updateNotifier).onNewFrame();
-                // Iris updates dependencies through CustomUniforms first. Only
-                // fixed inputs outside that real order need the holder-wide
-                // refresh; updating the whole holder first advances stateful
-                // suppliers twice (notably MatrixUniforms.Previous).
                 this.customUniforms.update();
-                if (this.fixedInputs != null) {
-                    updateUnvisitedFixedInputs(this.customUniforms, this.fixedInputs);
-                }
             } catch (RuntimeException failure) {
                 if (this.strict) {
                     throw new IllegalStateException("Iris uniform graph failed to update", failure);
@@ -386,6 +544,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
             }
         }
         Frame frame = sampleFrame();
+        this.currentFrame = frame;
         if (this.historyState == HistoryState.UNINITIALIZED
                 || this.historyState == HistoryState.PREWARMED_NO_HISTORY) {
             this.historyState = HistoryState.FIRST_FRAME_ACTIVE;
@@ -399,6 +558,92 @@ final class IrisMetalUniformValues implements AutoCloseable {
         this.previousProjection.set(frame.projection());
         this.previousCameraPosition.set(frame.cameraPosition());
         this.historyState = HistoryState.HISTORY_VALID;
+    }
+
+    /**
+     * Reproduces one fixed Iris {@code ProgramUniforms.update()} boundary for
+     * a generation-owned block. Dynamic values are deliberately handled by the
+     * caller first; this method only advances cached fixed/custom values in
+     * Iris's once, tick, frame and custom phases.
+     */
+    private IrisMetalDynamicUniforms.@Nullable DrawSnapshot beginProgram(
+            final Block block,
+            final DrawUniformContext context
+    ) {
+        if (this.dynamicUniforms != null) {
+            // The block token is the Metal-side identity of one generated
+            // Iris program. The layout list is only its reflected ABI and is
+            // not a program identity; using it would merge repeated uses of
+            // one block and lose the real Program.use() boundary.
+            this.dynamicUniforms.beginProgram(block.token, block.plan.dynamicMembers);
+        }
+        IrisMetalDynamicUniforms.DrawSnapshot dynamicSnapshot = this.dynamicUniforms == null
+                ? null
+                : this.dynamicUniforms.snapshot(block.plan.dynamicMembers, context);
+        long gameTime = this.gameTimeSource.getAsLong();
+        int frame = frameCounter();
+        boolean firstUse = !block.programInitialized;
+        for (PlanEntry entry : block.plan.entries) {
+            CachedUniform cached = entry.cachedUniform();
+            if (cached == null) {
+                continue;
+            }
+            switch (entry.phase()) {
+                case ONCE -> {
+                    if (firstUse) {
+                        cached.update();
+                        block.onceUpdated.add(cached);
+                    }
+                }
+                case PER_TICK -> {
+                    Long last = block.lastTick.get(cached);
+                    if (firstUse || last == null || last.longValue() != gameTime) {
+                        cached.update();
+                        block.lastTick.put(cached, gameTime);
+                    }
+                }
+                case PER_FRAME -> {
+                    Integer last = block.lastFrame.get(cached);
+                    if (firstUse || last == null || last.intValue() != frame) {
+                        cached.update();
+                        block.lastFrame.put(cached, frame);
+                    }
+                }
+                case CUSTOM -> {
+                    // CustomUniforms owns its dependency-topological update
+                    // once per frame. A standalone cached custom input has no
+                    // graph owner and follows Iris's program-draw boundary.
+                    if (this.customUniforms == null) {
+                        cached.update();
+                    }
+                }
+                default -> {
+                }
+            }
+        }
+        block.programInitialized = true;
+        block.programUpdateCount++;
+        return dynamicSnapshot;
+    }
+
+    private static long currentGameTime() {
+        Minecraft minecraft = Minecraft.getInstance();
+        ClientLevel level = minecraft == null ? null : minecraft.level;
+        return level == null ? 0L : level.getGameTime();
+    }
+
+    /**
+     * Exercises the same per-block Program.use() commit without allocating a
+     * GPU buffer. The production draw path reaches {@link #beginProgram(Block,
+     * DrawUniformContext)} through {@link #materializeDraw(Object, ByteBuffer,
+     * ByteBuffer, ByteBuffer, DrawUniformContext)}.
+     */
+    void beginProgramForTests(final Object token, final DrawUniformContext context) {
+        Block block = findBlock(token);
+        if (block == null) {
+            throw new IllegalStateException("Iris uniform block is not registered for " + token);
+        }
+        beginProgram(block, Objects.requireNonNull(context, "context"));
     }
 
     /**
@@ -493,8 +738,9 @@ final class IrisMetalUniformValues implements AutoCloseable {
             write(staging, member, frame, block.alphaTestReference);
         }
         staging.rewind();
-        block.device.createCommandEncoder().writeToBuffer(block.buffer.slice(), staging);
         IrisMetalPassTrace.observeUniformSnapshot(block.label, "frame", block.layout, staging);
+        block.uploadedBytes += staging.remaining();
+        block.device.createCommandEncoder().writeToBuffer(block.buffer.slice(), staging);
     }
 
     int coreDrawBlockSize(final ShaderKey key) {
@@ -503,9 +749,20 @@ final class IrisMetalUniformValues implements AutoCloseable {
 
     int drawBlockSize(final Object token) {
         Block block = findBlock(token);
-        return block != null && block.layout.stream().anyMatch(member -> isDynamicDrawUniform(member.name()))
+        return block != null && (block.plan.requiresMaterialization()
+                || block.layout.stream().anyMatch(member -> isDynamicDrawUniform(member.name())))
                 ? block.size
                 : 0;
+    }
+
+    long programUpdateCount(final Object token) {
+        Block block = findBlock(token);
+        return block == null ? 0L : block.programUpdateCount;
+    }
+
+    long uploadedBytes(final Object token) {
+        Block block = findBlock(token);
+        return block == null ? 0L : block.uploadedBytes;
     }
 
     boolean requiresDynamicTransforms(final Object token) {
@@ -542,6 +799,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
         if (block == null || block.staging == null) {
             throw new IllegalStateException("Iris uniform block is not prepared for " + token);
         }
+        IrisMetalDynamicUniforms.DrawSnapshot dynamicSnapshot = beginProgram(block, context);
         materializeDrawUniforms(
                 block.staging,
                 block.layout,
@@ -553,9 +811,30 @@ final class IrisMetalUniformValues implements AutoCloseable {
                 CapturedRenderingState.INSTANCE.getTextureReloadCount(),
                 context,
                 this.dynamicUniforms,
-                usesMojangCoreTransforms(token)
+                usesMojangCoreTransforms(token),
+                dynamicSnapshot
         );
+        writeProgramCachedUniforms(output, block.plan);
         IrisMetalPassTrace.observeUniformSnapshot(block.label, "draw", block.layout, output);
+    }
+
+    private static void writeProgramCachedUniforms(
+            final ByteBuffer destination,
+            final ProgramPlan plan
+    ) {
+        for (PlanEntry entry : plan.entries) {
+            CachedUniform cached = entry.cachedUniform();
+            if (cached == null) {
+                continue;
+            }
+            if (entry.member().arrayCount() != 0) {
+                throw new IllegalStateException(
+                        "Iris program uniform cannot materialize array member '"
+                                + entry.member().name() + "' (count=" + entry.member().arrayCount() + ")"
+                );
+            }
+            writeCachedUniform(destination, entry.member(), cached);
+        }
     }
 
     void materializeDraw(
@@ -578,7 +857,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
                 base, layout, output, dynamicTransforms, projection, 0,
                 CapturedRenderingState.INSTANCE.getCurrentRenderedEntity(),
                 CapturedRenderingState.INSTANCE.getTextureReloadCount(),
-                DrawUniformContext.empty(), null, true
+                DrawUniformContext.empty(), null, true, null
         );
     }
 
@@ -594,7 +873,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
                 base, layout, output, dynamicTransforms, projection, renderStage,
                 CapturedRenderingState.INSTANCE.getCurrentRenderedEntity(),
                 CapturedRenderingState.INSTANCE.getTextureReloadCount(),
-                DrawUniformContext.empty(), null, false
+                DrawUniformContext.empty(), null, false, null
         );
     }
 
@@ -611,7 +890,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
     ) {
         materializeDrawUniforms(
                 base, layout, output, dynamicTransforms, projection, renderStage,
-                entityId, textureReloadCount, context, null, false
+                entityId, textureReloadCount, context, null, false, null
         );
     }
 
@@ -626,7 +905,8 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final int textureReloadCount,
             final DrawUniformContext context,
             final @Nullable IrisMetalDynamicUniforms dynamicUniforms,
-            final boolean coreDraw
+            final boolean coreDraw,
+            final IrisMetalDynamicUniforms.@Nullable DrawSnapshot dynamicSnapshot
     ) {
         Objects.requireNonNull(context, "context");
         ByteBuffer destination = output.slice().order(output.order());
@@ -660,7 +940,11 @@ final class IrisMetalUniformValues implements AutoCloseable {
                 : modelViewInverse.transpose3x3(new Matrix3f());
 
         for (MetalIrisShaderCompiler.UniformMember member : layout) {
-            if (dynamicUniforms != null && dynamicUniforms.write(member, destination, context)) {
+            if (dynamicUniforms != null
+                    && (dynamicSnapshot == null || dynamicUniforms.contains(dynamicSnapshot, member.name()))
+                    && (dynamicSnapshot == null
+                    ? dynamicUniforms.write(member, destination, context)
+                    : dynamicUniforms.write(member, destination, context, dynamicSnapshot))) {
                 continue;
             }
             switch (member.name()) {
@@ -801,10 +1085,10 @@ final class IrisMetalUniformValues implements AutoCloseable {
     ) {
         for (MetalIrisShaderCompiler.UniformMember member : layout) {
             String name = member.name();
-            if (this.customUniforms != null && this.customUniforms.hasVariable(name)) {
+            if (this.programFixedInputs != null && this.programFixedInputs.containsKey(name)) {
                 continue;
             }
-            if (this.fixedInputs != null && this.fixedInputs.containsKey(name)) {
+            if (this.customUniforms != null && this.customUniforms.hasVariable(name)) {
                 continue;
             }
             if (this.dynamicUniforms != null && this.dynamicUniforms.canMaterialize(member)) {
@@ -1072,6 +1356,9 @@ final class IrisMetalUniformValues implements AutoCloseable {
             return;
         }
         this.closed = true;
+        if (this.dynamicUniforms != null) {
+            this.dynamicUniforms.close();
+        }
         for (Block block : this.blocks) {
             if (block.buffer != null) {
                 block.buffer.close();
@@ -1401,8 +1688,14 @@ final class IrisMetalUniformValues implements AutoCloseable {
             putMat4(out, member.offset(), LIGHTMAP_TEXTURE_MATRIX);
             return true;
         }
-        if (this.customUniforms == null || !this.customUniforms.hasVariable(member.name())) {
+        // ProgramUniforms owns a separate fixed-input instance from the
+        // CustomUniforms dependency graph. Prefer the program cache whenever
+        // both holders expose the same common uniform name.
+        if (this.programFixedInputs != null && this.programFixedInputs.containsKey(member.name())) {
             return writeFixedInput(out, member);
+        }
+        if (this.customUniforms == null || !this.customUniforms.hasVariable(member.name())) {
+            return false;
         }
         // UniformMember uses 0 for an ordinary scalar/vector/matrix and a
         // positive value only for an explicit GLSL array declarator.
@@ -1413,8 +1706,22 @@ final class IrisMetalUniformValues implements AutoCloseable {
             );
         }
 
+        Object expression = this.customUniforms.getVariable(member.name());
+        if (!(expression instanceof CachedUniform uniform)) {
+            throw new IllegalStateException(
+                    "Iris custom uniform '" + member.name() + "' is not a CachedUniform"
+            );
+        }
+        return writeCachedUniform(out, member, uniform);
+    }
+
+    private static boolean writeCachedUniform(
+            final ByteBuffer out,
+            final MetalIrisShaderCompiler.UniformMember member,
+            final CachedUniform uniform
+    ) {
         FunctionReturn value = new FunctionReturn();
-        this.customUniforms.getVariable(member.name()).evaluateTo(this.customUniforms, value);
+        uniform.writeTo(value);
         int at = member.offset();
         switch (member.type()) {
             case "bool" -> out.putInt(at, value.booleanReturn ? 1 : 0);
@@ -1461,7 +1768,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final ByteBuffer out,
             final MetalIrisShaderCompiler.UniformMember member
     ) {
-        if (this.fixedInputs == null || !this.fixedInputs.containsKey(member.name())) {
+        if (this.programFixedInputs == null || !this.programFixedInputs.containsKey(member.name())) {
             return false;
         }
         if (member.arrayCount() > 0) {
@@ -1470,45 +1777,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
                             + "' (count=" + member.arrayCount() + ")"
             );
         }
-        CachedUniform uniform = this.fixedInputs.getUniform(member.name());
-        FunctionReturn value = new FunctionReturn();
-        uniform.writeTo(value);
-        int at = member.offset();
-        switch (member.type()) {
-            case "bool" -> out.putInt(at, value.booleanReturn ? 1 : 0);
-            case "int" -> out.putInt(at, value.intReturn);
-            case "float" -> out.putFloat(at, value.floatReturn);
-            case "vec2" -> {
-                Vector2f vector = fixedObject(member, value, Vector2f.class);
-                putVec2(out, at, vector.x, vector.y);
-            }
-            case "vec3" -> {
-                Vector3f vector = customVector3(member, value.objectReturn, "Iris fixed uniform");
-                putVec3(out, at, vector.x, vector.y, vector.z);
-            }
-            case "vec4" -> {
-                Vector4f vector = fixedObject(member, value, Vector4f.class);
-                putVec4(out, at, vector.x, vector.y, vector.z, vector.w);
-            }
-            case "ivec2" -> {
-                Vector2i vector = fixedObject(member, value, Vector2i.class);
-                putIVec2(out, at, vector.x, vector.y);
-            }
-            case "ivec3" -> {
-                Vector3i vector = fixedObject(member, value, Vector3i.class);
-                putIVec3(out, at, vector.x, vector.y, vector.z);
-            }
-            case "mat4" -> putMat4(
-                    out,
-                    at,
-                    packProjectionUniform(member.name(), fixedObject(member, value, Matrix4fc.class))
-            );
-            default -> throw new IllegalStateException(
-                    "Iris fixed uniform graph produced unsupported GLSL type '" + member.type()
-                            + "' for '" + member.name() + "'"
-            );
-        }
-        return true;
+        return writeCachedUniform(out, member, this.programFixedInputs.getUniform(member.name()));
     }
 
     private static <T> T fixedObject(

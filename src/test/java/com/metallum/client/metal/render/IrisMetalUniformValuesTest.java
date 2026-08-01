@@ -27,6 +27,10 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -543,6 +547,198 @@ final class IrisMetalUniformValuesTest {
 
         assertEquals(1, dependencyCalls.get(), "CustomUniforms dependency must not be updated twice");
         assertEquals(1, independentCalls.get(), "unvisited fixed input must be refreshed once");
+    }
+
+    @Test
+    void registeredProgramPlanOwnsFixedUniformLifecyclePerProgram() {
+        SystemTimeUniforms.COUNTER.reset();
+        AtomicInteger gameTime = new AtomicInteger(1);
+        AtomicInteger graphCalls = new AtomicInteger();
+        AtomicInteger onceCalls = new AtomicInteger();
+        AtomicInteger tickCalls = new AtomicInteger();
+        AtomicInteger frameCalls = new AtomicInteger();
+        AtomicInteger onceValue = new AtomicInteger(11);
+        AtomicInteger tickValue = new AtomicInteger(21);
+        AtomicInteger frameValue = new AtomicInteger(31);
+
+        CustomUniformFixedInputUniformsHolder.Builder graphBuilder =
+                new CustomUniformFixedInputUniformsHolder.Builder();
+        graphBuilder.uniform1i(
+                UniformUpdateFrequency.PER_FRAME,
+                "onceValue",
+                () -> {
+                    graphCalls.incrementAndGet();
+                    return 900;
+                }
+        );
+        CustomUniforms customUniforms = new CustomUniforms.Builder().build(graphBuilder.build());
+
+        CustomUniformFixedInputUniformsHolder.Builder programBuilder =
+                new CustomUniformFixedInputUniformsHolder.Builder();
+        programBuilder.uniform1i(
+                UniformUpdateFrequency.ONCE,
+                "onceValue",
+                () -> {
+                    onceCalls.incrementAndGet();
+                    return onceValue.get();
+                }
+        );
+        programBuilder.uniform1i(
+                UniformUpdateFrequency.PER_TICK,
+                "tickValue",
+                () -> {
+                    tickCalls.incrementAndGet();
+                    return tickValue.get();
+                }
+        );
+        programBuilder.uniform1i(
+                UniformUpdateFrequency.PER_FRAME,
+                "frameValue",
+                () -> {
+                    frameCalls.incrementAndGet();
+                    return frameValue.get();
+                }
+        );
+        CustomUniformFixedInputUniformsHolder programInputs = programBuilder.build();
+        IrisMetalUniformValues values = new IrisMetalUniformValues(
+                0.0f,
+                customUniforms,
+                programInputs,
+                new FrameUpdateNotifier(),
+                () -> 0,
+                () -> gameTime.get()
+        );
+
+        List<MetalIrisShaderCompiler.UniformMember> layout = List.of(
+                new MetalIrisShaderCompiler.UniformMember("int", "onceValue", 0, 0, 4),
+                new MetalIrisShaderCompiler.UniformMember("int", "tickValue", 0, 4, 4),
+                new MetalIrisShaderCompiler.UniformMember("int", "frameValue", 0, 8, 4)
+        );
+        MetalIrisShaderCompiler.GlslProgram firstProgram = new MetalIrisShaderCompiler.GlslProgram(
+                "registered-program-one",
+                "", "", "", "",
+                layout,
+                16,
+                List.of(),
+                List.of(),
+                List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                new int[]{0},
+                java.util.OptionalDouble.empty()
+        );
+        MetalIrisShaderCompiler.GlslProgram secondProgram = new MetalIrisShaderCompiler.GlslProgram(
+                "registered-program-two",
+                "", "", "", "",
+                layout,
+                16,
+                List.of(),
+                List.of(),
+                List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                new int[]{0},
+                java.util.OptionalDouble.empty()
+        );
+        Object firstToken = new Object();
+        Object secondToken = new Object();
+        values.register(firstToken, "registered-program-one", firstProgram);
+        values.register(secondToken, "registered-program-two", secondProgram);
+        ByteBuffer output = ByteBuffer.allocate(16).order(ByteOrder.nativeOrder());
+
+        try {
+            SystemTimeUniforms.COUNTER.beginFrame();
+            values.beginProgramForTests(firstToken, IrisMetalUniformValues.DrawUniformContext.empty());
+            assertEquals(1, onceCalls.get());
+            assertEquals(1, tickCalls.get());
+            assertEquals(1, frameCalls.get());
+            assertEquals(0, graphCalls.get(), "program reads must not use the CustomUniforms graph cache");
+            assertTrue(values.writeOfficialUniform(output, layout.get(0)));
+            assertEquals(11, output.getInt(0));
+            assertTrue(values.writeOfficialUniform(output, layout.get(1)));
+            assertEquals(21, output.getInt(4));
+            assertTrue(values.writeOfficialUniform(output, layout.get(2)));
+            assertEquals(31, output.getInt(8));
+
+            values.beginProgramForTests(firstToken, IrisMetalUniformValues.DrawUniformContext.empty());
+            assertEquals(1, onceCalls.get(), "ONCE must not rerun for the same registered program");
+            assertEquals(1, tickCalls.get(), "PER_TICK must not rerun within one tick");
+            assertEquals(1, frameCalls.get(), "PER_FRAME must not rerun within one frame");
+            assertEquals(2, values.programUpdateCount(firstToken));
+
+            onceValue.set(12);
+            tickValue.set(22);
+            frameValue.set(32);
+            gameTime.set(2);
+            SystemTimeUniforms.COUNTER.beginFrame();
+            values.beginProgramForTests(firstToken, IrisMetalUniformValues.DrawUniformContext.empty());
+            assertEquals(1, onceCalls.get(), "ONCE must remain committed for the program");
+            assertEquals(2, tickCalls.get());
+            assertEquals(2, frameCalls.get());
+            assertTrue(values.writeOfficialUniform(output, layout.get(0)));
+            assertEquals(11, output.getInt(0));
+            assertTrue(values.writeOfficialUniform(output, layout.get(1)));
+            assertEquals(22, output.getInt(4));
+            assertTrue(values.writeOfficialUniform(output, layout.get(2)));
+            assertEquals(32, output.getInt(8));
+
+            values.beginProgramForTests(secondToken, IrisMetalUniformValues.DrawUniformContext.empty());
+            assertEquals(2, onceCalls.get(), "a second registered program has its own ONCE phase");
+            assertEquals(3, tickCalls.get(), "a second registered program has its own tick boundary");
+            assertEquals(3, frameCalls.get(), "a second registered program has its own frame boundary");
+            assertEquals(1, values.programUpdateCount(secondToken));
+        } finally {
+            values.close();
+            SystemTimeUniforms.COUNTER.reset();
+        }
+    }
+
+    @Test
+    void dynamicSnapshotEvaluatesOnceAndDetachesNotifierAcrossProgramUses() {
+        AtomicInteger supplierCalls = new AtomicInteger();
+        AtomicInteger listenerClears = new AtomicInteger();
+        AtomicReference<Runnable> listener = new AtomicReference<>();
+        net.irisshaders.iris.gl.state.ValueUpdateNotifier notifier = runnable -> {
+            if (runnable == null) {
+                listenerClears.incrementAndGet();
+            }
+            listener.set(runnable);
+        };
+        IrisMetalDynamicUniforms dynamic = IrisMetalDynamicUniforms.create(() -> 0);
+        dynamic.uniform1i("testDynamic", supplierCalls::incrementAndGet, notifier);
+        MetalIrisShaderCompiler.UniformMember member =
+                new MetalIrisShaderCompiler.UniformMember("int", "testDynamic", 0, 0, 4);
+        IrisMetalUniformValues.DrawUniformContext context = IrisMetalUniformValues.DrawUniformContext.empty();
+        ByteBuffer output = ByteBuffer.allocate(16).order(ByteOrder.nativeOrder());
+
+        dynamic.beginProgram(List.of(member));
+        assertEquals(UniformUpdateFrequency.CUSTOM, dynamic.frequency("testDynamic"));
+        assertNotNull(listener.get());
+        IrisMetalDynamicUniforms.DrawSnapshot first = dynamic.snapshot(List.of(member), context);
+        assertSame(first, dynamic.snapshot(List.of(member), context), "one program-use commit has one dynamic snapshot");
+        assertTrue(dynamic.write(member, output, context, first));
+        assertTrue(dynamic.write(member, output, context, first));
+        assertEquals(1, supplierCalls.get(), "trace/write must reuse one committed dynamic value");
+        listener.get().run();
+        IrisMetalDynamicUniforms.DrawSnapshot invalidated = dynamic.snapshot(List.of(member), context);
+        assertTrue(dynamic.write(member, output, context, invalidated));
+        assertEquals(2, supplierCalls.get(), "a notifier must invalidate the committed dynamic value");
+        Runnable firstListener = listener.get();
+
+        dynamic.beginProgram(List.of(member));
+        assertEquals(1, listenerClears.get(), "switching programs must remove the old notifier listener");
+        assertNotNull(listener.get());
+        assertNotSame(firstListener, listener.get(), "each program use gets a fresh listener closure");
+        IrisMetalDynamicUniforms.DrawSnapshot second = dynamic.snapshot(List.of(member), context);
+        assertThrows(
+                IllegalStateException.class,
+                () -> dynamic.write(member, output, context, first),
+                "a snapshot from an earlier Program.use must not cross the commit boundary"
+        );
+        assertTrue(dynamic.write(member, output, context, second));
+        assertEquals(3, supplierCalls.get(), "the next program use must update the dynamic supplier once");
+
+        dynamic.beginProgram(List.of());
+        assertNull(listener.get(), "a program without the member must detach its notifier");
+        assertEquals(2, listenerClears.get());
+        dynamic.close();
+        assertNull(listener.get());
     }
 
     @Test
