@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import org.junit.jupiter.api.Test;
 
 import java.util.BitSet;
@@ -68,6 +69,25 @@ final class IrisMetalPostChainTest {
         );
 
         assertEquals(Set.of(0, 4), histories);
+    }
+
+    @Test
+    void finalStageHasItsOwnExecutionIdentity() {
+        assertEquals(
+                IrisMetalPostChain.Stage.FINAL,
+                new IrisMetalPostChain.PassInfo(
+                        IrisMetalPostChain.Stage.FINAL,
+                        "final",
+                        new int[]{0},
+                        new BitSet(),
+                        bits(0),
+                        new BitSet()
+                ).stage()
+        );
+        assertEquals(
+                net.irisshaders.iris.shaderpack.texture.TextureStage.COMPOSITE_AND_FINAL,
+                IrisMetalPostChain.Stage.FINAL.textureStage
+        );
     }
 
     @Test
@@ -207,6 +227,55 @@ final class IrisMetalPostChainTest {
         IrisMetalPostChain.externalTexture(provider, pass, comparison);
 
         assertEquals(comparison, observed.get());
+    }
+
+    @Test
+    void resourceProviderCarriesTypedTexelBufferFormat() {
+        IrisMetalPostChain.PassInfo pass = new IrisMetalPostChain.PassInfo(
+                IrisMetalPostChain.Stage.COMPOSITE,
+                "composite",
+                new int[]{0},
+                new BitSet(),
+                bits(0),
+                new BitSet()
+        );
+        MetalIrisShaderCompiler.SamplerDecl sampler =
+                new MetalIrisShaderCompiler.SamplerDecl("sampleBuffer", "samplerBuffer");
+        GpuBufferSlice slice = new GpuBufferSlice(null, 16L, 64L);
+        IrisMetalPostChain.TexelBufferBinding binding =
+                new IrisMetalPostChain.TexelBufferBinding(slice, com.mojang.blaze3d.GpuFormat.R32_FLOAT);
+
+        IrisMetalPostChain.ResourceProvider provider = new IrisMetalPostChain.ResourceProvider() {
+            @Override
+            public com.mojang.blaze3d.buffers.GpuBufferSlice uniform(
+                    final IrisMetalPostChain.PassInfo ignoredPass,
+                    final String ignoredBlockName
+            ) {
+                return null;
+            }
+
+            @Override
+            public IrisMetalPostChain.TextureBinding texture(
+                    final IrisMetalPostChain.PassInfo ignoredPass,
+                    final String ignoredSamplerName
+            ) {
+                return null;
+            }
+
+            @Override
+            public IrisMetalPostChain.TexelBufferBinding texelBuffer(
+                    final IrisMetalPostChain.PassInfo observedPass,
+                    final MetalIrisShaderCompiler.SamplerDecl observedSampler
+            ) {
+                assertEquals(pass, observedPass);
+                assertEquals(sampler, observedSampler);
+                return binding;
+            }
+        };
+
+        assertEquals(binding, provider.texelBuffer(pass, sampler));
+        assertEquals(com.mojang.blaze3d.GpuFormat.R32_FLOAT, binding.format());
+        assertEquals(64L, binding.slice().length());
     }
 
     @Test

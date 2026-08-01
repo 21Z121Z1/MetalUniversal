@@ -13,6 +13,10 @@ import org.lwjgl.util.spvc.Spvc;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -59,6 +63,8 @@ final class MetalComputePipeline implements AutoCloseable {
     private final int threadgroupHeight;
     private final int threadgroupDepth;
     private final int maxTotalThreadsPerThreadgroup;
+    private final String validationPipelineId;
+    private final List<String> validationShaderIds;
     private boolean closed;
 
     private MetalComputePipeline(
@@ -67,7 +73,8 @@ final class MetalComputePipeline implements AutoCloseable {
             final MemorySegment pipelineState,
             final int threadgroupWidth,
             final int threadgroupHeight,
-            final int threadgroupDepth
+            final int threadgroupDepth,
+            final String shaderHash
     ) {
         this.device = device;
         this.label = label;
@@ -77,6 +84,8 @@ final class MetalComputePipeline implements AutoCloseable {
         this.threadgroupDepth = threadgroupDepth;
         this.maxTotalThreadsPerThreadgroup =
                 MetalNativeBridge.MTLComputePipelineState_maxTotalThreadsPerThreadgroup(pipelineState);
+        this.validationShaderIds = List.of("sha256:" + shaderHash);
+        this.validationPipelineId = "sha256:" + sha256(label + ":" + shaderHash);
         int requested = threadgroupWidth * threadgroupHeight * threadgroupDepth;
         if (requested > this.maxTotalThreadsPerThreadgroup) {
             close();
@@ -164,8 +173,17 @@ final class MetalComputePipeline implements AutoCloseable {
                 pipelineState,
                 localSizeX,
                 localSizeY,
-                localSizeZ
+                localSizeZ,
+                sha256(msl)
         );
+    }
+
+    String validationPipelineId() {
+        return validationPipelineId;
+    }
+
+    List<String> validationShaderIds() {
+        return validationShaderIds;
     }
 
     private static ByteBuffer compileGlslToSpirv(final String label, final String glslSource) {
@@ -204,6 +222,20 @@ final class MetalComputePipeline implements AutoCloseable {
         } finally {
             Shaderc.shaderc_compile_options_release(options);
             Shaderc.shaderc_compiler_release(compiler);
+        }
+    }
+
+    private static String sha256(final String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder result = new StringBuilder(digest.length * 2);
+            for (byte valueByte : digest) {
+                result.append(String.format("%02x", valueByte));
+            }
+            return result.toString();
+        } catch (NoSuchAlgorithmException exception) {
+            throw new AssertionError(exception);
         }
     }
 

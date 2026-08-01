@@ -95,14 +95,22 @@ public final class MetalIrisDepthConvention {
      * identical; only the clip-space representation changes.
      */
     static Matrix4f packProjection(final Matrix4fc forwardZeroToOne) {
-        if (!enabledForMetalBackend()) {
+        return packProjection(forwardZeroToOne, enabledForMetalBackend());
+    }
+
+    static Matrix4f packProjection(final Matrix4fc forwardZeroToOne, final boolean enabled) {
+        if (!enabled) {
             return new Matrix4f(forwardZeroToOne);
         }
         return zeroToOneToOpenGl(forwardZeroToOne);
     }
 
     static Matrix4f packProjectionInverse(final Matrix4fc forwardZeroToOneInverse) {
-        if (!enabledForMetalBackend()) {
+        return packProjectionInverse(forwardZeroToOneInverse, enabledForMetalBackend());
+    }
+
+    static Matrix4f packProjectionInverse(final Matrix4fc forwardZeroToOneInverse, final boolean enabled) {
+        if (!enabled) {
             return new Matrix4f(forwardZeroToOneInverse);
         }
         Matrix4f forward = new Matrix4f(forwardZeroToOneInverse).invert();

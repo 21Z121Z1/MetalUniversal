@@ -1,6 +1,8 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.validation.contract.ProducerType;
+import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.IndexType;
@@ -28,6 +30,7 @@ import java.nio.IntBuffer;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
@@ -47,6 +50,7 @@ final class MetalRenderPass implements RenderPassBackend {
     private Vector4fc[] clearColors;
     private boolean clearDepthEnabled;
     private final double clearDepthValue;
+    private final long contractPassToken;
     private final ScissorState scissorState = new ScissorState();
     private final GpuBufferSlice[] vertexBuffers = new GpuBufferSlice[MAX_VERTEX_BUFFERS];
     private final HashMap<String, GpuBufferSlice> uniforms = new HashMap<>();
@@ -56,6 +60,7 @@ final class MetalRenderPass implements RenderPassBackend {
     private long dirtyDescriptorMask;
     @Nullable
     private MetalCompiledRenderPipeline compiledPipeline;
+    private String contractPipelineId = "unbound";
     @Nullable
     private GpuBuffer indexBuffer;
     private MTLIndexType indexType = MTLIndexType.UInt16;
@@ -78,7 +83,8 @@ final class MetalRenderPass implements RenderPassBackend {
             final RenderPass.RenderArea renderArea,
             @Nullable final Vector4fc[] clearColors,
             final boolean clearDepthEnabled,
-            final double clearDepthValue
+            final double clearDepthValue,
+            final long contractPassToken
     ) {
         this.device = device;
         this.commandEncoder = encoder;
@@ -91,6 +97,21 @@ final class MetalRenderPass implements RenderPassBackend {
         this.clearColors = clearColors == null ? null : clearColors.clone();
         this.clearDepthEnabled = clearDepthEnabled;
         this.clearDepthValue = clearDepthValue;
+        this.contractPassToken = contractPassToken;
+        if (contractPassToken >= 0L && (this.clearColors != null || this.clearDepthEnabled)) {
+            RenderContractRuntime.recordProducer(
+                    contractPassToken,
+                    ProducerType.CLEAR,
+                    "unbound",
+                    Map.of(
+                            "colorClear", Boolean.toString(this.clearColors != null),
+                            "depthClear", Boolean.toString(this.clearDepthEnabled),
+                            "depthValue", Double.toString(this.clearDepthValue)
+                    ),
+                    Map.of(),
+                    List.of()
+            );
+        }
     }
 
     @Override
@@ -126,6 +147,14 @@ final class MetalRenderPass implements RenderPassBackend {
             this.compiledPipeline = compiled;
             vertexBuffersDirty = true;
             pipelineDirty = true;
+        }
+        this.contractPipelineId = pipeline.getLocation().toString();
+        if (contractPassToken >= 0L) {
+            RenderContractRuntime.updatePipeline(contractPassToken, compiled.validationPipelineId());
+            RenderContractRuntime.updateShaders(contractPassToken, compiled.validationShaderIds());
+        }
+        if (contractPassToken >= 0L) {
+            this.contractPipelineId = compiled.validationPipelineId();
         }
     }
 
@@ -201,6 +230,12 @@ final class MetalRenderPass implements RenderPassBackend {
         }
         scissorState.enable(x, y, width, height);
         scissorDirty = true;
+        if (contractPassToken >= 0L) {
+            RenderContractRuntime.updateScissor(
+                    contractPassToken,
+                    new com.metallum.client.validation.contract.ScissorRecord(true, x, y, width, height)
+            );
+        }
     }
 
     @Override
@@ -210,6 +245,12 @@ final class MetalRenderPass implements RenderPassBackend {
         }
         scissorState.disable();
         scissorDirty = true;
+        if (contractPassToken >= 0L) {
+            RenderContractRuntime.updateScissor(
+                    contractPassToken,
+                    com.metallum.client.validation.contract.ScissorRecord.disabled()
+            );
+        }
     }
 
     @Override
@@ -243,6 +284,13 @@ final class MetalRenderPass implements RenderPassBackend {
 
         bindDrawState(enc);
         drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, vertexOffset, instanceCount, indexType, firstInstance);
+        recordProducer(ProducerType.DRAW_INDEXED, Map.of(
+                "indexCount", Integer.toString(indexCount),
+                "instanceCount", Integer.toString(instanceCount),
+                "firstIndex", Integer.toString(firstIndex),
+                "vertexOffset", Integer.toString(vertexOffset),
+                "firstInstance", Integer.toString(firstInstance)
+        ));
     }
 
     @Override
@@ -259,6 +307,10 @@ final class MetalRenderPass implements RenderPassBackend {
                 drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
             }
         }
+        recordProducer(ProducerType.MULTI_DRAW, Map.of(
+                "drawCount", Integer.toString(drawCount),
+                "instanceCount", Integer.toString(instanceCount)
+        ));
     }
 
     @Override
@@ -284,6 +336,7 @@ final class MetalRenderPass implements RenderPassBackend {
                 1L,
                 0L
         );
+        recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(drawCount)));
     }
 
     @Override
@@ -306,6 +359,7 @@ final class MetalRenderPass implements RenderPassBackend {
                 drawCount,
                 VkDrawIndexedIndirectCommand.SIZEOF
         );
+        recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
     }
 
     @Override
@@ -336,6 +390,7 @@ final class MetalRenderPass implements RenderPassBackend {
             MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
             drawIndexedNative(enc, nativeIndexBuffer, draw.firstIndex(), draw.indexCount(), draw.baseVertex(), 1, drawIndexType, 0);
         }
+        recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(draws.size())));
     }
 
     @Override
@@ -350,6 +405,12 @@ final class MetalRenderPass implements RenderPassBackend {
         } else {
             enc.drawPrimitives(primitiveType, firstVertex, vertexCount, Math.max(1, instanceCount), firstInstance);
         }
+        recordProducer(ProducerType.DRAW, Map.of(
+                "vertexCount", Integer.toString(vertexCount),
+                "instanceCount", Integer.toString(instanceCount),
+                "firstVertex", Integer.toString(firstVertex),
+                "firstInstance", Integer.toString(firstInstance)
+        ));
     }
 
     @Override
@@ -379,6 +440,7 @@ final class MetalRenderPass implements RenderPassBackend {
                 drawCount,
                 VkDrawIndirectCommand.SIZEOF
         );
+        recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
     }
 
     @Override
@@ -439,6 +501,50 @@ final class MetalRenderPass implements RenderPassBackend {
                 label == null ? "unlabeled render pass" : label,
                 cpuTimingStartNanos,
                 System.nanoTime()
+        );
+    }
+
+    void finishContractPass() {
+        if (contractPassToken >= 0L) {
+            commandEncoder.endContractTraceGroup();
+            RenderContractRuntime.endPass(contractPassToken);
+        }
+    }
+
+    private void recordProducer(
+            final ProducerType type,
+            final Map<String, String> parameters
+    ) {
+        if (contractPassToken < 0L) return;
+        if (!RenderContractRuntime.producerDetailsCaptured()) {
+            RenderContractRuntime.recordProducer(
+                    contractPassToken,
+                    type,
+                    contractPipelineId,
+                    parameters,
+                    Map.of(),
+                    List.of()
+            );
+            return;
+        }
+        Map<String, String> boundResources = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, TextureViewAndSampler> entry : samplers.entrySet()) {
+            if (entry.getValue().textureView().texture() instanceof MetalGpuTexture texture) {
+                boundResources.put(entry.getKey(), texture.getLabel() + "@" + texture.validationResourceId());
+            }
+        }
+        for (Map.Entry<String, GpuTextureView> entry : storageImages.entrySet()) {
+            if (entry.getValue().texture() instanceof MetalGpuTexture texture) {
+                boundResources.put(entry.getKey(), texture.getLabel() + "@" + texture.validationResourceId());
+            }
+        }
+        RenderContractRuntime.recordProducer(
+                contractPassToken,
+                type,
+                contractPipelineId,
+                parameters,
+                boundResources,
+                List.of()
         );
     }
 

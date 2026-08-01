@@ -2,6 +2,7 @@ package com.metallum.mixin.iris;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.IrisMetalPackLifecycle;
+import com.metallum.client.metal.render.IrisMetalPackRejectedException;
 import com.metallum.client.metal.render.IrisMetalVertexSerializerBootstrap;
 import com.metallum.client.metal.render.MetalIrisCompat;
 import net.irisshaders.iris.Iris;
@@ -32,10 +33,9 @@ public abstract class IrisBootstrapCompatMixin {
      * perform it ourselves; gating {@code loadShaderpack} alone accomplishes
      * nothing because nothing ever reaches it.
      *
-     * <p>A pack that fails to load must not take the client's renderer init
-     * down with it: Iris's own {@code currentPack} simply stays empty, which
-     * {@link IrisPipelineFactoryMixin} reads as "no pack" and serves the
-     * vanilla pipeline.</p>
+     * <p>A configured active pack that fails to load is rejected here. Leaving
+     * {@code currentPack} empty would make the later factory interpret a pack
+     * failure as an intentional shaders-off selection.</p>
      */
     @Inject(method = "onRenderSystemInit", at = @At("HEAD"), cancellable = true)
     private static void metallum$skipGlRendererInit(final CallbackInfo ci) {
@@ -52,27 +52,20 @@ public abstract class IrisBootstrapCompatMixin {
                 metallum$pbrDefaultsInitialized = true;
             }
             boolean semanticEnabled = MetalIrisCompat.semanticLayerEnabled();
-            if (semanticEnabled) {
-                IrisMetalVertexSerializerBootstrap.ensureRegistered();
-                if (IrisMetalPackLifecycle.shouldLoadConfiguredPack(
-                        semanticEnabled, Iris.getIrisConfig().areShadersEnabled()
-                )) {
-                    Iris.loadShaderpack();
-                }
-            }
-        } catch (Throwable t) {
-            if (IrisMetalPackLifecycle.strictModeRequested()
-                    && IrisMetalPackLifecycle.shouldLoadConfiguredPack(
-                    MetalIrisCompat.semanticLayerEnabled(),
-                    Iris.getIrisConfig().areShadersEnabled()
+            boolean shadersEnabled = semanticEnabled
+                    && Iris.getIrisConfig().areShadersEnabled();
+            if (IrisMetalPackLifecycle.shouldLoadConfiguredPack(
+                    semanticEnabled, shadersEnabled
             )) {
-                throw new IllegalStateException(
-                        "Iris Metal strict pack admission failed during bootstrap", t
-                );
+                IrisMetalVertexSerializerBootstrap.ensureRegistered();
+                Iris.loadShaderpack();
             }
+        } catch (IrisMetalPackRejectedException rejection) {
             Metallum.LOGGER.error(
-                    "[metallum-iris] Metal-safe Iris bootstrap failed; continuing without a pack", t
+                    "[metallum-iris] active pack rejected during Metal bootstrap: {}",
+                    rejection.getMessage()
             );
+            throw rejection;
         }
         ci.cancel();
     }
@@ -113,8 +106,17 @@ public abstract class IrisBootstrapCompatMixin {
         boolean semanticEnabled = MetalIrisCompat.semanticLayerEnabled();
         boolean shadersEnabled = semanticEnabled
                 && Iris.getIrisConfig().areShadersEnabled();
-        if (!IrisMetalPackLifecycle.shouldLoadConfiguredPack(semanticEnabled, shadersEnabled)
-                && !IrisMetalPackLifecycle.consumeDisabledReloadTransition(
+        boolean shouldLoad = IrisMetalPackLifecycle.shouldLoadConfiguredPack(
+                semanticEnabled, shadersEnabled
+        );
+        if (shouldLoad) {
+            // A pack may be enabled after startup while the bootstrap path was
+            // correctly dormant; register the CPU serializer contract before
+            // Iris constructs the first active pipeline.
+            IrisMetalVertexSerializerBootstrap.ensureRegistered();
+            return;
+        }
+        if (!IrisMetalPackLifecycle.consumeDisabledReloadTransition(
                 semanticEnabled, shadersEnabled
         )) {
             ci.cancel();

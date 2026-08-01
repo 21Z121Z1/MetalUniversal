@@ -10,6 +10,8 @@ import net.irisshaders.iris.shaderpack.programs.ComputeSource;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
 import net.irisshaders.iris.shaderpack.properties.IndirectPointer;
+import net.irisshaders.iris.shaderpack.properties.PackDirectives;
+import net.irisshaders.iris.shaderpack.properties.PackRenderTargetDirectives.RenderTargetSettings;
 import org.joml.Vector2f;
 import org.joml.Vector3i;
 
@@ -34,6 +36,7 @@ final class IrisMetalPackAdmission {
         Objects.requireNonNull(outputColorSpace, "outputColorSpace");
         ShaderPack pack = Objects.requireNonNull(programSet.getPack(), "shaderPack");
 
+        validateRenderTargetFormats(programSet.getPackDirectives());
         requireColorSpaceSupported(
                 outputColorSpace,
                 programSet.getPackDirectives().supportsColorCorrection()
@@ -63,6 +66,39 @@ final class IrisMetalPackAdmission {
         IrisMetalComputeResources.validatePack(pack);
     }
 
+    /**
+     * Validates every explicit Iris render-target declaration before any
+     * generation-owned texture or pipeline resource is created.
+     */
+    static void validateRenderTargetFormats(final PackDirectives directives) {
+        Objects.requireNonNull(directives, "packDirectives");
+        for (Map.Entry<Integer, RenderTargetSettings> entry
+                : directives.getRenderTargetDirectives().getRenderTargetSettings().entrySet()) {
+            Integer index = entry.getKey();
+            if (index == null || index < 0) {
+                throw unsupported(
+                        "render-target",
+                        String.valueOf(index),
+                        "logical target index must be non-negative"
+                );
+            }
+            RenderTargetSettings settings = entry.getValue();
+            if (settings == null || settings.getInternalFormat() == null) {
+                continue;
+            }
+            String internalFormat = settings.getInternalFormat().name();
+            try {
+                IrisMetalPipelineOverrides.formatForInternalName(internalFormat);
+            } catch (IllegalArgumentException exception) {
+                throw unsupported(
+                        "render-target",
+                        "colortex" + index,
+                        "internal format " + internalFormat + " has no exact Metal lowering"
+                );
+            }
+        }
+    }
+
     /** Fixed Iris color spaces are lowered by the post-final Metal pass. */
     static void requireColorSpaceSupported(
             final ColorSpace colorSpace,
@@ -83,6 +119,45 @@ final class IrisMetalPackAdmission {
                 source.getTessControlSource().orElse(null),
                 source.getTessEvalSource().orElse(null)
         );
+        validateSamplerBuffers(
+                family,
+                source.getName(),
+                source.getVertexSource().orElse(null),
+                source.getFragmentSource().orElse(null)
+        );
+    }
+
+    /**
+     * Fixed Iris has no pack-owned samplerBuffer provider ABI for raster
+     * programs (including post/final) or compute programs. Reject the
+     * declaration while the ProgramSet is still being admitted, before a
+     * generation can publish textures or PSOs that would fail later in
+     * prepare().
+     */
+    static void validateSamplerBuffers(
+            final String family,
+            final String program,
+            final String... sources
+    ) {
+        Objects.requireNonNull(family, "family");
+        Objects.requireNonNull(program, "program");
+        Objects.requireNonNull(sources, "sources");
+        for (String source : sources) {
+            if (source == null) {
+                continue;
+            }
+            for (MetalIrisShaderCompiler.SamplerDecl sampler
+                    : MetalIrisShaderCompiler.inspectSamplerDeclarations(source)) {
+                if (sampler.isTexelBuffer()) {
+                    throw unsupported(
+                            family,
+                            program,
+                            "pack-owned samplerBuffer '" + sampler.name()
+                                    + "' has no fixed Iris typed provider ABI"
+                    );
+                }
+            }
+        }
     }
 
     static void validateProgramStages(
@@ -132,6 +207,9 @@ final class IrisMetalPackAdmission {
     ) {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(buffers, "buffers");
+        source.getSource().ifPresent(sourceText -> validateSamplerBuffers(
+                "compute", source.getName(), sourceText
+        ));
         Vector3i absolute = source.getWorkGroups();
         if (absolute != null && (absolute.x() <= 0 || absolute.y() <= 0 || absolute.z() <= 0)) {
             throw unsupported(
@@ -173,12 +251,12 @@ final class IrisMetalPackAdmission {
         }
     }
 
-    private static UnsupportedOperationException unsupported(
+    private static IrisMetalPackRejectedException unsupported(
             final String family,
             final String program,
             final String reason
     ) {
-        return new UnsupportedOperationException(
+        return new IrisMetalPackRejectedException(
                 "Iris Metal pack admission rejected family=" + family
                         + ", program=" + program + ": " + reason
         );

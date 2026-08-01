@@ -4,6 +4,7 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.metallum.client.metal.render.mtl.MTLStorageMode;
 import com.metallum.client.metal.render.mtl.MTLTextureUsage;
+import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.textures.GpuTexture;
 import net.fabricmc.api.EnvType;
@@ -12,9 +13,11 @@ import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Environment(EnvType.CLIENT)
 final class MetalGpuTexture extends GpuTexture {
+    private static final AtomicLong NEXT_VALIDATION_RESOURCE_ID = new AtomicLong(1L);
     static final int USAGE_SHADER_WRITE = 1 << 5;
     // Minimal usage flags keep Apple GPU lossless bandwidth compression alive:
     // MTLTextureUsage.ShaderWrite disables it on pre-M5 GPUs, so it is only
@@ -24,6 +27,7 @@ final class MetalGpuTexture extends GpuTexture {
     private static final boolean MINIMAL_USAGE =
             Boolean.parseBoolean(System.getProperty("metallum.opt.minimalTextureUsage", "true"));
     private final MetalDevice device;
+    private final long validationResourceId = NEXT_VALIDATION_RESOURCE_ID.getAndIncrement();
     private final MTLPixelFormat mtlPixelFormat;
     private boolean closed;
     @Nullable
@@ -31,6 +35,7 @@ final class MetalGpuTexture extends GpuTexture {
     @Nullable
     private Double materializedDepthClear;
     private int views = 1;
+    private boolean validationAllocationInvalidated;
     @Nullable
     private MemorySegment nativeHandle;
 
@@ -90,6 +95,15 @@ final class MetalGpuTexture extends GpuTexture {
         return this.getFormat().blockSize();
     }
 
+    /** Process-local allocation identity; never use the native pointer as a contract key. */
+    long validationResourceId() {
+        return validationResourceId;
+    }
+
+    String validationDebugId() {
+        return "metal-texture-" + validationResourceId;
+    }
+
     void recordMaterializedClear(@Nullable final Vector4fc color, @Nullable final Double depth) {
         if (color != null) {
             this.materializedColorClear = color;
@@ -132,6 +146,13 @@ final class MetalGpuTexture extends GpuTexture {
         if (this.closed && this.views == 0 && this.nativeHandle != null) {
             MemorySegment handle = this.nativeHandle;
             this.nativeHandle = null;
+            if (!this.validationAllocationInvalidated && RenderContractRuntime.enabled()) {
+                this.validationAllocationInvalidated = true;
+                RenderContractRuntime.invalidateResourceAllocations(
+                        this.validationResourceId,
+                        this.validationDebugId()
+                );
+            }
             this.device.queueResourceRelease(handle);
         }
     }

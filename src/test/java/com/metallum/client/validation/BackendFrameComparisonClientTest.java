@@ -4,6 +4,7 @@ import net.irisshaders.iris.uniforms.SystemTimeUniforms;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -41,6 +42,20 @@ final class BackendFrameComparisonClientTest {
         assertEquals(-177.71662902161114, camera.z());
         assertEquals(-164.09991455078125F, camera.yaw());
         assertEquals(29.249996185302734F, camera.pitch());
+    }
+
+    @Test
+    void fixedPartialTickAcceptsTheFullRenderInterpolationInterval() {
+        assertEquals(1.0F, BackendFrameComparisonClient.parseFixedPartialTick("1.0"));
+        assertEquals(0.25F, BackendFrameComparisonClient.parseFixedPartialTick(" 0.25 "));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BackendFrameComparisonClient.parseFixedPartialTick("1.01")
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BackendFrameComparisonClient.parseFixedPartialTick("not-a-number")
+        );
     }
 
     @Test
@@ -110,6 +125,99 @@ final class BackendFrameComparisonClientTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> BackendFrameComparisonClient.applyFixedIrisSystemTime(-1, 16L)
+        );
+    }
+
+    @Test
+    void scheduledResizeRequiresOneCompletePositiveContract() {
+        assertNull(BackendFrameComparisonClient.parseResizeRequest(-1, -1, -1));
+        BackendFrameComparisonClient.ResizeRequest request =
+                BackendFrameComparisonClient.parseResizeRequest(120, 1280, 720);
+        assertEquals(120, request.frame());
+        assertEquals(1280, request.width());
+        assertEquals(720, request.height());
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BackendFrameComparisonClient.parseResizeRequest(120, -1, 720)
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BackendFrameComparisonClient.parseResizeRequest(-1, 1280, 720)
+        );
+    }
+
+    @Test
+    void scheduledShaderToggleRequiresDisableBeforeEnable() {
+        assertNull(BackendFrameComparisonClient.parseShaderToggleRequest(-1, -1));
+        BackendFrameComparisonClient.ShaderToggleRequest request =
+                BackendFrameComparisonClient.parseShaderToggleRequest(120, 170);
+        assertEquals(120, request.disableFrame());
+        assertEquals(170, request.enableFrame());
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BackendFrameComparisonClient.parseShaderToggleRequest(170, 120)
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BackendFrameComparisonClient.parseShaderToggleRequest(-1, 120)
+        );
+    }
+
+    @Test
+    void scheduledDimensionSwitchRequiresAKnownTarget() {
+        assertNull(BackendFrameComparisonClient.parseDimensionSwitchRequest(-1, ""));
+        BackendFrameComparisonClient.DimensionSwitchRequest request =
+                BackendFrameComparisonClient.parseDimensionSwitchRequest(150, "nether");
+        assertEquals(150, request.frame());
+        assertEquals(
+                BackendFrameComparisonClient.DimensionSwitchTarget.NETHER,
+                request.target()
+        );
+        assertEquals(
+                BackendFrameComparisonClient.DimensionSwitchTarget.NETHER,
+                BackendFrameComparisonClient.parseDimensionSwitchRequest(
+                        150,
+                        "minecraft:the_nether"
+                ).target()
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BackendFrameComparisonClient.parseDimensionSwitchRequest(-1, "nether")
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BackendFrameComparisonClient.parseDimensionSwitchRequest(150, "moon")
+        );
+    }
+
+    @Test
+    void dimensionSwitchSequenceRequiresStrictlyIncreasingKnownSteps() {
+        List<BackendFrameComparisonClient.DimensionSwitchRequest> requests =
+                BackendFrameComparisonClient.parseDimensionSwitchSequence(
+                        "150:nether,450:minecraft:overworld,750:end"
+                );
+        assertEquals(3, requests.size());
+        assertEquals(150, requests.get(0).frame());
+        assertEquals(
+                BackendFrameComparisonClient.DimensionSwitchTarget.OVERWORLD,
+                requests.get(1).target()
+        );
+        assertEquals(
+                BackendFrameComparisonClient.DimensionSwitchTarget.END,
+                requests.get(2).target()
+        );
+        assertTrue(
+                BackendFrameComparisonClient.parseDimensionSwitchSequence(" ").isEmpty()
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BackendFrameComparisonClient.parseDimensionSwitchSequence(
+                        "150:nether,150:overworld"
+                )
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> BackendFrameComparisonClient.parseDimensionSwitchSequence("nether")
         );
     }
 

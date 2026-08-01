@@ -573,7 +573,12 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
     void beginFrame(final MetalCommandEncoder encoder, @Nullable final ComputeDispatcher computeDispatcher) {
         requirePhase(Phase.READY, Phase.COMPLETE);
         if (!enabled) {
-            throw new IllegalStateException("The active pack explicitly disabled shadow rendering");
+            // Fixed Iris does not construct ShadowRenderer when the pack
+            // explicitly disables shadows. Keep the Metal generation's
+            // phase contract observable without clearing or dispatching
+            // shadow-owned resources that Iris would not touch.
+            completeWithoutRendering(encoder);
+            return;
         }
         encoder.clearDepthTexture(
                 targets.shadowDepthTexture(),
@@ -598,6 +603,13 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
         phase = Phase.OPAQUE;
     }
 
+    void beginFrame(final MetalDevice device, final IrisMetalPostChain.ResourceProvider resources) {
+        Objects.requireNonNull(device, "device");
+        Objects.requireNonNull(resources, "resources");
+        beginFrame(device.commandEncoder(), (source, translated, width, height) ->
+                executeCompute(device, compute(source, new BitSet(this.targetCount)), resources));
+    }
+
     /** Drives only the two LevelRenderer submission points and the depth copy between them. */
     void renderGeometry(final MetalCommandEncoder encoder, final LevelRendererAdapter adapter) {
         requirePhase(Phase.OPAQUE);
@@ -620,8 +632,11 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
             return;
         }
         MetalCommandEncoder encoder = device.commandEncoder();
-        beginFrame(encoder, (source, translated, width, height) ->
-                executeCompute(device, compute(source, new BitSet(this.targetCount)), resources));
+        if (phase == Phase.READY) {
+            beginFrame(encoder, (source, translated, width, height) ->
+                    executeCompute(device, compute(source, new BitSet(this.targetCount)), resources));
+        }
+        requirePhase(Phase.OPAQUE);
         renderGeometry(encoder, adapter);
         for (ShadowCompositePass pass : this.compositePasses) {
             for (ComputeSource source : pass.computes()) {
@@ -633,6 +648,28 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
             completeCompositePass(pass);
         }
         finishComposites();
+    }
+
+    /**
+     * Completes a begin-level shadow clear when Iris skips geometry because
+     * the effective shadow distance is zero. OpenGL still exposes the cleared
+     * shadow targets to later pack programs, so the Metal phase must become
+     * readable even though no shadow geometry or shadow-composite pass ran.
+     */
+    void completeWithoutRendering(final MetalCommandEncoder encoder) {
+        if (phase == Phase.COMPLETE) {
+            return;
+        }
+        if (!enabled) {
+            requirePhase(Phase.READY);
+            phase = Phase.COMPLETE;
+            return;
+        }
+        requirePhase(Phase.OPAQUE);
+        targets.captureNoTranslucentsDepth(encoder);
+        targets.generateDepthMipmaps(encoder);
+        targets.generateConfiguredColorMipmaps(encoder);
+        phase = Phase.COMPLETE;
     }
 
     private void executeCompositeRaster(
@@ -754,7 +791,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
             final ShadowCompute compute,
             final IrisMetalPostChain.ResourceProvider resources
     ) {
-        try (MetalComputePass pass = device.commandEncoder().createComputePass()) {
+        try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/shadow/compute")) {
             pass.setPipeline(Objects.requireNonNull(compute.pipeline, "shadow compute pipeline"));
             bindComputeResources(pass, compute, resources);
             dispatchCompute(pass, compute, resources);

@@ -20,6 +20,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.render.BackendFrameComparisonGameRendererMixin";
     private static final String BACKEND_FRAME_COMPARISON_SERVER_MIXIN =
             "com.metallum.mixin.render.BackendFrameComparisonServerMixin";
+    private static final String BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN =
+            "com.metallum.mixin.render.BackendFrameComparisonDeltaTrackerMixin";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -30,7 +32,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     public void onLoad(String mixinPackage) {
         String osName = System.getProperty("os.name", "");
         this.isMacOs = osName.toLowerCase(Locale.ROOT).contains("mac");
-        this.isDefaultGraphicsApi = isDefaultGraphicsApiSelected();
+        this.isDefaultGraphicsApi = Boolean.getBoolean("metallum.validation.forceMetal")
+                || isDefaultGraphicsApiSelected();
     }
 
     @Override
@@ -45,7 +48,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (BACKEND_FRAME_COMPARISON_MIXIN.equals(mixinClassName)
                 || BACKEND_FRAME_COMPARISON_GAME_RENDERER_MIXIN.equals(mixinClassName)
-                || BACKEND_FRAME_COMPARISON_SERVER_MIXIN.equals(mixinClassName)) {
+                || BACKEND_FRAME_COMPARISON_SERVER_MIXIN.equals(mixinClassName)
+                || BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN.equals(mixinClassName)) {
             return Boolean.getBoolean("metallum.backend.compare.enabled");
         }
         if (mixinClassName.contains(".mixin.sodium.")) {

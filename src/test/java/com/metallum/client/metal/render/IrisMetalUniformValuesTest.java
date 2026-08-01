@@ -8,16 +8,21 @@ import net.irisshaders.iris.uniforms.custom.CustomUniforms;
 import net.irisshaders.iris.uniforms.custom.CustomUniformFixedInputUniformsHolder;
 import net.irisshaders.iris.gl.uniform.FloatSupplier;
 import net.irisshaders.iris.gl.uniform.UniformUpdateFrequency;
+import net.caffeinemc.mods.sodium.client.util.FogParameters;
 import com.mojang.blaze3d.pipeline.BlendFunction;
+import net.minecraft.client.renderer.fog.FogData;
 import org.junit.jupiter.api.Test;
 import org.joml.Matrix3f;
 import org.joml.Matrix4f;
 import org.joml.Vector2i;
+import org.joml.Vector3d;
+import org.joml.Vector3i;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,6 +31,126 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class IrisMetalUniformValuesTest {
+    @Test
+    void clampsFogDensityLikeFixedIrisSupplier() {
+        assertEquals(0.0f, IrisMetalUniformValues.irisFogDensity(-1.0f), 0.0f);
+        assertEquals(0.375f, IrisMetalUniformValues.irisFogDensity(0.375f), 0.0f);
+    }
+
+    @Test
+    void readsInternalFogColorFromSodiumFogParametersLikeFixedIris() {
+        var color = IrisMetalUniformValues.irisFogColor(
+                new FogParameters(0.1f, 0.2f, 0.3f, 0.4f, 0.0f, 256.0f, 0.0f, 256.0f)
+        );
+        assertEquals(0.1f, color.x, 0.0f);
+        assertEquals(0.2f, color.y, 0.0f);
+        assertEquals(0.3f, color.z, 0.0f);
+        assertEquals(0.4f, color.w, 0.0f);
+        var none = IrisMetalUniformValues.irisFogColor(FogParameters.NONE);
+        assertEquals(1.0f, none.x, 0.0f);
+        assertEquals(1.0f, none.y, 0.0f);
+        assertEquals(1.0f, none.z, 0.0f);
+        assertEquals(1.0f, none.w, 0.0f);
+    }
+
+    @Test
+    void convertsTheCameraFogRecordWithoutRoundingOrReordering() {
+        FogData data = new FogData();
+        data.color.set(0.11f, 0.22f, 0.33f, 0.44f);
+        data.environmentalStart = 12.0f;
+        data.environmentalEnd = 384.0f;
+        data.renderDistanceStart = 20.0f;
+        data.renderDistanceEnd = 512.0f;
+
+        FogParameters parameters = IrisMetalUniformValues.fogParameters(data);
+
+        assertEquals(0.11f, parameters.red(), 0.0f);
+        assertEquals(0.22f, parameters.green(), 0.0f);
+        assertEquals(0.33f, parameters.blue(), 0.0f);
+        assertEquals(0.44f, parameters.alpha(), 0.0f);
+        assertEquals(12.0f, parameters.environmentalStart(), 0.0f);
+        assertEquals(384.0f, parameters.environmentalEnd(), 0.0f);
+        assertEquals(20.0f, parameters.renderStart(), 0.0f);
+        assertEquals(512.0f, parameters.renderEnd(), 0.0f);
+    }
+
+    @Test
+    void materializesLiveFogSuppliersAtDrawBoundary() {
+        ByteBuffer output = ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());
+        List<MetalIrisShaderCompiler.UniformMember> layout = List.of(
+                new MetalIrisShaderCompiler.UniformMember("vec3", "fogColor", 0, 0, 12),
+                new MetalIrisShaderCompiler.UniformMember("vec4", "iris_FogColor", 0, 16, 16),
+                new MetalIrisShaderCompiler.UniformMember("float", "iris_FogDensity", 0, 32, 4),
+                new MetalIrisShaderCompiler.UniformMember("float", "iris_FogStart", 0, 36, 4),
+                new MetalIrisShaderCompiler.UniformMember("float", "iris_FogEnd", 0, 40, 4)
+        );
+        FogParameters parameters = new FogParameters(
+                0.1f, 0.2f, 0.3f, 0.4f, 12.0f, 384.0f, 20.0f, 512.0f
+        );
+
+        IrisMetalUniformValues.writeLiveFogUniforms(
+                output,
+                layout,
+                parameters,
+                new org.joml.Vector3d(0.6, 0.5, 0.4),
+                -0.25f
+        );
+
+        assertEquals(0.6f, output.getFloat(0), 0.0f);
+        assertEquals(0.5f, output.getFloat(4), 0.0f);
+        assertEquals(0.4f, output.getFloat(8), 0.0f);
+        assertEquals(0.1f, output.getFloat(16), 0.0f);
+        assertEquals(0.2f, output.getFloat(20), 0.0f);
+        assertEquals(0.3f, output.getFloat(24), 0.0f);
+        assertEquals(0.4f, output.getFloat(28), 0.0f);
+        assertEquals(0.0f, output.getFloat(32), 0.0f);
+        assertEquals(12.0f, output.getFloat(36), 0.0f);
+        assertEquals(384.0f, output.getFloat(40), 0.0f);
+        assertTrue(IrisMetalUniformValues.requiresDrawContext(layout));
+    }
+
+    @Test
+    void materializesPinnedIrisDynamicSuppliersWithoutNameFallback() {
+        CapturedRenderingState state = CapturedRenderingState.INSTANCE;
+        float previousDensity = state.getFogDensity();
+        float previousAlpha = state.getCurrentAlphaTest();
+        try {
+            state.setFogDensity(0.375f);
+            state.setCurrentAlphaTest(0.625f);
+
+            IrisMetalDynamicUniforms dynamic = IrisMetalDynamicUniforms.create(() -> 7);
+            ByteBuffer output = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+            assertTrue(dynamic.write(
+                    new MetalIrisShaderCompiler.UniformMember("int", "fogMode", 0, 0, 4),
+                    output,
+                    IrisMetalUniformValues.DrawUniformContext.empty()
+            ));
+            assertTrue(dynamic.write(
+                    new MetalIrisShaderCompiler.UniformMember("int", "fogShape", 0, 4, 4),
+                    output,
+                    IrisMetalUniformValues.DrawUniformContext.empty()
+            ));
+            assertTrue(dynamic.write(
+                    new MetalIrisShaderCompiler.UniformMember("float", "fogDensity", 0, 8, 4),
+                    output,
+                    IrisMetalUniformValues.DrawUniformContext.empty()
+            ));
+            assertTrue(dynamic.write(
+                    new MetalIrisShaderCompiler.UniformMember("float", "alphaTestRef", 0, 32, 4),
+                    output,
+                    IrisMetalUniformValues.DrawUniformContext.empty()
+            ));
+
+            assertEquals(2049, output.getInt(0));
+            assertEquals(1, output.getInt(4));
+            assertEquals(0.375f, output.getFloat(8), 0.0f);
+            assertEquals(0.625f, output.getFloat(32), 0.0f);
+        } finally {
+            state.setFogDensity(previousDensity);
+            state.setCurrentAlphaTest(previousAlpha);
+        }
+    }
+
     @Test
     void usesTheCanonicalIrisSystemTimerAndFrameCounter() {
         SystemTimeUniforms.TIMER.reset();
@@ -283,6 +408,177 @@ final class IrisMetalUniformValuesTest {
         assertEquals(160, block.getInt(4));
         assertEquals(2, block.getInt(8));
         assertEquals(0.625f, block.getFloat(12), 0.0f);
+    }
+
+    @Test
+    void acceptsIrisUniform3dSuppliersAtTheStd140Vec3Boundary() {
+        CustomUniformFixedInputUniformsHolder.Builder inputBuilder =
+                new CustomUniformFixedInputUniformsHolder.Builder();
+        inputBuilder.uniform3d(
+                UniformUpdateFrequency.PER_FRAME,
+                "skyColor",
+                () -> new Vector3d(0.11, 0.22, 0.33)
+        );
+        CustomUniformFixedInputUniformsHolder inputs = inputBuilder.build();
+        inputs.updateAll();
+        CustomUniforms customUniforms = new CustomUniforms.Builder().build(inputs);
+        IrisMetalUniformValues values = new IrisMetalUniformValues(
+                0.0f, customUniforms, inputs, new FrameUpdateNotifier(), () -> 0
+        );
+        ByteBuffer block = ByteBuffer.allocate(16).order(ByteOrder.nativeOrder());
+
+        assertTrue(values.writeOfficialUniform(
+                block,
+                new MetalIrisShaderCompiler.UniformMember("vec3", "skyColor", 0, 0, 16)
+        ));
+        assertEquals(0.11f, block.getFloat(0), 0.0f);
+        assertEquals(0.22f, block.getFloat(4), 0.0f);
+        assertEquals(0.33f, block.getFloat(8), 0.0f);
+    }
+
+    @Test
+    void strictProductionUniformBlocksRejectMembersOutsideIrisGraphs() {
+        CustomUniformFixedInputUniformsHolder inputs =
+                new CustomUniformFixedInputUniformsHolder.Builder().build();
+        CustomUniforms customUniforms = new CustomUniforms.Builder().build(inputs);
+        IrisMetalDynamicUniforms dynamic = IrisMetalDynamicUniforms.create(() -> 0);
+        IrisMetalUniformValues values = new IrisMetalUniformValues(
+                0.0f, customUniforms, inputs, dynamic, new FrameUpdateNotifier(), () -> 0
+        );
+        MetalIrisShaderCompiler.GlslProgram program = new MetalIrisShaderCompiler.GlslProgram(
+                "strict-unknown-uniform",
+                "", "", "", "",
+                List.of(new MetalIrisShaderCompiler.UniformMember("float", "notRegistered", 0, 0, 4)),
+                16,
+                List.of(),
+                List.of(),
+                List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                new int[]{0},
+                java.util.OptionalDouble.empty()
+        );
+
+        IllegalStateException failure = assertThrows(
+                IllegalStateException.class,
+                () -> values.register("strict-unknown", "strict-unknown", program)
+        );
+        assertTrue(failure.getMessage().contains("absent from the fixed/custom/dynamic supplier graph"));
+    }
+
+    @Test
+    void strictProductionUniformBlocksAcceptIrisFixedInputSuppliers() {
+        CustomUniformFixedInputUniformsHolder.Builder inputBuilder =
+                new CustomUniformFixedInputUniformsHolder.Builder();
+        inputBuilder.uniform3i(
+                UniformUpdateFrequency.PER_TICK,
+                "currentTime",
+                () -> new Vector3i(2026, 8, 1)
+        );
+        inputBuilder.uniform2i(
+                UniformUpdateFrequency.PER_TICK,
+                "currentYearTime",
+                () -> new Vector2i(123, 456)
+        );
+        CustomUniformFixedInputUniformsHolder inputs = inputBuilder.build();
+        CustomUniforms customUniforms = new CustomUniforms.Builder().build(inputs);
+        IrisMetalUniformValues values = new IrisMetalUniformValues(
+                0.0f, customUniforms, inputs, IrisMetalDynamicUniforms.create(() -> 0),
+                new FrameUpdateNotifier(), () -> 0
+        );
+        MetalIrisShaderCompiler.GlslProgram program = new MetalIrisShaderCompiler.GlslProgram(
+                "strict-fixed-inputs",
+                "", "", "", "",
+                List.of(
+                        new MetalIrisShaderCompiler.UniformMember("ivec3", "currentTime", 0, 0, 12),
+                        new MetalIrisShaderCompiler.UniformMember("ivec2", "currentYearTime", 0, 16, 8)
+                ),
+                32,
+                List.of(),
+                List.of(),
+                List.of(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME),
+                new int[]{0},
+                java.util.OptionalDouble.empty()
+        );
+
+        values.register("strict-fixed-inputs", "strict-fixed-inputs", program);
+        inputs.updateAll();
+        ByteBuffer output = ByteBuffer.allocate(32).order(ByteOrder.nativeOrder());
+        assertTrue(values.writeOfficialUniform(
+                output,
+                new MetalIrisShaderCompiler.UniformMember("ivec3", "currentTime", 0, 0, 12)
+        ));
+        assertTrue(values.writeOfficialUniform(
+                output,
+                new MetalIrisShaderCompiler.UniformMember("ivec2", "currentYearTime", 0, 16, 8)
+        ));
+        assertEquals(2026, output.getInt(0));
+        assertEquals(8, output.getInt(4));
+        assertEquals(1, output.getInt(8));
+        assertEquals(123, output.getInt(16));
+        assertEquals(456, output.getInt(20));
+    }
+
+    @Test
+    void updatesFixedInputsOutsideCustomOrderWithoutDoubleRunningDependencies() {
+        AtomicInteger dependencyCalls = new AtomicInteger();
+        AtomicInteger independentCalls = new AtomicInteger();
+        CustomUniformFixedInputUniformsHolder.Builder inputBuilder =
+                new CustomUniformFixedInputUniformsHolder.Builder();
+        inputBuilder.uniform1i(
+                UniformUpdateFrequency.PER_FRAME,
+                "dependency",
+                dependencyCalls::incrementAndGet
+        );
+        inputBuilder.uniform1i(
+                UniformUpdateFrequency.PER_FRAME,
+                "independent",
+                independentCalls::incrementAndGet
+        );
+        CustomUniformFixedInputUniformsHolder inputs = inputBuilder.build();
+        CustomUniforms.Builder customBuilder = new CustomUniforms.Builder();
+        customBuilder.addVariable("int", "derived", "dependency + 1", true);
+        CustomUniforms customUniforms = customBuilder.build(inputs);
+
+        customUniforms.update();
+        IrisMetalUniformValues.updateUnvisitedFixedInputs(customUniforms, inputs);
+
+        assertEquals(1, dependencyCalls.get(), "CustomUniforms dependency must not be updated twice");
+        assertEquals(1, independentCalls.get(), "unvisited fixed input must be refreshed once");
+    }
+
+    @Test
+    void lowersEveryIrisMatrixUniformProjectionAlias() {
+        Matrix4f zeroToOne = new Matrix4f().setPerspective(
+                (float) Math.toRadians(70.0),
+                16.0f / 9.0f,
+                0.05f,
+                512.0f,
+                true
+        );
+        Matrix4f expected = MetalIrisDepthConvention.zeroToOneToOpenGl(zeroToOne);
+        Matrix4f expectedInverse = new Matrix4f(expected).invert();
+
+        for (String name : List.of(
+                "gbufferProjection",
+                "gbufferPreviousProjection",
+                "dhProjection",
+                "dhPreviousProjection",
+                "iris_ProjectionMatrix"
+        )) {
+            assertMatrix4Equals(
+                    expected,
+                    new Matrix4f(IrisMetalUniformValues.packProjectionUniform(name, zeroToOne, true))
+            );
+        }
+        for (String name : List.of(
+                "gbufferProjectionInverse",
+                "dhProjectionInverse",
+                "iris_ProjectionMatrixInverse"
+        )) {
+            assertMatrix4Equals(
+                    expectedInverse,
+                    new Matrix4f(IrisMetalUniformValues.packProjectionUniform(name, new Matrix4f(zeroToOne).invert(), true))
+            );
+        }
     }
 
     @Test

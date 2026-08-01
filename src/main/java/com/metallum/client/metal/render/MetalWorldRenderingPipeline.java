@@ -186,7 +186,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             // Publish only after the generation and its non-GPU renderer resources
             // are complete. Cached dimensions remain selected if construction fails.
             IrisMetalPipelineOverrides.select(this.overrides);
-            IrisMetalPackLifecycle.onSemanticPipelineActivated();
+            IrisMetalPackLifecycle.onSemanticPipelineActivated(this.overrides.generation());
             Metallum.LOGGER.info(
                     "[metallum-iris] semantic pipeline generation {} online for pack program set {}",
                     this.overrides.generation(), this.pack.getProfileInfo()
@@ -249,15 +249,28 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
      */
     @Override
     public void beginLevelRendering() {
+        IrisMetalPassTrace.observeLifecycle("begin_level_enter");
         activateDimensionGeneration();
         this.frameState.beginWorldRendering();
+        // Iris's fixed-input uniform graph includes currentSelectedBlockId and
+        // currentSelectedBlockData suppliers.  Populate the same world-owned
+        // material maps before evaluating that graph; otherwise an initial
+        // world load (especially a non-Overworld dimension) can observe the
+        // maps as null and fail before the first draw.
+        ensureBlockMaterialMappings();
         // Iris advances queued PBR resource aliases once per world frame
         // before any program asks their dynamic TextureWrapper suppliers.
         PBRTextureManager.INSTANCE.onNewFrame();
+        IrisMetalPassTrace.observeLifecycle("pbr_frame_complete");
         // Refresh the pack's uniform block before sodium draws terrain.
         IrisMetalPipelineOverrides.updateFrame();
+        IrisMetalPassTrace.observeLifecycle("begin_stage_enter");
         IrisMetalPipelineOverrides.executePostStage(IrisMetalPostChain.Stage.BEGIN);
+        IrisMetalPassTrace.observeLifecycle("begin_stage_complete");
         IrisMetalPassTrace.observePhase("gbuffer", "executing");
+    }
+
+    private void ensureBlockMaterialMappings() {
         if (this.initializedBlockIds) {
             return;
         }
@@ -320,6 +333,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     ) {
         if (!IrisMetalPipelineOverrides.shadowsEnabled()
                 || IrisVideoSettings.getOverriddenShadowDistance(IrisVideoSettings.shadowDistance) == 0) {
+            IrisMetalPipelineOverrides.completeShadowFrame();
             IrisMetalPassTrace.observePhase("shadow", "empty");
             IrisMetalPipelineOverrides.executePostStage(IrisMetalPostChain.Stage.PREPARE);
             return;
@@ -818,7 +832,6 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
     public void destroy() {
         this.frameState.endWorldRendering();
         IrisMetalPipelineOverrides.deactivate(this.overrides);
-        IrisMetalPackLifecycle.onSemanticPipelineDestroyed();
         this.horizonRenderer.destroy();
         this.shadowFeatureRenderDispatcher.close();
         this.shadowRenderBuffers.close();

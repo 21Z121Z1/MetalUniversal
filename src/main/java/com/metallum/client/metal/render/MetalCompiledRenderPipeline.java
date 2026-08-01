@@ -6,6 +6,7 @@ import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BlendFunction;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
+import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.platform.PolygonMode;
 import com.mojang.blaze3d.vertex.VertexFormat;
@@ -16,6 +17,9 @@ import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -72,6 +76,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final boolean lazyVariants;
     private final MetalDevice device;
     private final RenderPipeline info;
+    private final String validationPipelineId;
+    private final List<String> validationShaderIds;
     private final MemorySegment vertexFunction;
     private final MemorySegment fragmentFunction;
     /** Guarded by MetalDevice.COMPILE_CHAIN_LOCK (close runs inside clearPipelineCache). */
@@ -198,6 +204,22 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
         this.device = device;
         this.info = info;
+        this.validationShaderIds = List.of(
+                "sha256:" + sha256(vertexMsl),
+                "sha256:" + sha256(fragmentMsl)
+        );
+        this.validationPipelineId = "sha256:" + sha256(
+                vertexMsl + "\u0000" + fragmentMsl + "\u0000"
+                        + stablePipelineState(
+                        info,
+                        this.colorFormats,
+                        this.resources,
+                        this.genericVertexInputs,
+                        this.firstAvailableVertexBufferSlot,
+                        this.genericVertexBufferSlot
+                )
+                        + "\u0000metal4=" + device.metal4MainRendererEnabled()
+        );
         this.lazyVariants = device.asyncPrewarmEnabled();
         this.vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
         this.fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
@@ -240,6 +262,77 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 }
             }
         }
+    }
+
+    private static String stablePipelineState(
+            final RenderPipeline pipeline,
+            final MTLPixelFormat[] colorFormats,
+            final List<ResourceBinding> resources,
+            final List<MetalCrossShaderCompiler.GenericVertexInput> genericInputs,
+            final int firstVertexSlot,
+            final int genericVertexSlot
+    ) {
+        StringBuilder result = new StringBuilder();
+        result.append("location=").append(pipeline.getLocation());
+        result.append("|colors=").append(Arrays.toString(colorFormats));
+        result.append("|targets=");
+        for (ColorTargetState target : pipeline.getColorTargetStates()) {
+            if (target == null) {
+                result.append("null;");
+                continue;
+            }
+            result.append(target.format()).append("/mask=").append(target.writeMask()).append("/blend=");
+            Optional<BlendFunction> blend = target.blendFunction();
+            if (blend.isEmpty()) {
+                result.append("disabled");
+            } else {
+                BlendFunction function = blend.get();
+                result.append(function.color().sourceFactor()).append(',')
+                        .append(function.color().destFactor()).append(',')
+                        .append(function.color().op()).append(';')
+                        .append(function.alpha().sourceFactor()).append(',')
+                        .append(function.alpha().destFactor()).append(',')
+                        .append(function.alpha().op());
+            }
+            result.append(';');
+        }
+        DepthStencilState depth = pipeline.getDepthStencilState();
+        result.append("|depth=");
+        if (depth == null) {
+            result.append("none");
+        } else {
+            result.append(depth.depthTest()).append('/').append(depth.writeDepth())
+                    .append('/').append(Float.toString(depth.depthBiasScaleFactor()))
+                    .append('/').append(Float.toString(depth.depthBiasConstant()));
+        }
+        result.append("|raster=").append(pipeline.isCull()).append('/')
+                .append(pipeline.getPolygonMode()).append('/').append(pipeline.getPrimitiveTopology());
+        result.append("|resources=");
+        for (ResourceBinding resource : resources) {
+            result.append(resource.kind()).append('/').append(resource.name()).append('/')
+                    .append(resource.bindingIndex()).append('/').append(resource.stageMask()).append('/')
+                    .append(resource.texelBufferFormat()).append(';');
+        }
+        result.append("|vertexBindings=");
+        for (VertexFormat binding : pipeline.getVertexFormatBindings()) {
+            if (binding == null) {
+                result.append("null;");
+                continue;
+            }
+            result.append(binding.getVertexSize()).append('/').append(binding.getStepRate()).append(':');
+            for (VertexFormatElement element : binding.getElements()) {
+                result.append(element.name()).append('@').append(element.offset()).append('@')
+                        .append(element.format()).append(';');
+            }
+            result.append('|');
+        }
+        result.append("|vertexSlots=").append(firstVertexSlot).append('/').append(genericVertexSlot);
+        result.append("|generic=");
+        for (MetalCrossShaderCompiler.GenericVertexInput input : genericInputs) {
+            result.append(input.location()).append('/').append(input.baseType()).append('/')
+                    .append(input.components()).append(';');
+        }
+        return result.toString();
     }
 
     private PipelineSignature signatureFor(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
@@ -453,6 +546,28 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     int genericVertexBufferSlot() {
         return this.genericVertexBufferSlot;
+    }
+
+    String validationPipelineId() {
+        return validationPipelineId;
+    }
+
+    List<String> validationShaderIds() {
+        return validationShaderIds;
+    }
+
+    private static String sha256(final String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder result = new StringBuilder(digest.length * 2);
+            for (byte item : digest) {
+                result.append(String.format(java.util.Locale.ROOT, "%02x", item));
+            }
+            return result.toString();
+        } catch (NoSuchAlgorithmException exception) {
+            throw new AssertionError(exception);
+        }
     }
 
     static int resolveGenericVertexBufferSlot(

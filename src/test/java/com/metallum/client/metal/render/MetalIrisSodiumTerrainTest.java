@@ -253,8 +253,8 @@ final class MetalIrisSodiumTerrainTest {
             );
             try {
                 RenderPipeline source = fakeSodiumPipeline(TerrainKind.TRANSLUCENT);
-                IllegalStateException failure = assertThrows(
-                        IllegalStateException.class,
+                IrisMetalPackRejectedException failure = assertThrows(
+                        IrisMetalPackRejectedException.class,
                         () -> IrisMetalPipelineOverrides.pipelineForTerrain(source)
                 );
                 assertTrue(failure.getMessage().contains("strict mode rejected generation"));

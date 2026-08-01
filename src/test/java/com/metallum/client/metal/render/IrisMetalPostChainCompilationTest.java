@@ -27,6 +27,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /** Device gate for the installed Potato and BSL deferred/composite/final program sets. */
 @EnabledOnOs(OS.MAC)
@@ -36,7 +37,10 @@ final class IrisMetalPostChainCompilationTest {
         Path packPath = Path.of(System.getProperty(
                 "metallum.iris.potato.path", "run/shaderpacks/potato-shaders.zip"
         ));
-        assertTrue(Files.isRegularFile(packPath), "Missing Potato shader-pack fixture: " + packPath);
+        assumeTrue(
+                Files.isRegularFile(packPath),
+                "SKIPPED: missing Potato shader-pack fixture: " + packPath
+        );
 
         Iris.testing = true;
         try (FileSystem fileSystem = FileSystems.newFileSystem(packPath)) {
@@ -86,7 +90,10 @@ final class IrisMetalPostChainCompilationTest {
         Path packPath = Path.of(System.getProperty(
                 "metallum.iris.bsl.path", "run/shaderpacks/bsl-shaders.zip"
         ));
-        assertTrue(Files.isRegularFile(packPath), "Missing BSL shader-pack fixture: " + packPath);
+        assumeTrue(
+                Files.isRegularFile(packPath),
+                "SKIPPED: missing BSL shader-pack fixture: " + packPath
+        );
 
         Iris.testing = true;
         try (FileSystem fileSystem = FileSystems.newFileSystem(packPath)) {

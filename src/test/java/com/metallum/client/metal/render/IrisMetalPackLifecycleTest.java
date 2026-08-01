@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -34,22 +35,19 @@ final class IrisMetalPackLifecycleTest {
     }
 
     @Test
-    void strictModeIsExplicitAndDefaultsOff() {
-        String previous = System.getProperty(IrisMetalPackLifecycle.STRICT_PROPERTY);
-        try {
-            System.clearProperty(IrisMetalPackLifecycle.STRICT_PROPERTY);
-            assertFalse(IrisMetalPackLifecycle.strictModeRequested());
-            System.setProperty(IrisMetalPackLifecycle.STRICT_PROPERTY, "true");
-            assertTrue(IrisMetalPackLifecycle.strictModeRequested());
-            System.setProperty(IrisMetalPackLifecycle.STRICT_PROPERTY, "false");
-            assertFalse(IrisMetalPackLifecycle.strictModeRequested());
-        } finally {
-            if (previous == null) {
-                System.clearProperty(IrisMetalPackLifecycle.STRICT_PROPERTY);
-            } else {
-                System.setProperty(IrisMetalPackLifecycle.STRICT_PROPERTY, previous);
-            }
-        }
+    void inactiveCachedDimensionTeardownCannotArmDisabledTransition() {
+        IrisMetalPackLifecycle.onSemanticPipelineActivated(41);
+        IrisMetalPackLifecycle.onSemanticPipelineSelected(42);
+
+        IrisMetalPackLifecycle.onSemanticPipelineDestroyed(41);
+        assertFalse(
+                IrisMetalPackLifecycle.consumeDisabledReloadTransition(true, false),
+                "destroying an inactive cached dimension armed the disable transition"
+        );
+
+        IrisMetalPackLifecycle.onSemanticPipelineDestroyed(42);
+        assertTrue(IrisMetalPackLifecycle.consumeDisabledReloadTransition(true, false));
+        assertFalse(IrisMetalPackLifecycle.consumeDisabledReloadTransition(true, false));
     }
 
     @Test
@@ -85,6 +83,28 @@ final class IrisMetalPackLifecycleTest {
                 () -> IrisMetalPackAdmission.validateComputeSource(compute, Map.of())
         );
         assertTrue(failure.getMessage().contains("non-positive absolute workgroups"));
+    }
+
+    @Test
+    void admissionRejectsPackOwnedSamplerBufferBeforeGenerationPublish() {
+        UnsupportedOperationException failure = assertThrows(
+                UnsupportedOperationException.class,
+                () -> IrisMetalPackAdmission.validateSamplerBuffers(
+                        "composite", "composite0",
+                        "// uniform samplerBuffer ignored;\n"
+                                + "layout(binding = 3) uniform samplerBuffer history;"
+                )
+        );
+        assertTrue(failure.getMessage().contains("samplerBuffer 'history'"));
+        assertTrue(failure.getMessage().contains("typed provider ABI"));
+    }
+
+    @Test
+    void admissionLeavesOrdinaryPackSamplersSupported() {
+        assertDoesNotThrow(() -> IrisMetalPackAdmission.validateSamplerBuffers(
+                "composite", "composite0",
+                "layout(binding = 0) uniform sampler2D colortex0;"
+        ));
     }
 
     @Test

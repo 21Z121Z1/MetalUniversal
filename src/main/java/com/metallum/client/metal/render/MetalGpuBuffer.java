@@ -14,10 +14,13 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Environment(EnvType.CLIENT)
 class MetalGpuBuffer extends GpuBuffer {
+    private static final AtomicLong NEXT_VALIDATION_RESOURCE_ID = new AtomicLong(1L);
     private final MetalDevice device;
+    private final long validationResourceId = NEXT_VALIDATION_RESOURCE_ID.getAndIncrement();
     private final boolean cpuAccessible;
     private final boolean dynamic;
     private final long resourceOptions;
@@ -96,6 +99,14 @@ class MetalGpuBuffer extends GpuBuffer {
             throw new IllegalStateException("Native Metal buffer is closed");
         }
         return this.nativeHandle;
+    }
+
+    long validationResourceId() {
+        return validationResourceId;
+    }
+
+    String validationDebugId() {
+        return "metal-buffer-" + validationResourceId;
     }
 
     boolean isDynamic() {

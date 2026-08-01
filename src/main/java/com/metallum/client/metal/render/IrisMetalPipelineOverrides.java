@@ -100,10 +100,11 @@ import java.util.function.Supplier;
  * (draw buffer 0 aliases the sodium pipeline's own target — the main
  * framebuffer — until the B2-3 composite chain lands).</p>
  *
- * <p>Ordinary release mode records translation/compilation failures and may
- * retain the native pipeline. {@code -Dmetallum.iris.strict=true} turns every
- * active-pack fallback into a generation failure, so validation cannot pass
- * with silently vanilla-looking draws.</p>
+ * <p>An admitted active pack is fail-closed: translation, compilation,
+ * descriptor, and resource failures reject the generation before it can be
+ * published. Test-only construction helpers may still request a non-strict
+ * diagnostic instance, but production never substitutes the native pipeline
+ * for an admitted pack.</p>
  */
 @Environment(EnvType.CLIENT)
 public final class IrisMetalPipelineOverrides {
@@ -343,7 +344,7 @@ public final class IrisMetalPipelineOverrides {
                 updateNotifier,
                 renderStageSource,
                 true,
-                IrisMetalPackLifecycle.strictModeRequested()
+                true
         );
     }
 
@@ -416,6 +417,7 @@ public final class IrisMetalPipelineOverrides {
             return;
         }
         active = instance;
+        IrisMetalPackLifecycle.onSemanticPipelineSelected(instance.generation());
         IrisMetalPassTrace.activate(instance.programSet, instance.generation());
     }
 
@@ -434,6 +436,7 @@ public final class IrisMetalPipelineOverrides {
         }
         expected.close();
         if (wasActive) {
+            IrisMetalPackLifecycle.onSemanticPipelineDestroyed(expected.generation());
             IrisMetalPassTrace.close();
         }
     }
@@ -444,15 +447,25 @@ public final class IrisMetalPipelineOverrides {
         if (instance == null) {
             return;
         }
+        IrisMetalPassTrace.observeLifecycle("update_frame_enter");
+        IrisMetalPassTrace.observeFogState("update_frame_enter");
+        // Iris dispatches setup[] only when RenderTargets.resizeIfNeeded()
+        // reports a resource recreation. A full clear is a separate contract
+        // and must not re-run setup programs on an otherwise stable generation.
+        instance.setupRequiredThisFrame = false;
         // Every GPU resource the draw path may need is created and uploaded
         // HERE, not on demand in pushDescriptor. Allocating or uploading while
         // a render encoder is live ends that encoder (writeToTexture /
         // writeToBuffer / clearDepthTexture all open a blit encoder), and the
         // caller then writes into a closed handle — see handoff §6 iteration 5.
         instance.prewarm(MetalDevice.current());
+        IrisMetalPassTrace.observeLifecycle("prewarm_complete");
+        IrisMetalPassTrace.observeFogState("prewarm_complete");
         IrisMetalPassTrace.beginFrame(instance.uniformValues.frameCounter());
         instance.beginFrame();
         instance.uniformValues.updateFrame();
+        IrisMetalPassTrace.observeLifecycle("uniform_update_complete");
+        IrisMetalPassTrace.observeFogState("uniform_update_complete");
     }
 
     /** Captures depthtex1 at Iris's opaque-to-translucent phase boundary. */
@@ -511,6 +524,13 @@ public final class IrisMetalPipelineOverrides {
             throw new IllegalStateException("Iris Metal shadow frame has no active pipeline generation");
         }
         instance.executeShadowFrame(adapter);
+    }
+
+    static void completeShadowFrame() {
+        Instance instance = active;
+        if (instance != null) {
+            instance.completeShadowFrame();
+        }
     }
 
     /**
@@ -701,10 +721,12 @@ public final class IrisMetalPipelineOverrides {
                 );
                 CustomUniformFixedInputUniformsHolder fixedInputGraph = fixedInputs.build();
                 CustomUniforms customUniforms = this.pack.customUniforms.build(fixedInputGraph);
+                IrisMetalDynamicUniforms dynamicUniformGraph = IrisMetalDynamicUniforms.create(renderStageSource);
                 this.uniformValues = new IrisMetalUniformValues(
                         this.packDirectives.getSunPathRotation(),
                         customUniforms,
                         fixedInputGraph,
+                        dynamicUniformGraph,
                         updateNotifier,
                         renderStageSource
                 );
@@ -767,9 +789,9 @@ public final class IrisMetalPipelineOverrides {
             }
             String message = "Iris Metal strict mode rejected generation " + this.generation + ": " + reason;
             if (cause == null) {
-                throw new IllegalStateException(message);
+                throw new IrisMetalPackRejectedException(message);
             }
-            throw new IllegalStateException(message, cause);
+            throw new IrisMetalPackRejectedException(message, cause);
         }
 
         int generation() {
@@ -789,6 +811,16 @@ public final class IrisMetalPipelineOverrides {
             }
             shadows.executeFrame(currentDevice, adapter, this.postResources);
             IrisMetalPassTrace.observePhase("shadow", "executed");
+        }
+
+        private void completeShadowFrame() {
+            IrisMetalShadowPipeline shadows = this.shadowPipeline;
+            MetalDevice currentDevice = this.device != null ? this.device : MetalDevice.current();
+            if (this.closed || shadows == null || currentDevice == null) {
+                return;
+            }
+            shadows.completeWithoutRendering(currentDevice.commandEncoder());
+            IrisMetalPassTrace.observePhase("shadow", "cleared");
         }
 
         MetalIrisShaderCompiler.@Nullable GlslProgram program(final TerrainKind kind) {
@@ -1827,7 +1859,9 @@ public final class IrisMetalPipelineOverrides {
             Minecraft minecraft = Minecraft.getInstance();
             if (!this.postPrepared && targets != null && minecraft != null && minecraft.gameRenderer != null) {
                 GpuFormat finalFormat = minecraft.gameRenderer.mainRenderTarget().getColorTexture().getFormat();
-                this.postChain.prepare(device, targets, finalFormat, device.activeShaderSource());
+                this.postChain.prepare(
+                        device, targets, finalFormat, device.activeShaderSource(), this.postResources
+                );
                 this.postPrepared = true;
             }
             if (this.postPrepared
@@ -1887,6 +1921,7 @@ public final class IrisMetalPipelineOverrides {
                         this.postChain.mipmappedTargets(),
                         this.postChain.storageImageTargets()
                 );
+                this.setupRequiredThisFrame = true;
                 IrisMetalPassTrace.observeTargets(
                         "allocated", width, height, this.targetFormats.length, formatNames(this.targetFormats)
                 );
@@ -1896,6 +1931,7 @@ public final class IrisMetalPipelineOverrides {
                 );
             } else if (this.renderTargets.width() != width || this.renderTargets.height() != height) {
                 this.renderTargets.resize(width, height);
+                this.setupRequiredThisFrame = true;
                 IrisMetalPassTrace.observeTargets(
                         "resized", width, height, this.targetFormats.length, formatNames(this.targetFormats)
                 );
@@ -1920,7 +1956,6 @@ public final class IrisMetalPipelineOverrides {
                     device.commandEncoder(),
                     new Vector4f((float) fog.x, (float) fog.y, (float) fog.z, 1.0F)
             );
-            this.setupRequiredThisFrame = fullClear;
             IrisMetalComputeResources compute = this.computeResources;
             if (compute != null) {
                 compute.clearForFrame(device.commandEncoder());
@@ -1928,6 +1963,11 @@ public final class IrisMetalPipelineOverrides {
             targets.colorTargets().restore(this.postChain.stageInput(
                     fullClear ? IrisMetalPostChain.Stage.SETUP : IrisMetalPostChain.Stage.BEGIN
             ));
+            IrisMetalShadowPipeline shadows = this.shadowPipeline;
+            if (shadows != null) {
+                shadows.beginFrame(device, this.postResources);
+                IrisMetalPassTrace.observePhase("shadow", "began");
+            }
             IrisMetalPassTrace.observePhase("targets-clear", fullClear ? "full" : "directed");
         }
 

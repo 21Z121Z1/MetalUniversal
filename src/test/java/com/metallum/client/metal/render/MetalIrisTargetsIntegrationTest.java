@@ -253,11 +253,79 @@ final class MetalIrisTargetsIntegrationTest {
             assertRgba(main.colorTargets().writeTexture(0), 255, 0, 0, "main colortex isolated from shadow pass");
 
             // Pack-config resize rebuilds shadow textures at the new square size.
+            MetalGpuTexture oldShadowDepth = shadow.shadowDepthTexture();
+            MetalGpuTexture oldShadowDepthNoTranslucents = shadow.shadowDepthNoTranslucentsTexture();
+            MetalGpuTexture oldShadowColor = shadow.colorTargets().mainTexture(0);
+            MetalGpuTextureView oldShadowColorView = shadow.colorTargets().readView(0);
+            MetalGpuTextureView oldShadowDepthView = shadow.shadowDepthView();
             shadow.resize(64);
+            assertTrue(oldShadowDepth.isClosed(), "resize must retire shadowtex0");
+            assertTrue(oldShadowDepthNoTranslucents.isClosed(), "resize must retire shadowtex1");
+            assertTrue(oldShadowColor.isClosed(), "resize must retire old shadowcolor texture");
+            assertTrue(oldShadowColorView.isClosed(), "resize must retire old shadowcolor view");
+            assertTrue(oldShadowDepthView.isClosed(), "resize must retire old shadow depth view");
             assertEquals(64, shadow.resolution());
             assertEquals(64, shadow.shadowDepthTexture().getWidth(0));
             runShadowPass(shadow, "iris_shadow_030", "iris_shadow_white", 1.0);
             assertDepth(shadow.shadowDepthTexture(), 0.3F, "shadowtex0 after resize re-render");
+        }
+    }
+
+    @Test
+    void shadowCompositeMrtWritesAndPublishesBothTargets() {
+        fragmentShaders.put("iris_shadow_mrt", """
+                #version 450
+                layout(location=0) out vec4 first;
+                layout(location=1) out vec4 second;
+                void main() {
+                    first = vec4(1.0, 0.0, 0.0, 1.0);
+                    second = vec4(0.0, 1.0, 0.0, 1.0);
+                }
+                """);
+        try (IrisMetalShadowTargets shadow = new IrisMetalShadowTargets(
+                device,
+                new GpuFormat[]{GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM},
+                32
+        )) {
+            BitSet readsFromAlt = new BitSet();
+            for (int target = 0; target < 2; target++) {
+                encoder.clearColorTexture(shadow.colorTargets().mainTexture(target), new Vector4f(0.0F));
+                encoder.clearColorTexture(shadow.colorTargets().altTexture(target), new Vector4f(0.0F));
+            }
+            RenderPipeline pipeline = RenderPipeline.builder()
+                    .withLocation("metallum_iris/iris_shadow_mrt")
+                    .withVertexShader("metallum_iris/fullscreen")
+                    .withFragmentShader("metallum_iris/iris_shadow_mrt")
+                    .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                    .withCull(false)
+                    .withColorTargetState(0, new ColorTargetState(
+                            Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                    .withColorTargetState(1, new ColorTargetState(
+                            Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                    .build();
+            try (IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor =
+                         shadow.createShadowCompositeDescriptor(
+                                 "iris shadow MRT composite", new int[]{0, 1}, readsFromAlt,
+                                 0, 0, 32, 32
+                         )) {
+                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
+                pass.setPipeline(pipeline);
+                pass.draw(3, 1, 0, 0);
+                encoder.submitRenderPass();
+            }
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+
+            assertRgba(shadow.colorTargets().mainTexture(0), 0, 0, 0, "shadow MRT main target0 untouched");
+            assertRgba(shadow.colorTargets().mainTexture(1), 0, 0, 0, "shadow MRT main target1 untouched");
+            assertRgba(shadow.colorTargets().altTexture(0), 255, 0, 0, "shadow MRT alt target0");
+            assertRgba(shadow.colorTargets().altTexture(1), 0, 255, 0, "shadow MRT alt target1");
+
+            BitSet published = new BitSet();
+            published.set(0, 2);
+            shadow.publishFlipState(published);
+            assertRgba(shadow.colorTargets().readTexture(0), 255, 0, 0, "published shadow MRT target0");
+            assertRgba(shadow.colorTargets().readTexture(1), 0, 255, 0, "published shadow MRT target1");
         }
     }
 

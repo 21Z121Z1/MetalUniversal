@@ -1,11 +1,16 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.mtl.MTLComputeCommandEncoder;
+import com.metallum.client.validation.contract.ProducerType;
+import com.metallum.client.validation.contract.RenderContractRuntime;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Mod-private compute pass over one {@code MTLComputeCommandEncoder}.
@@ -26,25 +31,39 @@ import java.lang.foreign.MemorySegment;
 final class MetalComputePass implements AutoCloseable {
     private final MetalCommandEncoder owner;
     private final MTLComputeCommandEncoder encoder;
+    private final long contractPassToken;
+    private final Map<String, String> boundResources = new LinkedHashMap<>();
     @Nullable
     private MetalComputePipeline pipeline;
     private boolean closed;
 
-    MetalComputePass(final MetalCommandEncoder owner, final MTLComputeCommandEncoder encoder) {
+    MetalComputePass(
+            final MetalCommandEncoder owner,
+            final MTLComputeCommandEncoder encoder,
+            final long contractPassToken
+    ) {
         this.owner = owner;
         this.encoder = encoder;
+        this.contractPassToken = contractPassToken;
     }
 
     MetalComputePass setPipeline(final MetalComputePipeline pipeline) {
         ensureOpen();
         this.pipeline = pipeline;
         encoder.setComputePipelineState(pipeline.pipelineStateHandle());
+        if (contractPassToken >= 0L) {
+            RenderContractRuntime.updatePipeline(contractPassToken, pipeline.validationPipelineId());
+            RenderContractRuntime.updateShaders(contractPassToken, pipeline.validationShaderIds());
+        }
         return this;
     }
 
     MetalComputePass bindBuffer(final int index, final MetalGpuBuffer buffer, final long offset) {
         ensureOpen();
         encoder.setBuffer(buffer.nativeHandle(), offset, index);
+        if (contractPassToken >= 0L && RenderContractRuntime.producerDetailsCaptured()) {
+            boundResources.put("buffer[" + index + "]", buffer.validationDebugId() + "+" + offset);
+        }
         return this;
     }
 
@@ -61,12 +80,20 @@ final class MetalComputePass implements AutoCloseable {
             );
         }
         encoder.setTexture(texture.nativeHandle(), index);
+        if (contractPassToken >= 0L && RenderContractRuntime.producerDetailsCaptured()) {
+            boundResources.put("texture[" + index + "]", MetalCommandEncoder.contractResource(texture, 0).stableKey());
+        }
         return this;
     }
 
     MetalComputePass bindTextureView(final int index, final MetalGpuTextureView view) {
         ensureOpen();
         encoder.setTexture(view.nativeHandle(), index);
+        if (contractPassToken >= 0L && RenderContractRuntime.producerDetailsCaptured()) {
+            boundResources.put("texture[" + index + "]", MetalCommandEncoder.contractResource(
+                    (MetalGpuTexture) view.texture(), view.baseMipLevel()
+            ).stableKey());
+        }
         return this;
     }
 
@@ -92,6 +119,18 @@ final class MetalComputePass implements AutoCloseable {
         encoder.dispatchThreadgroups(
                 groupsX, groupsY, groupsZ,
                 bound.threadgroupWidth(), bound.threadgroupHeight(), bound.threadgroupDepth()
+        );
+        RenderContractRuntime.recordProducer(
+                contractPassToken,
+                ProducerType.DISPATCH,
+                bound.validationPipelineId(),
+                Map.of(
+                        "groupsX", Integer.toString(groupsX),
+                        "groupsY", Integer.toString(groupsY),
+                        "groupsZ", Integer.toString(groupsZ)
+                ),
+                boundResources,
+                List.of()
         );
         return this;
     }
@@ -122,6 +161,14 @@ final class MetalComputePass implements AutoCloseable {
                 offset,
                 bound.threadgroupWidth(), bound.threadgroupHeight(), bound.threadgroupDepth()
         );
+        RenderContractRuntime.recordProducer(
+                contractPassToken,
+                ProducerType.DISPATCH_INDIRECT,
+                bound.validationPipelineId(),
+                Map.of("offset", Long.toString(offset)),
+                boundResources,
+                List.of()
+        );
         return this;
     }
 
@@ -144,6 +191,8 @@ final class MetalComputePass implements AutoCloseable {
             return;
         }
         closed = true;
+        owner.endContractTraceGroup();
         owner.endComputePass(encoder);
+        RenderContractRuntime.endPass(contractPassToken);
     }
 }

@@ -22,5 +22,8 @@ abstract class BackendFrameComparisonServerMixin {
         BackendFrameComparisonClient.configureIntegratedServer(
                 (IntegratedServer) (Object) this
         );
+        BackendFrameComparisonClient.applyScheduledDimensionSwitch(
+                (IntegratedServer) (Object) this
+        );
     }
 }

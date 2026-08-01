@@ -30,6 +30,22 @@ dependencies {
 	testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.12.2"
 }
 
+// The OpenGL uniform recorder is a validation-only mod. Keeping it in a
+// separate source set means the production JAR cannot apply observer mixins or
+// perform trace file I/O during ordinary Iris rendering.
+sourceSets {
+	validation {
+		compileClasspath += sourceSets.main.output + configurations.compileClasspath
+		runtimeClasspath += output + sourceSets.main.runtimeClasspath
+	}
+}
+
+configurations {
+	validationImplementation.extendsFrom(implementation)
+	validationCompileOnly.extendsFrom(compileOnly)
+	validationRuntimeOnly.extendsFrom(runtimeOnly)
+}
+
 java {
 	toolchain {
 		languageVersion = JavaLanguageVersion.of(25)
@@ -46,6 +62,24 @@ def metalApiValidation = hostedCi ? "0" : "1"
 def metalShaderValidation = hostedCi ? "0" : "1"
 def hardwareMetalValidationAvailable = {
 	org.gradle.internal.os.OperatingSystem.current().isMacOsX() && !hostedCi
+}
+def renderContractSourceCommit = System.getProperty("metallum.validation.sourceCommit")
+if (renderContractSourceCommit == null || renderContractSourceCommit.isBlank()) {
+	try {
+		def process = new ProcessBuilder("git", "rev-parse", "HEAD")
+				.directory(project.projectDir)
+				.redirectErrorStream(true)
+				.start()
+		def candidate = process.inputStream.getText("UTF-8").trim()
+		if (process.waitFor() == 0 && candidate ==~ /[0-9a-fA-F]{40}/) {
+			renderContractSourceCommit = candidate
+		}
+	} catch (Exception ignored) {
+		// Source archives and exported workspaces may not contain a .git directory.
+	}
+}
+if (renderContractSourceCommit == null || renderContractSourceCommit.isBlank()) {
+	renderContractSourceCommit = "unknown"
 }
 
 tasks.test {
@@ -86,7 +120,6 @@ if (runClientIrisRequested && runClientMetalFxRequested) {
 def isolatedClientWorld = providers.gradleProperty("world").orNull
 def irisClientDefaults = [
 		"metallum.iris.semantic"                 : "true",
-		"metallum.iris.strict"                   : "true",
 		"metallum.metalfx.mode"                  : "OFF",
 		"metallum.metalfx.frameGeneration"       : "false",
 		"metallum.metalfx.objectMotionProducer"  : "false",
@@ -136,6 +169,8 @@ tasks.withType(JavaExec).configureEach {
 		}
 		def dedicatedValidation = gradle.startParameter.taskNames.any {
 			it == "minecraftMetalFxClientValidation" || it.endsWith(":minecraftMetalFxClientValidation")
+					|| it == "renderContractMinecraftValidation" || it.endsWith(":renderContractMinecraftValidation")
+					|| it == "renderContractMinecraftDiagnose" || it.endsWith(":renderContractMinecraftDiagnose")
 						|| it == "minecraftNativeFullscreenBaseline"
 						|| it.endsWith(":minecraftNativeFullscreenBaseline")
 						|| it == "minecraftNativeRenderEfficiencyValidation"
@@ -154,6 +189,46 @@ processResources {
 
 	filesMatching("fabric.mod.json") {
 		expand "version": inputs.properties.version
+	}
+}
+
+tasks.named("processValidationResources") {
+	filesMatching("fabric.mod.json") {
+		expand "version": project.version
+	}
+}
+
+tasks.register("validationJar", Jar) {
+	group = "build"
+	description = "Builds the opt-in OpenGL/Iris validation mod separately from production."
+	archiveClassifier = "validation"
+	from(sourceSets.validation.output)
+	dependsOn("validationClasses", "processValidationResources")
+}
+
+tasks.register("verifyProductionJarIsolation") {
+	group = "verification"
+	description = "Ensures production output does not contain validation-only OpenGL trace classes or mixins."
+	dependsOn("jar", "validationJar")
+	doLast {
+		def production = tasks.named("jar").get().archiveFile.get().asFile
+		def forbidden = [
+				"com/metallum/client/metal/render/IrisOpenGlUniformTrace.class",
+				"com/metallum/mixin/iris/IrisOpenGlUniformBuilderTraceMixin.class",
+				"com/metallum/mixin/iris/IrisOpenGlUniformUpdateTraceMixin.class",
+				"com/metallum/mixin/iris/IrisOpenGlProgramUniformsTraceMixin.class",
+				"com/metallum/mixin/iris/IrisFixedUniformSupplierTraceMixin.class",
+				"com/metallum/mixin/iris/IrisCachedUniformUpdateTraceMixin.class",
+				"com/metallum/mixin/iris/IrisOpenGlFogRendererTraceMixin.class",
+				"metallum-validation.mixins.json"
+		]
+		def present = zipTree(production).files.collect { it.path }.findAll { path ->
+			forbidden.any { path.endsWith(it) }
+		}
+		if (!present.isEmpty()) {
+			throw new GradleException("Production JAR contains validation-only entries: ${present}")
+		}
+		logger.lifecycle("Production JAR validation isolation: PASS")
 	}
 }
 
@@ -649,6 +724,7 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
 		includeTestsMatching "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest"
 		includeTestsMatching "com.metallum.client.metal.render.IrisMetalExternalLevelSamplerTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", metalApiValidation
@@ -753,7 +829,6 @@ tasks.register("verifyIsolatedClientProfiles") {
 	doLast {
 		def failures = []
 		if (irisClientDefaults["metallum.iris.semantic"] != "true"
-				|| irisClientDefaults["metallum.iris.strict"] != "true"
 				|| irisClientDefaults["metallum.metalfx.mode"] != "OFF"
 				|| irisClientDefaults["metallum.metalfx.frameGeneration"] != "false"
 				|| irisClientDefaults["metallum.metalfx.objectMotionProducer"] != "false"
@@ -842,7 +917,31 @@ def lockedBackpressureValidationRequested = gradle.startParameter.taskNames.any 
 }
 def minecraftMetalFxValidationRequested = gradle.startParameter.taskNames.any {
 	it == "minecraftMetalFxClientValidation" || it.endsWith(":minecraftMetalFxClientValidation")
+			|| it == "renderContractMinecraftValidation" || it.endsWith(":renderContractMinecraftValidation")
 }
+def renderContractMinecraftValidationRequested = gradle.startParameter.taskNames.any {
+	it == "renderContractMinecraftValidation" || it.endsWith(":renderContractMinecraftValidation")
+}
+def renderContractMinecraftDiagnoseRequested = gradle.startParameter.taskNames.any {
+	it == "renderContractMinecraftDiagnose" || it.endsWith(":renderContractMinecraftDiagnose")
+}
+def renderContractValidationRequested = gradle.startParameter.taskNames.any {
+		it == "renderContractValidation" || it.endsWith(":renderContractValidation")
+}
+// The aggregate contract task includes the real Minecraft producer; reuse the
+// Metal validation runClient configuration instead of allowing an OpenGL fallback.
+minecraftMetalFxValidationRequested = minecraftMetalFxValidationRequested
+		|| renderContractValidationRequested || renderContractMinecraftDiagnoseRequested
+def renderContractManifestValidationRequested = gradle.startParameter.taskNames.any {
+	it == "renderContractManifestValidation" || it.endsWith(":renderContractManifestValidation")
+}
+renderContractManifestValidationRequested = renderContractManifestValidationRequested
+		|| renderContractValidationRequested
+def renderContractPersistRequested = (providers.gradleProperty("renderContractPersist").orNull
+		?: System.getProperty("metallum.renderContract.persist", "false")).toString().toBoolean()
+renderContractMinecraftValidationRequested = renderContractMinecraftValidationRequested
+		|| renderContractValidationRequested || renderContractMinecraftDiagnoseRequested
+renderContractPersistRequested = renderContractPersistRequested || renderContractMinecraftDiagnoseRequested
 def nativeFullscreenBaselineRequested = gradle.startParameter.taskNames.any {
 	it == "minecraftNativeFullscreenBaseline" || it.endsWith(":minecraftNativeFullscreenBaseline")
 }
@@ -859,8 +958,18 @@ def nativeFrameGenerationValidationRequested = gradle.startParameter.taskNames.a
 if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 		|| nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested) {
 	def requestedValidationOutput = System.getProperty("metallum.validation.output")
-	def validationOutputDir = requestedValidationOutput == null
-			? file("${buildDir}/metal-validation/"
+	def renderContractTempOutput = null
+	if (renderContractMinecraftValidationRequested && !renderContractPersistRequested
+			&& (requestedValidationOutput == null || requestedValidationOutput.isBlank())) {
+		renderContractTempOutput = java.nio.file.Files.createTempDirectory(
+				"metallum-render-contract-minecraft-").toFile()
+	}
+	def validationOutputDir = requestedValidationOutput == null || requestedValidationOutput.isBlank()
+			? (renderContractTempOutput != null
+					? renderContractTempOutput
+					: renderContractMinecraftDiagnoseRequested
+					? file("${buildDir}/render-contract/minecraft-diagnose-current")
+					: file("${buildDir}/metal-validation/"
 			+ (nativeFrameGenerationValidationRequested
 					? "minecraft-native-framegen-current"
 					: nativeRenderEfficiencyValidationRequested
@@ -869,7 +978,7 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 					? "minecraft-native-fullscreen-current"
 					: lockedBackpressureValidationRequested
 					? "minecraft-client-locked-backpressure-current"
-					: "minecraft-client-current"))
+					: "minecraft-client-current")))
 			: file(requestedValidationOutput)
 	def requestedFrameGeneration = nativeFrameGenerationValidationRequested
 			? "true"
@@ -904,6 +1013,30 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 		}
 		systemProperty "metallum.validation.enabled", "true"
 		systemProperty "metallum.validation.output", validationOutputDir.absolutePath
+		// Validation must never silently exercise the OpenGL fallback after a
+		// previous client crash persisted preferredGraphicsBackend=opengl.
+		systemProperty "metallum.validation.forceMetal", "true"
+		systemProperty "metallum.validation.requireMetal", "true"
+		systemProperty "metallum.renderContract.enabled", renderContractMinecraftValidationRequested ? "true" : "false"
+		systemProperty "metallum.renderContract.runId",
+				renderContractMinecraftDiagnoseRequested ? "minecraft-diagnose-current"
+						: renderContractMinecraftValidationRequested ? "minecraft-current" : "disabled"
+		systemProperty "metallum.validation.sourceCommit", renderContractSourceCommit
+		// Normal Minecraft runs retain the complete logical pass graph and
+		// producer counts, but not every binding snapshot. A diagnostic rerun can
+		// opt into full producer evidence with -Dmetallum.renderContract.captureProducers=true.
+		systemProperty "metallum.renderContract.captureProducers", System.getProperty(
+				"metallum.renderContract.captureProducers",
+				renderContractMinecraftDiagnoseRequested ? "true"
+						: renderContractMinecraftValidationRequested ? "false" : "true"
+		)
+		["metallum.renderContract.tracePass", "metallum.renderContract.producerRange",
+				"metallum.validation.tracePass", "metallum.validation.producerRange"].each { propertyName ->
+			def requestedValue = System.getProperty(propertyName)
+			if (requestedValue != null) {
+				systemProperty propertyName, requestedValue
+			}
+		}
 		["metallum.opt.metal4", "metallum.opt.metal4MainRenderer"].each { propertyName ->
 			def requestedValue = System.getProperty(propertyName)
 			if (requestedValue != null) {
@@ -1172,6 +1305,37 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			// literal so the gate follows MetalValidationClient's capture count.
 			if (completed != expected) {
 				problems << "captured ${completed} of ${expected} GPU readbacks".toString()
+			}
+			if (renderContractMinecraftValidationRequested) {
+				def contractFields = [
+						enabled: runState.renderContractEnabled,
+						status: runState.renderContractStatus,
+						ready: runState.renderContractReady,
+						requested: runState.renderContractRequestedCaptures,
+						completed: runState.renderContractCompletedCaptures,
+						failed: runState.renderContractFailedCaptures,
+						pending: runState.renderContractPendingCaptures,
+						dropped: runState.renderContractDroppedCaptures,
+						passes: runState.renderContractPassCount,
+						droppedEvents: runState.renderContractDroppedEvents,
+						manifest: runState.renderContractManifestFinalized,
+				]
+				if (contractFields.enabled != true) problems << "render-contract recorder was not enabled"
+				if (contractFields.status != "passed") problems << "render-contract status is ${contractFields.status}"
+				if (contractFields.ready != true) problems << "render-contract completion gate is not ready"
+				if (!(contractFields.requested instanceof Number) || contractFields.requested <= 0)
+					problems << "render-contract recorded no capture requests"
+				if (!(contractFields.completed instanceof Number) || contractFields.completed != contractFields.requested)
+					problems << "render-contract completed ${contractFields.completed} of ${contractFields.requested} captures"
+				if (contractFields.failed != 0 || contractFields.pending != 0 || contractFields.dropped != 0)
+					problems << "render-contract capture lifecycle failed: ${contractFields}"
+				if (contractFields.droppedEvents != 0) problems << "render-contract dropped ${contractFields.droppedEvents} trace events"
+				if (!(contractFields.passes instanceof Number) || contractFields.passes <= 0)
+					problems << "render-contract produced no logical passes"
+				if (contractFields.manifest != true) problems << "render-contract pass manifest was not finalized"
+			}
+			if (runState.renderBackend != "Metal") {
+				problems << "validation ran on ${runState.renderBackend ?: 'unknown'} instead of Metal"
 			}
 			def explicitMetal4Master = System.getProperty("metallum.opt.metal4")
 			def explicitMetal4Main = System.getProperty("metallum.opt.metal4MainRenderer")
@@ -1532,6 +1696,10 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 					"MetalFX client validation: PASS (${completed}/${expected} GPU readbacks,"
 							+ " ${runState.failedGpuCaptures} failed)"
 			)
+			if (renderContractTempOutput != null) {
+				delete renderContractTempOutput
+				logger.lifecycle("Render-contract temporary validation output removed after PASS: ${renderContractTempOutput}")
+			}
 		}
 	}
 }
@@ -2252,4 +2420,426 @@ publishing {
 		// The repositories here will be used for publishing your artifact, not for
 		// retrieving dependencies.
 	}
+}
+
+// Backend-neutral render-contract verification. The unit task is deliberately
+// narrow; the native tasks below exercise the same production Java -> FFM ->
+// Swift path with a fresh JVM for each Metal 3/Metal 4 mode.
+def renderContractSyntheticTaskRequested = gradle.startParameter.taskNames.any {
+	it == "renderContractSyntheticValidation" || it.endsWith(":renderContractSyntheticValidation")
+			|| it == "renderContractManifestValidation" || it.endsWith(":renderContractManifestValidation")
+			|| it == "renderContractValidation" || it.endsWith(":renderContractValidation")
+}
+def renderContractSyntheticOutputDir = null
+if (renderContractSyntheticTaskRequested) {
+	renderContractSyntheticOutputDir = renderContractPersistRequested
+			? file("${buildDir}/render-contract/synthetic-current")
+			: java.nio.file.Files.createTempDirectory("metallum-render-contract-synthetic-").toFile()
+}
+
+	def renderContractCleanupAction = {
+		long retentionHours = (project.providers.gradleProperty("renderContractTempRetentionHours").orNull ?: "12") as long
+		long maxTempBytes = (project.providers.gradleProperty("renderContractTempMaxBytes").orNull ?: "805306368") as long
+		int maxTempRuns = (project.providers.gradleProperty("renderContractTempMaxRuns").orNull ?: "2") as int
+		if (retentionHours < 1L) {
+			throw new GradleException("renderContractTempRetentionHours must be at least 1")
+		}
+		if (maxTempBytes <= 0L || maxTempRuns < 1) {
+			throw new GradleException("renderContractTempMaxBytes must be positive and renderContractTempMaxRuns must be at least 1")
+		}
+		long cutoff = System.currentTimeMillis() - retentionHours * 60L * 60L * 1000L
+		File tempRoot = new File(System.getProperty("java.io.tmpdir"))
+		def prefixes = [
+				"metallum-render-contract-",
+				"metallum-validation-"
+		]
+		def directorySize = { File directory ->
+			long size = 0L
+			directory.eachFileRecurse { child ->
+				if (child.isFile()) size += child.length()
+			}
+			size
+		}
+		def candidates = tempRoot.listFiles()?.findAll { candidate ->
+			candidate.directory && prefixes.any { prefix -> candidate.name.startsWith(prefix) }
+		} ?: []
+		int removed = 0
+		long totalBytes = candidates.collect { directorySize(it) }.sum(0L)
+		candidates.findAll { candidate ->
+			if (candidate.lastModified() > 0L && candidate.lastModified() < cutoff) {
+				return true
+			}
+			false
+		}.each { candidate ->
+			long size = directorySize(candidate)
+			project.delete(candidate)
+			totalBytes -= size
+			removed++
+		}
+		// Empty roots are failed-before-start or unit-test scratch directories;
+		// remove them first so they cannot evict a non-empty failure report just
+		// because their directory mtime is newer.
+		candidates.findAll { candidate ->
+			candidate.exists() && directorySize(candidate) == 0L
+		}.each { candidate ->
+			project.delete(candidate)
+			removed++
+		}
+		candidates = candidates.findAll { it.exists() }.sort { left, right ->
+			left.lastModified() <=> right.lastModified()
+		}
+		while ((totalBytes > maxTempBytes || candidates.size() > maxTempRuns) && !candidates.isEmpty()) {
+			File candidate = candidates.remove(0)
+			long size = directorySize(candidate)
+			project.delete(candidate)
+			totalBytes -= size
+			removed++
+		}
+		project.logger.lifecycle(
+				"Render-contract temporary cleanup removed ${removed} directories "
+						+ "(retention=${retentionHours}h, maxRuns=${maxTempRuns}, "
+						+ "maxBytes=${maxTempBytes}, remainingBytes=${Math.max(0L, totalBytes)})"
+		)
+	}
+
+	tasks.register("renderContractCleanup") {
+		group = "verification"
+		description = "Removes stale and over-budget render-contract directories from the system temporary directory."
+		doLast { renderContractCleanupAction() }
+	}
+
+	tasks.register("renderContractPostRunCleanup") {
+		group = "verification"
+		description = "Bounds managed render-contract temporary evidence after a Minecraft validation run."
+		doLast { renderContractCleanupAction() }
+	}
+
+tasks.register("renderContractUnitTest", Test) {
+	group = "verification"
+	description = "Runs pure JVM render-contract, expectation and artifact tests."
+	dependsOn tasks.named("testClasses")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+		filter {
+			includeTestsMatching "com.metallum.client.validation.contract.*"
+			includeTestsMatching "com.metallum.client.validation.expectation.*"
+			includeTestsMatching "com.metallum.client.validation.fixture.*"
+			includeTestsMatching "com.metallum.client.validation.report.*"
+			includeTestsMatching "com.metallum.client.validation.reference.*"
+			includeTestsMatching "com.metallum.client.validation.storage.*"
+		}
+}
+
+def configureRenderContractNativeTest = { Test task, boolean metal4 ->
+	task.group = "verification"
+	task.description = "Runs render-contract production GPU integration tests with Metal ${metal4 ? 4 : 3}."
+	task.onlyIf { hardwareMetalValidationAvailable() }
+	task.dependsOn tasks.named("buildMacNative")
+	task.testClassesDirs = sourceSets.test.output.classesDirs
+	task.classpath = sourceSets.test.runtimeClasspath
+	task.useJUnitPlatform()
+	task.filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
+	}
+	task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+	task.systemProperty "metallum.opt.metal4", metal4.toString()
+	task.environment "MTL_DEBUG_LAYER", metalApiValidation
+	task.environment "MTL_SHADER_VALIDATION", metalShaderValidation
+	task.testLogging {
+		showStandardStreams = true
+	}
+}
+
+tasks.register("renderContractMetal3NativeTest", Test) { task ->
+	configureRenderContractNativeTest(task, false)
+}
+
+tasks.register("renderContractMetal4NativeTest", Test) { task ->
+	configureRenderContractNativeTest(task, true)
+}
+
+tasks.register("renderContractNativeTest") {
+	group = "verification"
+	description = "Runs render-contract GPU integration tests for both Metal 3 and Metal 4."
+	dependsOn "renderContractMetal3NativeTest", "renderContractMetal4NativeTest"
+}
+
+tasks.register("renderContractSyntheticValidation", JavaExec) {
+	group = "verification"
+	description = "Runs bounded synthetic render-contract checks and the native GPU suites."
+	dependsOn "renderContractUnitTest", "renderContractNativeTest", "renderContractCleanup"
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "com.metallum.client.validation.fixture.RenderContractSyntheticValidation"
+	systemProperty "metallum.validation.sourceCommit", renderContractSourceCommit
+	if (renderContractSyntheticOutputDir != null) {
+		args renderContractSyntheticOutputDir.absolutePath
+		doFirst {
+			delete renderContractSyntheticOutputDir
+		}
+	}
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		jvmArgs "--enable-native-access=ALL-UNNAMED"
+	}
+	doLast {
+		if (!renderContractPersistRequested && !renderContractManifestValidationRequested
+				&& renderContractSyntheticOutputDir != null && renderContractSyntheticOutputDir.exists()) {
+			delete renderContractSyntheticOutputDir
+			logger.lifecycle("Render-contract synthetic temporary output removed after PASS: ${renderContractSyntheticOutputDir}")
+		}
+	}
+}
+
+tasks.register("renderContractCase", JavaExec) {
+	group = "verification"
+	description = "Runs one explicitly named render-contract fixture case."
+	dependsOn "classes", "renderContractCleanup"
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "com.metallum.client.validation.fixture.RenderContractSyntheticValidation"
+		systemProperty "metallum.validation.sourceCommit", renderContractSourceCommit
+		doFirst {
+			def caseName = providers.gradleProperty("renderContractCase").orNull
+			if (caseName == null || caseName.isBlank()) {
+				throw new GradleException("renderContractCase requires -PrenderContractCase=<name>")
+			}
+			if (!(caseName ==~ /[A-Za-z0-9._-]+/)) {
+				throw new GradleException("Invalid render-contract case name: ${caseName}")
+			}
+		def output = renderContractPersistRequested
+				? file("${buildDir}/render-contract/case-${caseName}")
+				: java.nio.file.Files.createTempDirectory(
+						"metallum-render-contract-case-${caseName}-").toFile()
+			delete output
+			args output.absolutePath, caseName
+			ext.renderContractOutput = output
+	}
+	doLast {
+		if (!renderContractPersistRequested && ext.has("renderContractOutput")) {
+			delete ext.renderContractOutput
+			logger.lifecycle("Render-contract temporary case output removed after PASS")
+		}
+	}
+}
+
+tasks.register("renderContractManifestValidation") {
+	group = "verification"
+	description = "Validates versioned render-contract manifests and completion status."
+	dependsOn "renderContractSyntheticValidation"
+	doLast {
+		def root = renderContractSyntheticOutputDir
+		if (root == null) {
+			throw new GradleException("No render-contract synthetic output was allocated")
+		}
+		def manifests = fileTree(root) { include "**/pass-manifest.json" }
+		if (manifests.isEmpty()) {
+			throw new GradleException("No render-contract pass manifests were generated under ${root}")
+		}
+		def parser = new groovy.json.JsonSlurper()
+			manifests.files.each { manifest ->
+				def json = parser.parse(manifest)
+				def passes = json.passes instanceof List ? json.passes : []
+				def openPasses = json.openPasses instanceof List ? json.openPasses : []
+				def passKeys = [] as Set
+				passes.each { pass ->
+					def key = "${pass.frameId}:${pass.sequence}"
+					if (!passKeys.add(key)) {
+						throw new GradleException("Duplicate logical pass sequence ${key} in ${manifest}")
+					}
+				}
+				def storageExceeded = json.storageBudget?.exceeded == true
+				if (json.schemaVersion != 1 || !json.runId || !json.status || json.status != "passed"
+						|| json.manifestComplete != true
+						|| json.droppedEvents != 0 || !openPasses.isEmpty()
+						|| json.passCount != passes.size() || storageExceeded) {
+					throw new GradleException("Invalid render-contract manifest ${manifest}")
+				}
+		}
+		logger.lifecycle("Render-contract manifests: PASS (${manifests.files.size()} files)")
+			if (!renderContractPersistRequested) {
+			delete root
+			logger.lifecycle("Render-contract synthetic temporary output removed after manifest PASS: ${root}")
+		}
+	}
+}
+
+tasks.register("renderContractMinecraftValidation") {
+	group = "verification"
+	description = "Runs Minecraft deterministic validation with the opt-in render-contract recorder enabled."
+	dependsOn "renderContractCleanup"
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		dependsOn "minecraftMetalFxClientValidation"
+	} else {
+		doLast {
+			logger.lifecycle("renderContractMinecraftValidation SKIPPED: macOS Metal is required")
+		}
+	}
+}
+
+tasks.register("renderContractMinecraftDiagnose") {
+	group = "verification"
+	description = "Runs Minecraft render-contract validation with persistent producer evidence for diagnosis."
+	dependsOn "renderContractCleanup"
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		dependsOn "minecraftMetalFxClientValidation"
+	} else {
+		doLast {
+			logger.lifecycle("renderContractMinecraftDiagnose SKIPPED: macOS Metal is required")
+		}
+	}
+	doLast {
+		if (!org.gradle.internal.os.OperatingSystem.current().isMacOsX()) return
+		def requestedOutput = System.getProperty("metallum.validation.output")
+		def root = requestedOutput == null || requestedOutput.isBlank()
+				? file("${buildDir}/render-contract/minecraft-diagnose-current")
+				: file(requestedOutput)
+		def contractRoot = new File(root, "render-contract")
+		def required = [
+				new File(root, "run-state.json"),
+				new File(contractRoot, "pass-manifest.json"),
+				new File(contractRoot, "results.json")
+		]
+		def missing = required.findAll { path -> !path.isFile() }
+		if (!missing.isEmpty()) {
+			throw new GradleException(
+					"Minecraft render-contract diagnosis is incomplete at ${root}; missing ${missing.join(', ')}"
+			)
+		}
+		def parser = new groovy.json.JsonSlurper()
+		def manifest = parser.parse(new File(contractRoot, "pass-manifest.json"))
+		def results = parser.parse(new File(contractRoot, "results.json"))
+		def problems = []
+		if (manifest.status != "passed") problems << "manifest status=${manifest.status}"
+		if (manifest.manifestComplete != true) problems << "manifestComplete=${manifest.manifestComplete}"
+		if (!(manifest.passCount instanceof Number) || manifest.passCount <= 0) problems << "no logical passes"
+		if (manifest.droppedEvents != 0) problems << "droppedEvents=${manifest.droppedEvents}"
+		if (results.status != "passed") problems << "results status=${results.status}"
+		if (results.failedCaptures != 0) problems << "failedCaptures=${results.failedCaptures}"
+		if (results.pendingCaptures != 0) problems << "pendingCaptures=${results.pendingCaptures}"
+		if (results.droppedCaptures != 0) problems << "droppedCaptures=${results.droppedCaptures}"
+		def producerDetailsRequested = System.getProperty(
+				"metallum.renderContract.captureProducers", "true").toBoolean()
+		if (producerDetailsRequested && manifest.producerDetailsCaptured != true) {
+			problems << "producer details were requested but manifest producerDetailsCaptured=${manifest.producerDetailsCaptured}"
+		}
+		if (!problems.isEmpty()) {
+			throw new GradleException(
+					"Minecraft render-contract diagnosis did not produce complete evidence: "
+							+ problems.join('; ')
+			)
+		}
+		logger.lifecycle(
+				"Minecraft render-contract diagnosis evidence: PASS; "
+						+ "passes=${manifest.passCount}, captures=${results.completedCaptures}, root=${root}"
+		)
+	}
+}
+
+tasks.register("renderContractDiagnose", JavaExec) {
+	group = "verification"
+	description = "Compares two persisted render-contract runs and locates the first divergent pass."
+	dependsOn "classes"
+	classpath = sourceSets.main.runtimeClasspath
+	mainClass = "com.metallum.client.validation.report.RenderContractDiagnosis"
+	systemProperty "metallum.validation.sourceCommit", renderContractSourceCommit
+	doFirst {
+		def propertyValue = { String name ->
+			providers.gradleProperty(name).orNull ?: System.getProperty(name)
+		}
+		def reference = propertyValue("renderContractReference")
+		def actual = propertyValue("renderContractActual")
+		def report = propertyValue("renderContractReport")
+		if ([reference, actual, report].any { it == null || it.isBlank() }) {
+			throw new GradleException(
+					"renderContractDiagnose requires -PrenderContractReference=<root> "
+							+ "-PrenderContractActual=<root> -PrenderContractReport=<file>"
+			)
+		}
+		def paths = [reference, actual, report].collect { java.nio.file.Path.of(it).toAbsolutePath().normalize() }
+		if (!paths[0].isAbsolute() || !paths[1].isAbsolute() || !paths[2].isAbsolute()) {
+			throw new GradleException("renderContractDiagnose paths must be absolute")
+		}
+		if (!java.nio.file.Files.isDirectory(paths[0]) || !java.nio.file.Files.isDirectory(paths[1])) {
+			throw new GradleException(
+					"renderContractDiagnose roots must be directories: reference=${paths[0]}, actual=${paths[1]}"
+			)
+		}
+		args paths[0].toString(), paths[1].toString(), paths[2].toString()
+		logger.lifecycle("Render-contract diagnosis: ${paths[0]} vs ${paths[1]}")
+	}
+}
+
+tasks.register("updateRenderContractGolden") {
+	group = "verification"
+	description = "Explicitly updates a render-contract expected artifact after confirmation."
+	doLast {
+		def caseName = providers.gradleProperty("renderContractCase").orNull
+		def confirmed = providers.gradleProperty("confirmGoldenUpdate").orNull
+		if (caseName == null || caseName.isBlank() || confirmed != "true") {
+			throw new GradleException(
+					"Golden update is fail-closed; provide -PrenderContractCase=<name> -PconfirmGoldenUpdate=true"
+			)
+		}
+		if (!renderContractPersistRequested) {
+			throw new GradleException(
+					"Golden update requires persistent output; rerun with -PrenderContractPersist=true"
+			)
+			}
+			if (!(caseName ==~ /[A-Za-z0-9._-]+/)) {
+				throw new GradleException("Invalid render-contract case name: ${caseName}")
+			}
+				def current = file("${buildDir}/render-contract/case-${caseName}")
+			if (!current.exists()) {
+				throw new GradleException("No generated capture at ${current}; run renderContractCase first")
+			}
+			def expected = file("validation/render-contract/fixtures/${caseName}/expected")
+			delete expected
+			copy {
+				from current
+				into expected
+				exclude "**/*.tmp", "**/.DS_Store"
+			}
+			logger.lifecycle("Golden update confirmed for ${caseName}: copied ${current} -> ${expected}")
+		}
+}
+
+tasks.register("renderContractValidation") {
+	group = "verification"
+	description = "Runs unit, native Metal 3/4, synthetic and Minecraft render-contract validation."
+	dependsOn "test", "buildMacNative", "renderContractNativeTest", "renderContractSyntheticValidation",
+			"renderContractManifestValidation", "renderContractMinecraftValidation"
+}
+
+// The output directory is allocated during Gradle configuration. Keep the
+// cleanup pass ahead of every producer so a parallel build cannot delete an
+// active run between allocation and the first artifact write.
+tasks.named("minecraftMetalFxClientValidation").configure {
+	mustRunAfter("renderContractCleanup")
+}
+tasks.named("renderContractSyntheticValidation").configure {
+	mustRunAfter("renderContractCleanup")
+}
+tasks.named("renderContractCase").configure {
+	mustRunAfter("renderContractCleanup")
+}
+
+// A client validation task is a dependency wrapper around runClient. When the
+// Minecraft process fails its wrapper is skipped, so a finalizer attached only
+// to the wrapper is not reliable. Finalize the actual producer as well, keeping
+// the newest bounded failure evidence while evicting stale/over-budget runs.
+if (renderContractMinecraftValidationRequested) {
+	tasks.named("runClient").configure {
+		finalizedBy("renderContractPostRunCleanup")
+	}
+}
+
+// Synthetic and single-case runs also allocate managed temporary roots. Their
+// doLast cleanup only covers the passing path; the finalizer covers assertion,
+// JVM and native-launch failures without touching persistent build output.
+tasks.named("renderContractSyntheticValidation").configure {
+	finalizedBy("renderContractPostRunCleanup")
+}
+tasks.named("renderContractCase").configure {
+	finalizedBy("renderContractPostRunCleanup")
 }

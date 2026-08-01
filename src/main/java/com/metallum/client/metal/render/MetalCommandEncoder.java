@@ -2,6 +2,18 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
+import com.metallum.client.validation.contract.AttachmentBindingRecord;
+import com.metallum.client.validation.contract.AttachmentSemantic;
+import com.metallum.client.validation.contract.CapturePoint;
+import com.metallum.client.validation.contract.CapturePointKind;
+import com.metallum.client.validation.contract.PassType;
+import com.metallum.client.validation.contract.ProducerType;
+import com.metallum.client.validation.contract.RenderContractRuntime;
+import com.metallum.client.validation.contract.ResourceIdentity;
+import com.metallum.client.validation.contract.SemanticPassIdResolver;
+import com.metallum.client.validation.contract.ScissorRecord;
+import com.metallum.client.validation.contract.TraceIdentity;
+import com.metallum.client.validation.contract.ViewportRecord;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.buffers.GpuFence;
@@ -77,6 +89,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private boolean renderEncoderDeferredStore;
     private final Long2ObjectOpenHashMap<java.util.ArrayDeque<MemorySegment>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
     private final List<SubmitCallback> currentSubmitCallbacks = new ArrayList<>();
+    private int contractTraceGroupDepth;
 
     MetalCommandEncoder(final MetalDevice device) {
         this.device = device;
@@ -230,12 +243,54 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
      * a pass is open is a caller error.
      */
     MetalComputePass createComputePass() {
+        return createComputePass("metallum/compute");
+    }
+
+    MetalComputePass createComputePass(final String semanticPassId) {
         submitRenderPass();
         // Pending deferred clears materialize through transient render
         // encoders; they must all land BEFORE the compute encoder opens, since
         // flushing mid-pass would tear the pass's encoder out from under it.
         flushAllPendingClears();
-        return new MetalComputePass(this, computeCommandEncoder());
+        long contractPassToken = RenderContractRuntime.beginRenderPass(
+                semanticPassId,
+                PassType.COMPUTE,
+                List.of(),
+                null,
+                null,
+                new ViewportRecord(0, 0, 0, 0),
+                ScissorRecord.disabled(),
+                "unbound",
+                List.of(),
+                Map.of(
+                        "backend", "metal",
+                        "commandBufferSubmissionId", Long.toString(currentSubmitIndex),
+                        "nativeEncoderGeneration", Long.toString(encoderGeneration + 1)
+                )
+        );
+        MTLComputeCommandEncoder nativeEncoder = computeCommandEncoder();
+        beginContractTraceGroup(contractPassToken);
+        return new MetalComputePass(this, nativeEncoder, contractPassToken);
+    }
+
+    void beginContractTraceGroup(final long passToken) {
+        if (passToken < 0L) {
+            return;
+        }
+        TraceIdentity identity = RenderContractRuntime.traceIdentity(passToken);
+        if (identity == null) {
+            return;
+        }
+        MetalNativeBridge.MTLCommandBuffer_pushDebugGroup(commandBuffer().nativeHandle(), identity.debugLabel());
+        contractTraceGroupDepth++;
+    }
+
+    void endContractTraceGroup() {
+        if (contractTraceGroupDepth <= 0) {
+            return;
+        }
+        MetalNativeBridge.MTLCommandBuffer_popDebugGroup(commandBuffer().nativeHandle());
+        contractTraceGroupDepth--;
     }
 
     private void flushAllPendingClears() {
@@ -271,6 +326,18 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
         flushPendingClear(texture);
         blitCommandEncoder().generateMipmaps(texture.nativeHandle());
+        if (!RenderContractRuntime.enabled()) {
+            return;
+        }
+        ResourceIdentity identity = contractResource(texture, 0);
+        RenderContractRuntime.recordTransfer(
+                PassType.MIPMAP,
+                "metallum/mipmap",
+                ProducerType.GENERATE_MIPMAPS,
+                List.of(identity),
+                Map.of("mipLevels", Integer.toString(texture.getMipLevels())),
+                Map.of("texture", identity.stableKey())
+        );
     }
 
     @Override
@@ -539,7 +606,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 depthClear.isPresent(),
                 depthClear.isPresent()
                         ? MetalIrisDepthConvention.hardwareClear(depthClear.getAsDouble())
-                        : 0.0
+                        : 0.0,
+                beginContractPass(descriptor, colorTextureViews, depthTexture, renderArea, hasColorClear, depthClear.isPresent())
         );
         currentRenderPass = renderPass;
         renderPass.pushDebugGroup(descriptor.label());
@@ -551,13 +619,168 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         if (currentRenderPass != null) {
             currentRenderPass.materializePendingClear();
             currentRenderPass.finishTiming();
+            currentRenderPass.finishContractPass();
             currentRenderPass.popDebugGroup();
             currentRenderPass = null;
         }
     }
 
+    private long beginContractPass(
+            final RenderPassDescriptor descriptor,
+            final MetalGpuTextureView[] colorTextureViews,
+            @Nullable final GpuTextureView depthTexture,
+            final RenderPass.RenderArea renderArea,
+            final boolean hasColorClear,
+            final boolean hasDepthClear
+    ) {
+        if (!RenderContractRuntime.enabled()) {
+            return -1L;
+        }
+        List<AttachmentBindingRecord> colors = new ArrayList<>();
+        for (int slot = 0; slot < colorTextureViews.length; slot++) {
+            MetalGpuTextureView view = colorTextureViews[slot];
+            if (view == null) continue;
+            MetalGpuTexture texture = (MetalGpuTexture) view.texture();
+            colors.add(new AttachmentBindingRecord(
+                    slot,
+                    contractResource(texture, view.baseMipLevel()),
+                    AttachmentSemantic.COLOR,
+                    hasColorClear ? "clear" : "load",
+                    "store",
+                    true
+            ));
+        }
+        AttachmentBindingRecord depthBinding = null;
+        if (depthTexture != null) {
+            MetalGpuTexture texture = (MetalGpuTexture) depthTexture.texture();
+            depthBinding = new AttachmentBindingRecord(
+                    0,
+                    contractResource(texture, depthTexture.baseMipLevel()),
+                    AttachmentSemantic.DEPTH,
+                    hasDepthClear ? "clear" : "load",
+                    "store",
+                    true
+            );
+        }
+        String label = descriptor.label() == null ? "" : descriptor.label().get();
+        Map<String, String> metadata = new java.util.LinkedHashMap<>();
+        metadata.put("backend", "metal");
+        metadata.put("sourceLabel", label);
+        metadata.put("validationRunId", System.getProperty("metallum.renderContract.runId", "minecraft-current"));
+        metadata.put("frameId", Long.toString(RenderContractRuntime.currentFrameId()));
+        metadata.put("commandBufferSubmissionId", Long.toString(currentSubmitIndex));
+        metadata.put("nativeEncoderGeneration", Long.toString(encoderGeneration));
+        long passToken = RenderContractRuntime.beginRenderPass(
+                SemanticPassIdResolver.resolve(label, PassType.RENDER),
+                PassType.RENDER,
+                colors,
+                depthBinding,
+                null,
+                new ViewportRecord(renderArea.x(), renderArea.y(), renderArea.width(), renderArea.height()),
+                ScissorRecord.disabled(),
+                "unbound",
+                List.of(),
+                metadata
+        );
+        beginContractTraceGroup(passToken);
+        return passToken;
+    }
+
+    static ResourceIdentity contractResource(final MetalGpuTexture texture, final int mipLevel) {
+        return RenderContractRuntime.identifyResource(
+                texture.getLabel(),
+                texture.validationResourceId(),
+                texture.validationDebugId(),
+                texture.getFormat().toString(),
+                texture.getWidth(mipLevel),
+                texture.getHeight(mipLevel),
+                texture.getDepthOrLayers(),
+                mipLevel,
+                1,
+                texture.usage()
+        );
+    }
+
+    private void recordPresentAndMaybeCapture(
+            final MetalGpuTexture source,
+            final GpuTextureView textureView
+    ) {
+        if (!RenderContractRuntime.enabled()) {
+            return;
+        }
+        ResourceIdentity identity = contractResource(source, textureView.baseMipLevel());
+        RenderContractRuntime.recordTransfer(
+                PassType.PRESENT,
+                "metallum/present",
+                ProducerType.PRESENT,
+                List.of(identity),
+                Map.of(
+                        "captureRepresents", "PRE_PRESENT_DRAWABLE_CONTENT",
+                        "orientation", "backend-native-texture"
+                ),
+                Map.of("source", identity.stableKey())
+        );
+        long frameId = RenderContractRuntime.currentFrameId();
+        if (RenderContractRuntime.consumeFinalDrawableCapture(frameId)) {
+            scheduleFinalDrawableCapture(source, frameId);
+        }
+    }
+
+    private void scheduleFinalDrawableCapture(final MetalGpuTexture source, final long frameId) {
+        int width = source.getWidth(0);
+        int height = source.getHeight(0);
+        int byteCount = Math.multiplyExact(Math.multiplyExact(width, height), source.pixelSize());
+        CapturePoint point = new CapturePoint(frameId, "metallum/present", CapturePointKind.FINAL_DRAWABLE, -1);
+        RenderContractRuntime.ReadbackRequest request = new RenderContractRuntime.ReadbackRequest(
+                "final-drawable",
+                source.validationResourceId(),
+                source.validationDebugId(),
+                source.getFormat().toString(),
+                source.pixelSize(),
+                width,
+                height,
+                source.getDepthOrLayers(),
+                0,
+                1,
+                source.usage(),
+                AttachmentSemantic.COLOR
+        );
+        RenderContractRuntime.requestReadbacks(point, List.of(request), List.of());
+        MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
+                () -> "Render-contract final drawable readback",
+                GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST,
+                byteCount
+        );
+        copyTextureToBuffer(source, buffer, 0L, () -> {
+            try {
+                ByteBuffer mapped = buffer.currentStorage().limit(byteCount).slice();
+                byte[] bytes = new byte[byteCount];
+                mapped.get(bytes);
+                RenderContractRuntime.recordReadback(
+                        point,
+                        "final-drawable",
+                        source.validationResourceId(),
+                        source.validationDebugId(),
+                        source.getFormat().toString(),
+                        source.pixelSize(),
+                        width,
+                        height,
+                        source.getDepthOrLayers(),
+                        0,
+                        1,
+                        source.usage(),
+                        bytes,
+                        List.of()
+                );
+            } finally {
+                buffer.close();
+            }
+        }, 0);
+    }
+
     void presentTextureToDrawable(final MemorySegment layer, final GpuTextureView textureView) {
         MetalGpuTexture source = (MetalGpuTexture) textureView.texture();
+        recordPresentAndMaybeCapture(source, textureView);
         MetalFxManager.FrameGenerationInput frameInput = MetalFxManager.frameGenerationInput(source);
         if (frameInput != null) {
             flushPendingClear(source);
@@ -827,17 +1050,40 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     boolean encodeTextureCopy(final MetalGpuTexture source, final MetalGpuTexture destination, final boolean linear) {
+        return encodeTextureCopy(source, destination, linear, ProducerType.COPY, "metallum/texture-copy");
+    }
+
+    boolean encodeTextureCopy(
+            final MetalGpuTexture source,
+            final MetalGpuTexture destination,
+            final boolean linear,
+            final ProducerType producerType,
+            final String semanticPassId
+    ) {
         flushPendingClear(source);
         submitRenderPass();
         endEncoder();
         destination.markContentsDirty();
-        return MetalNativeBridge.metallum_encode_texture_copy(
+        boolean encoded = MetalNativeBridge.metallum_encode_texture_copy(
                 commandBuffer().nativeHandle(),
                 source.nativeHandle(),
                 destination.nativeHandle(),
                 linear,
                 fence
         );
+        if (RenderContractRuntime.enabled()) {
+            ResourceIdentity sourceIdentity = contractResource(source, 0);
+            ResourceIdentity destinationIdentity = contractResource(destination, 0);
+            RenderContractRuntime.recordTransfer(
+                    producerType == ProducerType.RESOLVE ? PassType.RESOLVE : PassType.COPY,
+                    semanticPassId,
+                    producerType,
+                    List.of(destinationIdentity),
+                    Map.of("linear", Boolean.toString(linear), "encoded", Boolean.toString(encoded)),
+                    Map.of("source", sourceIdentity.stableKey())
+            );
+        }
+        return encoded;
     }
 
     @Override
@@ -890,6 +1136,18 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 regionHeight,
                 fence
         );
+        if (RenderContractRuntime.enabled()) {
+            ResourceIdentity colorIdentity = contractResource(color, 0);
+            ResourceIdentity depthIdentity = contractResource(depth, 0);
+            RenderContractRuntime.recordTransfer(
+                    PassType.RENDER,
+                    "metallum/clear-region",
+                    ProducerType.CLEAR,
+                    List.of(colorIdentity, depthIdentity),
+                    Map.of("region", regionX + "," + regionY + "," + regionWidth + "," + regionHeight),
+                    Map.of()
+            );
+        }
     }
 
     @Override
@@ -1189,6 +1447,18 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 height
         );
         endEncoder();
+        if (RenderContractRuntime.enabled()) {
+            ResourceIdentity sourceIdentity = contractResource(srcTexture, mipLevel);
+            ResourceIdentity destinationIdentity = contractResource(dstTexture, mipLevel);
+            RenderContractRuntime.recordTransfer(
+                    PassType.COPY,
+                    "metallum/texture-copy",
+                    ProducerType.COPY,
+                    List.of(destinationIdentity),
+                    Map.of("width", Integer.toString(width), "height", Integer.toString(height)),
+                    Map.of("source", sourceIdentity.stableKey())
+            );
+        }
     }
 
     @Override

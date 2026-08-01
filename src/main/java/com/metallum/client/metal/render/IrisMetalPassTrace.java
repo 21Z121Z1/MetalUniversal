@@ -8,7 +8,18 @@ import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
 import net.irisshaders.iris.shaderpack.properties.PackDirectives;
+import net.caffeinemc.mods.sodium.client.util.FogParameters;
+import net.caffeinemc.mods.sodium.client.util.FogStorage;
+import net.minecraft.client.Minecraft;
 import org.jspecify.annotations.Nullable;
+import org.joml.Matrix3fc;
+import org.joml.Matrix4fc;
+import org.joml.Vector2f;
+import org.joml.Vector2i;
+import org.joml.Vector3f;
+import org.joml.Vector3i;
+import org.joml.Vector4f;
+import org.joml.Vector4i;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -17,6 +28,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
@@ -109,6 +121,31 @@ final class IrisMetalPassTrace {
         writeFrameScoped("phase", phase + "|" + status, Map.of("phase", phase, "status", status));
     }
 
+    /** Records backend lifecycle order that is not itself a pass boundary. */
+    static void observeLifecycle(final String phase) {
+        writeMetal("lifecycle", Map.of("phase", phase));
+    }
+
+    /** Records the live Sodium fog snapshot without influencing execution. */
+    static void observeFogState(final String phase) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.gameRenderer == null) {
+            observeLifecycle(phase + "|fog-unavailable");
+            return;
+        }
+        FogParameters fog = ((FogStorage) minecraft.gameRenderer).sodium$getFogParameters();
+        Map<String, Object> fields = new HashMap<>();
+        fields.put("phase", phase);
+        fields.put("fogIsNone", fog == FogParameters.NONE);
+        fields.put("fogRed", fog.red());
+        fields.put("fogGreen", fog.green());
+        fields.put("fogBlue", fog.blue());
+        fields.put("fogAlpha", fog.alpha());
+        fields.put("fogEnvironmentalStart", fog.environmentalStart());
+        fields.put("fogEnvironmentalEnd", fog.environmentalEnd());
+        writeMetal("fog-state", fields);
+    }
+
     static void observeTerrain(final String kind, final int[] drawBuffers) {
         writeFrameScoped("terrain", kind + "|" + Arrays.toString(drawBuffers), Map.of(
                 "kind", kind,
@@ -184,6 +221,48 @@ final class IrisMetalPassTrace {
                 session.writeEvent("sampler", event);
             }
         }
+    }
+
+    /** Records the exact std140 bytes and reflected layout used by Metal. */
+    static void observeUniformSnapshot(
+            final String label,
+            final String lifetime,
+            final List<MetalIrisShaderCompiler.UniformMember> layout,
+            final java.nio.ByteBuffer bytes
+    ) {
+        if (layout.isEmpty()) {
+            return;
+        }
+        List<Map<String, Object>> members = new ArrayList<>(layout.size());
+        for (MetalIrisShaderCompiler.UniformMember member : layout) {
+            members.add(Map.of(
+                    "name", member.name(),
+                    "type", member.type(),
+                    "arrayCount", member.arrayCount(),
+                    "offset", member.offset(),
+                    "byteSize", member.byteSize()
+            ));
+        }
+        String encoded = hex(bytes);
+        writeFrameScoped("uniform_snapshot", lifetime + "|" + label + "|" + encoded, Map.of(
+                "label", label,
+                "lifetime", lifetime,
+                "layout", members,
+                "bytes", encoded
+        ));
+    }
+
+    /**
+     * Classifies fixed Iris inputs that are intentionally outside the
+     * deterministic render timeline. This helper is shared by the production
+     * trace labels and the validation-only OpenGL recorder; it has no supplier
+     * side effects.
+     */
+    static @Nullable String externalInputKind(final String uniformName) {
+        return switch (uniformName) {
+            case "currentDate", "currentTime", "currentYearTime" -> "wall_clock_local_date_time";
+            default -> null;
+        };
     }
 
     static void markMissing(final String stage) {
@@ -679,5 +758,17 @@ final class IrisMetalPassTrace {
                 .replace("\n", "\\n")
                 .replace("\r", "\\r")
                 .replace("\t", "\\t");
+    }
+
+    private static String hex(final java.nio.ByteBuffer source) {
+        java.nio.ByteBuffer bytes = source.duplicate();
+        bytes.clear();
+        char[] digits = "0123456789abcdef".toCharArray();
+        StringBuilder result = new StringBuilder(bytes.remaining() * 2);
+        while (bytes.hasRemaining()) {
+            int value = bytes.get() & 0xff;
+            result.append(digits[value >>> 4]).append(digits[value & 0x0f]);
+        }
+        return result.toString();
     }
 }

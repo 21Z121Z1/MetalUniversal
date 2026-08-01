@@ -3,8 +3,26 @@ package com.metallum.client.metal.render;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 final class IrisMetalPassTraceTest {
+    @Test
+    void classifiesIrisWallClockUniformsAsExternalInputs() {
+        assertEquals(
+                "wall_clock_local_date_time",
+                IrisMetalPassTrace.externalInputKind("currentTime")
+        );
+        assertEquals(
+                "wall_clock_local_date_time",
+                IrisMetalPassTrace.externalInputKind("currentYearTime")
+        );
+        assertEquals(
+                "wall_clock_local_date_time",
+                IrisMetalPassTrace.externalInputKind("currentDate")
+        );
+        assertNull(IrisMetalPassTrace.externalInputKind("worldTime"));
+    }
+
     @Test
     void bslComposite7TaaModeZeroDoesNotInventTwoPhaseJitter() {
         String source = """

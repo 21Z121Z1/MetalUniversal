@@ -1382,6 +1382,21 @@ final class MetalIrisShaderCompiler {
         }
     }
 
+    /**
+     * Enumerates opaque sampler declarations from an already loaded Iris
+     * source without compiling or applying a backend-specific lowering.
+     * Admission uses the same declaration parser as the Metal linker so an
+     * unsupported pack resource cannot survive until PSO preparation.
+     */
+    static List<SamplerDecl> inspectSamplerDeclarations(final String source) {
+        Objects.requireNonNull(source, "source");
+        Map<String, String> samplers = new java.util.LinkedHashMap<>();
+        collectSamplerDecls(stripComments(source), samplers);
+        return samplers.entrySet().stream()
+                .map(entry -> new SamplerDecl(entry.getKey(), entry.getValue()))
+                .toList();
+    }
+
     private static void collectStorageBufferDecls(
             final String programName,
             final String source,

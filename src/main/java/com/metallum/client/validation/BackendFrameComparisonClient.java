@@ -20,7 +20,11 @@ import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
 
 import javax.imageio.ImageIO;
@@ -91,6 +95,25 @@ public final class BackendFrameComparisonClient {
             "metallum.backend.compare.iris-reload-frame",
             -1
     );
+    private static final ResizeRequest RESIZE_REQUEST = parseResizeRequest(
+            Integer.getInteger("metallum.backend.compare.resize-frame", -1),
+            Integer.getInteger("metallum.backend.compare.resize-width", -1),
+            Integer.getInteger("metallum.backend.compare.resize-height", -1)
+    );
+    private static final ShaderToggleRequest SHADER_TOGGLE_REQUEST = parseShaderToggleRequest(
+            Integer.getInteger("metallum.backend.compare.shader-disable-frame", -1),
+            Integer.getInteger("metallum.backend.compare.shader-enable-frame", -1)
+    );
+    private static final DimensionSwitchRequest DIMENSION_SWITCH_REQUEST =
+            parseDimensionSwitchRequest(
+                    Integer.getInteger("metallum.backend.compare.dimension-switch-frame", -1),
+                    System.getProperty("metallum.backend.compare.dimension-switch-target", "")
+            );
+    /** Optional ordered lifecycle contract used by the repeated-transition receipt. */
+    private static final List<DimensionSwitchRequest> DIMENSION_SWITCH_SEQUENCE =
+            parseDimensionSwitchSequence(
+                    System.getProperty("metallum.backend.compare.dimension-switch-sequence", "")
+            );
     private static final long FIXED_CLOCK_TICKS = Long.getLong(
             "metallum.backend.compare.fixed-clock-ticks",
             Long.MIN_VALUE
@@ -104,6 +127,13 @@ public final class BackendFrameComparisonClient {
     );
     private static final boolean FREEZE_SIMULATION = Boolean.getBoolean(
             "metallum.backend.compare.freeze-simulation"
+    );
+    private static final float FIXED_PARTIAL_TICK = parseFixedPartialTick(
+            System.getProperty("metallum.backend.compare.fixed-partial-tick", "1.0")
+    );
+    /** Optional validation input used to remove player-ground-state timing drift. */
+    private static final boolean FIXED_PLAYER_ON_GROUND = Boolean.getBoolean(
+            "metallum.backend.compare.fixed-player-on-ground"
     );
     private static final FixedWeather FIXED_WEATHER = parseFixedWeather(
             System.getProperty("metallum.backend.compare.fixed-weather", "")
@@ -128,6 +158,46 @@ public final class BackendFrameComparisonClient {
     private static boolean stopRequested;
     private static boolean irisReloadAttempted;
     private static boolean irisReloadCompleted;
+    private static boolean resizeAttempted;
+    private static boolean resizeCompleted;
+    private static int resizeObservedWidth = -1;
+    private static int resizeObservedHeight = -1;
+    private static boolean shaderDisableAttempted;
+    private static boolean shaderDisableCompleted;
+    private static boolean shaderEnableAttempted;
+    private static boolean shaderEnableCompleted;
+    private static int shaderDisableGeneration = -1;
+    private static int shaderEnableGeneration = -1;
+    private static boolean dimensionSwitchAttempted;
+    private static boolean dimensionSwitchServerApplied;
+    private static boolean dimensionSwitchCompleted;
+    private static UUID dimensionSwitchPlayerUuid;
+    private static String dimensionSwitchSource = "";
+    private static String dimensionSwitchServerTarget = "";
+    private static String dimensionSwitchClientTarget = "";
+    private static String dimensionSwitchPipelineBefore;
+    private static String dimensionSwitchPipelineAfter;
+    private static int dimensionSwitchGenerationBefore = -1;
+    private static int dimensionSwitchGenerationAfter = -1;
+    private static int dimensionSwitchObservedFrame = -1;
+    private static int dimensionSwitchServerTick = -1;
+    private static String dimensionSwitchFailure = "";
+    private static final Object DIMENSION_SWITCH_LOCK = new Object();
+    private static int dimensionSequenceIndex;
+    private static boolean dimensionSequenceAttempted;
+    private static boolean dimensionSequenceServerApplied;
+    private static UUID dimensionSequencePlayerUuid;
+    private static String dimensionSequenceSource = "";
+    private static String dimensionSequenceServerTarget = "";
+    private static String dimensionSequenceClientTarget = "";
+    private static String dimensionSequencePipelineBefore;
+    private static String dimensionSequencePipelineAfter;
+    private static int dimensionSequenceGenerationBefore = -1;
+    private static int dimensionSequenceGenerationAfter = -1;
+    private static int dimensionSequenceObservedFrame = -1;
+    private static int dimensionSequenceServerTick = -1;
+    private static String dimensionSequenceFailure = "";
+    private static final List<DimensionSwitchReceipt> DIMENSION_SEQUENCE_RECEIPTS = new ArrayList<>();
     private static volatile boolean fixedClockApplied;
     private static volatile boolean integratedServerConfigured;
     private static boolean flawlessFramesAttempted;
@@ -160,6 +230,12 @@ public final class BackendFrameComparisonClient {
         applyFixedClock(minecraft);
         applyFixedCamera(minecraft);
         applyFixedClientScene(minecraft);
+        if (FIXED_PLAYER_ON_GROUND) {
+            // This is deliberately a validation-only input. It keeps Iris's
+            // own is_on_ground supplier identical across backend lanes without
+            // changing the production uniform supplier or normal gameplay.
+            minecraft.player.setOnGround(true);
+        }
         if (minecraft.options != null) {
             minecraft.options.pauseOnLostFocus = false;
         }
@@ -218,8 +294,21 @@ public final class BackendFrameComparisonClient {
         if (!irisReloadAttempted && levelFrame == IRIS_RELOAD_FRAME) {
             reloadIris();
         }
+        applyScheduledResize(minecraft);
+        applyScheduledShaderToggle(minecraft);
+        if (dimensionSequenceEnabled()) {
+            applyScheduledDimensionSwitchSequence(minecraft);
+            observeDimensionSwitchSequence(minecraft);
+        } else {
+            applyScheduledDimensionSwitch(minecraft);
+            observeDimensionSwitch(minecraft);
+        }
         if (stopRequested && pendingCaptures == 0 && AUTO_STOP) {
-            writeSession(failedCaptures == 0 ? "passed" : "failed", null);
+            boolean lifecyclePassed = (RESIZE_REQUEST == null || resizeCompleted)
+                    && (SHADER_TOGGLE_REQUEST == null
+                    || shaderEnableCompleted)
+                    && dimensionLifecyclePassed();
+            writeSession(failedCaptures == 0 && lifecyclePassed ? "passed" : "failed", null);
             minecraft.stop();
         }
     }
@@ -230,6 +319,43 @@ public final class BackendFrameComparisonClient {
         }
         if (!CAPTURE_FRAMES.contains(levelFrame) || COMPLETED_FRAMES.contains(levelFrame)) {
             return;
+        }
+        if (RESIZE_REQUEST != null && levelFrame >= RESIZE_REQUEST.frame() && !resizeCompleted) {
+            failedCaptures++;
+            stopRequested = true;
+            writeFailure(
+                    levelFrame,
+                    new IllegalStateException(
+                            "scheduled resize did not complete before capture frame " + levelFrame
+                                    + ": expected " + RESIZE_REQUEST.width() + "x" + RESIZE_REQUEST.height()
+                                    + ", observed " + currentWindowExtent()
+                    )
+            );
+            return;
+        }
+        if (SHADER_TOGGLE_REQUEST != null) {
+            if (levelFrame >= SHADER_TOGGLE_REQUEST.disableFrame() && !shaderDisableCompleted) {
+                failedCaptures++;
+                stopRequested = true;
+                writeFailure(
+                        levelFrame,
+                        new IllegalStateException(
+                                "scheduled shader disable did not complete before capture frame " + levelFrame
+                        )
+                );
+                return;
+            }
+            if (levelFrame >= SHADER_TOGGLE_REQUEST.enableFrame() && !shaderEnableCompleted) {
+                failedCaptures++;
+                stopRequested = true;
+                writeFailure(
+                        levelFrame,
+                        new IllegalStateException(
+                                "scheduled shader enable did not complete before capture frame " + levelFrame
+                        )
+                );
+                return;
+            }
         }
         capture(renderer, levelFrame);
     }
@@ -244,6 +370,16 @@ public final class BackendFrameComparisonClient {
             return;
         }
         applyFixedIrisSystemTime(levelFrame, FIXED_IRIS_FRAME_MILLIS);
+    }
+
+    /**
+     * Returns the render interpolation input for the deterministic comparison
+     * harness.  A fixed value is an input contract only; normal clients never
+     * enter this path because {@code metallum.backend.compare.enabled} is
+     * false.
+     */
+    public static float fixedPartialTick() {
+        return FIXED_PARTIAL_TICK;
     }
 
     static void applyFixedIrisSystemTime(final int frame, final long frameMillis) {
@@ -285,6 +421,507 @@ public final class BackendFrameComparisonClient {
                 FIXED_CLOCK_TICKS == Long.MIN_VALUE ? "unchanged" : FIXED_CLOCK_TICKS,
                 FIXED_WEATHER.propertyValue
         );
+    }
+
+    /**
+     * Applies the one-shot dimension request on the integrated-server thread.
+     * The client render thread only publishes the request; calling
+     * {@code ServerPlayer.teleport} from that thread would make the receipt
+     * meaningless and can race the server's player list. The server-side
+     * request uses the canonical {@link TeleportTransition} path below so the
+     * client receives the complete cross-dimension lifecycle.
+     */
+    public static void applyScheduledDimensionSwitch(final IntegratedServer server) {
+        if (dimensionSequenceEnabled()) {
+            applyScheduledDimensionSwitchSequence(server);
+            return;
+        }
+        if (!ENABLED || DIMENSION_SWITCH_REQUEST == null || !dimensionSwitchAttempted
+                || dimensionSwitchServerApplied || !dimensionSwitchFailure.isEmpty()) {
+            return;
+        }
+        synchronized (DIMENSION_SWITCH_LOCK) {
+            if (dimensionSwitchServerApplied || !dimensionSwitchFailure.isEmpty()) {
+                return;
+            }
+            UUID playerUuid = dimensionSwitchPlayerUuid;
+            if (playerUuid == null) {
+                recordDimensionSwitchFailure("dimension switch request has no player identity");
+                return;
+            }
+            ServerPlayer player = server.getPlayerList().getPlayer(playerUuid);
+            if (player == null) {
+                recordDimensionSwitchFailure("integrated server could not find requested player " + playerUuid);
+                return;
+            }
+            ServerLevel target = server.getLevel(DIMENSION_SWITCH_REQUEST.target().levelKey());
+            if (target == null) {
+                recordDimensionSwitchFailure(
+                        "integrated server has no target dimension "
+                                + DIMENSION_SWITCH_REQUEST.target().id()
+                );
+                return;
+            }
+            String source = player.level().dimension().identifier().toString();
+            String targetId = target.dimension().identifier().toString();
+            if (source.equals(targetId)) {
+                recordDimensionSwitchFailure("requested target already active: " + targetId);
+                return;
+            }
+            double scale = dimensionCoordinateScale(player.level().dimension(), target.dimension());
+            ServerPlayer teleported = player.teleport(
+                    new TeleportTransition(
+                            target,
+                            new Vec3(
+                                    player.getX() * scale,
+                                    player.getY(),
+                                    player.getZ() * scale
+                            ),
+                            player.getDeltaMovement(),
+                            player.getYRot(),
+                            player.getXRot(),
+                            false,
+                            false,
+                            Set.of(),
+                            TeleportTransition.DO_NOTHING
+                    )
+            );
+            if (teleported == null) {
+                recordDimensionSwitchFailure(
+                        "ServerPlayer.teleport rejected " + source + " -> " + targetId
+                );
+                return;
+            }
+            dimensionSwitchServerApplied = true;
+            dimensionSwitchSource = source;
+            dimensionSwitchServerTarget = targetId;
+            dimensionSwitchServerTick = server.getTickCount();
+            Metallum.LOGGER.info(
+                    "[metallum-backend-compare] dimension switch applied on server tick {}:"
+                            + " player={} {} -> {}",
+                    dimensionSwitchServerTick,
+                    playerUuid,
+                    source,
+                    targetId
+            );
+            writeDimensionSwitchReceipt("server-applied");
+        }
+    }
+
+    private static void applyScheduledDimensionSwitch(final Minecraft minecraft) {
+        if (DIMENSION_SWITCH_REQUEST == null || dimensionSwitchAttempted
+                || levelFrame < DIMENSION_SWITCH_REQUEST.frame()) {
+            return;
+        }
+        dimensionSwitchAttempted = true;
+        dimensionSwitchPlayerUuid = minecraft.player.getUUID();
+        dimensionSwitchPipelineBefore = pipelineClass();
+        dimensionSwitchGenerationBefore = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+        Metallum.LOGGER.info(
+                "[metallum-backend-compare] scheduled dimension switch at level frame {}:"
+                        + " player={} {} -> {} pipeline={} generation={}",
+                levelFrame,
+                dimensionSwitchPlayerUuid,
+                currentDimension(minecraft),
+                DIMENSION_SWITCH_REQUEST.target().id(),
+                dimensionSwitchPipelineBefore,
+                dimensionSwitchGenerationBefore
+        );
+        writeDimensionSwitchReceipt("requested");
+    }
+
+    private static boolean dimensionSequenceEnabled() {
+        return !DIMENSION_SWITCH_SEQUENCE.isEmpty();
+    }
+
+    private static boolean dimensionLifecyclePassed() {
+        if (dimensionSequenceEnabled()) {
+            return dimensionSequenceIndex == DIMENSION_SWITCH_SEQUENCE.size()
+                    && dimensionSequenceFailure.isEmpty();
+        }
+        return DIMENSION_SWITCH_REQUEST == null || dimensionSwitchCompleted;
+    }
+
+    private static DimensionSwitchRequest activeDimensionSequenceRequest() {
+        return dimensionSequenceIndex >= DIMENSION_SWITCH_SEQUENCE.size()
+                ? null
+                : DIMENSION_SWITCH_SEQUENCE.get(dimensionSequenceIndex);
+    }
+
+    private static void applyScheduledDimensionSwitchSequence(final IntegratedServer server) {
+        DimensionSwitchRequest request = activeDimensionSequenceRequest();
+        if (!ENABLED || request == null || !dimensionSequenceAttempted
+                || dimensionSequenceServerApplied || !dimensionSequenceFailure.isEmpty()) {
+            return;
+        }
+        synchronized (DIMENSION_SWITCH_LOCK) {
+            if (dimensionSequenceServerApplied || !dimensionSequenceFailure.isEmpty()) {
+                return;
+            }
+            UUID playerUuid = dimensionSequencePlayerUuid;
+            if (playerUuid == null) {
+                recordDimensionSequenceFailure("dimension sequence step has no player identity");
+                return;
+            }
+            ServerPlayer player = server.getPlayerList().getPlayer(playerUuid);
+            if (player == null) {
+                recordDimensionSequenceFailure(
+                        "integrated server could not find requested player " + playerUuid
+                );
+                return;
+            }
+            ServerLevel target = server.getLevel(request.target().levelKey());
+            if (target == null) {
+                recordDimensionSequenceFailure(
+                        "integrated server has no target dimension " + request.target().id()
+                );
+                return;
+            }
+            String source = player.level().dimension().identifier().toString();
+            String targetId = target.dimension().identifier().toString();
+            if (source.equals(targetId)) {
+                recordDimensionSequenceFailure(
+                        "requested target already active at sequence step " + dimensionSequenceIndex
+                                + ": " + targetId
+                );
+                return;
+            }
+            double scale = dimensionCoordinateScale(player.level().dimension(), target.dimension());
+            ServerPlayer teleported = player.teleport(
+                    new TeleportTransition(
+                            target,
+                            new Vec3(
+                                    player.getX() * scale,
+                                    player.getY(),
+                                    player.getZ() * scale
+                            ),
+                            player.getDeltaMovement(),
+                            player.getYRot(),
+                            player.getXRot(),
+                            false,
+                            false,
+                            Set.of(),
+                            TeleportTransition.DO_NOTHING
+                    )
+            );
+            if (teleported == null) {
+                recordDimensionSequenceFailure(
+                        "ServerPlayer.teleport rejected sequence step " + dimensionSequenceIndex
+                                + ": " + source + " -> " + targetId
+                );
+                return;
+            }
+            dimensionSequenceServerApplied = true;
+            dimensionSequenceSource = source;
+            dimensionSequenceServerTarget = targetId;
+            dimensionSequenceServerTick = server.getTickCount();
+            Metallum.LOGGER.info(
+                    "[metallum-backend-compare] dimension sequence step {} applied on server tick {}:"
+                            + " player={} {} -> {}",
+                    dimensionSequenceIndex,
+                    dimensionSequenceServerTick,
+                    playerUuid,
+                    source,
+                    targetId
+            );
+            writeDimensionSequenceReceipt("server-applied");
+        }
+    }
+
+    private static void applyScheduledDimensionSwitchSequence(final Minecraft minecraft) {
+        DimensionSwitchRequest request = activeDimensionSequenceRequest();
+        if (request == null || dimensionSequenceAttempted || levelFrame < request.frame()) {
+            return;
+        }
+        dimensionSequenceAttempted = true;
+        dimensionSequencePlayerUuid = minecraft.player.getUUID();
+        dimensionSequencePipelineBefore = pipelineClass();
+        dimensionSequenceGenerationBefore = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+        Metallum.LOGGER.info(
+                "[metallum-backend-compare] scheduled dimension sequence step {} at level frame {}:"
+                        + " player={} {} -> {} pipeline={} generation={}",
+                dimensionSequenceIndex,
+                levelFrame,
+                dimensionSequencePlayerUuid,
+                currentDimension(minecraft),
+                request.target().id(),
+                dimensionSequencePipelineBefore,
+                dimensionSequenceGenerationBefore
+        );
+        writeDimensionSequenceReceipt("requested");
+    }
+
+    private static void observeDimensionSwitchSequence(final Minecraft minecraft) {
+        DimensionSwitchRequest request = activeDimensionSequenceRequest();
+        if (request == null || !dimensionSequenceAttempted || !dimensionSequenceServerApplied
+                || minecraft.level == null) {
+            return;
+        }
+        String observedDimension = currentDimension(minecraft);
+        if (!request.target().id().equals(observedDimension)) {
+            return;
+        }
+        String pipeline = pipelineClass();
+        int generation = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+        boolean semanticPipeline =
+                Iris.getIrisConfig().areShadersEnabled()
+                        && Iris.getCurrentPack().isPresent()
+                        && Iris.getPipelineManager().getPipelineNullable()
+                        instanceof com.metallum.client.metal.render.MetalWorldRenderingPipeline;
+        if (!semanticPipeline || generation < 0 || generation == dimensionSequenceGenerationBefore) {
+            return;
+        }
+        dimensionSequenceClientTarget = observedDimension;
+        dimensionSequencePipelineAfter = pipeline;
+        dimensionSequenceGenerationAfter = generation;
+        dimensionSequenceObservedFrame = levelFrame;
+        DIMENSION_SEQUENCE_RECEIPTS.add(
+                new DimensionSwitchReceipt(
+                        dimensionSequenceIndex,
+                        request.frame(),
+                        request.target().id(),
+                        dimensionSequenceSource,
+                        dimensionSequenceServerTarget,
+                        dimensionSequenceClientTarget,
+                        dimensionSequenceServerTick,
+                        dimensionSequenceObservedFrame,
+                        dimensionSequenceGenerationBefore,
+                        dimensionSequenceGenerationAfter,
+                        dimensionSequencePipelineBefore,
+                        dimensionSequencePipelineAfter,
+                        "completed",
+                        ""
+                )
+        );
+        Metallum.LOGGER.info(
+                "[metallum-backend-compare] dimension sequence step {} observed at level frame {}:"
+                        + " {} generation {} -> {} pipeline={}",
+                dimensionSequenceIndex,
+                levelFrame,
+                observedDimension,
+                dimensionSequenceGenerationBefore,
+                dimensionSequenceGenerationAfter,
+                dimensionSequencePipelineAfter
+        );
+        dimensionSequenceIndex++;
+        resetDimensionSequenceStep();
+        writeDimensionSequenceReceipt("completed");
+    }
+
+    private static void resetDimensionSequenceStep() {
+        dimensionSequenceAttempted = false;
+        dimensionSequenceServerApplied = false;
+        dimensionSequencePlayerUuid = null;
+        dimensionSequenceSource = "";
+        dimensionSequenceServerTarget = "";
+        dimensionSequenceClientTarget = "";
+        dimensionSequencePipelineBefore = null;
+        dimensionSequencePipelineAfter = null;
+        dimensionSequenceGenerationBefore = -1;
+        dimensionSequenceGenerationAfter = -1;
+        dimensionSequenceObservedFrame = -1;
+        dimensionSequenceServerTick = -1;
+    }
+
+    private static void recordDimensionSequenceFailure(final String message) {
+        dimensionSequenceFailure = message;
+        failedCaptures++;
+        stopRequested = true;
+        DimensionSwitchRequest request = activeDimensionSequenceRequest();
+        DIMENSION_SEQUENCE_RECEIPTS.add(
+                new DimensionSwitchReceipt(
+                        dimensionSequenceIndex,
+                        request == null ? -1 : request.frame(),
+                        request == null ? "" : request.target().id(),
+                        dimensionSequenceSource,
+                        dimensionSequenceServerTarget,
+                        dimensionSequenceClientTarget,
+                        dimensionSequenceServerTick,
+                        dimensionSequenceObservedFrame,
+                        dimensionSequenceGenerationBefore,
+                        dimensionSequenceGenerationAfter,
+                        dimensionSequencePipelineBefore,
+                        dimensionSequencePipelineAfter,
+                        "failed",
+                        message
+                )
+        );
+        Metallum.LOGGER.error("[metallum-backend-compare] {}", message);
+        writeDimensionSequenceReceipt("failed");
+    }
+
+    private static void writeDimensionSequenceReceipt(final String status) {
+        try {
+            Path directory = ROOT.resolve(backendName());
+            Files.createDirectories(directory);
+            StringBuilder json = new StringBuilder("{\n")
+                    .append("  \"schema\": 1,\n")
+                    .append("  \"status\": \"").append(jsonEscape(status)).append("\",\n")
+                    .append("  \"requestedSteps\": ").append(DIMENSION_SWITCH_SEQUENCE.size()).append(",\n")
+                    .append("  \"completedSteps\": ").append(dimensionSequenceIndex).append(",\n")
+                    .append("  \"failure\": ")
+                    .append(jsonStringOrNull(dimensionSequenceFailure.isEmpty() ? null : dimensionSequenceFailure))
+                    .append(",\n  \"steps\": [\n");
+            for (int index = 0; index < DIMENSION_SEQUENCE_RECEIPTS.size(); index++) {
+                DimensionSwitchReceipt receipt = DIMENSION_SEQUENCE_RECEIPTS.get(index);
+                json.append("    {")
+                        .append("\"index\": ").append(receipt.index())
+                        .append(", \"requestedFrame\": ").append(receipt.requestedFrame())
+                        .append(", \"target\": \"").append(jsonEscape(receipt.target())).append('\"')
+                        .append(", \"source\": \"").append(jsonEscape(receipt.source())).append('\"')
+                        .append(", \"serverTarget\": \"").append(jsonEscape(receipt.serverTarget())).append('\"')
+                        .append(", \"clientTarget\": \"").append(jsonEscape(receipt.clientTarget())).append('\"')
+                        .append(", \"serverTick\": ").append(receipt.serverTick())
+                        .append(", \"observedFrame\": ").append(receipt.observedFrame())
+                        .append(", \"generationBefore\": ").append(receipt.generationBefore())
+                        .append(", \"generationAfter\": ").append(receipt.generationAfter())
+                        .append(", \"pipelineBefore\": ")
+                        .append(jsonStringOrNull(receipt.pipelineBefore()))
+                        .append(", \"pipelineAfter\": ")
+                        .append(jsonStringOrNull(receipt.pipelineAfter()))
+                        .append(", \"status\": \"").append(jsonEscape(receipt.status())).append('\"')
+                        .append(", \"failure\": ")
+                        .append(jsonStringOrNull(receipt.failure().isEmpty() ? null : receipt.failure()))
+                        .append("}");
+                if (index + 1 < DIMENSION_SEQUENCE_RECEIPTS.size()) {
+                    json.append(',');
+                }
+                json.append('\n');
+            }
+            json.append("  ]\n}\n");
+            Files.writeString(
+                    directory.resolve("dimension-switches.json"),
+                    json,
+                    StandardCharsets.UTF_8
+            );
+        } catch (IOException ignoredException) {
+            // The runtime log remains the source of the original failure.
+        }
+    }
+
+    private static void observeDimensionSwitch(final Minecraft minecraft) {
+        if (DIMENSION_SWITCH_REQUEST == null || !dimensionSwitchServerApplied
+                || dimensionSwitchCompleted || minecraft.level == null) {
+            return;
+        }
+        String observedDimension = currentDimension(minecraft);
+        if (!DIMENSION_SWITCH_REQUEST.target().id().equals(observedDimension)) {
+            return;
+        }
+        String pipeline = pipelineClass();
+        int generation = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+        boolean semanticPipeline =
+                minecraft.level != null
+                        && Iris.getIrisConfig().areShadersEnabled()
+                        && Iris.getCurrentPack().isPresent()
+                        && Iris.getPipelineManager().getPipelineNullable()
+                        instanceof com.metallum.client.metal.render.MetalWorldRenderingPipeline;
+        if (!semanticPipeline || generation < 0 || generation == dimensionSwitchGenerationBefore) {
+            return;
+        }
+        dimensionSwitchCompleted = true;
+        dimensionSwitchClientTarget = observedDimension;
+        dimensionSwitchPipelineAfter = pipeline;
+        dimensionSwitchGenerationAfter = generation;
+        dimensionSwitchObservedFrame = levelFrame;
+        Metallum.LOGGER.info(
+                "[metallum-backend-compare] dimension switch observed at level frame {}:"
+                        + " {} generation {} -> {} pipeline={}",
+                levelFrame,
+                observedDimension,
+                dimensionSwitchGenerationBefore,
+                dimensionSwitchGenerationAfter,
+                dimensionSwitchPipelineAfter
+        );
+        writeDimensionSwitchReceipt("completed");
+    }
+
+    private static double dimensionCoordinateScale(
+            final net.minecraft.resources.ResourceKey<Level> source,
+            final net.minecraft.resources.ResourceKey<Level> target
+    ) {
+        if (source.equals(Level.OVERWORLD) && target.equals(Level.NETHER)) {
+            return 1.0 / 8.0;
+        }
+        if (source.equals(Level.NETHER) && target.equals(Level.OVERWORLD)) {
+            return 8.0;
+        }
+        return 1.0;
+    }
+
+    private static String currentDimension(final Minecraft minecraft) {
+        return minecraft == null || minecraft.level == null
+                ? ""
+                : minecraft.level.dimension().identifier().toString();
+    }
+
+    private static String pipelineClass() {
+        var pipeline = Iris.getPipelineManager().getPipelineNullable();
+        return pipeline == null ? "" : pipeline.getClass().getName();
+    }
+
+    private static void recordDimensionSwitchFailure(final String message) {
+        dimensionSwitchFailure = message;
+        failedCaptures++;
+        stopRequested = true;
+        Metallum.LOGGER.error("[metallum-backend-compare] {}", message);
+        writeDimensionSwitchReceipt("failed");
+    }
+
+    private static void writeDimensionSwitchReceipt(final String status) {
+        try {
+            Path directory = ROOT.resolve(backendName());
+            Files.createDirectories(directory);
+            String target = DIMENSION_SWITCH_REQUEST == null
+                    ? ""
+                    : DIMENSION_SWITCH_REQUEST.target().id();
+            Files.writeString(
+                    directory.resolve("dimension-switch.json"),
+                    String.format(
+                            Locale.ROOT,
+                            "{\n"
+                                    + "  \"schema\": 1,\n"
+                                    + "  \"status\": \"%s\",\n"
+                                    + "  \"requestedFrame\": %d,\n"
+                                    + "  \"target\": \"%s\",\n"
+                                    + "  \"playerUuid\": \"%s\",\n"
+                                    + "  \"source\": \"%s\",\n"
+                                    + "  \"serverTarget\": \"%s\",\n"
+                                    + "  \"clientTarget\": \"%s\",\n"
+                                    + "  \"serverApplied\": %s,\n"
+                                    + "  \"clientObserved\": %s,\n"
+                                    + "  \"completed\": %s,\n"
+                                    + "  \"serverTick\": %d,\n"
+                                    + "  \"observedFrame\": %d,\n"
+                                    + "  \"generationBefore\": %d,\n"
+                                    + "  \"generationAfter\": %d,\n"
+                                    + "  \"pipelineBefore\": %s,\n"
+                                    + "  \"pipelineAfter\": %s,\n"
+                                    + "  \"failure\": %s\n"
+                                    + "}\n",
+                            jsonEscape(status),
+                            DIMENSION_SWITCH_REQUEST == null ? -1 : DIMENSION_SWITCH_REQUEST.frame(),
+                            jsonEscape(target),
+                            dimensionSwitchPlayerUuid == null ? "" : dimensionSwitchPlayerUuid,
+                            jsonEscape(dimensionSwitchSource),
+                            jsonEscape(dimensionSwitchServerTarget),
+                            jsonEscape(dimensionSwitchClientTarget),
+                            dimensionSwitchServerApplied,
+                            dimensionSwitchCompleted,
+                            dimensionSwitchCompleted,
+                            dimensionSwitchServerTick,
+                            dimensionSwitchObservedFrame,
+                            dimensionSwitchGenerationBefore,
+                            dimensionSwitchGenerationAfter,
+                            jsonStringOrNull(dimensionSwitchPipelineBefore),
+                            jsonStringOrNull(dimensionSwitchPipelineAfter),
+                            jsonStringOrNull(dimensionSwitchFailure.isEmpty() ? null : dimensionSwitchFailure)
+                    ),
+                    StandardCharsets.UTF_8
+            );
+        } catch (IOException ignoredException) {
+            // The runtime log remains the source of the original failure.
+        }
     }
 
     private static boolean sceneReadinessRequested() {
@@ -506,6 +1143,142 @@ public final class BackendFrameComparisonClient {
             );
         }
         writeSession("running", null);
+    }
+
+    private static void applyScheduledResize(final Minecraft minecraft) {
+        if (RESIZE_REQUEST == null) {
+            return;
+        }
+        if (!resizeAttempted && levelFrame >= RESIZE_REQUEST.frame()) {
+            resizeAttempted = true;
+            var window = minecraft.getWindow();
+            int currentWidth = window.getWidth();
+            int currentHeight = window.getHeight();
+            int logicalWidth = logicalResizeDimension(
+                    RESIZE_REQUEST.width(), currentWidth, window.getScreenWidth()
+            );
+            int logicalHeight = logicalResizeDimension(
+                    RESIZE_REQUEST.height(), currentHeight, window.getScreenHeight()
+            );
+            window.setWindowed(logicalWidth, logicalHeight);
+            Metallum.LOGGER.info(
+                    "[metallum-backend-compare] scheduled resize requested at level frame {}:"
+                            + " framebuffer {}x{} -> {}x{} (windowed {}x{})",
+                    levelFrame,
+                    currentWidth,
+                    currentHeight,
+                    RESIZE_REQUEST.width(),
+                    RESIZE_REQUEST.height(),
+                    logicalWidth,
+                    logicalHeight
+            );
+        }
+        if (!resizeCompleted) {
+            var window = minecraft.getWindow();
+            if (window.getWidth() == RESIZE_REQUEST.width()
+                    && window.getHeight() == RESIZE_REQUEST.height()) {
+                resizeCompleted = true;
+                resizeObservedWidth = window.getWidth();
+                resizeObservedHeight = window.getHeight();
+                Metallum.LOGGER.info(
+                        "[metallum-backend-compare] scheduled resize completed at level frame {}: {}",
+                        levelFrame,
+                        currentWindowExtent()
+                );
+                writeSession("running", null);
+            }
+        }
+    }
+
+    private static int logicalResizeDimension(final int framebufferDimension,
+                                              final int currentFramebufferDimension,
+                                              final int currentLogicalDimension) {
+        if (currentFramebufferDimension <= 0 || currentLogicalDimension <= 0) {
+            return framebufferDimension;
+        }
+        double backingScale = (double) currentFramebufferDimension / currentLogicalDimension;
+        if (!Double.isFinite(backingScale) || backingScale <= 0.0) {
+            return framebufferDimension;
+        }
+        return Math.max(1, (int) Math.round(framebufferDimension / backingScale));
+    }
+
+    private static String currentWindowExtent() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.getWindow() == null) {
+            return "<unavailable>";
+        }
+        return minecraft.getWindow().getWidth() + "x" + minecraft.getWindow().getHeight();
+    }
+
+    private static void applyScheduledShaderToggle(final Minecraft minecraft) {
+        if (SHADER_TOGGLE_REQUEST == null) {
+            return;
+        }
+        if (!shaderDisableAttempted && levelFrame >= SHADER_TOGGLE_REQUEST.disableFrame()) {
+            shaderDisableAttempted = true;
+            int generationBefore = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+            try {
+                Iris.toggleShaders(minecraft, false);
+                shaderDisableGeneration = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+                shaderDisableCompleted = !Iris.getIrisConfig().areShadersEnabled()
+                        && Iris.getCurrentPack().isEmpty()
+                        && shaderDisableGeneration < 0
+                        && Iris.getPipelineManager().getPipelineNullable()
+                        instanceof net.irisshaders.iris.pipeline.VanillaRenderingPipeline;
+                Metallum.LOGGER.info(
+                        "[metallum-backend-compare] scheduled shader disable at level frame {}:"
+                                + " generation {} -> {}, completed={}",
+                        levelFrame,
+                        generationBefore,
+                        shaderDisableGeneration,
+                        shaderDisableCompleted
+                );
+            } catch (IOException | RuntimeException exception) {
+                failedCaptures++;
+                stopRequested = true;
+                writeFailure(levelFrame, exception);
+                Metallum.LOGGER.error(
+                        "[metallum-backend-compare] scheduled shader disable failed at level frame {}",
+                        levelFrame,
+                        exception
+                );
+            }
+            writeSession("running", null);
+        }
+        if (shaderDisableCompleted
+                && !shaderEnableAttempted
+                && levelFrame >= SHADER_TOGGLE_REQUEST.enableFrame()) {
+            shaderEnableAttempted = true;
+            int generationBefore = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+            try {
+                Iris.toggleShaders(minecraft, true);
+                shaderEnableGeneration = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+                shaderEnableCompleted = Iris.getIrisConfig().areShadersEnabled()
+                        && Iris.getCurrentPack().isPresent()
+                        && shaderEnableGeneration >= 0
+                        && Iris.getPipelineManager().getPipelineNullable()
+                        instanceof com.metallum.client.metal.render.MetalWorldRenderingPipeline;
+                Metallum.LOGGER.info(
+                        "[metallum-backend-compare] scheduled shader enable at level frame {}:"
+                                + " generation {} -> {}, completed={}",
+                        levelFrame,
+                        generationBefore,
+                        shaderEnableGeneration,
+                        shaderEnableCompleted
+                );
+            } catch (IOException | RuntimeException exception) {
+                failedCaptures++;
+                stopRequested = true;
+                writeFailure(levelFrame, exception);
+                Metallum.LOGGER.error(
+                        "[metallum-backend-compare] scheduled shader enable failed at level frame {}",
+                        levelFrame,
+                        exception
+                );
+            }
+            writeSession("running", null);
+        }
     }
 
     private static void writeCapture(
@@ -807,6 +1580,21 @@ public final class BackendFrameComparisonClient {
                                     + "  \"irisReloadFrame\": %d,\n"
                                     + "  \"irisReloadAttempted\": %s,\n"
                                     + "  \"irisReloadCompleted\": %s,\n"
+                                    + "  \"resizeFrame\": %d,\n"
+                                    + "  \"resizeWidth\": %d,\n"
+                                    + "  \"resizeHeight\": %d,\n"
+                                    + "  \"resizeAttempted\": %s,\n"
+                                    + "  \"resizeCompleted\": %s,\n"
+                                    + "  \"resizeObservedWidth\": %d,\n"
+                                    + "  \"resizeObservedHeight\": %d,\n"
+                                    + "  \"shaderDisableFrame\": %d,\n"
+                                    + "  \"shaderEnableFrame\": %d,\n"
+                                    + "  \"shaderDisableAttempted\": %s,\n"
+                                    + "  \"shaderDisableCompleted\": %s,\n"
+                                    + "  \"shaderEnableAttempted\": %s,\n"
+                                    + "  \"shaderEnableCompleted\": %s,\n"
+                                    + "  \"shaderDisableGeneration\": %d,\n"
+                                    + "  \"shaderEnableGeneration\": %d,\n"
                                     + "  \"fixedClockTicks\": %s,\n"
                                     + "  \"fixedIrisFrameMillis\": %s,\n"
                                     + "  \"freezeSimulationRequested\": %s,\n"
@@ -850,6 +1638,21 @@ public final class BackendFrameComparisonClient {
                             IRIS_RELOAD_FRAME,
                             irisReloadAttempted,
                             irisReloadCompleted,
+                            RESIZE_REQUEST == null ? -1 : RESIZE_REQUEST.frame(),
+                            RESIZE_REQUEST == null ? -1 : RESIZE_REQUEST.width(),
+                            RESIZE_REQUEST == null ? -1 : RESIZE_REQUEST.height(),
+                            resizeAttempted,
+                            resizeCompleted,
+                            resizeObservedWidth,
+                            resizeObservedHeight,
+                            SHADER_TOGGLE_REQUEST == null ? -1 : SHADER_TOGGLE_REQUEST.disableFrame(),
+                            SHADER_TOGGLE_REQUEST == null ? -1 : SHADER_TOGGLE_REQUEST.enableFrame(),
+                            shaderDisableAttempted,
+                            shaderDisableCompleted,
+                            shaderEnableAttempted,
+                            shaderEnableCompleted,
+                            shaderDisableGeneration,
+                            shaderEnableGeneration,
                             FIXED_CLOCK_TICKS == Long.MIN_VALUE
                                     ? "null"
                                     : Long.toString(FIXED_CLOCK_TICKS),
@@ -1051,6 +1854,108 @@ public final class BackendFrameComparisonClient {
         };
     }
 
+    static float parseFixedPartialTick(final String value) {
+        try {
+            float parsed = Float.parseFloat(value == null ? "" : value.trim());
+            if (!Float.isFinite(parsed) || parsed < 0.0F || parsed > 1.0F) {
+                throw new IllegalArgumentException(
+                        "fixed-partial-tick must be finite and within [0,1], found " + value
+                );
+            }
+            return parsed;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(
+                    "fixed-partial-tick must be a finite number within [0,1], found " + value,
+                    exception
+            );
+        }
+    }
+
+    static ResizeRequest parseResizeRequest(final int frame, final int width, final int height) {
+        if (frame == -1 && width == -1 && height == -1) {
+            return null;
+        }
+        if (frame < 0 || width <= 0 || height <= 0) {
+            throw new IllegalArgumentException(
+                    "resize requires frame >= 0 and positive width/height, found "
+                            + frame + "," + width + "," + height
+            );
+        }
+        return new ResizeRequest(frame, width, height);
+    }
+
+    static ShaderToggleRequest parseShaderToggleRequest(final int disableFrame, final int enableFrame) {
+        if (disableFrame == -1 && enableFrame == -1) {
+            return null;
+        }
+        if (disableFrame < 0 || enableFrame <= disableFrame) {
+            throw new IllegalArgumentException(
+                    "shader toggle requires disableFrame >= 0 and enableFrame > disableFrame, found "
+                            + disableFrame + "," + enableFrame
+            );
+        }
+        return new ShaderToggleRequest(disableFrame, enableFrame);
+    }
+
+    static DimensionSwitchRequest parseDimensionSwitchRequest(
+            final int frame,
+            final String target
+    ) {
+        String normalized = target == null ? "" : target.trim().toLowerCase(Locale.ROOT);
+        if (frame == -1 && normalized.isEmpty()) {
+            return null;
+        }
+        if (frame < 0 || normalized.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "dimension switch requires frame >= 0 and a target, found "
+                            + frame + "," + target
+            );
+        }
+        DimensionSwitchTarget parsedTarget = switch (normalized) {
+            case "overworld", "minecraft:overworld" -> DimensionSwitchTarget.OVERWORLD;
+            case "nether", "minecraft:the_nether" -> DimensionSwitchTarget.NETHER;
+            case "end", "minecraft:the_end" -> DimensionSwitchTarget.END;
+            default -> throw new IllegalArgumentException(
+                    "dimension switch target must be overworld, nether or end, found " + target
+            );
+        };
+        return new DimensionSwitchRequest(frame, parsedTarget);
+    }
+
+    static List<DimensionSwitchRequest> parseDimensionSwitchSequence(final String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        List<DimensionSwitchRequest> requests = new ArrayList<>();
+        int previousFrame = -1;
+        for (String entry : value.split(",")) {
+            String token = entry.trim();
+            int separator = token.indexOf(':');
+            if (separator <= 0 || separator == token.length() - 1) {
+                throw new IllegalArgumentException(
+                        "dimension-switch-sequence entries require frame:target, found " + entry
+                );
+            }
+            int frame;
+            try {
+                frame = Integer.parseInt(token.substring(0, separator).trim());
+            } catch (NumberFormatException exception) {
+                throw new IllegalArgumentException(
+                        "dimension-switch-sequence frame must be an integer, found " + entry,
+                        exception
+                );
+            }
+            if (frame < 0 || frame <= previousFrame) {
+                throw new IllegalArgumentException(
+                        "dimension-switch-sequence frames must be strictly increasing, found " + entry
+                );
+            }
+            requests.add(parseDimensionSwitchRequest(frame, token.substring(separator + 1).trim()));
+            previousFrame = frame;
+        }
+        return List.copyOf(requests);
+    }
+
     private static EntityReceipt entityReceipt(final Minecraft minecraft) {
         if (minecraft.level == null) {
             return new EntityReceipt(0, sha256(List.of()), List.of());
@@ -1204,6 +2109,57 @@ public final class BackendFrameComparisonClient {
 
         FixedWeather(final String propertyValue) {
             this.propertyValue = propertyValue;
+        }
+    }
+
+    record ResizeRequest(int frame, int width, int height) {
+    }
+
+    record ShaderToggleRequest(int disableFrame, int enableFrame) {
+    }
+
+    record DimensionSwitchRequest(int frame, DimensionSwitchTarget target) {
+    }
+
+    record DimensionSwitchReceipt(
+            int index,
+            int requestedFrame,
+            String target,
+            String source,
+            String serverTarget,
+            String clientTarget,
+            int serverTick,
+            int observedFrame,
+            int generationBefore,
+            int generationAfter,
+            String pipelineBefore,
+            String pipelineAfter,
+            String status,
+            String failure
+    ) {
+    }
+
+    enum DimensionSwitchTarget {
+        OVERWORLD("minecraft:overworld"),
+        NETHER("minecraft:the_nether"),
+        END("minecraft:the_end");
+
+        private final String id;
+
+        DimensionSwitchTarget(final String id) {
+            this.id = id;
+        }
+
+        String id() {
+            return id;
+        }
+
+        net.minecraft.resources.ResourceKey<Level> levelKey() {
+            return switch (this) {
+                case OVERWORLD -> Level.OVERWORLD;
+                case NETHER -> Level.NETHER;
+                case END -> Level.END;
+            };
         }
     }
 

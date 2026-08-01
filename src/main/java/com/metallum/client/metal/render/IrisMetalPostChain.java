@@ -134,7 +134,7 @@ final class IrisMetalPostChain implements AutoCloseable {
         ) {
             this.colorSpace = colorSpace;
             this.info = new PassInfo(
-                    Stage.COMPOSITE,
+                    Stage.FINAL,
                     "iris-color-space-" + colorSpace.name().toLowerCase(Locale.ROOT),
                     new int[]{0},
                     new BitSet(),
@@ -154,7 +154,9 @@ final class IrisMetalPostChain implements AutoCloseable {
         SHADOW_COMPOSITE(null, TextureStage.SHADOWCOMP, null),
         PREPARE(ProgramArrayId.Prepare, TextureStage.PREPARE, "prepare_pre"),
         DEFERRED(ProgramArrayId.Deferred, TextureStage.DEFERRED, "deferred_pre"),
-        COMPOSITE(ProgramArrayId.Composite, TextureStage.COMPOSITE_AND_FINAL, "composite_pre");
+        COMPOSITE(ProgramArrayId.Composite, TextureStage.COMPOSITE_AND_FINAL, "composite_pre"),
+        /** The standalone Iris final renderer and final compute queue. */
+        FINAL(null, TextureStage.COMPOSITE_AND_FINAL, null);
 
         final @Nullable ProgramArrayId arrayId;
         final TextureStage textureStage;
@@ -246,6 +248,14 @@ final class IrisMetalPostChain implements AutoCloseable {
         }
     }
 
+    /** A typed Iris samplerBuffer range. The format is part of the binding ABI. */
+    record TexelBufferBinding(GpuBufferSlice slice, GpuFormat format) {
+        TexelBufferBinding {
+            Objects.requireNonNull(slice, "slice");
+            Objects.requireNonNull(format, "format");
+        }
+    }
+
     private record TargetBlendState(
             Optional<BlendFunction> global,
             Map<Integer, Optional<BlendFunction>> perTarget
@@ -310,7 +320,15 @@ final class IrisMetalPostChain implements AutoCloseable {
             return null;
         }
 
-        default @Nullable GpuBufferSlice texelBuffer(final PassInfo pass, final String samplerName) {
+        /**
+         * Resolves a raster samplerBuffer before its render PSO is built. Iris
+         * has no samplerBuffer format in the GLSL type, so providers must
+         * supply the exact Metal/GpuFormat alongside the byte range.
+         */
+        default @Nullable TexelBufferBinding texelBuffer(
+                final PassInfo pass,
+                final MetalIrisShaderCompiler.SamplerDecl sampler
+        ) {
             return null;
         }
     }
@@ -464,7 +482,7 @@ final class IrisMetalPostChain implements AutoCloseable {
 
         private PassInfo info() {
             return new PassInfo(
-                    Stage.COMPOSITE,
+                    Stage.FINAL,
                     this.name,
                     new int[]{0},
                     this.readsFromAlt,
@@ -628,7 +646,6 @@ final class IrisMetalPostChain implements AutoCloseable {
                 MetalIrisShaderCompiler.GlslProgram program = translate(
                         source, stage.textureStage, textureMap, drawBuffers
                 );
-                validateRasterResources(source.getName(), program);
                 String base = "iris/gen" + generation + "/post/"
                         + stage.name().toLowerCase(Locale.ROOT) + "/" + ordinal++;
                 Identifier vertexId = Identifier.fromNamespaceAndPath("metallum", base + "_v");
@@ -666,7 +683,7 @@ final class IrisMetalPostChain implements AutoCloseable {
 
         List<PlannedCompute> finalComputes = planComputes(
                 programSet.getFinalCompute(),
-                Stage.COMPOSITE,
+                Stage.FINAL,
                 -1,
                 state,
                 textureMap,
@@ -682,7 +699,6 @@ final class IrisMetalPostChain implements AutoCloseable {
             MetalIrisShaderCompiler.GlslProgram program = translate(
                     source, TextureStage.COMPOSITE_AND_FINAL, textureMap, declared
             );
-            validateRasterResources(source.getName(), program);
             String base = "iris/gen" + generation + "/post/final";
             Identifier vertexId = Identifier.fromNamespaceAndPath("metallum", base + "_v");
             Identifier fragmentId = Identifier.fromNamespaceAndPath("metallum", base + "_f");
@@ -772,6 +788,16 @@ final class IrisMetalPostChain implements AutoCloseable {
             final GpuFormat finalColorFormat,
             final ShaderSource fallback
     ) {
+        prepare(device, targets, finalColorFormat, fallback, null);
+    }
+
+    void prepare(
+            final MetalDevice device,
+            final IrisMetalRenderTargets targets,
+            final GpuFormat finalColorFormat,
+            final ShaderSource fallback,
+            final @Nullable ResourceProvider resources
+    ) {
         ensureOpen();
         validateTargets(targets);
         Objects.requireNonNull(finalColorFormat, "finalColorFormat");
@@ -794,14 +820,14 @@ final class IrisMetalPostChain implements AutoCloseable {
         for (Stage stage : Stage.values()) {
             for (PlannedPass pass : this.passes.get(stage)) {
                 if (pass.pipeline == null) {
-                    pass.pipeline = buildPipeline(pass, targets);
+                    pass.pipeline = buildPipeline(pass, targets, resources);
                 }
                 verifyPrecompile(device, device.precompilePipeline(pass.pipeline, source), pass.info.name());
             }
         }
         if (this.finalPass != null) {
             if (this.finalPass.pipeline == null) {
-                this.finalPass.pipeline = buildFinalPipeline(this.finalPass, finalColorFormat);
+                this.finalPass.pipeline = buildFinalPipeline(this.finalPass, finalColorFormat, resources);
             }
             verifyPrecompile(
                     device,
@@ -933,7 +959,9 @@ final class IrisMetalPostChain implements AutoCloseable {
                 resolved = encoder.encodeTextureCopy(
                         colors.readTexture(0),
                         (MetalGpuTexture) mainColor.texture(),
-                        true
+                        true,
+                        com.metallum.client.validation.contract.ProducerType.RESOLVE,
+                        "iris/final/resolve"
                 );
                 if (!resolved) {
                     throw new IllegalStateException("Metal final colortex0 -> MainTarget resolve failed");
@@ -1197,7 +1225,7 @@ final class IrisMetalPostChain implements AutoCloseable {
             return;
         }
         if (this.concurrentCompute) {
-            try (MetalComputePass pass = device.commandEncoder().createComputePass()) {
+            try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/compute")) {
                 for (PlannedCompute compute : computes) {
                     executeCompute(pass, compute, targets, resources, executed);
                 }
@@ -1210,7 +1238,7 @@ final class IrisMetalPostChain implements AutoCloseable {
         // An encoder boundary on the shared Metal fence is the conservative
         // native equivalent for hazard-untracked resources.
         for (PlannedCompute compute : computes) {
-            try (MetalComputePass pass = device.commandEncoder().createComputePass()) {
+            try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/compute")) {
                 executeCompute(pass, compute, targets, resources, executed);
             }
         }
@@ -1506,6 +1534,17 @@ final class IrisMetalPostChain implements AutoCloseable {
                 renderPass.bindStorageImage(sampler.name(), image);
                 continue;
             }
+            if (sampler.isTexelBuffer()) {
+                TexelBufferBinding binding = resources.texelBuffer(info, sampler);
+                if (binding == null) {
+                    throw new IllegalStateException(
+                            "Iris pass " + info.name() + " is missing required typed texel buffer '"
+                                    + sampler.name() + "'"
+                    );
+                }
+                renderPass.setUniform(sampler.name(), binding.slice());
+                continue;
+            }
             TextureBinding binding = externalTexture(resources, info, sampler);
             if (binding == null) {
                 binding = standardTexture(info, sampler.name(), targets);
@@ -1645,7 +1684,8 @@ final class IrisMetalPostChain implements AutoCloseable {
 
     private static RenderPipeline buildPipeline(
             final PlannedPass pass,
-            final IrisMetalRenderTargets targets
+            final IrisMetalRenderTargets targets,
+            final @Nullable ResourceProvider resources
     ) {
         RenderPipeline.Builder builder = basePipeline(
                 pass.vertexId,
@@ -1653,7 +1693,8 @@ final class IrisMetalPostChain implements AutoCloseable {
                 Identifier.fromNamespaceAndPath(
                         "metallum", pass.vertexId.getPath().substring(0, pass.vertexId.getPath().length() - 2)
                 ),
-                pass.program
+                pass.program,
+                texelBufferFormats(pass.info, pass.program, resources)
         );
         int[] drawBuffers = pass.info.drawBuffers();
         for (int slot = 0; slot < drawBuffers.length; slot++) {
@@ -1668,13 +1709,15 @@ final class IrisMetalPostChain implements AutoCloseable {
 
     private static RenderPipeline buildFinalPipeline(
             final PlannedFinal pass,
-            final GpuFormat finalColorFormat
+            final GpuFormat finalColorFormat,
+            final @Nullable ResourceProvider resources
     ) {
         return basePipeline(
                 pass.vertexId,
                 pass.fragmentId,
                 Identifier.fromNamespaceAndPath("metallum", "iris/gen/post/final"),
-                pass.program
+                pass.program,
+                texelBufferFormats(pass.info(), pass.program, resources)
         ).withColorTargetState(new ColorTargetState(
                 Optional.empty(), finalColorFormat, ColorTargetState.WRITE_ALL
         )).build();
@@ -1691,7 +1734,8 @@ final class IrisMetalPostChain implements AutoCloseable {
                         "metallum",
                         "iris/presentation/" + pass.colorSpace.name().toLowerCase(Locale.ROOT)
                 ),
-                pass.program
+                pass.program,
+                Map.of()
         ).withColorTargetState(new ColorTargetState(
                 Optional.empty(), finalColorFormat, ColorTargetState.WRITE_ALL
         )).build();
@@ -1701,7 +1745,8 @@ final class IrisMetalPostChain implements AutoCloseable {
             final Identifier vertexId,
             final Identifier fragmentId,
             final Identifier location,
-            final MetalIrisShaderCompiler.GlslProgram program
+            final MetalIrisShaderCompiler.GlslProgram program,
+            final Map<String, GpuFormat> texelBufferFormats
     ) {
         BindGroupLayout.Builder bindings = BindGroupLayout.builder();
         Set<String> names = new HashSet<>();
@@ -1719,9 +1764,15 @@ final class IrisMetalPostChain implements AutoCloseable {
                 continue;
             }
             if (sampler.isTexelBuffer()) {
-                throw new UnsupportedOperationException(
-                        "Post sampler buffer '" + sampler.name() + "' needs a typed texel-buffer binding"
-                );
+                GpuFormat format = texelBufferFormats.get(sampler.name());
+                if (format == null) {
+                    throw new IllegalStateException(
+                            "Iris post samplerBuffer '" + sampler.name()
+                                    + "' has no typed format binding"
+                    );
+                }
+                bindings.withUniform(sampler.name(), UniformType.UNIFORM_BUFFER, format);
+                continue;
             }
             bindings.withSampler(sampler.name());
         }
@@ -1738,19 +1789,32 @@ final class IrisMetalPostChain implements AutoCloseable {
         return builder;
     }
 
-    /** Rejects resources for which fixed Iris has no backend-neutral supplier before generation publish. */
-    private static void validateRasterResources(
-            final String programName,
-            final MetalIrisShaderCompiler.GlslProgram program
+    private static Map<String, GpuFormat> texelBufferFormats(
+            final PassInfo pass,
+            final MetalIrisShaderCompiler.GlslProgram program,
+            final @Nullable ResourceProvider resources
     ) {
+        Map<String, GpuFormat> formats = new LinkedHashMap<>();
         for (MetalIrisShaderCompiler.SamplerDecl sampler : program.samplers()) {
-            if (sampler.isTexelBuffer()) {
-                throw new UnsupportedOperationException(
-                        "Iris raster program " + programName + " declares samplerBuffer '"
-                                + sampler.name() + "'; fixed Iris provides no pack-owned texel-buffer supplier"
+            if (!sampler.isTexelBuffer()) {
+                continue;
+            }
+            if (resources == null) {
+                throw new IllegalStateException(
+                        "Iris pass " + pass.name() + " declares samplerBuffer '" + sampler.name()
+                                + "' but no typed texel-buffer provider was supplied"
                 );
             }
+            TexelBufferBinding binding = resources.texelBuffer(pass, sampler);
+            if (binding == null) {
+                throw new IllegalStateException(
+                        "Iris pass " + pass.name() + " is missing typed texel-buffer admission for '"
+                                + sampler.name() + "'"
+                );
+            }
+            formats.put(sampler.name(), binding.format());
         }
+        return Map.copyOf(formats);
     }
 
     private static RenderPass.RenderArea renderArea(

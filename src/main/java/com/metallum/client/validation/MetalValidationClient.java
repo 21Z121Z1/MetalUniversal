@@ -7,6 +7,9 @@ import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalGpuTimingRecorder;
 import com.metallum.client.metal.render.MetalFxManager;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.validation.contract.RenderContractRuntime;
+import com.metallum.client.validation.storage.ValidationStorageBudget;
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.CloudStatus;
@@ -44,7 +47,6 @@ import net.minecraft.world.level.saveddata.WeatherData;
 import net.minecraft.world.phys.Vec3;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -69,6 +71,9 @@ public final class MetalValidationClient implements ClientModInitializer {
     );
     private static final boolean PERFORMANCE_ONLY = Boolean.getBoolean(
             "metallum.validation.performanceOnly"
+    );
+    private static final boolean REQUIRE_METAL = Boolean.getBoolean(
+            "metallum.validation.requireMetal"
     );
     private static final boolean NATIVE_DIRECT_FRAME_GENERATION = Boolean.getBoolean(
             "metallum.metalfx.nativeDirectFrameGeneration"
@@ -205,6 +210,7 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static boolean sceneReinstalledAfterWarmup;
     private static boolean loggedFirstFrame;
     private static boolean loggedFirstLevelFrame;
+    private static String observedBackend = "unknown";
     private static ArmorStand controlledEntity;
     private static ItemEntity spinningItem;
     private static Boat turningVehicle;
@@ -232,18 +238,18 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (!ENABLED) {
             return;
         }
-        outputDirectory = Path.of(
-                System.getProperty(
-                        "metallum.validation.output",
-                        "build/metal-validation/minecraft-client-current"
-                )
-        ).toAbsolutePath().normalize();
+        outputDirectory = resolveOutputDirectory();
+        System.setProperty("metallum.validation.output", outputDirectory.toString());
         try {
             Files.createDirectories(outputDirectory);
         } catch (IOException exception) {
             throw new IllegalStateException("Could not create Minecraft validation output directory", exception);
         }
         Metallum.LOGGER.info("Automated Minecraft MetalFX validation enabled: {}", outputDirectory);
+        RenderContractRuntime.start(
+                outputDirectory,
+                System.getProperty("metallum.renderContract.runId", "minecraft-current")
+        );
         try {
             // ReplayMod's FlawlessFrames protocol, implemented by Sodium:
             // while active, every frame builds all pending chunk sections
@@ -292,6 +298,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (minecraft.level == null || minecraft.player == null) {
             return;
         }
+        verifyBackend();
         if (!loggedFirstLevelFrame) {
             loggedFirstLevelFrame = true;
             Metallum.LOGGER.info("Validation driver observed a level; arming the scripted timeline");
@@ -394,6 +401,8 @@ public final class MetalValidationClient implements ClientModInitializer {
             runNativeFullscreenBaseline(minecraft);
             return;
         }
+
+        RenderContractRuntime.beginFrame(frame);
 
         // Scene mutations must land in the frame that triggers them (the
         // prioritized Sodium rebuild is only reliably synchronous when the
@@ -508,6 +517,17 @@ public final class MetalValidationClient implements ClientModInitializer {
                                 + completed + "/" + EXPECTED_GPU_CAPTURES + ", failures=" + failures
                 );
             }
+            if (RenderContractRuntime.enabled() && !RenderContractRuntime.completionGatePassed()) {
+                if (frame >= TIMELINE_TIMEOUT_FRAME) {
+                    RenderContractRuntime.markFailed();
+                    finishRunState("failed", completed, failures + 1);
+                    throw new IllegalStateException(
+                            "Render-contract completion gate did not settle before timeline timeout: "
+                                    + RenderContractRuntime.snapshot()
+                    );
+                }
+                return;
+            }
             if (frame >= VALIDATION_END_FRAME) {
                 finishAndStop(minecraft, completed, failures);
             }
@@ -522,6 +542,23 @@ public final class MetalValidationClient implements ClientModInitializer {
     public static void afterFrame(final GameRenderer renderer) {
         // GPU attachment capture is intentionally connected separately in the
         // MetalFX manager after temporal encoding and before present.
+        if (timelineAnchored && !PERFORMANCE_ONLY && frame > 0) {
+            RenderContractRuntime.endFrame(frame - 1L);
+        }
+    }
+
+    private static void verifyBackend() {
+        if (!"unknown".equals(observedBackend)) {
+            return;
+        }
+        observedBackend = RenderSystem.getDevice().getDeviceInfo().backendName();
+        Metallum.LOGGER.info("Validation driver observed graphics backend: {}", observedBackend);
+        if (REQUIRE_METAL && !"Metal".equalsIgnoreCase(observedBackend)) {
+            throw new IllegalStateException(
+                    "Automated Minecraft validation requires the Metal backend, but observed "
+                            + observedBackend + ". The run is rejected before any contract result is accepted."
+            );
+        }
     }
 
     private static void runNativeFullscreenBaseline(final Minecraft minecraft) {
@@ -649,12 +686,11 @@ public final class MetalValidationClient implements ClientModInitializer {
             readback.addProperty("fnv1a64", Long.toUnsignedString(readbackDiagnostics.checksum(), 16));
             report.add("nativeMainReadback", readback);
             report.addProperty("stable60Fps", stable60);
-            Files.writeString(
+            ValidationStorageBudget.shared(outputDirectory).writeString(
                     outputDirectory.resolve(NATIVE_DIRECT_FRAME_GENERATION
                             ? "native-direct-frame-generation.json"
                             : "native-fullscreen-baseline.json"),
-                    new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n",
-                    StandardCharsets.UTF_8
+                    new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n"
             );
         } catch (IOException exception) {
             throw new IllegalStateException("Could not write native fullscreen baseline", exception);
@@ -2008,9 +2044,17 @@ public final class MetalValidationClient implements ClientModInitializer {
             final int completed,
             final int failures
     ) {
-        finishRunState("passed", completed, failures);
+        String finalStatus = RenderContractRuntime.enabled()
+                && !RenderContractRuntime.completionGatePassed()
+                ? "failed"
+                : "passed";
+        if ("failed".equals(finalStatus)) {
+            Metallum.LOGGER.error("Render-contract completion gate failed: {}", RenderContractRuntime.snapshot());
+        }
+        finishRunState(finalStatus, completed, failures + ("failed".equals(finalStatus) ? 1 : 0));
         Metallum.LOGGER.info(
-                "Automated Minecraft MetalFX validation passed {}/{} GPU captures; stopping client",
+                "Automated Minecraft MetalFX validation {} {}/{} GPU captures; stopping client",
+                finalStatus,
                 completed,
                 EXPECTED_GPU_CAPTURES
         );
@@ -2045,20 +2089,46 @@ public final class MetalValidationClient implements ClientModInitializer {
             final int completed,
             final int failures
     ) {
+        RenderContractRuntime.Snapshot contractBeforeClose = RenderContractRuntime.snapshot();
+        // Render-contract validation is intentionally independent from the
+        // MetalFX-owned failure taxonomy. Keeping the two reports separate
+        // lets this validation source set run against the stable MetalFX
+        // manager without importing its dirty task state.
+        List<String> validationFailureScenarios = new ArrayList<>();
+        if (contractBeforeClose.enabled() && !contractBeforeClose.ready()
+                && !validationFailureScenarios.contains("render-contract")) {
+            validationFailureScenarios.add("render-contract");
+        }
+        if (!"passed".equals(status) && validationFailureScenarios.isEmpty()) {
+            validationFailureScenarios.add("validation-run");
+        }
+        String failureReasonsJson = new GsonBuilder().create().toJson(validationFailureScenarios);
+        String runId = System.getProperty("metallum.renderContract.runId", "minecraft-current");
+        String sourceCommit = System.getProperty("metallum.validation.sourceCommit", "unknown");
+        if ("failed".equals(status)) {
+            RenderContractRuntime.markFailed();
+        }
+        RenderContractRuntime.close();
+        RenderContractRuntime.Snapshot contract = RenderContractRuntime.snapshot();
         long[] metal4MainStats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
         long[] metal4MetalFxStats = MetalNativeBridge.metallum_metal4_metalfx_stats();
         try {
-            Files.writeString(
+            ValidationStorageBudget storage = ValidationStorageBudget.shared(outputDirectory);
+            writeStateArtifact(
+                    storage,
                     outputDirectory.resolve("frame-state.json"),
-                    FRAME_JSON + "\n]\n",
-                    StandardCharsets.UTF_8
+                    FRAME_JSON + "\n]\n"
             );
-            Files.writeString(
+            writeStateArtifact(
+                    storage,
                     outputDirectory.resolve("run-state.json"),
                     String.format(
                             Locale.ROOT,
                             """
                     {
+                      "schemaVersion": 1,
+                      "runId": "%s",
+                      "gitCommit": "%s",
                       "mode": "automated-minecraft-client",
                       "usedDedicatedServer": false,
                       "usedSystemScreenshot": false,
@@ -2082,9 +2152,27 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "metal4SpatialScalerEncodes": %d,
                       "metal4TemporalScalerEncodes": %d,
                       "metal4FrameGenerationInputSubmissions": %d,
+                      "renderContractEnabled": %s,
+                      "renderContractStatus": "%s",
+                      "renderContractReady": %s,
+                      "renderContractRequestedCaptures": %d,
+                      "renderContractCompletedCaptures": %d,
+                      "renderContractFailedCaptures": %d,
+                      "renderContractPendingCaptures": %d,
+                      "renderContractDroppedCaptures": %d,
+                      "renderContractPassCount": %d,
+                      "renderContractDroppedEvents": %d,
+                      "renderContractManifestFinalized": %s,
+                      "renderContractArtifactBytes": %d,
+                      "renderContractMaxArtifactBytes": %d,
+                      "renderContractStorageBudgetExceeded": %s,
+                      "validationFailureScenarios": %s,
+                      "renderBackend": "%s",
                       "status": "%s"
                     }
                     """,
+                            jsonEscape(runId),
+                            jsonEscape(sourceCommit),
                             frame,
                             FRAME_GENERATION_REQUESTED ? FRAME_GENERATION_STEADY_FRAMES : 0,
                             EXPECTED_GPU_CAPTURES,
@@ -2102,12 +2190,70 @@ public final class MetalValidationClient implements ClientModInitializer {
                             metal4MetalFxStats[2],
                             metal4MetalFxStats[3],
                             metal4MetalFxStats[4],
-                            status
-                    ),
-                    StandardCharsets.UTF_8
+                            contract.enabled(),
+                            contract.status(),
+                            "passed".equals(status)
+                                    && contractBeforeClose.ready() && contract.manifestFinalized(),
+                            contract.requestedCaptures(),
+                            contract.completedCaptures(),
+                            contract.failedCaptures(),
+                            contract.pendingCaptures(),
+                            contract.droppedCaptures(),
+                            contract.passCount(),
+                            contract.droppedEvents(),
+                            contract.manifestFinalized(),
+                            contract.artifactBytes(),
+                            contract.maxArtifactBytes(),
+                            contract.storageBudgetExceeded(),
+                            failureReasonsJson,
+                            jsonEscape(observedBackend),
+                            jsonEscape(status)
+                    )
             );
         } catch (IOException exception) {
             throw new IllegalStateException("Could not write Minecraft validation state", exception);
         }
+    }
+
+    private static void writeStateArtifact(
+            final ValidationStorageBudget storage,
+            final Path path,
+            final String value
+    ) throws IOException {
+        try {
+            storage.writeString(path, value);
+        } catch (ValidationStorageBudget.StorageBudgetExceededException exhausted) {
+            // Keep the terminal state machine observable even when a capture
+            // payload exhausted the normal artifact budget. The storage class
+            // bounds this fallback to a small critical-evidence reserve.
+            storage.writeCriticalString(path, value);
+        }
+    }
+
+    private static Path resolveOutputDirectory() {
+        String configured = System.getProperty("metallum.validation.output");
+        if (configured != null && !configured.isBlank()) {
+            return Path.of(configured).toAbsolutePath().normalize();
+        }
+        if (Boolean.getBoolean("metallum.validation.persist")) {
+            return Path.of("build/metal-validation/minecraft-client-current")
+                    .toAbsolutePath().normalize();
+        }
+        try {
+            return Files.createTempDirectory("metallum-validation-")
+                    .toAbsolutePath().normalize();
+        } catch (IOException exception) {
+            throw new IllegalStateException("Could not create temporary Minecraft validation output", exception);
+        }
+    }
+
+    private static String jsonEscape(final String value) {
+        if (value == null) {
+            return "unknown";
+        }
+        return value.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r");
     }
 }

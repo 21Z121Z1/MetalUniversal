@@ -14,7 +14,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(GameRenderer.class)
 abstract class BackendFrameComparisonGameRendererMixin {
-    @Inject(method = "renderLevel", at = @At("HEAD"))
+    @Inject(
+            method = "renderLevel",
+            at = @At("HEAD")
+    )
     private void metallum$fixIrisSystemTime(
             final DeltaTracker deltaTracker,
             final CallbackInfo ci

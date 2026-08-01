@@ -1,11 +1,10 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.Metallum;
-import com.metallum.client.metal.render.IrisMetalPackLifecycle;
+import com.metallum.client.metal.render.IrisMetalPackRejectedException;
 import com.metallum.client.metal.render.MetalIrisCompat;
 import com.metallum.client.metal.render.MetalWorldRenderingPipeline;
 import net.irisshaders.iris.Iris;
-import net.irisshaders.iris.pipeline.VanillaRenderingPipeline;
 import net.irisshaders.iris.pipeline.WorldRenderingPipeline;
 import net.irisshaders.iris.shaderpack.ShaderPack;
 import net.irisshaders.iris.shaderpack.materialmap.NamespacedId;
@@ -26,9 +25,11 @@ import java.util.Optional;
  * {@link MetalWorldRenderingPipeline} instead, so a real pack drives sodium
  * terrain through the Metal backend.</p>
  *
- * <p>Failure to build the semantic pipeline falls back to Iris's own
- * {@code VanillaRenderingPipeline} rather than letting the GL constructor run:
- * a pack we cannot serve must degrade to shaders-off, not to a crash.</p>
+ * <p>Failure to build the semantic pipeline rejects pack activation. The
+ * factory must not return {@code VanillaRenderingPipeline} for an active pack:
+ * that would report a successful selection while silently changing semantics.
+ * Iris can keep the previous valid generation or surface the rejection through
+ * its normal reload error path.</p>
  */
 @Mixin(value = Iris.class, remap = false)
 public abstract class IrisPipelineFactoryMixin {
@@ -62,18 +63,14 @@ public abstract class IrisPipelineFactoryMixin {
         }
         try {
             cir.setReturnValue(new MetalWorldRenderingPipeline(pack.get().getProgramSet(dimensionId)));
-        } catch (Throwable t) {
-            if (IrisMetalPackLifecycle.strictModeRequested()) {
-                throw new IllegalStateException(
-                        "Iris Metal strict pipeline admission failed for dimension " + dimensionId,
-                        t
-                );
-            }
+        } catch (IrisMetalPackRejectedException rejection) {
             Metallum.LOGGER.error(
-                    "[metallum-iris] failed to build the semantic pipeline for dimension {};"
-                            + " falling back to shaders-off rendering", dimensionId, t
+                    "[metallum-iris] rejected the active pack for dimension {}: {}"
+                            + "; no shaders-off pipeline was substituted",
+                    dimensionId,
+                    rejection.getMessage()
             );
-            cir.setReturnValue(new VanillaRenderingPipeline());
+            throw rejection;
         }
     }
 }
