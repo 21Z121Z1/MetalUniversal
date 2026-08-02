@@ -11,7 +11,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 
-/** Adds content comparison and native-backing version state to Metal buffers. */
+/** Adds content-diff and native-backing version state to Metal buffers. */
 @Mixin(targets = "com.metallum.client.metal.render.MetalGpuBuffer")
 public abstract class MetalGpuBufferUploadDedupMixin implements MetalUploadDedupBuffer {
     @Shadow
@@ -23,10 +23,6 @@ public abstract class MetalGpuBufferUploadDedupMixin implements MetalUploadDedup
     @Unique
     private boolean metallum$uploadInitialized;
     @Unique
-    private long metallum$lastUploadOffset = -1L;
-    @Unique
-    private int metallum$lastUploadLength = -1;
-    @Unique
     private long metallum$bindingVersion;
 
     @Inject(method = "swapBacking", at = @At("TAIL"))
@@ -35,41 +31,42 @@ public abstract class MetalGpuBufferUploadDedupMixin implements MetalUploadDedup
             final ByteBuffer storage,
             final CallbackInfo ci
     ) {
+        this.metallum$uploadInitialized = true;
         this.metallum$bindingVersion++;
     }
 
     @Override
-    public boolean metallum$matchesUpload(final long offset, final ByteBuffer data) {
-        if (!this.isDynamic() || !this.metallum$uploadInitialized) {
-            return false;
-        }
+    public UploadRange metallum$diffUpload(final long offset, final ByteBuffer data) {
         int length = data.remaining();
-        if (offset != this.metallum$lastUploadOffset || length != this.metallum$lastUploadLength) {
-            return false;
+        if (!this.isDynamic() || !this.metallum$uploadInitialized || length == 0) {
+            return length == 0 ? UploadRange.empty() : UploadRange.full(length);
         }
         if (offset < 0L || offset > Integer.MAX_VALUE || offset + length > Integer.MAX_VALUE) {
-            return false;
+            return UploadRange.full(length);
         }
 
-        ByteBuffer existing = this.currentStorage();
-        int start = Math.toIntExact(offset);
-        int end = Math.addExact(start, length);
-        if (end > existing.capacity()) {
-            return false;
+        ByteBuffer storage = this.currentStorage();
+        int destinationStart = Math.toIntExact(offset);
+        int destinationEnd = Math.addExact(destinationStart, length);
+        if (destinationEnd > storage.capacity()) {
+            return UploadRange.full(length);
         }
-        existing.position(start);
-        existing.limit(end);
-        return existing.slice().mismatch(data.duplicate()) < 0;
-    }
 
-    @Override
-    public void metallum$recordUpload(final long offset, final ByteBuffer data) {
-        if (!this.isDynamic()) {
-            return;
+        storage.position(destinationStart);
+        storage.limit(destinationEnd);
+        ByteBuffer existing = storage.slice();
+        ByteBuffer source = data.duplicate();
+        int first = existing.mismatch(source);
+        if (first < 0) {
+            return UploadRange.empty();
         }
-        this.metallum$uploadInitialized = true;
-        this.metallum$lastUploadOffset = offset;
-        this.metallum$lastUploadLength = data.remaining();
+
+        int sourcePosition = source.position();
+        int last = length - 1;
+        while (last > first && existing.get(last) == source.get(sourcePosition + last)) {
+            last--;
+        }
+        return new UploadRange(first, last + 1);
     }
 
     @Override
