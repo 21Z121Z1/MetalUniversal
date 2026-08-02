@@ -52,7 +52,7 @@ public abstract class IrisMetalDepthAllocationMixin {
             require = 0
     )
     private void metallum$ensureDepthtex1Capture(
-            final @Coerce Object encoder,
+            @Coerce final Object encoder,
             final CallbackInfo ci
     ) {
         IrisMetalDepthAllocationRuntime.ensureCaptureDestination(this, 1);
@@ -64,7 +64,7 @@ public abstract class IrisMetalDepthAllocationMixin {
             require = 0
     )
     private void metallum$ensureDepthtex1CaptureFromScene(
-            final @Coerce Object encoder,
+            @Coerce final Object encoder,
             final GpuTexture source,
             final CallbackInfo ci
     ) {
@@ -77,7 +77,7 @@ public abstract class IrisMetalDepthAllocationMixin {
             require = 0
     )
     private void metallum$ensureDepthtex2Capture(
-            final @Coerce Object encoder,
+            @Coerce final Object encoder,
             final CallbackInfo ci
     ) {
         IrisMetalDepthAllocationRuntime.ensureCaptureDestination(this, 2);
@@ -89,7 +89,7 @@ public abstract class IrisMetalDepthAllocationMixin {
             require = 0
     )
     private void metallum$ensureDepthtex2CaptureFromScene(
-            final @Coerce Object encoder,
+            @Coerce final Object encoder,
             final GpuTexture source,
             final CallbackInfo ci
     ) {
