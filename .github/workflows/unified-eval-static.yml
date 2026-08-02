@@ -1,15 +1,22 @@
-name: Unified eval static
+name: Unified eval verification
 
 on:
+  push:
+    branches:
+      - agent/unified-render-eval-performance
   pull_request:
     paths:
       - 'AGENTS.md'
       - 'docs/agent/**'
       - 'docs/render-contract-validation.md'
       - 'scripts/agent/**'
+      - 'src/main/java/com/metallum/client/metal/**'
       - 'src/main/java/com/metallum/client/terrain/**'
       - 'src/main/java/com/metallum/client/validation/**'
+      - 'src/main/native/**'
+      - 'src/test/native/**'
       - 'src/main/resources/metallum.mixins.json'
+      - 'build.gradle'
       - '.github/workflows/unified-eval-static.yml'
   workflow_dispatch:
 
@@ -17,18 +24,78 @@ permissions:
   contents: read
 
 concurrency:
-  group: unified-eval-static-${{ github.event.pull_request.number || github.ref }}
+  group: unified-eval-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  harness:
+  headless-harness:
+    name: Headless harness
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '25'
-      - name: Verify unified evaluation harness
+      - name: Verify schemas, analyzer and Java gates
         shell: bash
         run: bash scripts/agent/verify_unified_eval.sh
+
+  macos26-native:
+    name: macOS 26 native compile
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Record macOS 26 toolchain identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version
+          swiftc --version
+          java -version
+      - name: Compile shipping native module and Metal 4 test binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon \
+            buildMacNative \
+            compileJava \
+            compileMetal4PipelineSmokeTest \
+            compileMetal4PipelinePathTest
+      - name: Inspect native artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          dylib='src/main/resources/natives/macos/libmetallum.dylib'
+          test -s "$dylib"
+          file "$dylib"
+          otool -L "$dylib"
+          nm -gU "$dylib" > build/metallum-native-symbols.txt
+          grep -q '_metallum_system_thermal_state' build/metallum-native-symbols.txt
+      - name: State hosted-runner boundary
+        shell: bash
+        run: |
+          cat <<'EOF'
+          macOS 26 hosted verification proves toolchain compatibility, Swift/MetalFX/Metal 4 compilation,
+          Java-to-native build integration and exported-symbol presence. It does not prove attended
+          WindowServer behavior, shader-pack visual parity, stable GPU performance or real-client Metal 4 use.
+          Those remain local Apple Silicon gates.
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos26-native-evidence
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            src/main/resources/natives/macos/libmetallum.dylib
+            build/metallum-native-symbols.txt
+            build/reports/problems/
