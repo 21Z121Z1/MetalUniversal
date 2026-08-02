@@ -22,13 +22,23 @@ import java.util.Map;
 @Mixin(targets = "com.metallum.client.metal.render.MetalRenderPass")
 public abstract class MetalRenderPassBindingCacheMixin {
     @Unique
-    private final Map<String, metallum$TextureBinding> metallum$textures = new HashMap<>();
+    private final Map<String, GpuTextureView> metallum$textureViews = new HashMap<>();
     @Unique
-    private final Map<String, metallum$BufferBinding> metallum$uniforms = new HashMap<>();
+    private final Map<String, GpuSampler> metallum$textureSamplers = new HashMap<>();
+    @Unique
+    private final Map<String, GpuBuffer> metallum$uniformBuffers = new HashMap<>();
+    @Unique
+    private final Map<String, Long> metallum$uniformOffsets = new HashMap<>();
+    @Unique
+    private final Map<String, Long> metallum$uniformLengths = new HashMap<>();
     @Unique
     private final Map<String, GpuTextureView> metallum$storageImages = new HashMap<>();
     @Unique
-    private final Map<Integer, metallum$BufferBinding> metallum$storageBuffers = new HashMap<>();
+    private final Map<Integer, GpuBuffer> metallum$storageBuffers = new HashMap<>();
+    @Unique
+    private final Map<Integer, Long> metallum$storageOffsets = new HashMap<>();
+    @Unique
+    private final Map<Integer, Long> metallum$storageLengths = new HashMap<>();
 
     @Inject(
             method = "bindTexture(Ljava/lang/String;Lcom/mojang/blaze3d/textures/GpuTextureView;Lcom/mojang/blaze3d/textures/GpuSampler;)V",
@@ -42,24 +52,26 @@ public abstract class MetalRenderPassBindingCacheMixin {
             final CallbackInfo ci
     ) {
         if (textureView == null && sampler == null) {
-            if (!this.metallum$textures.containsKey(name)) {
+            if (!this.metallum$textureViews.containsKey(name)) {
                 IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
                 ci.cancel();
                 return;
             }
-            this.metallum$textures.remove(name);
+            this.metallum$textureViews.remove(name);
+            this.metallum$textureSamplers.remove(name);
             return;
         }
         if (textureView == null || sampler == null) {
             return;
         }
-        metallum$TextureBinding previous = this.metallum$textures.get(name);
-        if (previous != null && previous.matches(textureView, sampler)) {
+        if (this.metallum$textureViews.get(name) == textureView
+                && this.metallum$textureSamplers.get(name) == sampler) {
             IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
             ci.cancel();
             return;
         }
-        this.metallum$textures.put(name, new metallum$TextureBinding(textureView, sampler));
+        this.metallum$textureViews.put(name, textureView);
+        this.metallum$textureSamplers.put(name, sampler);
     }
 
     @Inject(
@@ -72,13 +84,14 @@ public abstract class MetalRenderPassBindingCacheMixin {
             final GpuBufferSlice value,
             final CallbackInfo ci
     ) {
-        metallum$BufferBinding previous = this.metallum$uniforms.get(name);
-        if (previous != null && previous.matches(value)) {
+        if (this.metallum$sameUniform(name, value)) {
             IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
             ci.cancel();
             return;
         }
-        this.metallum$uniforms.put(name, metallum$BufferBinding.of(value));
+        this.metallum$uniformBuffers.put(name, value.buffer());
+        this.metallum$uniformOffsets.put(name, value.offset());
+        this.metallum$uniformLengths.put(name, value.length());
     }
 
     @Inject(
@@ -109,32 +122,27 @@ public abstract class MetalRenderPassBindingCacheMixin {
             final GpuBufferSlice value,
             final CallbackInfo ci
     ) {
-        metallum$BufferBinding previous = this.metallum$storageBuffers.get(binding);
-        if (previous != null && previous.matches(value)) {
+        if (this.metallum$sameStorageBuffer(binding, value)) {
             IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
             ci.cancel();
             return;
         }
-        this.metallum$storageBuffers.put(binding, metallum$BufferBinding.of(value));
+        this.metallum$storageBuffers.put(binding, value.buffer());
+        this.metallum$storageOffsets.put(binding, value.offset());
+        this.metallum$storageLengths.put(binding, value.length());
     }
 
     @Unique
-    private record metallum$TextureBinding(GpuTextureView view, GpuSampler sampler) {
-        private boolean matches(final GpuTextureView otherView, final GpuSampler otherSampler) {
-            return this.view == otherView && this.sampler == otherSampler;
-        }
+    private boolean metallum$sameUniform(final String name, final GpuBufferSlice value) {
+        return this.metallum$uniformBuffers.get(name) == value.buffer()
+                && this.metallum$uniformOffsets.getOrDefault(name, Long.MIN_VALUE) == value.offset()
+                && this.metallum$uniformLengths.getOrDefault(name, Long.MIN_VALUE) == value.length();
     }
 
     @Unique
-    private record metallum$BufferBinding(GpuBuffer buffer, long offset, long length) {
-        private static metallum$BufferBinding of(final GpuBufferSlice slice) {
-            return new metallum$BufferBinding(slice.buffer(), slice.offset(), slice.length());
-        }
-
-        private boolean matches(final GpuBufferSlice slice) {
-            return this.buffer == slice.buffer()
-                    && this.offset == slice.offset()
-                    && this.length == slice.length();
-        }
+    private boolean metallum$sameStorageBuffer(final int binding, final GpuBufferSlice value) {
+        return this.metallum$storageBuffers.get(binding) == value.buffer()
+                && this.metallum$storageOffsets.getOrDefault(binding, Long.MIN_VALUE) == value.offset()
+                && this.metallum$storageLengths.getOrDefault(binding, Long.MIN_VALUE) == value.length();
     }
 }
