@@ -7,7 +7,6 @@ import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Coerce;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
@@ -22,9 +21,14 @@ public abstract class IrisMetalCommandEncoderComputeGroupingMixin {
     private void metallum$reuseComputeEncoder(
             final CallbackInfoReturnable<MTLComputeCommandEncoder> cir
     ) {
-        if (IrisMetalComputeGroupingRuntime.mayReuseEncoder()
-                && this.currentEncoder instanceof MTLComputeCommandEncoder compute) {
+        if (!IrisMetalComputeGroupingRuntime.mayReuseEncoder()) return;
+        if (this.currentEncoder instanceof MTLComputeCommandEncoder compute) {
             cir.setReturnValue(compute);
+        } else {
+            // A submit, render/blit transition or exceptional path ended the
+            // encoder before the planned group completed. Never attach the
+            // remaining logical count to a new unrelated encoder.
+            IrisMetalComputeGroupingRuntime.abort();
         }
     }
 
@@ -36,5 +40,17 @@ public abstract class IrisMetalCommandEncoderComputeGroupingMixin {
         if (this.currentEncoder == encoder && IrisMetalComputeGroupingRuntime.deferClose()) {
             ci.cancel();
         }
+    }
+
+    @Inject(method = "renderCommandEncoder", at = @At("HEAD"), require = 0)
+    private void metallum$abortGroupingBeforeRender(
+            final CallbackInfoReturnable<?> cir
+    ) {
+        IrisMetalComputeGroupingRuntime.abort();
+    }
+
+    @Inject(method = "submit", at = @At("HEAD"), require = 0)
+    private void metallum$abortGroupingBeforeSubmit(final CallbackInfo ci) {
+        IrisMetalComputeGroupingRuntime.abort();
     }
 }
