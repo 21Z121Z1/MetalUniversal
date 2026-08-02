@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "scope": "Unified Iris-on-Metal render correctness, admission, diagnosis, and performance evaluation",
-  "reference_branch": "agent/unified-render-eval-performance",
+  "reference_branch": "integration/iris-metal-next",
   "suite_model": {
     "conformance": "Deterministic render-contract manifests, attachment readbacks, expectations, and first-divergence reports.",
     "admission": "A short real-client probe proves that the selected optimization lane actually executes before expensive paired performance trials begin.",
