@@ -785,6 +785,14 @@ public final class MetalValidationClient implements ClientModInitializer {
                     "nativeComputeEncoderCountPerFrame",
                     "unavailable — the current timing ABI exports render and blit kinds only"
             );
+            unavailable.addProperty(
+                    "javaToNativeFfmCallCount",
+                    "unavailable — the current FFM bridge does not expose per-frame downcall counters"
+            );
+            unavailable.addProperty(
+                    "descriptorBindingMutationCount",
+                    "unavailable — the report exposes argument snapshot-lane mutations only, not backend-wide descriptor mutations"
+            );
             report.add("unavailableMetrics", unavailable);
             JsonObject off = new JsonObject();
             off.addProperty("modeOff", offDiagnostics.modeOff());
