@@ -15,6 +15,8 @@ import java.util.concurrent.ConcurrentMap;
 @Mixin(targets = "com.metallum.client.metal.render.IrisMetalUniformValues")
 public abstract class IrisMetalUniformLookupCacheMixin {
     @Unique
+    private final ConcurrentMap<Object, Object> metallum$blocks = new ConcurrentHashMap<>();
+    @Unique
     private final ConcurrentMap<Object, GpuBufferSlice> metallum$slices = new ConcurrentHashMap<>();
     @Unique
     private final ConcurrentMap<Object, Integer> metallum$drawBlockSizes = new ConcurrentHashMap<>();
@@ -22,6 +24,29 @@ public abstract class IrisMetalUniformLookupCacheMixin {
     private final ConcurrentMap<Object, Boolean> metallum$dynamicTransforms = new ConcurrentHashMap<>();
     @Unique
     private final ConcurrentMap<Object, Boolean> metallum$projections = new ConcurrentHashMap<>();
+
+    @Inject(method = "findBlock", at = @At("HEAD"), cancellable = true)
+    private void metallum$reuseBlock(
+            final Object token,
+            final CallbackInfoReturnable<Object> cir
+    ) {
+        Object cached = this.metallum$blocks.get(token);
+        if (cached != null) {
+            IrisMetalPerformanceCounters.recordUniformLookupCacheHit();
+            cir.setReturnValue(cached);
+        }
+    }
+
+    @Inject(method = "findBlock", at = @At("RETURN"))
+    private void metallum$rememberBlock(
+            final Object token,
+            final CallbackInfoReturnable<Object> cir
+    ) {
+        Object value = cir.getReturnValue();
+        if (value != null) {
+            this.metallum$blocks.putIfAbsent(token, value);
+        }
+    }
 
     @Inject(
             method = "slice(Ljava/lang/Object;)Lcom/mojang/blaze3d/buffers/GpuBufferSlice;",
