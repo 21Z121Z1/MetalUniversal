@@ -1,6 +1,6 @@
 # Unified render evaluation and autonomous optimization loop
 
-This is the canonical workflow for `agent/unified-render-eval-performance`. It combines the render-contract framework with the Iris performance harness without collapsing correctness and measurement into one high-overhead run.
+This is the canonical workflow for `integration/iris-metal-next`. Create bounded feature branches from that integration branch; do not continue development from superseded `agent/*`, `codex/*`, or pre-Iris feature branches. The workflow combines the render-contract framework with the Iris performance harness without collapsing correctness and measurement into one high-overhead run.
 
 ## Evaluation model
 
