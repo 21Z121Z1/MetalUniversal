@@ -1,0 +1,31 @@
+name: Unified eval PR bootstrap
+
+on:
+  pull_request:
+    types: [reopened]
+    branches:
+      - agent/unified-render-eval-performance
+
+permissions:
+  contents: write
+
+concurrency:
+  group: unified-eval-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  merge-and-integrate:
+    if: ${{ github.event.pull_request.number == 6 }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/unified-render-eval-performance
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Merge histories, reconcile hooks, validate and push
+        shell: bash
+        run: bash scripts/agent/bootstrap_unified_eval.sh
