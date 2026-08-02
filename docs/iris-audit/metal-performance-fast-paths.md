@@ -4,11 +4,11 @@ Branch: `feature/iris-metal-performance`
 
 This change set implements conservative CPU and bandwidth optimizations without changing the fixed-Iris rendering contract, shader calculations, pass order, ping-pong transitions, or pack admission rules.
 
-## Implemented
+## Implemented conservative paths
 
 ### Dynamic uniform dirty-range uploads
 
-Metal uniform buffers use orphan-on-write backing swaps to preserve in-flight GPU safety. The upload path now compares the requested bytes with the current CPU-visible backing and computes the minimal changed half-open range.
+Metal uniform buffers use orphan-on-write backing swaps to preserve in-flight GPU safety. The upload path compares requested bytes with the current CPU-visible backing and computes the minimal changed half-open range.
 
 - byte-identical uploads are cancelled completely;
 - partially changed uploads are trimmed to the first and last changed byte;
@@ -21,14 +21,9 @@ A backing generation counter increments after every swap so descriptor caching n
 
 Within a render pass, repeated uniform and SSBO bindings are suppressed only when Java buffer identity, native-backing generation, offset, and range are unchanged.
 
-Within one compute encoder, the backend also caches:
+Within one compute encoder, the backend also caches compute pipeline identity, buffers, texture handles and sampler handles. Texture binding still performs the deferred-clear safety check before a native bind can be skipped.
 
-- compute pipeline identity;
-- buffer identity, backing generation, and offset;
-- texture or texture-view native handle;
-- sampler native handle.
-
-Texture binding still performs the deferred-clear safety check before a native bind can be skipped. `DynamicTransforms` and `Projection` remain excluded from render-pass uniform suppression because their calls also invalidate the generated Iris draw-uniform block.
+`DynamicTransforms` and `Projection` remain excluded from render-pass uniform suppression because their calls also invalidate the generated Iris draw-uniform block.
 
 ### Validation-allocation gating
 
@@ -36,70 +31,56 @@ Texture binding still performs the deferred-clear safety check before a native b
 
 ### Content-versioned mipmap generation
 
-Each physical Metal texture side receives an independent content version and mipmap version. Render attachments, copies, storage-image writes, uploads, MetalFX writes, and clear requests invalidate the version. `generateMipmaps` becomes a no-op when the texture has not changed since its last completed generation.
-
-Tracking is per physical texture, so Iris main/alt ping-pong sides remain independent and flips preserve their original semantics.
+Each physical Metal texture side receives an independent content version and mipmap version. Render attachments, copies, storage-image writes, uploads, MetalFX writes and clear requests invalidate the version. `generateMipmaps` becomes a no-op when the texture has not changed since its last completed generation.
 
 ### Exact full-surface copy suppression
 
-A destination texture records the source object, source content version, mip level, width, and height of its last completed full-surface copy. A later copy is skipped only when every field still matches and neither texture has been written or cleared in between.
-
-This mainly targets unchanged persistent history copies. Partial copies, format changes, different mip levels, and changed source content retain the original blit path.
+A destination texture records the source object, source content version, mip level, width and height of its last completed full-surface copy. A later copy is skipped only when every field still matches and neither texture has been written or cleared in between.
 
 ### Persistent post-pass attachment views
 
-`IrisMetalRenderTargets.createWriteDescriptor` now reuses the ping-pong target's generation-owned write views instead of creating and destroying one `MetalGpuTextureView` per MRT attachment per fullscreen pass. Only genuinely transient depth views remain owned by the descriptor wrapper.
+`IrisMetalRenderTargets.createWriteDescriptor` reuses the ping-pong target's generation-owned write views instead of creating and destroying one `MetalGpuTextureView` per MRT attachment per fullscreen pass. Only genuinely transient depth views remain owned by the descriptor wrapper.
 
-Integer render-target sampler classification is also precomputed once per generation, and constant white/zero clear vectors are reused.
+Integer render-target sampler classification is precomputed once per generation, and fixed white/zero clear vectors are reused.
 
 ### Immutable Iris lookup caches
 
-The branch caches generation-stable lookups for:
-
-- `colortexN` and legacy render-target aliases;
-- `colorimgN` storage-image aliases;
-- sampler requirements and sampler types;
-- uniform token to block object;
-- uniform token to GPU slice;
-- draw block size;
-- DynamicTransforms and Projection requirements.
+The branch caches generation-stable lookups for render-target aliases, storage-image aliases, sampler requirements and types, uniform blocks and slices, draw block size, and dynamic transform/projection requirements.
 
 Negative block/slice results are not cached because core programs can be registered lazily.
 
 ### Optional counters
 
-Set:
+Enable counters with:
 
 ```text
 -Dmetallum.iris.performanceCounters=true
 ```
 
-Then query `IrisMetalPerformanceCounters.snapshot()` for:
+The snapshot reports skipped descriptor bindings, skipped or trimmed uniform uploads, skipped mipmap generation, skipped full texture copies and lookup-cache hits.
 
-- skipped descriptor/compute binding calls;
-- fully skipped uniform uploads and bytes;
-- partially trimmed uniform uploads and bytes;
-- skipped mipmap generations;
-- skipped full texture copies and bytes;
-- resource-classification cache hits;
-- uniform lookup cache hits.
+## Experimental high-risk layer
 
-Accounting is disabled by default; the optimization paths remain enabled.
+The remaining transformations now have an implemented default-off planning/runtime layer:
 
-## Deliberately not changed
+- hazard graph and dependency edges;
+- render and compute merge candidates;
+- attachment load/store policy model;
+- generation resource liveness and depthtex1/depthtex2 requirements;
+- final/color-space fusion eligibility inputs;
+- stable argument-buffer / MTL4 argument-table layouts;
+- per-in-flight argument snapshots;
+- ICB-compatible indexed draw command grouping;
+- fail-fast validation and JSON plan dump.
 
-The following remain outside this conservative pass because they require measured hazard or ABI work:
+The full architecture and local-agent handoff are documented in:
 
-- shader precision or pack-visible calculations;
-- render-pass fusion;
-- automatic compute-dispatch reordering or broader concurrency;
-- attachment load/store liveness changes;
-- conditional depthtex1/depthtex2 allocation or capture removal across all gbuffer/core/post programs;
-- final/color-space shader fusion;
-- Metal argument-buffer or Metal 4 argument-table ABI migration;
-- indirect command buffers or GPU-driven submission;
-- MetalFX scheduling and presentation behavior.
+```text
+docs/iris-audit/experimental-performance-architecture.md
+```
+
+These transformations remain disabled until their native bridge entry points and complete generation descriptor population are connected locally.
 
 ## Validation status
 
-No Gradle build, test suite, client launch, Metal API Validation run, or framebuffer comparison has been performed for this branch, following the requested implementation-only scope. The changes therefore remain implemented but unverified.
+No Gradle build, test suite, client launch, Metal API Validation run or framebuffer comparison has been performed for this branch, following the requested implementation-first scope. The changes remain unverified.
