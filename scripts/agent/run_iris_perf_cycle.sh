@@ -35,8 +35,6 @@ overall_status=0
 
 profile_args() {
   local profile="$1"
-  # Every profile states all lane flags explicitly so inherited Java properties
-  # cannot contaminate a baseline/candidate comparison.
   local pass_fusion=false
   local compute_grouping=false
   local depth_liveness=false
@@ -78,7 +76,10 @@ profile_args() {
 for raw_profile in "${profile_list[@]}"; do
   profile="$(printf '%s' "$raw_profile" | tr -d '[:space:]')"
   [[ -n "$profile" ]] || continue
-  mapfile -t common_args < <(profile_args "$profile")
+  common_args=()
+  while IFS= read -r argument; do
+    common_args+=("$argument")
+  done < <(profile_args "$profile")
   profile_dir="$OUT/$profile"
   mkdir -p "$profile_dir"
   printf '%s\n' "${common_args[@]}" > "$profile_dir/properties.txt"
@@ -113,8 +114,6 @@ for raw_profile in "${profile_list[@]}"; do
       overall_status=1
     fi
 
-    # Preserve every generated validation/report artifact touched during this
-    # run without assuming a single fixed build output path.
     while IFS= read -r -d '' file; do
       rel="${file#$ROOT/}"
       case "$rel" in
@@ -188,7 +187,7 @@ summary = {
     "world": world,
     "repetitions_requested": repetitions,
     "profiles": profiles,
-    "note": "Regex-extracted metrics are discovery aids. Acceptance requires validating the source report semantics and comparing like-for-like samples.",
+    "note": "Regex-extracted metrics are discovery aids. Acceptance requires validating source-report semantics and like-for-like samples.",
 }
 (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 PY
