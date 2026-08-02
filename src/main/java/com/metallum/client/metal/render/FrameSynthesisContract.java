@@ -108,20 +108,16 @@ final class FrameSynthesisContract {
             float deltaSeconds
     ) {
         CameraFrameInput {
-            if (!valid()) {
+            if (!(fieldOfViewDegrees > 0.0F && fieldOfViewDegrees < 180.0F)
+                    || !(nearPlane > 0.0F && farPlane > nearPlane)
+                    || !(aspectRatio > 0.0F && deltaSeconds > 0.0F)
+                    || !Float.isFinite(fieldOfViewDegrees)
+                    || !Float.isFinite(nearPlane)
+                    || !Float.isFinite(farPlane)
+                    || !Float.isFinite(aspectRatio)
+                    || !Float.isFinite(deltaSeconds)) {
                 throw new IllegalArgumentException("Invalid camera input for Frame Generation");
             }
-        }
-
-        private boolean valid() {
-            return fieldOfViewDegrees > 0.0F && fieldOfViewDegrees < 180.0F
-                    && nearPlane > 0.0F && farPlane > nearPlane
-                    && aspectRatio > 0.0F && deltaSeconds > 0.0F
-                    && Float.isFinite(fieldOfViewDegrees)
-                    && Float.isFinite(nearPlane)
-                    && Float.isFinite(farPlane)
-                    && Float.isFinite(aspectRatio)
-                    && Float.isFinite(deltaSeconds);
         }
     }
 
