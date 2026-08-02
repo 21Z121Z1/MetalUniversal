@@ -11,7 +11,12 @@ public final class MetalGpuTimingRecorder {
             || Boolean.getBoolean("metallum.metalfx.debug");
     private static final boolean PASS_TIMING_ENABLED =
             Boolean.getBoolean("metallum.validation.gpuPassTiming");
-    private static final int CAPACITY = 2048;
+    // Acceptance runs sample at least 120 seconds. At the observed ~40-60
+    // source FPS, 2048 entries would silently discard most of that window and
+    // make the JSON report look like a shorter run. Keep enough completed
+    // command-buffer samples for the required protocol while remaining a
+    // bounded diagnostic allocation.
+    private static final int CAPACITY = 16_384;
     private static final List<Sample> SAMPLES = new ArrayList<>();
     private static final List<CpuPassSample> CPU_PASS_SAMPLES = new ArrayList<>();
     private static long renderEncoderFactoryCalls;

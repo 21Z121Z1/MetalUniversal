@@ -15,8 +15,14 @@ fi
 
 PROFILES="${PROFILES:-baseline,depth-liveness,compute-grouping,pass-fusion,argument-tables,all-safe-lanes}"
 REPETITIONS="${REPETITIONS:-3}"
+WARMUP_SECONDS="${WARMUP_SECONDS:-30}"
+SAMPLE_SECONDS="${SAMPLE_SECONDS:-120}"
 if ! [[ "$REPETITIONS" =~ ^[1-9][0-9]*$ ]]; then
   echo "REPETITIONS must be a positive integer" >&2
+  exit 2
+fi
+if ! [[ "$WARMUP_SECONDS" =~ ^[0-9]+$ ]] || ! [[ "$SAMPLE_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "WARMUP_SECONDS and SAMPLE_SECONDS must be non-negative integers" >&2
   exit 2
 fi
 
@@ -70,7 +76,9 @@ profile_args() {
     "-Dmetallum.iris.depthLiveness=$depth_liveness" \
     "-Dmetallum.iris.experimental.resourcePruning=$depth_liveness" \
     "-Dmetallum.iris.argumentTables=$argument_tables" \
-    "-Dmetallum.iris.experimental.argumentTables=$argument_tables"
+    "-Dmetallum.iris.experimental.argumentTables=$argument_tables" \
+    "-Dmetallum.validation.warmupSeconds=$WARMUP_SECONDS" \
+    "-Dmetallum.validation.sampleSeconds=$SAMPLE_SECONDS"
 }
 
 copy_validation_artifacts() {
@@ -165,6 +173,21 @@ metric_definitions = {
         "unit": "encoders/frame",
         "pattern": re.compile(r"(?i)(?:native\s+)?encoder(?: count|s)?\D{0,20}([0-9]+(?:\.[0-9]+)?)"),
     },
+    "native_render_encoder_count": {
+        "direction": "lower",
+        "unit": "render encoders/frame",
+        "pattern": re.compile(r"(?!)"),
+    },
+    "native_compute_encoder_count": {
+        "direction": "lower",
+        "unit": "compute encoders/frame",
+        "pattern": re.compile(r"(?!)"),
+    },
+    "native_blit_encoder_count": {
+        "direction": "lower",
+        "unit": "blit encoders/frame",
+        "pattern": re.compile(r"(?!)"),
+    },
     "store_load_bytes": {
         "direction": "lower",
         "unit": "bytes/frame",
@@ -185,6 +208,16 @@ metric_definitions = {
         "unit": "events",
         "pattern": re.compile(r"(?i)(?:frame[_ -]?time stutter count|stutterCount)\D{0,20}([0-9]+(?:\.[0-9]+)?)"),
     },
+    "ffm_call_count": {
+        "direction": "lower",
+        "unit": "calls",
+        "pattern": re.compile(r"(?!)"),
+    },
+    "descriptor_binding_mutation_count": {
+        "direction": "lower",
+        "unit": "mutations",
+        "pattern": re.compile(r"(?!)"),
+    },
 }
 
 forbidden = [
@@ -195,17 +228,76 @@ forbidden = [
     re.compile(r"Invalid backend", re.I),
 ]
 
+def structured_metric_values(report):
+    """Return source-report metrics and explicit reasons for unavailable fields."""
+    native_counts = report.get("nativeEncoderCountsPerMeasuredFrame", {})
+    cpu_frame = report.get("cpuRenderEncodeFrameMilliseconds", {})
+    argument_binding = report.get("argumentBindingRuntime", {})
+    unavailable = report.get("unavailableMetrics", {})
+    values = {
+        "fps": [report["sourceFpsFromP50"]] if report.get("sourceFpsFromP50") is not None else [],
+        "gpu_ms": [report["gpuP50Milliseconds"]] if report.get("gpuP50Milliseconds") is not None else [],
+        "cpu_ms": [cpu_frame["p50Milliseconds"]] if cpu_frame.get("p50Milliseconds") is not None else [],
+        "native_render_encoder_count": [native_counts["renderPerFrame"]] if native_counts.get("renderPerFrame") is not None else [],
+        "native_compute_encoder_count": [],
+        "native_blit_encoder_count": [native_counts["blitPerFrame"]] if native_counts.get("blitPerFrame") is not None else [],
+        "store_load_bytes": [],
+        "resident_resource_bytes": [],
+        "peak_memory_bytes": [],
+        "stutter_count": ([report["frameTimeStutterCount"]]
+                           if report.get("frameTimeStutterCount") is not None else []),
+        "ffm_call_count": [],
+        "descriptor_binding_mutation_count": ([argument_binding["bindingMutations"]]
+                                                if argument_binding.get("enabled")
+                                                and argument_binding.get("bindingMutations") is not None
+                                                else []),
+    }
+    reasons = {}
+    for key, report_key in {
+        "native_compute_encoder_count": "nativeComputeEncoderCountPerFrame",
+        "store_load_bytes": "attachmentStoreLoadBytes",
+        "resident_resource_bytes": "residentRenderResourceBytes",
+        "peak_memory_bytes": "peakResidentMemoryBytes",
+        "stutter_count": "frameTimeStutterCount",
+        "ffm_call_count": "javaToNativeFfmCallCount",
+        "descriptor_binding_mutation_count": "descriptorBindingMutationCount",
+    }.items():
+        if report_key in unavailable:
+            reasons[key] = unavailable[report_key]
+    if not argument_binding.get("enabled"):
+        reasons["descriptor_binding_mutation_count"] = (
+            "unavailable — argument snapshot lane is disabled in the matching baseline; "
+            "backend-wide descriptor mutation telemetry is not exposed"
+        )
+    return values, reasons
+
 profiles = {}
 for profile_dir in sorted(p for p in root.iterdir() if p.is_dir()):
     runs = []
     aggregate = {key: [] for key in metric_definitions}
+    aggregate_reasons = {key: [] for key in metric_definitions}
     for run_dir in sorted(profile_dir.glob("run-*")):
         log_path = run_dir / "client.log"
         text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
         metrics = {}
+        metric_reasons = {}
         for key, definition in metric_definitions.items():
             values = [float(value) for value in definition["pattern"].findall(text)]
             metrics[key] = values
+        report_paths = sorted(run_dir.rglob("native-fullscreen-baseline.json"))
+        structured_report = None
+        if report_paths:
+            try:
+                structured_report = json.loads(report_paths[-1].read_text(encoding="utf-8"))
+                structured_values, structured_reasons = structured_metric_values(structured_report)
+                for key, values in structured_values.items():
+                    metrics[key] = [float(value) for value in values]
+                    if key in structured_reasons:
+                        metric_reasons[key] = structured_reasons[key]
+                        aggregate_reasons[key].append(structured_reasons[key])
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                metric_reasons["source_report"] = f"structured report unreadable: {error}"
+        for key, values in metrics.items():
             aggregate[key].extend(values)
         hits = []
         for pattern in forbidden:
@@ -218,6 +310,12 @@ for profile_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             "metrics": metrics,
             "forbidden_log_hits": hits,
             "plan_present": (run_dir / "optimization-plan.json").exists(),
+            "source_report": str(report_paths[-1]) if report_paths else None,
+            "optimization_runtime": ({
+                "renderFusion": structured_report.get("renderFusionRuntime"),
+                "computeGrouping": structured_report.get("computeGroupingRuntime"),
+            } if structured_report else None),
+            "metric_unavailable_reasons": metric_reasons,
         })
     aggregate_stats = {}
     for key, values in aggregate.items():
@@ -239,6 +337,9 @@ for profile_dir in sorted(p for p in root.iterdir() if p.is_dir()):
                 "sample_count": 0,
                 "direction": definition["direction"],
                 "unit": definition["unit"],
+                "unavailable_reason": (aggregate_reasons[key][0]
+                                       if aggregate_reasons[key]
+                                       else "metric missing from source report and client log"),
             }
     profiles[profile_dir.name] = {"runs": runs, "aggregate": aggregate_stats}
 
@@ -283,6 +384,12 @@ if baseline is not None:
             comparison["unit"] = definition["unit"]
             comparison["baseline_sample_count"] = before_stats.get("sample_count", 0)
             comparison["candidate_sample_count"] = after_stats.get("sample_count", 0)
+            if not comparison.get("available"):
+                comparison["reason"] = (
+                    after_stats.get("unavailable_reason")
+                    or before_stats.get("unavailable_reason")
+                    or comparison.get("reason")
+                )
             metric_comparisons[key] = comparison
         comparisons[profile_name] = {
             "task_before_profile": "baseline",
@@ -300,7 +407,7 @@ summary = {
     "repetitions_requested": repetitions,
     "profiles": profiles,
     "comparisons": comparisons,
-    "note": "Regex-extracted metrics are discovery aids. Acceptance requires validating source-report semantics, direction consistency and like-for-like samples.",
+    "note": "Structured native-fullscreen-baseline.json metrics take precedence over log discovery. Acceptance still requires source-report semantics, direction consistency and like-for-like samples.",
 }
 (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 (root / "comparison.json").write_text(json.dumps(comparisons, indent=2) + "\n", encoding="utf-8")
@@ -310,10 +417,15 @@ labels = {
     "gpu_ms": "GPU frame time",
     "cpu_ms": "CPU render/encode time",
     "encoder_count": "Native encoder count",
+    "native_render_encoder_count": "Native render encoder count/frame",
+    "native_compute_encoder_count": "Native compute encoder count/frame",
+    "native_blit_encoder_count": "Native blit encoder count/frame",
     "store_load_bytes": "Attachment store/load bytes",
     "resident_resource_bytes": "Resident render resources",
     "peak_memory_bytes": "Peak memory",
     "stutter_count": "Frame-time stutters",
+    "ffm_call_count": "Java→native/FFM calls",
+    "descriptor_binding_mutation_count": "Descriptor/binding mutations",
 }
 lines = [
     "# Task before/after performance comparison",
@@ -340,7 +452,8 @@ for profile_name, comparison in comparisons.items():
         value = comparison["metrics"][key]
         label = labels[key]
         if not value.get("available"):
-            lines.append(f"| {label} | unavailable | unavailable | — | — | {value['baseline_sample_count']}/{value['candidate_sample_count']} |")
+            reason = value.get("reason", "no structured source report or log sample")
+            lines.append(f"| {label} | unavailable ({reason}) | unavailable ({reason}) | — | — | {value['baseline_sample_count']}/{value['candidate_sample_count']} |")
             continue
         unit = value["unit"]
         percent = value.get("improvement_percent")
