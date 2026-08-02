@@ -30,6 +30,11 @@
     "render.LightmapFlickerValidationMixin",
     "render.TextureAtlasAnimationValidationMixin",
     "render.MinecraftMetalFxMixin",
+    "render.MetalGpuBufferUploadDedupMixin",
+    "render.MetalCommandEncoderUploadDedupMixin",
+    "render.MetalGpuTextureVersionMixin",
+    "render.MetalCommandEncoderMipmapCacheMixin",
+    "render.MetalRenderPassBindingCacheMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
     "sodium.ShaderChunkRendererMetalFxMixin",
@@ -49,7 +54,8 @@
     "iris.HorizonRendererIrisMixin",
     "iris.CloudRendererIrisMixin",
     "iris.ProjectionMetalIrisDepthMixin",
-    "iris.GlStateManagerCompatMixin"
+    "iris.GlStateManagerCompatMixin",
+    "iris.IrisMetalPostChainBindingCacheMixin"
   ],
   "injectors": {
     "defaultRequire": 1
