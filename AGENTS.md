@@ -1,5 +1,7 @@
 # MetalUniversal agent map
 
+The canonical continued-development base is `integration/iris-metal-next`. Create one bounded feature branch from it for each task. Superseded `agent/*`, `codex/*`, archive, bootstrap-test and pre-Iris feature branches are historical inputs only unless the operator explicitly requests extraction from them.
+
 This file is the repository entry map. The canonical autonomous workflow is the unified render evaluation loop; legacy performance scripts remain useful for focused compatibility but are not the final acceptance authority.
 
 ## Repository objective
