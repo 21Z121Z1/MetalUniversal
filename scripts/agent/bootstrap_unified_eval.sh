@@ -51,10 +51,15 @@ path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 PY
 
 python3 -m json.tool src/main/resources/metallum.mixins.json >/dev/null
-# The hosted macOS 15 image does not expose the iOS 26 Metal 4 SDK types.
-# This merge gate validates only the Java/terrain/mixin slice and explicitly
-# excludes that pre-existing environment-only native task.
-./gradlew --no-daemon compileJava test -x buildIOSNative \
+# The hosted macOS 15 image lacks the macOS/iOS 26 Metal 4 and Frame
+# Interpolator SDK surfaces required by the current performance branch. This
+# bootstrap gate therefore validates the merged Java/terrain/mixin slice only;
+# native and attended GPU gates remain mandatory on the documented macOS 26
+# local agent host.
+./gradlew --no-daemon compileJava test \
+  -x buildIOSNative \
+  -x buildMacNative \
+  -x buildIOSSpvc \
   --tests com.metallum.client.terrain.TerrainSchedulingControllerTest \
   --tests com.metallum.client.terrain.TerrainNativeSignalTest \
   --tests com.metallum.mixin.MetallumMixinRegistrationTest
