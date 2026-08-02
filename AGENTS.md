@@ -68,6 +68,12 @@ Do not use plain `./gradlew build` as a static smoke test: this repository's `ch
 - Do not weaken tests, validation thresholds, Metal API Validation, or error handling to make a change pass.
 - Never commit shader packs, worlds, generated binaries, screenshots, captures, or `build/agent-runs/`.
 
+## Performance acceptance
+
+No fixed improvement percentage is required. A change may pass when at least one target metric is strictly better than the matching baseline, the positive direction is consistent across comparable repeated runs, and all correctness and non-regression gates pass.
+
+A zero delta is not an improvement. A directionally unstable result or a result indistinguishable from run-to-run variation is `inconclusive-noise`.
+
 ## Autonomous work policy
 
 Safe and pre-authorized:
@@ -106,11 +112,23 @@ Every autonomous performance task must report:
 - starting and ending commit;
 - files and architectural boundaries changed;
 - exact commands run and their exit status;
-- baseline and candidate metrics with sample counts;
 - correctness evidence and artifact paths;
 - Metal API/shader validation status;
 - known unvalidated conditions;
 - reverted experiments and why they failed;
 - whether the branch is safe to hand to human review.
+
+It must also contain a task-before/task-after comparison with:
+
+- FPS median before and after;
+- absolute FPS change and FPS improvement percentage;
+- CPU render/encode median before and after;
+- GPU frame-time median before and after;
+- native encoder count/frame before and after;
+- attachment store/load bytes before and after;
+- resident render-resource bytes before and after;
+- absolute change, direction-normalized efficiency improvement percentage and sample counts for every available metric.
+
+FPS is higher-is-better. Time, encoder count, bandwidth and memory are lower-is-better. Missing efficiency metrics must be marked `unavailable` with a precise reason. Before/after FPS may not be omitted when the client performance run completed.
 
 A build without runtime evidence is not a rendering-performance acceptance. A faster frame with semantic or visual regression is a failed result.
