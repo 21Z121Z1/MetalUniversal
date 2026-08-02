@@ -147,6 +147,55 @@ fragment float4 bump_fs(constant BumpUniforms& u [[buffer(0)]]) {
 }
 """
 
+private let bindingChurnShaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+
+struct ChurnVertex {
+    float2 position [[attribute(0)]];
+};
+
+struct ChurnOut {
+    float4 position [[position]];
+};
+
+vertex ChurnOut churn_vs(ChurnVertex in [[stage_in]]) {
+    ChurnOut output;
+    output.position = float4(in.position, 0.0, 1.0);
+    return output;
+}
+
+fragment float4 churn_fs(constant float4& color [[buffer(2)]]) {
+    return color;
+}
+"""
+
+private let privateRewriteShaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+
+struct RewriteVertex {
+    float2 position [[attribute(0)]];
+    float4 color [[attribute(1)]];
+};
+
+struct RewriteOut {
+    float4 position [[position]];
+    float4 color;
+};
+
+vertex RewriteOut private_rewrite_vs(RewriteVertex in [[stage_in]]) {
+    RewriteOut output;
+    output.position = float4(in.position, 0.0, 1.0);
+    output.color = in.color;
+    return output;
+}
+
+fragment float4 private_rewrite_fs(RewriteOut in [[stage_in]]) {
+    return in.color;
+}
+"""
+
 private func fail(_ message: String) throws -> Never {
     throw PathFailure.message(message)
 }
@@ -159,8 +208,12 @@ private func check(_ condition: @autoclosure () -> Bool, _ message: String) thro
 
 /// Calls the shipping metallum_create_shader_function export, which is what
 /// registers the function -> library association the Metal 4 path needs.
-private func createShippingFunction(device: MTLDevice, entryPoint: String) throws -> MTLFunction {
-    let pointer: UnsafeMutableRawPointer? = shaderSource.withCString { sourcePtr in
+private func createShippingFunction(
+    device: MTLDevice,
+    entryPoint: String,
+    source: String = shaderSource
+) throws -> MTLFunction {
+    let pointer: UnsafeMutableRawPointer? = source.withCString { sourcePtr in
         entryPoint.withCString { entryPtr in
             metallum_create_shader_function(device, sourcePtr, entryPtr)
         }
@@ -172,6 +225,492 @@ private func createShippingFunction(device: MTLDevice, entryPoint: String) throw
         try fail("metallum_create_shader_function did not return an MTLFunction for \(entryPoint)")
     }
     return function
+}
+
+@available(macOS 26.0, *)
+private func shippingMetal4BindingChurnTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    metallum_set_metal4_compiler_enabled(1)
+    try check(metallum_metal4_main_renderer_enable(device, nil) != 0,
+              "the shipping Metal 4 main renderer could not be enabled for binding-churn validation")
+
+    let vertexFunction = try createShippingFunction(
+        device: device,
+        entryPoint: "churn_vs",
+        source: bindingChurnShaderSource
+    )
+    let fragmentFunction = try createShippingFunction(
+        device: device,
+        entryPoint: "churn_fs",
+        source: bindingChurnShaderSource
+    )
+
+    func makePipeline(vertexBufferIndex: Int, stride: Int, label: String) throws -> MTLRenderPipelineState {
+        let descriptor = makeDescriptor(
+            vertexFunction: vertexFunction,
+            fragmentFunction: fragmentFunction,
+            label: label
+        )
+        let vertexDescriptor = MTLVertexDescriptor()
+        vertexDescriptor.attributes[0].format = .float2
+        vertexDescriptor.attributes[0].offset = 0
+        vertexDescriptor.attributes[0].bufferIndex = vertexBufferIndex
+        vertexDescriptor.layouts[vertexBufferIndex].stride = stride
+        vertexDescriptor.layouts[vertexBufferIndex].stepFunction = .perVertex
+        descriptor.vertexDescriptor = vertexDescriptor
+        return try createShippingPipeline(device: device, descriptor: descriptor)
+    }
+
+    func makeShippingBuffer(
+        length: Int,
+        options: MTLResourceOptions = .storageModeShared,
+        label: String
+    ) throws -> (UnsafeMutableRawPointer, MTLBuffer) {
+        guard let pointer = metallum_create_buffer(device, length, options),
+              let buffer = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLBuffer else {
+            try fail("could not allocate \(label)")
+        }
+        buffer.label = label
+        return (pointer, buffer)
+    }
+
+    func writeFloats(_ values: [Float], to buffer: MTLBuffer) {
+        values.withUnsafeBytes { bytes in
+            buffer.contents().copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+        }
+    }
+
+    let pipelineA = try makePipeline(vertexBufferIndex: 0, stride: 8, label: "binding-churn-layout-a")
+    let pipelineB = try makePipeline(vertexBufferIndex: 1, stride: 16, label: "binding-churn-layout-b")
+
+    let (targetPointer, target) = try "binding churn target".withCString { label in
+        guard let pointer = metallum_create_texture_2d(
+            device,
+            .rgba8Unorm,
+            8,
+            8,
+            1,
+            1,
+            0,
+            [.renderTarget, .shaderRead],
+            .shared,
+            label
+        ), let texture = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLTexture else {
+            try fail("could not allocate the binding-churn target")
+        }
+        return (pointer, texture)
+    }
+    let (verticesAPointer, verticesA) = try makeShippingBuffer(
+        length: 64, options: .storageModePrivate, label: "binding churn vertices A"
+    )
+    let (verticesBPointer, verticesB) = try makeShippingBuffer(
+        length: 96, options: .storageModePrivate, label: "binding churn vertices B"
+    )
+    let (stagingAPointer, stagingA) = try makeShippingBuffer(length: 64, label: "binding churn staging A")
+    let (stagingBPointer, stagingB) = try makeShippingBuffer(length: 96, label: "binding churn staging B")
+    let (colorsPointer, colors) = try makeShippingBuffer(length: 64, label: "binding churn colors")
+    let (indicesPointer, indices) = try makeShippingBuffer(length: 16, label: "binding churn indices")
+    defer {
+        metallum_release_object(targetPointer)
+        metallum_release_object(verticesAPointer)
+        metallum_release_object(verticesBPointer)
+        metallum_release_object(stagingAPointer)
+        metallum_release_object(stagingBPointer)
+        metallum_release_object(colorsPointer)
+        metallum_release_object(indicesPointer)
+    }
+
+    let fullScreenTriangle: [Float] = [-1, -1, 3, -1, -1, 3]
+    writeFloats(fullScreenTriangle + [0, 0] + fullScreenTriangle, to: stagingA)
+    writeFloats(
+        [-1, -1, 0, 0, 3, -1, 0, 0, -1, 3, 0, 0]
+        + [-1, -1, 0, 0, 3, -1, 0, 0, -1, 3, 0, 0],
+        to: stagingB
+    )
+    writeFloats(
+        [1, 0, 0, 1,
+         0, 1, 0, 1,
+         0, 0, 1, 1,
+         1, 1, 0, 1],
+        to: colors
+    )
+    let indexValues: [UInt16] = [0, 1, 2, 0, 3, 4, 5, 0]
+    indexValues.withUnsafeBytes { bytes in
+        indices.contents().copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+    }
+
+    for slot in 0..<3 {
+        let leasePointer: UnsafeMutableRawPointer? = "binding churn slot \(slot)".withCString { label in
+            metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
+        }
+        guard let leasePointer else {
+            try fail("could not acquire binding-churn command-buffer slot \(slot)")
+        }
+        defer { metallum_release_object(leasePointer) }
+        guard let uploadPointer = "binding churn mesh upload \(slot)".withCString({ label in
+            metallum_MTLCommandBuffer_makeBlitCommandEncoder(leasePointer, label)
+        }) else {
+            try fail("could not create binding-churn upload encoder for slot \(slot)")
+        }
+        metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer(uploadPointer, stagingA, 0, verticesA, 0, 64)
+        metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer(uploadPointer, stagingB, 0, verticesB, 0, 96)
+        metallum_MTLCommandEncoder_endEncoding(uploadPointer)
+        metallum_release_object(uploadPointer)
+        guard let encoderPointer = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            leasePointer,
+            target,
+            nil,
+            8,
+            8,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+            1
+        ) else {
+            try fail("could not create binding-churn render encoder for slot \(slot)")
+        }
+
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(encoderPointer, pipelineA)
+        metallum_MTLRenderCommandEncoder_setScissorRect(encoderPointer, 0, 0, 4, 4)
+        metallum_MTLRenderCommandEncoder_setBuffer(encoderPointer, verticesA, 0, 0, 1)
+        metallum_MTLRenderCommandEncoder_setBuffer(encoderPointer, colors, 0, 2, 2)
+        metallum_MTLRenderCommandEncoder_drawPrimitives(encoderPointer, .triangle, 0, 3, 1, 0)
+
+        metallum_MTLRenderCommandEncoder_setBuffer(encoderPointer, nil, 0, 0, 1)
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(encoderPointer, pipelineB)
+        metallum_MTLRenderCommandEncoder_setScissorRect(encoderPointer, 4, 0, 4, 4)
+        metallum_MTLRenderCommandEncoder_setBuffer(encoderPointer, verticesB, 0, 1, 1)
+        metallum_MTLRenderCommandEncoder_setBuffer(encoderPointer, colors, 16, 2, 2)
+        metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+            encoderPointer, .triangle, 3, .uint16, indices, 0, 1, 0, 0
+        )
+
+        metallum_MTLRenderCommandEncoder_setBuffer(encoderPointer, nil, 0, 1, 1)
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(encoderPointer, pipelineA)
+        metallum_MTLRenderCommandEncoder_setScissorRect(encoderPointer, 0, 4, 4, 4)
+        // Minecraft section draws bind an entire uber-buffer and express the
+        // allocation offset as baseVertex rather than rebasing the address.
+        metallum_MTLRenderCommandEncoder_setBuffer(encoderPointer, verticesA, 0, 0, 1)
+        metallum_MTLRenderCommandEncoder_setBuffer(encoderPointer, colors, 32, 2, 2)
+        metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+            encoderPointer, .triangle, 3, .uint16, indices, 0, 1, 4, 0
+        )
+
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(encoderPointer, pipelineB)
+        metallum_MTLRenderCommandEncoder_setScissorRect(encoderPointer, 4, 4, 4, 4)
+        metallum_MTLRenderCommandEncoder_setBuffer(encoderPointer, verticesB, 48, 1, 1)
+        metallum_MTLRenderCommandEncoder_setBuffer(encoderPointer, colors, 48, 2, 2)
+        // A non-zero index address plus a negative base vertex is legal and is
+        // used by generic RenderPass.Draw callers even though terrain offsets
+        // are normally positive.
+        metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+            encoderPointer, .triangle, 3, .uint16, indices, 8, 1, -3, 0
+        )
+
+        metallum_MTLCommandEncoder_endEncoding(encoderPointer)
+        metallum_release_object(encoderPointer)
+        metallum_MTLCommandBuffer_commit(leasePointer)
+        try check(metallum_MTLCommandBuffer_waitUntilCompleted(leasePointer, 5_000) == 0,
+                  "binding-churn slot \(slot) did not complete")
+        try check(metallum_MTLCommandBuffer_completedSuccessfully(leasePointer) != 0,
+                  "binding-churn slot \(slot) completed with an error")
+
+        var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
+        target.getBytes(&pixels, bytesPerRow: 8 * 4, from: MTLRegionMake2D(0, 0, 8, 8), mipmapLevel: 0)
+        let expected: [[UInt8]] = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255]
+        ]
+        for y in 0..<8 {
+            for x in 0..<8 {
+                let quadrant = (y >= 4 ? 2 : 0) + (x >= 4 ? 1 : 0)
+                let base = (y * 8 + x) * 4
+                let actual = Array(pixels[base..<(base + 4)])
+                try check(actual == expected[quadrant],
+                          "binding-churn slot \(slot) pixel (\(x),\(y)) expected \(expected[quadrant]), got \(actual)")
+            }
+        }
+    }
+    print("Metal 4 binding churn: two vertex layouts, address/offset changes, positive/negative base vertex, null clears, indexed/non-indexed draws, exact coverage and all three reusable slots passed")
+}
+
+private func runShippingMetal4BindingChurnTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 26.0, *) else {
+        print("shipping Metal 4 binding-churn test skipped: needs macOS 26")
+        return
+    }
+    try shippingMetal4BindingChurnTest(device: device, queue: queue)
+}
+
+/// Rewrites the same private vertex/index buffers from three per-slot staging
+/// buffers and commits all three shipping MTL4 leases before waiting on any of
+/// them. The queue barrier is the only GPU ordering between one slot's vertex
+/// consumption and the next slot's private-buffer overwrite.
+@available(macOS 26.0, *)
+private func shippingMetal4PrivateBufferRewriteTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    metallum_set_metal4_compiler_enabled(1)
+    try check(metallum_metal4_main_renderer_enable(device, nil) != 0,
+              "the shipping Metal 4 main renderer could not be enabled for private-buffer rewrite validation")
+
+    let vertexFunction = try createShippingFunction(
+        device: device,
+        entryPoint: "private_rewrite_vs",
+        source: privateRewriteShaderSource
+    )
+    let fragmentFunction = try createShippingFunction(
+        device: device,
+        entryPoint: "private_rewrite_fs",
+        source: privateRewriteShaderSource
+    )
+    let pipelineDescriptor = makeDescriptor(
+        vertexFunction: vertexFunction,
+        fragmentFunction: fragmentFunction,
+        label: "private-buffer-rewrite"
+    )
+    let vertexDescriptor = MTLVertexDescriptor()
+    vertexDescriptor.attributes[0].format = .float2
+    vertexDescriptor.attributes[0].offset = 0
+    vertexDescriptor.attributes[0].bufferIndex = 0
+    vertexDescriptor.attributes[1].format = .float4
+    vertexDescriptor.attributes[1].offset = MemoryLayout<Float>.stride * 2
+    vertexDescriptor.attributes[1].bufferIndex = 0
+    vertexDescriptor.layouts[0].stride = MemoryLayout<Float>.stride * 6
+    vertexDescriptor.layouts[0].stepFunction = .perVertex
+    pipelineDescriptor.vertexDescriptor = vertexDescriptor
+    let pipeline = try createShippingPipeline(device: device, descriptor: pipelineDescriptor)
+
+    func makeShippingBuffer(
+        length: Int,
+        options: MTLResourceOptions,
+        label: String
+    ) throws -> (UnsafeMutableRawPointer, MTLBuffer) {
+        guard let pointer = metallum_create_buffer(device, length, options),
+              let buffer = Unmanaged<AnyObject>.fromOpaque(pointer)
+            .takeUnretainedValue() as? MTLBuffer else {
+            try fail("could not allocate \(label)")
+        }
+        buffer.label = label
+        return (pointer, buffer)
+    }
+
+    func makeShippingTarget(label: String) throws -> (UnsafeMutableRawPointer, MTLTexture) {
+        guard let pointer = label.withCString({ labelPointer in
+            metallum_create_texture_2d(
+                device,
+                .rgba8Unorm,
+                8,
+                8,
+                1,
+                1,
+                0,
+                [.renderTarget, .shaderRead],
+                .shared,
+                labelPointer
+            )
+        }), let texture = Unmanaged<AnyObject>.fromOpaque(pointer)
+            .takeUnretainedValue() as? MTLTexture else {
+            try fail("could not allocate \(label)")
+        }
+        return (pointer, texture)
+    }
+
+    func writeFloats(_ values: [Float], to buffer: MTLBuffer) {
+        values.withUnsafeBytes { bytes in
+            buffer.contents().copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+        }
+    }
+
+    func writeIndices(_ values: [UInt16], to buffer: MTLBuffer) {
+        values.withUnsafeBytes { bytes in
+            buffer.contents().copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+        }
+    }
+
+    let vertexBytes = 9 * MemoryLayout<Float>.stride * 6
+    let indexBytes = 3 * MemoryLayout<UInt16>.stride
+    let (privateVertexPointer, privateVertex) = try makeShippingBuffer(
+        length: vertexBytes,
+        options: .storageModePrivate,
+        label: "private rewrite vertex destination"
+    )
+    let (privateIndexPointer, privateIndex) = try makeShippingBuffer(
+        length: indexBytes,
+        options: .storageModePrivate,
+        label: "private rewrite index destination"
+    )
+    var ownedPointers: [UnsafeMutableRawPointer] = [privateVertexPointer, privateIndexPointer]
+    var stagingVertices: [(UnsafeMutableRawPointer, MTLBuffer)] = []
+    var stagingIndices: [(UnsafeMutableRawPointer, MTLBuffer)] = []
+    var targets: [(UnsafeMutableRawPointer, MTLTexture)] = []
+    let positions: [Float] = [-1, -1, 3, -1, -1, 3]
+    let activeColors: [[Float]] = [
+        [1, 0, 0, 1],
+        [0, 1, 0, 1],
+        [0, 0, 1, 1]
+    ]
+
+    for slot in 0..<3 {
+        let vertexStaging = try makeShippingBuffer(
+            length: vertexBytes,
+            options: .storageModeShared,
+            label: "private rewrite vertex staging \(slot)"
+        )
+        let indexStaging = try makeShippingBuffer(
+            length: indexBytes,
+            options: .storageModeShared,
+            label: "private rewrite index staging \(slot)"
+        )
+        let target = try makeShippingTarget(label: "private rewrite target \(slot)")
+        stagingVertices.append(vertexStaging)
+        stagingIndices.append(indexStaging)
+        targets.append(target)
+        ownedPointers.append(vertexStaging.0)
+        ownedPointers.append(indexStaging.0)
+        ownedPointers.append(target.0)
+
+        var vertexValues: [Float] = []
+        for triangle in 0..<3 {
+            let color = triangle == slot ? activeColors[slot] : [0, 0, 0, 1]
+            for vertex in 0..<3 {
+                vertexValues.append(positions[vertex * 2])
+                vertexValues.append(positions[vertex * 2 + 1])
+                vertexValues.append(contentsOf: color)
+            }
+        }
+        writeFloats(vertexValues, to: vertexStaging.1)
+        writeIndices(
+            [UInt16(slot * 3), UInt16(slot * 3 + 1), UInt16(slot * 3 + 2)],
+            to: indexStaging.1
+        )
+    }
+
+    var leasePointers: [UnsafeMutableRawPointer] = []
+    defer {
+        for pointer in leasePointers {
+            metallum_release_object(pointer)
+        }
+        for pointer in ownedPointers {
+            metallum_release_object(pointer)
+        }
+    }
+
+    var barriersBefore: UInt64 = 0
+    try check(metallum_metal4_upload_barrier_stats(&barriersBefore) != 0,
+              "the Metal 4 upload barrier telemetry export was unavailable before rewrite validation")
+
+    // Deliberately commit all three command buffers before the first completion
+    // wait. This is the race-shaped contract the old CPU drain hid.
+    for slot in 0..<3 {
+        let leasePointer: UnsafeMutableRawPointer? = "private rewrite slot \(slot)".withCString { label in
+            metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
+        }
+        guard let leasePointer else {
+            try fail("could not acquire private-rewrite command-buffer slot \(slot)")
+        }
+        leasePointers.append(leasePointer)
+
+        guard let uploadPointer = "private rewrite upload \(slot)".withCString({ label in
+            metallum_MTLCommandBuffer_makeBlitCommandEncoder(leasePointer, label)
+        }) else {
+            try fail("could not create private-rewrite upload encoder for slot \(slot)")
+        }
+        metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer(
+            uploadPointer,
+            stagingVertices[slot].1,
+            0,
+            privateVertex,
+            0,
+            UInt64(vertexBytes)
+        )
+        metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer(
+            uploadPointer,
+            stagingIndices[slot].1,
+            0,
+            privateIndex,
+            0,
+            UInt64(indexBytes)
+        )
+        metallum_MTLCommandEncoder_endEncoding(uploadPointer)
+        metallum_release_object(uploadPointer)
+
+        guard let renderPointer = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            leasePointer,
+            targets[slot].1,
+            nil,
+            8,
+            8,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+            1
+        ) else {
+            try fail("could not create private-rewrite render encoder for slot \(slot)")
+        }
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(renderPointer, pipeline)
+        metallum_MTLRenderCommandEncoder_setBuffer(renderPointer, privateVertex, 0, 0, 1)
+        metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+            renderPointer,
+            .triangle,
+            3,
+            .uint16,
+            privateIndex,
+            0,
+            1,
+            0,
+            0
+        )
+        metallum_MTLCommandEncoder_endEncoding(renderPointer)
+        metallum_release_object(renderPointer)
+        metallum_MTLCommandBuffer_commit(leasePointer)
+    }
+
+    let expectedColors: [[UInt8]] = [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255]
+    ]
+    for slot in 0..<3 {
+        try check(metallum_MTLCommandBuffer_waitUntilCompleted(leasePointers[slot], 5_000) == 0,
+                  "private-rewrite slot \(slot) did not complete")
+        try check(metallum_MTLCommandBuffer_completedSuccessfully(leasePointers[slot]) != 0,
+                  "private-rewrite slot \(slot) completed with an error")
+
+        var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
+        targets[slot].1.getBytes(
+            &pixels,
+            bytesPerRow: 8 * 4,
+            from: MTLRegionMake2D(0, 0, 8, 8),
+            mipmapLevel: 0
+        )
+        for pixel in 0..<(8 * 8) {
+            let base = pixel * 4
+            let actual = Array(pixels[base..<(base + 4)])
+            try check(actual == expectedColors[slot],
+                      "private-rewrite slot \(slot) pixel \(pixel) expected \(expectedColors[slot]), got \(actual)")
+        }
+    }
+
+    var barriersAfter: UInt64 = 0
+    try check(metallum_metal4_upload_barrier_stats(&barriersAfter) != 0
+                  && barriersAfter >= barriersBefore + 3,
+              "private-rewrite did not encode one upload barrier per asynchronous slot "
+                  + "(before=\(barriersBefore), after=\(barriersAfter))")
+    print("Metal 4 private rewrite: shared private vertex/index destinations were rewritten from three staging pairs, all three leases committed before waiting, exact GPU readback passed, upload barriers=\(barriersAfter)")
+}
+
+private func runShippingMetal4PrivateBufferRewriteTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 26.0, *) else {
+        print("shipping Metal 4 private-buffer rewrite test skipped: needs macOS 26")
+        return
+    }
+    try shippingMetal4PrivateBufferRewriteTest(device: device, queue: queue)
 }
 
 private func makeDescriptor(
@@ -1324,6 +1863,13 @@ private func runPathTest() throws {
 
     // (6) M4: the frame-generation present path's Metal 4 object graph.
     try runPresentPathTest(device: device)
+
+    // (6b) The shipping M4 main renderer under Minecraft-style per-draw
+    // vertex/index/uniform binding churn across all reusable queue slots.
+    try runShippingMetal4BindingChurnTest(device: device, queue: queue)
+
+    // (6c) The queue-barrier contract for asynchronous private-buffer rewrite.
+    try runShippingMetal4PrivateBufferRewriteTest(device: device, queue: queue)
 
     // (7) M5: the bump allocator that replaces set*Bytes.
     try runBumpAllocatorTest(device: device)

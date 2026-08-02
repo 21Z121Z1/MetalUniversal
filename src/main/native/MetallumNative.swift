@@ -122,6 +122,13 @@ private enum NativeState {
     static var metal4SpatialEncodeCount: UInt64 = 0
     static var metal4TemporalEncodeCount: UInt64 = 0
     static var metal4FrameGenerationInputCount: UInt64 = 0
+    // The upload bridge cannot identify the destination allocation or range
+    // from its ABI, so this counts encoded MTL4 upload/copy barriers rather
+    // than pretending to be a resource hazard tracker. Keep the diagnostic
+    // bounded: one counter and one first-use log line per native session.
+    static let metal4UploadBarrierTelemetryLock = NSLock()
+    static var metal4UploadBarrierCount: UInt64 = 0
+    static var metal4UploadBarrierLogged = false
     static let metal4CompilerLock = NSLock()
     // Residency set (migration spec M3), enabled by metallum.opt.residencySet.
     // MTLResidencySet is macOS 15 / iOS 18 and needs no Metal 4, so the table of
@@ -159,6 +166,27 @@ private enum NativeState {
         functionLibrariesLock.lock()
         defer { functionLibrariesLock.unlock() }
         return functionLibraries.object(forKey: function as AnyObject) as? MTLLibrary
+    }
+
+    static func recordMetal4UploadBarrier() {
+        metal4UploadBarrierTelemetryLock.lock()
+        metal4UploadBarrierCount &+= 1
+        let firstUse = !metal4UploadBarrierLogged
+        metal4UploadBarrierLogged = true
+        metal4UploadBarrierTelemetryLock.unlock()
+        if firstUse {
+            NSLog(
+                "[metallum] Metal 4 upload barrier contract active: "
+                    + "afterQueueStages=vertex|fragment|dispatch|blit "
+                    + "beforeStages=blit visibility=device"
+            )
+        }
+    }
+
+    static func metal4UploadBarrierStats() -> UInt64 {
+        metal4UploadBarrierTelemetryLock.lock()
+        defer { metal4UploadBarrierTelemetryLock.unlock() }
+        return metal4UploadBarrierCount
     }
 
     /// Process-wide compiler, built on first use. Nil means Metal 4 pipeline
@@ -896,17 +924,13 @@ private final class Metal4MainRenderEncoderBridge {
             NSLog("[metallum] Metal 4 rejected buffer binding index %d (maximum 30)", index)
             return
         }
-        guard let buffer else {
-            NSLog("[metallum] Metal 4 rejected null buffer binding at index %d", index)
-            return
-        }
         if (stageMask & 1) != 0 {
             vertexBuffers[index] = buffer
-            vertexArguments.setAddress(buffer.gpuAddress + UInt64(offset), index: index)
+            vertexArguments.setAddress(buffer.map { $0.gpuAddress + UInt64(offset) } ?? 0, index: index)
         }
         if (stageMask & 2) != 0 {
             fragmentBuffers[index] = buffer
-            fragmentArguments.setAddress(buffer.gpuAddress + UInt64(offset), index: index)
+            fragmentArguments.setAddress(buffer.map { $0.gpuAddress + UInt64(offset) } ?? 0, index: index)
         }
     }
 
@@ -7642,6 +7666,13 @@ public func metallum_set_debug_labels_enabled(_ enabled: Int32) {
     NativeState.debugLabelsEnabled = enabled != 0
 }
 
+/// Foundation's process thermal state is the only thermal signal exposed by
+/// the current native boundary; no fabricated GPU temperature is inferred.
+@_cdecl("metallum_system_thermal_state")
+public func metallum_system_thermal_state() -> Int32 {
+    return Int32(ProcessInfo.processInfo.thermalState.rawValue)
+}
+
 @_cdecl("metallum_MTLDevice_maxMemoryAllocationSize")
 public func metallum_MTLDevice_maxMemoryAllocationSize(_ device: MTLDevice) -> UInt64 {
     let maxBuffer = UInt64(device.maxBufferLength)
@@ -7723,6 +7754,18 @@ public func metallum_metal4_main_renderer_stats(
     begun?.pointee = values.0
     submitted?.pointee = values.1
     reused?.pointee = values.2
+    return 1
+}
+
+/// Bounded diagnostic for the shipping MTL4 upload/copy barrier path. The
+/// existing Java ABI deliberately remains unchanged; native regression tests
+/// can use this counter to prove that the encoded dependency was exercised.
+@_cdecl("metallum_metal4_upload_barrier_stats")
+public func metallum_metal4_upload_barrier_stats(
+    _ count: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    guard #available(macOS 26.0, iOS 26.0, *) else { return 0 }
+    count?.pointee = NativeState.metal4UploadBarrierStats()
     return 1
 }
 
@@ -7906,8 +7949,13 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
         if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
             guard let encoder = lease.commandBuffer.makeComputeCommandEncoder() else { return nil }
             encoder.label = label
+            // Upload/copy work may overwrite a mesh buffer that an earlier
+            // submitted render encoder is still fetching. Metal 3's fence wait
+            // covered both vertex and fragment stages; the Metal 4 replacement
+            // must preserve that WAR edge across command-buffer boundaries.
+            NativeState.recordMetal4UploadBarrier()
             encoder.barrier(
-                afterQueueStages: [.fragment, .dispatch, .blit],
+                afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
                 beforeStages: .blit,
                 visibilityOptions: .device
             )
