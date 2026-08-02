@@ -96,8 +96,10 @@ tasks.test {
 	if (hostedCi) {
 		exclude "**/IrisMetalPostChainCompilationTest.class"
 		exclude "**/IrisMetalShadowPipelineTest.class"
+		exclude "**/IrisMetalShadowComputeConformanceTest.class"
 		exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
 		exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
+		exclude "**/MetalRenderContractGpuIntegrationTest.class"
 	}
 	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
