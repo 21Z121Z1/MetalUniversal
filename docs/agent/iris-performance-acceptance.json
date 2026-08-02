@@ -98,6 +98,11 @@
     "zero_delta_is_improvement": false,
     "must_improve_at_least_one": [
       {
+        "metric": "fps_median",
+        "better_direction": "higher",
+        "strict_positive_change_required": true
+      },
+      {
         "metric": "cpu_render_encode_time_ms_median",
         "better_direction": "lower",
         "strict_positive_change_required": true
@@ -150,6 +155,27 @@
       }
     ]
   },
+  "required_final_comparison": {
+    "task_before_profile": "baseline",
+    "task_after_profile": "accepted candidate or final combined candidate",
+    "mandatory_metrics": [
+      "fps_median",
+      "gpu_frame_time_ms_median",
+      "cpu_render_encode_time_ms_median",
+      "native_encoder_count_per_frame_median",
+      "render_pass_store_load_bytes_estimate_median",
+      "resident_render_resource_bytes"
+    ],
+    "mandatory_fields_per_metric": [
+      "before",
+      "after",
+      "absolute_change",
+      "improvement_percent",
+      "baseline_sample_count",
+      "candidate_sample_count"
+    ],
+    "missing_metric_rule": "A missing efficiency metric must be shown as unavailable with a precise reason; task-before and task-after FPS must be reported whenever the client performance run completed."
+  },
   "decision_states": [
     "accepted",
     "accepted-disabled-by-default",
@@ -165,6 +191,8 @@
     "baseline/",
     "candidate/",
     "summary.json",
+    "comparison.json",
+    "comparison.md",
     "decision.md"
   ],
   "human_approval_boundaries": [
