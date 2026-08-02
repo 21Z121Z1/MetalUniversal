@@ -2,6 +2,7 @@ package com.metallum.client.terrain;
 
 import com.metallum.client.metal.render.MetalGpuTimingRecorder;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.performance.IrisMetalFrameBudgetController;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryUsage;
@@ -16,7 +17,14 @@ public final class TerrainRuntimeSignals {
     ) {
         long cpuNanos = controller.latestCpuFrameNanos();
         long gpuNanos = MetalGpuTimingRecorder.latestGpuNanos();
-        long frameNanos = cpuNanos > 0L ? cpuNanos : TerrainSchedulingController.TARGET_FRAME_NANOS;
+        IrisMetalFrameBudgetController frameBudget = IrisMetalFrameBudgetController.runtime();
+        // A slow previous frame must not create a larger background-work budget.
+        // Use the configured display cadence when the deadline controller is active.
+        long frameNanos = frameBudget.isEnabled()
+                ? frameBudget.estimatedFramePeriodNanos()
+                : cpuNanos > 0L
+                ? cpuNanos
+                : TerrainSchedulingController.TARGET_FRAME_NANOS;
         return new TerrainSchedulingController.FrameInputs(
                 frameNanos,
                 cpuNanos,
@@ -37,10 +45,7 @@ public final class TerrainRuntimeSignals {
         }
     }
 
-    /**
-     * Uses the JDK's real heap and operating-system memory counters. A missing
-     * counter is ignored rather than replaced with a guessed constant.
-     */
+    /** Uses the JDK's real heap and operating-system memory counters. */
     public static double memoryPressure() {
         double heapPressure = 0.0;
         try {
