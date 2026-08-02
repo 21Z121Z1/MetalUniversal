@@ -23,9 +23,9 @@ public abstract class IrisMetalPostChainComputeGroupingMixin {
 
     @Inject(method = "executeComputeGroup", at = @At("HEAD"), require = 0)
     private void metallum$beginComputeGrouping(
-            final @Coerce Object device,
-            final @Coerce Object targets,
-            final @Coerce Object resources,
+            @Coerce final Object device,
+            @Coerce final Object targets,
+            @Coerce final Object resources,
             final List<?> computes,
             final List<String> executed,
             final CallbackInfo ci
@@ -38,9 +38,9 @@ public abstract class IrisMetalPostChainComputeGroupingMixin {
 
     @Inject(method = "executeComputeGroup", at = @At("RETURN"), require = 0)
     private void metallum$finishComputeGrouping(
-            final @Coerce Object device,
-            final @Coerce Object targets,
-            final @Coerce Object resources,
+            @Coerce final Object device,
+            @Coerce final Object targets,
+            @Coerce final Object resources,
             final List<?> computes,
             final List<String> executed,
             final CallbackInfo ci
