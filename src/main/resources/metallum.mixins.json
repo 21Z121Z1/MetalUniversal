@@ -34,6 +34,7 @@
     "render.MetalCommandEncoderUploadDedupMixin",
     "render.MetalGpuTextureVersionMixin",
     "render.MetalCommandEncoderMipmapCacheMixin",
+    "render.MetalCommandEncoderCopyDedupMixin",
     "render.MetalRenderPassBindingCacheMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
@@ -55,7 +56,8 @@
     "iris.CloudRendererIrisMixin",
     "iris.ProjectionMetalIrisDepthMixin",
     "iris.GlStateManagerCompatMixin",
-    "iris.IrisMetalPostChainBindingCacheMixin"
+    "iris.IrisMetalPostChainBindingCacheMixin",
+    "iris.IrisMetalUniformLookupCacheMixin"
   ],
   "injectors": {
     "defaultRequire": 1
