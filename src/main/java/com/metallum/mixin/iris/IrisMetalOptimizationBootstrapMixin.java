@@ -1,6 +1,7 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.client.metal.render.IrisMetalOptimizationBootstrap;
+import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -13,7 +14,7 @@ public abstract class IrisMetalOptimizationBootstrapMixin {
     @Inject(method = "create", at = @At("RETURN"))
     private static void metallum$buildOptimizationPlan(
             final int generation,
-            final Object programSet,
+            final ProgramSet programSet,
             final int targetCount,
             final java.util.BitSet initialFlipState,
             final CallbackInfoReturnable<Object> cir
