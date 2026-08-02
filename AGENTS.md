@@ -1,134 +1,126 @@
 # MetalUniversal agent map
 
-This file is a map, not the complete manual. Read only the documents relevant to the current task.
+This file is the repository entry map. The canonical autonomous workflow is the unified render evaluation loop; legacy performance scripts remain useful for focused compatibility but are not the final acceptance authority.
 
 ## Repository objective
 
-MetalUniversal is a Metal backend for Minecraft Java on Apple platforms. The current performance branch adds Iris-on-Metal optimization lanes while preserving Iris-visible shader-pack semantics. Correctness is mandatory; an optimization that silently changes observable rendering is a regression.
+MetalUniversal is a Metal backend for Minecraft Java on Apple platforms. This branch combines Iris-on-Metal optimization with backend-neutral render-contract validation and terrain/runtime telemetry. Correctness is mandatory: an optimization that silently changes any shader-pack-visible result is a regression.
 
 ## Read first
 
-For Iris performance work, read in this order:
+For correctness, diagnosis, or performance work, read in this order:
 
-1. `docs/iris-audit/advanced-optimization-runtime-handoff.md`
-2. `docs/iris-audit/advanced-optimization-local-agent-handoff.md`
-3. `docs/iris-audit/experimental-performance-architecture.md`
-4. `docs/agent/iris-performance-loop.md`
-5. `docs/agent/iris-performance-acceptance.json`
+1. `docs/agent/unified-evaluation-loop.md`
+2. `docs/agent/unified-evaluation-acceptance.json`
+3. `docs/render-contract-validation.md`
+4. `docs/iris-audit/advanced-optimization-runtime-handoff.md`
+5. `docs/iris-audit/experimental-performance-architecture.md`
+6. `docs/agent/prompts/autonomous-unified-render-eval.md`
 
-Inspect the implementation after reading the map. Do not treat documentation claims as proof; verify against code and tests.
+Documentation is a map, not proof. Verify claims against source, generated manifests and runtime evidence.
 
 ## Architecture map
 
-- Java renderer and resource lifecycle: `src/main/java/com/metallum/client/metal/render/`
+- Iris/Metal renderer and resource lifecycle: `src/main/java/com/metallum/client/metal/render/`
+- Render-contract identity, capture, expectations and diagnosis: `src/main/java/com/metallum/client/validation/`
+- Terrain scheduling and runtime telemetry: `src/main/java/com/metallum/client/terrain/`
 - Java FFM bridge: `src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java`
 - Metal wrappers: `src/main/java/com/metallum/client/metal/render/mtl/`
 - Swift Metal/MetalFX implementation: `src/main/native/`
-- Iris/Sodium integration mixins: `src/main/java/com/metallum/mixin/iris/`, `.../sodium/`, `.../render/`
-- Java tests: `src/test/java/com/metallum/client/metal/render/`
-- Native tests: `src/test/native/`
-- Validation fixtures: `run/shaderpacks/`, local Minecraft world under `run/saves/`
+- Iris/Sodium/render mixins: `src/main/java/com/metallum/mixin/`
+- Validation fixtures: `validation/render-contract/`
 - Agent harness: `scripts/agent/`
-- Run artifacts: `build/agent-runs/` (never commit)
+- Generated run evidence: `build/agent-runs/` (never commit)
+
+`RenderTraceRecorder`, semantic pass IDs and generation-aware `ResourceIdentity` are canonical evaluation identities. `IrisMetalPassTrace` is Iris construction/oracle evidence and must not become a competing cross-backend identity based on timestamps, pointers or encoder order.
 
 ## Standard commands
 
-Run commands from the repository root.
+Run from the repository root.
 
 ```bash
 bash scripts/agent/doctor.sh
-bash scripts/agent/verify.sh static
-bash scripts/agent/verify.sh gpu
-WORLD="<world name>" bash scripts/agent/run_iris_perf_cycle.sh
+bash scripts/agent/verify_unified_eval.sh
+MODE=conformance WORLD="<world>" CANDIDATE_PROFILE=compute-grouping \
+  bash scripts/agent/run_unified_eval_cycle.sh
+MODE=full WORLD="<world>" BLOCKS=4 CANDIDATE_PROFILE=compute-grouping \
+  bash scripts/agent/run_unified_eval_cycle.sh
 ```
 
-Direct Gradle entry points:
+Focused legacy commands remain available:
 
 ```bash
-./gradlew --no-daemon clean test
-./gradlew --no-daemon buildMacNative assemble validationJar verifyProductionJarIsolation
-./gradlew --no-daemon metalMrtBackendIntegrationTest metalComputeBackendIntegrationTest metalIrisTargetsIntegrationTest
-./gradlew --no-daemon metalIrisShaderTranslationTest
-./gradlew --no-daemon minecraftNativeRenderEfficiencyValidation -Pworld="<world name>"
-./gradlew --no-daemon runClientIris -Pworld="<world name>"
+bash scripts/agent/verify.sh static
+bash scripts/agent/verify.sh gpu
+./gradlew --no-daemon renderContractSyntheticValidation
+./gradlew --no-daemon renderContractMinecraftDiagnose -Pworld="<world>"
+./gradlew --no-daemon minecraftNativeRenderEfficiencyValidation -Pworld="<world>"
 ```
 
-Do not use plain `./gradlew build` as a static smoke test: this repository's `check` graph includes attended WindowServer and hardware-GPU validation.
+Do not use plain `./gradlew build` as a headless smoke test. The repository check graph includes attended WindowServer and hardware-GPU work. Hosted runners without macOS 26 Metal 4 SDK surfaces can validate Java/schema logic only and must report native gates as environment-blocked.
 
 ## Non-negotiable invariants
 
 - Do not replace exact Iris/OpenGL-observable semantics with approximations.
 - Do not add shader-pack-name special cases.
-- Do not silently fall back. Reject, disable, or log a precise fail-closed reason.
-- Do not enable Iris and MetalFX in the same convenience profile unless a shared ownership contract is explicitly implemented and validated.
-- Do not load a second native dylib to extend the existing Metal bridge. Extend `MetalNativeBridge` and the existing Swift module together.
-- Keep Java FFM descriptors, Swift `@_cdecl` signatures, ownership, and nullability exactly aligned.
-- Do not reuse render or compute encoders across a resource hazard, clear boundary, attachment transition, or unsupported trace boundary.
-- Do not claim a performance gain without a recorded baseline and repeated comparable runs.
-- Do not weaken tests, validation thresholds, Metal API Validation, or error handling to make a change pass.
-- Never commit shader packs, worlds, generated binaries, screenshots, captures, or `build/agent-runs/`.
+- Do not silently fall back. Reject, disable, or emit a precise fail-closed reason.
+- Do not enable Iris and MetalFX together without an explicit shared ownership contract.
+- Extend the existing Java/FFM/Swift bridge; do not load a shadow native module.
+- Keep Java descriptors, Swift `@_cdecl` signatures, ownership and nullability aligned.
+- Do not merge render/compute work across RAW, WAR, WAW, explicit barriers, attachment transitions, clears or unsupported trace boundaries.
+- Hazard and liveness reasoning must use generation-aware resources, not semantic names alone.
+- Heavy producer trace and broad readback are conformance/diagnostic tools, not performance instrumentation.
+- Structured JSON metrics are authoritative. Log regex is never an acceptance source.
+- Do not claim performance without a passing correctness gate and interleaved paired trials.
+- Do not weaken tests, thresholds, Metal validation or error handling to make a candidate pass.
+- Never commit shader packs, worlds, binaries, screenshots, captures or `build/agent-runs/`.
 
-## Performance acceptance
+## Unified acceptance
 
-No fixed improvement percentage is required. A change may pass when at least one target metric is strictly better than the matching baseline, the positive direction is consistent across comparable repeated runs, and all correctness and non-regression gates pass.
+A candidate is accepted only when:
 
-A zero delta is not an improvement. A directionally unstable result or a result indistinguishable from run-to-run variation is `inconclusive-noise`.
+- baseline and candidate render-contract gates are complete and pass;
+- mandatory structured FPS exists after a completed client run;
+- at least four ABBA/interleaved paired blocks are available;
+- at least one target metric improves in at least 75% of paired blocks and its paired median improves;
+- GPU time, CPU time, peak memory and stutter guardrails remain within limits;
+- activation is proved by structured counters or admission/plan evidence.
+
+Zero delta is not improvement. Unstable direction is `inconclusive-noise`. A faster candidate with an unexplained image, attachment, depth, motion, reactive, shadow, water, held-item, sky or post-processing difference is rejected.
 
 ## Autonomous work policy
 
 Safe and pre-authorized:
 
-- inspect repository files, logs, generated reports, git history, and local tool output;
-- edit in-scope source, tests, scripts, and documentation;
-- run non-destructive builds, tests, validation tasks, and local Minecraft profiles;
+- inspect source, logs, reports, captures and git history;
+- edit in-scope source, tests, scripts and documentation;
+- run non-destructive builds, validation and local Minecraft profiles;
 - create local commits on the current feature branch;
-- revert the agent's own unsuccessful experiments.
+- revert the agent's own rejected experiments.
 
-Stop and request a human decision before:
+Stop for a human decision before:
 
-- force-pushing, rebasing shared history, merging, publishing a release, or modifying another branch;
-- changing public semantic guarantees, supported Iris version, shader-pack compatibility policy, or Minecraft/Sodium/Iris versions;
-- deleting user worlds, shader packs, captures, or unrelated work;
+- force-pushing, rebasing shared history, merging or releasing;
+- changing supported Minecraft/Iris/Sodium versions or public semantic guarantees;
+- deleting worlds, shader packs, captures or unrelated work;
 - accepting a visual difference as intentional without an existing specification;
-- broadening work into MetalFX presentation/frame generation unless required by a demonstrated shared-backend regression.
+- enabling an optimization by default when admission or runtime evidence is incomplete.
 
 ## Optimization loop
 
-1. Run `doctor.sh` and record environment state.
-2. Establish a clean correctness and performance baseline.
-3. Select one optimization lane or one measured bottleneck.
-4. Form a falsifiable hypothesis and identify the metric and semantic risk.
-5. Make the smallest coherent implementation, including instrumentation and tests.
-6. Run focused tests, then static verification, then GPU/render validation.
-7. Run at least three comparable baseline/candidate samples when claiming performance.
-8. Keep the change only when acceptance gates pass; otherwise revert or leave it disabled with a precise blocker.
-9. Update the active report with commands, artifacts, measurements, decisions, and remaining uncertainty.
-10. Self-review the final diff for ABI drift, stale flags, leaked resources, missing failure paths, and undocumented behavior.
+1. Record environment and exact source/binary identity.
+2. Establish a passing baseline conformance run.
+3. Select one measured bottleneck and write a falsifiable hypothesis.
+4. Implement the smallest complete change with activation evidence and fail-closed admission.
+5. Run focused tests and conformance.
+6. On failure, diagnose the first divergent semantic pass/producer instead of broad screenshot hunting.
+7. After correctness passes, run at least four ABBA paired blocks.
+8. Retain only `accepted-candidate`; revert correctness or guardrail failures; extend evidence for noise.
+9. Self-review ABI symmetry, Metal 3/4 paths, resource lifecycle, mixin application, stale flags and generated files.
+10. Hand off exact commands, artifacts, measurements, rejected experiments and remaining limits.
 
 ## Required final report
 
-Every autonomous performance task must report:
+Every autonomous optimization report must include starting/ending commits, files and ownership boundaries changed, commands and exit status, correctness evidence, first divergence if any, activation proof, Metal validation status, environment limits and review readiness.
 
-- starting and ending commit;
-- files and architectural boundaries changed;
-- exact commands run and their exit status;
-- correctness evidence and artifact paths;
-- Metal API/shader validation status;
-- known unvalidated conditions;
-- reverted experiments and why they failed;
-- whether the branch is safe to hand to human review.
-
-It must also contain a task-before/task-after comparison with:
-
-- FPS median before and after;
-- absolute FPS change and FPS improvement percentage;
-- CPU render/encode median before and after;
-- GPU frame-time median before and after;
-- native encoder count/frame before and after;
-- attachment store/load bytes before and after;
-- resident render-resource bytes before and after;
-- absolute change, direction-normalized efficiency improvement percentage and sample counts for every available metric.
-
-FPS is higher-is-better. Time, encoder count, bandwidth and memory are lower-is-better. Missing efficiency metrics must be marked `unavailable` with a precise reason. Before/after FPS may not be omitted when the client performance run completed.
-
-A build without runtime evidence is not a rendering-performance acceptance. A faster frame with semantic or visual regression is a failed result.
+Report before, after, raw change, direction-normalized improvement and paired block count for FPS, GPU frame time, CPU render/encode time, native encoder count, attachment store/load bytes, resident render resources, peak memory and stutters. Mark missing metrics `unavailable` with the exact absent structured source. Compilation alone is never rendering or performance acceptance.
