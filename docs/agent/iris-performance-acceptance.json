@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "scope": "Iris-on-Metal rendering efficiency on Apple Silicon",
+  "reference_branch": "feature/iris-metal-performance",
+  "required_environment": {
+    "os": "macOS",
+    "architecture": "arm64",
+    "java_major": 25,
+    "swiftc_required": true,
+    "xcode_command_line_tools_required": true,
+    "attended_windowserver_required_for_client_runs": true
+  },
+  "profiles": [
+    {
+      "name": "baseline",
+      "properties": {
+        "metallum.iris.experimental.passFusion": "false",
+        "metallum.iris.computeGrouping": "false",
+        "metallum.iris.depthLiveness": "false",
+        "metallum.iris.argumentTables": "false"
+      }
+    },
+    {
+      "name": "depth-liveness",
+      "properties": {
+        "metallum.iris.depthLiveness": "true"
+      }
+    },
+    {
+      "name": "compute-grouping",
+      "properties": {
+        "metallum.iris.computeGrouping": "true"
+      }
+    },
+    {
+      "name": "pass-fusion",
+      "properties": {
+        "metallum.iris.experimental.passFusion": "true"
+      }
+    },
+    {
+      "name": "argument-tables",
+      "properties": {
+        "metallum.iris.argumentTables": "true"
+      }
+    },
+    {
+      "name": "all-safe-lanes",
+      "properties": {
+        "metallum.iris.experimental.passFusion": "true",
+        "metallum.iris.computeGrouping": "true",
+        "metallum.iris.depthLiveness": "true",
+        "metallum.iris.argumentTables": "true"
+      }
+    }
+  ],
+  "correctness_gates": {
+    "required_tasks": [
+      "test",
+      "verifyProductionJarIsolation",
+      "buildMacNative",
+      "build",
+      "metalMrtBackendIntegrationTest",
+      "metalComputeBackendIntegrationTest",
+      "metalIrisTargetsIntegrationTest",
+      "metalIrisShaderTranslationTest"
+    ],
+    "forbidden_log_patterns": [
+      "Metal API Validation Enabled.*error",
+      "Execution of the command buffer was aborted",
+      "Internal Error.*Metal",
+      "failed to apply mixin",
+      "MixinApplyError",
+      "Invalid backend",
+      "silent fallback",
+      "semantic mismatch"
+    ],
+    "visual_rule": "No unexplained framebuffer, attachment, depth, motion, shadow, water, held-item, sky, transparency, or post-processing difference versus the matching baseline.",
+    "fallback_rule": "Any unsupported path must reject, disable, or emit a precise fail-closed diagnostic; silent approximation is forbidden."
+  },
+  "measurement_protocol": {
+    "warmup_seconds_min": 30,
+    "sample_seconds_min": 120,
+    "repetitions_min": 3,
+    "comparison": "same commit except candidate change, same world, camera, shader pack, resolution, render distance, JVM arguments, power state, display mode, and optimization flags",
+    "statistics": [
+      "median",
+      "p95",
+      "minimum",
+      "maximum",
+      "sample_count"
+    ],
+    "noise_rule": "Do not claim a win when the observed delta is smaller than run-to-run variation."
+  },
+  "performance_acceptance": {
+    "must_improve_at_least_one": [
+      {
+        "metric": "cpu_render_encode_time_ms_median",
+        "relative_improvement_min": 0.05
+      },
+      {
+        "metric": "gpu_frame_time_ms_median",
+        "relative_improvement_min": 0.03
+      },
+      {
+        "metric": "native_encoder_count_per_frame_median",
+        "relative_improvement_min": 0.10
+      },
+      {
+        "metric": "render_pass_store_load_bytes_estimate_median",
+        "relative_improvement_min": 0.10
+      },
+      {
+        "metric": "resident_render_resource_bytes",
+        "relative_improvement_min": 0.05
+      }
+    ],
+    "non_regression_limits": [
+      {
+        "metric": "gpu_frame_time_ms_p95",
+        "relative_regression_max": 0.02
+      },
+      {
+        "metric": "cpu_render_encode_time_ms_p95",
+        "relative_regression_max": 0.02
+      },
+      {
+        "metric": "frame_time_stutter_count",
+        "relative_regression_max": 0.0
+      },
+      {
+        "metric": "peak_resident_memory_bytes",
+        "relative_regression_max": 0.03
+      },
+      {
+        "metric": "shader_or_pipeline_compile_failures",
+        "absolute_max": 0
+      },
+      {
+        "metric": "validation_errors",
+        "absolute_max": 0
+      }
+    ]
+  },
+  "decision_states": [
+    "accepted",
+    "accepted-disabled-by-default",
+    "rejected-reverted",
+    "blocked-environment",
+    "blocked-semantic-ambiguity",
+    "inconclusive-noise"
+  ],
+  "required_artifacts": [
+    "environment.json",
+    "commands.log",
+    "git-status.txt",
+    "baseline/",
+    "candidate/",
+    "summary.json",
+    "decision.md"
+  ],
+  "human_approval_boundaries": [
+    "force push or rebase shared history",
+    "merge or release",
+    "change supported Iris/Minecraft/Sodium versions",
+    "accept a visual difference as intentional without an existing specification",
+    "delete user worlds, shader packs, or unrelated files",
+    "expand scope into MetalFX presentation or frame generation without a measured shared-backend dependency"
+  ]
+}
