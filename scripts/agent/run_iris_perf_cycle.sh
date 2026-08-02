@@ -73,6 +73,25 @@ profile_args() {
     "-Dmetallum.iris.experimental.argumentTables=$argument_tables"
 }
 
+copy_validation_artifacts() {
+  local marker="$1"
+  local destination_root="$2"
+  local artifact_root
+  for artifact_root in \
+    "$ROOT/build/metal-validation" \
+    "$ROOT/build/render-contract" \
+    "$ROOT/build/reports" \
+    "$ROOT/build/test-results"; do
+    [[ -d "$artifact_root" ]] || continue
+    while IFS= read -r -d '' file; do
+      rel="${file#$ROOT/}"
+      destination="$destination_root/$rel"
+      mkdir -p "$(dirname "$destination")"
+      cp -p "$file" "$destination" 2>/dev/null || true
+    done < <(find "$artifact_root" -type f -newer "$marker" -print0 2>/dev/null || true)
+  done
+}
+
 for raw_profile in "${profile_list[@]}"; do
   profile="$(printf '%s' "$raw_profile" | tr -d '[:space:]')"
   [[ -n "$profile" ]] || continue
@@ -114,15 +133,7 @@ for raw_profile in "${profile_list[@]}"; do
       overall_status=1
     fi
 
-    while IFS= read -r -d '' file; do
-      rel="${file#$ROOT/}"
-      case "$rel" in
-        build/agent-runs/*) continue ;;
-      esac
-      destination="$run_dir/artifacts/$rel"
-      mkdir -p "$(dirname "$destination")"
-      cp -p "$file" "$destination" 2>/dev/null || true
-    done < <(find "$ROOT/build" -type f -newer "$marker" -print0 2>/dev/null || true)
+    copy_validation_artifacts "$marker" "$run_dir/artifacts"
   done
 done
 
