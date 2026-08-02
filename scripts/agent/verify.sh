@@ -11,22 +11,58 @@ OUT="${METALLUM_AGENT_VERIFY_OUT:-$RUN_ROOT/verify-$MODE-$STAMP}"
 mkdir -p "$OUT"
 COMMAND_LOG="$OUT/commands.log"
 : > "$COMMAND_LOG"
+# Gradle's `clean` task removes the repository's build directory, including
+# RUN_ROOT. Keep the live log stream outside build/ until each command exits,
+# then copy the evidence back into the requested artifact directory. This
+# prevents a successful `clean test` from destroying the harness's own report.
+STAGING_ROOT="${METALLUM_AGENT_VERIFY_STAGING:-${TMPDIR:-/tmp}/metallum-agent-verify-$$}"
+mkdir -p "$STAGING_ROOT"
+STAGED_COMMAND_LOG="$STAGING_ROOT/commands.log"
+: > "$STAGED_COMMAND_LOG"
+# A static Gradle run invokes `clean`, which also removes prior performance
+# evidence under the default agent-run root. Snapshot that evidence before
+# Gradle starts and restore it after the gate so runs remain auditable.
+PRESERVED_RUN_ROOT="$STAGING_ROOT/existing-agent-runs"
+PRESERVE_EXISTING_RUNS=false
+case "$RUN_ROOT" in
+  "$ROOT/build/agent-runs"|"$ROOT/build/agent-runs"/*)
+    if [[ -d "$RUN_ROOT" ]]; then
+      mkdir -p "$PRESERVED_RUN_ROOT"
+      cp -a "$RUN_ROOT/." "$PRESERVED_RUN_ROOT/"
+      PRESERVE_EXISTING_RUNS=true
+    fi
+    ;;
+esac
 overall_status=0
+
+START_HEAD="$(git rev-parse HEAD)"
+START_GIT_STATUS="$(git status --porcelain=v1)"
+
+sync_artifacts() {
+  mkdir -p "$OUT"
+  cp "$STAGED_COMMAND_LOG" "$COMMAND_LOG"
+  if [[ -n "${STAGING_ENVIRONMENT:-}" && -f "$STAGING_ENVIRONMENT" ]]; then
+    cp "$STAGING_ENVIRONMENT" "$OUT/environment.json"
+  fi
+}
 
 run_logged() {
   local name="$1"
   shift
-  local log="$OUT/${name}.log"
+  local log="$STAGING_ROOT/${name}.log"
   {
     printf '[command]'
     printf ' %q' "$@"
     printf '\n'
-  } | tee -a "$COMMAND_LOG"
+  } | tee -a "$STAGED_COMMAND_LOG"
   set +e
   "$@" 2>&1 | tee "$log"
   local status=${PIPESTATUS[0]}
   set -e
-  printf '[exit] %s %d\n' "$name" "$status" | tee -a "$COMMAND_LOG"
+  printf '[exit] %s %d\n' "$name" "$status" | tee -a "$STAGED_COMMAND_LOG"
+  mkdir -p "$OUT"
+  cp "$log" "$OUT/${name}.log"
+  cp "$STAGED_COMMAND_LOG" "$COMMAND_LOG"
   if (( status != 0 )); then
     overall_status=1
   fi
@@ -34,9 +70,13 @@ run_logged() {
 }
 
 bash scripts/agent/doctor.sh
-
-git rev-parse HEAD > "$OUT/start-head.txt"
-git status --porcelain=v1 > "$OUT/start-git-status.txt"
+DOCTOR_ENVIRONMENT="$(find "$RUN_ROOT" -type f -name environment.json -print 2>/dev/null | sort | tail -1)"
+STAGING_ENVIRONMENT="$STAGING_ROOT/environment.json"
+if [[ -n "$DOCTOR_ENVIRONMENT" && -f "$DOCTOR_ENVIRONMENT" ]]; then
+  cp "$DOCTOR_ENVIRONMENT" "$STAGING_ENVIRONMENT"
+else
+  STAGING_ENVIRONMENT=""
+fi
 
 case "$MODE" in
   static)
@@ -97,8 +137,17 @@ case "$MODE" in
     ;;
 esac
 
+if [[ "$PRESERVE_EXISTING_RUNS" == true && -d "$PRESERVED_RUN_ROOT" ]]; then
+  mkdir -p "$RUN_ROOT"
+  cp -a "$PRESERVED_RUN_ROOT/." "$RUN_ROOT/"
+fi
+
+mkdir -p "$OUT"
+printf '%s\n' "$START_HEAD" > "$OUT/start-head.txt"
+printf '%s\n' "$START_GIT_STATUS" > "$OUT/start-git-status.txt"
 git rev-parse HEAD > "$OUT/end-head.txt"
 git status --porcelain=v1 > "$OUT/end-git-status.txt"
+sync_artifacts
 
 python3 - "$OUT" "$MODE" "$overall_status" <<'PY'
 import json, pathlib, re, sys

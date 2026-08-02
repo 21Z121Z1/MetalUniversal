@@ -8,6 +8,7 @@ import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Runtime scope for grouping independent non-concurrent Iris compute dispatches.
@@ -19,6 +20,11 @@ import java.util.Set;
  */
 public final class IrisMetalComputeGroupingRuntime {
     private static final ThreadLocal<State> STATE = new ThreadLocal<>();
+    private static final LongAdder admissionCandidates = new LongAdder();
+    private static final LongAdder admissions = new LongAdder();
+    private static final LongAdder rejections = new LongAdder();
+    private static final LongAdder analysisFailures = new LongAdder();
+    private static final LongAdder deferredPassCloses = new LongAdder();
 
     private IrisMetalComputeGroupingRuntime() {
     }
@@ -30,14 +36,18 @@ public final class IrisMetalComputeGroupingRuntime {
             STATE.remove();
             return false;
         }
+        admissionCandidates.increment();
         try {
             if (!independent(computes)) {
+                rejections.increment();
                 STATE.remove();
                 return false;
             }
+            admissions.increment();
             STATE.set(new State(computes.size()));
             return true;
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            analysisFailures.increment();
             STATE.remove();
             Metallum.LOGGER.warn(
                     "[metallum-iris-opt] compute grouping analysis failed; retaining encoder boundaries",
@@ -62,6 +72,7 @@ public final class IrisMetalComputeGroupingRuntime {
         if (state == null) return false;
         state.closedPasses++;
         if (state.closedPasses < state.passCount) {
+            deferredPassCloses.increment();
             return true;
         }
         STATE.remove();
@@ -70,6 +81,24 @@ public final class IrisMetalComputeGroupingRuntime {
 
     public static void abort() {
         STATE.remove();
+    }
+
+    public static synchronized Snapshot snapshot() {
+        return new Snapshot(
+                admissionCandidates.sum(),
+                admissions.sum(),
+                rejections.sum(),
+                analysisFailures.sum(),
+                deferredPassCloses.sum()
+        );
+    }
+
+    public static synchronized void reset() {
+        admissionCandidates.reset();
+        admissions.reset();
+        rejections.reset();
+        analysisFailures.reset();
+        deferredPassCloses.reset();
     }
 
     private static boolean independent(final List<?> computes) throws ReflectiveOperationException {
@@ -155,6 +184,15 @@ public final class IrisMetalComputeGroupingRuntime {
     }
 
     private record AccessSet(Set<String> reads, Set<String> writes) {
+    }
+
+    public record Snapshot(
+            long admissionCandidates,
+            long admissions,
+            long rejections,
+            long analysisFailures,
+            long deferredPassCloses
+    ) {
     }
 
     private static final class State {

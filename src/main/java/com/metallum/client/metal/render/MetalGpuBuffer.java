@@ -17,7 +17,12 @@ import java.nio.ByteOrder;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Environment(EnvType.CLIENT)
-class MetalGpuBuffer extends GpuBuffer {
+/**
+ * Public because MixinExtras generates an {@code Args} bridge for the upload
+ * deduplication hook. The generated bridge lives in a synthetic package and
+ * must be able to resolve this method-descriptor type at runtime.
+ */
+public class MetalGpuBuffer extends GpuBuffer {
     private static final AtomicLong NEXT_VALIDATION_RESOURCE_ID = new AtomicLong(1L);
     private final MetalDevice device;
     private final long validationResourceId = NEXT_VALIDATION_RESOURCE_ID.getAndIncrement();

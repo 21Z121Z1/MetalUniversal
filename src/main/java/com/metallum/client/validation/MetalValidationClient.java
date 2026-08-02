@@ -6,6 +6,11 @@ import com.google.gson.JsonObject;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalGpuTimingRecorder;
 import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
+import com.metallum.client.metal.render.IrisMetalRenderFusionRuntime;
+import com.metallum.client.metal.render.IrisMetalComputeGroupingRuntime;
+import com.metallum.client.metal.render.IrisMetalDepthAllocationRuntime;
+import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.validation.storage.ValidationStorageBudget;
@@ -80,8 +85,21 @@ public final class MetalValidationClient implements ClientModInitializer {
     );
     private static final int BASELINE_SETTLE_FRAMES = 60;
     private static final int BASELINE_MEASURED_FRAMES = 240;
+    // The short frame-count protocol remains the default for focused smoke
+    // runs. The performance-cycle runner supplies wall-clock durations for
+    // acceptance runs so a low-FPS candidate cannot satisfy the sample gate
+    // with fewer than the required seconds of evidence.
+    private static final long BASELINE_WARMUP_MILLIS = durationMillisProperty(
+            "metallum.validation.warmupSeconds"
+    );
+    private static final long BASELINE_SAMPLE_MILLIS = durationMillisProperty(
+            "metallum.validation.sampleSeconds"
+    );
     private static final List<Double> baselineFrameIntervalsMillis = new ArrayList<>();
+    private static final List<Double> baselineCpuFrameMillis = new ArrayList<>();
     private static long baselinePreviousFrameNanos;
+    private static long baselineTimelineStartNanos;
+    private static long baselineCpuFrameStartNanos;
     private static final int CONTROLLED_ENTITY_ID = -2_147_000_001;
     private static final UUID CONTROLLED_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf01");
@@ -283,6 +301,41 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (minecraft.options != null) {
             minecraft.options.pauseOnLostFocus = false;
         }
+        // The dedicated native render-efficiency task requires a real
+        // borderless Retina fullscreen drawable, but an interrupted previous
+        // launch can leave the isolated options file in windowed mode. Make
+        // the requested state part of the validation protocol instead of
+        // failing later with an environment-shaped renderer error. The
+        // MacRetinaFullscreenMixin owns the actual borderless transition; we
+        // only request it through Minecraft's normal option/update path and
+        // keep the fail-closed check below as the admission proof.
+        if (PRESERVE_FULLSCREEN && !minecraft.getWindow().isFullscreen()) {
+            windowResizeAttempts++;
+            if (windowResizeAttempts > 200) {
+                throw new IllegalStateException(
+                        "Fullscreen validation could not establish a fullscreen drawable after "
+                                + windowResizeAttempts + " attempts; current drawable="
+                                + minecraft.getWindow().getWidth() + "x"
+                                + minecraft.getWindow().getHeight()
+                );
+            }
+            minecraft.options.exclusiveFullscreen().set(false);
+            minecraft.options.fullscreen().set(true);
+            minecraft.getWindow().updateFullscreenIfChanged();
+            if (windowResizeAttempts == 1 || windowResizeAttempts % 40 == 0) {
+                Metallum.LOGGER.info(
+                        "Validation requested fullscreen drawable (attempt={}, current={}x{})",
+                        windowResizeAttempts,
+                        minecraft.getWindow().getWidth(),
+                        minecraft.getWindow().getHeight()
+                );
+            }
+            if (!minecraft.getWindow().isFullscreen()) {
+                sleepForAsyncWork(25L);
+                return;
+            }
+            windowResizeAttempts = 0;
+        }
         // A run that never starts its timeline still exits reporting success,
         // so the two states that precede the timeline are worth one line each:
         // without them a stalled run and a passing run look identical in the
@@ -392,12 +445,21 @@ public final class MetalValidationClient implements ClientModInitializer {
             MetalFxManager.resetHistory("validation timeline start");
             if (PERFORMANCE_ONLY) {
                 MetalGpuTimingRecorder.reset();
+                IrisMetalPerformanceCounters.reset();
+                IrisMetalRenderFusionRuntime.reset();
+                IrisMetalComputeGroupingRuntime.reset();
+                IrisMetalDepthAllocationRuntime.reset();
+                IrisMetalArgumentBindingRuntime.resetStats();
                 baselineFrameIntervalsMillis.clear();
+                baselineCpuFrameMillis.clear();
                 baselinePreviousFrameNanos = 0L;
+                baselineTimelineStartNanos = 0L;
+                baselineCpuFrameStartNanos = 0L;
             }
         }
 
         if (PERFORMANCE_ONLY) {
+            baselineCpuFrameStartNanos = System.nanoTime();
             runNativeFullscreenBaseline(minecraft);
             return;
         }
@@ -542,6 +604,13 @@ public final class MetalValidationClient implements ClientModInitializer {
     public static void afterFrame(final GameRenderer renderer) {
         // GPU attachment capture is intentionally connected separately in the
         // MetalFX manager after temporal encoding and before present.
+        if (timelineAnchored && PERFORMANCE_ONLY && baselineCpuFrameStartNanos != 0L) {
+            long elapsed = System.nanoTime() - baselineCpuFrameStartNanos;
+            if (elapsed > 0L) {
+                baselineCpuFrameMillis.add(elapsed / 1_000_000.0);
+            }
+            baselineCpuFrameStartNanos = 0L;
+        }
         if (timelineAnchored && !PERFORMANCE_ONLY && frame > 0) {
             RenderContractRuntime.endFrame(frame - 1L);
         }
@@ -567,12 +636,34 @@ public final class MetalValidationClient implements ClientModInitializer {
             MetalFxManager.requestNativeOffReadback();
         }
         long now = System.nanoTime();
-        if (baselinePreviousFrameNanos != 0L && frame > BASELINE_SETTLE_FRAMES) {
-            baselineFrameIntervalsMillis.add((now - baselinePreviousFrameNanos) / 1_000_000.0);
+        boolean durationProtocol = BASELINE_WARMUP_MILLIS > 0L || BASELINE_SAMPLE_MILLIS > 0L;
+        if (durationProtocol) {
+            if (baselineTimelineStartNanos == 0L) {
+                baselineTimelineStartNanos = now;
+            }
+            long elapsedMillis = (now - baselineTimelineStartNanos) / 1_000_000L;
+            if (elapsedMillis < BASELINE_WARMUP_MILLIS) {
+                baselinePreviousFrameNanos = now;
+                frame++;
+                return;
+            }
+            if (baselinePreviousFrameNanos != 0L) {
+                baselineFrameIntervalsMillis.add((now - baselinePreviousFrameNanos) / 1_000_000.0);
+            }
+            baselinePreviousFrameNanos = now;
+        } else {
+            if (baselinePreviousFrameNanos != 0L && frame > BASELINE_SETTLE_FRAMES) {
+                baselineFrameIntervalsMillis.add((now - baselinePreviousFrameNanos) / 1_000_000.0);
+            }
+            baselinePreviousFrameNanos = now;
         }
-        baselinePreviousFrameNanos = now;
         frame++;
-        if (frame < BASELINE_SETTLE_FRAMES + BASELINE_MEASURED_FRAMES + 1) {
+        if (durationProtocol) {
+            long elapsedMillis = (now - baselineTimelineStartNanos) / 1_000_000L;
+            if (elapsedMillis < BASELINE_WARMUP_MILLIS + BASELINE_SAMPLE_MILLIS) {
+                return;
+            }
+        } else if (frame < BASELINE_SETTLE_FRAMES + BASELINE_MEASURED_FRAMES + 1) {
             return;
         }
 
@@ -580,7 +671,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                 .map(MetalGpuTimingRecorder.Sample::milliseconds)
                 .filter(value -> value > 0.0 && Double.isFinite(value))
                 .toList();
-        int keep = Math.min(BASELINE_MEASURED_FRAMES, gpuMilliseconds.size());
+        int keep = Math.min(baselineFrameIntervalsMillis.size(), gpuMilliseconds.size());
         List<Double> steadyGpuMilliseconds = gpuMilliseconds.subList(
                 gpuMilliseconds.size() - keep,
                 gpuMilliseconds.size()
@@ -623,9 +714,16 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.addProperty("frameIntervalP95Milliseconds", frameP95);
             report.addProperty("frameIntervalMaxMilliseconds", frameMax);
             report.addProperty("sourceFpsFromP50", frameP50 > 0.0 ? 1_000.0 / frameP50 : 0.0);
+            double stutterThreshold = frameP50 > 0.0 ? frameP50 * 2.0 : 0.0;
+            long stutterCount = baselineFrameIntervalsMillis.stream()
+                    .filter(value -> stutterThreshold > 0.0 && value > stutterThreshold)
+                    .count();
+            report.addProperty("frameTimeStutterCount", stutterCount);
+            report.addProperty("frameTimeStutterThresholdMilliseconds", stutterThreshold);
             report.addProperty("gpuP50Milliseconds", gpuP50);
             report.addProperty("gpuP95Milliseconds", gpuP95);
             report.addProperty("gpuMaxMilliseconds", gpuMax);
+            report.add("cpuRenderEncodeFrameMilliseconds", summarizeScalarDurations(baselineCpuFrameMillis));
             report.addProperty(
                     "metal4MainQueuePilotEngaged",
                     Boolean.getBoolean("metallum.opt.metal4MainQueuePilot")
@@ -665,7 +763,37 @@ public final class MetalValidationClient implements ClientModInitializer {
             encoderLookup.addProperty("temporaryArraysAvoided", encoderLookupStats.cacheHits() * 3L);
             report.add("renderEncoderLookup", encoderLookup);
             report.add("cpuLogicalPasses", summarizeCpuPasses(MetalGpuTimingRecorder.cpuPassSnapshot()));
-            report.add("gpuNativeEncoders", summarizeGpuEncoders(MetalGpuTimingRecorder.gpuEncoderSnapshot()));
+            List<MetalGpuTimingRecorder.GpuEncoderSample> gpuEncoderSamples =
+                    MetalGpuTimingRecorder.gpuEncoderSnapshot();
+            report.add("gpuNativeEncoders", summarizeGpuEncoders(gpuEncoderSamples));
+            addNativeEncoderCounts(report, gpuEncoderSamples, keep);
+            addPerformanceCounters(report, IrisMetalPerformanceCounters.snapshot());
+            JsonObject unavailable = new JsonObject();
+            unavailable.addProperty(
+                    "attachmentStoreLoadBytes",
+                    "unavailable — current native bridge does not expose per-attachment load/store byte accounting"
+            );
+            unavailable.addProperty(
+                    "residentRenderResourceBytes",
+                    "unavailable — current native bridge does not expose MTLResource allocated-size telemetry"
+            );
+            unavailable.addProperty(
+                    "peakResidentMemoryBytes",
+                    "unavailable — validation does not sample process or Metal resident memory"
+            );
+            unavailable.addProperty(
+                    "nativeComputeEncoderCountPerFrame",
+                    "unavailable — the current timing ABI exports render and blit kinds only"
+            );
+            unavailable.addProperty(
+                    "javaToNativeFfmCallCount",
+                    "unavailable — the current FFM bridge does not expose per-frame downcall counters"
+            );
+            unavailable.addProperty(
+                    "descriptorBindingMutationCount",
+                    "unavailable — the report exposes argument snapshot-lane mutations only, not backend-wide descriptor mutations"
+            );
+            report.add("unavailableMetrics", unavailable);
             JsonObject off = new JsonObject();
             off.addProperty("modeOff", offDiagnostics.modeOff());
             off.addProperty("fastPathFrames", offDiagnostics.fastPathFrames());
@@ -720,6 +848,102 @@ public final class MetalValidationClient implements ClientModInitializer {
                 (int) Math.ceil(quantile * sorted.size()) - 1
         ));
         return sorted.get(index);
+    }
+
+    private static long durationMillisProperty(final String propertyName) {
+        String value = System.getProperty(propertyName, "0").trim();
+        if (value.isEmpty()) {
+            return 0L;
+        }
+        try {
+            long seconds = Long.parseLong(value);
+            if (seconds < 0L) {
+                throw new IllegalArgumentException(propertyName + " must be non-negative");
+            }
+            return Math.multiplyExact(seconds, 1_000L);
+        } catch (NumberFormatException | ArithmeticException exception) {
+            throw new IllegalArgumentException(propertyName + " must be a non-negative integer", exception);
+        }
+    }
+
+    private static JsonObject summarizeScalarDurations(final List<Double> values) {
+        JsonObject result = new JsonObject();
+        result.addProperty("samples", values.size());
+        result.addProperty("p50Milliseconds", percentile(values, 0.50));
+        result.addProperty("p95Milliseconds", percentile(values, 0.95));
+        result.addProperty("minimumMilliseconds", values.stream().mapToDouble(Double::doubleValue).min().orElse(0.0));
+        result.addProperty("maximumMilliseconds", values.stream().mapToDouble(Double::doubleValue).max().orElse(0.0));
+        return result;
+    }
+
+    private static void addNativeEncoderCounts(
+            final JsonObject report,
+            final List<MetalGpuTimingRecorder.GpuEncoderSample> samples,
+            final int measuredFrames
+    ) {
+        long render = samples.stream().filter(sample -> "render".equals(sample.kind())).count();
+        long blit = samples.stream().filter(sample -> "blit".equals(sample.kind())).count();
+        JsonObject counts = new JsonObject();
+        counts.addProperty("measuredFrames", measuredFrames);
+        counts.addProperty("renderTotal", render);
+        counts.addProperty("blitTotal", blit);
+        counts.addProperty("renderPerFrame", measuredFrames > 0 ? (double) render / measuredFrames : 0.0);
+        counts.addProperty("blitPerFrame", measuredFrames > 0 ? (double) blit / measuredFrames : 0.0);
+        counts.addProperty("computePerFrame", "unavailable");
+        report.add("nativeEncoderCountsPerMeasuredFrame", counts);
+    }
+
+    private static void addPerformanceCounters(
+            final JsonObject report,
+            final IrisMetalPerformanceCounters.Snapshot snapshot
+    ) {
+        JsonObject counters = new JsonObject();
+        counters.addProperty("descriptorBindingsSkipped", snapshot.descriptorBindingsSkipped());
+        counters.addProperty("uniformUploadsSkipped", snapshot.uniformUploadsSkipped());
+        counters.addProperty("uniformUploadBytesSkipped", snapshot.uniformUploadBytesSkipped());
+        counters.addProperty("uniformUploadsTrimmed", snapshot.uniformUploadsTrimmed());
+        counters.addProperty("uniformUploadBytesTrimmed", snapshot.uniformUploadBytesTrimmed());
+        counters.addProperty("mipmapGenerationsSkipped", snapshot.mipmapGenerationsSkipped());
+        counters.addProperty("textureCopiesSkipped", snapshot.textureCopiesSkipped());
+        counters.addProperty("textureCopyBytesSkipped", snapshot.textureCopyBytesSkipped());
+        counters.addProperty("bindingClassificationCacheHits", snapshot.bindingClassificationCacheHits());
+        counters.addProperty("uniformLookupCacheHits", snapshot.uniformLookupCacheHits());
+            report.add("irisPerformanceCounters", counters);
+            IrisMetalRenderFusionRuntime.Snapshot fusion = IrisMetalRenderFusionRuntime.snapshot();
+            JsonObject fusionReport = new JsonObject();
+            fusionReport.addProperty("admissionCandidates", fusion.admissionCandidates());
+            fusionReport.addProperty("admissions", fusion.admissions());
+            fusionReport.addProperty("rejections", fusion.rejections());
+            fusionReport.addProperty("analysisFailures", fusion.analysisFailures());
+            fusionReport.addProperty("forcedBoundaryPasses", fusion.forcedBoundaryPasses());
+            report.add("renderFusionRuntime", fusionReport);
+            IrisMetalComputeGroupingRuntime.Snapshot compute = IrisMetalComputeGroupingRuntime.snapshot();
+            JsonObject computeReport = new JsonObject();
+            computeReport.addProperty("admissionCandidates", compute.admissionCandidates());
+            computeReport.addProperty("admissions", compute.admissions());
+            computeReport.addProperty("rejections", compute.rejections());
+            computeReport.addProperty("analysisFailures", compute.analysisFailures());
+            computeReport.addProperty("deferredPassCloses", compute.deferredPassCloses());
+            report.add("computeGroupingRuntime", computeReport);
+            IrisMetalDepthAllocationRuntime.Snapshot depth = IrisMetalDepthAllocationRuntime.snapshot();
+            JsonObject depthReport = new JsonObject();
+            depthReport.addProperty("pruneAttempts", depth.pruneAttempts());
+            depthReport.addProperty("prunedPairs", depth.prunedPairs());
+            depthReport.addProperty("recreatedResources", depth.recreatedResources());
+            depthReport.addProperty("pruneFailures", depth.pruneFailures());
+            depthReport.addProperty("captureSkips", depth.captureSkips());
+            report.add("depthLivenessRuntime", depthReport);
+            IrisMetalArgumentBindingRuntime.Stats argumentStats = IrisMetalArgumentBindingRuntime.stats();
+            JsonObject argumentReport = new JsonObject();
+            argumentReport.addProperty(
+                    "enabled",
+                    Boolean.getBoolean("metallum.iris.experimental.argumentTables")
+                            || Boolean.getBoolean("metallum.iris.argumentTables")
+            );
+            argumentReport.addProperty("layouts", argumentStats.layouts());
+            argumentReport.addProperty("bindingMutations", argumentStats.updates());
+            argumentReport.addProperty("encodedSnapshots", argumentStats.encodedSnapshots());
+            report.add("argumentBindingRuntime", argumentReport);
     }
 
     private static JsonArray summarizeCpuPasses(final List<MetalGpuTimingRecorder.CpuPassSample> samples) {
