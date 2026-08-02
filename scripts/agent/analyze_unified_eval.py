@@ -131,9 +131,16 @@ def normalize_trial(trial_dir: Path) -> dict[str, Any]:
         if after > before:
             source_files.append(str(path.relative_to(trial_dir)))
 
+    status_path = trial_dir / "exit-status.txt"
+    try:
+        exit_status = int(status_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        exit_status = None
     normalized: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "trial_dir": str(trial_dir),
+        "exit_status": exit_status,
+        "complete": exit_status == 0,
         "sources": source_files,
         "parse_errors": parse_errors,
         "metrics": {},
@@ -209,8 +216,12 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     for metric, spec in METRICS.items():
         pairs: list[dict[str, float | None]] = []
         for block in blocks:
-            baseline = load_trial(block / "baseline")["metrics"].get(metric, {})
-            candidate = load_trial(block / "candidate")["metrics"].get(metric, {})
+            baseline_trial = load_trial(block / "baseline")
+            candidate_trial = load_trial(block / "candidate")
+            if not baseline_trial.get("complete") or not candidate_trial.get("complete"):
+                continue
+            baseline = baseline_trial["metrics"].get(metric, {})
+            candidate = candidate_trial["metrics"].get(metric, {})
             if not baseline.get("available") or not candidate.get("available"):
                 continue
             before = float(baseline["median"])
@@ -222,7 +233,7 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         if not pairs:
             comparison["metrics"][metric] = {
                 "available": False,
-                "reason": "no block contained both normalized baseline and candidate values",
+                "reason": "no complete block contained both normalized baseline and candidate values",
                 "direction": spec["direction"],
                 "unit": spec["unit"],
                 "paired_blocks": 0,
@@ -378,6 +389,7 @@ def self_test() -> None:
             for profile, fps in (("baseline", baseline), ("candidate", candidate)):
                 trial = root / "trials" / f"block-{block_number:03d}" / profile
                 trial.mkdir(parents=True)
+                (trial / "exit-status.txt").write_text("0\n", encoding="utf-8")
                 (trial / "source.json").write_text(
                     json.dumps({"fps": {"median": fps}, "gpu_frame_time_ms": 10.0}),
                     encoding="utf-8",
