@@ -46,12 +46,14 @@ Direct Gradle entry points:
 
 ```bash
 ./gradlew --no-daemon clean test
-./gradlew --no-daemon buildMacNative build verifyProductionJarIsolation
+./gradlew --no-daemon buildMacNative assemble validationJar verifyProductionJarIsolation
 ./gradlew --no-daemon metalMrtBackendIntegrationTest metalComputeBackendIntegrationTest metalIrisTargetsIntegrationTest
 ./gradlew --no-daemon metalIrisShaderTranslationTest
 ./gradlew --no-daemon minecraftNativeRenderEfficiencyValidation -Pworld="<world name>"
 ./gradlew --no-daemon runClientIris -Pworld="<world name>"
 ```
+
+Do not use plain `./gradlew build` as a static smoke test: this repository's `check` graph includes attended WindowServer and hardware-GPU validation.
 
 ## Non-negotiable invariants
 
