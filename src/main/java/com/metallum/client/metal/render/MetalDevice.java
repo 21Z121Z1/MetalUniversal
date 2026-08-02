@@ -53,8 +53,20 @@ final class MetalDevice implements GpuDeviceBackend {
     private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new ConcurrentHashMap<>();
     private final Map<MslFunctionKey, MemorySegment> functionCache = new ConcurrentHashMap<>();
     private final Map<StableTerrainSamplerKey, MetalGpuSampler> stableTerrainSamplers = new HashMap<>();
-    private final Map<Long, Deque<MemorySegment>> bufferPool = new HashMap<>();
+    private static final int MAX_POOLED_BUFFER_BUCKETS = 32;
     private static final int MAX_POOLED_BUFFERS_PER_SIZE = 16;
+    private final Map<Long, Deque<MemorySegment>> bufferPool = new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<Long, Deque<MemorySegment>> eldest) {
+            if (size() <= MAX_POOLED_BUFFER_BUCKETS) {
+                return false;
+            }
+            for (MemorySegment handle : eldest.getValue()) {
+                MetalNativeBridge.metallum_release_object(handle);
+            }
+            return true;
+        }
+    };
     private ShaderSource activeShaderSource;
     private int pendingExtraTextureUsage;
     private static final boolean PSO_ARCHIVE =
@@ -252,12 +264,12 @@ final class MetalDevice implements GpuDeviceBackend {
                 })
                 : null;
         this.commandEncoder = new MetalCommandEncoder(this);
+        this.deviceInfo = buildDeviceInfo(deviceName);
         this.genericVertexAttributeBuffer = (MetalGpuBuffer) this.createBuffer(
                 () -> "OpenGL generic vertex attribute defaults",
                 GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_DST,
                 genericVertexAttributeDefaults()
         );
-        this.deviceInfo = buildDeviceInfo(deviceName);
         current = this;
         MetalFxManager.initialize(this);
     }
@@ -399,11 +411,17 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull GpuBuffer createBuffer(@Nullable final Supplier<String> label, @GpuBuffer.Usage final int usage, final long size) {
+        if (size <= 0L) {
+            throw new IllegalArgumentException("Metal buffer size must be > 0 (got " + size + ")");
+        }
         return new MetalGpuBuffer(this, usage, size);
     }
 
     @Override
     public @NonNull GpuBuffer createBuffer(@Nullable final Supplier<String> label, @GpuBuffer.Usage final int usage, final ByteBuffer data) {
+        if (data == null || data.remaining() <= 0) {
+            throw new IllegalArgumentException("Cannot create buffer from empty ByteBuffer");
+        }
         int effectiveUsage = usage | GpuBuffer.USAGE_COPY_DST;
         if ((usage & GpuBuffer.USAGE_INDEX) != 0) {
             /*
@@ -616,6 +634,10 @@ final class MetalDevice implements GpuDeviceBackend {
         return defaults;
     }
 
+    long maxBufferAllocationSize() {
+        return this.deviceInfo.limits().maxMemoryAllocationSize();
+    }
+
     void waitForSubmittedGpuWork() {
         this.commandEncoder.waitForSubmittedGpuWork();
     }
@@ -645,7 +667,7 @@ final class MetalDevice implements GpuDeviceBackend {
         });
     }
 
-    private static long composePoolKey(final long size, final long resourceOptions) {
+    static long composePoolKey(final long size, final long resourceOptions) {
         return (size << 12) | (resourceOptions & 0xFFFL);
     }
 

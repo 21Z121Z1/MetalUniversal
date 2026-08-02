@@ -8190,6 +8190,7 @@ public func metallum_create_buffer(
     _ options: MTLResourceOptions
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
+        guard length > 0 else { return nil }
         guard let buffer = device.makeBuffer(length: length, options: options) else {
             return nil
         }
@@ -9032,8 +9033,17 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
     _ drawCount: Int,
     _ stride: UInt64
 ) {
+    guard drawCount > 0 else { return }
+    guard indirectBufferOffset <= UInt64(Int.max), stride <= UInt64(Int.max) else { return }
+    let baseOffset = Int(indirectBufferOffset)
+    let strideInt = Int(stride)
+    let (span, multiplicationOverflow) = strideInt.multipliedReportingOverflow(by: drawCount)
+    guard !multiplicationOverflow else { return }
+    let (needed, additionOverflow) = baseOffset.addingReportingOverflow(span)
+    guard !additionOverflow, needed >= 0, needed <= indirectBuffer.length else { return }
+
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
-        var offset = Int(indirectBufferOffset)
+        var offset = baseOffset
         for _ in 0..<drawCount {
             bridge.encoder.drawIndexedPrimitives(
                 primitiveType: primitiveType,
@@ -9047,7 +9057,7 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
         return
     }
     let encoder = metal3RenderEncoder(pointer)
-    var offset = Int(indirectBufferOffset)
+    var offset = baseOffset
     for _ in 0..<drawCount {
         encoder.drawIndexedPrimitives(
             type: primitiveType,
