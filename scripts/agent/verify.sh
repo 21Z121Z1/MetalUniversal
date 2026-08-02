@@ -19,6 +19,20 @@ STAGING_ROOT="${METALLUM_AGENT_VERIFY_STAGING:-${TMPDIR:-/tmp}/metallum-agent-ve
 mkdir -p "$STAGING_ROOT"
 STAGED_COMMAND_LOG="$STAGING_ROOT/commands.log"
 : > "$STAGED_COMMAND_LOG"
+# A static Gradle run invokes `clean`, which also removes prior performance
+# evidence under the default agent-run root. Snapshot that evidence before
+# Gradle starts and restore it after the gate so runs remain auditable.
+PRESERVED_RUN_ROOT="$STAGING_ROOT/existing-agent-runs"
+PRESERVE_EXISTING_RUNS=false
+case "$RUN_ROOT" in
+  "$ROOT/build/agent-runs"|"$ROOT/build/agent-runs"/*)
+    if [[ -d "$RUN_ROOT" ]]; then
+      mkdir -p "$PRESERVED_RUN_ROOT"
+      cp -a "$RUN_ROOT/." "$PRESERVED_RUN_ROOT/"
+      PRESERVE_EXISTING_RUNS=true
+    fi
+    ;;
+esac
 overall_status=0
 
 START_HEAD="$(git rev-parse HEAD)"
@@ -122,6 +136,11 @@ case "$MODE" in
     exit 2
     ;;
 esac
+
+if [[ "$PRESERVE_EXISTING_RUNS" == true && -d "$PRESERVED_RUN_ROOT" ]]; then
+  mkdir -p "$RUN_ROOT"
+  cp -a "$PRESERVED_RUN_ROOT/." "$RUN_ROOT/"
+fi
 
 mkdir -p "$OUT"
 printf '%s\n' "$START_HEAD" > "$OUT/start-head.txt"
