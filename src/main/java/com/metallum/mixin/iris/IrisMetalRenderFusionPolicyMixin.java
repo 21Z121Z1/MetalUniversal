@@ -6,17 +6,18 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Coerce;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /** Publishes each real Iris raster pass to the physical-resource fusion policy. */
 @Mixin(targets = "com.metallum.client.metal.render.IrisMetalPostChain")
 public abstract class IrisMetalRenderFusionPolicyMixin {
     @Inject(method = "executeStage", at = @At("HEAD"), require = 0)
-    private void metallum$beginStage(final CallbackInfo ci) {
+    private void metallum$beginStage(final CallbackInfoReturnable<Object> cir) {
         IrisMetalRenderFusionRuntime.breakChain();
     }
 
     @Inject(method = "executeStage", at = @At("RETURN"), require = 0)
-    private void metallum$finishStage(final CallbackInfo ci) {
+    private void metallum$finishStage(final CallbackInfoReturnable<Object> cir) {
         IrisMetalRenderFusionRuntime.breakChain();
     }
 
@@ -48,12 +49,12 @@ public abstract class IrisMetalRenderFusionPolicyMixin {
     }
 
     @Inject(method = "executeFinal", at = @At("HEAD"), require = 0)
-    private void metallum$breakBeforeFinal(final CallbackInfo ci) {
+    private void metallum$breakBeforeFinal(final CallbackInfoReturnable<Object> cir) {
         IrisMetalRenderFusionRuntime.breakChain();
     }
 
     @Inject(method = "executeColorSpace", at = @At("HEAD"), require = 0)
-    private void metallum$breakBeforeColorSpace(final CallbackInfo ci) {
+    private void metallum$breakBeforeColorSpace(final CallbackInfoReturnable<Boolean> cir) {
         IrisMetalRenderFusionRuntime.breakChain();
     }
 }
