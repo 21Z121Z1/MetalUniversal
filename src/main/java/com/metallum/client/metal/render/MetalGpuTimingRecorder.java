@@ -10,7 +10,9 @@ public final class MetalGpuTimingRecorder {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.validation.gpuTiming")
             || Boolean.getBoolean("metallum.metalfx.debug")
             || Boolean.getBoolean("metallum.opt.terrainAdaptiveScheduling")
-            || Boolean.getBoolean("metallum.opt.terrainSchedulingTelemetry");
+            || Boolean.getBoolean("metallum.opt.terrainSchedulingTelemetry")
+            || Boolean.getBoolean("metallum.validation.frameStutter")
+            || !System.getProperty("metallum.validation.frameStutterReport", "").isBlank();
     private static final boolean PASS_TIMING_ENABLED =
             Boolean.getBoolean("metallum.validation.gpuPassTiming");
     // Formal acceptance samples at least 120 seconds. Retain enough completed
