@@ -16,7 +16,8 @@ abstract class PreferredGraphicsApiMixin {
     @Inject(method = "getBackendsToTry", at = @At("HEAD"), cancellable = true)
     private void metallum$injectMetalBackend(final CallbackInfoReturnable<GpuBackend[]> cir) {
         PreferredGraphicsApi self = (PreferredGraphicsApi) (Object) this;
-        if (self != PreferredGraphicsApi.DEFAULT) {
+        if (self != PreferredGraphicsApi.DEFAULT
+                && !Boolean.getBoolean("metallum.validation.forceMetal")) {
             return;
         }
 
