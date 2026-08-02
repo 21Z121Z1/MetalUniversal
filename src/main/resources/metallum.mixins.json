@@ -57,7 +57,9 @@
     "iris.ProjectionMetalIrisDepthMixin",
     "iris.GlStateManagerCompatMixin",
     "iris.IrisMetalPostChainBindingCacheMixin",
-    "iris.IrisMetalUniformLookupCacheMixin"
+    "iris.IrisMetalUniformLookupCacheMixin",
+    "iris.IrisMetalOptimizationBootstrapMixin",
+    "iris.IrisMetalDepthLivenessMixin"
   ],
   "injectors": {
     "defaultRequire": 1
