@@ -17,8 +17,13 @@ public final class IrisMetalPerformanceCounters {
     private static final LongAdder descriptorBindingsSkipped = new LongAdder();
     private static final LongAdder uniformUploadsSkipped = new LongAdder();
     private static final LongAdder uniformUploadBytesSkipped = new LongAdder();
+    private static final LongAdder uniformUploadsTrimmed = new LongAdder();
+    private static final LongAdder uniformUploadBytesTrimmed = new LongAdder();
     private static final LongAdder mipmapGenerationsSkipped = new LongAdder();
+    private static final LongAdder textureCopiesSkipped = new LongAdder();
+    private static final LongAdder textureCopyBytesSkipped = new LongAdder();
     private static final LongAdder bindingClassificationCacheHits = new LongAdder();
+    private static final LongAdder uniformLookupCacheHits = new LongAdder();
 
     private IrisMetalPerformanceCounters() {
     }
@@ -36,9 +41,23 @@ public final class IrisMetalPerformanceCounters {
         }
     }
 
+    public static void recordUniformUploadTrimmed(final long originalBytes, final long writtenBytes) {
+        if (ENABLED && writtenBytes < originalBytes) {
+            uniformUploadsTrimmed.increment();
+            uniformUploadBytesTrimmed.add(Math.max(0L, originalBytes - writtenBytes));
+        }
+    }
+
     public static void recordMipmapGenerationSkipped() {
         if (ENABLED) {
             mipmapGenerationsSkipped.increment();
+        }
+    }
+
+    public static void recordTextureCopySkipped(final long bytes) {
+        if (ENABLED) {
+            textureCopiesSkipped.increment();
+            textureCopyBytesSkipped.add(Math.max(0L, bytes));
         }
     }
 
@@ -48,13 +67,24 @@ public final class IrisMetalPerformanceCounters {
         }
     }
 
+    public static void recordUniformLookupCacheHit() {
+        if (ENABLED) {
+            uniformLookupCacheHits.increment();
+        }
+    }
+
     public static Snapshot snapshot() {
         return new Snapshot(
                 descriptorBindingsSkipped.sum(),
                 uniformUploadsSkipped.sum(),
                 uniformUploadBytesSkipped.sum(),
+                uniformUploadsTrimmed.sum(),
+                uniformUploadBytesTrimmed.sum(),
                 mipmapGenerationsSkipped.sum(),
-                bindingClassificationCacheHits.sum()
+                textureCopiesSkipped.sum(),
+                textureCopyBytesSkipped.sum(),
+                bindingClassificationCacheHits.sum(),
+                uniformLookupCacheHits.sum()
         );
     }
 
@@ -62,16 +92,26 @@ public final class IrisMetalPerformanceCounters {
         descriptorBindingsSkipped.reset();
         uniformUploadsSkipped.reset();
         uniformUploadBytesSkipped.reset();
+        uniformUploadsTrimmed.reset();
+        uniformUploadBytesTrimmed.reset();
         mipmapGenerationsSkipped.reset();
+        textureCopiesSkipped.reset();
+        textureCopyBytesSkipped.reset();
         bindingClassificationCacheHits.reset();
+        uniformLookupCacheHits.reset();
     }
 
     public record Snapshot(
             long descriptorBindingsSkipped,
             long uniformUploadsSkipped,
             long uniformUploadBytesSkipped,
+            long uniformUploadsTrimmed,
+            long uniformUploadBytesTrimmed,
             long mipmapGenerationsSkipped,
-            long bindingClassificationCacheHits
+            long textureCopiesSkipped,
+            long textureCopyBytesSkipped,
+            long bindingClassificationCacheHits,
+            long uniformLookupCacheHits
     ) {
     }
 }
