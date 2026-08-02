@@ -173,47 +173,28 @@ final class FrameSynthesisContract {
         }
     }
 
-    record FrameGenerationInput(
+    /**
+     * Pure admission decision before texture-view roles are attached.
+     *
+     * <p>Color transfer function and consumer-view format are deliberately not
+     * represented here. The current backend cannot yet prove the sRGB view
+     * semantics required by Frame Generation, so that contract belongs in a
+     * separate texture-view change rather than being approximated as base
+     * {@code RGBA8_UNORM} storage.</p>
+     */
+    record FrameGenerationAdmission(
             FrameStamp stamp,
-            MetalGpuTexture sceneColor,
-            MetalGpuTexture nativeSceneColor,
-            MetalGpuTexture uiColor,
-            FinalizedMotionFrame motion,
+            ProducerCoverageSet producerCoverage,
             CameraFrameInput camera,
             boolean reset
     ) {
-        FrameGenerationInput {
+        FrameGenerationAdmission {
             Objects.requireNonNull(stamp, "stamp");
-            Objects.requireNonNull(sceneColor, "sceneColor");
-            Objects.requireNonNull(nativeSceneColor, "nativeSceneColor");
-            Objects.requireNonNull(uiColor, "uiColor");
-            Objects.requireNonNull(motion, "motion");
+            Objects.requireNonNull(producerCoverage, "producerCoverage");
             Objects.requireNonNull(camera, "camera");
-            if (!stamp.equals(motion.stamp())) {
-                throw new IllegalArgumentException("Scene and motion inputs must share a frame stamp");
-            }
-            if (reset != motion.reset()) {
-                throw new IllegalArgumentException("Scene and motion inputs must agree on history reset");
-            }
-            validateColor(sceneColor, "sceneColor");
-            validateColor(nativeSceneColor, "nativeSceneColor");
-            validateColor(uiColor, "uiColor");
-            if (!motion.producerCoverage().frameGenerationEligible()) {
+            if (!producerCoverage.frameGenerationEligible()) {
                 throw new IllegalArgumentException("Producer coverage is incomplete for Frame Generation");
             }
-        }
-    }
-
-    private static void validateColor(final MetalGpuTexture texture, final String role) {
-        if (texture.isClosed()) {
-            throw new IllegalArgumentException(role + " references a closed texture");
-        }
-        if (texture.getFormat() != GpuFormat.RGBA8_UNORM) {
-            throw new IllegalArgumentException(role + " requires RGBA8_UNORM on the current backend");
-        }
-        if (texture.getDepthOrLayers() != 1 || texture.getMipLevels() != 1
-                || texture.getWidth(0) <= 0 || texture.getHeight(0) <= 0) {
-            throw new IllegalArgumentException(role + " must be a positive single-layer, single-mip texture");
         }
     }
 
