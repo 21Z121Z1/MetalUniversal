@@ -1,5 +1,6 @@
 package com.metallum.mixin.iris;
 
+import com.metallum.client.metal.render.IrisMetalDepthAllocationRuntime;
 import com.metallum.client.metal.render.IrisMetalOptimizationBootstrap;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import org.spongepowered.asm.mixin.Mixin;
@@ -20,6 +21,7 @@ public abstract class IrisMetalOptimizationBootstrapMixin {
             final CallbackInfoReturnable<Object> cir
     ) {
         IrisMetalOptimizationBootstrap.onPostChainCreated(cir.getReturnValue());
+        IrisMetalDepthAllocationRuntime.onPlanAvailable();
     }
 
     @Inject(method = "close", at = @At("HEAD"))
