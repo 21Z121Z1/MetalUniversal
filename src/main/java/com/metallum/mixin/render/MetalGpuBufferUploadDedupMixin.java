@@ -4,10 +4,14 @@ import com.metallum.client.metal.render.MetalUploadDedupBuffer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 
-/** Adds content comparison state to Metal dynamic/uniform buffers. */
+/** Adds content comparison and native-backing version state to Metal buffers. */
 @Mixin(targets = "com.metallum.client.metal.render.MetalGpuBuffer")
 public abstract class MetalGpuBufferUploadDedupMixin implements MetalUploadDedupBuffer {
     @Shadow
@@ -22,6 +26,17 @@ public abstract class MetalGpuBufferUploadDedupMixin implements MetalUploadDedup
     private long metallum$lastUploadOffset = -1L;
     @Unique
     private int metallum$lastUploadLength = -1;
+    @Unique
+    private long metallum$bindingVersion;
+
+    @Inject(method = "swapBacking", at = @At("TAIL"))
+    private void metallum$observeBackingSwap(
+            final MemorySegment handle,
+            final ByteBuffer storage,
+            final CallbackInfo ci
+    ) {
+        this.metallum$bindingVersion++;
+    }
 
     @Override
     public boolean metallum$matchesUpload(final long offset, final ByteBuffer data) {
@@ -55,5 +70,10 @@ public abstract class MetalGpuBufferUploadDedupMixin implements MetalUploadDedup
         this.metallum$uploadInitialized = true;
         this.metallum$lastUploadOffset = offset;
         this.metallum$lastUploadLength = data.remaining();
+    }
+
+    @Override
+    public long metallum$bindingVersion() {
+        return this.metallum$bindingVersion;
     }
 }
