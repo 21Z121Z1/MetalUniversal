@@ -12,21 +12,6 @@ mkdir -p "$OUT"
 COMMAND_LOG="$OUT/commands.log"
 : > "$COMMAND_LOG"
 
-run_step() {
-  local name="$1"
-  shift
-  local log="$OUT/${name}.log"
-  printf '\n[%s] %q' "$name" "$1" | tee -a "$COMMAND_LOG"
-  shift || true
-  for arg in "$@"; do printf ' %q' "$arg" | tee -a "$COMMAND_LOG"; done
-  printf '\n' | tee -a "$COMMAND_LOG"
-  set +e
-  "$@" >/dev/null 2>&1
-  set -e
-}
-
-# run_logged is separate because macOS Bash 3.2 makes reconstructing "$@"
-# after logging unnecessarily error-prone.
 run_logged() {
   local name="$1"
   shift
@@ -54,7 +39,11 @@ git status --porcelain=v1 > "$OUT/start-git-status.txt"
 case "$MODE" in
   static)
     run_logged unit-tests ./gradlew --no-daemon clean test
-    run_logged native-and-build ./gradlew --no-daemon buildMacNative build verifyProductionJarIsolation
+    # Do not call `build`: this repository's `check` task includes attended
+    # WindowServer and hardware-GPU validation. Static verification intentionally
+    # compiles/assembles without crossing into those runtime gates.
+    run_logged native-and-assemble ./gradlew --no-daemon \
+      buildMacNative assemble validationJar verifyProductionJarIsolation
     ;;
   gpu)
     run_logged native-build ./gradlew --no-daemon buildMacNative
@@ -75,7 +64,8 @@ case "$MODE" in
     ;;
   full)
     run_logged unit-tests ./gradlew --no-daemon clean test
-    run_logged native-and-build ./gradlew --no-daemon buildMacNative build verifyProductionJarIsolation
+    run_logged native-and-assemble ./gradlew --no-daemon \
+      buildMacNative assemble validationJar verifyProductionJarIsolation
     run_logged mrt-compute-targets ./gradlew --no-daemon \
       metalMrtBackendIntegrationTest \
       metalComputeBackendIntegrationTest \
