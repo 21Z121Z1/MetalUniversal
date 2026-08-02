@@ -8,6 +8,7 @@ WORLD="${WORLD:-}"
 CANDIDATE_PROFILE="${CANDIDATE_PROFILE:-all-safe-lanes}"
 BLOCKS="${BLOCKS:-4}"
 MODE="${MODE:-full}"
+CORRECTNESS_GATE="${METALLUM_CORRECTNESS_GATE:-}"
 RUN_ROOT="${METALLUM_AGENT_RUN_ROOT:-$ROOT/build/agent-runs}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${METALLUM_UNIFIED_EVAL_OUT:-$RUN_ROOT/unified-eval-$STAMP}"
@@ -31,6 +32,19 @@ fi
 if [[ "$MODE" == "performance" || "$MODE" == "full" ]] && (( BLOCKS < 4 )); then
   echo "Performance acceptance requires at least four paired ABBA blocks" >&2
   exit 2
+fi
+if [[ "$MODE" == "performance" ]]; then
+  if [[ -z "$CORRECTNESS_GATE" || ! -f "$CORRECTNESS_GATE" ]]; then
+    echo "MODE=performance requires METALLUM_CORRECTNESS_GATE pointing to a prior passing gate.json" >&2
+    exit 2
+  fi
+  python3 - "$CORRECTNESS_GATE" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+data = json.loads(p.read_text(encoding="utf-8"))
+if data.get("status") != "pass":
+    raise SystemExit(f"correctness gate is not passing: {p}")
+PY
 fi
 
 mkdir -p "$OUT" "$OUT/correctness" "$OUT/trials"
@@ -202,22 +216,28 @@ git status --porcelain=v1 > "$OUT/git-status.txt"
 
 gate_status=pass
 gate_reason="all requested correctness gates passed"
-if [[ "$MODE" == "full" || "$MODE" == "conformance" || "$MODE" == "diagnostic" ]]; then
+if [[ "$MODE" == "performance" ]]; then
+  cp "$CORRECTNESS_GATE" "$OUT/correctness/gate.json"
+else
   run_logged static bash scripts/agent/verify.sh static || gate_status=fail
   run_logged gpu bash scripts/agent/verify.sh gpu || gate_status=fail
   run_logged synthetic ./gradlew --no-daemon renderContractSyntheticValidation || gate_status=fail
   run_profile_task baseline renderContractMinecraftValidation "$OUT/correctness/baseline" || gate_status=fail
   run_profile_task "$CANDIDATE_PROFILE" renderContractMinecraftValidation "$OUT/correctness/candidate" || gate_status=fail
-fi
-if [[ "$MODE" == "diagnostic" ]]; then
-  run_profile_task "$CANDIDATE_PROFILE" renderContractMinecraftDiagnose "$OUT/correctness/diagnostic" || gate_status=fail
-fi
-if [[ "$gate_status" != "pass" ]]; then gate_reason="one or more correctness commands failed; inspect command/status/log artifacts"; fi
-python3 - "$OUT/correctness/gate.json" "$gate_status" "$gate_reason" <<'PY'
+  if [[ "$MODE" == "diagnostic" ]]; then
+    run_profile_task "$CANDIDATE_PROFILE" renderContractMinecraftDiagnose "$OUT/correctness/diagnostic" || gate_status=fail
+  fi
+  if [[ "$gate_status" != "pass" ]]; then gate_reason="one or more correctness commands failed; inspect command/status/log artifacts"; fi
+  python3 - "$OUT/correctness/gate.json" "$gate_status" "$gate_reason" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 path.write_text(json.dumps({"schema_version":1,"status":sys.argv[2],"reason":sys.argv[3]}, indent=2) + "\n")
 PY
+fi
+
+# Recompute binary fingerprints after correctness/build tasks have produced the
+# exact JAR and dylib used by the following trials.
+write_manifest
 
 if [[ "$MODE" == "full" || "$MODE" == "performance" ]]; then
   for ((block=1; block<=BLOCKS; block++)); do
@@ -226,17 +246,34 @@ if [[ "$MODE" == "full" || "$MODE" == "performance" ]]; then
     if (( block % 2 == 1 )); then order=(baseline candidate); else order=(candidate baseline); fi
     printf '%s\n' "${order[@]}" > "$block_dir/order.txt"
     for label in "${order[@]}"; do
-      profile_value=baseline
-      [[ "$label" == "candidate" ]] && profile_value="$CANDIDATE_PROFILE"
-      run_profile_task "$profile_value" minecraftNativeRenderEfficiencyValidation "$block_dir/$label" || true
+      profile=baseline
+      [[ "$label" == "candidate" ]] && profile="$CANDIDATE_PROFILE"
+      run_profile_task "$profile" minecraftNativeRenderEfficiencyValidation "$block_dir/$label" || true
     done
   done
 fi
 
-set +e
-python3 scripts/agent/analyze_unified_eval.py --root "$OUT"
-analysis_status=$?
-set -e
+if [[ "$MODE" == "full" || "$MODE" == "performance" ]]; then
+  set +e
+  python3 scripts/agent/analyze_unified_eval.py --root "$OUT"
+  analysis_status=$?
+  set -e
+else
+  analysis_status=0
+  if [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status"))' "$OUT/correctness/gate.json")" != "pass" ]]; then
+    analysis_status=2
+  fi
+  python3 - "$OUT/decision.json" "$analysis_status" "$MODE" <<'PY'
+import json, pathlib, sys
+status = int(sys.argv[2])
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+  "schema_version": 1,
+  "state": "correctness-pass-no-performance-decision" if status == 0 else "rejected-correctness-gate",
+  "mode": sys.argv[3],
+  "reason": "No performance acceptance was requested." if status == 0 else "Correctness gate failed."
+}, indent=2) + "\n")
+PY
+fi
 printf '%d\n' "$analysis_status" > "$OUT/analysis-exit-status.txt"
 
 echo "Unified evaluation artifacts: $OUT"
