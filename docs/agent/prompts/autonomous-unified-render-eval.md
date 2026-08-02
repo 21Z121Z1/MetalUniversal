@@ -1,6 +1,6 @@
 # Autonomous unified render evaluation and optimization task
 
-Work only on branch `agent/unified-render-eval-performance` unless the operator explicitly supplies another branch. Read `AGENTS.md`, `docs/agent/unified-evaluation-loop.md`, `docs/agent/unified-evaluation-acceptance.json`, and `docs/render-contract-validation.md` before modifying code.
+Use `integration/iris-metal-next` as the canonical base. Create or use one bounded feature branch from that base for the assigned change. Do not continue development from superseded `agent/*`, `codex/*`, archive, test-bootstrap, or pre-Iris feature branches unless the operator explicitly requests historical extraction. Read `AGENTS.md`, `docs/agent/unified-evaluation-loop.md`, `docs/agent/unified-evaluation-acceptance.json`, and `docs/render-contract-validation.md` before modifying code.
 
 ## Objective
 
