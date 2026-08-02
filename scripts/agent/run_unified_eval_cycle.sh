@@ -156,10 +156,9 @@ copy_artifacts_since() {
   local destination="$2"
   local root file rel
   mkdir -p "$destination"
-  for root in build/metal-validation build/render-contract build/reports build/test-results build/agent-runs; do
+  for root in build/metal-validation build/render-contract build/reports build/test-results; do
     [[ -d "$root" ]] || continue
     while IFS= read -r -d '' file; do
-      case "$file" in "$OUT"/*) continue ;; esac
       rel="${file#$ROOT/}"
       mkdir -p "$destination/$(dirname "$rel")"
       cp -p "$file" "$destination/$rel" 2>/dev/null || true
@@ -173,7 +172,7 @@ run_profile_task() {
   local trial_dir="$3"
   local marker="$trial_dir/.start-marker"
   local args=()
-  local arg status profile_value
+  local arg status
   mkdir -p "$trial_dir/artifacts"
   : > "$marker"
   while IFS= read -r arg; do args+=("$arg"); done < <(profile_args "$profile")
