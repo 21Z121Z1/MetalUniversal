@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
+import com.metallum.client.metal.render.MetalUploadDedupBuffer;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import org.spongepowered.asm.mixin.Mixin;
@@ -18,18 +19,23 @@ import java.util.Map;
  * <p>Texture and storage-image calls are deliberately not cancelled: those
  * methods also flush deferred clears or mark potential shader writes. Uniform
  * and SSBO binding calls are pure descriptor-state updates and can safely be
- * suppressed when buffer identity, offset and range are unchanged.</p>
+ * suppressed when buffer identity, native-backing generation, offset and range
+ * are unchanged.</p>
  */
 @Mixin(targets = "com.metallum.client.metal.render.MetalRenderPass")
 public abstract class MetalRenderPassBindingCacheMixin {
     @Unique
     private final Map<String, GpuBuffer> metallum$uniformBuffers = new HashMap<>();
     @Unique
+    private final Map<String, Long> metallum$uniformVersions = new HashMap<>();
+    @Unique
     private final Map<String, Long> metallum$uniformOffsets = new HashMap<>();
     @Unique
     private final Map<String, Long> metallum$uniformLengths = new HashMap<>();
     @Unique
     private final Map<Integer, GpuBuffer> metallum$storageBuffers = new HashMap<>();
+    @Unique
+    private final Map<Integer, Long> metallum$storageVersions = new HashMap<>();
     @Unique
     private final Map<Integer, Long> metallum$storageOffsets = new HashMap<>();
     @Unique
@@ -45,12 +51,19 @@ public abstract class MetalRenderPassBindingCacheMixin {
             final GpuBufferSlice value,
             final CallbackInfo ci
     ) {
+        // These two Mojang blocks also invalidate the generated Iris draw block;
+        // preserve that semantic boundary even when their native binding did not
+        // move.
+        if ("DynamicTransforms".equals(name) || "Projection".equals(name)) {
+            return;
+        }
         if (this.metallum$sameUniform(name, value)) {
             IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
             ci.cancel();
             return;
         }
         this.metallum$uniformBuffers.put(name, value.buffer());
+        this.metallum$uniformVersions.put(name, metallum$bindingVersion(value.buffer()));
         this.metallum$uniformOffsets.put(name, value.offset());
         this.metallum$uniformLengths.put(name, value.length());
     }
@@ -71,6 +84,7 @@ public abstract class MetalRenderPassBindingCacheMixin {
             return;
         }
         this.metallum$storageBuffers.put(binding, value.buffer());
+        this.metallum$storageVersions.put(binding, metallum$bindingVersion(value.buffer()));
         this.metallum$storageOffsets.put(binding, value.offset());
         this.metallum$storageLengths.put(binding, value.length());
     }
@@ -78,6 +92,8 @@ public abstract class MetalRenderPassBindingCacheMixin {
     @Unique
     private boolean metallum$sameUniform(final String name, final GpuBufferSlice value) {
         return this.metallum$uniformBuffers.get(name) == value.buffer()
+                && this.metallum$uniformVersions.getOrDefault(name, Long.MIN_VALUE)
+                == metallum$bindingVersion(value.buffer())
                 && this.metallum$uniformOffsets.getOrDefault(name, Long.MIN_VALUE) == value.offset()
                 && this.metallum$uniformLengths.getOrDefault(name, Long.MIN_VALUE) == value.length();
     }
@@ -85,7 +101,16 @@ public abstract class MetalRenderPassBindingCacheMixin {
     @Unique
     private boolean metallum$sameStorageBuffer(final int binding, final GpuBufferSlice value) {
         return this.metallum$storageBuffers.get(binding) == value.buffer()
+                && this.metallum$storageVersions.getOrDefault(binding, Long.MIN_VALUE)
+                == metallum$bindingVersion(value.buffer())
                 && this.metallum$storageOffsets.getOrDefault(binding, Long.MIN_VALUE) == value.offset()
                 && this.metallum$storageLengths.getOrDefault(binding, Long.MIN_VALUE) == value.length();
+    }
+
+    @Unique
+    private static long metallum$bindingVersion(final GpuBuffer buffer) {
+        return buffer instanceof MetalUploadDedupBuffer versioned
+                ? versioned.metallum$bindingVersion()
+                : 0L;
     }
 }
