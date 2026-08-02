@@ -61,6 +61,7 @@
     "iris.IrisMetalUniformLookupCacheMixin",
     "iris.IrisMetalOptimizationBootstrapMixin",
     "iris.IrisMetalDepthLivenessMixin",
+    "iris.IrisMetalDepthAllocationMixin",
     "iris.IrisMetalPostChainComputeGroupingMixin"
   ],
   "injectors": {
