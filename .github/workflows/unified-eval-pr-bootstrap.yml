@@ -2,9 +2,9 @@ name: Unified eval PR bootstrap
 
 on:
   pull_request:
-    types: [reopened]
+    types: [opened, reopened, synchronize]
     branches:
-      - agent/unified-render-eval-performance
+      - master
 
 permissions:
   contents: write
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   merge-and-integrate:
-    if: ${{ github.event.pull_request.number == 6 }}
+    if: ${{ github.event.pull_request.head.ref == 'agent/unified-render-eval-performance' }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
