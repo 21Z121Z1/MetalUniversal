@@ -10,6 +10,16 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /** Publishes each real Iris raster pass to the physical-resource fusion policy. */
 @Mixin(targets = "com.metallum.client.metal.render.IrisMetalPostChain")
 public abstract class IrisMetalRenderFusionPolicyMixin {
+    @Inject(method = "executeStage", at = @At("HEAD"), require = 0)
+    private void metallum$beginStage(final CallbackInfo ci) {
+        IrisMetalRenderFusionRuntime.breakChain();
+    }
+
+    @Inject(method = "executeStage", at = @At("RETURN"), require = 0)
+    private void metallum$finishStage(final CallbackInfo ci) {
+        IrisMetalRenderFusionRuntime.breakChain();
+    }
+
     @Inject(method = "executePass", at = @At("HEAD"), require = 0)
     private void metallum$beginRasterPass(
             @Coerce final Object device,
