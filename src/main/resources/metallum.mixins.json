@@ -36,6 +36,7 @@
     "render.MetalCommandEncoderMipmapCacheMixin",
     "render.MetalCommandEncoderCopyDedupMixin",
     "render.MetalRenderPassBindingCacheMixin",
+    "render.IrisMetalCommandEncoderComputeGroupingMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
     "sodium.ShaderChunkRendererMetalFxMixin",
@@ -59,7 +60,8 @@
     "iris.IrisMetalPostChainBindingCacheMixin",
     "iris.IrisMetalUniformLookupCacheMixin",
     "iris.IrisMetalOptimizationBootstrapMixin",
-    "iris.IrisMetalDepthLivenessMixin"
+    "iris.IrisMetalDepthLivenessMixin",
+    "iris.IrisMetalPostChainComputeGroupingMixin"
   ],
   "injectors": {
     "defaultRequire": 1
