@@ -24,11 +24,9 @@ public final class IrisMetalComputeGroupingRuntime {
     }
 
     public static boolean begin(final List<?> computes, final boolean concurrentCompute) {
-        if (concurrentCompute
-                || !IrisMetalOptimizationPlan.ENABLE_COMPUTE_GROUPING
-                || !IrisMetalAdvancedOptimizationConfig.COMPUTE_GROUPING
-                || computes == null
-                || computes.size() < 2) {
+        boolean enabled = IrisMetalOptimizationPlan.ENABLE_COMPUTE_GROUPING
+                || IrisMetalAdvancedOptimizationConfig.COMPUTE_GROUPING;
+        if (concurrentCompute || !enabled || computes == null || computes.size() < 2) {
             STATE.remove();
             return false;
         }
