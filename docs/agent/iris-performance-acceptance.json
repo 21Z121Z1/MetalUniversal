@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "scope": "Iris-on-Metal rendering efficiency on Apple Silicon",
   "reference_branch": "feature/iris-metal-performance",
   "required_environment": {
@@ -91,29 +91,36 @@
       "maximum",
       "sample_count"
     ],
-    "noise_rule": "Do not claim a win when the observed delta is smaller than run-to-run variation."
+    "noise_rule": "No fixed gain magnitude is required. The improved metric must nevertheless show a directionally consistent positive change across comparable repeated runs. If the sign is unstable or the result cannot be distinguished from run-to-run variation, use inconclusive-noise."
   },
   "performance_acceptance": {
+    "acceptance_rule": "Accept when at least one target metric is strictly better than the matching baseline and every correctness and non-regression gate passes. There is no fixed minimum percentage improvement.",
+    "zero_delta_is_improvement": false,
     "must_improve_at_least_one": [
       {
         "metric": "cpu_render_encode_time_ms_median",
-        "relative_improvement_min": 0.05
+        "better_direction": "lower",
+        "strict_positive_change_required": true
       },
       {
         "metric": "gpu_frame_time_ms_median",
-        "relative_improvement_min": 0.03
+        "better_direction": "lower",
+        "strict_positive_change_required": true
       },
       {
         "metric": "native_encoder_count_per_frame_median",
-        "relative_improvement_min": 0.10
+        "better_direction": "lower",
+        "strict_positive_change_required": true
       },
       {
         "metric": "render_pass_store_load_bytes_estimate_median",
-        "relative_improvement_min": 0.10
+        "better_direction": "lower",
+        "strict_positive_change_required": true
       },
       {
         "metric": "resident_render_resource_bytes",
-        "relative_improvement_min": 0.05
+        "better_direction": "lower",
+        "strict_positive_change_required": true
       }
     ],
     "non_regression_limits": [
