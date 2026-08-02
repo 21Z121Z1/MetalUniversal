@@ -8,19 +8,20 @@ import java.util.List;
 /** Diagnostic capture of completed main-queue Metal command buffers. */
 public final class MetalGpuTimingRecorder {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.validation.gpuTiming")
-            || Boolean.getBoolean("metallum.metalfx.debug");
+            || Boolean.getBoolean("metallum.metalfx.debug")
+            || Boolean.getBoolean("metallum.opt.terrainAdaptiveScheduling")
+            || Boolean.getBoolean("metallum.opt.terrainSchedulingTelemetry");
     private static final boolean PASS_TIMING_ENABLED =
             Boolean.getBoolean("metallum.validation.gpuPassTiming");
-    // Acceptance runs sample at least 120 seconds. At the observed ~40-60
-    // source FPS, 2048 entries would silently discard most of that window and
-    // make the JSON report look like a shorter run. Keep enough completed
-    // command-buffer samples for the required protocol while remaining a
-    // bounded diagnostic allocation.
+    // Formal acceptance samples at least 120 seconds. Retain enough completed
+    // command-buffer timings for the whole window instead of silently keeping
+    // only the last ~2,048 frames.
     private static final int CAPACITY = 16_384;
     private static final List<Sample> SAMPLES = new ArrayList<>();
     private static final List<CpuPassSample> CPU_PASS_SAMPLES = new ArrayList<>();
     private static long renderEncoderFactoryCalls;
     private static long renderEncoderCacheHits;
+    private static long latestGpuNanos;
 
     private MetalGpuTimingRecorder() {
     }
@@ -35,6 +36,7 @@ public final class MetalGpuTimingRecorder {
             return;
         }
         SAMPLES.add(new Sample(submitIndex, start, end));
+        latestGpuNanos = Math.max(1L, Math.round((end - start) * 1_000_000_000.0));
         if (SAMPLES.size() > CAPACITY) {
             SAMPLES.subList(0, SAMPLES.size() - CAPACITY).clear();
         }
@@ -45,6 +47,7 @@ public final class MetalGpuTimingRecorder {
         CPU_PASS_SAMPLES.clear();
         renderEncoderFactoryCalls = 0L;
         renderEncoderCacheHits = 0L;
+        latestGpuNanos = 0L;
         if (PASS_TIMING_ENABLED) {
             MetalNativeBridge.metallum_gpu_encoder_timing_reset();
         }
@@ -52,6 +55,11 @@ public final class MetalGpuTimingRecorder {
 
     public static synchronized List<Sample> snapshot() {
         return List.copyOf(SAMPLES);
+    }
+
+    /** Latest completed GPU service duration, or zero when timing is disabled/unavailable. */
+    public static synchronized long latestGpuNanos() {
+        return latestGpuNanos;
     }
 
     static synchronized void recordCpuPass(final String label, final long startNanos, final long endNanos) {
