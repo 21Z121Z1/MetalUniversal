@@ -21,6 +21,7 @@
   ],
   "correctness_gate": {
     "required": true,
+    "performance_only_reuse_rule": "MODE=performance must receive METALLUM_CORRECTNESS_GATE pointing to a prior passing gate.json from the same source/binary/scenario identity.",
     "tasks": [
       "scripts/agent/verify.sh static",
       "scripts/agent/verify.sh gpu",
@@ -40,7 +41,8 @@
     "block_order": "ABBA or equivalent randomized interleaving; never run all baselines before all candidates",
     "warmup_seconds_min": 30,
     "sample_seconds_min": 120,
-    "aggregation": "Aggregate frames within each trial first, then compare baseline and candidate within each block.",
+    "aggregation": "Aggregate frames within each completed trial first, then compare baseline and candidate within each block.",
+    "failed_or_incomplete_trial_rule": "A nonzero or missing exit status is excluded from paired analysis and can never contribute to acceptance.",
     "structured_metrics_only": true,
     "log_regex_is_authoritative": false,
     "minimum_positive_block_fraction": 0.75
@@ -62,6 +64,7 @@
   ],
   "acceptance_rule": "Accept only when correctness passes, mandatory structured FPS exists, at least one target metric improves in at least 75% of four or more paired blocks, and no guardrail exceeds its regression limit.",
   "decision_states": [
+    "correctness-pass-no-performance-decision",
     "accepted-candidate",
     "rejected-correctness-gate",
     "rejected-regression",
@@ -75,8 +78,8 @@
     "correctness/gate.json",
     "correctness baseline/candidate evidence",
     "trials/block-NNN/{baseline,candidate}/metrics.json",
-    "comparison.json",
-    "comparison.md",
+    "comparison.json when performance was requested",
+    "comparison.md when performance was requested",
     "decision.json"
   ],
   "human_approval_boundaries": [
