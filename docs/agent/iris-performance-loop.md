@@ -6,6 +6,8 @@ This document defines the repository-native workflow for a local coding agent. `
 
 Improve rendering efficiency on the Iris semantic Metal path while preserving every observable shader-pack contract. The agent must optimize measured bottlenecks, not maximize code changes or enable every experimental lane.
 
+There is no fixed minimum gain percentage. A candidate may be accepted when at least one target metric is strictly better than the matching baseline, the positive direction is consistent across comparable repeated runs, and every correctness and non-regression gate passes. A zero delta is not an improvement. An unstable result or a result that cannot be distinguished from run-to-run variation is `inconclusive-noise`.
+
 ## Initial state
 
 Expected branch:
@@ -76,6 +78,8 @@ Use a deterministic world, camera, resolution, shader pack, options, render dist
 The wrapper stores commands, logs, plan dumps and generated validation artifacts under `build/agent-runs/`.
 
 Inspect source reports, not only regex-extracted values in `summary.json`. If a required metric is absent or ambiguous, add structured instrumentation before optimizing.
+
+The baseline is the mandatory task-before state. It must contain enough data to report final before/after FPS and efficiency changes.
 
 ## Phase 3: select one hypothesis
 
@@ -158,7 +162,18 @@ REPETITIONS=3 \
 
 Replace the candidate profile as appropriate. Compare median and p95, inspect run-to-run variation, and verify the lane activated.
 
-A candidate is inconclusive when the delta is within noise. Increase sample duration/repetitions or add a more direct metric; do not call noise a win.
+The runner produces:
+
+```text
+summary.json
+comparison.json
+comparison.md
+decision.md
+```
+
+`comparison.json` and `comparison.md` treat baseline as task before and each candidate as task after. They calculate raw change and direction-normalized improvement percentage for FPS, CPU/GPU time, encoder count, attachment bandwidth, resident resources, peak memory and stutter count when those metrics are available.
+
+A candidate may pass with any strictly positive measured gain. There is no fixed 3%, 5% or 10% threshold. However, a candidate is inconclusive when the sign is unstable or the apparent gain cannot be distinguished from run-to-run variation. Increase sample duration/repetitions or add a more direct metric; do not call noise a win.
 
 ## Phase 7: correctness and visual acceptance
 
@@ -210,5 +225,18 @@ The final report must distinguish:
 - measured but inconclusive;
 - intentionally deferred;
 - environment-blocked.
+
+The final report must also include a task-before/task-after table containing:
+
+- FPS median before and after;
+- absolute FPS change and FPS improvement percentage;
+- GPU frame-time median before and after;
+- CPU render/encode median before and after;
+- native encoder count/frame before and after;
+- attachment store/load bytes before and after;
+- resident render-resource bytes before and after;
+- absolute change, direction-normalized efficiency improvement percentage and sample count for every available metric.
+
+FPS is higher-is-better. Time, encoder count, bandwidth and memory are lower-is-better. If an efficiency metric cannot be measured, display it as `unavailable` with a precise reason. If the Minecraft performance run completed, before/after FPS may not be omitted.
 
 Do not open, merge or publish a PR unless the user explicitly authorizes it.
