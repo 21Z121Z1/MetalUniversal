@@ -1,6 +1,7 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.client.metal.render.IrisMetalDepthAllocationRuntime;
+import com.mojang.blaze3d.textures.GpuTexture;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Coerce;
@@ -45,7 +46,11 @@ public abstract class IrisMetalDepthAllocationMixin {
         cir.setReturnValue(IrisMetalDepthAllocationRuntime.ensureDepthtex2View(this));
     }
 
-    @Inject(method = "captureNoTranslucentsDepth", at = @At("HEAD"), require = 0)
+    @Inject(
+            method = "captureNoTranslucentsDepth(Lcom/metallum/client/metal/render/MetalCommandEncoder;)V",
+            at = @At("HEAD"),
+            require = 0
+    )
     private void metallum$ensureDepthtex1Capture(
             final @Coerce Object encoder,
             final CallbackInfo ci
@@ -53,9 +58,39 @@ public abstract class IrisMetalDepthAllocationMixin {
         IrisMetalDepthAllocationRuntime.ensureCaptureDestination(this, 1);
     }
 
-    @Inject(method = "captureNoHandDepth", at = @At("HEAD"), require = 0)
+    @Inject(
+            method = "captureNoTranslucentsDepth(Lcom/metallum/client/metal/render/MetalCommandEncoder;Lcom/mojang/blaze3d/textures/GpuTexture;)V",
+            at = @At("HEAD"),
+            require = 0
+    )
+    private void metallum$ensureDepthtex1CaptureFromScene(
+            final @Coerce Object encoder,
+            final GpuTexture source,
+            final CallbackInfo ci
+    ) {
+        IrisMetalDepthAllocationRuntime.ensureCaptureDestination(this, 1);
+    }
+
+    @Inject(
+            method = "captureNoHandDepth(Lcom/metallum/client/metal/render/MetalCommandEncoder;)V",
+            at = @At("HEAD"),
+            require = 0
+    )
     private void metallum$ensureDepthtex2Capture(
             final @Coerce Object encoder,
+            final CallbackInfo ci
+    ) {
+        IrisMetalDepthAllocationRuntime.ensureCaptureDestination(this, 2);
+    }
+
+    @Inject(
+            method = "captureNoHandDepth(Lcom/metallum/client/metal/render/MetalCommandEncoder;Lcom/mojang/blaze3d/textures/GpuTexture;)V",
+            at = @At("HEAD"),
+            require = 0
+    )
+    private void metallum$ensureDepthtex2CaptureFromScene(
+            final @Coerce Object encoder,
+            final GpuTexture source,
             final CallbackInfo ci
     ) {
         IrisMetalDepthAllocationRuntime.ensureCaptureDestination(this, 2);
