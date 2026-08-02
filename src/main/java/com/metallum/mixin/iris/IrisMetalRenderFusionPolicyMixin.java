@@ -12,10 +12,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class IrisMetalRenderFusionPolicyMixin {
     @Inject(method = "executePass", at = @At("HEAD"), require = 0)
     private void metallum$beginRasterPass(
-            final @Coerce Object device,
-            final @Coerce Object targets,
-            final @Coerce Object resources,
-            final @Coerce Object plannedPass,
+            @Coerce final Object device,
+            @Coerce final Object targets,
+            @Coerce final Object resources,
+            @Coerce final Object plannedPass,
             final CallbackInfo ci
     ) {
         IrisMetalRenderFusionRuntime.beginPass(plannedPass);
@@ -23,10 +23,10 @@ public abstract class IrisMetalRenderFusionPolicyMixin {
 
     @Inject(method = "executePass", at = @At("RETURN"), require = 0)
     private void metallum$finishRasterPass(
-            final @Coerce Object device,
-            final @Coerce Object targets,
-            final @Coerce Object resources,
-            final @Coerce Object plannedPass,
+            @Coerce final Object device,
+            @Coerce final Object targets,
+            @Coerce final Object resources,
+            @Coerce final Object plannedPass,
             final CallbackInfo ci
     ) {
         IrisMetalRenderFusionRuntime.endPass();
