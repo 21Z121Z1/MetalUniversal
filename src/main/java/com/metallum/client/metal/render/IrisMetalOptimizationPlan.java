@@ -1,7 +1,6 @@
 package com.metallum.client.metal.render;
 
 import java.util.ArrayList;
-import java.util.BitSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
