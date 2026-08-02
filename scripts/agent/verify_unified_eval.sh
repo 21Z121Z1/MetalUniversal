@@ -5,7 +5,14 @@ cd "$ROOT"
 
 python3 -m json.tool docs/agent/unified-evaluation-acceptance.json >/dev/null
 python3 scripts/agent/analyze_unified_eval.py --self-test
+python3 scripts/agent/normalize_unified_trial.py --self-test
+python3 scripts/agent/check_unified_eval_admission.py --self-test
+python3 -m py_compile \
+  scripts/agent/analyze_unified_eval.py \
+  scripts/agent/normalize_unified_trial.py \
+  scripts/agent/check_unified_eval_admission.py
 bash -n scripts/agent/run_unified_eval_cycle.sh
+bash -n scripts/agent/verify.sh
 
 ./gradlew --no-daemon compileJava test \
   -x buildMacNative \

@@ -121,6 +121,12 @@ public final class IrisMetalArgumentBindingRuntime {
         return new Stats(LAYOUTS.sum(), UPDATES.sum(), ENCODED.sum());
     }
 
+    public static synchronized void resetStats() {
+        LAYOUTS.reset();
+        UPDATES.reset();
+        ENCODED.reset();
+    }
+
     private static boolean enabled() {
         return IrisMetalOptimizationPlan.ENABLE_ARGUMENT_TABLES
                 || IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES;

@@ -9,6 +9,7 @@ import java.util.BitSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Planner-side authorization for the backend's existing same-attachment render
@@ -17,6 +18,11 @@ import java.util.Set;
  */
 public final class IrisMetalRenderFusionRuntime {
     private static final ThreadLocal<State> STATE = ThreadLocal.withInitial(State::new);
+    private static final LongAdder admissionCandidates = new LongAdder();
+    private static final LongAdder admissions = new LongAdder();
+    private static final LongAdder rejections = new LongAdder();
+    private static final LongAdder analysisFailures = new LongAdder();
+    private static final LongAdder forcedBoundaryPasses = new LongAdder();
 
     private IrisMetalRenderFusionRuntime() {
     }
@@ -26,16 +32,30 @@ public final class IrisMetalRenderFusionRuntime {
         state.forceBoundary = true;
         if (!enabled() || plannedPass == null || IrisMetalExperimentalOptimizer.active() == null) {
             state.pending = null;
+            state.forceBoundary = false;
             return;
         }
         try {
             PassAccess current = access(plannedPass);
             PassAccess previous = state.previous;
-            state.forceBoundary = previous == null || !mayFuse(previous, current);
+            boolean admitted = previous != null && mayFuse(previous, current);
+            if (previous != null) {
+                admissionCandidates.increment();
+                if (admitted) {
+                    admissions.increment();
+                } else {
+                    rejections.increment();
+                }
+            }
+            state.forceBoundary = !admitted;
+            if (state.forceBoundary) {
+                forcedBoundaryPasses.increment();
+            }
             state.pending = current;
         } catch (ReflectiveOperationException | RuntimeException failure) {
             state.pending = null;
             state.forceBoundary = true;
+            analysisFailures.increment();
             Metallum.LOGGER.warn(
                     "[metallum-iris-opt] render fusion analysis failed; forcing encoder boundary",
                     failure
@@ -60,6 +80,24 @@ public final class IrisMetalRenderFusionRuntime {
     /** Called immediately before MetalCommandEncoder chooses encoder reuse. */
     public static boolean forceBoundary() {
         return STATE.get().forceBoundary;
+    }
+
+    public static synchronized Snapshot snapshot() {
+        return new Snapshot(
+                admissionCandidates.sum(),
+                admissions.sum(),
+                rejections.sum(),
+                analysisFailures.sum(),
+                forcedBoundaryPasses.sum()
+        );
+    }
+
+    public static synchronized void reset() {
+        admissionCandidates.reset();
+        admissions.reset();
+        rejections.reset();
+        analysisFailures.reset();
+        forcedBoundaryPasses.reset();
     }
 
     private static boolean enabled() {
@@ -153,6 +191,15 @@ public final class IrisMetalRenderFusionRuntime {
     }
 
     private record PassAccess(List<String> attachmentSignature, Set<String> reads, Set<String> writes) {
+    }
+
+    public record Snapshot(
+            long admissionCandidates,
+            long admissions,
+            long rejections,
+            long analysisFailures,
+            long forcedBoundaryPasses
+    ) {
     }
 
     private static final class State {

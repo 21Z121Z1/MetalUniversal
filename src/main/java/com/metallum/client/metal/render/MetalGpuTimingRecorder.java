@@ -13,7 +13,10 @@ public final class MetalGpuTimingRecorder {
             || Boolean.getBoolean("metallum.opt.terrainSchedulingTelemetry");
     private static final boolean PASS_TIMING_ENABLED =
             Boolean.getBoolean("metallum.validation.gpuPassTiming");
-    private static final int CAPACITY = 2048;
+    // Formal acceptance samples at least 120 seconds. Retain enough completed
+    // command-buffer timings for the whole window instead of silently keeping
+    // only the last ~2,048 frames.
+    private static final int CAPACITY = 16_384;
     private static final List<Sample> SAMPLES = new ArrayList<>();
     private static final List<CpuPassSample> CPU_PASS_SAMPLES = new ArrayList<>();
     private static long renderEncoderFactoryCalls;

@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Releases generation-owned depthtex1/depthtex2 allocations when the complete
@@ -24,6 +25,11 @@ public final class IrisMetalDepthAllocationRuntime {
             | GpuTexture.USAGE_COPY_DST;
     private static final Set<Object> TARGETS = Collections.newSetFromMap(new WeakHashMap<>());
     private static final Set<String> WARNED = ConcurrentHashMap.newKeySet();
+    private static final LongAdder pruneAttempts = new LongAdder();
+    private static final LongAdder prunedPairs = new LongAdder();
+    private static final LongAdder recreatedResources = new LongAdder();
+    private static final LongAdder pruneFailures = new LongAdder();
+    private static final LongAdder captureSkips = new LongAdder();
 
     private IrisMetalDepthAllocationRuntime() {
     }
@@ -59,6 +65,30 @@ public final class IrisMetalDepthAllocationRuntime {
         ensure(targets, index, true);
     }
 
+    public static void recordCaptureSkipped(final int index) {
+        if (enabled() && (index == 1 || index == 2)) {
+            captureSkips.increment();
+        }
+    }
+
+    public static synchronized Snapshot snapshot() {
+        return new Snapshot(
+                pruneAttempts.sum(),
+                prunedPairs.sum(),
+                recreatedResources.sum(),
+                pruneFailures.sum(),
+                captureSkips.sum()
+        );
+    }
+
+    public static synchronized void reset() {
+        pruneAttempts.reset();
+        prunedPairs.reset();
+        recreatedResources.reset();
+        pruneFailures.reset();
+        captureSkips.reset();
+    }
+
     private static boolean enabled() {
         return IrisMetalOptimizationPlan.ENABLE_RESOURCE_PRUNING
                 || IrisMetalAdvancedOptimizationConfig.DEPTH_LIVENESS;
@@ -66,10 +96,12 @@ public final class IrisMetalDepthAllocationRuntime {
 
     private static void prune(final Object targets) {
         if (!enabled() || IrisMetalExperimentalOptimizer.active() == null) return;
+        pruneAttempts.increment();
         try {
             if (!IrisMetalOptimizationBootstrap.depthtex1Required()) closePair(targets, 1);
             if (!IrisMetalOptimizationBootstrap.depthtex2Required()) closePair(targets, 2);
         } catch (ReflectiveOperationException | RuntimeException failure) {
+            pruneFailures.increment();
             Metallum.LOGGER.warn(
                     "[metallum-iris-opt] depth allocation pruning failed; keeping conservative allocation",
                     failure
@@ -101,6 +133,7 @@ public final class IrisMetalDepthAllocationRuntime {
             Object replacementView = createView(replacementTexture);
             texture.set(targets, replacementTexture);
             textureView.set(targets, replacementView);
+            recreatedResources.increment();
 
             String key = "depthtex" + index;
             if (WARNED.add(key)) {
@@ -121,8 +154,12 @@ public final class IrisMetalDepthAllocationRuntime {
         String viewField = index == 1 ? "noTranslucentsDepthView" : "noHandDepthView";
         Object view = read(targets, viewField);
         Object texture = read(targets, textureField);
+        boolean wasLive = (view != null && !closed(view)) || (texture != null && !closed(texture));
         close(view);
         close(texture);
+        if (wasLive) {
+            prunedPairs.increment();
+        }
     }
 
     private static Object createTexture(
@@ -190,5 +227,14 @@ public final class IrisMetalDepthAllocationRuntime {
             }
         }
         throw new NoSuchFieldException(name);
+    }
+
+    public record Snapshot(
+            long pruneAttempts,
+            long prunedPairs,
+            long recreatedResources,
+            long pruneFailures,
+            long captureSkips
+    ) {
     }
 }

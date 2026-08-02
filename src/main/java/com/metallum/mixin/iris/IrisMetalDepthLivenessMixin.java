@@ -1,6 +1,7 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.client.metal.render.IrisMetalOptimizationBootstrap;
+import com.metallum.client.metal.render.IrisMetalDepthAllocationRuntime;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -16,6 +17,7 @@ public abstract class IrisMetalDepthLivenessMixin {
     private static void metallum$skipUnusedDepthtex1(final CallbackInfo ci) {
         if (Boolean.getBoolean("metallum.iris.experimental.resourcePruning")
                 && !IrisMetalOptimizationBootstrap.depthtex1Required()) {
+            IrisMetalDepthAllocationRuntime.recordCaptureSkipped(1);
             ci.cancel();
         }
     }
@@ -24,6 +26,7 @@ public abstract class IrisMetalDepthLivenessMixin {
     private static void metallum$skipUnusedDepthtex2(final CallbackInfo ci) {
         if (Boolean.getBoolean("metallum.iris.experimental.resourcePruning")
                 && !IrisMetalOptimizationBootstrap.depthtex2Required()) {
+            IrisMetalDepthAllocationRuntime.recordCaptureSkipped(2);
             ci.cancel();
         }
     }

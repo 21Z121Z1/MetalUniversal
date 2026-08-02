@@ -1,9 +1,10 @@
 {
-  "schema_version": 1,
-  "scope": "Unified Iris-on-Metal render correctness, diagnosis, and performance evaluation",
+  "schema_version": 2,
+  "scope": "Unified Iris-on-Metal render correctness, admission, diagnosis, and performance evaluation",
   "reference_branch": "agent/unified-render-eval-performance",
   "suite_model": {
     "conformance": "Deterministic render-contract manifests, attachment readbacks, expectations, and first-divergence reports.",
+    "admission": "A short real-client probe proves that the selected optimization lane actually executes before expensive paired performance trials begin.",
     "performance": "Low-overhead structured counters and ABBA-paired baseline/candidate trials with heavy producer capture disabled.",
     "diagnostic": "Focused producer detail and attachment readback for the first divergent semantic pass only."
   },
@@ -36,6 +37,21 @@
       "A screenshot-only match cannot prove depth, motion, reactive, shadow, or HDR attachment correctness."
     ]
   },
+  "admission_gate": {
+    "required_before_performance": true,
+    "default_warmup_seconds": 2,
+    "default_sample_seconds": 5,
+    "source": "the unique native-fullscreen-baseline.json payload emitted by the candidate probe",
+    "rules": {
+      "pass-fusion": "renderFusionRuntime.admissions > 0",
+      "compute-grouping": "computeGroupingRuntime.admissions > 0 and deferredPassCloses > 0",
+      "depth-liveness": "depthLivenessRuntime.prunedPairs > 0 or captureSkips > 0",
+      "argument-tables": "argumentBindingRuntime.enabled is true and encodedSnapshots > 0",
+      "all-safe-lanes": "at least one selected Iris lane proves runtime activation"
+    },
+    "failure_state": "rejected-no-admission",
+    "malformed_or_missing_evidence_state": "inconclusive-admission-evidence"
+  },
   "measurement_protocol": {
     "minimum_paired_blocks": 4,
     "block_order": "ABBA or equivalent randomized interleaving; never run all baselines before all candidates",
@@ -43,6 +59,9 @@
     "sample_seconds_min": 120,
     "aggregation": "Aggregate frames within each completed trial first, then compare baseline and candidate within each block.",
     "failed_or_incomplete_trial_rule": "A nonzero or missing exit status is excluded from paired analysis and can never contribute to acceptance.",
+    "authoritative_source_report": "native-fullscreen-baseline.json",
+    "source_report_uniqueness": "Exactly one unique report payload is allowed per trial; byte-identical copies are permitted, non-identical copies reject the trial.",
+    "sample_window_rule": "A metric is available only when its sample window matches measuredFrameIntervals; warmup and measured samples may not be mixed.",
     "structured_metrics_only": true,
     "log_regex_is_authoritative": false,
     "minimum_positive_block_fraction": 0.75
@@ -62,11 +81,13 @@
     {"name": "frame_time_stutter_count", "relative_regression_max": 0.0},
     {"name": "validation_errors", "absolute_max": 0}
   ],
-  "acceptance_rule": "Accept only when correctness passes, mandatory structured FPS exists, at least one target metric improves in at least 75% of four or more paired blocks, and no guardrail exceeds its regression limit.",
+  "acceptance_rule": "Accept only when correctness and admission pass, mandatory structured FPS exists, at least one target metric improves in at least 75% of four or more paired blocks, and no guardrail exceeds its regression limit.",
   "decision_states": [
     "correctness-pass-no-performance-decision",
     "accepted-candidate",
     "rejected-correctness-gate",
+    "rejected-no-admission",
+    "inconclusive-admission-evidence",
     "rejected-regression",
     "inconclusive-noise",
     "blocked-environment",
@@ -77,9 +98,11 @@
     "acceptance.json",
     "correctness/gate.json",
     "correctness baseline/candidate evidence",
+    "admission/candidate/metrics.json when performance was requested",
+    "admission/admission.json when performance was requested",
     "trials/block-NNN/{baseline,candidate}/metrics.json",
-    "comparison.json when performance was requested",
-    "comparison.md when performance was requested",
+    "comparison.json when paired performance trials started",
+    "comparison.md when paired performance trials started",
     "decision.json"
   ],
   "human_approval_boundaries": [
