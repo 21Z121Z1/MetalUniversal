@@ -11,6 +11,7 @@ OUT="${METALLUM_AGENT_VERIFY_OUT:-$RUN_ROOT/verify-$MODE-$STAMP}"
 mkdir -p "$OUT"
 COMMAND_LOG="$OUT/commands.log"
 : > "$COMMAND_LOG"
+overall_status=0
 
 run_logged() {
   local name="$1"
@@ -27,8 +28,9 @@ run_logged() {
   set -e
   printf '[exit] %s %d\n' "$name" "$status" | tee -a "$COMMAND_LOG"
   if (( status != 0 )); then
-    return "$status"
+    overall_status=1
   fi
+  return 0
 }
 
 bash scripts/agent/doctor.sh
@@ -72,11 +74,18 @@ case "$MODE" in
       metalIrisTargetsIntegrationTest
     run_logged shader-translation ./gradlew --no-daemon metalIrisShaderTranslationTest
     if [[ -n "${WORLD:-}" ]]; then
+      set +e
       METALLUM_AGENT_RUN_ROOT="$RUN_ROOT" \
       PROFILES="${PROFILES:-baseline,all-safe-lanes}" \
       REPETITIONS="${REPETITIONS:-3}" \
       WORLD="$WORLD" \
         bash scripts/agent/run_iris_perf_cycle.sh
+      cycle_status=$?
+      set -e
+      printf '[exit] performance-cycle %d\n' "$cycle_status" | tee -a "$COMMAND_LOG"
+      if (( cycle_status != 0 )); then
+        overall_status=1
+      fi
     else
       echo "WORLD is not set; full mode completed build/GPU validation but skipped Minecraft performance runs" \
         | tee "$OUT/client-skip.txt"
@@ -91,10 +100,11 @@ esac
 git rev-parse HEAD > "$OUT/end-head.txt"
 git status --porcelain=v1 > "$OUT/end-git-status.txt"
 
-python3 - "$OUT" "$MODE" <<'PY'
+python3 - "$OUT" "$MODE" "$overall_status" <<'PY'
 import json, pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 mode = sys.argv[2]
+command_failed = int(sys.argv[3]) != 0
 forbidden = [
     re.compile(r"MixinApplyError", re.I),
     re.compile(r"failed to apply mixin", re.I),
@@ -108,18 +118,22 @@ for path in root.glob("*.log"):
         for match in pattern.finditer(text):
             line = text.count("\n", 0, match.start()) + 1
             hits.append({"file": path.name, "line": line, "pattern": pattern.pattern})
+status = "pass"
+if command_failed:
+    status = "fail-command"
+if hits:
+    status = "fail-forbidden-log-pattern"
 summary = {
     "mode": mode,
     "artifact_root": str(root),
     "start_head": (root / "start-head.txt").read_text().strip(),
     "end_head": (root / "end-head.txt").read_text().strip(),
+    "command_failed": command_failed,
     "forbidden_log_hits": hits,
-    "status": "pass" if not hits else "fail-forbidden-log-pattern",
+    "status": status,
 }
 (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-if hits:
-    print(json.dumps(summary, indent=2))
-    raise SystemExit(1)
 PY
 
 printf 'Verification artifacts: %s\n' "$OUT"
+exit "$overall_status"
