@@ -9,8 +9,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-/** Applies validation-only mixins only for an explicitly requested Oracle run. */
+/** Applies validation-only mixins only for explicitly requested runs. */
 public final class MetallumValidationMixinConfigPlugin implements IMixinConfigPlugin {
+    private static final String LIFECYCLE_MIXIN = "IrisMetalLifecycleValidationMixin";
+
     @Override
     public void onLoad(final String mixinPackage) {
     }
@@ -23,9 +25,13 @@ public final class MetallumValidationMixinConfigPlugin implements IMixinConfigPl
     @Override
     public boolean shouldApplyMixin(final String targetClassName, final String mixinClassName) {
         String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-        return osName.contains("mac")
-                && FabricLoader.getInstance().isModLoaded("iris")
-                && Boolean.getBoolean("metallum.iris.trace")
+        if (!osName.contains("mac") || !FabricLoader.getInstance().isModLoaded("iris")) {
+            return false;
+        }
+        if (mixinClassName.endsWith(LIFECYCLE_MIXIN)) {
+            return Boolean.getBoolean("metallum.iris.validation.enabled");
+        }
+        return Boolean.getBoolean("metallum.iris.trace")
                 && Boolean.getBoolean("metallum.iris.openglTrace");
     }
 
