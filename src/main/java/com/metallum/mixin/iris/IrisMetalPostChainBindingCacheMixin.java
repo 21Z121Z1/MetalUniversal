@@ -7,13 +7,13 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Caches immutable sampler/image name classification for the lifetime of the
- * process. Iris resource aliases are fixed by the pinned Iris contract, so the
- * same names do not need regex parsing for every fullscreen pass and dispatch.
+ * Caches immutable resource classification and sampler requirements for a
+ * pinned Iris generation.
  */
 @Mixin(targets = "com.metallum.client.metal.render.IrisMetalPostChain")
 public abstract class IrisMetalPostChainBindingCacheMixin {
@@ -22,6 +22,12 @@ public abstract class IrisMetalPostChainBindingCacheMixin {
             new ConcurrentHashMap<>();
     @Unique
     private static final ConcurrentMap<String, Integer> metallum$colorImageIndices =
+            new ConcurrentHashMap<>();
+    @Unique
+    private final ConcurrentMap<String, Boolean> metallum$requiredSamplers =
+            new ConcurrentHashMap<>();
+    @Unique
+    private final ConcurrentMap<String, Set<String>> metallum$samplerTypes =
             new ConcurrentHashMap<>();
 
     @Inject(method = "renderTargetIndex", at = @At("HEAD"), cancellable = true)
@@ -62,5 +68,45 @@ public abstract class IrisMetalPostChainBindingCacheMixin {
             final CallbackInfoReturnable<Integer> cir
     ) {
         metallum$colorImageIndices.putIfAbsent(name, cir.getReturnValue());
+    }
+
+    @Inject(method = "requiresSampler", at = @At("HEAD"), cancellable = true)
+    private void metallum$reuseRequiredSampler(
+            final String name,
+            final CallbackInfoReturnable<Boolean> cir
+    ) {
+        Boolean cached = this.metallum$requiredSamplers.get(name);
+        if (cached != null) {
+            IrisMetalPerformanceCounters.recordBindingClassificationCacheHit();
+            cir.setReturnValue(cached);
+        }
+    }
+
+    @Inject(method = "requiresSampler", at = @At("RETURN"))
+    private void metallum$rememberRequiredSampler(
+            final String name,
+            final CallbackInfoReturnable<Boolean> cir
+    ) {
+        this.metallum$requiredSamplers.putIfAbsent(name, cir.getReturnValue());
+    }
+
+    @Inject(method = "samplerTypes", at = @At("HEAD"), cancellable = true)
+    private void metallum$reuseSamplerTypes(
+            final String name,
+            final CallbackInfoReturnable<Set<String>> cir
+    ) {
+        Set<String> cached = this.metallum$samplerTypes.get(name);
+        if (cached != null) {
+            IrisMetalPerformanceCounters.recordBindingClassificationCacheHit();
+            cir.setReturnValue(cached);
+        }
+    }
+
+    @Inject(method = "samplerTypes", at = @At("RETURN"))
+    private void metallum$rememberSamplerTypes(
+            final String name,
+            final CallbackInfoReturnable<Set<String>> cir
+    ) {
+        this.metallum$samplerTypes.putIfAbsent(name, cir.getReturnValue());
     }
 }
