@@ -16,6 +16,8 @@ public final class MetalHotPathTelemetry {
     private static final LongAdder renderOffsetOnly = new LongAdder();
     private static final LongAdder computeForwarded = new LongAdder();
     private static final LongAdder computeSuppressed = new LongAdder();
+    private static final LongAdder nativeMultiDrawBatches = new LongAdder();
+    private static final LongAdder nativeMultiDrawCommands = new LongAdder();
 
     private MetalHotPathTelemetry() {
     }
@@ -50,13 +52,22 @@ public final class MetalHotPathTelemetry {
         }
     }
 
+    public static void recordNativeMultiDrawBatch(final int commandCount) {
+        if (ENABLED) {
+            nativeMultiDrawBatches.increment();
+            nativeMultiDrawCommands.add(Math.max(0, commandCount));
+        }
+    }
+
     public static Snapshot snapshot() {
         return new Snapshot(
                 renderForwarded.sum(),
                 renderSuppressed.sum(),
                 renderOffsetOnly.sum(),
                 computeForwarded.sum(),
-                computeSuppressed.sum()
+                computeSuppressed.sum(),
+                nativeMultiDrawBatches.sum(),
+                nativeMultiDrawCommands.sum()
         );
     }
 
@@ -66,6 +77,8 @@ public final class MetalHotPathTelemetry {
         renderOffsetOnly.reset();
         computeForwarded.reset();
         computeSuppressed.reset();
+        nativeMultiDrawBatches.reset();
+        nativeMultiDrawCommands.reset();
     }
 
     public record Snapshot(
@@ -73,10 +86,16 @@ public final class MetalHotPathTelemetry {
             long renderSuppressedCalls,
             long renderOffsetOnlyCalls,
             long computeForwardedCalls,
-            long computeSuppressedCalls
+            long computeSuppressedCalls,
+            long nativeMultiDrawBatches,
+            long nativeMultiDrawCommands
     ) {
         public long totalSuppressedFfmCalls() {
             return renderSuppressedCalls + computeSuppressedCalls;
+        }
+
+        public long collapsedDrawCalls() {
+            return Math.max(0L, nativeMultiDrawCommands - nativeMultiDrawBatches);
         }
 
         public double renderSuppressionRatio() {
