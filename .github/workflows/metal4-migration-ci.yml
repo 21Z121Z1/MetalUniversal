@@ -5,13 +5,19 @@ on:
   push:
     branches:
       - feature/metal4-complete-migration
+    paths:
+      - build.gradle
+      - docs/mtl4-api-probe.swift
+      - docs/iris-audit/mobilegl-hotpath-current-status.md
+      - src/main/**
+      - src/test/**
 
 permissions:
   contents: write
 
 concurrency:
   group: metal4-migration-acceptance
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   compile-and-test:
