@@ -69,6 +69,24 @@ and lifecycle gates enabled:
   `computeCommandPacketCalls=0`; this workload did not create a compute
   encoder/dispatch, so C1 compute correctness remains unexercised rather than
   being treated as a failure.
+- `./gradlew --rerun-tasks metalComputeBackendIntegrationTest --stacktrace
+  -Dmetallum.opt.computeCommandPacket=true
+  -Dmetallum.opt.computeCommandPacketMinOperations=1` passed with Metal API and
+  GPU validation enabled. The real-M1-Pro suite ran 11 tests covering absolute,
+  relative, and indirect dispatch, compute-to-compute ordering, storage-image
+  readback, and render-to-compute visibility while the compute-packet gate was
+  requested. This validates the backend workload path; it does not turn the
+  BSL client smoke lane's absent-dispatch result into a shaderpack telemetry
+  claim.
+- `./gradlew --rerun-tasks metalIrisTargetsIntegrationTest --stacktrace`
+  passed 17 real-M1-Pro offscreen/readback tests with Metal API and GPU
+  validation enabled, including shadow targets, ping-pong/depth/resize, and
+  shadow-composite compute publication. Both
+  `metalMrtBackendIntegrationTest` baseline (packet switches off) and candidate
+  (`renderStatePacket=true`, `renderCommandPacket=true`, minimum operations 1)
+  passed 16 readback tests. The candidate log's uint4/RGBA8 pipeline messages
+  came from the intentional `fragmentOutputFormatMismatchFailsClosed` test;
+  the XML result had zero failures and errors.
 - With BSL selected, I0 and I1 reached the semantic terrain path and reported
   `multiDrawBatches=0`, `terrainIcbAttempts=0`, `terrainIcbAccepted=0`, and
   `terrainIcbFallbacks=0`. I1 therefore verified the closed direct-resource
