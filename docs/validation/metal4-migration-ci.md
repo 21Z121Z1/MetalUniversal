@@ -1,8 +1,8 @@
 # Metal 4 migration macOS 26 CI receipt
 
-- Conclusion: **FAIL**
-- Source commit: `245c14532f8188c4fd0426726a97a19f8f661d31`
-- Workflow trigger: `bf9d96744cf89ae1132aaf39fa466766889f613c`
+- Conclusion: **PASS**
+- Source commit: `6623f37f9b2a7eb49dc734ec239ba1968bc7222c`
+- Workflow trigger: `6623f37f9b2a7eb49dc734ec239ba1968bc7222c`
 - Runner: `macOS / ARM64`
 - Xcode path: `/Applications/Xcode_26.6.0.app/Contents/Developer`
 - Swift: `Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)`
@@ -147,14 +147,14 @@ clang: warning: using sysroot for 'MacOSX' but targeting 'iPhone' [-Wincompatibl
 [buildIOSSpvc] -- SPIRV-Cross: Finding Git version for SPIRV-Cross.
 [buildIOSSpvc] -- Found Git: /opt/homebrew/bin/git (found version "2.55.0")
 [buildIOSSpvc] -- SPIRV-Cross: Git hash: vulkan-sdk-1.3.290.0
-[buildIOSSpvc] -- Configuring done (8.3s)
+[buildIOSSpvc] -- Configuring done (7.3s)
 [buildIOSSpvc] -- Generating done (0.0s)
 [buildIOSSpvc] -- Build files have been written to: /Users/runner/work/MetalUniversal/MetalUniversal/build/spirv-cross-build
 [buildIOSSpvc] Running: cmake --build . --config Release -j 4
 [buildIOSSpvc] [ 12%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross.cpp.o
-[buildIOSSpvc] [ 37%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_parsed_ir.cpp.o
+[buildIOSSpvc] [ 25%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cfg.cpp.o
 [buildIOSSpvc] [ 37%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_parser.cpp.o
-[buildIOSSpvc] [ 50%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cfg.cpp.o
+[buildIOSSpvc] [ 50%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_parsed_ir.cpp.o
 [buildIOSSpvc] [ 62%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_c.cpp.o
 [buildIOSSpvc] [ 75%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_glsl.cpp.o
 [buildIOSSpvc] [ 87%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_msl.cpp.o
@@ -169,31 +169,52 @@ clang: warning: using sysroot for 'MacOSX' but targeting 'iPhone' [-Wincompatibl
 > Task :classes
 > Task :processIncludeJars
 > Task :sourcesJar
-
-> Task :metal4ApiProbe FAILED
-docs/mtl4-api-probe.swift:280:25: error: cannot find 'buffer' in scope
-278 |     cenc.dispatchThreads(threadsPerGrid: MTLSize(width: 8, height: 8, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
-279 |     cenc.dispatchThreadgroups(
-280 |         indirectBuffer: buffer.gpuAddress,
-    |                         `- error: cannot find 'buffer' in scope
-281 |         threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1)
-282 |     )
-
+> Task :metal4ApiProbe
+> Task :compileTestJava
+> Task :extractIrisNestedJars
+> Task :processTestResources
 > Task :jar
+> Task :assemble
+> Task :testClasses
+> Task :metalComputeBackendIntegrationTest SKIPPED
+> Task :compileMetalFrameGenerationLifecycleTest
+
+> Task :metalFrameGenerationLifecycleTest
+PASS: display-aware source admission
+PASS: generated then real
+PASS: GUI suspend and resize
+PASS: enqueue then shutdown
+PASS: newer source supersedes stalled source
+PASS: stale callback preserves newer history
+PASS: generated submitted shutdown
+PASS: real submitted shutdown
+PASS: command buffer failure
+PASS: stale display update
+PASS: duplicate callback and idempotent release
+PASS: presentedTime zero
+PASS: presented before GPU completion
+Metal frame-generation lifecycle tests passed: 13
+
+> Task :compileMetalFxPerformanceValidation
+> Task :metalFxPerformanceValidation SKIPPED
+> Task :metalIrisTargetsIntegrationTest SKIPPED
+> Task :metalMrtBackendIntegrationTest SKIPPED
+> Task :compileMetalMrtSmokeTest
+> Task :metalMrtSmokeTest SKIPPED
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/Users/runner/.gradle/caches/modules-2/files-2.1/org.joml/joml/1.10.8/fc0a71dad90a2cf41d82a76156a0e700af8e4f8d/joml-1.10.8.jar)
+WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+> Task :test
+> Task :validateAccessWidener
+
+> Task :verifyIsolatedClientProfiles
+Isolated client profiles: PASS
+
+> Task :check
+> Task :build
 
 [Incubating] Problems report is available at: file:///Users/runner/work/MetalUniversal/MetalUniversal/build/reports/problems/problems-report.html
-
-FAILURE: Build failed with an exception.
-
-* What went wrong:
-Execution failed for task ':metal4ApiProbe'.
-> Process 'command 'bash'' finished with non-zero exit value 1
-
-* Try:
-> Run with --stacktrace option to get the stack trace.
-> Run with --info or --debug option to get more log output.
-> Run with --scan to get full insights from a Build Scan (powered by Develocity).
-> Get more help at https://help.gradle.org.
 
 Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
 
@@ -201,6 +222,6 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/9.4.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD FAILED in 2m 10s
-9 actionable tasks: 9 executed
+BUILD SUCCESSFUL in 2m 58s
+19 actionable tasks: 19 executed
 ```
