@@ -1,0 +1,31 @@
+name: Synchronize Metal 4 migration base
+
+on:
+  push:
+    branches:
+      - feature/metal4-complete-migration
+    paths:
+      - .github/workflows/metal4-sync-base.yml
+
+permissions:
+  contents: write
+
+jobs:
+  merge-base:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/metal4-complete-migration
+          fetch-depth: 0
+
+      - name: Merge latest hotpath base and remove this workflow
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin feature/mobilegl-inspired-hotpath
+          git merge --no-edit origin/feature/mobilegl-inspired-hotpath
+          git rm .github/workflows/metal4-sync-base.yml
+          git commit --amend --no-edit
+          git push origin HEAD:feature/metal4-complete-migration
