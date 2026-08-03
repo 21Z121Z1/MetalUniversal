@@ -1,0 +1,191 @@
+name: Apply fixed Metal 4 argument tables
+
+on:
+  push:
+    branches:
+      - feature/metal4-complete-migration
+    paths:
+      - .github/workflows/metal4-argument-table-refactor.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/metal4-complete-migration
+          fetch-depth: 0
+
+      - name: Replace dynamic table pools with per-slot tables
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/main/native/MetallumNative.swift')
+          text = path.read_text()
+
+          old_header = '''private final class Metal4MainQueueContext {
+              // Each compute dispatch needs an argument-table snapshot that will not be
+              // mutated by a later dispatch before the command buffer executes. Eight
+              // tables cover the current clear/transparency/CUTOUT/hand/fused chain plus
+              // the legacy camera+merge probe, while remaining bounded per slot.
+              private static let computeArgumentTableCount = 8
+
+              private enum SlotState {
+          '''
+          new_header = '''private final class Metal4MainQueueContext {
+              // Metal 4 collects argument-table bindings when a draw or dispatch is
+              // encoded. One table per stage and in-flight slot is therefore enough:
+              // later rewrites cannot affect commands already recorded, while the slot
+              // boundary prevents CPU mutation during GPU execution.
+              private enum SlotState {
+          '''
+          if old_header in text:
+              text = text.replace(old_header, new_header, 1)
+          elif new_header not in text:
+              raise SystemExit('queue context header anchor not found')
+
+          old_slot = '''        let vertexArguments: MTL4ArgumentTable
+                  let fragmentArguments: MTL4ArgumentTable
+                  let computeArgumentTables: [MTL4ArgumentTable]
+                  var renderArgumentTables: [(vertex: MTL4ArgumentTable, fragment: MTL4ArgumentTable)] = []
+                  let uniformBuffer: MTLBuffer
+                  var uniformOffset = 0
+                  var nextComputeArgumentTable = 0
+                  var nextRenderArgumentTable = 0
+                  var state: SlotState = .free
+
+                  init(
+                      commandBuffer: MTL4CommandBuffer,
+                      allocator: MTL4CommandAllocator,
+                      vertexArguments: MTL4ArgumentTable,
+                      fragmentArguments: MTL4ArgumentTable,
+                      computeArgumentTables: [MTL4ArgumentTable],
+                      uniformBuffer: MTLBuffer
+                  ) {
+                      self.commandBuffer = commandBuffer
+                      self.allocator = allocator
+                      self.vertexArguments = vertexArguments
+                      self.fragmentArguments = fragmentArguments
+                      self.computeArgumentTables = computeArgumentTables
+                      self.uniformBuffer = uniformBuffer
+                  }
+          '''
+          new_slot = '''        let vertexArguments: MTL4ArgumentTable
+                  let fragmentArguments: MTL4ArgumentTable
+                  let computeArguments: MTL4ArgumentTable
+                  let uniformBuffer: MTLBuffer
+                  var uniformOffset = 0
+                  var state: SlotState = .free
+
+                  init(
+                      commandBuffer: MTL4CommandBuffer,
+                      allocator: MTL4CommandAllocator,
+                      vertexArguments: MTL4ArgumentTable,
+                      fragmentArguments: MTL4ArgumentTable,
+                      computeArguments: MTL4ArgumentTable,
+                      uniformBuffer: MTLBuffer
+                  ) {
+                      self.commandBuffer = commandBuffer
+                      self.allocator = allocator
+                      self.vertexArguments = vertexArguments
+                      self.fragmentArguments = fragmentArguments
+                      self.computeArguments = computeArguments
+                      self.uniformBuffer = uniformBuffer
+                  }
+          '''
+          if old_slot in text:
+              text = text.replace(old_slot, new_slot, 1)
+          elif new_slot not in text:
+              raise SystemExit('slot ownership anchor not found')
+
+          old_create = '''            var computeArgumentTables: [MTL4ArgumentTable] = []
+                  for _ in 0..<Self.computeArgumentTableCount {
+                      guard let table = try? device.makeArgumentTable(descriptor: tableDescriptor) else {
+                          return nil
+                      }
+                      computeArgumentTables.append(table)
+                  }
+                  guard let allocator = try? device.makeCommandAllocator(descriptor: allocatorDescriptor),
+                        let commandBuffer = device.makeCommandBuffer(),
+                        let vertexArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
+                        let fragmentArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
+                        let uniformBuffer = device.makeBuffer(length: 65_536, options: .storageModeShared) else {
+          '''
+          new_create = '''            guard let allocator = try? device.makeCommandAllocator(descriptor: allocatorDescriptor),
+                        let commandBuffer = device.makeCommandBuffer(),
+                        let vertexArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
+                        let fragmentArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
+                        let computeArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
+                        let uniformBuffer = device.makeBuffer(length: 65_536, options: .storageModeShared) else {
+          '''
+          if old_create in text:
+              text = text.replace(old_create, new_create, 1)
+          elif new_create not in text:
+              raise SystemExit('argument table creation anchor not found')
+
+          old_append = '''                vertexArguments: vertexArguments,
+                      fragmentArguments: fragmentArguments,
+                      computeArgumentTables: computeArgumentTables,
+                      uniformBuffer: uniformBuffer
+          '''
+          new_append = '''                vertexArguments: vertexArguments,
+                      fragmentArguments: fragmentArguments,
+                      computeArguments: computeArguments,
+                      uniformBuffer: uniformBuffer
+          '''
+          if old_append in text:
+              text = text.replace(old_append, new_append, 1)
+          elif new_append not in text:
+              raise SystemExit('slot append anchor not found')
+
+          start = '    func argumentTables(at index: Int) -> (MTL4ArgumentTable, MTL4ArgumentTable) {'
+          end = '    func writeClearUniforms(_ uniforms: MetallumClearUniforms, at slotIndex: Int) -> (MTLBuffer, Int)? {'
+          if start in text:
+              left, tail = text.split(start, 1)
+              _, right = tail.split(end, 1)
+              replacement = '''    func argumentTables(at index: Int) -> (MTL4ArgumentTable, MTL4ArgumentTable) {
+                  let slot = slots[index]
+                  return (slot.vertexArguments, slot.fragmentArguments)
+              }
+
+              func computeArgumentTable(at index: Int) -> MTL4ArgumentTable {
+                  slots[index].computeArguments
+              }
+
+          ''' + end
+              text = left + replacement + right
+          elif 'return (slot.vertexArguments, slot.fragmentArguments)' not in text:
+              raise SystemExit('argument table accessors anchor not found')
+
+          text = text.replace('''        slot.uniformOffset = 0
+                  slot.nextComputeArgumentTable = 0
+                  slot.nextRenderArgumentTable = 0
+                  slot.allocator.reset()
+          ''', '''        slot.uniformOffset = 0
+                  slot.allocator.reset()
+          ''', 1)
+
+          forbidden = [
+              'computeArgumentTableCount',
+              'computeArgumentTables',
+              'renderArgumentTables',
+              'nextComputeArgumentTable',
+              'nextRenderArgumentTable',
+              'Metal 4 compute argument-table pool exhausted'
+          ]
+          remaining = [token for token in forbidden if token in text]
+          if remaining:
+              raise SystemExit(f'dynamic argument-table state remains: {remaining}')
+
+          path.write_text(text)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main/native/MetallumNative.swift
+          git commit -m "refactor(metal4): use fixed per-slot argument tables [skip ci]"
+          git push origin HEAD:feature/metal4-complete-migration
