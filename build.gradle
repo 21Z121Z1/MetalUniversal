@@ -388,7 +388,7 @@ tasks.register("metal4ApiProbe", Exec) {
     }
     workingDir project.projectDir
     inputs.file("docs/mtl4-api-probe.swift")
-    commandLine "bash", "-lc", "xcrun swiftc -typecheck -sdk \"$(xcrun --show-sdk-path --sdk macosx)\" -target arm64-apple-macosx14.0 docs/mtl4-api-probe.swift"
+    commandLine "bash", "-lc", 'xcrun swiftc -typecheck -sdk "$(xcrun --show-sdk-path --sdk macosx)" -target arm64-apple-macosx14.0 docs/mtl4-api-probe.swift'
 }
 
 tasks.named("check") {
