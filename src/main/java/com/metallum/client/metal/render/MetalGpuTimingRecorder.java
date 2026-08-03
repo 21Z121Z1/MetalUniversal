@@ -135,7 +135,7 @@ public final class MetalGpuTimingRecorder {
     public record CpuPassSample(String label, double milliseconds) {
     }
 
-    public record GpuEncoderSample(String label, int kind, double milliseconds) {
+    public record GpuEncoderSample(String label, String kind, double milliseconds) {
     }
 
     public record RenderEncoderLookupStats(long factoryCalls, long cacheHits) {
