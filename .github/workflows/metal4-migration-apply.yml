@@ -1,0 +1,45 @@
+name: Apply Metal 4 migration
+
+on:
+  push:
+    branches:
+      - feature/metal4-complete-migration
+    paths:
+      - tools/apply_metal4_complete_migration.py
+      - .github/workflows/metal4-migration-apply.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: metal4-migration-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/metal4-complete-migration
+          fetch-depth: 0
+
+      - name: Apply exact migration patch
+        run: python3 tools/apply_metal4_complete_migration.py
+
+      - name: Commit generated source changes
+        run: |
+          if git diff --quiet; then
+            echo "Migration patch already applied"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            src/main/native/MetallumNative.swift \
+            src/main/java/com/metallum/client/metal/render/MetalDevice.java \
+            docs/mtl4-api-probe.swift \
+            build.gradle
+          git commit -m "feat(metal4): close generic backend migration"
+          git push origin HEAD:feature/metal4-complete-migration
