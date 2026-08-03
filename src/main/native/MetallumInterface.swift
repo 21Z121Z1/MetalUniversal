@@ -44,12 +44,14 @@ private var interfaceTables: [UInt64: UnsafeMutableRawPointer] = [:]
 enum MetallumInterfaceFeature: Int32 {
     case core = 1
     case metalFX = 2
+    case renderStatePacket = 3
 
     /// Highest interface version this dylib provides for the feature.
     var currentVersion: UInt32 {
         switch self {
         case .core: return 1
         case .metalFX: return 1
+        case .renderStatePacket: return 1
         }
     }
 }
@@ -72,6 +74,7 @@ struct MetallumBuildCapability {
     static let cutoutReactive: UInt64 = 1 << 7
     static let handOverlay: UInt64 = 1 << 8
     static let presentationTimeline: UInt64 = 1 << 9
+    static let renderStatePacket: UInt64 = 1 << 10
 }
 
 private func buildCapabilities(for feature: MetallumInterfaceFeature) -> UInt64 {
@@ -80,6 +83,7 @@ private func buildCapabilities(for feature: MetallumInterfaceFeature) -> UInt64 
         return MetallumBuildCapability.core
             | MetallumBuildCapability.raster
             | MetallumBuildCapability.compute
+            | MetallumBuildCapability.renderStatePacket
     case .metalFX:
         #if canImport(MetalFX)
         return MetallumBuildCapability.metalFXSpatial
@@ -92,6 +96,8 @@ private func buildCapabilities(for feature: MetallumInterfaceFeature) -> UInt64 
         #else
         return 0
         #endif
+    case .renderStatePacket:
+        return MetallumBuildCapability.renderStatePacket
     }
 }
 
@@ -102,6 +108,7 @@ public func metallum_core_device_capabilities(_ device: MTLDevice) -> UInt64 {
     var bits = MetallumBuildCapability.core
         | MetallumBuildCapability.raster
         | MetallumBuildCapability.compute
+        | MetallumBuildCapability.renderStatePacket
     if metallum_metalfx_supports_spatial(device) != 0 {
         bits |= MetallumBuildCapability.metalFXSpatial
     }
@@ -153,6 +160,13 @@ private func entries(for feature: MetallumInterfaceFeature, version: UInt32) -> 
             functionPointer(metallum_metalfx_supports_motion_v2 as @convention(c) (MTLDevice) -> Int32),
             functionPointer(metallum_metalfx_supports_cutout_reactive as @convention(c) (MTLDevice) -> Int32),
             functionPointer(metallum_metalfx_supports_hand_overlay as @convention(c) (MTLDevice) -> Int32)
+        ]
+    case .renderStatePacket:
+        return [
+            functionPointer(
+                metallum_render_state_packet_apply_v1
+                    as @convention(c) (MTLRenderCommandEncoder, UnsafeRawPointer?, Int64) -> Int32
+            )
         ]
     }
 }
