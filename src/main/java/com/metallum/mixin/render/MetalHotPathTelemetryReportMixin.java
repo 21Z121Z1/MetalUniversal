@@ -47,6 +47,7 @@ public abstract class MetalHotPathTelemetryReportMixin {
                         + "renderOffsetOnly={} computeForwarded={} computeSuppressed={} "
                         + "multiDrawBatches={} multiDrawCommands={} "
                         + "statePacketCalls={} statePacketEntries={} statePacketReplays={} "
+                        + "statePacketSingleEntryBypasses={} statePacketCapacityFlushes={} "
                         + "renderCommandPacketCalls={} renderCommandOperations={} "
                         + "renderCommandReplays={} computeCommandPacketCalls={} "
                         + "computeCommandOperations={} computeCommandReplays={} "
@@ -66,6 +67,8 @@ public abstract class MetalHotPathTelemetryReportMixin {
                 state.packetCalls(),
                 state.packetEntries(),
                 state.legacyReplays(),
+                state.singleEntryBypasses(),
+                state.capacityFlushes(),
                 command.renderPacketCalls(),
                 command.renderOperations(),
                 command.renderLegacyReplays(),

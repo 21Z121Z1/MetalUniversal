@@ -174,7 +174,7 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) this.indexBuffer;
         MTLRenderCommandEncoder encoder = this.metallum$invokeRenderEncoder();
         this.metallum$invokeBindDrawState(encoder);
-        ((MetalRenderStateFlushable) encoder).metallum$flushPendingRenderState();
+        ((MetalRenderStateFlushable) (Object) encoder).metallum$flushPendingRenderState();
         MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
                 encoder.handle(),
                 primitiveType.value,
@@ -212,7 +212,7 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
             final CallbackInfo ci
     ) {
         MTLRenderCommandEncoder encoder = this.metallum$invokeRenderEncoder();
-        ((MetalRenderStateFlushable) encoder).metallum$flushPendingRenderState();
+        ((MetalRenderStateFlushable) (Object) encoder).metallum$flushPendingRenderState();
     }
 
     @Inject(

@@ -29,6 +29,6 @@ public abstract class MetalRenderPassCommandPacketBoundaryMixin {
         if (encoder == null || MetalNativeBridge.isNullHandle(encoder.handle())) {
             return;
         }
-        ((MetalRenderStateFlushable) encoder).metallum$flushRenderState(encoder.handle());
+        ((MetalRenderStateFlushable) (Object) encoder).metallum$flushRenderState(encoder.handle());
     }
 }

@@ -248,7 +248,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
             final MemorySegment encoder
     ) {
         if (this.metallum$commandPacket == null) {
-            ((MetalRenderStateFlushable) encoderObject).metallum$flushRenderState(encoder);
+            ((MetalRenderStateFlushable) (Object) encoderObject).metallum$flushRenderState(encoder);
         }
     }
 
