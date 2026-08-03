@@ -11,8 +11,11 @@ current implementation/debug authority is:
 - `mobilegl-inspired-hotpath-redesign.md` — original architecture and completed
   state-shadow/token/frame-arena work;
 - `mobilegl-command-packets-terrain-icb-agent-guide.md` — authoritative guide for
-  render command packets, compute command packets, terrain ICB, switches,
-  debugging, validation, and agent handoff.
+  render command packets, compute command packets, debugging, validation, and
+  agent handoff;
+- `mobilegl-terrain-icb-resource-contract-addendum.md` — authoritative override
+  for terrain-ICB enablement, direct texture/sampler risk, and corrected ICB
+  validation lanes.
 
 ## Implemented but not yet validated
 
@@ -26,7 +29,9 @@ current implementation/debug authority is:
 - compute fence/end boundaries;
 - packet/ICB telemetry and periodic log reports;
 - Java packet-layout and terrain-scope tests;
-- default-off Mixin gating for render packet and terrain scope.
+- default-off Mixin gating for render packet and terrain scope;
+- a second default-off `terrainIcbDirectResourceProbe` gate, required before the
+  current direct texture/sampler terrain path may execute ICB commands.
 
 ## Not proven
 
@@ -43,7 +48,7 @@ No claim is made yet for:
 
 ## Required next action
 
-Follow `mobilegl-command-packets-terrain-icb-agent-guide.md` from Phase 0. Fix
-compile and Mixin errors before changing architecture. Enable exactly one new
-feature per correctness lane. Do not enable all experiments together for the
-first run.
+Follow `mobilegl-command-packets-terrain-icb-agent-guide.md` from Phase 0 and
+apply the terrain addendum whenever testing ICB. Fix compile and Mixin errors
+before changing architecture. Enable exactly one new feature per correctness
+lane. Do not enable all experiments together for the first run.
