@@ -25,21 +25,27 @@ jobs:
           ref: feature/metal4-complete-migration
           fetch-depth: 0
 
+      - name: Configure repository identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge current hotpath base
+        run: |
+          git fetch origin feature/mobilegl-inspired-hotpath
+          git merge --no-edit origin/feature/mobilegl-inspired-hotpath
+
       - name: Apply exact migration patch
         run: python3 tools/apply_metal4_complete_migration.py
 
       - name: Commit generated source changes
         run: |
-          if git diff --quiet; then
-            echo "Migration patch already applied"
-            exit 0
+          if ! git diff --quiet; then
+            git add \
+              src/main/native/MetallumNative.swift \
+              src/main/java/com/metallum/client/metal/render/MetalDevice.java \
+              docs/mtl4-api-probe.swift \
+              build.gradle
+            git commit -m "feat(metal4): close generic backend migration"
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            src/main/native/MetallumNative.swift \
-            src/main/java/com/metallum/client/metal/render/MetalDevice.java \
-            docs/mtl4-api-probe.swift \
-            build.gradle
-          git commit -m "feat(metal4): close generic backend migration"
           git push origin HEAD:feature/metal4-complete-migration
