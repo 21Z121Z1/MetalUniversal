@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 
 enum MetalFrameGenerationAdmissionDecision: Equatable {
     case wait(until: CFTimeInterval)
@@ -57,9 +58,6 @@ enum MetalFrameGenerationLifecycleAction: Equatable {
     case invalidateHistory
 }
 
-/// Identifies which source most recently established each presenter history.
-/// Drawable callbacks can arrive after source ownership has moved on; a stale
-/// failure must not invalidate history produced by a newer source.
 struct MetalFrameGenerationHistoryOwnership {
     private(set) var interpolatorEventValue: UInt64?
     private(set) var displayEventValue: UInt64?
@@ -95,11 +93,6 @@ struct MetalFrameGenerationHistoryOwnership {
     }
 }
 
-/// Metal-independent reducer for one source frame.
-///
-/// All calls are expected to be serialized by the presenter. The reducer owns
-/// no Metal objects; it only decides whether work may advance and when the
-/// presenter's source ownership token can be released.
 struct MetalFrameGenerationLifecycle {
     let sourceFrameID: UInt64
 
@@ -137,9 +130,6 @@ struct MetalFrameGenerationLifecycle {
         if hasInterpolation && !generatedSubmitted {
             return .generated
         }
-        // Generated and real command buffers share one serial presenter queue.
-        // Submission order is therefore sufficient; waiting for the generated
-        // completion handler here can unnecessarily skip the next display update.
         if (!hasInterpolation || generatedSubmitted) && !realSubmitted {
             return .real
         }
@@ -194,8 +184,6 @@ struct MetalFrameGenerationLifecycle {
         failureReason = reason
         switch step {
         case .generated:
-            // A generated-frame failure invalidates interpolation history, but
-            // the real source frame may still be presented on a later update.
             generatedSubmitted = true
             generatedCompleted = true
             generatedSucceeded = false
@@ -249,7 +237,6 @@ struct MetalFrameGenerationLifecycle {
             failureReason = reason ?? "\(work) command buffer failed"
             phase = .failed
             if work == .generated {
-                // Preserve the source long enough to try its real frame.
                 return [.invalidateHistory]
             }
             return [.invalidateHistory] + terminalActions()
@@ -269,11 +256,6 @@ struct MetalFrameGenerationLifecycle {
                 }
                 return terminalActions()
             }
-            // The present command buffer has finished reading the source slot
-            // and writing the CAMetalDrawable, so the slot is safe to reuse.
-            // WindowServer may report the actual scanout several refreshes
-            // later in windowed mode; retaining ownership until that callback
-            // serializes this latency into the game's source-frame rate.
             phase = .realPresentPending
             terminalPhase = .realPresentPending
             ownershipReleased = true
@@ -355,4 +337,94 @@ struct MetalFrameGenerationLifecycle {
         phase = .released
         return [.releaseOwnership]
     }
+}
+
+// MARK: - Raw compute packet adapters
+//
+// The generic compute ABI returns a retained MTLComputeCommandEncoder as an
+// opaque pointer. MetallumInterface.swift owns only that pointer, while the
+// established native functions accept the typed protocol object. These local
+// overloads restore the object and call Metal directly. They deliberately have
+// no @_cdecl symbol and therefore do not change the public ABI.
+
+@inline(__always)
+private func metalComputePacketEncoder(
+    _ pointer: UnsafeMutableRawPointer
+) -> MTLComputeCommandEncoder {
+    Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+        as! MTLComputeCommandEncoder
+}
+
+func metallum_MTLComputeCommandEncoder_setComputePipelineState(
+    _ pointer: UnsafeMutableRawPointer,
+    _ pipelineState: MTLComputePipelineState
+) {
+    metalComputePacketEncoder(pointer).setComputePipelineState(pipelineState)
+}
+
+func metallum_MTLComputeCommandEncoder_setBuffer(
+    _ pointer: UnsafeMutableRawPointer,
+    _ buffer: MTLBuffer?,
+    _ offset: UInt64,
+    _ index: Int32
+) {
+    metalComputePacketEncoder(pointer).setBuffer(
+        buffer,
+        offset: Int(offset),
+        index: Int(index)
+    )
+}
+
+func metallum_MTLComputeCommandEncoder_setTexture(
+    _ pointer: UnsafeMutableRawPointer,
+    _ texture: MTLTexture?,
+    _ index: Int32
+) {
+    metalComputePacketEncoder(pointer).setTexture(texture, index: Int(index))
+}
+
+func metallum_MTLComputeCommandEncoder_setSamplerState(
+    _ pointer: UnsafeMutableRawPointer,
+    _ sampler: MTLSamplerState?,
+    _ index: Int32
+) {
+    metalComputePacketEncoder(pointer).setSamplerState(sampler, index: Int(index))
+}
+
+func metallum_MTLComputeCommandEncoder_dispatchThreadgroups(
+    _ pointer: UnsafeMutableRawPointer,
+    _ groupsX: Int32,
+    _ groupsY: Int32,
+    _ groupsZ: Int32,
+    _ threadsPerGroupX: Int32,
+    _ threadsPerGroupY: Int32,
+    _ threadsPerGroupZ: Int32
+) {
+    metalComputePacketEncoder(pointer).dispatchThreadgroups(
+        MTLSize(width: Int(groupsX), height: Int(groupsY), depth: Int(groupsZ)),
+        threadsPerThreadgroup: MTLSize(
+            width: Int(threadsPerGroupX),
+            height: Int(threadsPerGroupY),
+            depth: Int(threadsPerGroupZ)
+        )
+    )
+}
+
+func metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
+    _ pointer: UnsafeMutableRawPointer,
+    _ indirectBuffer: MTLBuffer,
+    _ indirectOffset: UInt64,
+    _ threadsPerGroupX: Int32,
+    _ threadsPerGroupY: Int32,
+    _ threadsPerGroupZ: Int32
+) {
+    metalComputePacketEncoder(pointer).dispatchThreadgroups(
+        indirectBuffer: indirectBuffer,
+        indirectBufferOffset: Int(indirectOffset),
+        threadsPerThreadgroup: MTLSize(
+            width: Int(threadsPerGroupX),
+            height: Int(threadsPerGroupY),
+            depth: Int(threadsPerGroupZ)
+        )
+    )
 }
