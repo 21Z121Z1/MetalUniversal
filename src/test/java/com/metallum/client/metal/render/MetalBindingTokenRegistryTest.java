@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class MetalBindingTokenRegistryTest {
@@ -19,6 +20,25 @@ final class MetalBindingTokenRegistryTest {
         assertSame(firstToken, secondToken);
         assertEquals(firstToken.id(), secondToken.id());
         assertFalse(firstToken.invalidatesGeneratedIrisBlock());
+    }
+
+    @Test
+    void identityCachePreservesCanonicalTokenAcrossClearAndDistinctStrings() {
+        MetalBindingTokenCache cache = new MetalBindingTokenCache(4);
+        String stableName = new String("NoiseTexture");
+
+        MetalBindingToken first = cache.resolve(stableName);
+        assertSame(first, cache.resolve(stableName));
+        assertSame(first, cache.resolve(new String("NoiseTexture")));
+
+        cache.clear();
+        assertSame(first, cache.resolve(stableName));
+    }
+
+    @Test
+    void identityCacheRequiresPowerOfTwoCapacity() {
+        assertThrows(IllegalArgumentException.class, () -> new MetalBindingTokenCache(1));
+        assertThrows(IllegalArgumentException.class, () -> new MetalBindingTokenCache(3));
     }
 
     @Test
