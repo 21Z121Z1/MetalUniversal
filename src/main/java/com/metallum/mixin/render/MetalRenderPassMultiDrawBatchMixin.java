@@ -32,6 +32,8 @@ import java.util.Map;
  */
 @Mixin(targets = "com.metallum.client.metal.render.MetalRenderPass")
 public abstract class MetalRenderPassMultiDrawBatchMixin {
+    private static final int MAX_PORTABLE_ICB_COMMANDS = 16_384;
+
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.nativeMultiDrawBatch", "true")
     );
@@ -148,8 +150,6 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
             }
         }
 
-        // Exact validation metadata remains owned by the target method. Avoid
-        // opening an encoder merely to discover that this mixin will fall back.
         if (!batchEligible && !noTrace) {
             return;
         }
@@ -168,6 +168,7 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
                     && MetalTerrainIcbScope.active()
                     && instanceCount > 0
                     && emitted >= TERRAIN_ICB_THRESHOLD
+                    && emitted <= MAX_PORTABLE_ICB_COMMANDS
                     && MetalTerrainIcbBridge.available();
             if (attemptIcb) {
                 MetalCommandPacketTelemetry.terrainIcbAttempt(emitted);
