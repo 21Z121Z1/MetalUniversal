@@ -125,127 +125,86 @@ private func validateRenderStateEntry(_ entry: RenderStatePacketEntry) -> Bool {
     }
 }
 
-private func applyRenderBuffer(
-    _ encoder: MTLRenderCommandEncoder,
-    _ buffer: MTLBuffer?,
-    _ offset: Int,
-    _ index: Int,
-    _ stageMask: UInt32
-) {
-    if (stageMask & renderStageVertex) != 0 {
-        encoder.setVertexBuffer(buffer, offset: offset, index: index)
-    }
-    if (stageMask & renderStageFragment) != 0 {
-        encoder.setFragmentBuffer(buffer, offset: offset, index: index)
-    }
-}
-
-private func applyRenderBufferOffset(
-    _ encoder: MTLRenderCommandEncoder,
-    _ offset: Int,
-    _ index: Int,
-    _ stageMask: UInt32
-) {
-    if (stageMask & renderStageVertex) != 0 {
-        encoder.setVertexBufferOffset(offset, index: index)
-    }
-    if (stageMask & renderStageFragment) != 0 {
-        encoder.setFragmentBufferOffset(offset, index: index)
-    }
-}
-
-private func applyRenderTexture(
-    _ encoder: MTLRenderCommandEncoder,
-    _ texture: MTLTexture?,
-    _ index: Int,
-    _ stageMask: UInt32
-) {
-    if (stageMask & renderStageVertex) != 0 {
-        encoder.setVertexTexture(texture, index: index)
-    }
-    if (stageMask & renderStageFragment) != 0 {
-        encoder.setFragmentTexture(texture, index: index)
-    }
-}
-
-private func applyRenderSampler(
-    _ encoder: MTLRenderCommandEncoder,
-    _ sampler: MTLSamplerState?,
-    _ index: Int,
-    _ stageMask: UInt32
-) {
-    if (stageMask & renderStageVertex) != 0 {
-        encoder.setVertexSamplerState(sampler, index: index)
-    }
-    if (stageMask & renderStageFragment) != 0 {
-        encoder.setFragmentSamplerState(sampler, index: index)
-    }
-}
-
+/// Reuse the shipping setter functions rather than duplicating Metal 3 / Metal
+/// 4 dispatch here. Those functions accept the raw encoder handle, route to the
+/// Metal4MainRenderEncoderBridge when appropriate, and otherwise use the Metal 3
+/// encoder. Java still crosses FFM once for the whole packet.
 private func applyRenderStateEntry(
-    _ encoder: MTLRenderCommandEncoder,
+    _ encoderPointer: UnsafeMutableRawPointer,
     _ entry: RenderStatePacketEntry
 ) {
-    let index = Int(entry.index)
+    let stageMask = Int32(bitPattern: entry.stageMask)
     switch entry.opcode {
     case .pipeline:
-        encoder.setRenderPipelineState(packetObject(entry.a) as! MTLRenderPipelineState)
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(
+            encoderPointer,
+            packetObject(entry.a) as! MTLRenderPipelineState
+        )
     case .depthStencil:
-        encoder.setDepthStencilState(packetObject(entry.a) as? MTLDepthStencilState)
+        metallum_MTLRenderCommandEncoder_setDepthStencilState(
+            encoderPointer,
+            packetObject(entry.a) as? MTLDepthStencilState
+        )
     case .depthBias:
-        encoder.setDepthBias(
+        metallum_MTLRenderCommandEncoder_setDepthBias(
+            encoderPointer,
             Float(bitPattern: UInt32(truncatingIfNeeded: entry.a)),
-            slopeScale: Float(bitPattern: UInt32(truncatingIfNeeded: entry.b)),
-            clamp: Float(bitPattern: UInt32(truncatingIfNeeded: entry.c))
+            Float(bitPattern: UInt32(truncatingIfNeeded: entry.b)),
+            Float(bitPattern: UInt32(truncatingIfNeeded: entry.c))
         )
     case .winding:
-        encoder.setFrontFacing(MTLWinding(rawValue: UInt(entry.a))!)
+        metallum_MTLRenderCommandEncoder_setFrontFacingWinding(
+            encoderPointer,
+            MTLWinding(rawValue: UInt(entry.a))!
+        )
     case .cullMode:
-        encoder.setCullMode(MTLCullMode(rawValue: UInt(entry.a))!)
+        metallum_MTLRenderCommandEncoder_setCullMode(
+            encoderPointer,
+            MTLCullMode(rawValue: UInt(entry.a))!
+        )
     case .fillMode:
-        encoder.setTriangleFillMode(MTLTriangleFillMode(rawValue: UInt(entry.a))!)
+        metallum_MTLRenderCommandEncoder_setTriangleFillMode(
+            encoderPointer,
+            MTLTriangleFillMode(rawValue: UInt(entry.a))!
+        )
     case .buffer:
-        applyRenderBuffer(
-            encoder,
+        metallum_MTLRenderCommandEncoder_setBuffer(
+            encoderPointer,
             packetObject(entry.a) as? MTLBuffer,
-            Int(bitPattern: UInt(entry.b)),
-            index,
-            entry.stageMask
+            entry.b,
+            entry.index,
+            stageMask
         )
     case .bufferOffset:
-        applyRenderBufferOffset(
-            encoder,
-            Int(bitPattern: UInt(entry.a)),
-            index,
-            entry.stageMask
+        metallum_MTLRenderCommandEncoder_setBufferOffset(
+            encoderPointer,
+            entry.a,
+            entry.index,
+            stageMask
         )
     case .texture:
-        applyRenderTexture(
-            encoder,
+        metallum_MTLRenderCommandEncoder_setTexture(
+            encoderPointer,
             packetObject(entry.a) as? MTLTexture,
-            index,
-            entry.stageMask
+            entry.index,
+            stageMask
         )
     case .textureAndSampler:
-        applyRenderTexture(
-            encoder,
+        metallum_MTLRenderCommandEncoder_setTextureAndSampler(
+            encoderPointer,
             packetObject(entry.a) as? MTLTexture,
-            index,
-            entry.stageMask
-        )
-        applyRenderSampler(
-            encoder,
             packetObject(entry.b) as? MTLSamplerState,
-            index,
-            entry.stageMask
+            entry.index,
+            stageMask
         )
     case .scissor:
-        encoder.setScissorRect(MTLScissorRect(
-            x: Int(entry.index),
-            y: Int(entry.a),
-            width: Int(entry.b),
-            height: Int(entry.c)
-        ))
+        metallum_MTLRenderCommandEncoder_setScissorRect(
+            encoderPointer,
+            entry.index,
+            entry.a,
+            entry.b,
+            entry.c
+        )
     }
 }
 
@@ -253,7 +212,7 @@ private func applyRenderStateEntry(
 /// state was applied and Java may safely replay the packet through legacy calls.
 @_cdecl("metallum_render_state_packet_apply_v1")
 public func metallum_render_state_packet_apply_v1(
-    _ encoder: MTLRenderCommandEncoder,
+    _ encoderPointer: UnsafeMutableRawPointer,
     _ rawPacket: UnsafeRawPointer?,
     _ rawByteCount: Int64
 ) -> Int32 {
@@ -285,7 +244,7 @@ public func metallum_render_state_packet_apply_v1(
         }
     }
     for index in 0..<entryCount {
-        applyRenderStateEntry(encoder, decodeRenderStateEntry(packet, index)!)
+        applyRenderStateEntry(encoderPointer, decodeRenderStateEntry(packet, index)!)
     }
     return Int32(entryCount)
 }
@@ -454,7 +413,7 @@ private func entries(for feature: MetallumInterfaceFeature, version: UInt32) -> 
         return [
             functionPointer(
                 metallum_render_state_packet_apply_v1
-                    as @convention(c) (MTLRenderCommandEncoder, UnsafeRawPointer?, Int64) -> Int32
+                    as @convention(c) (UnsafeMutableRawPointer, UnsafeRawPointer?, Int64) -> Int32
             )
         ]
     }
