@@ -10,6 +10,7 @@ import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
@@ -18,6 +19,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.lang.reflect.Field;
+import java.util.Map;
 
 /**
  * Keeps buffer descriptor state stable across repeated Iris/Sodium draw setup.
@@ -34,8 +36,19 @@ import java.lang.reflect.Field;
 @Mixin(targets = "com.metallum.client.metal.render.MetalRenderPass")
 public abstract class MetalRenderPassBindingCacheMixin {
     @Unique
+    private static final boolean metallum$TOKENIZED_BINDINGS = !"false".equalsIgnoreCase(
+            System.getProperty("metallum.opt.bindingTokens", "true")
+    );
+    @Unique
+    private static final boolean metallum$COMPILED_BINDING_PLAN = !"false".equalsIgnoreCase(
+            System.getProperty("metallum.opt.compiledBindingPlan", "true")
+    );
+    @Unique
     private static final BindingState[] metallum$EMPTY_BINDINGS = new BindingState[0];
 
+    @Unique
+    private final Map<String, BindingState> metallum$legacyUniformBindings =
+            new Object2ObjectOpenHashMap<>();
     @Unique
     private final Int2ObjectOpenHashMap<BindingState> metallum$fallbackUniformBindings =
             new Int2ObjectOpenHashMap<>();
@@ -54,6 +67,11 @@ public abstract class MetalRenderPassBindingCacheMixin {
             final RenderPipeline pipeline,
             final CallbackInfo ci
     ) {
+        if (!metallum$TOKENIZED_BINDINGS || !metallum$COMPILED_BINDING_PLAN) {
+            this.metallum$currentBindingPlan = null;
+            this.metallum$uniformBindingsBySlot = metallum$EMPTY_BINDINGS;
+            return;
+        }
         Object compiledPipeline = metallum$compiledPipeline(this);
         MetalCompiledBindingPlan nextPlan = compiledPipeline instanceof MetalCompiledBindingPlanProvider provider
                 ? provider.metallum$bindingPlan()
@@ -81,6 +99,11 @@ public abstract class MetalRenderPassBindingCacheMixin {
             final GpuBufferSlice value,
             final CallbackInfo ci
     ) {
+        if (!metallum$TOKENIZED_BINDINGS) {
+            this.metallum$deduplicateLegacyUniform(name, value, ci);
+            return;
+        }
+
         MetalBindingToken token = this.metallum$tokenCache.resolve(name);
         // These Mojang blocks also invalidate the generated Iris draw block;
         // preserve that semantic boundary even when their native binding did
@@ -114,6 +137,28 @@ public abstract class MetalRenderPassBindingCacheMixin {
                 state = new BindingState();
                 this.metallum$fallbackUniformBindings.put(token.id(), state);
             }
+        }
+        state.update(value);
+    }
+
+    @Unique
+    private void metallum$deduplicateLegacyUniform(
+            final String name,
+            final GpuBufferSlice value,
+            final CallbackInfo ci
+    ) {
+        if ("DynamicTransforms".equals(name) || "Projection".equals(name)) {
+            return;
+        }
+        BindingState state = this.metallum$legacyUniformBindings.get(name);
+        if (state != null && state.matches(value)) {
+            IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
+            ci.cancel();
+            return;
+        }
+        if (state == null) {
+            state = new BindingState();
+            this.metallum$legacyUniformBindings.put(name, state);
         }
         state.update(value);
     }
