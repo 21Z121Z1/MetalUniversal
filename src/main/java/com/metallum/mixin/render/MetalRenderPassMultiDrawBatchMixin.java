@@ -47,6 +47,15 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
     private static final boolean TERRAIN_ICB_ENABLED = Boolean.getBoolean(
             "metallum.opt.terrainIcbPilot"
     );
+    /**
+     * Diagnostic-only acknowledgement that the current Metal 3 terrain shader
+     * still binds textures/samplers directly. Apple's ICB contract requires
+     * non-buffer shader resources to be carried by an argument buffer. Keep
+     * this false except in a dedicated framebuffer/Metal-validation probe.
+     */
+    private static final boolean TERRAIN_ICB_DIRECT_RESOURCE_PROBE = Boolean.getBoolean(
+            "metallum.opt.terrainIcbDirectResourceProbe"
+    );
     private static final boolean METAL4_REQUESTED = Boolean.getBoolean(
             "metallum.opt.metal4"
     );
@@ -164,6 +173,7 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
 
             boolean encodedByIcb = false;
             boolean attemptIcb = TERRAIN_ICB_ENABLED
+                    && TERRAIN_ICB_DIRECT_RESOURCE_PROBE
                     && !METAL4_REQUESTED
                     && MetalTerrainIcbScope.active()
                     && instanceCount > 0
