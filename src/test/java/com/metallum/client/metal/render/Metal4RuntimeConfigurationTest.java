@@ -65,6 +65,40 @@ final class Metal4RuntimeConfigurationTest {
     }
 
     @Test
+    void explicitCompilerAndPresentFormValidProductionSubset() {
+        var configuration = Metal4RuntimeConfiguration.resolve(
+                true, true,
+                true, true, false, false,
+                false, true
+        );
+
+        assertTrue(configuration.available());
+        assertTrue(configuration.compiler());
+        assertTrue(configuration.present());
+        assertTrue(configuration.residency());
+        assertFalse(configuration.mainQueuePilot());
+        assertFalse(configuration.mainRenderer());
+        assertNull(configuration.rejectionReason());
+    }
+
+    @Test
+    void enabledMasterWithoutSubfeaturesIsAValidCapabilityProbe() {
+        var configuration = Metal4RuntimeConfiguration.resolve(
+                true, true,
+                false, false, false, false,
+                false, false
+        );
+
+        assertTrue(configuration.available());
+        assertFalse(configuration.compiler());
+        assertFalse(configuration.present());
+        assertFalse(configuration.mainQueuePilot());
+        assertFalse(configuration.mainRenderer());
+        assertFalse(configuration.residency());
+        assertNull(configuration.rejectionReason());
+    }
+
+    @Test
     void presentCannotRunWithoutCompiler() {
         var configuration = Metal4RuntimeConfiguration.resolve(
                 true, true,
