@@ -11,8 +11,8 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Preserves command-buffer debug-group ordering when draw commands are delayed
- * inside the experimental render command packet.
+ * Preserves externally observable ordering while direct draw commands may be
+ * delayed inside the experimental render command packet.
  */
 @Mixin(targets = "com.metallum.client.metal.render.MetalRenderPass")
 public abstract class MetalRenderPassCommandPacketBoundaryMixin {
@@ -20,8 +20,11 @@ public abstract class MetalRenderPassCommandPacketBoundaryMixin {
     @Nullable
     private MTLRenderCommandEncoder nativeEncoder;
 
-    @Inject(method = {"pushDebugGroup", "popDebugGroup"}, at = @At("HEAD"))
-    private void metallum$flushBeforeDebugBoundary(final CallbackInfo ci) {
+    @Inject(
+            method = {"pushDebugGroup", "popDebugGroup", "recordProducer"},
+            at = @At("HEAD")
+    )
+    private void metallum$flushBeforeObservableBoundary(final CallbackInfo ci) {
         MTLRenderCommandEncoder encoder = this.nativeEncoder;
         if (encoder == null || MetalNativeBridge.isNullHandle(encoder.handle())) {
             return;
