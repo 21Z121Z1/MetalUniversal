@@ -330,8 +330,6 @@ final class MetalRenderCommandPacket implements AutoCloseable {
             return;
         }
         if (applied < 0) {
-            // Native ABI contract: negative means the complete packet failed
-            // validation and zero operations were applied.
             replayLegacy(encoder);
             this.active = false;
             reset();
@@ -417,13 +415,13 @@ final class MetalRenderCommandPacket implements AutoCloseable {
                         Float.intBitsToFloat((int) c)
                 );
                 case OP_WINDING -> MetalNativeBridge.MTLRenderCommandEncoder_setFrontFacingWinding(
-                        encoder, a
+                        encoder, (int) a
                 );
                 case OP_CULL_MODE -> MetalNativeBridge.MTLRenderCommandEncoder_setCullMode(
                         encoder, a
                 );
                 case OP_FILL_MODE -> MetalNativeBridge.MTLRenderCommandEncoder_setTriangleFillMode(
-                        encoder, a
+                        encoder, (int) a
                 );
                 case OP_BUFFER -> MetalNativeBridge.MTLRenderCommandEncoder_setBuffer(
                         encoder, segment(a), b, c, flags
@@ -441,24 +439,24 @@ final class MetalRenderCommandPacket implements AutoCloseable {
                         encoder, a, b, c, d
                 );
                 case OP_DRAW_PRIMITIVES -> MetalNativeBridge.MTLRenderCommandEncoder_drawPrimitives(
-                        encoder, a, (int) b, (int) c, (int) d, (int) e
+                        encoder, a, b, c, d, e
                 );
                 case OP_DRAW_INDEXED -> MetalNativeBridge.MTLRenderCommandEncoder_drawIndexedPrimitives(
                         encoder,
                         a,
-                        (int) b,
+                        b,
                         c,
                         segment(d),
                         e,
-                        (int) f,
+                        f,
                         unpackHigh(g),
                         unpackLow(g)
                 );
                 case OP_DRAW_PRIMITIVES_INDIRECT -> MetalNativeBridge.MTLRenderCommandEncoder_drawPrimitivesIndirect(
-                        encoder, a, segment(b), c, (int) d, e
+                        encoder, a, segment(b), c, d, e
                 );
                 case OP_DRAW_INDEXED_INDIRECT -> MetalNativeBridge.MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
-                        encoder, a, b, segment(c), segment(d), e, (int) f, g
+                        encoder, a, b, segment(c), segment(d), e, f, g
                 );
                 default -> throw new IllegalStateException(
                         "Unknown render command packet opcode " + opcode
