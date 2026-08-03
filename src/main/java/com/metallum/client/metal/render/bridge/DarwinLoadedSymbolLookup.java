@@ -25,6 +25,7 @@ import java.util.Locale;
 final class DarwinLoadedSymbolLookup {
     private static final int RTLD_LAZY = 0x1;
     private static final int RTLD_NOLOAD = 0x10;
+    private static final int MAX_IMAGE_PATH_BYTES = 16 * 1024;
     private static final Linker LINKER = Linker.nativeLinker();
     private static final MethodHandle IMAGE_COUNT = downcall(
             "_dyld_image_count",
@@ -57,50 +58,74 @@ final class DarwinLoadedSymbolLookup {
     }
 
     static @Nullable MemorySegment find(final String symbol) {
-        if (!isDarwin() || IMAGE_COUNT == null || IMAGE_NAME == null || DLOPEN == null || DLSYM == null) {
+        if (!isDarwin()
+                || IMAGE_COUNT == null
+                || IMAGE_NAME == null
+                || DLOPEN == null
+                || DLSYM == null) {
             return null;
         }
         synchronized (DarwinLoadedSymbolLookup.class) {
             try (Arena arena = Arena.ofConfined()) {
-                MemorySegment handle = metallumHandle;
-                if (handle.address() == 0L) {
-                    handle = locateMetallumHandle(arena);
-                    if (handle.address() == 0L) {
-                        return null;
-                    }
-                    metallumHandle = handle;
-                }
                 MemorySegment symbolName = arena.allocateFrom(symbol);
-                MemorySegment address = (MemorySegment) DLSYM.invokeExact(handle, symbolName);
-                return address.address() == 0L ? null : address;
+                if (metallumHandle.address() != 0L) {
+                    MemorySegment cached = lookup(metallumHandle, symbolName);
+                    if (cached.address() != 0L) {
+                        return cached;
+                    }
+                    // A future interface symbol may come from a differently
+                    // named image. Fall through and scan instead of pinning a
+                    // negative result to the first successful handle forever.
+                }
+
+                int count = (int) IMAGE_COUNT.invokeExact();
+                for (int index = 0; index < count; index++) {
+                    MemorySegment namePointer = (MemorySegment) IMAGE_NAME.invokeExact(index);
+                    if (namePointer.address() == 0L) {
+                        continue;
+                    }
+                    String imagePath = namePointer.reinterpret(MAX_IMAGE_PATH_BYTES).getString(0L);
+                    if (!isMetallumImagePath(imagePath)) {
+                        continue;
+                    }
+                    MemorySegment path = arena.allocateFrom(imagePath);
+                    MemorySegment handle = (MemorySegment) DLOPEN.invokeExact(
+                            path,
+                            RTLD_LAZY | RTLD_NOLOAD
+                    );
+                    if (handle.address() == 0L) {
+                        continue;
+                    }
+                    MemorySegment address = lookup(handle, symbolName);
+                    if (address.address() != 0L) {
+                        metallumHandle = handle;
+                        return address;
+                    }
+                }
+                return null;
             } catch (Throwable ignored) {
                 return null;
             }
         }
     }
 
-    private static MemorySegment locateMetallumHandle(final Arena arena) throws Throwable {
-        int count = (int) IMAGE_COUNT.invokeExact();
-        for (int index = 0; index < count; index++) {
-            MemorySegment namePointer = (MemorySegment) IMAGE_NAME.invokeExact(index);
-            if (namePointer.address() == 0L) {
-                continue;
-            }
-            String imagePath = namePointer.reinterpret(Long.MAX_VALUE).getString(0L);
-            String lower = imagePath.toLowerCase(Locale.ROOT);
-            if (!lower.contains("metallum") || !lower.endsWith(".dylib")) {
-                continue;
-            }
-            MemorySegment path = arena.allocateFrom(imagePath);
-            MemorySegment handle = (MemorySegment) DLOPEN.invokeExact(
-                    path,
-                    RTLD_LAZY | RTLD_NOLOAD
-            );
-            if (handle.address() != 0L) {
-                return handle;
-            }
+    static boolean isMetallumImagePath(final String imagePath) {
+        if (imagePath == null || imagePath.isBlank()) {
+            return false;
         }
-        return MemorySegment.NULL;
+        String normalized = imagePath.replace('\\', '/');
+        int separator = normalized.lastIndexOf('/');
+        String fileName = normalized.substring(separator + 1).toLowerCase(Locale.ROOT);
+        return fileName.endsWith(".dylib")
+                && (fileName.startsWith("libmetallum")
+                || fileName.startsWith("metallum-native-"));
+    }
+
+    private static MemorySegment lookup(
+            final MemorySegment handle,
+            final MemorySegment symbolName
+    ) throws Throwable {
+        return (MemorySegment) DLSYM.invokeExact(handle, symbolName);
     }
 
     private static @Nullable MethodHandle downcall(
