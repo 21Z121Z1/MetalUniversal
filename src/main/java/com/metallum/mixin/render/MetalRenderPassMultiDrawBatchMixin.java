@@ -124,8 +124,7 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
                 ProducerType.MULTI_DRAW,
                 Map.of(
                         "drawCount", Integer.toString(drawCount),
-                        "instanceCount", Integer.toString(instanceCount),
-                        "nativeBatchCount", Integer.toString(emitted)
+                        "instanceCount", Integer.toString(instanceCount)
                 )
         );
         ci.cancel();
