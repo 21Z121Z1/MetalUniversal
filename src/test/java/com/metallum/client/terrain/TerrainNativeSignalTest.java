@@ -1,11 +1,7 @@
 package com.metallum.client.terrain;
 
-import java.lang.foreign.Arena;
-import java.lang.foreign.FunctionDescriptor;
-import java.lang.foreign.Linker;
-import java.lang.foreign.SymbolLookup;
-import java.lang.foreign.ValueLayout;
-import java.lang.invoke.MethodHandle;
+import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -22,17 +18,9 @@ final class TerrainNativeSignalTest {
         assumeTrue(System.getProperty("os.name", "").toLowerCase().contains("mac"));
         assumeTrue(Files.isRegularFile(SHIPPED_DYLIB),
                 "run buildMacNative before this ABI smoke test");
-        try (Arena arena = Arena.ofConfined()) {
-            SymbolLookup lookup = SymbolLookup.libraryLookup(SHIPPED_DYLIB, arena);
-            var symbol = lookup.find("metallum_system_thermal_state");
-            assumeTrue(symbol.isPresent(), "the shipped native library predates the thermal export");
-            MethodHandle thermalState = Linker.nativeLinker().downcallHandle(
-                    symbol.orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.JAVA_INT)
-            );
-            int state = (int) thermalState.invokeExact();
-            assertTrue(state >= 0 && state <= 3, "Foundation thermal state was " + state);
-        }
+        int state = MetalNativeBridge.metallum_system_thermal_state();
+        assumeTrue(state >= 0, "the loaded native library predates the thermal export");
+        assertTrue(state <= 3, "Foundation thermal state was " + state);
     }
 
     @Test
