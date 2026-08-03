@@ -17,6 +17,8 @@ import java.util.List;
  */
 @Environment(EnvType.CLIENT)
 final class MetalDestructionQueue {
+    private static final int MAX_CLOSE_ROTATIONS_PER_SLOT = 1024;
+
     private final Slot[] slots;
     private int currentQueueIndex;
 
@@ -56,8 +58,23 @@ final class MetalDestructionQueue {
     }
 
     void close() {
-        for (int i = 0; i < this.slots.length; i++) {
+        int rotations = 0;
+        int maximumRotations = Math.multiplyExact(
+                this.slots.length,
+                MAX_CLOSE_ROTATIONS_PER_SLOT
+        );
+        while (this.pendingActionCount() > 0 && rotations < maximumRotations) {
             this.rotate();
+            rotations++;
+        }
+        int remaining = this.pendingActionCount();
+        if (remaining > 0) {
+            Metallum.LOGGER.error(
+                    "[metallum] Deferred destruction queue did not quiesce during close; "
+                            + "{} action(s) remain after {} rotations",
+                    remaining,
+                    rotations
+            );
         }
     }
 
