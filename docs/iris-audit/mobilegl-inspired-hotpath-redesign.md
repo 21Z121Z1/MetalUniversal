@@ -103,7 +103,9 @@ every non-empty record. `MetalRenderPassMultiDrawBatchMixin` now:
 5. invokes the existing native Metal multi-draw ABI once.
 
 The scratch arena grows geometrically and is reused by the render thread. The
-batch path defaults to four or more emitted draws.
+batch path defaults to four or more emitted draws. This collapses Java/FFM draw
+crossings; the existing native implementation still emits the same ordered
+Metal draw commands, so GPU draw count and rendering semantics are unchanged.
 
 ## Runtime switches
 
@@ -131,7 +133,7 @@ batch path defaults to four or more emitted draws.
 - full buffer binds replaced by offset-only binds;
 - compute state calls forwarded/suppressed;
 - native multi-draw batches and commands;
-- estimated collapsed draw-call count.
+- removed Java/FFM draw crossings through `collapsedFfmDrawCalls()`.
 
 ## Correctness boundaries
 
@@ -174,7 +176,8 @@ For each lane record:
 
 - FFM state setters per frame;
 - render and compute suppression ratios;
-- draw calls and native multi-draw batches;
+- Java/FFM draw crossings and native multi-draw batches;
+- GPU draw count separately;
 - CPU render-pass encode p50/p95/p99;
 - frame-time p50/p95/p99/p99.9;
 - 1% and 0.1% lows;
