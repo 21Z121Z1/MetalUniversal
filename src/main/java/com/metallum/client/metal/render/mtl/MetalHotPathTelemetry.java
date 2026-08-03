@@ -94,7 +94,8 @@ public final class MetalHotPathTelemetry {
             return renderSuppressedCalls + computeSuppressedCalls;
         }
 
-        public long collapsedDrawCalls() {
+        /** Number of Java/FFM draw crossings removed; GPU draw count is unchanged. */
+        public long collapsedFfmDrawCalls() {
             return Math.max(0L, nativeMultiDrawCommands - nativeMultiDrawBatches);
         }
 
