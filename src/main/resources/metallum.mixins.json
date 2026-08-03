@@ -36,6 +36,7 @@
     "render.MetalCommandEncoderMipmapCacheMixin",
     "render.MetalCommandEncoderCopyDedupMixin",
     "render.MetalCompiledRenderPipelineBindingPlanMixin",
+    "render.MTLRenderCommandEncoderFlushMixin",
     "render.MetalRenderPassBindingCacheMixin",
     "render.MetalGpuBufferNativeHandleAccessor",
     "render.MetalRenderPassNoTraceDrawMixin",
