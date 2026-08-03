@@ -79,4 +79,22 @@ final class MetalDestructionQueueTest {
         assertEquals(5, runs[0], "close() must drain all queued actions");
         assertEquals(0, queue.pendingActionCount());
     }
+
+    @Test
+    void closeAlsoDrainsActionsQueuedByClosingCallbacks() {
+        MetalDestructionQueue queue = new MetalDestructionQueue(3);
+        List<String> events = new ArrayList<>();
+        queue.add(() -> {
+            events.add("first");
+            queue.add(() -> {
+                events.add("second");
+                queue.add(() -> events.add("third"));
+            });
+        });
+
+        queue.close();
+
+        assertEquals(List.of("first", "second", "third"), events);
+        assertEquals(0, queue.pendingActionCount());
+    }
 }
