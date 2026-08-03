@@ -3,14 +3,14 @@ package com.metallum.client.metal.render.mtl;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
 
 /**
  * Compute command encoder participating in the backend's single-MTLFence
- * hazard chain: the owner must {@link #waitForFence} right after creation and
- * {@link #updateFence} before {@link #endEncoding()}, mirroring how render and
- * blit encoders are sequenced by {@code MetalCommandEncoder}.
+ * hazard chain. Experimental compute packets preserve setter/dispatch order
+ * and flush before every synchronization or encoder-lifetime boundary.
  */
 @Environment(EnvType.CLIENT)
 public final class MTLComputeCommandEncoder extends MTLCommandEncoder {
@@ -21,6 +21,8 @@ public final class MTLComputeCommandEncoder extends MTLCommandEncoder {
     private final MetalComputeStateShadow stateShadow = STATE_SHADOW_ENABLED
             ? new MetalComputeStateShadow()
             : null;
+    private final @Nullable MetalComputeCommandPacketFacade commandPacket =
+            MetalComputeCommandPacketFacade.createIfAvailable();
 
     MTLComputeCommandEncoder(final MemorySegment handle) {
         super(handle);
@@ -32,7 +34,11 @@ public final class MTLComputeCommandEncoder extends MTLCommandEncoder {
             MetalHotPathTelemetry.computeSuppressed();
             return;
         }
-        MetalNativeBridge.MTLComputeCommandEncoder_setComputePipelineState(encoder, pipelineState);
+        if (commandPacket == null || !commandPacket.pipeline(encoder, pipelineState)) {
+            MetalNativeBridge.MTLComputeCommandEncoder_setComputePipelineState(
+                    encoder, pipelineState
+            );
+        }
         MetalHotPathTelemetry.computeForwarded();
     }
 
@@ -42,7 +48,11 @@ public final class MTLComputeCommandEncoder extends MTLCommandEncoder {
             MetalHotPathTelemetry.computeSuppressed();
             return;
         }
-        MetalNativeBridge.MTLComputeCommandEncoder_setBuffer(encoder, buffer, offset, index);
+        if (commandPacket == null || !commandPacket.buffer(encoder, buffer, offset, index)) {
+            MetalNativeBridge.MTLComputeCommandEncoder_setBuffer(
+                    encoder, buffer, offset, index
+            );
+        }
         MetalHotPathTelemetry.computeForwarded();
     }
 
@@ -52,7 +62,9 @@ public final class MTLComputeCommandEncoder extends MTLCommandEncoder {
             MetalHotPathTelemetry.computeSuppressed();
             return;
         }
-        MetalNativeBridge.MTLComputeCommandEncoder_setTexture(encoder, texture, index);
+        if (commandPacket == null || !commandPacket.texture(encoder, texture, index)) {
+            MetalNativeBridge.MTLComputeCommandEncoder_setTexture(encoder, texture, index);
+        }
         MetalHotPathTelemetry.computeForwarded();
     }
 
@@ -62,7 +74,9 @@ public final class MTLComputeCommandEncoder extends MTLCommandEncoder {
             MetalHotPathTelemetry.computeSuppressed();
             return;
         }
-        MetalNativeBridge.MTLComputeCommandEncoder_setSamplerState(encoder, sampler, index);
+        if (commandPacket == null || !commandPacket.sampler(encoder, sampler, index)) {
+            MetalNativeBridge.MTLComputeCommandEncoder_setSamplerState(encoder, sampler, index);
+        }
         MetalHotPathTelemetry.computeForwarded();
     }
 
@@ -74,9 +88,26 @@ public final class MTLComputeCommandEncoder extends MTLCommandEncoder {
             final int threadsPerGroupY,
             final int threadsPerGroupZ
     ) {
-        MetalNativeBridge.MTLComputeCommandEncoder_dispatchThreadgroups(
-                handle(), groupsX, groupsY, groupsZ, threadsPerGroupX, threadsPerGroupY, threadsPerGroupZ
-        );
+        MemorySegment encoder = handle();
+        if (commandPacket == null || !commandPacket.dispatch(
+                encoder,
+                groupsX,
+                groupsY,
+                groupsZ,
+                threadsPerGroupX,
+                threadsPerGroupY,
+                threadsPerGroupZ
+        )) {
+            MetalNativeBridge.MTLComputeCommandEncoder_dispatchThreadgroups(
+                    encoder,
+                    groupsX,
+                    groupsY,
+                    groupsZ,
+                    threadsPerGroupX,
+                    threadsPerGroupY,
+                    threadsPerGroupZ
+            );
+        }
     }
 
     public void dispatchThreadgroupsIndirect(
@@ -86,16 +117,55 @@ public final class MTLComputeCommandEncoder extends MTLCommandEncoder {
             final int threadsPerGroupY,
             final int threadsPerGroupZ
     ) {
-        MetalNativeBridge.MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
-                handle(), indirectBuffer, indirectOffset, threadsPerGroupX, threadsPerGroupY, threadsPerGroupZ
-        );
+        MemorySegment encoder = handle();
+        if (commandPacket == null || !commandPacket.dispatchIndirect(
+                encoder,
+                indirectBuffer,
+                indirectOffset,
+                threadsPerGroupX,
+                threadsPerGroupY,
+                threadsPerGroupZ
+        )) {
+            MetalNativeBridge.MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
+                    encoder,
+                    indirectBuffer,
+                    indirectOffset,
+                    threadsPerGroupX,
+                    threadsPerGroupY,
+                    threadsPerGroupZ
+            );
+        }
     }
 
     public void updateFence(final MemorySegment fence) {
-        MetalNativeBridge.MTLComputeCommandEncoder_updateFence(handle(), fence);
+        MemorySegment encoder = handle();
+        flushCommands(encoder);
+        MetalNativeBridge.MTLComputeCommandEncoder_updateFence(encoder, fence);
     }
 
     public void waitForFence(final MemorySegment fence) {
-        MetalNativeBridge.MTLComputeCommandEncoder_waitForFence(handle(), fence);
+        MemorySegment encoder = handle();
+        flushCommands(encoder);
+        MetalNativeBridge.MTLComputeCommandEncoder_waitForFence(encoder, fence);
+    }
+
+    @Override
+    public void endEncoding() {
+        if (!MetalNativeBridge.isNullHandle(this.handle)) {
+            flushCommands(this.handle);
+        }
+        try {
+            super.endEncoding();
+        } finally {
+            if (commandPacket != null) {
+                commandPacket.close();
+            }
+        }
+    }
+
+    private void flushCommands(final MemorySegment encoder) {
+        if (commandPacket != null) {
+            commandPacket.flush(encoder);
+        }
     }
 }
