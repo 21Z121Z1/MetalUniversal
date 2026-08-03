@@ -35,9 +35,10 @@ current implementation/debug authority is:
 
 ## Local validation snapshot (2026-08-04)
 
-The latest remote tip tested for this snapshot was `a1c1f9c` before the local
-fix commits. The following evidence was collected in an isolated worktree on
-an Apple M1 Pro with Metal API and GPU validation enabled:
+The implementation tip tested for this snapshot was `1898a38` before this
+documentation-only update. The following evidence was collected in an
+isolated worktree on an Apple M1 Pro with the repository's native validation
+and lifecycle gates enabled:
 
 - `./gradlew clean test --stacktrace` passed (383 tests), including the packet,
   native-interface, terrain-scope, state-shadow, destruction-queue, and Mixin
@@ -50,15 +51,29 @@ an Apple M1 Pro with Metal API and GPU validation enabled:
   production bridge has initialized; the earlier Objective-C duplicate-class
   warning was isolated to test-side `libraryLookup` calls and is absent after
   the loader tests reuse the existing image.
+- The local ignored runtime fixture contains BSL (`SHA-256
+  185774628b5259c36255183fc1adeb0f64f89235f7ea2c826fa327d1112687a8`) and
+  Potato (`SHA-256
+  55aa21562dbc2860fd466719908437a8bc22ad358a673fb3c119e4bcdf1616af`)
+  shaderpacks. `./gradlew metalIrisShaderTranslationTest --stacktrace`
+  translated BSL 52/52 and Potato 44/44 stages successfully, and both packs
+  produced SOLID/CUTOUT/TRANSLUCENT Sodium terrain PSOs.
 - Default-off, R0/R1/R2/R3, C0/C1, and I0/I1 `runClientIris` smoke lanes reached
   the copied `New World` and produced hotpath telemetry without hotpath Mixin,
   native-bridge, partial-execution, or command-buffer errors. R2 and R3
   produced render-command packet calls and operations with zero command-packet
   replays; R2 produced zero state-only packet calls, preserving packet
   mutual-exclusion.
-- I1 kept `terrainIcbAttempts`, `terrainIcbAccepted`, and
-  `terrainIcbFallbacks` at zero, as required when the direct-resource gate is
-  closed.
+- With BSL selected, C0 and C1 both reached the semantic terrain path, but
+  both reported `computeForwarded=0` and
+  `computeCommandPacketCalls=0`; this workload did not create a compute
+  encoder/dispatch, so C1 compute correctness remains unexercised rather than
+  being treated as a failure.
+- With BSL selected, I0 and I1 reached the semantic terrain path and reported
+  `multiDrawBatches=0`, `terrainIcbAttempts=0`, `terrainIcbAccepted=0`, and
+  `terrainIcbFallbacks=0`. I1 therefore verified the closed direct-resource
+  gate, but did not admit an ICB because this scene emitted no qualifying
+  ordinary indexed multi-draw.
 
 The `./gradlew buildMacNative build --stacktrace` command completed native
 compilation, Java compilation, and lifecycle tests, but its final visible
@@ -72,11 +87,11 @@ result, not as a pass.
 No claim is made yet for:
 
 - framebuffer/image hash equivalence or Iris semantic equivalence;
-- compute dispatch correctness: the available smoke world had no shaderpack,
-  so C1 created no compute encoder/dispatch workload;
+- compute dispatch correctness: the BSL semantic workload created no compute
+  encoder/dispatch, so C1 did not exercise packet execution;
 - terrain ICB correctness: I2 was not run because the direct texture/sampler
-  resource contract is incomplete and no qualifying shaderpack/scene fixture
-  was available;
+  resource contract is incomplete and the BSL scene emitted no qualifying
+  ordinary indexed multi-draw;
 - physical-GPU ICB validation, sustained visual acceptance, or the prescribed
   30-second/120-second interleaved performance protocol;
 - FPS, CPU encode, GPU time, frame-time tails, allocation, GC, or FFM crossing
