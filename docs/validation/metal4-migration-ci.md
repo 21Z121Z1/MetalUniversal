@@ -1,8 +1,8 @@
 # Metal 4 migration macOS 26 CI receipt
 
 - Conclusion: **PASS**
-- Source commit: `7ced2d12b2e468990d3593d1b3a8f323f2665763`
-- Workflow trigger: `2f6662d3628e70aaedf4724900ba70218f4ac52f`
+- Source commit: `baf40e1c254f60ca2db3748c34f97d6c866a24d6`
+- Workflow trigger: `baf40e1c254f60ca2db3748c34f97d6c866a24d6`
 - Runner: `macOS / ARM64`
 - Xcode path: `/Applications/Xcode_26.6.0.app/Contents/Developer`
 - Swift: `Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)`
@@ -149,13 +149,13 @@ clang: warning: using sysroot for 'MacOSX' but targeting 'iPhone' [-Wincompatibl
 [buildIOSSpvc] -- SPIRV-Cross: Finding Git version for SPIRV-Cross.
 [buildIOSSpvc] -- Found Git: /opt/homebrew/bin/git (found version "2.55.0")
 [buildIOSSpvc] -- SPIRV-Cross: Git hash: vulkan-sdk-1.3.290.0
-[buildIOSSpvc] -- Configuring done (7.5s)
+[buildIOSSpvc] -- Configuring done (5.1s)
 [buildIOSSpvc] -- Generating done (0.0s)
 [buildIOSSpvc] -- Build files have been written to: /Users/runner/work/MetalUniversal/MetalUniversal/build/spirv-cross-build
 [buildIOSSpvc] Running: cmake --build . --config Release -j 4
-[buildIOSSpvc] [ 12%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_parser.cpp.o
-[buildIOSSpvc] [ 25%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_parsed_ir.cpp.o
-[buildIOSSpvc] [ 37%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross.cpp.o
+[buildIOSSpvc] [ 25%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross.cpp.o
+[buildIOSSpvc] [ 25%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_parser.cpp.o
+[buildIOSSpvc] [ 37%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_parsed_ir.cpp.o
 [buildIOSSpvc] [ 50%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cfg.cpp.o
 [buildIOSSpvc] [ 62%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_c.cpp.o
 [buildIOSSpvc] [ 75%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_glsl.cpp.o
@@ -201,13 +201,10 @@ Metal frame-generation lifecycle tests passed: 13
 > Task :metalMrtBackendIntegrationTest SKIPPED
 > Task :compileMetalMrtSmokeTest
 > Task :metalMrtSmokeTest SKIPPED
-> Task :jar
-
 WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
 WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/Users/runner/.gradle/caches/modules-2/files-2.1/org.joml/joml/1.10.8/fc0a71dad90a2cf41d82a76156a0e700af8e4f8d/joml-1.10.8.jar)
 WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe
 WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
-
 > Task :test
 > Task :validateAccessWidener
 
@@ -215,6 +212,7 @@ WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
 Isolated client profiles: PASS
 
 > Task :check
+> Task :jar
 > Task :assemble
 > Task :build
 
@@ -226,6 +224,6 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/9.4.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 3m 12s
+BUILD SUCCESSFUL in 2m 14s
 19 actionable tasks: 19 executed
 ```
