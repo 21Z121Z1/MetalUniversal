@@ -177,7 +177,7 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
                 encoder.handle(),
                 primitiveType.value,
                 this.indexType.value,
-                nativeIndexBuffer.nativeHandle(),
+                metallum$nativeHandle(nativeIndexBuffer),
                 MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(firstIndexOffsets)),
                 MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(indexCounts)),
                 MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(vertexOffsets)),
@@ -235,8 +235,8 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
         encoder.drawIndexedPrimitivesIndirect(
                 primitiveType,
                 this.indexType,
-                ((MetalGpuBuffer) this.indexBuffer).nativeHandle(),
-                ((MetalGpuBuffer) commands.buffer()).nativeHandle(),
+                metallum$nativeHandle((MetalGpuBuffer) this.indexBuffer),
+                metallum$nativeHandle((MetalGpuBuffer) commands.buffer()),
                 commands.offset(),
                 drawCount,
                 VkDrawIndexedIndirectCommand.SIZEOF
@@ -265,7 +265,7 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
         this.metallum$invokeBindDrawState(encoder);
         encoder.drawPrimitivesIndirect(
                 primitiveType,
-                ((MetalGpuBuffer) commands.buffer()).nativeHandle(),
+                metallum$nativeHandle((MetalGpuBuffer) commands.buffer()),
                 commands.offset(),
                 drawCount,
                 VkDrawIndirectCommand.SIZEOF
@@ -282,6 +282,10 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
     @Redirect(method = "finishTiming", at = @At(value = "INVOKE", target = "Ljava/lang/System;nanoTime()J"))
     private long metallum$finishPassClockOnlyWhenEnabled() {
         return PASS_TIMING_ENABLED ? System.nanoTime() : 0L;
+    }
+
+    private static MemorySegment metallum$nativeHandle(final MetalGpuBuffer buffer) {
+        return ((MetalGpuBufferNativeHandleAccessor) buffer).metallum$invokeNativeHandle();
     }
 
     private boolean metallum$useFastPath() {
