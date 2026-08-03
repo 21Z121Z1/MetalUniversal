@@ -17,10 +17,10 @@ import java.lang.foreign.MemorySegment;
 /**
  * Experimental ordered render command stream.
  *
- * <p>Redirects only calls which survived the encoder's existing Java state
- * shadow. Direct and indirect draws are appended after those state operations,
- * preserving order. Triangle-fan and native multi-draw remain explicit packet
- * boundaries because they already have specialized native implementations.</p>
+ * <p>Only native calls which survived the existing encoder state shadow are
+ * redirected. Direct and indirect draws remain in-order packet operations.
+ * Triangle-fan, native multi-draw, clear, fence and debug-group boundaries use
+ * the existing flush surface and therefore execute explicitly.</p>
  */
 @Mixin(value = MTLRenderCommandEncoder.class, remap = false)
 public abstract class MTLRenderCommandEncoderPacketMixin {
@@ -55,13 +55,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "setRenderPipelineState",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setRenderPipelineState("
-                            + "Ljava/lang/foreign/MemorySegment;"
-                            + "Ljava/lang/foreign/MemorySegment;)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setRenderPipelineState(Ljava/lang/foreign/MemorySegment;Ljava/lang/foreign/MemorySegment;)V")
     )
     private void metallum$packetPipeline(
             final MemorySegment encoder,
@@ -75,13 +69,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "setDepthStencilState",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setDepthStencilState("
-                            + "Ljava/lang/foreign/MemorySegment;"
-                            + "Ljava/lang/foreign/MemorySegment;)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setDepthStencilState(Ljava/lang/foreign/MemorySegment;Ljava/lang/foreign/MemorySegment;)V")
     )
     private void metallum$packetDepthStencil(
             final MemorySegment encoder,
@@ -95,12 +83,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "setDepthBias",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setDepthBias("
-                            + "Ljava/lang/foreign/MemorySegment;FFF)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setDepthBias(Ljava/lang/foreign/MemorySegment;FFF)V")
     )
     private void metallum$packetDepthBias(
             final MemorySegment encoder,
@@ -116,16 +99,11 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "setFrontFacingWinding",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setFrontFacingWinding("
-                            + "Ljava/lang/foreign/MemorySegment;J)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setFrontFacingWinding(Ljava/lang/foreign/MemorySegment;I)V")
     )
     private void metallum$packetWinding(
             final MemorySegment encoder,
-            final long winding
+            final int winding
     ) {
         if (this.metallum$commandPacket == null
                 || !this.metallum$commandPacket.winding(encoder, winding)) {
@@ -135,12 +113,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "setCullMode",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setCullMode("
-                            + "Ljava/lang/foreign/MemorySegment;J)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setCullMode(Ljava/lang/foreign/MemorySegment;J)V")
     )
     private void metallum$packetCullMode(
             final MemorySegment encoder,
@@ -154,16 +127,11 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "setTriangleFillMode",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setTriangleFillMode("
-                            + "Ljava/lang/foreign/MemorySegment;J)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setTriangleFillMode(Ljava/lang/foreign/MemorySegment;I)V")
     )
     private void metallum$packetFillMode(
             final MemorySegment encoder,
-            final long fillMode
+            final int fillMode
     ) {
         if (this.metallum$commandPacket == null
                 || !this.metallum$commandPacket.fillMode(encoder, fillMode)) {
@@ -173,13 +141,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "setBuffer",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setBuffer("
-                            + "Ljava/lang/foreign/MemorySegment;"
-                            + "Ljava/lang/foreign/MemorySegment;JJI)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setBuffer(Ljava/lang/foreign/MemorySegment;Ljava/lang/foreign/MemorySegment;JJI)V")
     )
     private void metallum$packetBuffer(
             final MemorySegment encoder,
@@ -189,9 +151,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
             final int stageMask
     ) {
         if (this.metallum$commandPacket == null
-                || !this.metallum$commandPacket.buffer(
-                encoder, buffer, offset, index, stageMask
-        )) {
+                || !this.metallum$commandPacket.buffer(encoder, buffer, offset, index, stageMask)) {
             MetalNativeBridge.MTLRenderCommandEncoder_setBuffer(
                     encoder, buffer, offset, index, stageMask
             );
@@ -200,12 +160,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = {"setBuffer", "setBufferOffset"},
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setBufferOffset("
-                            + "Ljava/lang/foreign/MemorySegment;JJI)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setBufferOffset(Ljava/lang/foreign/MemorySegment;JJI)V")
     )
     private void metallum$packetBufferOffset(
             final MemorySegment encoder,
@@ -214,9 +169,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
             final int stageMask
     ) {
         if (this.metallum$commandPacket == null
-                || !this.metallum$commandPacket.bufferOffset(
-                encoder, offset, index, stageMask
-        )) {
+                || !this.metallum$commandPacket.bufferOffset(encoder, offset, index, stageMask)) {
             MetalNativeBridge.MTLRenderCommandEncoder_setBufferOffset(
                     encoder, offset, index, stageMask
             );
@@ -225,13 +178,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "setTexture",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setTexture("
-                            + "Ljava/lang/foreign/MemorySegment;"
-                            + "Ljava/lang/foreign/MemorySegment;JI)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setTexture(Ljava/lang/foreign/MemorySegment;Ljava/lang/foreign/MemorySegment;JI)V")
     )
     private void metallum$packetTexture(
             final MemorySegment encoder,
@@ -249,14 +196,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "setTextureAndSampler",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setTextureAndSampler("
-                            + "Ljava/lang/foreign/MemorySegment;"
-                            + "Ljava/lang/foreign/MemorySegment;"
-                            + "Ljava/lang/foreign/MemorySegment;JI)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setTextureAndSampler(Ljava/lang/foreign/MemorySegment;Ljava/lang/foreign/MemorySegment;Ljava/lang/foreign/MemorySegment;JI)V")
     )
     private void metallum$packetTextureAndSampler(
             final MemorySegment encoder,
@@ -277,12 +217,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "setScissorRect",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_setScissorRect("
-                            + "Ljava/lang/foreign/MemorySegment;JJJJ)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_setScissorRect(Ljava/lang/foreign/MemorySegment;JJJJ)V")
     )
     private void metallum$packetScissor(
             final MemorySegment encoder,
@@ -306,11 +241,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
                     "drawIndexedPrimitivesIndirect",
                     "drawPrimitivesIndirect"
             },
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/mtl/MTLRenderCommandEncoder;"
-                            + "flushState(Ljava/lang/foreign/MemorySegment;)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/mtl/MTLRenderCommandEncoder;flushState(Ljava/lang/foreign/MemorySegment;)V")
     )
     private void metallum$deferPreDrawFlush(
             final MTLRenderCommandEncoder encoderObject,
@@ -323,29 +254,24 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "drawPrimitives",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_drawPrimitives("
-                            + "Ljava/lang/foreign/MemorySegment;JIIIII)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_drawPrimitives(Ljava/lang/foreign/MemorySegment;JJJJJ)V")
     )
     private void metallum$packetDrawPrimitives(
             final MemorySegment encoder,
             final long primitiveType,
-            final int firstVertex,
-            final int vertexCount,
-            final int instanceCount,
-            final int baseInstance
+            final long firstVertex,
+            final long vertexCount,
+            final long instanceCount,
+            final long baseInstance
     ) {
         if (this.metallum$commandPacket == null
                 || !this.metallum$commandPacket.drawPrimitives(
                 encoder,
                 primitiveType,
-                firstVertex,
-                vertexCount,
-                instanceCount,
-                baseInstance
+                (int) firstVertex,
+                (int) vertexCount,
+                (int) instanceCount,
+                (int) baseInstance
         )) {
             MetalNativeBridge.MTLRenderCommandEncoder_drawPrimitives(
                     encoder,
@@ -360,36 +286,30 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "drawIndexedPrimitives",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_drawIndexedPrimitives("
-                            + "Ljava/lang/foreign/MemorySegment;JIJ"
-                            + "Ljava/lang/foreign/MemorySegment;JIII)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_drawIndexedPrimitives(Ljava/lang/foreign/MemorySegment;JJJLjava/lang/foreign/MemorySegment;JJJJ)V")
     )
     private void metallum$packetDrawIndexed(
             final MemorySegment encoder,
             final long primitiveType,
-            final int indexCount,
+            final long indexCount,
             final long indexType,
             final MemorySegment indexBuffer,
             final long offset,
-            final int instanceCount,
-            final int baseVertex,
-            final int baseInstance
+            final long instanceCount,
+            final long baseVertex,
+            final long baseInstance
     ) {
         if (this.metallum$commandPacket == null
                 || !this.metallum$commandPacket.drawIndexed(
                 encoder,
                 primitiveType,
-                indexCount,
+                (int) indexCount,
                 indexType,
                 indexBuffer,
                 offset,
-                instanceCount,
-                baseVertex,
-                baseInstance
+                (int) instanceCount,
+                (int) baseVertex,
+                (int) baseInstance
         )) {
             MetalNativeBridge.MTLRenderCommandEncoder_drawIndexedPrimitives(
                     encoder,
@@ -407,20 +327,14 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "drawPrimitivesIndirect",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_drawPrimitivesIndirect("
-                            + "Ljava/lang/foreign/MemorySegment;J"
-                            + "Ljava/lang/foreign/MemorySegment;JIJ)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_drawPrimitivesIndirect(Ljava/lang/foreign/MemorySegment;JLjava/lang/foreign/MemorySegment;JJJ)V")
     )
     private void metallum$packetDrawPrimitivesIndirect(
             final MemorySegment encoder,
             final long primitiveType,
             final MemorySegment indirectBuffer,
             final long indirectOffset,
-            final int drawCount,
+            final long drawCount,
             final long stride
     ) {
         if (this.metallum$commandPacket == null
@@ -429,7 +343,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
                 primitiveType,
                 indirectBuffer,
                 indirectOffset,
-                drawCount,
+                (int) drawCount,
                 stride
         )) {
             MetalNativeBridge.MTLRenderCommandEncoder_drawPrimitivesIndirect(
@@ -445,14 +359,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
 
     @Redirect(
             method = "drawIndexedPrimitivesIndirect",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;"
-                            + "MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect("
-                            + "Ljava/lang/foreign/MemorySegment;JJ"
-                            + "Ljava/lang/foreign/MemorySegment;"
-                            + "Ljava/lang/foreign/MemorySegment;JIJ)V"
-            )
+            at = @At(value = "INVOKE", target = "Lcom/metallum/client/metal/render/bridge/MetalNativeBridge;MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(Ljava/lang/foreign/MemorySegment;JJLjava/lang/foreign/MemorySegment;Ljava/lang/foreign/MemorySegment;JJJ)V")
     )
     private void metallum$packetDrawIndexedIndirect(
             final MemorySegment encoder,
@@ -461,7 +368,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
             final MemorySegment indexBuffer,
             final MemorySegment indirectBuffer,
             final long indirectOffset,
-            final int drawCount,
+            final long drawCount,
             final long stride
     ) {
         if (this.metallum$commandPacket == null
@@ -472,7 +379,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
                 indexBuffer,
                 indirectBuffer,
                 indirectOffset,
-                drawCount,
+                (int) drawCount,
                 stride
         )) {
             MetalNativeBridge.MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
