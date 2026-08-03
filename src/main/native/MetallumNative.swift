@@ -9809,14 +9809,18 @@ public func metallum_MTLComputeCommandEncoder_setComputePipelineState(
 public func metallum_MTLComputeCommandEncoder_setBuffer(
     _ pointer: UnsafeMutableRawPointer,
     _ buffer: MTLBuffer?,
-    _ offset: Int,
+    _ offset: UInt64,
     _ index: Int32
 ) {
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-        bridge.setBuffer(buffer, offset: offset, index: Int(index))
+    guard let nativeOffset = Int(exactly: offset) else {
+        NSLog("[metallum] rejected compute buffer offset outside Int range: %llu", offset)
         return
     }
-    metal3ComputeEncoder(pointer).setBuffer(buffer, offset: offset, index: Int(index))
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
+        bridge.setBuffer(buffer, offset: nativeOffset, index: Int(index))
+        return
+    }
+    metal3ComputeEncoder(pointer).setBuffer(buffer, offset: nativeOffset, index: Int(index))
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_setTexture")
@@ -9876,14 +9880,21 @@ public func metallum_MTLComputeCommandEncoder_dispatchThreadgroups(
 public func metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
     _ pointer: UnsafeMutableRawPointer,
     _ indirectBuffer: MTLBuffer,
-    _ indirectOffset: Int,
+    _ indirectOffset: UInt64,
     _ threadsPerGroupX: Int32,
     _ threadsPerGroupY: Int32,
     _ threadsPerGroupZ: Int32
 ) {
-    guard indirectOffset >= 0, indirectOffset % 4 == 0,
-          indirectOffset + MemoryLayout<MTLDispatchThreadgroupsIndirectArguments>.stride <= indirectBuffer.length else {
-        NSLog("[metallum] rejected invalid indirect compute range offset=%d length=%d", indirectOffset, indirectBuffer.length)
+    let byteCount = 3 * MemoryLayout<UInt32>.stride
+    guard let nativeOffset = Int(exactly: indirectOffset),
+          nativeOffset % MemoryLayout<UInt32>.alignment == 0,
+          nativeOffset <= indirectBuffer.length,
+          byteCount <= indirectBuffer.length - nativeOffset else {
+        NSLog(
+            "[metallum] rejected invalid indirect compute range offset=%llu length=%d",
+            indirectOffset,
+            indirectBuffer.length
+        )
         return
     }
     let threads = MTLSize(
@@ -9894,14 +9905,14 @@ public func metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
         bridge.prepareDispatch()
         bridge.encoder.dispatchThreadgroups(
-            indirectBuffer: indirectBuffer.gpuAddress + UInt64(indirectOffset),
+            indirectBuffer: indirectBuffer.gpuAddress + indirectOffset,
             threadsPerThreadgroup: threads
         )
         return
     }
     metal3ComputeEncoder(pointer).dispatchThreadgroups(
         indirectBuffer: indirectBuffer,
-        indirectBufferOffset: indirectOffset,
+        indirectBufferOffset: nativeOffset,
         threadsPerThreadgroup: threads
     )
 }
