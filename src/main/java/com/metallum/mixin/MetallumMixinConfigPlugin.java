@@ -27,6 +27,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.render.MTLRenderCommandEncoderPacketMixin";
     private static final String RENDER_COMMAND_PACKET_BOUNDARY_MIXIN =
             "com.metallum.mixin.render.MetalRenderPassCommandPacketBoundaryMixin";
+    private static final String HOT_PATH_TELEMETRY_REPORT_MIXIN =
+            "com.metallum.mixin.render.MetalHotPathTelemetryReportMixin";
     private static final String TERRAIN_ICB_SCOPE_MIXIN =
             "com.metallum.mixin.sodium.DefaultChunkRendererTerrainIcbScopeMixin";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
@@ -62,6 +64,10 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         if (RENDER_COMMAND_PACKET_MIXIN.equals(mixinClassName)
                 || RENDER_COMMAND_PACKET_BOUNDARY_MIXIN.equals(mixinClassName)) {
             return Boolean.getBoolean("metallum.opt.renderCommandPacket")
+                    && this.isDefaultGraphicsApi;
+        }
+        if (HOT_PATH_TELEMETRY_REPORT_MIXIN.equals(mixinClassName)) {
+            return Boolean.getBoolean("metallum.hotpath.telemetry")
                     && this.isDefaultGraphicsApi;
         }
         if (TERRAIN_ICB_SCOPE_MIXIN.equals(mixinClassName)) {
