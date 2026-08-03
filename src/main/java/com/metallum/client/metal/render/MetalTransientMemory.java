@@ -38,6 +38,7 @@ final class MetalTransientMemory implements TransientMemory {
     /** Reused primitive ordering scratch for multi-upload packing. */
     private int[] multiUploadIndices = new int[0];
     private long submitIndex;
+    private boolean closed;
 
     MetalTransientMemory(final MetalDevice device, final MetalCommandEncoder encoder) {
         this.device = device;
@@ -60,6 +61,10 @@ final class MetalTransientMemory implements TransientMemory {
     }
 
     void close() {
+        if (this.closed) {
+            return;
+        }
+        this.closed = true;
         this.frameWrappers.clear();
         this.cpuBlockAllocator.close();
         this.gpuBlockAllocator.close();
@@ -368,7 +373,6 @@ final class MetalTransientMemory implements TransientMemory {
     private static final class TransientGpuBuffer extends MetalGpuBuffer {
         private final MetalTransientMemory owner;
         private final long bufferSubmitIndex;
-        private boolean closed;
 
         TransientGpuBuffer(
                 final MetalDevice device,
@@ -385,16 +389,15 @@ final class MetalTransientMemory implements TransientMemory {
 
         @Override
         public boolean isClosed() {
-            if (this.closed) {
-                return true;
-            }
-            this.closed = this.bufferSubmitIndex < this.owner.submitIndex;
-            return this.closed;
+            return this.owner.closed || this.bufferSubmitIndex < this.owner.submitIndex;
         }
 
         @Override
         public void close() {
-            this.closed = true;
+            // The facade is shared by every slice of the same backing/usage in
+            // this frame and does not own the underlying block. Closing one
+            // slice must not invalidate its siblings; frame rotation or owner
+            // shutdown is the only lifetime transition.
         }
 
         @Override
