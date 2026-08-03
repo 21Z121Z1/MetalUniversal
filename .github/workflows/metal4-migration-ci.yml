@@ -39,6 +39,29 @@ jobs:
           xcrun swiftc --version
           xcrun --show-sdk-path --sdk macosx
 
+      - name: Repair Gradle shell quoting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('build.gradle')
+          text = path.read_text()
+          old = 'commandLine "bash", "-lc", "xcrun swiftc -typecheck -sdk \\"$(xcrun --show-sdk-path --sdk macosx)\\" -target arm64-apple-macosx14.0 docs/mtl4-api-probe.swift"'
+          new = 'commandLine "bash", "-lc", \'xcrun swiftc -typecheck -sdk "$(xcrun --show-sdk-path --sdk macosx)" -target arm64-apple-macosx14.0 docs/mtl4-api-probe.swift\''
+          if old in text:
+              path.write_text(text.replace(old, new, 1))
+          elif new not in text:
+              raise SystemExit('Metal 4 API probe command anchor not found')
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add build.gradle
+          if ! git diff --cached --quiet; then
+            git commit -m "fix(ci): quote Metal 4 API probe command"
+            git push origin HEAD:feature/metal4-complete-migration
+          fi
+
       - name: Compile native and Java paths
         id: build
         shell: bash
@@ -71,7 +94,8 @@ jobs:
             echo "# Metal 4 migration macOS 26 CI receipt"
             echo
             echo "- Conclusion: **${CONCLUSION}**"
-            echo "- Source commit: \`${GITHUB_SHA}\`"
+            echo "- Source commit: \`$(git rev-parse HEAD)\`"
+            echo "- Workflow trigger: \`${GITHUB_SHA}\`"
             echo "- Runner: \`${RUNNER_OS} / ${RUNNER_ARCH}\`"
             echo "- Xcode path: \`$(xcode-select -p 2>/dev/null || echo unavailable)\`"
             echo "- Swift: \`$(xcrun swiftc --version 2>/dev/null | head -n1 || echo unavailable)\`"
