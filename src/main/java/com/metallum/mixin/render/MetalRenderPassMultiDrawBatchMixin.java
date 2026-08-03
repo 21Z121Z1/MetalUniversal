@@ -9,6 +9,7 @@ import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
 import com.metallum.client.validation.contract.ProducerType;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import org.jspecify.annotations.Nullable;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.gen.Invoker;
@@ -30,10 +31,17 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.nativeMultiDrawBatch", "true")
     );
+    private static final boolean NO_TRACE_FAST_PATH = !"false".equalsIgnoreCase(
+            System.getProperty("metallum.opt.noTraceDrawFastPath", "true")
+    );
     private static final int THRESHOLD = Math.max(
             2,
             Integer.getInteger("metallum.opt.nativeMultiDrawBatchThreshold", 4)
     );
+
+    @Shadow
+    @Final
+    private long contractPassToken;
 
     @Shadow
     @Nullable
@@ -51,6 +59,18 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
     @Invoker("primitiveTopology")
     protected abstract MTLPrimitiveType metallum$invokePrimitiveTopology();
 
+    @Invoker("drawIndexedNative")
+    protected abstract void metallum$invokeDrawIndexedNative(
+            MTLRenderCommandEncoder encoder,
+            MetalGpuBuffer nativeIndexBuffer,
+            int firstIndex,
+            int indexCount,
+            int baseVertex,
+            int instanceCount,
+            MTLIndexType indexType,
+            int baseInstance
+    );
+
     @Invoker("recordProducer")
     protected abstract void metallum$invokeRecordProducer(ProducerType type, Map<String, String> parameters);
 
@@ -66,67 +86,108 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
             final int drawCount,
             final CallbackInfo ci
     ) {
-        if (!ENABLED
-                || drawCount < THRESHOLD
+        final boolean noTrace = NO_TRACE_FAST_PATH && this.contractPassToken < 0L;
+        if (drawCount < 0
                 || drawCount > Integer.MAX_VALUE / 3
-                || drawParameters.capacity() < drawCount * 3
-                || !(this.indexBuffer instanceof MetalGpuBuffer)) {
+                // Absolute IntBuffer.get(index) is bounded by limit(), not capacity().
+                || drawParameters.limit() < drawCount * 3
+                || !(this.indexBuffer instanceof MetalGpuBuffer nativeIndexBuffer)) {
+            return;
+        }
+
+        if (drawCount == 0) {
+            if (noTrace) {
+                ci.cancel();
+            }
             return;
         }
 
         MTLPrimitiveType primitiveType = this.metallum$invokePrimitiveTopology();
-        if (primitiveType == MTLPrimitiveType.TriangleFan) {
-            return;
-        }
+        boolean batchEligible = ENABLED
+                && primitiveType != MTLPrimitiveType.TriangleFan
+                && drawCount >= THRESHOLD;
 
-        MetalMultiDrawScratch scratch = MetalMultiDrawScratch.CURRENT.get();
-        scratch.ensureCapacity(drawCount);
+        MetalMultiDrawScratch scratch = null;
         int emitted = 0;
-        for (int draw = 0; draw < drawCount; draw++) {
-            int base = draw * 3;
-            int firstIndex = drawParameters.get(base);
-            int indexCount = drawParameters.get(base + 1);
-            int baseVertex = drawParameters.get(base + 2);
-            if (indexCount <= 0) {
-                continue;
+        if (batchEligible) {
+            scratch = MetalMultiDrawScratch.CURRENT.get();
+            scratch.ensureCapacity(drawCount);
+            for (int draw = 0; draw < drawCount; draw++) {
+                int base = draw * 3;
+                int firstIndex = drawParameters.get(base);
+                int indexCount = drawParameters.get(base + 1);
+                int baseVertex = drawParameters.get(base + 2);
+                if (indexCount <= 0) {
+                    continue;
+                }
+                // Preserve the original drawIndexedNative path for malformed
+                // negative offsets instead of changing its failure semantics.
+                if (firstIndex < 0) {
+                    batchEligible = false;
+                    break;
+                }
+                long firstIndexOffset = (long) firstIndex * this.indexType.bytes;
+                scratch.put(emitted++, firstIndexOffset, indexCount, baseVertex);
             }
-            // The old loop would pass a negative byte offset to Metal. Keep the
-            // conservative path so existing validation/error behavior is not
-            // silently replaced by a different failure mode.
-            if (firstIndex < 0) {
-                return;
+            if (emitted < THRESHOLD) {
+                batchEligible = false;
             }
-            long firstIndexOffset = (long) firstIndex * this.indexType.bytes;
-            scratch.put(emitted++, firstIndexOffset, indexCount, baseVertex);
-        }
-        if (emitted < THRESHOLD) {
-            return;
         }
 
         MTLRenderCommandEncoder encoder = this.metallum$invokeRenderEncoder();
         this.metallum$invokeBindDrawState(encoder);
-        MemorySegment nativeIndexBuffer = ((MetalGpuBufferNativeHandleAccessor) this.indexBuffer)
-                .metallum$invokeNativeHandle();
-        MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
-                encoder.handle(),
-                primitiveType.value,
-                this.indexType.value,
-                nativeIndexBuffer,
-                scratch.firstIndexOffsets(),
-                scratch.indexCounts(),
-                scratch.vertexOffsets(),
-                emitted,
-                instanceCount,
-                firstInstance
-        );
-        MetalHotPathTelemetry.recordNativeMultiDrawBatch(emitted);
-        this.metallum$invokeRecordProducer(
-                ProducerType.MULTI_DRAW,
-                Map.of(
-                        "drawCount", Integer.toString(drawCount),
-                        "instanceCount", Integer.toString(instanceCount)
-                )
-        );
+
+        if (batchEligible) {
+            MemorySegment nativeHandle = ((MetalGpuBufferNativeHandleAccessor) nativeIndexBuffer)
+                    .metallum$invokeNativeHandle();
+            MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
+                    encoder.handle(),
+                    primitiveType.value,
+                    this.indexType.value,
+                    nativeHandle,
+                    scratch.firstIndexOffsets(),
+                    scratch.indexCounts(),
+                    scratch.vertexOffsets(),
+                    emitted,
+                    instanceCount,
+                    firstInstance
+            );
+            MetalHotPathTelemetry.recordNativeMultiDrawBatch(emitted);
+        } else if (noTrace) {
+            // Preserve the legacy per-draw behavior but omit render-contract
+            // parameter objects that would be discarded immediately.
+            for (int draw = 0; draw < drawCount; draw++) {
+                int base = draw * 3;
+                int firstIndex = drawParameters.get(base);
+                int indexCount = drawParameters.get(base + 1);
+                int baseVertex = drawParameters.get(base + 2);
+                if (indexCount > 0) {
+                    this.metallum$invokeDrawIndexedNative(
+                            encoder,
+                            nativeIndexBuffer,
+                            firstIndex,
+                            indexCount,
+                            baseVertex,
+                            instanceCount,
+                            this.indexType,
+                            firstInstance
+                    );
+                }
+            }
+        } else {
+            // Validation needs the target method's exact producer metadata.
+            return;
+        }
+
+        if (!noTrace) {
+            this.metallum$invokeRecordProducer(
+                    ProducerType.MULTI_DRAW,
+                    Map.of(
+                            "drawCount", Integer.toString(drawCount),
+                            "instanceCount", Integer.toString(instanceCount)
+                    )
+            );
+        }
         ci.cancel();
     }
 }
