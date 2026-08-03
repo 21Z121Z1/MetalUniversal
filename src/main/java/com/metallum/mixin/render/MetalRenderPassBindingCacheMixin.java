@@ -45,6 +45,8 @@ public abstract class MetalRenderPassBindingCacheMixin {
     );
     @Unique
     private static final BindingState[] metallum$EMPTY_BINDINGS = new BindingState[0];
+    @Unique
+    private static volatile @Nullable Field metallum$compiledPipelineField;
 
     @Unique
     private final Map<String, BindingState> metallum$legacyUniformBindings =
@@ -188,8 +190,26 @@ public abstract class MetalRenderPassBindingCacheMixin {
 
     @Unique
     private static Object metallum$compiledPipeline(final Object renderPass) {
+        Field field = metallum$compiledPipelineField;
+        if (field == null) {
+            synchronized (renderPass.getClass()) {
+                field = metallum$compiledPipelineField;
+                if (field == null) {
+                    try {
+                        field = renderPass.getClass().getDeclaredField("compiledPipeline");
+                        field.setAccessible(true);
+                        metallum$compiledPipelineField = field;
+                    } catch (ReflectiveOperationException exception) {
+                        throw new IllegalStateException(
+                                "Unable to resolve MetalRenderPass.compiledPipeline",
+                                exception
+                        );
+                    }
+                }
+            }
+        }
         try {
-            return CompiledPipelineFieldHolder.FIELD.get(renderPass);
+            return field.get(renderPass);
         } catch (IllegalAccessException exception) {
             throw new IllegalStateException("Unable to read MetalRenderPass.compiledPipeline", exception);
         }
@@ -200,26 +220,6 @@ public abstract class MetalRenderPassBindingCacheMixin {
         return buffer instanceof MetalUploadDedupBuffer versioned
                 ? versioned.metallum$bindingVersion()
                 : 0L;
-    }
-
-    @Unique
-    private static final class CompiledPipelineFieldHolder {
-        private static final Field FIELD = resolve();
-
-        private static Field resolve() {
-            try {
-                Class<?> type = Class.forName(
-                        "com.metallum.client.metal.render.MetalRenderPass",
-                        false,
-                        MetalRenderPassBindingCacheMixin.class.getClassLoader()
-                );
-                Field field = type.getDeclaredField("compiledPipeline");
-                field.setAccessible(true);
-                return field;
-            } catch (ReflectiveOperationException exception) {
-                throw new ExceptionInInitializerError(exception);
-            }
-        }
     }
 
     private static final class BindingState {
