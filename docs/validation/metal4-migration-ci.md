@@ -1,8 +1,8 @@
 # Metal 4 migration macOS 26 CI receipt
 
 - Conclusion: **PASS**
-- Source commit: `6623f37f9b2a7eb49dc734ec239ba1968bc7222c`
-- Workflow trigger: `6623f37f9b2a7eb49dc734ec239ba1968bc7222c`
+- Source commit: `2c676fa951a497ab2f646e0a83da0214663c76d6`
+- Workflow trigger: `2c676fa951a497ab2f646e0a83da0214663c76d6`
 - Runner: `macOS / ARM64`
 - Xcode path: `/Applications/Xcode_26.6.0.app/Contents/Developer`
 - Swift: `Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)`
@@ -30,88 +30,88 @@ Starting a Gradle Daemon (subsequent builds will be faster)
 Fabric Loom: 1.16.3
 
 > Task :buildMacNative
-src/main/native/MetallumNative.swift:2450:19: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 1492 | 
- 1493 | @available(macOS 26.0, *)
- 1494 | final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate {
+src/main/native/MetallumNative.swift:2386:19: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
+ 1428 | 
+ 1429 | @available(macOS 26.0, *)
+ 1430 | final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate {
       |             `- note: enclosing scope here
- 1495 |     private struct PendingFrame {
- 1496 |         let sourceFrameID: UInt64
+ 1431 |     private struct PendingFrame {
+ 1432 |         let sourceFrameID: UInt64
       :
- 2448 |         }()
- 2449 |         if let lease = metal4Lease {
- 2450 |             guard #available(macOS 26.0, *),
+ 2384 |         }()
+ 2385 |         if let lease = metal4Lease {
+ 2386 |             guard #available(macOS 26.0, *),
       |                   `- warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 2451 |                   let copies = lease.commandBuffer.makeComputeCommandEncoder() else {
- 2452 |                 completeFrame()
+ 2387 |                   let copies = lease.commandBuffer.makeComputeCommandEncoder() else {
+ 2388 |                 completeFrame()
 
-src/main/native/MetallumNative.swift:6125:12: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6046 | #if os(macOS) && canImport(MetalFX)
- 6047 | @available(macOS 26.0, iOS 26.0, *)
- 6048 | private func metal4MetalFxEncodeV2(
+src/main/native/MetallumNative.swift:6061:12: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
+ 5982 | #if os(macOS) && canImport(MetalFX)
+ 5983 | @available(macOS 26.0, iOS 26.0, *)
+ 5984 | private func metal4MetalFxEncodeV2(
       |              `- note: enclosing scope here
- 6049 |     lease: Metal4MainCommandBufferLease, device: MTLDevice,
- 6050 |     colorTexture: MTLTexture, depthTexture: MTLTexture, handDepthTexture: MTLTexture?,
+ 5985 |     lease: Metal4MainCommandBufferLease, device: MTLDevice,
+ 5986 |     colorTexture: MTLTexture, depthTexture: MTLTexture, handDepthTexture: MTLTexture?,
       :
- 6123 |         descriptor.isAutoExposureEnabled = false
- 6124 |         descriptor.requiresSynchronousInitialization = true
- 6125 |         if #available(macOS 14.4, *) {
+ 6059 |         descriptor.isAutoExposureEnabled = false
+ 6060 |         descriptor.requiresSynchronousInitialization = true
+ 6061 |         if #available(macOS 14.4, *) {
       |            `- warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6126 |             descriptor.isReactiveMaskTextureEnabled = true
- 6127 |             descriptor.reactiveMaskTextureFormat = reactiveTexture.pixelFormat
+ 6062 |             descriptor.isReactiveMaskTextureEnabled = true
+ 6063 |             descriptor.reactiveMaskTextureFormat = reactiveTexture.pixelFormat
 
-src/main/native/MetallumNative.swift:6266:8: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6046 | #if os(macOS) && canImport(MetalFX)
- 6047 | @available(macOS 26.0, iOS 26.0, *)
- 6048 | private func metal4MetalFxEncodeV2(
+src/main/native/MetallumNative.swift:6202:8: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
+ 5982 | #if os(macOS) && canImport(MetalFX)
+ 5983 | @available(macOS 26.0, iOS 26.0, *)
+ 5984 | private func metal4MetalFxEncodeV2(
       |              `- note: enclosing scope here
- 6049 |     lease: Metal4MainCommandBufferLease, device: MTLDevice,
- 6050 |     colorTexture: MTLTexture, depthTexture: MTLTexture, handDepthTexture: MTLTexture?,
+ 5985 |     lease: Metal4MainCommandBufferLease, device: MTLDevice,
+ 5986 |     colorTexture: MTLTexture, depthTexture: MTLTexture, handDepthTexture: MTLTexture?,
       :
- 6264 |     scaler.reset = reset != 0
- 6265 |     scaler.isDepthReversed = depthReversed != 0
- 6266 |     if #available(macOS 14.4, *) { scaler.reactiveMaskTexture = reactiveTexture }
+ 6200 |     scaler.reset = reset != 0
+ 6201 |     scaler.isDepthReversed = depthReversed != 0
+ 6202 |     if #available(macOS 14.4, *) { scaler.reactiveMaskTexture = reactiveTexture }
       |        `- warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6267 |     scaler.fence = fence
- 6268 |     lease.commandBuffer.pushDebugGroup("MetalFX Temporal Upscale V2 (Metal 4)")
+ 6203 |     scaler.fence = fence
+ 6204 |     lease.commandBuffer.pushDebugGroup("MetalFX Temporal Upscale V2 (Metal 4)")
 
-src/main/native/MetallumNative.swift:6772:16: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6743 | ) -> Int32 {
- 6744 |     #if os(macOS) && canImport(MetalFX)
- 6745 |     if #available(macOS 26.0, *) {
+src/main/native/MetallumNative.swift:6708:16: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
+ 6679 | ) -> Int32 {
+ 6680 |     #if os(macOS) && canImport(MetalFX)
+ 6681 |     if #available(macOS 26.0, *) {
       |     `- note: enclosing scope here
- 6746 |         return autoreleasepool {
- 6747 |             let presenter: MetalFrameGenerationPresenter
+ 6682 |         return autoreleasepool {
+ 6683 |             let presenter: MetalFrameGenerationPresenter
       :
- 6770 |             }
- 6771 | 
- 6772 |             if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+ 6706 |             }
+ 6707 | 
+ 6708 |             if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
       |                `- warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6773 |                 lease.commandBuffer.pushDebugGroup("MetalFX Frame Generation Inputs (Metal 4)")
- 6774 |             } else {
+ 6709 |                 lease.commandBuffer.pushDebugGroup("MetalFX Frame Generation Inputs (Metal 4)")
+ 6710 |             } else {
 
-src/main/native/MetallumNative.swift:6796:16: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6743 | ) -> Int32 {
- 6744 |     #if os(macOS) && canImport(MetalFX)
- 6745 |     if #available(macOS 26.0, *) {
+src/main/native/MetallumNative.swift:6732:16: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
+ 6679 | ) -> Int32 {
+ 6680 |     #if os(macOS) && canImport(MetalFX)
+ 6681 |     if #available(macOS 26.0, *) {
       |     `- note: enclosing scope here
- 6746 |         return autoreleasepool {
- 6747 |             let presenter: MetalFrameGenerationPresenter
+ 6682 |         return autoreleasepool {
+ 6683 |             let presenter: MetalFrameGenerationPresenter
       :
- 6794 |                 globalFence: globalFence
- 6795 |             )
- 6796 |             if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+ 6730 |                 globalFence: globalFence
+ 6731 |             )
+ 6732 |             if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
       |                `- warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6797 |                 lease.commandBuffer.popDebugGroup()
- 6798 |             } else {
+ 6733 |                 lease.commandBuffer.popDebugGroup()
+ 6734 |             } else {
 
-src/main/native/MetallumNative.swift:6177:13: warning: variable 'cameraUniforms' was never mutated; consider changing to 'let' constant
- 6175 |     }
- 6176 |     if NativeState.legacyMotionPasses {
- 6177 |         var cameraUniforms = MotionUniforms(
+src/main/native/MetallumNative.swift:6113:13: warning: variable 'cameraUniforms' was never mutated; consider changing to 'let' constant
+ 6111 |     }
+ 6112 |     if NativeState.legacyMotionPasses {
+ 6113 |         var cameraUniforms = MotionUniforms(
       |             `- warning: variable 'cameraUniforms' was never mutated; consider changing to 'let' constant
- 6178 |             currentViewProjection: currentMatrix,
- 6179 |             inverseCurrentViewProjection: inverseMatrix,
+ 6114 |             currentViewProjection: currentMatrix,
+ 6115 |             inverseCurrentViewProjection: inverseMatrix,
 
 > Task :compileJava
 
@@ -147,14 +147,14 @@ clang: warning: using sysroot for 'MacOSX' but targeting 'iPhone' [-Wincompatibl
 [buildIOSSpvc] -- SPIRV-Cross: Finding Git version for SPIRV-Cross.
 [buildIOSSpvc] -- Found Git: /opt/homebrew/bin/git (found version "2.55.0")
 [buildIOSSpvc] -- SPIRV-Cross: Git hash: vulkan-sdk-1.3.290.0
-[buildIOSSpvc] -- Configuring done (7.3s)
+[buildIOSSpvc] -- Configuring done (8.9s)
 [buildIOSSpvc] -- Generating done (0.0s)
 [buildIOSSpvc] -- Build files have been written to: /Users/runner/work/MetalUniversal/MetalUniversal/build/spirv-cross-build
 [buildIOSSpvc] Running: cmake --build . --config Release -j 4
 [buildIOSSpvc] [ 12%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross.cpp.o
-[buildIOSSpvc] [ 25%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cfg.cpp.o
-[buildIOSSpvc] [ 37%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_parser.cpp.o
-[buildIOSSpvc] [ 50%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_parsed_ir.cpp.o
+[buildIOSSpvc] [ 25%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_parser.cpp.o
+[buildIOSSpvc] [ 37%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_parsed_ir.cpp.o
+[buildIOSSpvc] [ 50%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cfg.cpp.o
 [buildIOSSpvc] [ 62%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_c.cpp.o
 [buildIOSSpvc] [ 75%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_glsl.cpp.o
 [buildIOSSpvc] [ 87%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_msl.cpp.o
@@ -173,10 +173,10 @@ clang: warning: using sysroot for 'MacOSX' but targeting 'iPhone' [-Wincompatibl
 > Task :compileTestJava
 > Task :extractIrisNestedJars
 > Task :processTestResources
-> Task :jar
-> Task :assemble
 > Task :testClasses
 > Task :metalComputeBackendIntegrationTest SKIPPED
+> Task :jar
+> Task :assemble
 > Task :compileMetalFrameGenerationLifecycleTest
 
 > Task :metalFrameGenerationLifecycleTest
@@ -222,6 +222,6 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/9.4.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 2m 58s
+BUILD SUCCESSFUL in 2m 35s
 19 actionable tasks: 19 executed
 ```
