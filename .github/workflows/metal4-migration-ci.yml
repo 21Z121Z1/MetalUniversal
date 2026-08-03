@@ -39,157 +39,6 @@ jobs:
           xcrun swiftc --version
           xcrun --show-sdk-path --sdk macosx
 
-      - name: Normalize Metal 4 compute ABI ownership
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          lifecycle_path = Path('src/main/native/MetalFrameGenerationLifecycle.swift')
-          lifecycle = lifecycle_path.read_text()
-          start = '@inline(__always)\nprivate func metalComputePacketEncoder('
-          end = '// The current Swift overlay exposes Range<Int>;'
-          if start in lifecycle:
-              left, tail = lifecycle.split(start, 1)
-              _, right = tail.split(end, 1)
-              lifecycle = left + end + right
-              lifecycle_path.write_text(lifecycle)
-          elif 'private func metalComputePacketEncoder(' in lifecycle:
-              raise SystemExit('compute packet helper start changed unexpectedly')
-
-          native_path = Path('src/main/native/MetallumNative.swift')
-          native = native_path.read_text()
-
-          old_buffer = '''@_cdecl("metallum_MTLComputeCommandEncoder_setBuffer")
-          public func metallum_MTLComputeCommandEncoder_setBuffer(
-              _ pointer: UnsafeMutableRawPointer,
-              _ buffer: MTLBuffer?,
-              _ offset: Int,
-              _ index: Int32
-          ) {
-              if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-                  bridge.setBuffer(buffer, offset: offset, index: Int(index))
-                  return
-              }
-              metal3ComputeEncoder(pointer).setBuffer(buffer, offset: offset, index: Int(index))
-          }
-          '''
-          new_buffer = '''@_cdecl("metallum_MTLComputeCommandEncoder_setBuffer")
-          public func metallum_MTLComputeCommandEncoder_setBuffer(
-              _ pointer: UnsafeMutableRawPointer,
-              _ buffer: MTLBuffer?,
-              _ offset: UInt64,
-              _ index: Int32
-          ) {
-              guard let nativeOffset = Int(exactly: offset) else {
-                  NSLog("[metallum] rejected compute buffer offset outside Int range: %llu", offset)
-                  return
-              }
-              if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-                  bridge.setBuffer(buffer, offset: nativeOffset, index: Int(index))
-                  return
-              }
-              metal3ComputeEncoder(pointer).setBuffer(buffer, offset: nativeOffset, index: Int(index))
-          }
-          '''
-          if old_buffer in native:
-              native = native.replace(old_buffer, new_buffer, 1)
-          elif new_buffer not in native:
-              raise SystemExit('compute buffer ABI anchor not found')
-
-          old_indirect = '''@_cdecl("metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect")
-          public func metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
-              _ pointer: UnsafeMutableRawPointer,
-              _ indirectBuffer: MTLBuffer,
-              _ indirectOffset: Int,
-              _ threadsPerGroupX: Int32,
-              _ threadsPerGroupY: Int32,
-              _ threadsPerGroupZ: Int32
-          ) {
-              guard indirectOffset >= 0, indirectOffset % 4 == 0,
-                    indirectOffset + MemoryLayout<MTLDispatchThreadgroupsIndirectArguments>.stride <= indirectBuffer.length else {
-                  NSLog("[metallum] rejected invalid indirect compute range offset=%d length=%d", indirectOffset, indirectBuffer.length)
-                  return
-              }
-              let threads = MTLSize(
-                  width: Int(threadsPerGroupX),
-                  height: Int(threadsPerGroupY),
-                  depth: Int(threadsPerGroupZ)
-              )
-              if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-                  bridge.prepareDispatch()
-                  bridge.encoder.dispatchThreadgroups(
-                      indirectBuffer: indirectBuffer.gpuAddress + UInt64(indirectOffset),
-                      threadsPerThreadgroup: threads
-                  )
-                  return
-              }
-              metal3ComputeEncoder(pointer).dispatchThreadgroups(
-                  indirectBuffer: indirectBuffer,
-                  indirectBufferOffset: indirectOffset,
-                  threadsPerThreadgroup: threads
-              )
-          }
-          '''
-          new_indirect = '''@_cdecl("metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect")
-          public func metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
-              _ pointer: UnsafeMutableRawPointer,
-              _ indirectBuffer: MTLBuffer,
-              _ indirectOffset: UInt64,
-              _ threadsPerGroupX: Int32,
-              _ threadsPerGroupY: Int32,
-              _ threadsPerGroupZ: Int32
-          ) {
-              let byteCount = 3 * MemoryLayout<UInt32>.stride
-              guard let nativeOffset = Int(exactly: indirectOffset),
-                    nativeOffset % MemoryLayout<UInt32>.alignment == 0,
-                    nativeOffset <= indirectBuffer.length,
-                    byteCount <= indirectBuffer.length - nativeOffset else {
-                  NSLog(
-                      "[metallum] rejected invalid indirect compute range offset=%llu length=%d",
-                      indirectOffset,
-                      indirectBuffer.length
-                  )
-                  return
-              }
-              let threads = MTLSize(
-                  width: Int(threadsPerGroupX),
-                  height: Int(threadsPerGroupY),
-                  depth: Int(threadsPerGroupZ)
-              )
-              if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-                  bridge.prepareDispatch()
-                  bridge.encoder.dispatchThreadgroups(
-                      indirectBuffer: indirectBuffer.gpuAddress + indirectOffset,
-                      threadsPerThreadgroup: threads
-                  )
-                  return
-              }
-              metal3ComputeEncoder(pointer).dispatchThreadgroups(
-                  indirectBuffer: indirectBuffer,
-                  indirectBufferOffset: nativeOffset,
-                  threadsPerThreadgroup: threads
-              )
-          }
-          '''
-          if old_indirect in native:
-              native = native.replace(old_indirect, new_indirect, 1)
-          elif new_indirect not in native:
-              raise SystemExit('indirect compute ABI anchor not found')
-
-          native_path.write_text(native)
-          PY
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            src/main/native/MetalFrameGenerationLifecycle.swift \
-            src/main/native/MetallumNative.swift
-          if ! git diff --cached --quiet; then
-            git commit -m "fix(metal4): unify generic compute ABI ownership [skip ci]"
-            git push origin HEAD:feature/metal4-complete-migration
-          fi
-
       - name: Compile native and Java paths
         id: build
         shell: bash
@@ -204,16 +53,34 @@ jobs:
           echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
           exit 0
 
+      - name: Verify build did not modify tracked sources
+        id: clean
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          git diff --exit-code -- \
+            build.gradle \
+            docs/mtl4-api-probe.swift \
+            src/main/java \
+            src/main/native \
+            src/test
+          STATUS=$?
+          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+          exit 0
+
       - name: Write validation receipt
         if: always()
         shell: bash
         env:
           BUILD_STATUS: ${{ steps.build.outputs.status }}
+          CLEAN_STATUS: ${{ steps.clean.outputs.status }}
         run: |
           set -euo pipefail
           mkdir -p docs/validation
-          STATUS=${BUILD_STATUS:-setup-failed}
-          if [ "${STATUS}" = "0" ]; then
+          BUILD=${BUILD_STATUS:-setup-failed}
+          CLEAN=${CLEAN_STATUS:-setup-failed}
+          if [ "${BUILD}" = "0" ] && [ "${CLEAN}" = "0" ]; then
             CONCLUSION=PASS
           else
             CONCLUSION=FAIL
@@ -228,6 +95,8 @@ jobs:
             echo "- Xcode path: \`$(xcode-select -p 2>/dev/null || echo unavailable)\`"
             echo "- Swift: \`$(xcrun swiftc --version 2>/dev/null | head -n1 || echo unavailable)\`"
             echo "- SDK: \`$(xcrun --show-sdk-path --sdk macosx 2>/dev/null || echo unavailable)\`"
+            echo "- Build status: \`${BUILD}\`"
+            echo "- Source-clean status: \`${CLEAN}\`"
             echo "- Command: \`./gradlew buildMacNative build -x metalFrameGenerationPresentationValidation -x metalFxOffscreenValidation\`"
             echo
             echo "## Log tail"
@@ -259,5 +128,7 @@ jobs:
         shell: bash
         env:
           BUILD_STATUS: ${{ steps.build.outputs.status }}
+          CLEAN_STATUS: ${{ steps.clean.outputs.status }}
         run: |
           test "${BUILD_STATUS:-1}" = "0"
+          test "${CLEAN_STATUS:-1}" = "0"
