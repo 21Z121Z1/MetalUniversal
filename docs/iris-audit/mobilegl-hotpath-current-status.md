@@ -46,6 +46,10 @@ an Apple M1 Pro with Metal API and GPU validation enabled:
   as part of the build graph. The required packet/ICB C exports are present in
   `libmetallum.dylib`: interface table, render-state packet, render-command
   packet, compute-command packet, and terrain-ICB encoder.
+- The full clean test no longer loads a second shipped native image after the
+  production bridge has initialized; the earlier Objective-C duplicate-class
+  warning was isolated to test-side `libraryLookup` calls and is absent after
+  the loader tests reuse the existing image.
 - Default-off, R0/R1/R2/R3, C0/C1, and I0/I1 `runClientIris` smoke lanes reached
   the copied `New World` and produced hotpath telemetry without hotpath Mixin,
   native-bridge, partial-execution, or command-buffer errors. R2 and R3
