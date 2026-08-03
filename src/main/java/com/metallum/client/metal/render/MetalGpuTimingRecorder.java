@@ -30,15 +30,20 @@ public final class MetalGpuTimingRecorder {
         return PASS_TIMING_ENABLED;
     }
 
-    static synchronized void record(final long submitIndex, final double start, final double end) {
+    static void record(final long submitIndex, final double start, final double end) {
+        // Keep the disabled production path outside the monitor. This method is
+        // reached once per completed frame, and the previous synchronized
+        // declaration acquired the class monitor even when timing was disabled.
         if (!ENABLED || !(start > 0.0) || !(end > start)
                 || !Double.isFinite(start) || !Double.isFinite(end)) {
             return;
         }
-        SAMPLES.add(new Sample(submitIndex, start, end));
-        latestGpuNanos = Math.max(1L, Math.round((end - start) * 1_000_000_000.0));
-        if (SAMPLES.size() > CAPACITY) {
-            SAMPLES.subList(0, SAMPLES.size() - CAPACITY).clear();
+        synchronized (MetalGpuTimingRecorder.class) {
+            SAMPLES.add(new Sample(submitIndex, start, end));
+            latestGpuNanos = Math.max(1L, Math.round((end - start) * 1_000_000_000.0));
+            if (SAMPLES.size() > CAPACITY) {
+                SAMPLES.subList(0, SAMPLES.size() - CAPACITY).clear();
+            }
         }
     }
 
@@ -58,28 +63,41 @@ public final class MetalGpuTimingRecorder {
     }
 
     /** Latest completed GPU service duration, or zero when timing is disabled/unavailable. */
-    public static synchronized long latestGpuNanos() {
-        return latestGpuNanos;
+    public static long latestGpuNanos() {
+        if (!ENABLED) {
+            return 0L;
+        }
+        synchronized (MetalGpuTimingRecorder.class) {
+            return latestGpuNanos;
+        }
     }
 
-    static synchronized void recordCpuPass(final String label, final long startNanos, final long endNanos) {
+    static void recordCpuPass(final String label, final long startNanos, final long endNanos) {
+        // renderEncoder()/finishTiming() are on the render thread. Do not enter
+        // a synchronized method for every pass when the validation lane is off.
         if (!PASS_TIMING_ENABLED || endNanos <= startNanos) {
             return;
         }
-        CPU_PASS_SAMPLES.add(new CpuPassSample(label, (endNanos - startNanos) / 1_000_000.0));
-        if (CPU_PASS_SAMPLES.size() > CAPACITY * 16) {
-            CPU_PASS_SAMPLES.subList(0, CPU_PASS_SAMPLES.size() - CAPACITY * 16).clear();
+        synchronized (MetalGpuTimingRecorder.class) {
+            CPU_PASS_SAMPLES.add(new CpuPassSample(label, (endNanos - startNanos) / 1_000_000.0));
+            if (CPU_PASS_SAMPLES.size() > CAPACITY * 16) {
+                CPU_PASS_SAMPLES.subList(0, CPU_PASS_SAMPLES.size() - CAPACITY * 16).clear();
+            }
         }
     }
 
-    static synchronized void recordRenderEncoderLookup(final boolean cacheHit) {
+    static void recordRenderEncoderLookup(final boolean cacheHit) {
+        // This call occurs for every renderEncoder() lookup. The disabled path
+        // must be a plain predictable branch, not an uncontended monitor enter.
         if (!PASS_TIMING_ENABLED) {
             return;
         }
-        if (cacheHit) {
-            renderEncoderCacheHits++;
-        } else {
-            renderEncoderFactoryCalls++;
+        synchronized (MetalGpuTimingRecorder.class) {
+            if (cacheHit) {
+                renderEncoderCacheHits++;
+            } else {
+                renderEncoderFactoryCalls++;
+            }
         }
     }
 
@@ -117,7 +135,7 @@ public final class MetalGpuTimingRecorder {
     public record CpuPassSample(String label, double milliseconds) {
     }
 
-    public record GpuEncoderSample(String label, String kind, double milliseconds) {
+    public record GpuEncoderSample(String label, int kind, double milliseconds) {
     }
 
     public record RenderEncoderLookupStats(long factoryCalls, long cacheHits) {
