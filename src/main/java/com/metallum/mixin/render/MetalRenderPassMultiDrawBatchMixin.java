@@ -134,6 +134,12 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
             }
         }
 
+        // Exact validation metadata remains owned by the target method. Avoid
+        // opening an encoder merely to discover that this mixin will fall back.
+        if (!batchEligible && !noTrace) {
+            return;
+        }
+
         MTLRenderCommandEncoder encoder = this.metallum$invokeRenderEncoder();
         this.metallum$invokeBindDrawState(encoder);
 
@@ -153,7 +159,7 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
                     firstInstance
             );
             MetalHotPathTelemetry.recordNativeMultiDrawBatch(emitted);
-        } else if (noTrace) {
+        } else {
             // Preserve the legacy per-draw behavior but omit render-contract
             // parameter objects that would be discarded immediately.
             for (int draw = 0; draw < drawCount; draw++) {
@@ -174,9 +180,6 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
                     );
                 }
             }
-        } else {
-            // Validation needs the target method's exact producer metadata.
-            return;
         }
 
         if (!noTrace) {
