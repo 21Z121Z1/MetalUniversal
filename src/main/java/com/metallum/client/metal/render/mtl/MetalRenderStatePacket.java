@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render.mtl;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalRenderCommandPacketBridge;
 import com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge;
 import org.jspecify.annotations.Nullable;
 
@@ -37,6 +38,9 @@ final class MetalRenderStatePacket implements AutoCloseable {
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.renderStatePacket", "true")
     );
+    private static final boolean COMMAND_PACKET_REQUESTED = Boolean.getBoolean(
+            "metallum.opt.renderCommandPacket"
+    );
     private static final int CAPACITY = Math.clamp(
             Integer.getInteger("metallum.opt.renderStatePacketEntries", 256),
             16,
@@ -55,7 +59,12 @@ final class MetalRenderStatePacket implements AutoCloseable {
     private boolean closed;
 
     static @Nullable MetalRenderStatePacket createIfAvailable() {
-        if (!ENABLED || !MetalRenderStatePacketBridge.available()) {
+        // Never mirror state into both packet formats. The command packet is
+        // selected only when its negotiated native ABI is actually available;
+        // otherwise the established state-only path remains active.
+        if (!ENABLED
+                || (COMMAND_PACKET_REQUESTED && MetalRenderCommandPacketBridge.available())
+                || !MetalRenderStatePacketBridge.available()) {
             return null;
         }
         return new MetalRenderStatePacket(CAPACITY);
@@ -210,9 +219,6 @@ final class MetalRenderStatePacket implements AutoCloseable {
         if (applied == this.entryCount) {
             MetalRenderStatePacketTelemetry.recordPacket(this.entryCount);
         } else {
-            // State setters are idempotent. Even if a future decoder reports a
-            // partial positive count, replaying the complete packet restores
-            // the exact final encoder state.
             replayLegacy(encoder);
             this.active = false;
         }
@@ -290,7 +296,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
                 );
                 case OP_WINDING -> MetalNativeBridge.MTLRenderCommandEncoder_setFrontFacingWinding(
                         encoder,
-                        a
+                        (int) a
                 );
                 case OP_CULL_MODE -> MetalNativeBridge.MTLRenderCommandEncoder_setCullMode(
                         encoder,
@@ -298,7 +304,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
                 );
                 case OP_FILL_MODE -> MetalNativeBridge.MTLRenderCommandEncoder_setTriangleFillMode(
                         encoder,
-                        a
+                        (int) a
                 );
                 case OP_BUFFER -> MetalNativeBridge.MTLRenderCommandEncoder_setBuffer(
                         encoder,
