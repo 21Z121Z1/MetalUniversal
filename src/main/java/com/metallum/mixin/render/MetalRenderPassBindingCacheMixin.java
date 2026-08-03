@@ -2,7 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.MetalBindingToken;
-import com.metallum.client.metal.render.MetalBindingTokenRegistry;
+import com.metallum.client.metal.render.MetalBindingTokenCache;
 import com.metallum.client.metal.render.MetalUploadDedupBuffer;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -29,20 +29,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(targets = "com.metallum.client.metal.render.MetalRenderPass")
 public abstract class MetalRenderPassBindingCacheMixin {
     @Unique
-    private static final int metallum$TOKEN_CACHE_SIZE = 16;
-    @Unique
-    private static final int metallum$TOKEN_CACHE_MASK = metallum$TOKEN_CACHE_SIZE - 1;
-
-    @Unique
     private final Int2ObjectOpenHashMap<BindingState> metallum$uniformBindings =
             new Int2ObjectOpenHashMap<>();
     @Unique
     private final Int2ObjectOpenHashMap<BindingState> metallum$storageBindings =
             new Int2ObjectOpenHashMap<>();
     @Unique
-    private final String[] metallum$tokenNames = new String[metallum$TOKEN_CACHE_SIZE];
-    @Unique
-    private final MetalBindingToken[] metallum$tokens = new MetalBindingToken[metallum$TOKEN_CACHE_SIZE];
+    private final MetalBindingTokenCache metallum$tokenCache = new MetalBindingTokenCache();
 
     @Inject(
             method = "setUniform(Ljava/lang/String;Lcom/mojang/blaze3d/buffers/GpuBufferSlice;)V",
@@ -54,7 +47,7 @@ public abstract class MetalRenderPassBindingCacheMixin {
             final GpuBufferSlice value,
             final CallbackInfo ci
     ) {
-        MetalBindingToken token = this.metallum$resolveToken(name);
+        MetalBindingToken token = this.metallum$tokenCache.resolve(name);
         // These Mojang blocks also invalidate the generated Iris draw block;
         // preserve that semantic boundary even when their native binding did
         // not move.
@@ -95,18 +88,6 @@ public abstract class MetalRenderPassBindingCacheMixin {
             this.metallum$storageBindings.put(binding, state);
         }
         state.update(value);
-    }
-
-    @Unique
-    private MetalBindingToken metallum$resolveToken(final String name) {
-        int cacheIndex = System.identityHashCode(name) & metallum$TOKEN_CACHE_MASK;
-        if (this.metallum$tokenNames[cacheIndex] == name) {
-            return this.metallum$tokens[cacheIndex];
-        }
-        MetalBindingToken token = MetalBindingTokenRegistry.resolve(name);
-        this.metallum$tokenNames[cacheIndex] = name;
-        this.metallum$tokens[cacheIndex] = token;
-        return token;
     }
 
     @Unique
