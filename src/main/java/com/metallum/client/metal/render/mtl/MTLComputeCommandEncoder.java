@@ -14,25 +14,56 @@ import java.lang.foreign.MemorySegment;
  */
 @Environment(EnvType.CLIENT)
 public final class MTLComputeCommandEncoder extends MTLCommandEncoder {
+    private static final boolean STATE_SHADOW_ENABLED = !"false".equalsIgnoreCase(
+            System.getProperty("metallum.opt.encoderStateShadow", "true")
+    );
+
+    private final MetalComputeStateShadow stateShadow = STATE_SHADOW_ENABLED
+            ? new MetalComputeStateShadow()
+            : null;
 
     MTLComputeCommandEncoder(final MemorySegment handle) {
         super(handle);
     }
 
     public void setComputePipelineState(final MemorySegment pipelineState) {
-        MetalNativeBridge.MTLComputeCommandEncoder_setComputePipelineState(handle(), pipelineState);
+        MemorySegment encoder = handle();
+        if (stateShadow != null && !stateShadow.setPipeline(pipelineState)) {
+            MetalHotPathTelemetry.computeSuppressed();
+            return;
+        }
+        MetalNativeBridge.MTLComputeCommandEncoder_setComputePipelineState(encoder, pipelineState);
+        MetalHotPathTelemetry.computeForwarded();
     }
 
     public void setBuffer(final MemorySegment buffer, final long offset, final int index) {
-        MetalNativeBridge.MTLComputeCommandEncoder_setBuffer(handle(), buffer, offset, index);
+        MemorySegment encoder = handle();
+        if (stateShadow != null && !stateShadow.setBuffer(buffer, offset, index)) {
+            MetalHotPathTelemetry.computeSuppressed();
+            return;
+        }
+        MetalNativeBridge.MTLComputeCommandEncoder_setBuffer(encoder, buffer, offset, index);
+        MetalHotPathTelemetry.computeForwarded();
     }
 
     public void setTexture(final MemorySegment texture, final int index) {
-        MetalNativeBridge.MTLComputeCommandEncoder_setTexture(handle(), texture, index);
+        MemorySegment encoder = handle();
+        if (stateShadow != null && !stateShadow.setTexture(texture, index)) {
+            MetalHotPathTelemetry.computeSuppressed();
+            return;
+        }
+        MetalNativeBridge.MTLComputeCommandEncoder_setTexture(encoder, texture, index);
+        MetalHotPathTelemetry.computeForwarded();
     }
 
     public void setSamplerState(final MemorySegment sampler, final int index) {
-        MetalNativeBridge.MTLComputeCommandEncoder_setSamplerState(handle(), sampler, index);
+        MemorySegment encoder = handle();
+        if (stateShadow != null && !stateShadow.setSampler(sampler, index)) {
+            MetalHotPathTelemetry.computeSuppressed();
+            return;
+        }
+        MetalNativeBridge.MTLComputeCommandEncoder_setSamplerState(encoder, sampler, index);
+        MetalHotPathTelemetry.computeForwarded();
     }
 
     public void dispatchThreadgroups(
