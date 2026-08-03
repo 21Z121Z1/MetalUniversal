@@ -2176,6 +2176,7 @@ tasks.register("buildIOSNative", Exec) {
 			"-framework", "QuartzCore",
 			"-framework", "UIKit",
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
+			"src/main/native/MetalFrameGenerationLifecycle.swift",
 			"src/main/native/MetallumInterface.swift",
 			"src/main/native/MetallumNative.swift"
 	}

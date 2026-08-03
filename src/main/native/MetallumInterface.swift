@@ -84,7 +84,7 @@ private func validateRenderStateEntry(_ entry: RenderStatePacketEntry) -> Bool {
     case .pipeline:
         return packetObject(entry.a) as? MTLRenderPipelineState != nil
     case .depthStencil:
-        return packetObject(entry.a) as? MTLDepthStencilState != nil
+        return entry.a == 0 || packetObject(entry.a) as? MTLDepthStencilState != nil
     case .depthBias, .scissor:
         return true
     case .winding:
@@ -103,8 +103,8 @@ private func validateRenderStateEntry(_ entry: RenderStatePacketEntry) -> Bool {
             && (entry.a == 0 || packetObject(entry.a) as? MTLTexture != nil)
     case .textureAndSampler:
         return validRenderStageMask(entry.stageMask)
-            && packetObject(entry.a) as? MTLTexture != nil
-            && packetObject(entry.b) as? MTLSamplerState != nil
+            && (entry.a == 0 || packetObject(entry.a) as? MTLTexture != nil)
+            && (entry.b == 0 || packetObject(entry.b) as? MTLSamplerState != nil)
     }
 }
 
@@ -300,7 +300,7 @@ private func validateRenderCommandEntry(_ entry: RenderCommandPacketEntry) -> Bo
     case .pipeline:
         return packetObject(entry.a) as? MTLRenderPipelineState != nil
     case .depthStencil:
-        return packetObject(entry.a) as? MTLDepthStencilState != nil
+        return entry.a == 0 || packetObject(entry.a) as? MTLDepthStencilState != nil
     case .depthBias:
         return true
     case .winding:
@@ -324,8 +324,8 @@ private func validateRenderCommandEntry(_ entry: RenderCommandPacketEntry) -> Bo
             && exactInt(entry.b) != nil
     case .textureAndSampler:
         return validRenderStageMask(entry.flags)
-            && packetObject(entry.a) as? MTLTexture != nil
-            && packetObject(entry.b) as? MTLSamplerState != nil
+            && (entry.a == 0 || packetObject(entry.a) as? MTLTexture != nil)
+            && (entry.b == 0 || packetObject(entry.b) as? MTLSamplerState != nil)
             && exactInt(entry.c) != nil
     case .scissor:
         return exactInt(entry.a) != nil
@@ -709,6 +709,7 @@ public func metallum_terrain_icb_encode_indexed_v1(
     _ rawBaseInstance: Int32
 ) -> Int32 {
     guard rawDrawCount > 0,
+          rawDrawCount <= 16_384,
           rawInstanceCount > 0,
           let firstIndexOffsets,
           let indexCounts,
@@ -740,7 +741,7 @@ public func metallum_terrain_icb_encode_indexed_v1(
     for draw in 0..<drawCount {
         let offset = Int(firstIndexOffsets[draw])
         let count = Int(indexCounts[draw])
-        guard offset >= 0, count > 0 else { return 0 }
+        guard offset >= 0, offset % indexSize == 0, count > 0 else { return 0 }
         let (bytes, mulOverflow) = count.multipliedReportingOverflow(by: indexSize)
         let (end, addOverflow) = offset.addingReportingOverflow(bytes)
         guard !mulOverflow, !addOverflow, end <= indexBuffer.length else { return 0 }
