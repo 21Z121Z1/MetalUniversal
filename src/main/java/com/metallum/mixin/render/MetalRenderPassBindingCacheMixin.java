@@ -94,7 +94,6 @@ public abstract class MetalRenderPassBindingCacheMixin {
                 : 0L;
     }
 
-    @Unique
     private static final class BindingState {
         private GpuBuffer buffer;
         private long backingVersion;
