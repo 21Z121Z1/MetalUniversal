@@ -3,6 +3,7 @@ package com.metallum.client.metal.render.mtl;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
 
@@ -15,6 +16,8 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
     private final MetalRenderStateShadow stateShadow = STATE_SHADOW_ENABLED
             ? new MetalRenderStateShadow()
             : null;
+    private final @Nullable MetalRenderStatePacket statePacket =
+            MetalRenderStatePacket.createIfAvailable();
 
     MTLRenderCommandEncoder(final MemorySegment handle) {
         super(handle);
@@ -22,105 +25,218 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
 
     public void setRenderPipelineState(final MemorySegment pipeline) {
         MemorySegment encoder = handle();
-        if (stateShadow != null && !stateShadow.setPipeline(pipeline)) {
+        if (this.stateShadow != null && !this.stateShadow.setPipeline(pipeline)) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
-        MetalNativeBridge.MTLRenderCommandEncoder_setRenderPipelineState(encoder, pipeline);
+        if (this.statePacket == null || !this.statePacket.appendPipeline(encoder, pipeline)) {
+            MetalNativeBridge.MTLRenderCommandEncoder_setRenderPipelineState(encoder, pipeline);
+        }
         MetalHotPathTelemetry.renderForwarded();
     }
 
     public void setDepthStencilState(final MemorySegment depthStencilState) {
         MemorySegment encoder = handle();
-        if (stateShadow != null && !stateShadow.setDepthStencil(depthStencilState)) {
+        if (this.stateShadow != null && !this.stateShadow.setDepthStencil(depthStencilState)) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
-        MetalNativeBridge.MTLRenderCommandEncoder_setDepthStencilState(encoder, depthStencilState);
+        if (this.statePacket == null
+                || !this.statePacket.appendDepthStencil(encoder, depthStencilState)) {
+            MetalNativeBridge.MTLRenderCommandEncoder_setDepthStencilState(
+                    encoder,
+                    depthStencilState
+            );
+        }
         MetalHotPathTelemetry.renderForwarded();
     }
 
     public void setDepthBias(final float depthBias, final float slopeScale, final float clamp) {
         MemorySegment encoder = handle();
-        if (stateShadow != null && !stateShadow.setDepthBias(depthBias, slopeScale, clamp)) {
+        if (this.stateShadow != null
+                && !this.stateShadow.setDepthBias(depthBias, slopeScale, clamp)) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
-        MetalNativeBridge.MTLRenderCommandEncoder_setDepthBias(encoder, depthBias, slopeScale, clamp);
+        if (this.statePacket == null
+                || !this.statePacket.appendDepthBias(encoder, depthBias, slopeScale, clamp)) {
+            MetalNativeBridge.MTLRenderCommandEncoder_setDepthBias(
+                    encoder,
+                    depthBias,
+                    slopeScale,
+                    clamp
+            );
+        }
         MetalHotPathTelemetry.renderForwarded();
     }
 
     public void setFrontFacingWinding(final MTLWinding winding) {
         MemorySegment encoder = handle();
-        if (stateShadow != null && !stateShadow.setWinding(winding.value)) {
+        if (this.stateShadow != null && !this.stateShadow.setWinding(winding.value)) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
-        MetalNativeBridge.MTLRenderCommandEncoder_setFrontFacingWinding(encoder, winding.value);
+        if (this.statePacket == null
+                || !this.statePacket.appendWinding(encoder, winding.value)) {
+            MetalNativeBridge.MTLRenderCommandEncoder_setFrontFacingWinding(
+                    encoder,
+                    winding.value
+            );
+        }
         MetalHotPathTelemetry.renderForwarded();
     }
 
     public void setCullMode(final MTLCullMode cullMode) {
         MemorySegment encoder = handle();
-        if (stateShadow != null && !stateShadow.setCullMode(cullMode.value)) {
+        if (this.stateShadow != null && !this.stateShadow.setCullMode(cullMode.value)) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
-        MetalNativeBridge.MTLRenderCommandEncoder_setCullMode(encoder, cullMode.value);
+        if (this.statePacket == null
+                || !this.statePacket.appendCullMode(encoder, cullMode.value)) {
+            MetalNativeBridge.MTLRenderCommandEncoder_setCullMode(encoder, cullMode.value);
+        }
         MetalHotPathTelemetry.renderForwarded();
     }
 
     public void setTriangleFillMode(final MTLTriangleFillMode fillMode) {
         MemorySegment encoder = handle();
-        if (stateShadow != null && !stateShadow.setFillMode(fillMode.value)) {
+        if (this.stateShadow != null && !this.stateShadow.setFillMode(fillMode.value)) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
-        MetalNativeBridge.MTLRenderCommandEncoder_setTriangleFillMode(encoder, fillMode.value);
+        if (this.statePacket == null
+                || !this.statePacket.appendFillMode(encoder, fillMode.value)) {
+            MetalNativeBridge.MTLRenderCommandEncoder_setTriangleFillMode(
+                    encoder,
+                    fillMode.value
+            );
+        }
         MetalHotPathTelemetry.renderForwarded();
     }
 
-    public void setBuffer(final MemorySegment buffer, final long offset, final long index, final int stageMask) {
+    public void setBuffer(
+            final MemorySegment buffer,
+            final long offset,
+            final long index,
+            final int stageMask
+    ) {
         MemorySegment encoder = handle();
-        if (stateShadow == null) {
-            MetalNativeBridge.MTLRenderCommandEncoder_setBuffer(encoder, buffer, offset, index, stageMask);
+        if (this.stateShadow == null) {
+            if (this.statePacket == null
+                    || !this.statePacket.appendBuffer(
+                    encoder,
+                    buffer,
+                    offset,
+                    index,
+                    stageMask
+            )) {
+                MetalNativeBridge.MTLRenderCommandEncoder_setBuffer(
+                        encoder,
+                        buffer,
+                        offset,
+                        index,
+                        stageMask
+                );
+            }
             MetalHotPathTelemetry.renderForwarded();
             return;
         }
 
-        MetalRenderStateShadow.BufferUpdate update = stateShadow.classifyBuffer(buffer, offset, index, stageMask);
+        MetalRenderStateShadow.BufferUpdate update = this.stateShadow.classifyBuffer(
+                buffer,
+                offset,
+                index,
+                stageMask
+        );
         if (update == MetalRenderStateShadow.BufferUpdate.SKIP) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
         if (update == MetalRenderStateShadow.BufferUpdate.OFFSET_ONLY) {
-            MetalNativeBridge.MTLRenderCommandEncoder_setBufferOffset(encoder, offset, index, stageMask);
+            if (this.statePacket == null
+                    || !this.statePacket.appendBufferOffset(
+                    encoder,
+                    offset,
+                    index,
+                    stageMask
+            )) {
+                MetalNativeBridge.MTLRenderCommandEncoder_setBufferOffset(
+                        encoder,
+                        offset,
+                        index,
+                        stageMask
+                );
+            }
             MetalHotPathTelemetry.renderOffsetOnly();
             MetalHotPathTelemetry.renderForwarded();
         } else {
-            MetalNativeBridge.MTLRenderCommandEncoder_setBuffer(encoder, buffer, offset, index, stageMask);
+            if (this.statePacket == null
+                    || !this.statePacket.appendBuffer(
+                    encoder,
+                    buffer,
+                    offset,
+                    index,
+                    stageMask
+            )) {
+                MetalNativeBridge.MTLRenderCommandEncoder_setBuffer(
+                        encoder,
+                        buffer,
+                        offset,
+                        index,
+                        stageMask
+                );
+            }
             MetalHotPathTelemetry.renderForwarded();
         }
-        stateShadow.recordBuffer(buffer, offset, index, stageMask);
+        this.stateShadow.recordBuffer(buffer, offset, index, stageMask);
     }
 
     public void setBufferOffset(final long offset, final long index, final int stageMask) {
         MemorySegment encoder = handle();
-        if (stateShadow != null && !stateShadow.setBufferOffset(offset, index, stageMask)) {
+        if (this.stateShadow != null
+                && !this.stateShadow.setBufferOffset(offset, index, stageMask)) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
-        MetalNativeBridge.MTLRenderCommandEncoder_setBufferOffset(encoder, offset, index, stageMask);
+        if (this.statePacket == null
+                || !this.statePacket.appendBufferOffset(
+                encoder,
+                offset,
+                index,
+                stageMask
+        )) {
+            MetalNativeBridge.MTLRenderCommandEncoder_setBufferOffset(
+                    encoder,
+                    offset,
+                    index,
+                    stageMask
+            );
+        }
         MetalHotPathTelemetry.renderForwarded();
     }
 
     public void setTexture(final MemorySegment texture, final long index, final int stageMask) {
         MemorySegment encoder = handle();
-        if (stateShadow != null && !stateShadow.setTexture(texture, index, stageMask)) {
+        if (this.stateShadow != null
+                && !this.stateShadow.setTexture(texture, index, stageMask)) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
-        MetalNativeBridge.MTLRenderCommandEncoder_setTexture(encoder, texture, index, stageMask);
+        if (this.statePacket == null
+                || !this.statePacket.appendTexture(
+                encoder,
+                texture,
+                index,
+                stageMask
+        )) {
+            MetalNativeBridge.MTLRenderCommandEncoder_setTexture(
+                    encoder,
+                    texture,
+                    index,
+                    stageMask
+            );
+        }
         MetalHotPathTelemetry.renderForwarded();
     }
 
@@ -131,27 +247,47 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
             final int stageMask
     ) {
         MemorySegment encoder = handle();
-        if (stateShadow != null && !stateShadow.setTextureAndSampler(texture, sampler, index, stageMask)) {
+        if (this.stateShadow != null
+                && !this.stateShadow.setTextureAndSampler(texture, sampler, index, stageMask)) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
-        MetalNativeBridge.MTLRenderCommandEncoder_setTextureAndSampler(
+        if (this.statePacket == null
+                || !this.statePacket.appendTextureAndSampler(
                 encoder,
                 texture,
                 sampler,
                 index,
                 stageMask
-        );
+        )) {
+            MetalNativeBridge.MTLRenderCommandEncoder_setTextureAndSampler(
+                    encoder,
+                    texture,
+                    sampler,
+                    index,
+                    stageMask
+            );
+        }
         MetalHotPathTelemetry.renderForwarded();
     }
 
     public void setScissorRect(final long x, final long y, final long width, final long height) {
         MemorySegment encoder = handle();
-        if (stateShadow != null && !stateShadow.setScissor(x, y, width, height)) {
+        if (this.stateShadow != null
+                && !this.stateShadow.setScissor(x, y, width, height)) {
             MetalHotPathTelemetry.renderSuppressed();
             return;
         }
-        MetalNativeBridge.MTLRenderCommandEncoder_setScissorRect(encoder, x, y, width, height);
+        if (this.statePacket == null
+                || !this.statePacket.appendScissor(encoder, x, y, width, height)) {
+            MetalNativeBridge.MTLRenderCommandEncoder_setScissorRect(
+                    encoder,
+                    x,
+                    y,
+                    width,
+                    height
+            );
+        }
         MetalHotPathTelemetry.renderForwarded();
     }
 
@@ -168,8 +304,10 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
             final boolean clearDepthEnabled,
             final double clearDepth
     ) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
         MetalNativeBridge.MTLRenderCommandEncoder_clearDraw(
-                handle(),
+                encoder,
                 colorTexture,
                 depthTexture,
                 viewportWidth,
@@ -184,8 +322,8 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
         );
         // The native clear helper may install its own temporary pipeline and
         // bindings. Fail closed: the next ordinary draw repopulates all state.
-        if (stateShadow != null) {
-            stateShadow.invalidateAll();
+        if (this.stateShadow != null) {
+            this.stateShadow.invalidateAll();
         }
     }
 
@@ -196,8 +334,10 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
             final int instanceCount,
             final int baseInstance
     ) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
         MetalNativeBridge.MTLRenderCommandEncoder_drawPrimitives(
-                handle(),
+                encoder,
                 primitiveType.value,
                 firstVertex,
                 vertexCount,
@@ -216,8 +356,10 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
             final int baseVertex,
             final int baseInstance
     ) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
         MetalNativeBridge.MTLRenderCommandEncoder_drawIndexedPrimitives(
-                handle(),
+                encoder,
                 primitiveType.value,
                 indexCount,
                 indexType.value,
@@ -238,8 +380,10 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
             final int drawCount,
             final long stride
     ) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
         MetalNativeBridge.MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
-                handle(),
+                encoder,
                 primitiveType.value,
                 indexType.value,
                 indexBuffer,
@@ -257,8 +401,10 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
             final int drawCount,
             final long stride
     ) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
         MetalNativeBridge.MTLRenderCommandEncoder_drawPrimitivesIndirect(
-                handle(),
+                encoder,
                 primitiveType.value,
                 indirectBuffer,
                 indirectBufferOffset,
@@ -278,8 +424,10 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
             final int instanceCount,
             final int baseInstance
     ) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
         MetalNativeBridge.MTLRenderCommandEncoder_drawIndexedPrimitivesTriangleFan(
-                handle(),
+                encoder,
                 indexBuffer,
                 fanIndexBuffer,
                 fanIndexBufferOffset,
@@ -299,14 +447,51 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
      * encoders whose descriptor set a concrete store action.
      */
     public void setDepthStoreAction(final boolean store) {
-        MetalNativeBridge.MTLRenderCommandEncoder_setDepthStoreAction(handle(), store ? 1 : 0);
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        MetalNativeBridge.MTLRenderCommandEncoder_setDepthStoreAction(
+                encoder,
+                store ? 1 : 0
+        );
     }
 
     public void updateFence(final MemorySegment fence, final MTLRenderStages stages) {
-        MetalNativeBridge.MTLRenderCommandEncoder_updateFence(handle(), fence, stages.value);
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        MetalNativeBridge.MTLRenderCommandEncoder_updateFence(
+                encoder,
+                fence,
+                stages.value
+        );
     }
 
     public void waitForFence(final MemorySegment fence, final MTLRenderStages stages) {
-        MetalNativeBridge.MTLRenderCommandEncoder_waitForFence(handle(), fence, stages.value);
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        MetalNativeBridge.MTLRenderCommandEncoder_waitForFence(
+                encoder,
+                fence,
+                stages.value
+        );
+    }
+
+    @Override
+    public void endEncoding() {
+        if (!MetalNativeBridge.isNullHandle(this.handle)) {
+            flushState(this.handle);
+        }
+        try {
+            super.endEncoding();
+        } finally {
+            if (this.statePacket != null) {
+                this.statePacket.close();
+            }
+        }
+    }
+
+    private void flushState(final MemorySegment encoder) {
+        if (this.statePacket != null) {
+            this.statePacket.flush(encoder);
+        }
     }
 }
