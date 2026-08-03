@@ -339,14 +339,6 @@ struct MetalFrameGenerationLifecycle {
     }
 }
 
-// MARK: - Raw compute packet adapters
-//
-// The generic compute ABI returns a retained MTLComputeCommandEncoder as an
-// opaque pointer. MetallumInterface.swift owns only that pointer, while the
-// established native functions accept the typed protocol object. These local
-// overloads restore the object and call Metal directly. They deliberately have
-// no @_cdecl symbol and therefore do not change the public ABI.
-
 @inline(__always)
 private func metalComputePacketEncoder(
     _ pointer: UnsafeMutableRawPointer
@@ -427,4 +419,22 @@ func metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
             depth: Int(threadsPerGroupZ)
         )
     )
+}
+
+// The current Swift overlay exposes Range<Int>; the Objective-C selector uses
+// NSRange. Keep the packet implementation source-compatible with both forms.
+extension MTLRenderCommandEncoder {
+    func executeCommandsInBuffer(
+        _ buffer: MTLIndirectCommandBuffer,
+        range executionRange: NSRange
+    ) {
+        let (upperBound, overflow) = executionRange.location.addingReportingOverflow(
+            executionRange.length
+        )
+        precondition(!overflow && executionRange.location >= 0 && executionRange.length >= 0)
+        self.executeCommandsInBuffer(
+            buffer,
+            range: executionRange.location..<upperBound
+        )
+    }
 }
