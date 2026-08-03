@@ -41,16 +41,19 @@ public final class MetalDynamicBackingPoolBudget {
 
         while (!pool.isEmpty() && pool.size() > maxBuckets) {
             long key = largestNonEmptyBucketKey(pool);
-            ArrayDeque<MemorySegment> bucket = pool.remove(key);
+            ArrayDeque<MemorySegment> bucket = pool.get(key);
             if (bucket == null) {
                 break;
             }
             long size = allocationSize(key);
             while (!bucket.isEmpty()) {
-                releaser.accept(bucket.pop());
+                MemorySegment handle = bucket.peek();
+                releaser.accept(handle);
+                bucket.pop();
                 releasedHandles++;
                 retainedBytes = subtractSaturated(retainedBytes, size);
             }
+            pool.remove(key);
             removedBuckets++;
         }
 
@@ -63,7 +66,9 @@ public final class MetalDynamicBackingPoolBudget {
                 continue;
             }
             long size = allocationSize(key);
-            releaser.accept(bucket.pop());
+            MemorySegment handle = bucket.peek();
+            releaser.accept(handle);
+            bucket.pop();
             releasedHandles++;
             retainedBytes = subtractSaturated(retainedBytes, size);
             if (bucket.isEmpty()) {
