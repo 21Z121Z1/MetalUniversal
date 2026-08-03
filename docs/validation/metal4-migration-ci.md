@@ -1,8 +1,8 @@
 # Metal 4 migration macOS 26 CI receipt
 
 - Conclusion: **FAIL**
-- Source commit: `0594662c3b18279e598b3fa4f9bdc48f56ba3b46`
-- Workflow trigger: `a841e534bf77a487df3b0b4cb94686ed9116d0f1`
+- Source commit: `245c14532f8188c4fd0426726a97a19f8f661d31`
+- Workflow trigger: `bf9d96744cf89ae1132aaf39fa466766889f613c`
 - Runner: `macOS / ARM64`
 - Xcode path: `/Applications/Xcode_26.6.0.app/Contents/Developer`
 - Swift: `Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)`
@@ -29,39 +29,7 @@ Starting a Gradle Daemon (subsequent builds will be faster)
 > Configure project :
 Fabric Loom: 1.16.3
 
-> Task :buildMacNative FAILED
-src/main/native/MetalFrameGenerationLifecycle.swift:350:6: error: invalid redeclaration of 'metallum_MTLComputeCommandEncoder_setComputePipelineState'
-348 | }
-349 | 
-350 | func metallum_MTLComputeCommandEncoder_setComputePipelineState(
-    |      `- error: invalid redeclaration of 'metallum_MTLComputeCommandEncoder_setComputePipelineState'
-351 |     _ pointer: UnsafeMutableRawPointer,
-352 |     _ pipelineState: MTLComputePipelineState
-
-src/main/native/MetalFrameGenerationLifecycle.swift:370:6: error: invalid redeclaration of 'metallum_MTLComputeCommandEncoder_setTexture'
-368 | }
-369 | 
-370 | func metallum_MTLComputeCommandEncoder_setTexture(
-    |      `- error: invalid redeclaration of 'metallum_MTLComputeCommandEncoder_setTexture'
-371 |     _ pointer: UnsafeMutableRawPointer,
-372 |     _ texture: MTLTexture?,
-
-src/main/native/MetalFrameGenerationLifecycle.swift:378:6: error: invalid redeclaration of 'metallum_MTLComputeCommandEncoder_setSamplerState'
-376 | }
-377 | 
-378 | func metallum_MTLComputeCommandEncoder_setSamplerState(
-    |      `- error: invalid redeclaration of 'metallum_MTLComputeCommandEncoder_setSamplerState'
-379 |     _ pointer: UnsafeMutableRawPointer,
-380 |     _ sampler: MTLSamplerState?,
-
-src/main/native/MetalFrameGenerationLifecycle.swift:386:6: error: invalid redeclaration of 'metallum_MTLComputeCommandEncoder_dispatchThreadgroups'
-384 | }
-385 | 
-386 | func metallum_MTLComputeCommandEncoder_dispatchThreadgroups(
-    |      `- error: invalid redeclaration of 'metallum_MTLComputeCommandEncoder_dispatchThreadgroups'
-387 |     _ pointer: UnsafeMutableRawPointer,
-388 |     _ groupsX: Int32,
-
+> Task :buildMacNative
 src/main/native/MetallumNative.swift:2450:19: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
  1492 | 
  1493 | @available(macOS 26.0, *)
@@ -145,13 +113,81 @@ src/main/native/MetallumNative.swift:6177:13: warning: variable 'cameraUniforms'
  6178 |             currentViewProjection: currentMatrix,
  6179 |             inverseCurrentViewProjection: inverseMatrix,
 
+> Task :compileJava
+
+> Task :buildIOSNative
+clang: warning: using sysroot for 'MacOSX' but targeting 'iPhone' [-Wincompatible-sysroot]
+
+> Task :buildIOSSpvc
+[buildIOSSpvc] Running: git clone --depth 1 --branch vulkan-sdk-1.3.290.0 https://github.com/KhronosGroup/SPIRV-Cross.git /Users/runner/work/MetalUniversal/MetalUniversal/build/spirv-cross-src
+[buildIOSSpvc] Cloning into '/Users/runner/work/MetalUniversal/MetalUniversal/build/spirv-cross-src'...
+[buildIOSSpvc] Running: cmake -G Unix Makefiles -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_MAKE_PROGRAM=/usr/bin/make -DSPIRV_CROSS_SHARED=ON -DSPIRV_CROSS_STATIC=OFF -DSPIRV_CROSS_CLI=OFF -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_ENABLE_C_API=ON -DSPIRV_CROSS_ENABLE_MSL=ON -DSPIRV_CROSS_ENABLE_GLSL=ON -DSPIRV_CROSS_ENABLE_HLSL=OFF -DSPIRV_CROSS_ENABLE_CPP=OFF -DSPIRV_CROSS_ENABLE_REFLECT=OFF -DSPIRV_CROSS_ENABLE_UTIL=OFF -DCMAKE_BUILD_TYPE=Release /Users/runner/work/MetalUniversal/MetalUniversal/build/spirv-cross-src
+[buildIOSSpvc] CMake Warning (deprecated) at CMakeLists.txt:22 (cmake_minimum_required):
+[buildIOSSpvc]   Compatibility with CMake < 3.10 will be removed from a future version of
+[buildIOSSpvc]   CMake.
+[buildIOSSpvc] 
+[buildIOSSpvc]   Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+[buildIOSSpvc]   to tell CMake that the project requires at least <min> but has been updated
+[buildIOSSpvc]   to work with policies introduced by <max> or earlier.
+[buildIOSSpvc] This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+[buildIOSSpvc] to suppress it.
+[buildIOSSpvc] 
+[buildIOSSpvc] -- The CXX compiler identification is AppleClang 21.0.0.21000101
+[buildIOSSpvc] -- The C compiler identification is AppleClang 21.0.0.21000101
+[buildIOSSpvc] -- Detecting CXX compiler ABI info
+[buildIOSSpvc] -- Detecting CXX compiler ABI info - done
+[buildIOSSpvc] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[buildIOSSpvc] -- Detecting CXX compile features
+[buildIOSSpvc] -- Detecting CXX compile features - done
+[buildIOSSpvc] -- Detecting C compiler ABI info
+[buildIOSSpvc] -- Detecting C compiler ABI info - done
+[buildIOSSpvc] -- Check for working C compiler: /usr/bin/cc - skipped
+[buildIOSSpvc] -- Detecting C compile features
+[buildIOSSpvc] -- Detecting C compile features - done
+[buildIOSSpvc] -- SPIRV-Cross: Finding Git version for SPIRV-Cross.
+[buildIOSSpvc] -- Found Git: /opt/homebrew/bin/git (found version "2.55.0")
+[buildIOSSpvc] -- SPIRV-Cross: Git hash: vulkan-sdk-1.3.290.0
+[buildIOSSpvc] -- Configuring done (8.3s)
+[buildIOSSpvc] -- Generating done (0.0s)
+[buildIOSSpvc] -- Build files have been written to: /Users/runner/work/MetalUniversal/MetalUniversal/build/spirv-cross-build
+[buildIOSSpvc] Running: cmake --build . --config Release -j 4
+[buildIOSSpvc] [ 12%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross.cpp.o
+[buildIOSSpvc] [ 37%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_parsed_ir.cpp.o
+[buildIOSSpvc] [ 37%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_parser.cpp.o
+[buildIOSSpvc] [ 50%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cfg.cpp.o
+[buildIOSSpvc] [ 62%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_cross_c.cpp.o
+[buildIOSSpvc] [ 75%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_glsl.cpp.o
+[buildIOSSpvc] [ 87%] Building CXX object CMakeFiles/spirv-cross-c-shared.dir/spirv_msl.cpp.o
+[buildIOSSpvc] [100%] Linking CXX shared library libspirv-cross-c-shared.dylib
+[buildIOSSpvc] [100%] Built target spirv-cross-c-shared
+[buildIOSSpvc] Built libspvc.dylib -> /Users/runner/work/MetalUniversal/MetalUniversal/src/main/resources/natives/ios/libspvc.dylib
+[buildIOSSpvc] MSL backend symbols present: true
+[buildIOSSpvc] Architecture: Non-fat file: /Users/runner/work/MetalUniversal/MetalUniversal/build/spirv-cross-build/libspirv-cross-c-shared.dylib is architecture: arm64
+[buildIOSSpvc] LC_BUILD_VERSION platform: iOS
+
+> Task :processResources
+> Task :classes
+> Task :processIncludeJars
+> Task :sourcesJar
+
+> Task :metal4ApiProbe FAILED
+docs/mtl4-api-probe.swift:280:25: error: cannot find 'buffer' in scope
+278 |     cenc.dispatchThreads(threadsPerGrid: MTLSize(width: 8, height: 8, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+279 |     cenc.dispatchThreadgroups(
+280 |         indirectBuffer: buffer.gpuAddress,
+    |                         `- error: cannot find 'buffer' in scope
+281 |         threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1)
+282 |     )
+
+> Task :jar
+
 [Incubating] Problems report is available at: file:///Users/runner/work/MetalUniversal/MetalUniversal/build/reports/problems/problems-report.html
 
 FAILURE: Build failed with an exception.
 
 * What went wrong:
-Execution failed for task ':buildMacNative'.
-> Process 'command 'swiftc'' finished with non-zero exit value 1
+Execution failed for task ':metal4ApiProbe'.
+> Process 'command 'bash'' finished with non-zero exit value 1
 
 * Try:
 > Run with --stacktrace option to get the stack trace.
@@ -165,6 +201,6 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/9.4.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD FAILED in 53s
-1 actionable task: 1 executed
+BUILD FAILED in 2m 10s
+9 actionable tasks: 9 executed
 ```
