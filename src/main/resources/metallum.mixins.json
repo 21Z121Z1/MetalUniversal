@@ -39,6 +39,7 @@
     "render.MTLRenderCommandEncoderFlushMixin",
     "render.MTLRenderCommandEncoderPacketMixin",
     "render.MetalRenderPassCommandPacketBoundaryMixin",
+    "render.MetalHotPathTelemetryReportMixin",
     "render.MetalRenderPassBindingCacheMixin",
     "render.MetalGpuBufferNativeHandleAccessor",
     "render.MetalRenderPassNoTraceDrawMixin",
