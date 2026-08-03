@@ -36,6 +36,7 @@
     "render.MetalCommandEncoderCopyDedupMixin",
     "render.MetalRenderPassBindingCacheMixin",
     "render.MetalGpuBufferNativeHandleAccessor",
+    "render.MetalRenderPassNoTraceDrawMixin",
     "render.MetalRenderPassMultiDrawBatchMixin",
     "render.IrisMetalCommandEncoderComputeGroupingMixin",
     "render.IrisMetalRenderFusionBoundaryMixin",
