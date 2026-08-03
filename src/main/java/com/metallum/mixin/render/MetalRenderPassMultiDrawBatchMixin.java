@@ -1,10 +1,13 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalGpuBuffer;
+import com.metallum.client.metal.render.MetalTerrainIcbScope;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalTerrainIcbBridge;
 import com.metallum.client.metal.render.mtl.MTLIndexType;
 import com.metallum.client.metal.render.mtl.MTLPrimitiveType;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
+import com.metallum.client.metal.render.mtl.MetalCommandPacketTelemetry;
 import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
 import com.metallum.client.metal.render.mtl.MetalRenderStateFlushable;
 import com.metallum.client.validation.contract.ProducerType;
@@ -23,9 +26,9 @@ import java.nio.IntBuffer;
 import java.util.Map;
 
 /**
- * Converts Mojang's interleaved indexed multi-draw records into one existing
- * native Metal multi-draw call. This removes one Java/FFM/draw crossing per
- * command while preserving one pipeline, descriptor and attachment state.
+ * Converts Mojang's interleaved indexed multi-draw records into one native
+ * batch call. A separate default-off pilot may encode sufficiently large
+ * Sodium terrain batches through a Metal 3 indirect command buffer.
  */
 @Mixin(targets = "com.metallum.client.metal.render.MetalRenderPass")
 public abstract class MetalRenderPassMultiDrawBatchMixin {
@@ -38,6 +41,16 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
     private static final int THRESHOLD = Math.max(
             2,
             Integer.getInteger("metallum.opt.nativeMultiDrawBatchThreshold", 4)
+    );
+    private static final boolean TERRAIN_ICB_ENABLED = Boolean.getBoolean(
+            "metallum.opt.terrainIcbPilot"
+    );
+    private static final boolean METAL4_REQUESTED = Boolean.getBoolean(
+            "metallum.opt.metal4"
+    );
+    private static final int TERRAIN_ICB_THRESHOLD = Math.max(
+            16,
+            Integer.getInteger("metallum.opt.terrainIcbMinDraws", 64)
     );
 
     @Shadow
@@ -73,7 +86,10 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
     );
 
     @Invoker("recordProducer")
-    protected abstract void metallum$invokeRecordProducer(ProducerType type, Map<String, String> parameters);
+    protected abstract void metallum$invokeRecordProducer(
+            ProducerType type,
+            Map<String, String> parameters
+    );
 
     @Inject(
             method = "multiDrawIndexed(Ljava/nio/IntBuffer;III)V",
@@ -90,7 +106,6 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
         final boolean noTrace = NO_TRACE_FAST_PATH && this.contractPassToken < 0L;
         if (drawCount < 0
                 || drawCount > Integer.MAX_VALUE / 3
-                // Absolute IntBuffer.get(index) is bounded by limit(), not capacity().
                 || drawParameters.limit() < drawCount * 3
                 || !(this.indexBuffer instanceof MetalGpuBuffer nativeIndexBuffer)) {
             return;
@@ -121,8 +136,6 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
                 if (indexCount <= 0) {
                     continue;
                 }
-                // Preserve the original drawIndexedNative path for malformed
-                // negative offsets instead of changing its failure semantics.
                 if (firstIndex < 0) {
                     batchEligible = false;
                     break;
@@ -148,22 +161,51 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
             MemorySegment nativeHandle = ((MetalGpuBufferNativeHandleAccessor) nativeIndexBuffer)
                     .metallum$invokeNativeHandle();
             ((MetalRenderStateFlushable) encoder).metallum$flushPendingRenderState();
-            MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
-                    encoder.handle(),
-                    primitiveType.value,
-                    this.indexType.value,
-                    nativeHandle,
-                    scratch.firstIndexOffsets(),
-                    scratch.indexCounts(),
-                    scratch.vertexOffsets(),
-                    emitted,
-                    instanceCount,
-                    firstInstance
-            );
+
+            boolean encodedByIcb = false;
+            boolean attemptIcb = TERRAIN_ICB_ENABLED
+                    && !METAL4_REQUESTED
+                    && MetalTerrainIcbScope.active()
+                    && instanceCount > 0
+                    && emitted >= TERRAIN_ICB_THRESHOLD
+                    && MetalTerrainIcbBridge.available();
+            if (attemptIcb) {
+                MetalCommandPacketTelemetry.terrainIcbAttempt(emitted);
+                encodedByIcb = MetalTerrainIcbBridge.encodeIndexedBatch(
+                        encoder.handle(),
+                        primitiveType.value,
+                        this.indexType.value,
+                        nativeHandle,
+                        scratch.firstIndexOffsets(),
+                        scratch.indexCounts(),
+                        scratch.vertexOffsets(),
+                        emitted,
+                        instanceCount,
+                        firstInstance
+                );
+                if (encodedByIcb) {
+                    MetalCommandPacketTelemetry.terrainIcbAccepted();
+                } else {
+                    MetalCommandPacketTelemetry.terrainIcbFallback();
+                }
+            }
+
+            if (!encodedByIcb) {
+                MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
+                        encoder.handle(),
+                        primitiveType.value,
+                        this.indexType.value,
+                        nativeHandle,
+                        scratch.firstIndexOffsets(),
+                        scratch.indexCounts(),
+                        scratch.vertexOffsets(),
+                        emitted,
+                        instanceCount,
+                        firstInstance
+                );
+            }
             MetalHotPathTelemetry.recordNativeMultiDrawBatch(emitted);
         } else {
-            // Preserve the legacy per-draw behavior but omit render-contract
-            // parameter objects that would be discarded immediately.
             for (int draw = 0; draw < drawCount; draw++) {
                 int base = draw * 3;
                 int firstIndex = drawParameters.get(base);
