@@ -380,6 +380,21 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 		"src/test/native/Metal4PipelinePathTest.swift"
 }
 
+tasks.register("metal4ApiProbe", Exec) {
+    group = "verification"
+    description = "Typechecks the complete Metal 4 API spelling against the macOS 26 SDK."
+    onlyIf {
+        org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+    }
+    workingDir project.projectDir
+    inputs.file("docs/mtl4-api-probe.swift")
+    commandLine "bash", "-lc", "xcrun swiftc -typecheck -sdk \"$(xcrun --show-sdk-path --sdk macosx)\" -target arm64-apple-macosx14.0 docs/mtl4-api-probe.swift"
+}
+
+tasks.named("check") {
+    dependsOn "metal4ApiProbe"
+}
+
 tasks.register("metal4PipelinePathTest", Exec) {
 	group = "verification"
 	description = "Checks the shipping Metal 4 pipeline path renders identically to Metal 3 and falls back cleanly (migration spec M1/M2b)."

@@ -276,6 +276,10 @@ func probeCompute(cenc: MTL4ComputeCommandEncoder, compiler: MTL4Compiler, lib: 
     let cps = try compiler.makeComputePipelineState(descriptor: cpd)
     cenc.setComputePipelineState(cps)
     cenc.dispatchThreads(threadsPerGrid: MTLSize(width: 8, height: 8, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+    cenc.dispatchThreadgroups(
+        indirectBuffer: buffer.gpuAddress,
+        threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1)
+    )
     cenc.setThreadgroupMemoryLength(0, index: 0)
 }
 

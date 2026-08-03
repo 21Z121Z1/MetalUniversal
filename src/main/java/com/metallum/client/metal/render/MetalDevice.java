@@ -142,6 +142,8 @@ final class MetalDevice implements GpuDeviceBackend {
      * stale ShaderSource and must abandon instead of repopulating the map.
      */
     private volatile int pipelineCacheGeneration;
+    /** Terminal state published before background compilation and GPU teardown. */
+    private volatile boolean closing;
     @Nullable
     private final ExecutorService prewarmExecutor;
 
@@ -456,6 +458,9 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull CompiledRenderPipeline precompilePipeline(final @NonNull RenderPipeline pipeline, @Nullable final ShaderSource shaderSource) {
+        if (this.closing) {
+            throw new IllegalStateException("Metal device is closing");
+        }
         ShaderSource effectiveSource = shaderSource == null ? this.activeShaderSource : shaderSource;
         if (shaderSource != null) {
             this.activeShaderSource = shaderSource;
@@ -510,7 +515,7 @@ final class MetalDevice implements GpuDeviceBackend {
      * on demand instead.
      */
     void submitPrewarmTask(final Runnable task) {
-        if (this.prewarmExecutor != null) {
+        if (!this.closing && this.prewarmExecutor != null) {
             try {
                 this.prewarmExecutor.execute(task);
             } catch (java.util.concurrent.RejectedExecutionException ignored) {
@@ -519,7 +524,7 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     private void compileInBackground(final RenderPipeline pipeline, final ShaderSource source, final int generation) {
-        if (this.compiledPipelines.containsKey(pipeline)) {
+        if (this.closing || this.compiledPipelines.containsKey(pipeline)) {
             return;
         }
         synchronized (COMPILE_CHAIN_LOCK) {
@@ -568,16 +573,17 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public void close() {
+        if (this.closing) {
+            return;
+        }
+        this.closing = true;
         if (current == this) {
             current = null;
         }
-        this.waitForSubmittedGpuWork();
-        this.genericVertexAttributeBuffer.close();
-        this.commandEncoder.close();
+
+        // Freeze and join background compilation before touching any cache,
+        // encoder, residency state or native object it can still populate.
         if (this.prewarmExecutor != null) {
-            // Stop background compiles before tearing down the caches they
-            // populate; a straggler past the 5s bail-out still serializes
-            // against clearPipelineCache via COMPILE_CHAIN_LOCK.
             this.prewarmExecutor.shutdownNow();
             try {
                 if (!this.prewarmExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -587,7 +593,14 @@ final class MetalDevice implements GpuDeviceBackend {
                 Thread.currentThread().interrupt();
             }
         }
+
+        // All retirement queued below remains legal until commandEncoder.close()
+        // performs the terminal drain. Closing the encoder earlier stranded late
+        // sampler and buffer releases in a queue that could never rotate again.
+        this.waitForSubmittedGpuWork();
+        this.genericVertexAttributeBuffer.close();
         this.clearPipelineCache();
+        this.commandEncoder.close();
         this.drainBufferPool();
         if (!MetalNativeBridge.isNullHandle(this.cocoaView)) {
             try {

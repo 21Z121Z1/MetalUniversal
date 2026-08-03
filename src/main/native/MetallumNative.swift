@@ -122,6 +122,15 @@ private enum NativeState {
     static var metal4SpatialEncodeCount: UInt64 = 0
     static var metal4TemporalEncodeCount: UInt64 = 0
     static var metal4FrameGenerationInputCount: UInt64 = 0
+    // Backend-closure diagnostics. These counters distinguish the generic
+    // Iris/Blaze3D bridge from the dedicated MetalFX producers above and make a
+    // legacy-encoder escape observable when the MTL4 main queue is active.
+    static var metal4GenericComputeEncodeCount: UInt64 = 0
+    static var metal4GenericBlitEncodeCount: UInt64 = 0
+    static var metal4GenericRenderEncodeCount: UInt64 = 0
+    static var metal3GenericComputeEncodeCount: UInt64 = 0
+    static var metal3GenericBlitEncodeCount: UInt64 = 0
+    static var metal4LegacyEncoderViolationCount: UInt64 = 0
     // The upload bridge cannot identify the destination allocation or range
     // from its ABI, so this counts encoded MTL4 upload/copy barriers rather
     // than pretending to be a resource hazard tracker. Keep the diagnostic
@@ -977,6 +986,69 @@ private final class Metal4MainBlitEncoderBridge {
     init(_ encoder: MTL4ComputeCommandEncoder) { self.encoder = encoder }
 }
 
+/// Generic compute bridge used by Iris and every future Blaze3D compute pass.
+/// MTL4 has no setBuffer/setTexture calls; bindings are written into one
+/// argument table and snapshotted by each dispatch command.
+@available(macOS 26.0, iOS 26.0, *)
+private final class Metal4MainComputeEncoderBridge {
+    let encoder: MTL4ComputeCommandEncoder
+    private let arguments: MTL4ArgumentTable
+    private var encodedDispatch = false
+
+    init(encoder: MTL4ComputeCommandEncoder, arguments: MTL4ArgumentTable) {
+        self.encoder = encoder
+        self.arguments = arguments
+        encoder.setArgumentTable(arguments)
+    }
+
+    func setBuffer(_ buffer: MTLBuffer?, offset: Int, index: Int) {
+        guard index >= 0, index < 31, offset >= 0 else {
+            NSLog("[metallum] Metal 4 rejected compute buffer binding index=%d offset=%d", index, offset)
+            return
+        }
+        arguments.setAddress(buffer.map { $0.gpuAddress + UInt64(offset) } ?? 0, index: index)
+    }
+
+    func setTexture(_ texture: MTLTexture?, index: Int) {
+        guard index >= 0, index < 128 else {
+            NSLog("[metallum] Metal 4 rejected compute texture binding index=%d", index)
+            return
+        }
+        arguments.setTexture(texture?.gpuResourceID ?? MTLResourceID(), index: index)
+    }
+
+    func setSampler(_ sampler: MTLSamplerState?, index: Int) {
+        guard index >= 0, index < 16 else {
+            NSLog("[metallum] Metal 4 rejected compute sampler binding index=%d", index)
+            return
+        }
+        arguments.setSamplerState(sampler?.gpuResourceID ?? MTLResourceID(), index: index)
+    }
+
+    func prepareDispatch() {
+        if encodedDispatch {
+            // A generic compute pass may bind a producer and consumer in one
+            // encoder. Metal 3 relied on tracked encoder ordering here; MTL4
+            // needs an explicit intra-pass dispatch dependency.
+            encoder.barrier(
+                afterEncoderStages: .dispatch,
+                beforeEncoderStages: .dispatch,
+                visibilityOptions: .device
+            )
+        }
+        encodedDispatch = true
+    }
+
+    func publishWrites() {
+        guard encodedDispatch else { return }
+        encoder.barrier(
+            afterStages: .dispatch,
+            beforeQueueStages: [.vertex, .fragment, .dispatch, .blit],
+            visibilityOptions: .device
+        )
+    }
+}
+
 @available(macOS 26.0, iOS 26.0, *)
 private func metal4RenderBridge(_ pointer: UnsafeMutableRawPointer) -> Metal4MainRenderEncoderBridge? {
     Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? Metal4MainRenderEncoderBridge
@@ -987,12 +1059,21 @@ private func metal4BlitBridge(_ pointer: UnsafeMutableRawPointer) -> Metal4MainB
     Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? Metal4MainBlitEncoderBridge
 }
 
+@available(macOS 26.0, iOS 26.0, *)
+private func metal4ComputeBridge(_ pointer: UnsafeMutableRawPointer) -> Metal4MainComputeEncoderBridge? {
+    Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? Metal4MainComputeEncoderBridge
+}
+
 private func metal3RenderEncoder(_ pointer: UnsafeMutableRawPointer) -> MTLRenderCommandEncoder {
     Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLRenderCommandEncoder
 }
 
 private func metal3BlitEncoder(_ pointer: UnsafeMutableRawPointer) -> MTLBlitCommandEncoder {
     Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLBlitCommandEncoder
+}
+
+private func metal3ComputeEncoder(_ pointer: UnsafeMutableRawPointer) -> MTLComputeCommandEncoder {
+    Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLComputeCommandEncoder
 }
 
 @available(macOS 26.0, iOS 26.0, *)
@@ -7787,6 +7868,31 @@ public func metallum_metal4_metalfx_stats(
     return 1
 }
 
+/// Reports whether the Java-driven backend stayed entirely on MTL4 after
+/// enabling the main renderer. A non-zero legacy count is a release blocker.
+@_cdecl("metallum_metal4_backend_closure_stats")
+public func metallum_metal4_backend_closure_stats(
+    _ render: UnsafeMutablePointer<UInt64>?,
+    _ compute: UnsafeMutablePointer<UInt64>?,
+    _ blit: UnsafeMutablePointer<UInt64>?,
+    _ legacyViolations: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    guard #available(macOS 26.0, iOS 26.0, *),
+          NativeState.metal4MainQueueStorage != nil else {
+        return 0
+    }
+    render?.pointee = NativeState.metal4GenericRenderEncodeCount
+    compute?.pointee = NativeState.metal4GenericComputeEncodeCount
+    blit?.pointee = NativeState.metal4GenericBlitEncodeCount
+    legacyViolations?.pointee = NativeState.metal4LegacyEncoderViolationCount
+    return 1
+}
+
+@_cdecl("metallum_metal4_no_legacy_encoder_violations")
+public func metallum_metal4_no_legacy_encoder_violations() -> Int32 {
+    NativeState.metal4LegacyEncoderViolationCount == 0 ? 1 : 0
+}
+
 @_cdecl("metallum_MTLDevice_makeCommandQueue")
 public func metallum_MTLDevice_makeCommandQueue(_ device: MTLDevice) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
@@ -7948,6 +8054,7 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
         let label = stringFromOptionalCString(labelPtr) ?? "blit"
         if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
             guard let encoder = lease.commandBuffer.makeComputeCommandEncoder() else { return nil }
+            NativeState.metal4GenericBlitEncodeCount &+= 1
             encoder.label = label
             // Upload/copy work may overwrite a mesh buffer that an earlier
             // submitted render encoder is still fetching. Metal 3's fence wait
@@ -7961,6 +8068,12 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
             )
             return retainedPointer(Metal4MainBlitEncoderBridge(encoder))
         }
+        if #available(macOS 26.0, iOS 26.0, *), NativeState.metal4MainQueueStorage != nil {
+            NativeState.metal4LegacyEncoderViolationCount &+= 1
+            NSLog("[metallum] rejected Metal 3 blit encoder while Metal 4 main renderer is active")
+            return nil
+        }
+        NativeState.metal3GenericBlitEncodeCount &+= 1
         let commandBuffer = metal3CommandBuffer(pointer)
         let timing = gpuEncoderTimingContext(commandBuffer)
         let indices = timing?.reserve(label: label, kind: 1)
@@ -7987,6 +8100,10 @@ public func metallum_MTLCommandEncoder_endEncoding(_ pointer: UnsafeMutableRawPo
     }
     if #available(macOS 26.0, iOS 26.0, *), let blit = metal4BlitBridge(pointer) {
         blit.encoder.endEncoding()
+        return
+    }
+    if #available(macOS 26.0, iOS 26.0, *), let compute = metal4ComputeBridge(pointer) {
+        compute.encoder.endEncoding()
         return
     }
     let encoder = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLCommandEncoder
@@ -9641,62 +9758,96 @@ public func MTLBlitCommandEncoder_waitForFence(
 
 // MARK: - Generic compute / mipmap / compare-sampler ABI (Iris backend B0)
 //
-// Vanilla Blaze3D 26.2 has no compute, storage-resource, mipmap-generation or
-// depth-compare-sampler concepts, so these exports are mod-private extensions
-// consumed by the Java layer through optional FFM downcalls. Compute encoders
-// participate in the same single-MTLFence hazard chain as render/blit encoders
-// (resources are allocated untracked): the Java owner must waitForFence on
-// begin and updateFence on end, exactly like MetalCommandEncoder does for the
-// other encoder kinds.
+// The ABI remains pointer-shaped for Java FFM, but every operation now branches
+// on the concrete Metal 3 encoder or Metal 4 bridge. No MTL4 command-buffer lease
+// is force-cast to an MTLCommandBuffer, and no MTL4 compute encoder is force-cast
+// to MTLComputeCommandEncoder.
 
 @_cdecl("metallum_MTLCommandBuffer_makeComputeCommandEncoder")
 public func metallum_MTLCommandBuffer_makeComputeCommandEncoder(
-    _ commandBuffer: MTLCommandBuffer
+    _ pointer: UnsafeMutableRawPointer
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        retainedPointer(commandBuffer.makeComputeCommandEncoder())
+        if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
+            guard let encoder = lease.commandBuffer.makeComputeCommandEncoder() else { return nil }
+            encoder.label = "Metallum Generic Compute (Metal 4)"
+            encoder.barrier(
+                afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
+                beforeStages: .dispatch,
+                visibilityOptions: .device
+            )
+            let arguments = lease.owner.computeArgumentTable(at: lease.slotIndex)
+            NativeState.metal4GenericComputeEncodeCount &+= 1
+            return retainedPointer(Metal4MainComputeEncoderBridge(
+                encoder: encoder,
+                arguments: arguments
+            ))
+        }
+        if #available(macOS 26.0, iOS 26.0, *), NativeState.metal4MainQueueStorage != nil {
+            NativeState.metal4LegacyEncoderViolationCount &+= 1
+            NSLog("[metallum] rejected Metal 3 compute encoder while Metal 4 main renderer is active")
+            return nil
+        }
+        NativeState.metal3GenericComputeEncodeCount &+= 1
+        return retainedPointer(metal3CommandBuffer(pointer).makeComputeCommandEncoder())
     }
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_setComputePipelineState")
 public func metallum_MTLComputeCommandEncoder_setComputePipelineState(
-    _ encoder: MTLComputeCommandEncoder,
+    _ pointer: UnsafeMutableRawPointer,
     _ pipelineState: MTLComputePipelineState
 ) {
-    encoder.setComputePipelineState(pipelineState)
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
+        bridge.encoder.setComputePipelineState(pipelineState)
+        return
+    }
+    metal3ComputeEncoder(pointer).setComputePipelineState(pipelineState)
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_setBuffer")
 public func metallum_MTLComputeCommandEncoder_setBuffer(
-    _ encoder: MTLComputeCommandEncoder,
+    _ pointer: UnsafeMutableRawPointer,
     _ buffer: MTLBuffer?,
     _ offset: Int,
     _ index: Int32
 ) {
-    encoder.setBuffer(buffer, offset: offset, index: Int(index))
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
+        bridge.setBuffer(buffer, offset: offset, index: Int(index))
+        return
+    }
+    metal3ComputeEncoder(pointer).setBuffer(buffer, offset: offset, index: Int(index))
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_setTexture")
 public func metallum_MTLComputeCommandEncoder_setTexture(
-    _ encoder: MTLComputeCommandEncoder,
+    _ pointer: UnsafeMutableRawPointer,
     _ texture: MTLTexture?,
     _ index: Int32
 ) {
-    encoder.setTexture(texture, index: Int(index))
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
+        bridge.setTexture(texture, index: Int(index))
+        return
+    }
+    metal3ComputeEncoder(pointer).setTexture(texture, index: Int(index))
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_setSamplerState")
 public func metallum_MTLComputeCommandEncoder_setSamplerState(
-    _ encoder: MTLComputeCommandEncoder,
+    _ pointer: UnsafeMutableRawPointer,
     _ sampler: MTLSamplerState?,
     _ index: Int32
 ) {
-    encoder.setSamplerState(sampler, index: Int(index))
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
+        bridge.setSampler(sampler, index: Int(index))
+        return
+    }
+    metal3ComputeEncoder(pointer).setSamplerState(sampler, index: Int(index))
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_dispatchThreadgroups")
 public func metallum_MTLComputeCommandEncoder_dispatchThreadgroups(
-    _ encoder: MTLComputeCommandEncoder,
+    _ pointer: UnsafeMutableRawPointer,
     _ groupsX: Int32,
     _ groupsY: Int32,
     _ groupsZ: Int32,
@@ -9704,50 +9855,79 @@ public func metallum_MTLComputeCommandEncoder_dispatchThreadgroups(
     _ threadsPerGroupY: Int32,
     _ threadsPerGroupZ: Int32
 ) {
-    encoder.dispatchThreadgroups(
-        MTLSize(width: Int(groupsX), height: Int(groupsY), depth: Int(groupsZ)),
-        threadsPerThreadgroup: MTLSize(
-            width: Int(threadsPerGroupX),
-            height: Int(threadsPerGroupY),
-            depth: Int(threadsPerGroupZ)
-        )
+    let groups = MTLSize(width: Int(groupsX), height: Int(groupsY), depth: Int(groupsZ))
+    let threads = MTLSize(
+        width: Int(threadsPerGroupX),
+        height: Int(threadsPerGroupY),
+        depth: Int(threadsPerGroupZ)
     )
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
+        bridge.prepareDispatch()
+        bridge.encoder.dispatchThreadgroups(
+            threadgroupsPerGrid: groups,
+            threadsPerThreadgroup: threads
+        )
+        return
+    }
+    metal3ComputeEncoder(pointer).dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect")
 public func metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
-    _ encoder: MTLComputeCommandEncoder,
+    _ pointer: UnsafeMutableRawPointer,
     _ indirectBuffer: MTLBuffer,
     _ indirectOffset: Int,
     _ threadsPerGroupX: Int32,
     _ threadsPerGroupY: Int32,
     _ threadsPerGroupZ: Int32
 ) {
-    encoder.dispatchThreadgroups(
+    guard indirectOffset >= 0, indirectOffset % 4 == 0,
+          indirectOffset + MemoryLayout<MTLDispatchThreadgroupsIndirectArguments>.stride <= indirectBuffer.length else {
+        NSLog("[metallum] rejected invalid indirect compute range offset=%d length=%d", indirectOffset, indirectBuffer.length)
+        return
+    }
+    let threads = MTLSize(
+        width: Int(threadsPerGroupX),
+        height: Int(threadsPerGroupY),
+        depth: Int(threadsPerGroupZ)
+    )
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
+        bridge.prepareDispatch()
+        bridge.encoder.dispatchThreadgroups(
+            indirectBuffer: indirectBuffer.gpuAddress + UInt64(indirectOffset),
+            threadsPerThreadgroup: threads
+        )
+        return
+    }
+    metal3ComputeEncoder(pointer).dispatchThreadgroups(
         indirectBuffer: indirectBuffer,
         indirectBufferOffset: indirectOffset,
-        threadsPerThreadgroup: MTLSize(
-            width: Int(threadsPerGroupX),
-            height: Int(threadsPerGroupY),
-            depth: Int(threadsPerGroupZ)
-        )
+        threadsPerThreadgroup: threads
     )
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_updateFence")
 public func metallum_MTLComputeCommandEncoder_updateFence(
-    _ encoder: MTLComputeCommandEncoder,
+    _ pointer: UnsafeMutableRawPointer,
     _ fence: MTLFence
 ) {
-    encoder.updateFence(fence)
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
+        bridge.publishWrites()
+        return
+    }
+    metal3ComputeEncoder(pointer).updateFence(fence)
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_waitForFence")
 public func metallum_MTLComputeCommandEncoder_waitForFence(
-    _ encoder: MTLComputeCommandEncoder,
+    _ pointer: UnsafeMutableRawPointer,
     _ fence: MTLFence
 ) {
-    encoder.waitForFence(fence)
+    if #available(macOS 26.0, iOS 26.0, *), metal4ComputeBridge(pointer) != nil {
+        // The MTL4 consumer barrier is encoded when the bridge is created.
+        return
+    }
+    metal3ComputeEncoder(pointer).waitForFence(fence)
 }
 
 @_cdecl("metallum_MTLDevice_makeComputePipelineState")
@@ -9774,10 +9954,18 @@ public func metallum_MTLComputePipelineState_maxTotalThreadsPerThreadgroup(
 
 @_cdecl("metallum_MTLBlitCommandEncoder_generateMipmaps")
 public func metallum_MTLBlitCommandEncoder_generateMipmaps(
-    _ encoder: MTLBlitCommandEncoder,
+    _ pointer: UnsafeMutableRawPointer,
     _ texture: MTLTexture
 ) {
-    encoder.generateMipmaps(for: texture)
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4BlitBridge(pointer) {
+        bridge.encoder.generateMipmaps(texture: texture)
+        return
+    }
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
+        bridge.encoder.generateMipmaps(texture: texture)
+        return
+    }
+    metal3BlitEncoder(pointer).generateMipmaps(for: texture)
 }
 
 // Sampler creation with an optional depth-compare function. compareFunction
