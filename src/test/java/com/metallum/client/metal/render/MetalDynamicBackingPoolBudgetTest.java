@@ -9,6 +9,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class MetalDynamicBackingPoolBudgetTest {
@@ -52,7 +54,26 @@ final class MetalDynamicBackingPoolBudgetTest {
         assertEquals(2, result.retainedBuckets());
         assertEquals(1, result.releasedHandles());
         assertEquals(16L * 1024L, result.releasedBytes());
-        assertTrue(!pool.containsKey(key(16 * 1024L, 0L)));
+        assertFalse(pool.containsKey(key(16 * 1024L, 0L)));
+    }
+
+    @Test
+    void failedNativeReleaseLeavesHandleInPool() {
+        Long2ObjectOpenHashMap<ArrayDeque<MemorySegment>> pool = new Long2ObjectOpenHashMap<>();
+        long key = key(64 * 1024L, 0L);
+        pool.put(key, bucket(21L));
+
+        assertThrows(IllegalStateException.class, () -> MetalDynamicBackingPoolBudget.trim(
+                pool,
+                0L,
+                1,
+                ignored -> {
+                    throw new IllegalStateException("synthetic native release failure");
+                }
+        ));
+
+        assertEquals(1, pool.get(key).size());
+        assertEquals(21L, pool.get(key).peek().address());
     }
 
     @Test
