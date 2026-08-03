@@ -26,31 +26,6 @@ final class DarwinLoadedSymbolLookup {
     private static final int RTLD_LAZY = 0x1;
     private static final int RTLD_NOLOAD = 0x10;
     private static final int MAX_IMAGE_PATH_BYTES = 16 * 1024;
-    private static final Linker LINKER = Linker.nativeLinker();
-    private static final MethodHandle IMAGE_COUNT = downcall(
-            "_dyld_image_count",
-            FunctionDescriptor.of(ValueLayout.JAVA_INT)
-    );
-    private static final MethodHandle IMAGE_NAME = downcall(
-            "_dyld_get_image_name",
-            FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-    );
-    private static final MethodHandle DLOPEN = downcall(
-            "dlopen",
-            FunctionDescriptor.of(
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.JAVA_INT
-            )
-    );
-    private static final MethodHandle DLSYM = downcall(
-            "dlsym",
-            FunctionDescriptor.of(
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS,
-                    ValueLayout.ADDRESS
-            )
-    );
     /** Kept for process lifetime; do not dlclose the image that owns live handles. */
     private static MemorySegment metallumHandle = MemorySegment.NULL;
 
@@ -58,11 +33,7 @@ final class DarwinLoadedSymbolLookup {
     }
 
     static @Nullable MemorySegment find(final String symbol) {
-        if (!isDarwin()
-                || IMAGE_COUNT == null
-                || IMAGE_NAME == null
-                || DLOPEN == null
-                || DLSYM == null) {
+        if (!isDarwin() || !DarwinApi.AVAILABLE) {
             return null;
         }
         synchronized (DarwinLoadedSymbolLookup.class) {
@@ -78,9 +49,9 @@ final class DarwinLoadedSymbolLookup {
                     // negative result to the first successful handle forever.
                 }
 
-                int count = (int) IMAGE_COUNT.invokeExact();
+                int count = (int) DarwinApi.IMAGE_COUNT.invokeExact();
                 for (int index = 0; index < count; index++) {
-                    MemorySegment namePointer = (MemorySegment) IMAGE_NAME.invokeExact(index);
+                    MemorySegment namePointer = (MemorySegment) DarwinApi.IMAGE_NAME.invokeExact(index);
                     if (namePointer.address() == 0L) {
                         continue;
                     }
@@ -89,7 +60,7 @@ final class DarwinLoadedSymbolLookup {
                         continue;
                     }
                     MemorySegment path = arena.allocateFrom(imagePath);
-                    MemorySegment handle = (MemorySegment) DLOPEN.invokeExact(
+                    MemorySegment handle = (MemorySegment) DarwinApi.DLOPEN.invokeExact(
                             path,
                             RTLD_LAZY | RTLD_NOLOAD
                     );
@@ -125,24 +96,60 @@ final class DarwinLoadedSymbolLookup {
             final MemorySegment handle,
             final MemorySegment symbolName
     ) throws Throwable {
-        return (MemorySegment) DLSYM.invokeExact(handle, symbolName);
-    }
-
-    private static @Nullable MethodHandle downcall(
-            final String symbol,
-            final FunctionDescriptor descriptor
-    ) {
-        try {
-            return LINKER.defaultLookup().find(symbol)
-                    .map(address -> LINKER.downcallHandle(address, descriptor))
-                    .orElse(null);
-        } catch (Throwable ignored) {
-            return null;
-        }
+        return (MemorySegment) DarwinApi.DLSYM.invokeExact(handle, symbolName);
     }
 
     private static boolean isDarwin() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         return os.contains("mac") || os.contains("darwin") || os.contains("ios");
+    }
+
+    /** Defers restricted FFM initialization until a Darwin symbol is requested. */
+    private static final class DarwinApi {
+        private static final Linker LINKER = Linker.nativeLinker();
+        private static final MethodHandle IMAGE_COUNT = downcall(
+                "_dyld_image_count",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT)
+        );
+        private static final MethodHandle IMAGE_NAME = downcall(
+                "_dyld_get_image_name",
+                FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
+        );
+        private static final MethodHandle DLOPEN = downcall(
+                "dlopen",
+                FunctionDescriptor.of(
+                        ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_INT
+                )
+        );
+        private static final MethodHandle DLSYM = downcall(
+                "dlsym",
+                FunctionDescriptor.of(
+                        ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS
+                )
+        );
+        private static final boolean AVAILABLE = IMAGE_COUNT != null
+                && IMAGE_NAME != null
+                && DLOPEN != null
+                && DLSYM != null;
+
+        private DarwinApi() {
+        }
+
+        private static @Nullable MethodHandle downcall(
+                final String symbol,
+                final FunctionDescriptor descriptor
+        ) {
+            try {
+                return LINKER.defaultLookup().find(symbol)
+                        .map(address -> LINKER.downcallHandle(address, descriptor))
+                        .orElse(null);
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
     }
 }
