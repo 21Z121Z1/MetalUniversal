@@ -8,37 +8,37 @@ This branch independently reimplements performance patterns observed in
 MobileGL's DirectVulkan renderer. It does not copy MobileGL source code and does
 not add Vulkan or MoltenVK to MetalUniversal.
 
-## Design objective
+## Objective
 
-The original submission path could suppress some high-level Iris bindings, but
-state still reached the native bridge as many fine-grained calls:
+The original submission path could suppress selected Iris-level updates, but a
+logical draw still expanded into repeated Java collection work and many
+fine-grained Java -> FFM -> Swift -> Metal calls:
 
 ```text
 MetalRenderPass
   -> String-keyed resource lookup
-  -> MTLRenderCommandEncoder.setPipeline/setBuffer/setTexture/...
-  -> one FFM downcall per changed setter
-  -> one Metal encoder call per changed setter
-  -> one FFM downcall per draw
+  -> one native setter per changed buffer/texture/sampler/state
+  -> one native call per draw
 ```
 
-The staged redesign is:
+The staged replacement is:
 
 ```text
 compatibility-facing String API
-  -> stable MetalBindingToken
-  -> compact pass-local binding fingerprints
-  -> encoder-local allocation-free state shadow
-  -> skip unchanged FFM calls
-  -> use setBufferOffset when only the offset changed
-  -> collapse compatible indexed multi-draws into one native batch call
-  -> later: versioned native state/command packets
+  -> process-stable MetalBindingToken
+  -> pipeline-local dense MetalCompiledBindingPlan
+  -> pass-local binding fingerprint arrays
+  -> encoder-local state shadow
+  -> suppress unchanged FFM calls / use offset-only buffer updates
+  -> collapse compatible indexed multi-draws into one native call
+  -> later: versioned frame-local command packets
 ```
 
-The branch intentionally stops before the final packet phase until the lower
-risk Java changes are correctness- and performance-validated.
+The branch deliberately stops before the final native packet ABI until the
+Java-side changes pass compilation, semantic validation and controlled A/B
+performance testing.
 
-## Implemented execution changes
+## Implemented layers
 
 ### 1. Encoder-local render state shadow
 
@@ -53,78 +53,34 @@ risk Java changes are correctness- and performance-validated.
 - buffers and offsets per binding and shader-stage bit;
 - textures and samplers per binding and shader-stage bit.
 
-`MTLRenderCommandEncoder` checks this shadow before crossing FFM. A combined
-vertex+fragment bind seeds both stage shadows, so later stage-specific calls can
-be suppressed safely.
+`MTLRenderCommandEncoder` checks the shadow before crossing FFM. A combined
+vertex+fragment bind seeds both stage shadows.
 
-Buffer updates have three outcomes:
+Buffer changes are classified as:
 
 ```text
 SKIP         same backing and offset: no FFM call
-OFFSET_ONLY  same backing, new offset: use setBufferOffset
-FULL_BIND    new backing or untracked slot: use setBuffer
+OFFSET_ONLY  same backing, new offset: setBufferOffset
+FULL_BIND    new backing or unknown slot: setBuffer
 ```
 
-The cache is owned by the encoder object. A new encoder starts empty, preventing
-cross-generation state leakage. The native clear helper invalidates the shadow
-conservatively because it may install temporary native state.
+The shadow belongs to the encoder object, not a process-global cache. New
+encoders start empty. Native clear helpers invalidate the shadow because they may
+install temporary native pipeline and binding state.
 
 ### 2. Encoder-local compute state shadow
 
 `MetalComputeStateShadow` suppresses repeated compute pipeline, buffer, texture
-and sampler setters within one compute encoder. Dispatch calls and fence calls
-are never suppressed.
+and sampler setters within one compute encoder. Dispatches and synchronization
+operations are never suppressed.
 
-### 3. Stable binding tokens
+### 3. Allocation-free no-trace draw lane
 
-Compatibility-facing Blaze3D calls still supply resource names as strings.
-`MetalBindingTokenRegistry` compiles each distinct name once into a process-stable
-integer identity:
+Render-contract capture needs per-draw parameter maps and decimal strings. In
+production, `contractPassToken < 0` means the recorder discards those objects.
 
-```text
-name
-  -> token id
-  -> logical Iris SSBO binding, when encoded in the descriptor name
-  -> semantic flags
-```
-
-The two Mojang blocks that invalidate the generated Iris draw block,
-`DynamicTransforms` and `Projection`, carry an explicit semantic flag. This
-prevents ordinary binding deduplication from suppressing their required
-invalidation behavior.
-
-`MetalBindingTokenCache` adds a small direct-mapped identity cache in front of
-the registry. Stable pipeline strings therefore resolve with one identity probe;
-equal-but-distinct strings safely fall through to the canonical registry token.
-The cache is reusable by the later command-stream writer and compute binding
-path.
-
-`MetalRenderPassBindingCacheMixin` now keys uniform fingerprints by primitive
-token id instead of strings. A stable repeated uniform binding performs:
-
-```text
-String identity probe
-  -> primitive token id
-  -> Int2Object binding-state lookup
-  -> buffer/backing-generation/offset/length comparison
-```
-
-No string hash or allocation is required on the identity-cache hit path.
-Storage buffers already have integer logical bindings and retain their primitive
-map.
-
-Texture and storage-image calls are not cancelled at this layer because those
-methods also materialize deferred clears or mark possible shader writes. Their
-redundant native setters are suppressed by the encoder-local state shadow.
-
-### 4. Allocation-free no-trace draw lane
-
-Render-contract validation requires per-draw parameter maps and decimal strings.
-In production, `contractPassToken < 0` means those objects are discarded
-immediately by the recorder.
-
-`MetalRenderPassNoTraceDrawMixin` preserves the exact Metal draw work but bypasses
-producer-metadata construction when tracing is disabled for:
+`MetalRenderPassNoTraceDrawMixin` performs the same Metal work without building
+producer metadata for:
 
 - direct indexed draws;
 - direct non-indexed draws;
@@ -132,105 +88,195 @@ producer-metadata construction when tracing is disabled for:
 - indexed indirect draws;
 - non-indexed indirect draws.
 
-The original target methods remain the automatic fallback whenever contract
-capture is active or the optimization switch is disabled.
+The original methods remain the automatic path whenever contract capture is
+active or the optimization is disabled.
 
-Pass CPU timing also avoids both `System.nanoTime()` calls when GPU pass timing
-is disabled.
+Pass timing avoids both `System.nanoTime()` calls when GPU pass timing is off.
+`MetalGpuTimingRecorder` also checks disabled flags before entering class
+monitors for completed-frame timing, pass timing and encoder-lookup telemetry.
 
-### 5. Disabled telemetry does not enter monitors
+### 4. Process-stable binding tokens
 
-`MetalGpuTimingRecorder` previously declared high-frequency recording methods as
-`synchronized` and checked the feature flag only after monitor entry.
+`MetalBindingTokenRegistry` compiles each distinct compatibility resource name
+once into:
 
-The disabled path now checks its static flag before synchronization for:
+```text
+MetalBindingToken
+  id
+  logical Iris SSBO binding, when encoded in the name
+  semantic flags
+```
 
-- completed frame timing;
-- render-pass CPU timing;
-- render-encoder lookup telemetry;
-- latest GPU duration reads.
+`DynamicTransforms` and `Projection` carry an explicit
+`INVALIDATES_GENERATED_IRIS_BLOCK` flag, so deduplication cannot suppress their
+required Iris draw-block invalidation.
 
-Enabled recording retains synchronized mutation and the existing public sample
-ABI.
+`MetalBindingTokenCache` is a small direct-mapped identity cache. Stable pipeline
+String objects resolve with one identity probe; equal-but-distinct strings fall
+through to the canonical concurrent registry.
+
+When tokenization is disabled, `MetalRenderPassBindingCacheMixin` restores the
+prior String-keyed binding-state map for direct A/B comparison.
+
+### 5. Pipeline-local dense binding plan
+
+`MetalCompiledBindingPlan` is built once when `MetalCompiledRenderPipeline`
+construction completes. Reflection is restricted to this generation step and
+extracts the package-private binding records into immutable dense arrays:
+
+```text
+slot -> token
+slot -> resource kind
+slot -> physical Metal binding index
+slot -> shader stage mask
+```
+
+A token-to-slot primitive map is also built once. When a render pass selects a
+pipeline, it installs a `BindingState[]` sized exactly to the plan. Stable
+uniform setup therefore becomes:
+
+```text
+String identity probe
+  -> MetalBindingToken
+  -> dense slot
+  -> BindingState[] comparison
+```
+
+No String hash or per-draw reflection is involved. Unknown/non-pipeline bindings
+fail open to a primitive token-id map. Switching pipelines replaces the dense
+state array so slots from different layouts cannot alias.
+
+The compiled-plan lane can be disabled independently while keeping tokenization
+enabled.
 
 ### 6. Native indexed multi-draw collapse
 
-Mojang's first `multiDrawIndexed` overload supplies interleaved records:
+Mojang's interleaved indexed records are:
 
 ```text
 [firstIndex, indexCount, baseVertex]
 ```
 
-The old Metal path issued one Java wrapper call and one FFM/native draw call for
-every non-empty record. `MetalRenderPassMultiDrawBatchMixin` now:
+`MetalRenderPassMultiDrawBatchMixin`:
 
-1. keeps triangle-fan and malformed inputs on the conservative path;
-2. validates absolute `IntBuffer.get(index)` accesses against `limit()`, not
-   `capacity()`;
+1. preserves triangle-fan and malformed-input fallbacks;
+2. validates absolute `IntBuffer.get(index)` against `limit()`, not `capacity()`;
 3. deinterleaves records into reusable thread-local native arrays;
-4. converts first-index units to byte offsets using the active index type;
-5. binds pipeline/resources once;
+4. converts first-index units to byte offsets;
+5. binds state once;
 6. invokes the existing native Metal multi-draw ABI once.
 
-The scratch arena grows geometrically and is reused by the render thread. The
-batch path defaults to four or more emitted draws. GPU draw order and draw count
-remain unchanged; only Java/FFM crossings are collapsed.
+The default threshold is four emitted draws. GPU draw order and GPU draw count do
+not change; Java/FFM draw crossings are collapsed.
 
-When tracing is disabled but a draw group is not eligible for batching, the
-mixin executes the original per-draw loop without constructing producer metadata.
-When tracing is enabled and batching is ineligible, it returns before creating an
-encoder and lets the original method produce exact validation evidence.
+When tracing is off but a group cannot be batched, the original per-draw loop is
+executed without producer metadata. When tracing is on and batching is
+ineligible, the mixin returns before encoder creation and lets the target method
+produce exact validation evidence.
+
+### 7. Byte-budgeted dynamic backing pool
+
+Dynamic uniform orphaning previously bounded retained handles per size bucket,
+but not total retained bytes or number of distinct size buckets. A workload with
+many allocation sizes could therefore retain substantially more memory than the
+per-bucket constant suggested.
+
+`MetalCommandEncoderDynamicBackingBudgetMixin` runs after `submit()` has rotated
+the deferred destruction queue. Every handle visible in the pool is therefore
+already safe with respect to in-flight GPU work.
+
+`MetalDynamicBackingPoolBudget` enforces:
+
+- a total retained-byte limit;
+- a distinct-bucket limit;
+- largest-allocation-first eviction;
+- whole-bucket eviction when the bucket count is over budget;
+- release-before-remove behavior, preserving the handle if native release throws.
+
+The policy does not change `orphanWrite`, partial-update copying, backing swaps or
+GPU lifetime proof. Optional telemetry records peak observed bytes, released
+bytes, released handles and removed buckets.
 
 ## Runtime switches
 
 ```text
-# Master switch for render/compute encoder state shadows. Default: true
+# Encoder-local render/compute state shadows. Default: true
 -Dmetallum.opt.encoderStateShadow=true
 
-# Maximum tracked binding index count. Clamped to 8..256. Default: 64
+# Maximum shadowed binding count, clamped to 8..256. Default: 64
 -Dmetallum.opt.maxShadowedBindings=64
 
-# Allocation-free production draw lane. Default: true
+# Process-stable token binding cache. false restores String-keyed cache.
+-Dmetallum.opt.bindingTokens=true
+
+# Pipeline-local dense binding-state arrays. Requires bindingTokens=true.
+-Dmetallum.opt.compiledBindingPlan=true
+
+# Allocation-free production draw lane.
 -Dmetallum.opt.noTraceDrawFastPath=true
 
-# Interleaved indexed multi-draw collapse. Default: true
+# Interleaved indexed multi-draw collapse.
 -Dmetallum.opt.nativeMultiDrawBatch=true
 
-# Minimum emitted draws for native batching. Minimum: 2. Default: 4
+# Minimum emitted draws for batching, minimum 2.
 -Dmetallum.opt.nativeMultiDrawBatchThreshold=4
 
-# Optional hot-path counters. Default: false
+# Dynamic backing total-budget enforcement.
+-Dmetallum.opt.dynamicBackingPoolBudget=true
+
+# Retained dynamic backing bytes. Default: 32 MiB.
+-Dmetallum.opt.dynamicBackingPoolBytes=33554432
+
+# Maximum distinct dynamic backing buckets. Default: 64.
+-Dmetallum.opt.dynamicBackingPoolBuckets=64
+
+# Submit interval between byte scans. Default: 16.
+-Dmetallum.opt.dynamicBackingPoolTrimInterval=16
+
+# Optional counters.
 -Dmetallum.hotpath.telemetry=true
 ```
-
-`MetalHotPathTelemetry.snapshot()` reports:
-
-- render state calls forwarded across FFM;
-- render state calls suppressed before FFM;
-- full buffer binds replaced by offset-only binds;
-- compute state calls forwarded/suppressed;
-- native multi-draw batches and commands;
-- removed Java/FFM draw crossings through `collapsedFfmDrawCalls()`.
 
 ## Correctness boundaries
 
 The redesign does not:
 
 - reorder draws;
-- merge different pipelines or attachment signatures;
-- suppress draw, dispatch, fence or store-action operations;
-- suppress texture calls at the high-level pass where deferred-clear semantics
-  are executed;
+- merge different pipeline or attachment signatures;
+- suppress draw, dispatch, fence, barrier or store-action operations;
+- cancel texture/storage-image calls at the pass layer where deferred clears and
+  possible shader writes are handled;
 - batch triangle fans;
-- alter validation producer metadata when tracing is enabled;
-- alter Iris pass order, ping-pong sides or shader resources;
-- enable Metal 4 argument tables in parallel with direct bindings;
-- introduce ICB, GPU culling, heap aliasing or async compute.
+- change producer metadata when validation is enabled;
+- change Iris pass order, ping-pong sides or resource identities;
+- enable Metal 4 argument tables alongside direct bindings;
+- add ICB, GPU culling, heap aliasing or async compute;
+- release a dynamic backing before the existing deferred queue proves GPU
+  completion.
 
 Unknown stage masks and out-of-range bindings fail open to the original native
 setter. A closed encoder still throws before a duplicate can be suppressed.
 
-## Validation
+## Added unit coverage
+
+The branch adds tests for:
+
+- render state-shadow invalidation and stage-specific bindings;
+- compute state-shadow behavior;
+- reusable native multi-draw scratch arrays;
+- stable/equal binding-token resolution;
+- identity-cache clearing and capacity validation;
+- Iris SSBO logical-binding compilation;
+- dense binding-plan slot and metadata generation;
+- duplicate binding-plan rejection;
+- dynamic backing byte and bucket budgets;
+- pool-key size decoding;
+- preservation of a pooled handle when native release fails.
+
+These tests still need to be executed by Gradle/CI; their presence is not itself
+build evidence.
+
+## Validation matrix
 
 From a clean checkout:
 
@@ -239,93 +285,109 @@ From a clean checkout:
 ./gradlew buildMacNative build
 ```
 
-Then compare the branch against `integration/iris-metal-next` with the same
-world, camera path, resolution, Retina scale, VSync state, Sodium/Iris versions,
-shader pack and render distance.
+Use the same world, deterministic camera path, resolution, Retina scale, VSync,
+Sodium/Iris versions, shader pack and render distance.
 
-Required functional lanes:
+Recommended isolated lanes:
 
 ```text
-A: encoderStateShadow=false, noTraceDrawFastPath=false, nativeMultiDrawBatch=false
-B: encoderStateShadow=true,  noTraceDrawFastPath=false, nativeMultiDrawBatch=false
-C: encoderStateShadow=true,  noTraceDrawFastPath=true,  nativeMultiDrawBatch=false
-D: encoderStateShadow=true,  noTraceDrawFastPath=true,  nativeMultiDrawBatch=true
+A  encoderStateShadow=false
+   bindingTokens=false
+   noTraceDrawFastPath=false
+   nativeMultiDrawBatch=false
+   dynamicBackingPoolBudget=false
+
+B  encoderStateShadow=true
+   bindingTokens=false
+   noTraceDrawFastPath=false
+   nativeMultiDrawBatch=false
+   dynamicBackingPoolBudget=false
+
+C  encoderStateShadow=true
+   bindingTokens=true
+   compiledBindingPlan=false
+   noTraceDrawFastPath=false
+   nativeMultiDrawBatch=false
+   dynamicBackingPoolBudget=false
+
+D  encoderStateShadow=true
+   bindingTokens=true
+   compiledBindingPlan=true
+   noTraceDrawFastPath=false
+   nativeMultiDrawBatch=false
+   dynamicBackingPoolBudget=false
+
+E  D + noTraceDrawFastPath=true
+
+F  E + nativeMultiDrawBatch=true
+
+G  F + dynamicBackingPoolBudget=true
 ```
 
 For each lane record:
 
 - FFM state setters per frame;
-- render and compute suppression ratios;
+- render/compute suppression ratios;
+- offset-only buffer updates;
 - Java allocation bytes per frame and per draw;
 - Java/FFM draw crossings and native multi-draw batches;
 - GPU draw count separately;
-- CPU render-pass encode p50/p95/p99;
+- dynamic backing retained/released bytes and bucket count;
+- CPU encode p50/p95/p99;
 - frame-time p50/p95/p99/p99.9;
 - 1% and 0.1% lows;
 - frames over 33.3/50/100 ms;
-- GPU time;
+- GPU frame time;
 - framebuffer hashes and fixed-camera image diffs;
-- Metal API Validation errors.
+- Metal API Validation output.
 
 Acceptance requires framebuffer equivalence and no new Metal validation error.
-A performance change is admitted only when at least one target metric improves
-without a statistically meaningful regression in the others.
+A change is admitted only when at least one target metric improves without a
+statistically meaningful regression in the others.
 
-The repository's hosted workflow compiles native code and runs headless tests.
-Physical-GPU readbacks, CAMetalLayer presentation and fixed-camera image evidence
-remain local Apple Silicon acceptance requirements.
+Hosted CI can compile native code and run headless tests. Physical-GPU readbacks,
+CAMetalLayer presentation and fixed-camera image evidence remain local Apple
+Silicon acceptance requirements.
 
 ## Remaining phases
 
-### P1b: pipeline-local compiled binding plan
+### P1c: token-native private call surfaces
 
-The new process-stable token is the compatibility identity, not yet the final
-physical layout. At pipeline creation, compile tokens into a dense immutable plan:
+The compatibility API still passes names into `setUniform`/`bindTexture`.
+MetalUniversal-private Iris and Sodium paths should carry `MetalBindingToken`
+directly, using the compiled plan without any name resolution. Public Blaze3D
+compatibility methods remain as adapters.
 
-```text
-MetalBindingToken
-  -> resource kind
-  -> stage mask
-  -> physical Metal slot
-  -> argument-table slot
-  -> fallback policy
-  -> residency usage
-```
-
-Private Iris/Sodium call sites can then carry the token directly and stop passing
-names through the draw path.
-
-### P2: frame-local upload arena
+### P2: explicit three-slot frame context and upload arena
 
 Unify command-buffer lifetime, upload cursor, retained-resource list and deferred
-release queue into three explicit frame slots. Dynamic uniforms should append a
-new aligned slice instead of orphaning/copying whole backing buffers.
+release queue into three explicit frame slots. Dynamic uniforms should append
+aligned slices rather than copying an entire previous backing for partial
+orphaning where semantics permit.
 
-### P3: versioned native state/command packet
+### P3: versioned native state/command packets
 
-Replace the remaining changed setter stream with one versioned ABI:
+Replace the remaining changed setter stream with a negotiated ABI:
 
 ```text
-Java compact dirty entries
-  -> one ordinary FFM apply-state/encode call
+Java compact dirty entries / draw packets
+  -> one ordinary FFM apply/encode call per pass, then per frame
   -> native state shadow or argument-table patch
-  -> draw batch
+  -> Metal draws/dispatches
 ```
 
-This phase must extend the existing negotiated native interface and Swift module.
-It must not load a second dylib or mirror old direct setters and argument tables
-simultaneously.
+This must extend the existing versioned native interface. It must not load a
+second dylib or mirror direct setters and argument tables simultaneously.
 
 ### P4: true Metal 4 argument-table replacement
 
 Argument tables are admitted only when they replace corresponding direct
-`setBuffer`/`setTexture`/`setSampler` calls. Java emits changed slots, native
-patches the frame-local table, and an unchanged content signature skips both the
-patch and table bind.
+`setBuffer`/`setTexture`/`setSampler` calls. Unchanged content signatures skip
+both table patching and table binding.
 
 ### P5: terrain ICB/GPU-driven submission
 
-Only after Java/FFM submission cost is reduced should Sodium opaque/cutout terrain
-move to ICB or GPU-driven visibility. Iris composite and dynamically varying pack
-passes remain on the ordinary command stream unless profiling demonstrates a
-separate benefit.
+Only after Java/FFM submission cost is reduced should Sodium opaque/cutout
+terrain move to ICB or GPU-driven visibility. Iris composite and dynamically
+varying pack passes remain on the ordinary command stream unless profiling shows
+a separate benefit.
