@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalDynamicBackingPoolBudget;
+import com.metallum.client.metal.render.MetalDynamicBackingPoolTelemetry;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import org.spongepowered.asm.mixin.Final;
@@ -61,11 +62,12 @@ public abstract class MetalCommandEncoderDynamicBackingBudgetMixin {
             return;
         }
         this.metallum$submitsSinceBackingTrim = 0;
-        MetalDynamicBackingPoolBudget.trim(
+        MetalDynamicBackingPoolBudget.TrimResult result = MetalDynamicBackingPoolBudget.trim(
                 this.dynamicBackingPool,
                 metallum$MAX_RETAINED_BYTES,
                 metallum$MAX_BUCKETS,
                 MetalNativeBridge::metallum_release_object
         );
+        MetalDynamicBackingPoolTelemetry.record(result);
     }
 }
