@@ -130,13 +130,24 @@ public final class MetalNativeInterfaceTable {
 
     private static @Nullable MethodHandle findGetInterface() {
         try {
-            // Trigger the matched dylib load before asking loader/default lookup.
+            // Trigger the matched dylib load before looking up its negotiated
+            // surface. iOS exposes System.load-ed symbols through loaderLookup;
+            // macOS libraryLookup keeps a private handle, so fall back to the
+            // already-loaded dyld image without extracting another dylib.
             MetalNativeBridge.isIOS();
-            Optional<MemorySegment> symbol = SymbolLookup.loaderLookup().find("metallum_get_interface");
+            Optional<MemorySegment> symbol = SymbolLookup.loaderLookup().find(
+                    "metallum_get_interface"
+            );
             if (symbol.isEmpty()) {
                 symbol = LINKER.defaultLookup().find("metallum_get_interface");
             }
-            return symbol.map(address -> LINKER.downcallHandle(
+            MemorySegment address = symbol.orElseGet(
+                    () -> DarwinLoadedSymbolLookup.find("metallum_get_interface")
+            );
+            if (address == null || address.address() == 0L) {
+                return null;
+            }
+            return LINKER.downcallHandle(
                     address,
                     FunctionDescriptor.of(
                             INT,
@@ -144,7 +155,7 @@ public final class MetalNativeInterfaceTable {
                             INT,
                             ValueLayout.ADDRESS
                     )
-            )).orElse(null);
+            );
         } catch (Throwable ignored) {
             return null;
         }
