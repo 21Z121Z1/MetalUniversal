@@ -57,13 +57,14 @@ public final class MetalCompiledBindingPlan {
             BindingAccessors accessors = ACCESSORS.get(rawBinding.getClass());
             String name = accessors.name(rawBinding);
             MetalBindingToken token = MetalBindingTokenRegistry.resolve(name);
-            int previous = slotByTokenId.putIfAbsent(token.id(), slot);
+            int previous = slotByTokenId.get(token.id());
             if (previous >= 0) {
                 throw new IllegalStateException(
                         "Metal pipeline binding plan contains duplicate resource token '" + name
                                 + "' at slots " + previous + " and " + slot
                 );
             }
+            slotByTokenId.put(token.id(), slot);
             tokens[slot] = token;
             physicalBindingIndices[slot] = accessors.bindingIndex(rawBinding);
             stageMasks[slot] = accessors.stageMask(rawBinding);
