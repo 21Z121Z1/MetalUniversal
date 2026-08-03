@@ -21,11 +21,9 @@ import java.util.Optional;
  * and leaves the legacy per-symbol path active.</p>
  */
 public final class MetalNativeInterfaceTable {
-    private static final int HEADER_MIN_BYTES = 32;
-    private static final Linker LINKER = Linker.nativeLinker();
+    static final int HEADER_MIN_BYTES = 32;
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG;
-    private static final MethodHandle GET_INTERFACE = findGetInterface();
 
     private final int featureId;
     private final int abiVersion;
@@ -48,19 +46,32 @@ public final class MetalNativeInterfaceTable {
             final int featureId,
             final int minimumVersion
     ) {
-        if (GET_INTERFACE == null || minimumVersion < 0) {
+        MethodHandle getInterface = NativeAccess.GET_INTERFACE;
+        if (getInterface == null || minimumVersion < 0) {
             return null;
         }
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outTable = arena.allocate(ValueLayout.ADDRESS);
-            int status = (int) GET_INTERFACE.invokeExact(featureId, minimumVersion, outTable);
+            int status = (int) getInterface.invokeExact(featureId, minimumVersion, outTable);
             if (status != 0) {
                 return null;
             }
             MemorySegment rawPointer = outTable.get(ValueLayout.ADDRESS, 0L);
-            if (rawPointer.address() == 0L) {
-                return null;
-            }
+            return parse(featureId, minimumVersion, rawPointer);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    static @Nullable MetalNativeInterfaceTable parse(
+            final int expectedFeatureId,
+            final int minimumVersion,
+            final MemorySegment rawPointer
+    ) {
+        if (minimumVersion < 0 || rawPointer == null || rawPointer.address() == 0L) {
+            return null;
+        }
+        try {
             MemorySegment header = rawPointer.reinterpret(HEADER_MIN_BYTES);
             long headerSize = Integer.toUnsignedLong(header.get(INT, 0L));
             long byteCount = Integer.toUnsignedLong(header.get(INT, 4L));
@@ -70,7 +81,7 @@ public final class MetalNativeInterfaceTable {
             long capabilities = header.get(LONG, 24L);
             long pointerBytes = ValueLayout.ADDRESS.byteSize();
 
-            if (actualFeatureId != featureId
+            if (actualFeatureId != expectedFeatureId
                     || abiVersion < minimumVersion
                     || headerSize < HEADER_MIN_BYTES
                     || byteCount < headerSize
@@ -98,7 +109,7 @@ public final class MetalNativeInterfaceTable {
                     capabilities,
                     entries
             );
-        } catch (Throwable ignored) {
+        } catch (RuntimeException ignored) {
             return null;
         }
     }
@@ -128,36 +139,45 @@ public final class MetalNativeInterfaceTable {
         return this.entries[index];
     }
 
-    private static @Nullable MethodHandle findGetInterface() {
-        try {
-            // Trigger the matched dylib load before looking up its negotiated
-            // surface. iOS exposes System.load-ed symbols through loaderLookup;
-            // macOS libraryLookup keeps a private handle, so fall back to the
-            // already-loaded dyld image without extracting another dylib.
-            MetalNativeBridge.isIOS();
-            Optional<MemorySegment> symbol = SymbolLookup.loaderLookup().find(
-                    "metallum_get_interface"
-            );
-            if (symbol.isEmpty()) {
-                symbol = LINKER.defaultLookup().find("metallum_get_interface");
-            }
-            MemorySegment address = symbol.orElseGet(
-                    () -> DarwinLoadedSymbolLookup.find("metallum_get_interface")
-            );
-            if (address == null || address.address() == 0L) {
+    /** Defers native bridge loading and restricted FFM calls until negotiation. */
+    private static final class NativeAccess {
+        private static final Linker LINKER = Linker.nativeLinker();
+        private static final MethodHandle GET_INTERFACE = findGetInterface();
+
+        private NativeAccess() {
+        }
+
+        private static @Nullable MethodHandle findGetInterface() {
+            try {
+                // Trigger the matched dylib load before looking up its negotiated
+                // surface. iOS exposes System.load-ed symbols through loaderLookup;
+                // macOS libraryLookup keeps a private handle, so fall back to the
+                // already-loaded dyld image without extracting another dylib.
+                MetalNativeBridge.isIOS();
+                Optional<MemorySegment> symbol = SymbolLookup.loaderLookup().find(
+                        "metallum_get_interface"
+                );
+                if (symbol.isEmpty()) {
+                    symbol = LINKER.defaultLookup().find("metallum_get_interface");
+                }
+                MemorySegment address = symbol.orElseGet(
+                        () -> DarwinLoadedSymbolLookup.find("metallum_get_interface")
+                );
+                if (address == null || address.address() == 0L) {
+                    return null;
+                }
+                return LINKER.downcallHandle(
+                        address,
+                        FunctionDescriptor.of(
+                                INT,
+                                INT,
+                                INT,
+                                ValueLayout.ADDRESS
+                        )
+                );
+            } catch (Throwable ignored) {
                 return null;
             }
-            return LINKER.downcallHandle(
-                    address,
-                    FunctionDescriptor.of(
-                            INT,
-                            INT,
-                            INT,
-                            ValueLayout.ADDRESS
-                    )
-            );
-        } catch (Throwable ignored) {
-            return null;
         }
     }
 }
