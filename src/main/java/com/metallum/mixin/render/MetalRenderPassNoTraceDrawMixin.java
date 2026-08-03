@@ -6,6 +6,7 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLIndexType;
 import com.metallum.client.metal.render.mtl.MTLPrimitiveType;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
+import com.metallum.client.metal.render.mtl.MetalRenderStateFlushable;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import org.jspecify.annotations.Nullable;
@@ -173,6 +174,7 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) this.indexBuffer;
         MTLRenderCommandEncoder encoder = this.metallum$invokeRenderEncoder();
         this.metallum$invokeBindDrawState(encoder);
+        ((MetalRenderStateFlushable) encoder).metallum$flushPendingRenderState();
         MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
                 encoder.handle(),
                 primitiveType.value,
@@ -186,6 +188,31 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
                 0L
         );
         ci.cancel();
+    }
+
+    /**
+     * The original validation/legacy pointer multi-draw also calls the native
+     * batch ABI directly instead of an encoder draw wrapper. Flush immediately
+     * after its bindDrawState call so queued packet state is visible before the
+     * native draw regardless of which no-trace lane is selected.
+     */
+    @Inject(
+            method = "multiDrawIndexed(Lorg/lwjgl/PointerBuffer;Ljava/nio/IntBuffer;Ljava/nio/IntBuffer;I)V",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lcom/metallum/client/metal/render/MetalRenderPass;bindDrawState(Lcom/metallum/client/metal/render/mtl/MTLRenderCommandEncoder;)V",
+                    shift = At.Shift.AFTER
+            )
+    )
+    private void metallum$flushOriginalPointerMultiDrawState(
+            final PointerBuffer firstIndexOffsets,
+            final IntBuffer indexCounts,
+            final IntBuffer vertexOffsets,
+            final int drawCount,
+            final CallbackInfo ci
+    ) {
+        MTLRenderCommandEncoder encoder = this.metallum$invokeRenderEncoder();
+        ((MetalRenderStateFlushable) encoder).metallum$flushPendingRenderState();
     }
 
     @Inject(
