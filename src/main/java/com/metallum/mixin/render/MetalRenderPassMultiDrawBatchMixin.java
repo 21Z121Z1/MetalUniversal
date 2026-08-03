@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalGpuBuffer;
+import com.metallum.client.metal.render.MetalMultiDrawScratch;
 import com.metallum.client.metal.render.MetalTerrainIcbScope;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.bridge.MetalTerrainIcbBridge;
@@ -169,7 +170,7 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
         if (batchEligible) {
             MemorySegment nativeHandle = ((MetalGpuBufferNativeHandleAccessor) nativeIndexBuffer)
                     .metallum$invokeNativeHandle();
-            ((MetalRenderStateFlushable) encoder).metallum$flushPendingRenderState();
+            ((MetalRenderStateFlushable) (Object) encoder).metallum$flushPendingRenderState();
 
             boolean encodedByIcb = false;
             boolean attemptIcb = TERRAIN_ICB_ENABLED

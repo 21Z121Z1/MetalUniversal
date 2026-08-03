@@ -1,4 +1,4 @@
-package com.metallum.mixin.render;
+package com.metallum.client.metal.render;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -10,8 +10,8 @@ import java.lang.foreign.ValueLayout;
  * multi-draw ABI. Capacity grows geometrically and is then reused without
  * per-frame native allocation.
  */
-final class MetalMultiDrawScratch {
-    static final ThreadLocal<MetalMultiDrawScratch> CURRENT =
+public final class MetalMultiDrawScratch {
+    public static final ThreadLocal<MetalMultiDrawScratch> CURRENT =
             ThreadLocal.withInitial(MetalMultiDrawScratch::new);
 
     private Arena arena;
@@ -20,7 +20,7 @@ final class MetalMultiDrawScratch {
     private MemorySegment vertexOffsets = MemorySegment.NULL;
     private int capacity;
 
-    void ensureCapacity(final int required) {
+    public void ensureCapacity(final int required) {
         if (required <= capacity) {
             return;
         }
@@ -38,7 +38,12 @@ final class MetalMultiDrawScratch {
         capacity = next;
     }
 
-    void put(final int index, final long firstIndexOffset, final int indexCount, final int vertexOffset) {
+    public void put(
+            final int index,
+            final long firstIndexOffset,
+            final int indexCount,
+            final int vertexOffset
+    ) {
         if (index < 0 || index >= capacity) {
             throw new IndexOutOfBoundsException("multi-draw scratch index " + index + " / " + capacity);
         }
@@ -47,15 +52,15 @@ final class MetalMultiDrawScratch {
         vertexOffsets.set(ValueLayout.JAVA_INT, (long) index * Integer.BYTES, vertexOffset);
     }
 
-    MemorySegment firstIndexOffsets() {
+    public MemorySegment firstIndexOffsets() {
         return firstIndexOffsets;
     }
 
-    MemorySegment indexCounts() {
+    public MemorySegment indexCounts() {
         return indexCounts;
     }
 
-    MemorySegment vertexOffsets() {
+    public MemorySegment vertexOffsets() {
         return vertexOffsets;
     }
 }

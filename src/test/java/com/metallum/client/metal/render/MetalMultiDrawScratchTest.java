@@ -1,4 +1,4 @@
-package com.metallum.mixin.render;
+package com.metallum.client.metal.render;
 
 import org.junit.jupiter.api.Test;
 
