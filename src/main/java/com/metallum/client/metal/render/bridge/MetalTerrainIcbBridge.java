@@ -22,6 +22,7 @@ public final class MetalTerrainIcbBridge {
     private static final MetalNativeInterfaceTable TABLE = resolveTable();
     private static final MethodHandle ENCODE = resolveEncode(TABLE);
     private static final MethodHandle STATS = resolveStats(TABLE);
+    private static final MethodHandle SUBMISSION_BUDGET = resolveSubmissionBudget(TABLE);
 
     private MetalTerrainIcbBridge() {
     }
@@ -58,6 +59,19 @@ public final class MetalTerrainIcbBridge {
             );
         } catch (Throwable throwable) {
             throw new IllegalStateException("Terrain ICB stats invocation failed", throwable);
+        }
+    }
+
+    /** Returns the native Metal 4 dynamic-ICB allocation budget per submission. */
+    public static int submissionBudget() {
+        MethodHandle handle = SUBMISSION_BUDGET;
+        if (handle == null) {
+            return 0;
+        }
+        try {
+            return Math.max(0, (int) handle.invokeExact());
+        } catch (Throwable throwable) {
+            throw new IllegalStateException("Terrain ICB budget invocation failed", throwable);
         }
     }
 
@@ -149,6 +163,18 @@ public final class MetalTerrainIcbBridge {
                                 ValueLayout.ADDRESS,
                                 ValueLayout.ADDRESS
                         )
+                )
+        );
+    }
+
+    private static MethodHandle resolveSubmissionBudget(final MetalNativeInterfaceTable table) {
+        if (table == null || table.entryCount() < 3) {
+            return null;
+        }
+        return MetalFfmCallTelemetry.instrumentDowncall(
+                Linker.nativeLinker().downcallHandle(
+                        table.entry(2),
+                        FunctionDescriptor.of(ValueLayout.JAVA_INT)
                 )
         );
     }

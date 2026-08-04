@@ -164,6 +164,51 @@ METRICS = {
         "direction": "higher",
         "unit": "batches",
     },
+    "terrain_icb_attempts": {
+        "aliases": {"terrain_icb_attempts"},
+        "direction": "higher",
+        "unit": "batches",
+    },
+    "terrain_icb_draws": {
+        "aliases": {"terrain_icb_draws"},
+        "direction": "higher",
+        "unit": "draws",
+    },
+    "terrain_icb_fallbacks": {
+        "aliases": {"terrain_icb_fallbacks"},
+        "direction": "lower",
+        "unit": "batches",
+    },
+    "terrain_icb_budget_skips": {
+        "aliases": {"terrain_icb_budget_skips"},
+        "direction": "lower",
+        "unit": "batches",
+    },
+    "terrain_icb_budget_skip_draws": {
+        "aliases": {"terrain_icb_budget_skip_draws"},
+        "direction": "lower",
+        "unit": "draws",
+    },
+    "terrain_icb_allocations": {
+        "aliases": {"terrain_icb_allocations"},
+        "direction": "lower",
+        "unit": "allocations",
+    },
+    "terrain_icb_completion_releases": {
+        "aliases": {"terrain_icb_completion_releases"},
+        "direction": "higher",
+        "unit": "releases",
+    },
+    "terrain_icb_budget_fallbacks": {
+        "aliases": {"terrain_icb_budget_fallbacks"},
+        "direction": "lower",
+        "unit": "batches",
+    },
+    "terrain_icb_zero_allocation_fallbacks": {
+        "aliases": {"terrain_icb_zero_allocation_fallbacks"},
+        "direction": "lower",
+        "unit": "batches",
+    },
     "runtime_pipeline_compiles": {
         "aliases": {"runtime_pipeline_compiles"},
         "direction": "lower",

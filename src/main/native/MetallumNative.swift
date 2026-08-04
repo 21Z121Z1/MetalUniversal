@@ -804,9 +804,14 @@ private final class Metal4MainQueuePilot {
     }
 }
 
+// Single source of truth shared by the MTL4 lease and the append-only native
+// interface queried once by Java. A value of one keeps dynamic Sodium terrain
+// ICBs bounded without making Java rediscover the exhausted budget through an
+// FFM call for every later batch in the same submission.
+let metallumMetal4TerrainIcbSubmissionBudget = 1
+
 @available(macOS 26.0, iOS 26.0, *)
 private final class Metal4MainCommandBufferLease {
-    private static let terrainIcbBudget = 1
     fileprivate let owner: Metal4MainQueueContext
     fileprivate let slotIndex: Int
     private let condition = NSCondition()
@@ -838,7 +843,7 @@ private final class Metal4MainCommandBufferLease {
         // crashes Metal GPU Validation on macOS 26. Bound admission to one
         // qualifying batch per submission; later batches take the existing
         // native multi-draw fallback without any partial ICB execution.
-        guard terrainIcbAllocations < Self.terrainIcbBudget else {
+        guard terrainIcbAllocations < metallumMetal4TerrainIcbSubmissionBudget else {
             NativeState.recordTerrainIcbBudgetFallback()
             return nil
         }

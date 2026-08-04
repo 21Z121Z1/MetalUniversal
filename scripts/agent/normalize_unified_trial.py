@@ -181,6 +181,42 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             hot.get("terrainIcbAccepted") if hot_window_matches else None,
             "batches", "higher", hot_frames
         ),
+        "terrain_icb_attempts": metric(
+            hot.get("terrainIcbAttempts") if hot_window_matches else None,
+            "batches", "higher", hot_frames
+        ),
+        "terrain_icb_draws": metric(
+            hot.get("terrainIcbDraws") if hot_window_matches else None,
+            "draws", "higher", hot_frames
+        ),
+        "terrain_icb_fallbacks": metric(
+            hot.get("terrainIcbFallbacks") if hot_window_matches else None,
+            "batches", "lower", hot_frames
+        ),
+        "terrain_icb_budget_skips": metric(
+            hot.get("terrainIcbBudgetSkips") if hot_window_matches else None,
+            "batches", "lower", hot_frames
+        ),
+        "terrain_icb_budget_skip_draws": metric(
+            hot.get("terrainIcbBudgetSkipDraws") if hot_window_matches else None,
+            "draws", "lower", hot_frames
+        ),
+        "terrain_icb_allocations": metric(
+            hot.get("terrainIcbAllocations") if hot_window_matches else None,
+            "allocations", "lower", hot_frames
+        ),
+        "terrain_icb_completion_releases": metric(
+            hot.get("terrainIcbCompletionReleases") if hot_window_matches else None,
+            "releases", "higher", hot_frames
+        ),
+        "terrain_icb_budget_fallbacks": metric(
+            hot.get("terrainIcbBudgetFallbacks") if hot_window_matches else None,
+            "batches", "lower", hot_frames
+        ),
+        "terrain_icb_zero_allocation_fallbacks": metric(
+            hot.get("terrainIcbZeroAllocationFallbacks") if hot_window_matches else None,
+            "batches", "lower", hot_frames
+        ),
         "runtime_pipeline_compiles": metric(
             hot.get("runtimePipelineCompiles") if hot_window_matches else None,
             "compiles", "lower", hot_frames
@@ -244,6 +280,21 @@ def self_test() -> None:
             "cpuRenderEncodeFrameMilliseconds": {"samples": 300, "p50Milliseconds": 24.0},
             "nativeEncoderCountsPerMeasuredFrame": {"measuredFrames": 300, "renderPerFrame": 6.0, "blitPerFrame": 2.0},
             "renderFusionRuntime": {"admissions": 1},
+            "hotPathCounters": {
+                "enabled": True,
+                "measuredFrames": 300,
+                "terrainIcbAttempts": 4,
+                "terrainIcbAccepted": 4,
+                "terrainIcbDraws": 64,
+                "terrainIcbFallbacks": 0,
+                "terrainIcbBudgetSkips": 8,
+                "terrainIcbBudgetSkipDraws": 192,
+                "terrainIcbNativeStatsAvailable": True,
+                "terrainIcbAllocations": 4,
+                "terrainIcbCompletionReleases": 3,
+                "terrainIcbBudgetFallbacks": 0,
+                "terrainIcbZeroAllocationFallbacks": 0,
+            },
         }
         first = trial / "artifacts" / "validation" / "native-fullscreen-baseline.json"
         second = trial / "artifacts" / "copy" / "native-fullscreen-baseline.json"
@@ -256,6 +307,9 @@ def self_test() -> None:
         assert result["complete"]
         assert result["metrics"]["fps_median"]["median"] == 40.0
         assert result["metrics"]["native_encoder_count_per_frame_median"]["median"] == 8.0
+        assert result["metrics"]["terrain_icb_allocations"]["median"] == 4.0
+        assert result["metrics"]["terrain_icb_budget_skips"]["median"] == 8.0
+        assert result["metrics"]["terrain_icb_zero_allocation_fallbacks"]["median"] == 0.0
     print("normalize_unified_trial self-test: PASS")
 
 

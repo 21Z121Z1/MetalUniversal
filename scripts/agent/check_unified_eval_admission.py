@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def obj(value: Any) -> dict[str, Any]:
@@ -17,6 +17,10 @@ def obj(value: Any) -> dict[str, Any]:
 
 def positive(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def non_negative(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
 
 
 def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
@@ -93,11 +97,28 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
             "admitted": (
                 positive(hot.get("terrainIcbAttempts"))
                 and positive(hot.get("terrainIcbAccepted"))
+                and hot.get("terrainIcbAttempts") == hot.get("terrainIcbAccepted")
                 and positive(hot.get("terrainIcbDraws"))
                 and hot.get("terrainIcbFallbacks") == 0
+                and non_negative(hot.get("terrainIcbBudgetSkips"))
+                and non_negative(hot.get("terrainIcbBudgetSkipDraws"))
+                and hot.get("terrainIcbNativeStatsAvailable") is True
+                and hot.get("terrainIcbAllocations") == hot.get("terrainIcbAccepted")
+                and non_negative(hot.get("terrainIcbCompletionReleases"))
+                and abs(
+                    hot.get("terrainIcbAllocations")
+                    - hot.get("terrainIcbCompletionReleases")
+                ) <= 3
+                and hot.get("terrainIcbBudgetFallbacks") == 0
+                and hot.get("terrainIcbZeroAllocationFallbacks") == 0
             ),
             "evidence": hot,
-            "requirement": "terrain ICB attempts/accepted/draws > 0 and fallbacks == 0",
+            "requirement": (
+                "terrain ICB attempts/accepted/draws > 0; attempts equal accepted batches; "
+                "native allocations equal accepted batches; completion lag stays within three "
+                "in-flight submissions; exhausted-budget batches are skipped before FFM; native "
+                "budget and zero-sized-allocation fallbacks are forbidden"
+            ),
         },
         "pipeline-prewarm": {
             "admitted": (
@@ -140,7 +161,7 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
             and any(bool(lanes[name]["admitted"]) for name in selected[:4])
         )
         reason = (
-            "render packet and terrain ICB must execute without replay/fallback, runtime pipeline "
+            "render packet and bounded terrain ICB must execute without replay or allocation failure, runtime pipeline "
             "compiles must be zero, and at least one compiled Iris optimization lane must activate"
         )
     elif profile == "terrain-adaptive":
@@ -189,7 +210,20 @@ def self_test() -> None:
                 "computeGroupingRuntime": {"admissions": 0, "deferredPassCloses": 0},
                 "depthLivenessRuntime": {"prunedPairs": 0, "captureSkips": 0},
                 "argumentBindingRuntime": {"enabled": True, "encodedSnapshots": 10},
-                "hotPathCounters": {"runtimePipelineCompiles": 0},
+                "hotPathCounters": {
+                    "runtimePipelineCompiles": 0,
+                    "terrainIcbAttempts": 4,
+                    "terrainIcbAccepted": 4,
+                    "terrainIcbDraws": 64,
+                    "terrainIcbFallbacks": 0,
+                    "terrainIcbBudgetSkips": 8,
+                    "terrainIcbBudgetSkipDraws": 192,
+                    "terrainIcbNativeStatsAvailable": True,
+                    "terrainIcbAllocations": 4,
+                    "terrainIcbCompletionReleases": 3,
+                    "terrainIcbBudgetFallbacks": 0,
+                    "terrainIcbZeroAllocationFallbacks": 0,
+                },
             },
         }), encoding="utf-8")
         rejected, code = evaluate(path, "pass-fusion")
@@ -198,6 +232,13 @@ def self_test() -> None:
         assert code == 0 and admitted["state"] == "admitted"
         admitted, code = evaluate(path, "pipeline-prewarm")
         assert code == 0 and admitted["state"] == "admitted"
+        admitted, code = evaluate(path, "terrain-icb")
+        assert code == 0 and admitted["state"] == "admitted"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["admission"]["hotPathCounters"]["terrainIcbZeroAllocationFallbacks"] = 1
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        rejected, code = evaluate(path, "terrain-icb")
+        assert code == 3 and rejected["state"] == "rejected-no-admission"
     print("check_unified_eval_admission self-test: PASS")
 
 

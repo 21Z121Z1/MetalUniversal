@@ -175,6 +175,7 @@ final class MetalMrtBackendIntegrationTest {
     @Test
     void terrainIcbExecutesTextureArgumentBufferResources() {
         assertTrue(MetalTerrainIcbScope.enabled(), "production terrain ICB gate is disabled");
+        assertEquals(1, MetalTerrainIcbBridge.submissionBudget());
         assertTrue(IrisMetalArgumentBindingRuntime.enabled(), "argument buffers are disabled");
         assertTrue(
                 device.getDeviceInfo().features().multiDrawDirectInterleaved(),
@@ -256,9 +257,9 @@ final class MetalMrtBackendIntegrationTest {
                         pass.pass().multiDrawIndexed(draws, 1, 0, 16);
                         if (Boolean.getBoolean("metallum.opt.metal4")) {
                             // The second qualifying batch must execute exactly
-                            // once through the zero-execution native multi-draw
-                            // fallback after the per-submission ICB budget is
-                            // consumed.
+                            // once through native multi-draw, but Java already
+                            // knows the per-submission budget is consumed and
+                            // must not cross FFM only to rediscover that fact.
                             pass.pass().multiDrawIndexed(draws, 1, 0, 16);
                         }
                     } finally {
@@ -278,10 +279,12 @@ final class MetalMrtBackendIntegrationTest {
 
             MetalCommandPacketTelemetry.Snapshot commands = MetalCommandPacketTelemetry.snapshot();
             boolean metal4 = Boolean.getBoolean("metallum.opt.metal4");
-            assertEquals(metal4 ? 8L : 4L, commands.terrainIcbAttempts());
+            assertEquals(4L, commands.terrainIcbAttempts());
             assertEquals(4L, commands.terrainIcbAccepted());
-            assertEquals(metal4 ? 128L : 64L, commands.terrainIcbDraws());
-            assertEquals(metal4 ? 4L : 0L, commands.terrainIcbFallbacks());
+            assertEquals(64L, commands.terrainIcbDraws());
+            assertEquals(0L, commands.terrainIcbFallbacks());
+            assertEquals(metal4 ? 4L : 0L, commands.terrainIcbBudgetSkips());
+            assertEquals(metal4 ? 64L : 0L, commands.terrainIcbBudgetSkipDraws());
             IrisMetalArgumentBindingRuntime.Stats arguments = IrisMetalArgumentBindingRuntime.stats();
             assertTrue(arguments.encodedSnapshots() > 0L, "no argument-buffer snapshot executed");
             assertTrue(arguments.updates() >= 2L, "texture/sampler resources were not encoded");
@@ -294,7 +297,7 @@ final class MetalMrtBackendIntegrationTest {
                         icb.completionReleases() >= 4L,
                         "terrain ICBs were not released after GPU completion"
                 );
-                assertTrue(icb.budgetFallbacks() >= 4L, "ICB budget fallback did not execute");
+                assertEquals(0L, icb.budgetFallbacks(), "Java did not suppress exhausted-budget FFM calls");
                 assertEquals(0L, icb.zeroAllocationFallbacks());
                 long[] closure = MetalNativeBridge.metallum_metal4_backend_closure_stats();
                 assertEquals(1L, closure[0], "Metal 4 closure telemetry did not engage");

@@ -16,6 +16,8 @@ public final class MetalCommandPacketTelemetry {
     private static final LongAdder terrainIcbAccepted = new LongAdder();
     private static final LongAdder terrainIcbDraws = new LongAdder();
     private static final LongAdder terrainIcbFallbacks = new LongAdder();
+    private static final LongAdder terrainIcbBudgetSkips = new LongAdder();
+    private static final LongAdder terrainIcbBudgetSkipDraws = new LongAdder();
 
     private MetalCommandPacketTelemetry() {
     }
@@ -54,6 +56,12 @@ public final class MetalCommandPacketTelemetry {
         if (ENABLED) terrainIcbFallbacks.increment();
     }
 
+    public static void terrainIcbBudgetSkip(final int drawCount) {
+        if (!ENABLED) return;
+        terrainIcbBudgetSkips.increment();
+        terrainIcbBudgetSkipDraws.add(drawCount);
+    }
+
     public static Snapshot snapshot() {
         return new Snapshot(
                 renderPacketCalls.sum(),
@@ -65,7 +73,9 @@ public final class MetalCommandPacketTelemetry {
                 terrainIcbAttempts.sum(),
                 terrainIcbAccepted.sum(),
                 terrainIcbDraws.sum(),
-                terrainIcbFallbacks.sum()
+                terrainIcbFallbacks.sum(),
+                terrainIcbBudgetSkips.sum(),
+                terrainIcbBudgetSkipDraws.sum()
         );
     }
 
@@ -80,6 +90,8 @@ public final class MetalCommandPacketTelemetry {
         terrainIcbAccepted.reset();
         terrainIcbDraws.reset();
         terrainIcbFallbacks.reset();
+        terrainIcbBudgetSkips.reset();
+        terrainIcbBudgetSkipDraws.reset();
     }
 
     public record Snapshot(
@@ -92,7 +104,9 @@ public final class MetalCommandPacketTelemetry {
             long terrainIcbAttempts,
             long terrainIcbAccepted,
             long terrainIcbDraws,
-            long terrainIcbFallbacks
+            long terrainIcbFallbacks,
+            long terrainIcbBudgetSkips,
+            long terrainIcbBudgetSkipDraws
     ) {
     }
 }

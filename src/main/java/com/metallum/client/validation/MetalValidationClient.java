@@ -119,6 +119,7 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static long baselineSampleStartNanos;
     private static long baselineCpuFrameStartNanos;
     private static boolean baselineSampleStarted;
+    private static MetalTerrainIcbBridge.NativeStats baselineTerrainIcbNativeStats;
     private static final int CONTROLLED_ENTITY_ID = -2_147_000_001;
     private static final UUID CONTROLLED_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf01");
@@ -959,6 +960,11 @@ public final class MetalValidationClient implements ClientModInitializer {
         IrisMetalArgumentBindingRuntime.resetStats();
         MetalPipelineCompilationTelemetry.reset();
         MetalNativeBridge.metallum_pipeline_compile_telemetry_reset();
+        // Native ICB lifetime counters are process-monotonic because completion
+        // handlers may still be retiring warmup work. Snapshot them before the
+        // measurement-window FFM reset and report a delta at the end; resetting
+        // the native counters here would race those completion callbacks.
+        baselineTerrainIcbNativeStats = MetalTerrainIcbBridge.nativeStats();
         MetalFfmCallTelemetry.reset();
         MetalHotPathTelemetry.reset();
         MetalRenderStatePacketTelemetry.reset();
@@ -1029,7 +1035,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         MetalDynamicBackingPoolTelemetry.Snapshot backing = sample.backing();
         MetalPipelineCompilationTelemetry.Snapshot javaPipelines = sample.javaPipelines();
         MetalNativeBridge.NativePipelineCompilationSnapshot nativePipelines = sample.nativePipelines();
-        MetalTerrainIcbBridge.NativeStats terrainIcbNative = MetalTerrainIcbBridge.nativeStats();
+        MetalTerrainIcbBridge.NativeStats terrainIcbNative = sample.terrainIcbNative();
         JsonObject counters = new JsonObject();
         counters.addProperty("enabled", Boolean.getBoolean("metallum.hotpath.telemetry"));
         counters.addProperty("measuredFrames", measuredFrames);
@@ -1061,6 +1067,8 @@ public final class MetalValidationClient implements ClientModInitializer {
         counters.addProperty("terrainIcbAccepted", command.terrainIcbAccepted());
         counters.addProperty("terrainIcbDraws", command.terrainIcbDraws());
         counters.addProperty("terrainIcbFallbacks", command.terrainIcbFallbacks());
+        counters.addProperty("terrainIcbBudgetSkips", command.terrainIcbBudgetSkips());
+        counters.addProperty("terrainIcbBudgetSkipDraws", command.terrainIcbBudgetSkipDraws());
         counters.addProperty("terrainIcbNativeStatsAvailable", terrainIcbNative.available());
         counters.addProperty("terrainIcbAllocations", terrainIcbNative.allocations());
         counters.addProperty(
@@ -1099,6 +1107,7 @@ public final class MetalValidationClient implements ClientModInitializer {
     }
 
     private static HotPathSample captureHotPathSample() {
+        MetalTerrainIcbBridge.NativeStats currentTerrainIcb = MetalTerrainIcbBridge.nativeStats();
         return new HotPathSample(
                 MetalFfmCallTelemetry.snapshot(),
                 MetalHotPathTelemetry.snapshot(),
@@ -1107,7 +1116,28 @@ public final class MetalValidationClient implements ClientModInitializer {
                 MetalTransientArenaTelemetry.snapshot(),
                 MetalDynamicBackingPoolTelemetry.snapshot(),
                 MetalPipelineCompilationTelemetry.snapshot(),
-                MetalNativeBridge.metallum_pipeline_compile_telemetry_finish()
+                MetalNativeBridge.metallum_pipeline_compile_telemetry_finish(),
+                terrainIcbDelta(baselineTerrainIcbNativeStats, currentTerrainIcb)
+        );
+    }
+
+    private static MetalTerrainIcbBridge.NativeStats terrainIcbDelta(
+            final MetalTerrainIcbBridge.NativeStats start,
+            final MetalTerrainIcbBridge.NativeStats end
+    ) {
+        if (start == null || !start.available() || !end.available()
+                || end.allocations() < start.allocations()
+                || end.completionReleases() < start.completionReleases()
+                || end.budgetFallbacks() < start.budgetFallbacks()
+                || end.zeroAllocationFallbacks() < start.zeroAllocationFallbacks()) {
+            return new MetalTerrainIcbBridge.NativeStats(false, 0L, 0L, 0L, 0L);
+        }
+        return new MetalTerrainIcbBridge.NativeStats(
+                true,
+                end.allocations() - start.allocations(),
+                end.completionReleases() - start.completionReleases(),
+                end.budgetFallbacks() - start.budgetFallbacks(),
+                end.zeroAllocationFallbacks() - start.zeroAllocationFallbacks()
         );
     }
 
@@ -1119,7 +1149,8 @@ public final class MetalValidationClient implements ClientModInitializer {
             MetalTransientArenaTelemetry.Snapshot arena,
             MetalDynamicBackingPoolTelemetry.Snapshot backing,
             MetalPipelineCompilationTelemetry.Snapshot javaPipelines,
-            MetalNativeBridge.NativePipelineCompilationSnapshot nativePipelines
+            MetalNativeBridge.NativePipelineCompilationSnapshot nativePipelines,
+            MetalTerrainIcbBridge.NativeStats terrainIcbNative
     ) {
     }
 

@@ -54,7 +54,8 @@ public abstract class MetalHotPathTelemetryReportMixin {
                         + "renderCommandReplays={} computeCommandPacketCalls={} "
                         + "computeCommandOperations={} computeCommandReplays={} "
                         + "terrainIcbAttempts={} terrainIcbAccepted={} terrainIcbDraws={} "
-                        + "terrainIcbFallbacks={} terrainIcbAllocations={} "
+                        + "terrainIcbFallbacks={} terrainIcbBudgetSkips={} "
+                        + "terrainIcbBudgetSkipDraws={} terrainIcbAllocations={} "
                         + "terrainIcbCompletionReleases={} terrainIcbBudgetFallbacks={} "
                         + "terrainIcbZeroAllocationFallbacks={} transientWrapperHits={} "
                         + "transientWrapperMisses={} multiUploadCalls={} multiUploadItems={} "
@@ -83,6 +84,8 @@ public abstract class MetalHotPathTelemetryReportMixin {
                 command.terrainIcbAccepted(),
                 command.terrainIcbDraws(),
                 command.terrainIcbFallbacks(),
+                command.terrainIcbBudgetSkips(),
+                command.terrainIcbBudgetSkipDraws(),
                 terrainIcbNative.allocations(),
                 terrainIcbNative.completionReleases(),
                 terrainIcbNative.budgetFallbacks(),

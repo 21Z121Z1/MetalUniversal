@@ -370,7 +370,7 @@ final class MetalRenderPass implements RenderPassBackend {
         if (batchEligible) {
             enc.flushPendingState();
             boolean encodedByIcb = false;
-            boolean attemptIcb = MetalTerrainIcbScope.enabled()
+            boolean qualifyingIcb = MetalTerrainIcbScope.enabled()
                     && this.compiledPipeline != null
                     && this.compiledPipeline.terrainIcbCompatible()
                     && MetalTerrainIcbScope.active()
@@ -378,6 +378,8 @@ final class MetalRenderPass implements RenderPassBackend {
                     && emitted >= TERRAIN_ICB_THRESHOLD
                     && emitted <= MAX_PORTABLE_ICB_COMMANDS
                     && MetalTerrainIcbBridge.available();
+            boolean attemptIcb = qualifyingIcb
+                    && commandEncoder.claimTerrainIcbBudget(emitted);
             if (attemptIcb) {
                 MetalCommandPacketTelemetry.terrainIcbAttempt(emitted);
                 encodedByIcb = MetalTerrainIcbBridge.encodeIndexedBatch(

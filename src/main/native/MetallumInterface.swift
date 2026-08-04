@@ -1094,6 +1094,11 @@ public func metallum_terrain_icb_stats_v1(
     return 0
 }
 
+@_cdecl("metallum_terrain_icb_submission_budget_v1")
+public func metallum_terrain_icb_submission_budget_v1() -> Int32 {
+    Int32(metallumMetal4TerrainIcbSubmissionBudget)
+}
+
 // MARK: - Versioned native interface
 
 private let interfaceHeaderSize: UInt32 = 32
@@ -1285,6 +1290,10 @@ private func entries(for feature: MetallumInterfaceFeature, version: UInt32) -> 
                         UnsafeMutablePointer<UInt64>?,
                         UnsafeMutablePointer<UInt64>?
                     ) -> Int32
+            ),
+            functionPointer(
+                metallum_terrain_icb_submission_budget_v1
+                    as @convention(c) () -> Int32
             )
         ]
     case .renderArgumentBindings:

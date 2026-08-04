@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalTerrainIcbBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.metallum.client.validation.contract.AttachmentBindingRecord;
 import com.metallum.client.validation.contract.AttachmentSemantic;
@@ -92,9 +93,21 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private static final int MAX_POOLED_DYNAMIC_BACKINGS_PER_SIZE = 8;
     private final List<SubmitCallback> currentSubmitCallbacks = new ArrayList<>();
     private int contractTraceGroupDepth;
+    private final int terrainIcbSubmissionBudget;
+    private int terrainIcbBudgetClaims;
 
     MetalCommandEncoder(final MetalDevice device) {
         this.device = device;
+        this.terrainIcbSubmissionBudget = device.metal4MainRendererEnabled()
+                ? MetalTerrainIcbBridge.submissionBudget()
+                : Integer.MAX_VALUE;
+        if (device.metal4MainRendererEnabled()
+                && MetalTerrainIcbScope.enabled()
+                && this.terrainIcbSubmissionBudget <= 0) {
+            throw new IllegalStateException(
+                    "Metal 4 terrain ICB is enabled but its submission budget ABI is unavailable"
+            );
+        }
         this.transientMemory = new MetalTransientMemory(device, this);
         fence = MetalNativeBridge.metallum_create_fence(device.metalDeviceHandle());
         if (MetalNativeBridge.isNullHandle(fence)) {
@@ -377,9 +390,24 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         inFlight[slot] = new InFlight(currentSubmitIndex, commandBuffer, completedSemaphore, callbacks);
         commandBuffer = null;
         currentSubmitIndex++;
+        terrainIcbBudgetClaims = 0;
 
         transientMemory.rotate();
         destroyQueue.rotate();
+    }
+
+    /**
+     * Claims one native dynamic-ICB allocation for the current submission.
+     * Rejections after the native budget is known are handled in Java so a
+     * terrain-heavy frame does not pay one FFM round-trip per later batch.
+     */
+    boolean claimTerrainIcbBudget(final int drawCount) {
+        if (terrainIcbBudgetClaims >= terrainIcbSubmissionBudget) {
+            MetalCommandPacketTelemetry.terrainIcbBudgetSkip(drawCount);
+            return false;
+        }
+        terrainIcbBudgetClaims++;
+        return true;
     }
 
     /**
