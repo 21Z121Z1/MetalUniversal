@@ -5,7 +5,10 @@ on:
   push:
     branches:
       - feature/metal4-complete-migration
+      - fix/metal4-device-session-lifetime
     paths:
+      - .github/workflows/apply-metal4-device-session-fix.yml
+      - .github/workflows/metal4-migration-ci.yml
       - build.gradle
       - docs/mtl4-api-probe.swift
       - docs/iris-audit/mobilegl-hotpath-current-status.md
@@ -16,7 +19,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: metal4-migration-acceptance
+  group: metal4-migration-acceptance-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -26,8 +29,37 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: feature/metal4-complete-migration
+          ref: ${{ github.ref_name }}
           fetch-depth: 0
+
+      - name: Apply staged device-session patch
+        if: github.ref_name == 'fix/metal4-device-session-lifetime'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/apply-metal4-device-session-fix.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(workflow) if line.strip() == "python3 - <<'PY'") + 1
+          end = next(i for i in range(start, len(workflow)) if workflow[i].strip() == 'PY')
+          payload = []
+          for line in workflow[start:end]:
+              payload.append(line[10:] if line.startswith('          ') else line)
+          Path('/tmp/apply-metal4-device-session-fix.py').write_text('\n'.join(payload) + '\n')
+          PY
+          python3 /tmp/apply-metal4-device-session-fix.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-metal4-device-session-fix.yml
+          git checkout origin/feature/mobilegl-inspired-hotpath -- .github/workflows/metal4-migration-ci.yml
+          git add src/main/native/MetallumNative.swift \
+            src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java \
+            src/main/java/com/metallum/client/metal/render/MetalFxManager.java \
+            src/main/java/com/metallum/client/metal/render/MetalDevice.java \
+            .github/workflows/metal4-migration-ci.yml
+          git commit -m "fix(metal4): scope native state to device lifetime"
+          git push origin HEAD:${GITHUB_REF_NAME}
 
       - uses: gradle/actions/wrapper-validation@v6
 
@@ -126,7 +158,7 @@ jobs:
           git add docs/validation/metal4-migration-ci.md
           if ! git diff --cached --quiet; then
             git commit -m "ci: record Metal 4 macOS 26 acceptance [skip ci]"
-            git push origin HEAD:feature/metal4-complete-migration
+            git push origin HEAD:${GITHUB_REF_NAME}
           fi
 
       - name: Enforce acceptance
