@@ -5,11 +5,7 @@ on:
   push:
     branches:
       - feature/metal4-complete-migration
-      - fix/metal4-device-session-lifetime
     paths:
-      - .github/workflows/apply-metal4-device-session-fix.yml
-      - .github/workflows/metal4-migration-ci.yml
-      - scripts/apply_metal4_device_session_fix.py
       - build.gradle
       - docs/mtl4-api-probe.swift
       - docs/iris-audit/mobilegl-hotpath-current-status.md
@@ -20,7 +16,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: metal4-migration-acceptance-${{ github.ref_name }}
+  group: metal4-migration-acceptance
   cancel-in-progress: false
 
 jobs:
@@ -30,36 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.ref_name }}
+          ref: feature/metal4-complete-migration
           fetch-depth: 0
-
-      - name: Apply staged device-session patch
-        id: patch
-        if: github.ref_name == 'fix/metal4-device-session-lifetime'
-        shell: bash
-        run: |
-          set +e
-          python3 scripts/apply_metal4_device_session_fix.py 2>&1 | tee /tmp/metal4-device-session-patch.log
-          STATUS=${PIPESTATUS[0]}
-          if [ "${STATUS}" = "0" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git rm \
-              .github/workflows/apply-metal4-device-session-fix.yml \
-              scripts/apply_metal4_device_session_fix.py
-            git checkout origin/feature/mobilegl-inspired-hotpath -- .github/workflows/metal4-migration-ci.yml
-            git add \
-              src/main/native/MetallumNative.swift \
-              src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java \
-              src/main/java/com/metallum/client/metal/render/MetalFxManager.java \
-              src/main/java/com/metallum/client/metal/render/MetalDevice.java \
-              .github/workflows/metal4-migration-ci.yml
-            git commit -m "fix(metal4): scope native state to device lifetime"
-            git push origin HEAD:${GITHUB_REF_NAME}
-            STATUS=$?
-          fi
-          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
-          exit 0
 
       - uses: gradle/actions/wrapper-validation@v6
 
@@ -111,22 +79,20 @@ jobs:
         if: always()
         shell: bash
         env:
-          PATCH_STATUS: ${{ steps.patch.outputs.status }}
           BUILD_STATUS: ${{ steps.build.outputs.status }}
           CLEAN_STATUS: ${{ steps.clean.outputs.status }}
         run: |
           set -euo pipefail
           mkdir -p docs/validation
-          PATCH=${PATCH_STATUS:-setup-failed}
           BUILD=${BUILD_STATUS:-setup-failed}
           CLEAN=${CLEAN_STATUS:-setup-failed}
-          if [ "${PATCH}" = "0" ] && [ "${BUILD}" = "0" ] && [ "${CLEAN}" = "0" ]; then
+          if [ "${BUILD}" = "0" ] && [ "${CLEAN}" = "0" ]; then
             CONCLUSION=PASS
           else
             CONCLUSION=FAIL
           fi
           {
-            echo "# Metal 4 device-session macOS 26 CI receipt"
+            echo "# Metal 4 migration macOS 26 CI receipt"
             echo
             echo "- Conclusion: **${CONCLUSION}**"
             echo "- Source commit: \`$(git rev-parse HEAD)\`"
@@ -135,22 +101,11 @@ jobs:
             echo "- Xcode path: \`$(xcode-select -p 2>/dev/null || echo unavailable)\`"
             echo "- Swift: \`$(xcrun swiftc --version 2>/dev/null | head -n1 || echo unavailable)\`"
             echo "- SDK: \`$(xcrun --show-sdk-path --sdk macosx 2>/dev/null || echo unavailable)\`"
-            echo "- Patch status: \`${PATCH}\`"
             echo "- Build status: \`${BUILD}\`"
             echo "- Source-clean status: \`${CLEAN}\`"
             echo "- Command: \`./gradlew buildMacNative build -x metalFrameGenerationPresentationValidation -x metalFxOffscreenValidation\`"
             echo
-            echo "## Patch log"
-            echo
-            echo '```text'
-            if [ -f /tmp/metal4-device-session-patch.log ]; then
-              tail -n 120 /tmp/metal4-device-session-patch.log
-            else
-              echo "Patch log was not created."
-            fi
-            echo '```'
-            echo
-            echo "## Build log tail"
+            echo "## Log tail"
             echo
             echo '```text'
             if [ -f /tmp/metal4-migration-build.log ]; then
@@ -170,18 +125,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/validation/metal4-migration-ci.md
           if ! git diff --cached --quiet; then
-            git commit -m "ci: record Metal 4 device-session acceptance [skip ci]"
-            git push origin HEAD:${GITHUB_REF_NAME}
+            git commit -m "ci: record Metal 4 macOS 26 acceptance [skip ci]"
+            git push origin HEAD:feature/metal4-complete-migration
           fi
 
       - name: Enforce acceptance
         if: always()
         shell: bash
         env:
-          PATCH_STATUS: ${{ steps.patch.outputs.status }}
           BUILD_STATUS: ${{ steps.build.outputs.status }}
           CLEAN_STATUS: ${{ steps.clean.outputs.status }}
         run: |
-          test "${PATCH_STATUS:-1}" = "0"
           test "${BUILD_STATUS:-1}" = "0"
           test "${CLEAN_STATUS:-1}" = "0"
