@@ -39,6 +39,11 @@ private struct PipelineVariantKey: Hashable {
     let writeColor: Bool
 }
 
+private struct CopyPipelineKey: Hashable {
+    let deviceAddress: UInt
+    let colorFormat: MTLPixelFormat
+}
+
 private struct SamplerKey: Hashable {
     let deviceAddress: UInt
     let addressModeU: UInt
@@ -228,7 +233,7 @@ private enum NativeState {
     static var presentPipeline: MTLRenderPipelineState!
     static var presentNearestSampler: MTLSamplerState!
     static var presentLinearSampler: MTLSamplerState!
-    static var copyPipelines: [Int: MTLRenderPipelineState] = [:]
+    static var copyPipelines: [CopyPipelineKey: MTLRenderPipelineState] = [:]
     #if os(macOS)
     // Present mode the game last asked for, so stopping the frame-generation
     // presenter can hand the layer back in the state Minecraft expects instead
@@ -4168,7 +4173,10 @@ private func buildPresentSampler(device: MTLDevice, filter: MTLSamplerMinMagFilt
 }
 
 private func ensureCopyPipeline(_ device: MTLDevice, _ colorFormat: MTLPixelFormat) -> MTLRenderPipelineState? {
-    let key = Int(colorFormat.rawValue)
+    let key = CopyPipelineKey(
+        deviceAddress: objectAddress(device),
+        colorFormat: colorFormat
+    )
     if let pipeline = NativeState.copyPipelines[key] {
         return pipeline
     }
