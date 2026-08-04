@@ -23,6 +23,7 @@ import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormatElement;
+import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException;
 import org.joml.Vector4f;
 import org.joml.Vector4fc;
 import org.junit.jupiter.api.AfterEach;
@@ -600,6 +601,49 @@ final class MetalMrtBackendIntegrationTest {
     @Test
     void fragmentOutputFormatMismatchFailsClosed() {
         verifyFragmentOutputFormatMismatchFailsClosed();
+    }
+
+    @Test
+    void packedColorTargetsUseTheirDeclaredNumericClass() {
+        assertDoesNotThrow(() -> MetalCrossShaderCompiler.validateFragmentOutputSignature(
+                pipeline(
+                        "packed_rg11b10_float",
+                        List.of(GpuFormat.RG11B10_FLOAT),
+                        null,
+                        ColorTargetState.WRITE_ALL
+                ),
+                Map.of(0, MetalCrossShaderCompiler.FragmentOutputClass.FLOAT)
+        ));
+        assertDoesNotThrow(() -> MetalCrossShaderCompiler.validateFragmentOutputSignature(
+                pipeline(
+                        "packed_rgb10a2_unorm",
+                        List.of(GpuFormat.RGB10A2_UNORM),
+                        null,
+                        ColorTargetState.WRITE_ALL
+                ),
+                Map.of(0, MetalCrossShaderCompiler.FragmentOutputClass.FLOAT)
+        ));
+        assertDoesNotThrow(() -> MetalCrossShaderCompiler.validateFragmentOutputSignature(
+                pipeline(
+                        "packed_rgb10a2_uint",
+                        List.of(GpuFormat.RGB10A2_UINT),
+                        null,
+                        ColorTargetState.WRITE_ALL
+                ),
+                Map.of(0, MetalCrossShaderCompiler.FragmentOutputClass.UINT)
+        ));
+        assertThrows(
+                ShaderCompileException.class,
+                () -> MetalCrossShaderCompiler.validateFragmentOutputSignature(
+                        pipeline(
+                                "depth_as_color",
+                                List.of(GpuFormat.D32_FLOAT),
+                                null,
+                                ColorTargetState.WRITE_ALL
+                        ),
+                        Map.of(0, MetalCrossShaderCompiler.FragmentOutputClass.FLOAT)
+                )
+        );
     }
 
     @Test

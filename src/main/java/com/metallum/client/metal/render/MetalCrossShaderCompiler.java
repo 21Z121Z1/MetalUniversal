@@ -1390,6 +1390,22 @@ final class MetalCrossShaderCompiler {
 
     private static FragmentOutputClass colorTargetClass(final GpuFormat format)
             throws ShaderCompileException {
+        if (!format.hasColorAspect()) {
+            throw new ShaderCompileException(
+                    "Non-color format cannot be used as a color target: " + format
+            );
+        }
+
+        // Mojang represents packed 32-bit color formats as OPAQUE_32 because
+        // their channels do not share one ComponentType width.  Their shader
+        // output class still follows the format's declared numeric semantics.
+        if (format == GpuFormat.RG11B10_FLOAT || format == GpuFormat.RGB10A2_UNORM) {
+            return FragmentOutputClass.FLOAT;
+        }
+        if (format == GpuFormat.RGB10A2_UINT) {
+            return FragmentOutputClass.UINT;
+        }
+
         String componentType = format.componentType().name();
         if (componentType.startsWith("UINT")) {
             return FragmentOutputClass.UINT;
