@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 final class MetalTerrainIcbScopeTest {
     static {
         // Must be set before MetalTerrainIcbScope initializes its static gate.
-        System.setProperty("metallum.opt.terrainIcbPilot", "true");
+        System.setProperty("metallum.opt.terrainIcb", "true");
     }
 
     @BeforeAll
@@ -27,6 +27,8 @@ final class MetalTerrainIcbScopeTest {
 
     @Test
     void nestedScopesRemainActiveUntilFinalExit() {
+        assertTrue(MetalTerrainIcbScope.configuredEnabled());
+        assertTrue(MetalTerrainIcbScope.enabled());
         assertFalse(MetalTerrainIcbScope.active());
         MetalTerrainIcbScope.enter();
         MetalTerrainIcbScope.enter();

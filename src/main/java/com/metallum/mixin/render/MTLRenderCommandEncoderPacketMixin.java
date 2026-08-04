@@ -3,7 +3,6 @@ package com.metallum.mixin.render;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.metal.render.mtl.MetalRenderCommandPacketFacade;
-import com.metallum.client.metal.render.mtl.MetalRenderStateFlushable;
 import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
@@ -248,7 +247,7 @@ public abstract class MTLRenderCommandEncoderPacketMixin {
             final MemorySegment encoder
     ) {
         if (this.metallum$commandPacket == null) {
-            ((MetalRenderStateFlushable) (Object) encoderObject).metallum$flushRenderState(encoder);
+            encoderObject.flushPendingState();
         }
     }
 

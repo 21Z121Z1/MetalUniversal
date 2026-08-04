@@ -693,7 +693,263 @@ public func metallum_compute_command_packet_apply_v1(
     return Int32(operationCount)
 }
 
-// MARK: - Metal 3 Sodium terrain ICB pilot
+// MARK: - Compiled render argument-buffer ABI
+
+private let renderArgumentPacketMagic: UInt32 = 0x4D_41_42_47 // "MABG"
+private let renderArgumentPacketVersion: UInt32 = 1
+private let renderArgumentPacketHeaderSize = 24
+private let renderArgumentPacketEntrySize = 48
+private let renderArgumentPacketMaxEntries = 256
+
+private enum RenderArgumentKind: UInt32 {
+    case buffer = 1
+    case texture = 2
+    case sampler = 3
+}
+
+private struct RenderArgumentEntry {
+    let kind: RenderArgumentKind
+    let stageMask: UInt32
+    let vertexIndex: Int32
+    let fragmentIndex: Int32
+    let objectAddress: UInt64
+    let offset: UInt64
+    let flags: UInt32
+}
+
+private final class MetallumRenderArgumentLayout {
+    let vertex: MTLArgumentEncoder?
+    let fragment: MTLArgumentEncoder?
+
+    init?(
+        vertexFunction: MTLFunction?,
+        fragmentFunction: MTLFunction?,
+        hasVertexArguments: Bool,
+        hasFragmentArguments: Bool
+    ) {
+        if hasVertexArguments {
+            guard let vertexFunction else { return nil }
+            self.vertex = vertexFunction.makeArgumentEncoder(bufferIndex: 0)
+        } else {
+            self.vertex = nil
+        }
+        if hasFragmentArguments {
+            guard let fragmentFunction else { return nil }
+            self.fragment = fragmentFunction.makeArgumentEncoder(bufferIndex: 0)
+        } else {
+            self.fragment = nil
+        }
+        guard self.vertex != nil || self.fragment != nil else { return nil }
+    }
+}
+
+private func decodeRenderArgumentEntry(
+    _ packet: UnsafeRawPointer,
+    _ entryIndex: Int
+) -> RenderArgumentEntry? {
+    let base = renderArgumentPacketHeaderSize + entryIndex * renderArgumentPacketEntrySize
+    guard let kind = RenderArgumentKind(rawValue: packetLoad(packet, base, as: UInt32.self)) else {
+        return nil
+    }
+    return RenderArgumentEntry(
+        kind: kind,
+        stageMask: packetLoad(packet, base + 4, as: UInt32.self),
+        vertexIndex: packetLoad(packet, base + 8, as: Int32.self),
+        fragmentIndex: packetLoad(packet, base + 12, as: Int32.self),
+        objectAddress: packetLoad(packet, base + 16, as: UInt64.self),
+        offset: packetLoad(packet, base + 24, as: UInt64.self),
+        flags: packetLoad(packet, base + 32, as: UInt32.self)
+    )
+}
+
+@_cdecl("metallum_render_argument_layout_create_v1")
+public func metallum_render_argument_layout_create_v1(
+    _ vertexFunction: MTLFunction?,
+    _ fragmentFunction: MTLFunction?,
+    _ hasVertexArguments: Int32,
+    _ hasFragmentArguments: Int32
+) -> UnsafeMutableRawPointer? {
+    guard (hasVertexArguments == 0 || hasVertexArguments == 1),
+          (hasFragmentArguments == 0 || hasFragmentArguments == 1),
+          let layout = MetallumRenderArgumentLayout(
+              vertexFunction: vertexFunction,
+              fragmentFunction: fragmentFunction,
+              hasVertexArguments: hasVertexArguments != 0,
+              hasFragmentArguments: hasFragmentArguments != 0
+          ) else {
+        return nil
+    }
+    return Unmanaged.passRetained(layout).toOpaque()
+}
+
+/// Low 32 bits are the vertex encoded length, high 32 bits the fragment length.
+@_cdecl("metallum_render_argument_layout_sizes_v1")
+public func metallum_render_argument_layout_sizes_v1(
+    _ layoutPointer: UnsafeMutableRawPointer
+) -> UInt64 {
+    let layout = Unmanaged<MetallumRenderArgumentLayout>
+        .fromOpaque(layoutPointer).takeUnretainedValue()
+    let vertex = UInt64(UInt32(exactly: layout.vertex?.encodedLength ?? 0) ?? UInt32.max)
+    let fragment = UInt64(UInt32(exactly: layout.fragment?.encodedLength ?? 0) ?? UInt32.max)
+    return vertex | (fragment << 32)
+}
+
+@_cdecl("metallum_render_argument_packet_apply_v1")
+public func metallum_render_argument_packet_apply_v1(
+    _ layoutPointer: UnsafeMutableRawPointer,
+    _ encoderPointer: UnsafeMutableRawPointer,
+    _ vertexArgumentBuffer: MTLBuffer?,
+    _ vertexArgumentOffset: UInt64,
+    _ fragmentArgumentBuffer: MTLBuffer?,
+    _ fragmentArgumentOffset: UInt64,
+    _ rawPacket: UnsafeRawPointer?,
+    _ rawByteCount: Int64
+) -> Int32 {
+    guard let packet = rawPacket,
+          let byteCount = Int(exactly: rawByteCount),
+          byteCount >= renderArgumentPacketHeaderSize else {
+        return -1
+    }
+    guard packetLoad(packet, 0, as: UInt32.self) == renderArgumentPacketMagic,
+          packetLoad(packet, 4, as: UInt32.self) == renderArgumentPacketVersion,
+          packetLoad(packet, 16, as: UInt32.self) == UInt32(renderArgumentPacketEntrySize),
+          packetLoad(packet, 20, as: UInt32.self) == 0 else {
+        return -2
+    }
+    let declaredByteCount = Int(packetLoad(packet, 8, as: UInt32.self))
+    let entryCount = Int(packetLoad(packet, 12, as: UInt32.self))
+    guard entryCount > 0,
+          entryCount <= renderArgumentPacketMaxEntries,
+          entryCount <= (Int.max - renderArgumentPacketHeaderSize) / renderArgumentPacketEntrySize else {
+        return -3
+    }
+    let expectedByteCount = renderArgumentPacketHeaderSize
+        + entryCount * renderArgumentPacketEntrySize
+    guard declaredByteCount == expectedByteCount, byteCount >= expectedByteCount else {
+        return -4
+    }
+
+    let layout = Unmanaged<MetallumRenderArgumentLayout>
+        .fromOpaque(layoutPointer).takeUnretainedValue()
+    guard let vertexOffset = Int(exactly: vertexArgumentOffset),
+          let fragmentOffset = Int(exactly: fragmentArgumentOffset),
+          vertexOffset >= 0,
+          fragmentOffset >= 0 else {
+        return -5
+    }
+    if let vertex = layout.vertex {
+        guard let vertexArgumentBuffer,
+              vertexOffset <= vertexArgumentBuffer.length,
+              vertex.encodedLength <= vertexArgumentBuffer.length - vertexOffset else {
+            return -6
+        }
+    } else if vertexArgumentBuffer != nil {
+        return -6
+    }
+    if let fragment = layout.fragment {
+        guard let fragmentArgumentBuffer,
+              fragmentOffset <= fragmentArgumentBuffer.length,
+              fragment.encodedLength <= fragmentArgumentBuffer.length - fragmentOffset else {
+            return -7
+        }
+    } else if fragmentArgumentBuffer != nil {
+        return -7
+    }
+
+    // Validate every entry and the complete destination-key set before
+    // mutating either argument buffer. A negative result is therefore always
+    // zero execution and safe for a caller to diagnose or fail closed.
+    var entries: [RenderArgumentEntry] = []
+    entries.reserveCapacity(entryCount)
+    var destinationKeys = Set<UInt64>()
+    for index in 0..<entryCount {
+        guard let entry = decodeRenderArgumentEntry(packet, index),
+              validRenderStageMask(entry.stageMask),
+              (entry.flags & ~UInt32(1)) == 0,
+              entry.objectAddress != 0 else {
+            return -8
+        }
+        let object = packetObject(entry.objectAddress)
+        switch entry.kind {
+        case .buffer:
+            guard let buffer = object as? MTLBuffer,
+                  let offset = Int(exactly: entry.offset),
+                  offset >= 0, offset <= buffer.length else { return -9 }
+        case .texture:
+            guard object is MTLTexture, entry.offset == 0 else { return -9 }
+        case .sampler:
+            guard object is MTLSamplerState, entry.offset == 0, entry.flags == 0 else { return -9 }
+        }
+        if (entry.stageMask & renderStageVertex) != 0 {
+            guard layout.vertex != nil, entry.vertexIndex >= 0 else { return -10 }
+            let key = (UInt64(renderStageVertex) << 48)
+                | UInt64(UInt32(bitPattern: entry.vertexIndex))
+            guard destinationKeys.insert(key).inserted else { return -11 }
+        } else if entry.vertexIndex != -1 {
+            return -10
+        }
+        if (entry.stageMask & renderStageFragment) != 0 {
+            guard layout.fragment != nil, entry.fragmentIndex >= 0 else { return -10 }
+            let key = (UInt64(renderStageFragment) << 48)
+                | UInt64(UInt32(bitPattern: entry.fragmentIndex))
+            guard destinationKeys.insert(key).inserted else { return -11 }
+        } else if entry.fragmentIndex != -1 {
+            return -10
+        }
+        entries.append(entry)
+    }
+
+    if let vertex = layout.vertex, let vertexArgumentBuffer {
+        vertex.setArgumentBuffer(vertexArgumentBuffer, offset: vertexOffset)
+    }
+    if let fragment = layout.fragment, let fragmentArgumentBuffer {
+        fragment.setArgumentBuffer(fragmentArgumentBuffer, offset: fragmentOffset)
+    }
+
+    let metal3Encoder = Unmanaged<AnyObject>.fromOpaque(encoderPointer)
+        .takeUnretainedValue() as? MTLRenderCommandEncoder
+    for entry in entries {
+        let object = packetObject(entry.objectAddress)
+        if (entry.stageMask & renderStageVertex) != 0, let vertex = layout.vertex {
+            switch entry.kind {
+            case .buffer:
+                vertex.setBuffer(object as? MTLBuffer, offset: Int(entry.offset), index: Int(entry.vertexIndex))
+            case .texture:
+                vertex.setTexture(object as? MTLTexture, index: Int(entry.vertexIndex))
+            case .sampler:
+                vertex.setSamplerState(object as? MTLSamplerState, index: Int(entry.vertexIndex))
+            }
+        }
+        if (entry.stageMask & renderStageFragment) != 0, let fragment = layout.fragment {
+            switch entry.kind {
+            case .buffer:
+                fragment.setBuffer(object as? MTLBuffer, offset: Int(entry.offset), index: Int(entry.fragmentIndex))
+            case .texture:
+                fragment.setTexture(object as? MTLTexture, index: Int(entry.fragmentIndex))
+            case .sampler:
+                fragment.setSamplerState(object as? MTLSamplerState, index: Int(entry.fragmentIndex))
+            }
+        }
+        if let metal3Encoder, let resource = object as? MTLResource {
+            var usage: MTLResourceUsage = .read
+            if (entry.flags & 1) != 0 { usage.insert(.write) }
+            var stages: MTLRenderStages = []
+            if (entry.stageMask & renderStageVertex) != 0 { stages.insert(.vertex) }
+            if (entry.stageMask & renderStageFragment) != 0 { stages.insert(.fragment) }
+            metal3Encoder.useResource(resource, usage: usage, stages: stages)
+        }
+    }
+
+    // Do not bind the completed tables here. The Java encoder owns the
+    // ordered state packet and its per-encoder shadow; bypassing it would make
+    // buffer(0) appear unchanged after an argument-buffer pipeline and could
+    // suppress the vertex-buffer restore for the next legacy pipeline. The
+    // caller binds both tables only after this function has accepted and
+    // encoded the complete snapshot.
+    return Int32(entryCount)
+}
+
+// MARK: - Metal 3 Sodium terrain ICB
 
 @_cdecl("metallum_terrain_icb_encode_indexed_v1")
 public func metallum_terrain_icb_encode_indexed_v1(
@@ -720,7 +976,7 @@ public func metallum_terrain_icb_encode_indexed_v1(
     }
 
     // Metal 4 uses a private bridge object, not MTLRenderCommandEncoder. The
-    // pilot is deliberately Metal 3 only and returns before executing a draw.
+    // The ICB path is deliberately Metal 3 only and returns before executing a draw.
     let object = Unmanaged<AnyObject>.fromOpaque(encoderPointer).takeUnretainedValue()
     guard let encoder = object as? MTLRenderCommandEncoder else {
         return 0
@@ -760,7 +1016,7 @@ public func metallum_terrain_icb_encode_indexed_v1(
     ) else {
         return 0
     }
-    icb.label = "Metallum Sodium Terrain ICB Pilot"
+    icb.label = "Metallum Sodium Terrain ICB"
 
     for draw in 0..<drawCount {
         let command = icb.indirectRenderCommandAt(draw)
@@ -793,11 +1049,13 @@ enum MetallumInterfaceFeature: Int32 {
     case renderCommandPacket = 4
     case computeCommandPacket = 5
     case terrainIcb = 6
+    case renderArgumentBindings = 7
 
     var currentVersion: UInt32 {
         switch self {
         case .core, .metalFX, .renderStatePacket,
-             .renderCommandPacket, .computeCommandPacket, .terrainIcb:
+             .renderCommandPacket, .computeCommandPacket, .terrainIcb,
+             .renderArgumentBindings:
             return 1
         }
     }
@@ -824,6 +1082,7 @@ struct MetallumBuildCapability {
     static let renderCommandPacket: UInt64 = 1 << 11
     static let computeCommandPacket: UInt64 = 1 << 12
     static let terrainIcb: UInt64 = 1 << 13
+    static let renderArgumentBindings: UInt64 = 1 << 14
 }
 
 private func buildCapabilities(for feature: MetallumInterfaceFeature) -> UInt64 {
@@ -836,6 +1095,7 @@ private func buildCapabilities(for feature: MetallumInterfaceFeature) -> UInt64 
             | MetallumBuildCapability.renderCommandPacket
             | MetallumBuildCapability.computeCommandPacket
             | MetallumBuildCapability.terrainIcb
+            | MetallumBuildCapability.renderArgumentBindings
     case .metalFX:
         #if canImport(MetalFX)
         return MetallumBuildCapability.metalFXSpatial
@@ -856,6 +1116,8 @@ private func buildCapabilities(for feature: MetallumInterfaceFeature) -> UInt64 
         return MetallumBuildCapability.computeCommandPacket
     case .terrainIcb:
         return MetallumBuildCapability.terrainIcb
+    case .renderArgumentBindings:
+        return MetallumBuildCapability.renderArgumentBindings
     }
 }
 
@@ -868,6 +1130,7 @@ public func metallum_core_device_capabilities(_ device: MTLDevice) -> UInt64 {
         | MetallumBuildCapability.renderCommandPacket
         | MetallumBuildCapability.computeCommandPacket
         | MetallumBuildCapability.terrainIcb
+        | MetallumBuildCapability.renderArgumentBindings
     if metallum_metalfx_supports_spatial(device) != 0 {
         bits |= MetallumBuildCapability.metalFXSpatial
     }
@@ -954,6 +1217,30 @@ private func entries(for feature: MetallumInterfaceFeature, version: UInt32) -> 
                         Int32,
                         Int32,
                         Int32
+                    ) -> Int32
+            )
+        ]
+    case .renderArgumentBindings:
+        return [
+            functionPointer(
+                metallum_render_argument_layout_create_v1
+                    as @convention(c) (MTLFunction?, MTLFunction?, Int32, Int32) -> UnsafeMutableRawPointer?
+            ),
+            functionPointer(
+                metallum_render_argument_layout_sizes_v1
+                    as @convention(c) (UnsafeMutableRawPointer) -> UInt64
+            ),
+            functionPointer(
+                metallum_render_argument_packet_apply_v1
+                    as @convention(c) (
+                        UnsafeMutableRawPointer,
+                        UnsafeMutableRawPointer,
+                        MTLBuffer?,
+                        UInt64,
+                        MTLBuffer?,
+                        UInt64,
+                        UnsafeRawPointer?,
+                        Int64
                     ) -> Int32
             )
         ]

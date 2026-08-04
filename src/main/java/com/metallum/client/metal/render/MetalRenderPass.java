@@ -2,6 +2,8 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalRenderArgumentBindingBridge;
+import com.metallum.client.metal.render.bridge.MetalTerrainIcbBridge;
 import com.metallum.client.validation.contract.ProducerType;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.metal.render.mtl.*;
@@ -39,6 +41,20 @@ import java.util.function.Supplier;
 final class MetalRenderPass implements RenderPassBackend {
     static final boolean VALIDATION = SharedConstants.IS_RUNNING_IN_IDE;
     static final int MAX_VERTEX_BUFFERS = RenderPass.MAX_VERTEX_BUFFERS;
+    private static final int MAX_PORTABLE_ICB_COMMANDS =
+            MetalDevice.MAX_MULTI_DRAW_DIRECT_INTERLEAVED_DRAWS;
+    private static final boolean NATIVE_MULTI_DRAW_ENABLED = !"false".equalsIgnoreCase(
+            System.getProperty("metallum.opt.nativeMultiDrawBatch", "true")
+    );
+    private static final int NATIVE_MULTI_DRAW_THRESHOLD = Math.max(
+            2,
+            Integer.getInteger("metallum.opt.nativeMultiDrawBatchThreshold", 4)
+    );
+    private static final boolean METAL4_REQUESTED = Boolean.getBoolean("metallum.opt.metal4");
+    private static final int TERRAIN_ICB_THRESHOLD = Math.max(
+            16,
+            Integer.getInteger("metallum.opt.terrainIcbMinDraws", 16)
+    );
     private final MetalDevice device;
     private final MetalCommandEncoder commandEncoder;
     @Nullable
@@ -74,6 +90,8 @@ final class MetalRenderPass implements RenderPassBackend {
     private MTLRenderCommandEncoder nativeEncoder;
     private final long cpuTimingStartNanos = System.nanoTime();
     private boolean cpuTimingRecorded;
+    private static final ThreadLocal<MetalRenderArgumentPacket> ARGUMENT_PACKET =
+            ThreadLocal.withInitial(MetalRenderArgumentPacket::new);
 
     MetalRenderPass(
             final MetalDevice device,
@@ -300,22 +318,129 @@ final class MetalRenderPass implements RenderPassBackend {
 
     @Override
     public void multiDrawIndexed(@NonNull IntBuffer drawParameters, int instanceCount, int firstInstance, int drawCount) {
-        MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
+        if (drawCount < 0 || drawCount > Integer.MAX_VALUE / 3) {
+            throw new IllegalArgumentException("Invalid Metal indexed multi-draw count " + drawCount);
+        }
+        if (drawParameters.limit() < drawCount * 3) {
+            throw new IllegalArgumentException(
+                    "Metal indexed multi-draw needs " + (drawCount * 3)
+                            + " parameters, got " + drawParameters.limit()
+            );
+        }
+        if (drawCount == 0) {
+            return;
+        }
+        if (!(indexBuffer instanceof MetalGpuBuffer nativeIndexBuffer)) {
+            Metallum.LOGGER.warn("[metallum] multiDrawIndexed called with null/non-Metal index buffer, skipping draw");
+            return;
+        }
+
+        MTLPrimitiveType primitiveType = primitiveTopology();
+        boolean batchEligible = NATIVE_MULTI_DRAW_ENABLED
+                && primitiveType != MTLPrimitiveType.TriangleFan
+                && drawCount >= NATIVE_MULTI_DRAW_THRESHOLD;
+        MetalMultiDrawScratch scratch = null;
+        int emitted = 0;
+        if (batchEligible) {
+            scratch = MetalMultiDrawScratch.CURRENT.get();
+            scratch.ensureCapacity(drawCount);
+            for (int draw = 0; draw < drawCount; draw++) {
+                int base = draw * 3;
+                int firstIndex = drawParameters.get(base);
+                int indexCount = drawParameters.get(base + 1);
+                int baseVertex = drawParameters.get(base + 2);
+                if (indexCount <= 0) {
+                    continue;
+                }
+                if (firstIndex < 0) {
+                    throw new IllegalArgumentException(
+                            "Negative first index in Metal indexed multi-draw command " + draw
+                    );
+                }
+                long firstIndexOffset = Math.multiplyExact((long) firstIndex, this.indexType.bytes);
+                scratch.put(emitted++, firstIndexOffset, indexCount, baseVertex);
+            }
+            if (emitted < NATIVE_MULTI_DRAW_THRESHOLD) {
+                batchEligible = false;
+            }
+        }
+
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
 
-        for (int i = 0; i < drawCount; i++) {
-            int firstIndex = drawParameters.get(i * 3);
-            int indexCount = drawParameters.get(i * 3 + 1);
-            int baseVertex = drawParameters.get(i * 3 + 2);
-            if (indexCount > 0) {
-                drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
+        if (batchEligible) {
+            enc.flushPendingState();
+            boolean encodedByIcb = false;
+            boolean attemptIcb = MetalTerrainIcbScope.enabled()
+                    && !METAL4_REQUESTED
+                    && this.compiledPipeline != null
+                    && this.compiledPipeline.terrainIcbCompatible()
+                    && MetalTerrainIcbScope.active()
+                    && instanceCount > 0
+                    && emitted >= TERRAIN_ICB_THRESHOLD
+                    && emitted <= MAX_PORTABLE_ICB_COMMANDS
+                    && MetalTerrainIcbBridge.available();
+            if (attemptIcb) {
+                MetalCommandPacketTelemetry.terrainIcbAttempt(emitted);
+                encodedByIcb = MetalTerrainIcbBridge.encodeIndexedBatch(
+                        enc.handle(),
+                        primitiveType.value,
+                        this.indexType.value,
+                        nativeIndexBuffer.nativeHandle(),
+                        scratch.firstIndexOffsets(),
+                        scratch.indexCounts(),
+                        scratch.vertexOffsets(),
+                        emitted,
+                        instanceCount,
+                        firstInstance
+                );
+                if (encodedByIcb) {
+                    MetalCommandPacketTelemetry.terrainIcbAccepted();
+                } else {
+                    MetalCommandPacketTelemetry.terrainIcbFallback();
+                }
+            }
+            if (!encodedByIcb) {
+                MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
+                        enc.handle(),
+                        primitiveType.value,
+                        this.indexType.value,
+                        nativeIndexBuffer.nativeHandle(),
+                        scratch.firstIndexOffsets(),
+                        scratch.indexCounts(),
+                        scratch.vertexOffsets(),
+                        emitted,
+                        instanceCount,
+                        firstInstance
+                );
+            }
+            MetalHotPathTelemetry.recordNativeMultiDrawBatch(emitted);
+        } else {
+            for (int draw = 0; draw < drawCount; draw++) {
+                int base = draw * 3;
+                int firstIndex = drawParameters.get(base);
+                int indexCount = drawParameters.get(base + 1);
+                int baseVertex = drawParameters.get(base + 2);
+                if (indexCount > 0) {
+                    drawIndexedNative(
+                            enc,
+                            nativeIndexBuffer,
+                            firstIndex,
+                            indexCount,
+                            baseVertex,
+                            instanceCount,
+                            indexType,
+                            firstInstance
+                    );
+                }
             }
         }
-        recordProducer(ProducerType.MULTI_DRAW, Map.of(
-                "drawCount", Integer.toString(drawCount),
-                "instanceCount", Integer.toString(instanceCount)
-        ));
+        if (contractPassToken >= 0L) {
+            recordProducer(ProducerType.MULTI_DRAW, Map.of(
+                    "drawCount", Integer.toString(drawCount),
+                    "instanceCount", Integer.toString(instanceCount)
+            ));
+        }
     }
 
     @Override
@@ -763,8 +888,20 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         if (dirtyDescriptorMask != 0) {
+            boolean argumentDescriptorsDirty = false;
             for (MetalCompiledRenderPipeline.ResourceBinding binding : compiledPipeline.resources()) {
-                if ((dirtyDescriptorMask & (1L << binding.bindingIndex())) != 0L) {
+                if (binding.argumentBuffered()
+                        && (dirtyDescriptorMask & (1L << binding.bindingIndex())) != 0L) {
+                    argumentDescriptorsDirty = true;
+                    break;
+                }
+            }
+            if (argumentDescriptorsDirty) {
+                pushArgumentDescriptors(enc);
+            }
+            for (MetalCompiledRenderPipeline.ResourceBinding binding : compiledPipeline.resources()) {
+                if (!binding.argumentBuffered()
+                        && (dirtyDescriptorMask & (1L << binding.bindingIndex())) != 0L) {
                     pushDescriptor(enc, binding);
                 }
             }
@@ -897,6 +1034,191 @@ final class MetalRenderPass implements RenderPassBackend {
 
         MetalGpuBuffer uniformBuffer = (MetalGpuBuffer) uniformSlice.buffer();
         enc.setBuffer(uniformBuffer.nativeHandle(), uniformSlice.offset(), binding.bindingIndex(), binding.stageMask());
+    }
+
+    private void pushArgumentDescriptors(final MTLRenderCommandEncoder enc) {
+        if (compiledPipeline == null) {
+            throw new IllegalStateException("Pipeline is missing");
+        }
+        MetalRenderArgumentBindingBridge.Layout layout = compiledPipeline.argumentLayout();
+        if (layout == null) {
+            IrisMetalArgumentBindingRuntime.recordFailure();
+            throw new IllegalStateException(
+                    "Pipeline has argument-buffered resources but no native layout"
+            );
+        }
+
+        MetalRenderArgumentPacket packet = ARGUMENT_PACKET.get();
+        packet.reset();
+        for (MetalCompiledRenderPipeline.ResourceBinding binding : compiledPipeline.resources()) {
+            if (binding.argumentBuffered()) {
+                appendArgumentDescriptor(packet, binding);
+            }
+        }
+        int byteCount = packet.finish();
+
+        GpuBufferSlice vertexArguments = layout.vertexEncodedLength() == 0L
+                ? null
+                : commandEncoder.transientMemory().allocateGpu(
+                        layout.vertexEncodedLength(),
+                        256L,
+                        GpuBuffer.USAGE_UNIFORM
+                );
+        GpuBufferSlice fragmentArguments = layout.fragmentEncodedLength() == 0L
+                ? null
+                : commandEncoder.transientMemory().allocateGpu(
+                        layout.fragmentEncodedLength(),
+                        256L,
+                        GpuBuffer.USAGE_UNIFORM
+                );
+        MemorySegment vertexHandle = vertexArguments == null
+                ? MemorySegment.NULL
+                : ((MetalGpuBuffer) vertexArguments.buffer()).nativeHandle();
+        MemorySegment fragmentHandle = fragmentArguments == null
+                ? MemorySegment.NULL
+                : ((MetalGpuBuffer) fragmentArguments.buffer()).nativeHandle();
+        int applied = MetalRenderArgumentBindingBridge.apply(
+                layout,
+                enc.handle(),
+                vertexHandle,
+                vertexArguments == null ? 0L : vertexArguments.offset(),
+                fragmentHandle,
+                fragmentArguments == null ? 0L : fragmentArguments.offset(),
+                packet.storage(),
+                byteCount
+        );
+        if (applied != packet.entryCount()) {
+            IrisMetalArgumentBindingRuntime.recordFailure();
+            throw new IllegalStateException(
+                    "Native Metal argument packet rejected before execution: result=" + applied
+                            + ", entries=" + packet.entryCount()
+            );
+        }
+        // Slot zero is part of the same encoder-local state machine as vertex
+        // and legacy uniform buffers. Route these final binds through the
+        // ordered packet/shadow so a later non-argument pipeline cannot
+        // incorrectly suppress its own slot-zero restore.
+        if (vertexArguments != null) {
+            enc.setBuffer(
+                    vertexHandle,
+                    vertexArguments.offset(),
+                    0L,
+                    MetalCompiledRenderPipeline.STAGE_VERTEX
+            );
+        }
+        if (fragmentArguments != null) {
+            enc.setBuffer(
+                    fragmentHandle,
+                    fragmentArguments.offset(),
+                    0L,
+                    MetalCompiledRenderPipeline.STAGE_FRAGMENT
+            );
+        }
+        IrisMetalArgumentBindingRuntime.recordEncodedSnapshot(applied);
+    }
+
+    private void appendArgumentDescriptor(
+            final MetalRenderArgumentPacket packet,
+            final MetalCompiledRenderPipeline.ResourceBinding binding
+    ) {
+        if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
+            TextureViewAndSampler textureBinding = samplers.get(binding.name());
+            if (textureBinding == null) {
+                textureBinding = IrisMetalPipelineOverrides.fallbackTexture(
+                        device, compiledPipeline, binding.name(), samplers
+                );
+            }
+            if (textureBinding == null
+                    || !(textureBinding.textureView() instanceof MetalGpuTextureView textureView)
+                    || !(textureBinding.sampler() instanceof MetalGpuSampler sampler)
+                    || textureBinding.textureView().isClosed()) {
+                throw new IllegalStateException("Missing or invalid sampler " + binding.name());
+            }
+            if (MetalFxManager.usesTemporalUpscaling()
+                    && compiledPipeline.usesStableTerrainSampler(binding)) {
+                sampler = device.stableTerrainSampler(sampler);
+            }
+            packet.appendTexture(binding, textureView.nativeHandle(), false);
+            packet.appendSampler(binding, sampler.nativeHandle());
+            return;
+        }
+
+        if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.TEXEL_BUFFER) {
+            appendTexelBufferArgument(packet, binding);
+            return;
+        }
+
+        if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_IMAGE) {
+            GpuTextureView view = storageImages.get(binding.name());
+            if (view == null) {
+                view = IrisMetalPipelineOverrides.fallbackStorageImage(
+                        device, compiledPipeline, binding.name()
+                );
+            }
+            if (!(view instanceof MetalGpuTextureView metalView)
+                    || !(metalView.texture() instanceof MetalGpuTexture texture)
+                    || view.isClosed() || texture.isClosed()) {
+                throw new IllegalStateException("Missing or invalid storage image " + binding.name());
+            }
+            commandEncoder.flushPendingClear(texture);
+            texture.markContentsDirty();
+            packet.appendTexture(binding, metalView.nativeHandle(), true);
+            return;
+        }
+
+        GpuBufferSlice slice = uniforms.get(binding.name());
+        if (slice == null && binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER) {
+            slice = storageBuffers.get(MetalCrossShaderCompiler.storageBufferLogicalBinding(binding.name()));
+        }
+        if (slice == null) {
+            slice = IrisMetalPipelineOverrides.fallbackUniformForDraw(
+                    this, device, compiledPipeline, binding.name(), uniforms
+            );
+        }
+        if (slice == null
+                || !(slice.buffer() instanceof MetalGpuBuffer buffer)
+                || slice.buffer().isClosed()) {
+            throw new IllegalStateException("Missing or invalid buffer " + binding.name());
+        }
+        packet.appendBuffer(
+                binding,
+                buffer.nativeHandle(),
+                slice.offset(),
+                binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER
+        );
+    }
+
+    private void appendTexelBufferArgument(
+            final MetalRenderArgumentPacket packet,
+            final MetalCompiledRenderPipeline.ResourceBinding binding
+    ) {
+        GpuBufferSlice slice = uniforms.get(binding.name());
+        GpuFormat texelFormat = binding.texelBufferFormat();
+        if (slice == null
+                || !(slice.buffer() instanceof MetalGpuBuffer buffer)
+                || slice.buffer().isClosed()
+                || texelFormat == null) {
+            throw new IllegalStateException("Missing or invalid texel buffer " + binding.name());
+        }
+        int pixelSize = texelFormat.blockSize();
+        if (slice.length() <= 0L || slice.length() % pixelSize != 0L) {
+            throw new IllegalStateException(
+                    "Texel buffer " + binding.name() + " has invalid byte length " + slice.length()
+            );
+        }
+        MemorySegment view = MetalNativeBridge.metallum_create_buffer_texture_view(
+                buffer.nativeHandle(),
+                MTLPixelFormat.from(texelFormat).value,
+                slice.offset(),
+                slice.length() / pixelSize,
+                1L,
+                slice.length()
+        );
+        if (MetalNativeBridge.isNullHandle(view)) {
+            throw new IllegalStateException("Failed to create texel argument for " + binding.name());
+        }
+        packet.appendTexture(binding, view, false);
+        commandEncoder.queueForDestroy(() -> MetalNativeBridge.metallum_release_object(view));
     }
 
     private void pushTexelBufferDescriptor(final MTLRenderCommandEncoder enc, final MetalCompiledRenderPipeline.ResourceBinding binding) {

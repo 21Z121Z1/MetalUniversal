@@ -55,6 +55,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private final Map<StableTerrainSamplerKey, MetalGpuSampler> stableTerrainSamplers = new HashMap<>();
     private static final int MAX_POOLED_BUFFER_BUCKETS = 32;
     private static final int MAX_POOLED_BUFFERS_PER_SIZE = 16;
+    static final int MAX_MULTI_DRAW_DIRECT_INTERLEAVED_DRAWS = 16_384;
     private final Map<Long, Deque<MemorySegment>> bufferPool = new LinkedHashMap<>(16, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(final Map.Entry<Long, Deque<MemorySegment>> eldest) {
@@ -776,8 +777,20 @@ final class MetalDevice implements GpuDeviceBackend {
                 // ColorTargetState contract has the same upper bound. Keep
                 // the advertised limit aligned with both APIs so the generic
                 // CommandEncoder rejects an impossible pass before native use.
-                new DeviceLimits(1, 256, 16384, maxMemoryAllocationSize, 0, ColorTargetState.MAX_COLOR_TARGETS),
-                new DeviceFeatures(false, false, true, true, true, false, true),
+                new DeviceLimits(
+                        1,
+                        256,
+                        16384,
+                        maxMemoryAllocationSize,
+                        MAX_MULTI_DRAW_DIRECT_INTERLEAVED_DRAWS,
+                        ColorTargetState.MAX_COLOR_TARGETS
+                ),
+                // MetalRenderPass implements Mojang's interleaved indexed
+                // multi-draw contract as well as the separate-array form.
+                // Sodium checks this capability in the public RenderPass
+                // wrapper before the backend method can run, so the device
+                // declaration must match the production implementation.
+                new DeviceFeatures(false, true, true, true, true, false, true),
                 underlyingExtensions,
                 new HintsAndWorkarounds(false, false),
                 type

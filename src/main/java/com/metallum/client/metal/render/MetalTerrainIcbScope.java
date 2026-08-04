@@ -5,12 +5,28 @@ package com.metallum.client.metal.render;
  * Sodium's chunk renderer rather than another RenderPass consumer.
  */
 public final class MetalTerrainIcbScope {
-    private static final boolean ENABLED = Boolean.getBoolean(
-            "metallum.opt.terrainIcbPilot"
-    );
+    private static final boolean ENABLED = configuredEnabled();
     private static final ThreadLocal<int[]> DEPTH = ThreadLocal.withInitial(() -> new int[1]);
 
     private MetalTerrainIcbScope() {
+    }
+
+    /**
+     * Resolves the production switch shared by the Mixin admission gate and
+     * the render-thread scope. The old pilot property remains a compatibility
+     * alias for launch profiles that explicitly set it.
+     */
+    public static boolean configuredEnabled() {
+        String production = System.getProperty("metallum.opt.terrainIcb");
+        if (production != null) {
+            return Boolean.parseBoolean(production);
+        }
+        String legacyPilot = System.getProperty("metallum.opt.terrainIcbPilot");
+        return legacyPilot == null || Boolean.parseBoolean(legacyPilot);
+    }
+
+    public static boolean enabled() {
+        return ENABLED;
     }
 
     public static void enter() {

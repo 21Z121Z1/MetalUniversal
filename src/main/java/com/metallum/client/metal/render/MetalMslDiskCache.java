@@ -44,7 +44,7 @@ final class MetalMslDiskCache {
      * native), {@code applySampleLodBias} rewriting, entry-point
      * extraction, or binding assignment in {@code addToBindGroup}.
      */
-    static final String CACHE_SALT = "metallum-msl-v5-raster-storage-resources";
+    static final String CACHE_SALT = "metallum-msl-v6-native-argument-buffers";
 
     private static final boolean ENABLED =
             Boolean.parseBoolean(System.getProperty("metallum.opt.mslCache", "true"));
@@ -135,7 +135,11 @@ final class MetalMslDiskCache {
                         binding.get("name").getAsString(),
                         binding.get("bindingIndex").getAsInt(),
                         binding.get("stageMask").getAsInt(),
-                        texelFormat == null || texelFormat.isJsonNull() ? null : GpuFormat.valueOf(texelFormat.getAsString())
+                        texelFormat == null || texelFormat.isJsonNull() ? null : GpuFormat.valueOf(texelFormat.getAsString()),
+                        binding.get("vertexArgumentIndex").getAsInt(),
+                        binding.get("vertexSamplerArgumentIndex").getAsInt(),
+                        binding.get("fragmentArgumentIndex").getAsInt(),
+                        binding.get("fragmentSamplerArgumentIndex").getAsInt()
                 ));
             }
             List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs = new ArrayList<>();
@@ -181,6 +185,10 @@ final class MetalMslDiskCache {
             serialized.addProperty("name", binding.name());
             serialized.addProperty("bindingIndex", binding.bindingIndex());
             serialized.addProperty("stageMask", binding.stageMask());
+            serialized.addProperty("vertexArgumentIndex", binding.vertexArgumentIndex());
+            serialized.addProperty("vertexSamplerArgumentIndex", binding.vertexSamplerArgumentIndex());
+            serialized.addProperty("fragmentArgumentIndex", binding.fragmentArgumentIndex());
+            serialized.addProperty("fragmentSamplerArgumentIndex", binding.fragmentSamplerArgumentIndex());
             GpuFormat texelFormat = binding.texelBufferFormat();
             serialized.addProperty("texelFormat", texelFormat == null ? null : texelFormat.name());
             resources.add(serialized);

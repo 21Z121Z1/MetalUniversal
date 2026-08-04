@@ -69,6 +69,19 @@ public final class MetalCommandPacketTelemetry {
         );
     }
 
+    public static void reset() {
+        renderPacketCalls.reset();
+        renderOperations.reset();
+        renderLegacyReplays.reset();
+        computePacketCalls.reset();
+        computeOperations.reset();
+        computeLegacyReplays.reset();
+        terrainIcbAttempts.reset();
+        terrainIcbAccepted.reset();
+        terrainIcbDraws.reset();
+        terrainIcbFallbacks.reset();
+    }
+
     public record Snapshot(
             long renderPacketCalls,
             long renderOperations,

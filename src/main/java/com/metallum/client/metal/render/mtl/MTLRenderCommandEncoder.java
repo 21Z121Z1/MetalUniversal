@@ -489,6 +489,14 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
         }
     }
 
+    /**
+     * Flushes all state/command packets before a native operation that is not
+     * represented by the ordinary encoder methods (for example an ICB batch).
+     */
+    public void flushPendingState() {
+        flushState(handle());
+    }
+
     private void flushState(final MemorySegment encoder) {
         if (this.statePacket != null) {
             this.statePacket.flush(encoder);

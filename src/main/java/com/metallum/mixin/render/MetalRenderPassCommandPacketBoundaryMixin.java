@@ -2,7 +2,6 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
-import com.metallum.client.metal.render.mtl.MetalRenderStateFlushable;
 import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -29,6 +28,6 @@ public abstract class MetalRenderPassCommandPacketBoundaryMixin {
         if (encoder == null || MetalNativeBridge.isNullHandle(encoder.handle())) {
             return;
         }
-        ((MetalRenderStateFlushable) (Object) encoder).metallum$flushRenderState(encoder.handle());
+        encoder.flushPendingState();
     }
 }

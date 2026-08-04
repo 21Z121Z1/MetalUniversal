@@ -8,10 +8,10 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Narrows the experimental ICB path to Sodium chunk-render submissions.
+ * Narrows ICB admission to Sodium chunk-render submissions.
  *
- * <p>The pilot remains default-off. If Sodium changes the render method shape,
- * this required mixin intentionally fails during development rather than
+ * <p>If Sodium changes the render method shape, this required mixin
+ * intentionally fails during development rather than
  * silently widening ICB admission to unrelated render passes.</p>
  */
 @Mixin(DefaultChunkRenderer.class)

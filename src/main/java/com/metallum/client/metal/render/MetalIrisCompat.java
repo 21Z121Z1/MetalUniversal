@@ -25,26 +25,16 @@ import net.fabricmc.api.Environment;
 @Environment(EnvType.CLIENT)
 public final class MetalIrisCompat {
     /**
-     * Opt-in switch for the experimental Iris-on-Metal semantic layer. With
-     * the default {@code false}, the shims keep Iris safely dormant on Metal;
-     * {@code -Dmetallum.iris.semantic=true} enables the incomplete B2-1 path.
-     * With the semantic layer disabled the shims fall back to the pure
-     * dormancy behaviour described above: no pack is loaded, no terrain
-     * pipeline is overridden, and the client renders exactly as it did before
-     * the semantic layer existed. Any doubt about a regression should be
-     * bisected with this flag first.
-     *
-     * <p>What B2-1 actually covers: a pack's {@code gbuffers_terrain} draws
-     * sodium's solid and cutout terrain, with its uniform block filled from
-     * real frame state and its samplers resolved from their real Mojang or Iris
-     * resources. Terrain kinds whose DRAWBUFFERS name
-     * more than the main target stay on sodium's own shader until the terrain
-     * pass carries those attachments. There is no shadow pass and no
-     * composite/final chain, so what reaches the screen is the raw gbuffer0
-     * output.</p>
+     * Production switch for the Iris-on-Metal semantic layer. It is enabled by
+     * default so selecting a shader pack cannot silently fall back to vanilla
+     * rendering; {@code -Dmetallum.iris.semantic=false} is the explicit
+     * diagnostic kill switch. With the layer disabled the shims retain the
+     * shaders-off dormancy behaviour described above. Pack admission remains
+     * fail-closed: a selected pack must publish a complete semantic pipeline
+     * rather than silently substituting the vanilla renderer.
      */
     private static final boolean SEMANTIC_LAYER =
-            Boolean.parseBoolean(System.getProperty("metallum.iris.semantic", "false"));
+            Boolean.parseBoolean(System.getProperty("metallum.iris.semantic", "true"));
 
     private static volatile boolean announced;
     private static volatile boolean semanticAnnounced;
@@ -52,7 +42,7 @@ public final class MetalIrisCompat {
     private MetalIrisCompat() {
     }
 
-    /** True when the experimental semantic layer was requested at startup. */
+    /** True unless the semantic layer was explicitly disabled at startup. */
     public static boolean semanticLayerRequested() {
         return SEMANTIC_LAYER;
     }
@@ -79,8 +69,7 @@ public final class MetalIrisCompat {
             semanticAnnounced = true;
             Metallum.LOGGER.info(
                     "Iris-on-Metal semantic layer active: shader packs load for real and sodium terrain"
-                            + " draws through the pack's gbuffers_terrain programs"
-                            + " (experimental opt-in via -Dmetallum.iris.semantic=true)"
+                            + " draws through the pack's compiled semantic programs"
             );
         }
         return true;
@@ -100,8 +89,7 @@ public final class MetalIrisCompat {
         if (!announced) {
             announced = true;
             Metallum.LOGGER.info(
-                    "Iris detected on the Metal backend: holding Iris dormant"
-                            + " (GL init and clip-control paths cancelled; vanilla pipeline serves)"
+                    "Iris detected on the Metal backend: cancelling GL-only init and clip-control seams"
             );
         }
         return true;

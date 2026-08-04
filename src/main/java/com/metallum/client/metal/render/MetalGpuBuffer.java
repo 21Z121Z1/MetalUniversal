@@ -34,6 +34,7 @@ public class MetalGpuBuffer extends GpuBuffer {
     private MemorySegment nativeHandle;
     @Nullable
     private ByteBuffer storage;
+    private long backingGeneration = 1L;
     private boolean closed;
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size) {
@@ -122,7 +123,19 @@ public class MetalGpuBuffer extends GpuBuffer {
     }
 
     String validationDebugId() {
-        return "metal-buffer-" + validationResourceId;
+        return "metal-buffer-" + validationResourceId + "#" + backingGeneration;
+    }
+
+    long backingGeneration() {
+        return this.backingGeneration;
+    }
+
+    BackingSnapshot backingSnapshot() {
+        return new BackingSnapshot(
+                this.validationResourceId,
+                this.backingGeneration,
+                this.nativeHandle()
+        );
     }
 
     boolean isDynamic() {
@@ -145,8 +158,19 @@ public class MetalGpuBuffer extends GpuBuffer {
     }
 
     void swapBacking(final MemorySegment handle, final ByteBuffer storage) {
+        if (this.closed) {
+            throw new IllegalStateException("Cannot replace the backing of a closed Metal buffer");
+        }
+        if (MetalNativeBridge.isNullHandle(handle)) {
+            throw new IllegalArgumentException("Replacement Metal buffer handle must be non-null");
+        }
+        if (storage == null) {
+            throw new IllegalArgumentException("Replacement Metal buffer storage must be non-null");
+        }
+        long nextGeneration = Math.incrementExact(this.backingGeneration);
         this.nativeHandle = handle;
         this.storage = storage;
+        this.backingGeneration = nextGeneration;
     }
 
     @Override
@@ -164,6 +188,7 @@ public class MetalGpuBuffer extends GpuBuffer {
         if (this.nativeHandle != null) {
             MemorySegment handle = this.nativeHandle;
             this.nativeHandle = null;
+            this.backingGeneration = Math.incrementExact(this.backingGeneration);
             this.device.queueBufferRelease(handle, this.allocationSize, this.resourceOptions);
         }
     }
@@ -204,5 +229,13 @@ public class MetalGpuBuffer extends GpuBuffer {
     private static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {
         MTLStorageMode storageMode = isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private;
         return MTLResourceOptions.of(storageMode, MTLHazardTrackingMode.Untracked);
+    }
+
+    record BackingSnapshot(long resourceId, long generation, MemorySegment handle) {
+        BackingSnapshot {
+            if (resourceId <= 0L || generation <= 0L || MetalNativeBridge.isNullHandle(handle)) {
+                throw new IllegalArgumentException("Metal buffer backing snapshot must be live and positive");
+            }
+        }
     }
 }

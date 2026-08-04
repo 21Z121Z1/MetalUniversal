@@ -1,6 +1,8 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalRenderArgumentBindingBridge;
+import com.metallum.client.metal.render.bridge.MetalRenderArgumentBindingBridge.Layout;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BlendFunction;
@@ -47,8 +49,38 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     static final int STAGE_FRAGMENT = 2;
     static final int STAGE_ALL = STAGE_VERTEX | STAGE_FRAGMENT;
 
-    record ResourceBinding(ResourceKind kind, String name, int bindingIndex, int stageMask,
-                           @Nullable GpuFormat texelBufferFormat) {
+    record ResourceBinding(
+            ResourceKind kind,
+            String name,
+            int bindingIndex,
+            int stageMask,
+            @Nullable GpuFormat texelBufferFormat,
+            int vertexArgumentIndex,
+            int vertexSamplerArgumentIndex,
+            int fragmentArgumentIndex,
+            int fragmentSamplerArgumentIndex
+    ) {
+        ResourceBinding(
+                final ResourceKind kind,
+                final String name,
+                final int bindingIndex,
+                final int stageMask,
+                @Nullable final GpuFormat texelBufferFormat
+        ) {
+            this(kind, name, bindingIndex, stageMask, texelBufferFormat, -1, -1, -1, -1);
+        }
+
+        boolean argumentBuffered() {
+            return vertexArgumentIndex >= 0 || fragmentArgumentIndex >= 0;
+        }
+
+        int argumentIndex(final int stage) {
+            return stage == STAGE_VERTEX ? vertexArgumentIndex : fragmentArgumentIndex;
+        }
+
+        int samplerArgumentIndex(final int stage) {
+            return stage == STAGE_VERTEX ? vertexSamplerArgumentIndex : fragmentSamplerArgumentIndex;
+        }
     }
 
     private final List<ResourceBinding> resources;
@@ -80,6 +112,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final List<String> validationShaderIds;
     private final MemorySegment vertexFunction;
     private final MemorySegment fragmentFunction;
+    @Nullable
+    private final Layout argumentLayout;
+    private final boolean terrainIcbCompatible;
     /** Guarded by MetalDevice.COMPILE_CHAIN_LOCK (close runs inside clearPipelineCache). */
     private boolean closed;
 
@@ -208,6 +243,34 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 "sha256:" + sha256(vertexMsl),
                 "sha256:" + sha256(fragmentMsl)
         );
+        this.lazyVariants = device.asyncPrewarmEnabled();
+        this.vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
+        this.fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
+        boolean hasVertexArguments = resources.stream().anyMatch(
+                binding -> binding.vertexArgumentIndex() >= 0
+        );
+        boolean hasFragmentArguments = resources.stream().anyMatch(
+                binding -> binding.fragmentArgumentIndex() >= 0
+        );
+        if (hasVertexArguments || hasFragmentArguments) {
+            this.argumentLayout = MetalRenderArgumentBindingBridge.createLayout(
+                    this.vertexFunction,
+                    this.fragmentFunction,
+                    hasVertexArguments,
+                    hasFragmentArguments
+            );
+            if (this.argumentLayout == null) {
+                throw new IllegalStateException(
+                        "Unable to create native argument layout for pipeline " + info.getLocation()
+                );
+            }
+            IrisMetalArgumentBindingRuntime.recordLayout();
+        } else {
+            this.argumentLayout = null;
+        }
+        this.terrainIcbCompatible = MetalTerrainIcbScope.enabled()
+                && !Boolean.getBoolean("metallum.opt.metal4")
+                && this.argumentLayout != null;
         this.validationPipelineId = "sha256:" + sha256(
                 vertexMsl + "\u0000" + fragmentMsl + "\u0000"
                         + stablePipelineState(
@@ -219,10 +282,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         this.genericVertexBufferSlot
                 )
                         + "\u0000metal4=" + device.metal4MainRendererEnabled()
+                        + "\u0000terrainIcb=" + this.terrainIcbCompatible
         );
-        this.lazyVariants = device.asyncPrewarmEnabled();
-        this.vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
-        this.fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
 
         List<DepthStencilFormats> eagerFormats = this.lazyVariants ? eagerDepthStencilFormats() : supportedDepthStencilFormats();
         Map<PipelineSignature, MemorySegment> states = new java.util.concurrent.ConcurrentHashMap<>();
@@ -238,7 +299,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         vertexDescriptor,
                         this.colorFormats,
                         formats.depthFormat(),
-                        formats.stencilFormat()
+                        formats.stencilFormat(),
+                        this.terrainIcbCompatible
                 );
                 if (!MetalNativeBridge.isNullHandle(pipeline)) {
                     states.put(this.signatureFor(formats.depthFormat(), formats.stencilFormat()), pipeline);
@@ -311,7 +373,11 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         for (ResourceBinding resource : resources) {
             result.append(resource.kind()).append('/').append(resource.name()).append('/')
                     .append(resource.bindingIndex()).append('/').append(resource.stageMask()).append('/')
-                    .append(resource.texelBufferFormat()).append(';');
+                    .append(resource.texelBufferFormat()).append('/')
+                    .append(resource.vertexArgumentIndex()).append('/')
+                    .append(resource.vertexSamplerArgumentIndex()).append('/')
+                    .append(resource.fragmentArgumentIndex()).append('/')
+                    .append(resource.fragmentSamplerArgumentIndex()).append(';');
         }
         result.append("|vertexBindings=");
         for (VertexFormat binding : pipeline.getVertexFormatBindings()) {
@@ -370,7 +436,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         vertexDescriptor,
                         this.colorFormats,
                         depthFormat,
-                        stencilFormat
+                        stencilFormat,
+                        this.terrainIcbCompatible
                 );
             }
             if (MetalNativeBridge.isNullHandle(pipeline)) {
@@ -415,13 +482,15 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MTLVertexDescriptor vertexDescriptor,
             final MTLPixelFormat[] colorFormats,
             final MTLPixelFormat depthFormat,
-            final MTLPixelFormat stencilFormat
+            final MTLPixelFormat stencilFormat,
+            final boolean terrainIcbCompatible
     ) {
         if (MetalNativeBridge.isNullHandle(vertexFunction) || MetalNativeBridge.isNullHandle(fragmentFunction)) {
             return MemorySegment.NULL;
         }
 
         try (MTLRenderPipelineDescriptor pipelineDesc = new MTLRenderPipelineDescriptor()) {
+            pipelineDesc.setSupportIndirectCommandBuffers(terrainIcbCompatible);
             pipelineDesc.setCompiledFunctions(vertexFunction, fragmentFunction);
             pipelineDesc.setVertexDescriptor(vertexDescriptor);
             ColorTargetState[] colorTargets = info.getColorTargetStates();
@@ -455,10 +524,25 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
             pipelineDesc.setDepthStencilFormats(depthFormat, stencilFormat);
 
-            return MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
-                    device.metalDeviceHandle(),
-                    pipelineDesc.handle()
-            );
+            String compileIdentity = "render:" + info.getLocation()
+                    + "|colors=" + Arrays.toString(colorFormats)
+                    + "|depth=" + depthFormat
+                    + "|stencil=" + stencilFormat
+                    + "|terrainIcb=" + terrainIcbCompatible
+                    + "|metal4=" + device.metal4MainRendererEnabled();
+            MemorySegment pipeline = MemorySegment.NULL;
+            try {
+                pipeline = MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
+                        device.metalDeviceHandle(),
+                        pipelineDesc.handle()
+                );
+                return pipeline;
+            } finally {
+                MetalPipelineCompilationTelemetry.recordRender(
+                        compileIdentity,
+                        !MetalNativeBridge.isNullHandle(pipeline)
+                );
+            }
         }
     }
 
@@ -546,6 +630,15 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     int genericVertexBufferSlot() {
         return this.genericVertexBufferSlot;
+    }
+
+    @Nullable
+    Layout argumentLayout() {
+        return this.argumentLayout;
+    }
+
+    boolean terrainIcbCompatible() {
+        return this.terrainIcbCompatible;
     }
 
     String validationPipelineId() {
@@ -650,8 +743,14 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private static int firstAvailableVertexBufferSlot(final List<ResourceBinding> resources) {
         int maxVertexBufferBinding = -1;
         for (ResourceBinding resource : resources) {
+            if (resource.vertexArgumentIndex() >= 0) {
+                // Descriptor set zero occupies [[buffer(0)]] in the generated
+                // vertex entry point, irrespective of member kind.
+                maxVertexBufferBinding = Math.max(maxVertexBufferBinding, 0);
+            }
             if ((resource.kind() == ResourceKind.UNIFORM_BUFFER
                     || resource.kind() == ResourceKind.STORAGE_BUFFER)
+                    && !resource.argumentBuffered()
                     && (resource.stageMask() & STAGE_VERTEX) != 0) {
                 maxVertexBufferBinding = Math.max(maxVertexBufferBinding, resource.bindingIndex());
             }
@@ -669,6 +768,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             if (!MetalNativeBridge.isNullHandle(state)) {
                 MetalNativeBridge.metallum_release_object(state);
             }
+        }
+        if (this.argumentLayout != null) {
+            this.argumentLayout.close();
         }
     }
 }

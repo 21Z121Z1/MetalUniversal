@@ -315,6 +315,100 @@ private enum NativeState {
     #endif
 }
 
+/// Counts actual Metal pipeline-state creation attempts only while a validation
+/// sample is active. Pipeline compilation is rare, so a lock gives an exact
+/// cross-thread snapshot without adding any draw-path synchronization.
+private enum PipelineCompileTelemetry {
+    private static let lock = NSLock()
+    private static let maxIdentities = 32
+    private static var active = false
+    private static var renderAttempts: UInt64 = 0
+    private static var computeAttempts: UInt64 = 0
+    private static var failures: UInt64 = 0
+    private static var identities: [String] = []
+
+    static func resetAndBegin() {
+        lock.lock()
+        renderAttempts = 0
+        computeAttempts = 0
+        failures = 0
+        identities.removeAll(keepingCapacity: true)
+        active = true
+        lock.unlock()
+    }
+
+    static func record(render: Bool, identity: String, succeeded: Bool) {
+        lock.lock()
+        guard active else {
+            lock.unlock()
+            return
+        }
+        if render {
+            renderAttempts &+= 1
+        } else {
+            computeAttempts &+= 1
+        }
+        if !succeeded {
+            failures &+= 1
+        }
+        if identities.count < maxIdentities && !identities.contains(identity) {
+            identities.append(identity)
+        }
+        lock.unlock()
+        NSLog(
+            "[metallum-pipeline-sample] late %@ pipeline compile %@: %@",
+            render ? "render" : "compute",
+            succeeded ? "succeeded" : "failed",
+            identity
+        )
+    }
+
+    static func finish() -> (UInt64, UInt64, UInt64, [String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        active = false
+        return (renderAttempts, computeAttempts, failures, identities.sorted())
+    }
+
+    static func identity(at index: Int) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        let sorted = identities.sorted()
+        guard index >= 0 && index < sorted.count else { return nil }
+        return sorted[index]
+    }
+}
+
+private func trackedRenderPipelineState(
+    device: MTLDevice,
+    descriptor: MTLRenderPipelineDescriptor,
+    identity: String
+) throws -> MTLRenderPipelineState {
+    do {
+        let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        PipelineCompileTelemetry.record(render: true, identity: identity, succeeded: true)
+        return pipeline
+    } catch {
+        PipelineCompileTelemetry.record(render: true, identity: identity, succeeded: false)
+        throw error
+    }
+}
+
+private func trackedComputePipelineState(
+    device: MTLDevice,
+    function: MTLFunction,
+    identity: String
+) throws -> MTLComputePipelineState {
+    do {
+        let pipeline = try device.makeComputePipelineState(function: function)
+        PipelineCompileTelemetry.record(render: false, identity: identity, succeeded: true)
+        return pipeline
+    } catch {
+        PipelineCompileTelemetry.record(render: false, identity: identity, succeeded: false)
+        throw error
+    }
+}
+
 private struct CompletedGpuEncoderTiming {
     let label: String
     let kind: Int32
@@ -4045,7 +4139,11 @@ private func buildClearPipeline(
         descriptor.colorAttachments[0].isBlendingEnabled = false
         descriptor.colorAttachments[0].writeMask = writeColor ? .all : []
 
-        return try device.makeRenderPipelineState(descriptor: descriptor)
+        return try trackedRenderPipelineState(
+            device: device,
+            descriptor: descriptor,
+            identity: "clear/color=\(colorFormat.rawValue)/depth=\(depthFormat.rawValue)/write=\(writeColor)"
+        )
     } catch {
         NSLog("[metallum] Failed to create clear pipeline: %@", String(describing: error))
         return nil
@@ -4073,7 +4171,11 @@ private func buildPresentPipeline(
         descriptor.colorAttachments[0].pixelFormat = colorFormat
         descriptor.colorAttachments[0].isBlendingEnabled = false
 
-        return try device.makeRenderPipelineState(descriptor: descriptor)
+        return try trackedRenderPipelineState(
+            device: device,
+            descriptor: descriptor,
+            identity: "present/color=\(colorFormat.rawValue)"
+        )
     } catch {
         NSLog("[metallum] Failed to create present render pipeline: %@", String(describing: error))
         return nil
@@ -4094,7 +4196,11 @@ private func buildDepthResamplePipeline(
         descriptor.vertexFunction = vertexFunction
         descriptor.fragmentFunction = fragmentFunction
         descriptor.depthAttachmentPixelFormat = depthFormat
-        return try device.makeRenderPipelineState(descriptor: descriptor)
+        return try trackedRenderPipelineState(
+            device: device,
+            descriptor: descriptor,
+            identity: "depth-resample/depth=\(depthFormat.rawValue)"
+        )
     } catch {
         NSLog("[metallum] Failed to create depth-resample pipeline: %@", String(describing: error))
         return nil
@@ -4133,7 +4239,11 @@ private func buildOverlayPipeline(
         attachment.alphaBlendOperation = .add
         attachment.sourceAlphaBlendFactor = .one
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        return try device.makeRenderPipelineState(descriptor: descriptor)
+        return try trackedRenderPipelineState(
+            device: device,
+            descriptor: descriptor,
+            identity: "ui-overlay/color=\(colorFormat.rawValue)"
+        )
     } catch {
         NSLog("[metallum] Failed to create native UI overlay pipeline: %@", String(describing: error))
         return nil
@@ -4155,7 +4265,11 @@ private func buildFusedPresentPipeline(
         descriptor.fragmentFunction = fragmentFunction
         descriptor.colorAttachments[0].pixelFormat = colorFormat
         descriptor.colorAttachments[0].isBlendingEnabled = false
-        return try device.makeRenderPipelineState(descriptor: descriptor)
+        return try trackedRenderPipelineState(
+            device: device,
+            descriptor: descriptor,
+            identity: "fused-present/color=\(colorFormat.rawValue)"
+        )
     } catch {
         NSLog("[metallum] Failed to create fused present pipeline: %@", String(describing: error))
         return nil
@@ -4198,7 +4312,11 @@ private func ensureCopyPipeline(_ device: MTLDevice, _ colorFormat: MTLPixelForm
     descriptor.fragmentFunction = fragmentFunction
     descriptor.colorAttachments[0].pixelFormat = colorFormat
     descriptor.colorAttachments[0].isBlendingEnabled = false
-    guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else {
+    guard let pipeline = try? trackedRenderPipelineState(
+        device: device,
+        descriptor: descriptor,
+        identity: "texture-copy/color=\(colorFormat.rawValue)"
+    ) else {
         NSLog("[metallum] Failed to create texture-copy render pipeline")
         return nil
     }
@@ -4307,7 +4425,11 @@ private func ensureTransparencyMaskPipeline(_ device: MTLDevice) -> MTLComputePi
             return nil
         }
         function.label = "Transparency Mask"
-        let pipeline = try device.makeComputePipelineState(function: function)
+        let pipeline = try trackedComputePipelineState(
+            device: device,
+            function: function,
+            identity: "metalfx-transparency-mask"
+        )
         NativeState.transparencyMaskPipeline = pipeline
         return pipeline
     } catch {
@@ -4392,7 +4514,11 @@ private func ensureCutoutReactivePipeline(_ device: MTLDevice) -> MTLComputePipe
             return nil
         }
         function.label = "CUTOUT Reactive Dilation"
-        let pipeline = try device.makeComputePipelineState(function: function)
+        let pipeline = try trackedComputePipelineState(
+            device: device,
+            function: function,
+            identity: "metalfx-cutout-reactive"
+        )
         NativeState.cutoutReactivePipeline = pipeline
         return pipeline
     } catch {
@@ -4467,7 +4593,11 @@ private func ensureHandOverlayPipeline(_ device: MTLDevice) -> MTLComputePipelin
             return nil
         }
         function.label = "Hand Overlay Motion"
-        let pipeline = try device.makeComputePipelineState(function: function)
+        let pipeline = try trackedComputePipelineState(
+            device: device,
+            function: function,
+            identity: "metalfx-hand-overlay"
+        )
         NativeState.handOverlayPipeline = pipeline
         return pipeline
     } catch {
@@ -4629,7 +4759,11 @@ private func ensureMotionPipeline(_ device: MTLDevice) -> MTLComputePipelineStat
             return nil
         }
         function.label = "Motion Reconstruction"
-        let pipeline = try device.makeComputePipelineState(function: function)
+        let pipeline = try trackedComputePipelineState(
+            device: device,
+            function: function,
+            identity: "metalfx-motion-reconstruction"
+        )
         NativeState.motionPipeline = pipeline
         return pipeline
     } catch {
@@ -5190,10 +5324,18 @@ private func ensureMotionV2Pipelines(_ device: MTLDevice) -> (
             NSLog("[Metallum] MetalFX v2 motion compute function missing")
             return nil
         }
-        let camera = try device.makeComputePipelineState(function: cameraFunction)
-        let merge = try device.makeComputePipelineState(function: mergeFunction)
-        let fused = try device.makeComputePipelineState(function: fusedFunction)
-        let clear = try device.makeComputePipelineState(function: clearFunction)
+        let camera = try trackedComputePipelineState(
+            device: device, function: cameraFunction, identity: "metalfx-motion-v2-camera"
+        )
+        let merge = try trackedComputePipelineState(
+            device: device, function: mergeFunction, identity: "metalfx-motion-v2-merge"
+        )
+        let fused = try trackedComputePipelineState(
+            device: device, function: fusedFunction, identity: "metalfx-motion-v2-fused"
+        )
+        let clear = try trackedComputePipelineState(
+            device: device, function: clearFunction, identity: "metalfx-motion-v2-clear"
+        )
         NativeState.motionV2Pipeline = camera
         NativeState.motionMergePipeline = merge
         NativeState.motionFusedPipeline = fused
@@ -7805,6 +7947,45 @@ public func metallum_metal4_main_renderer_stats(
     return 1
 }
 
+@_cdecl("metallum_pipeline_compile_telemetry_reset")
+public func metallum_pipeline_compile_telemetry_reset() {
+    PipelineCompileTelemetry.resetAndBegin()
+}
+
+/// Freezes the current sample so the identity list cannot race subsequent
+/// report-time FFM queries. A new sample begins only after the next reset.
+@_cdecl("metallum_pipeline_compile_telemetry_finish")
+public func metallum_pipeline_compile_telemetry_finish(
+    _ renderAttempts: UnsafeMutablePointer<UInt64>?,
+    _ computeAttempts: UnsafeMutablePointer<UInt64>?,
+    _ failures: UnsafeMutablePointer<UInt64>?,
+    _ identityCount: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    let snapshot = PipelineCompileTelemetry.finish()
+    renderAttempts?.pointee = snapshot.0
+    computeAttempts?.pointee = snapshot.1
+    failures?.pointee = snapshot.2
+    identityCount?.pointee = UInt64(snapshot.3.count)
+    return 1
+}
+
+@_cdecl("metallum_pipeline_compile_telemetry_copy_identity")
+public func metallum_pipeline_compile_telemetry_copy_identity(
+    _ index: Int32,
+    _ destination: UnsafeMutablePointer<CChar>?,
+    _ capacity: Int32
+) -> Int32 {
+    guard let identity = PipelineCompileTelemetry.identity(at: Int(index)) else { return -1 }
+    let bytes = Array(identity.utf8)
+    let required = bytes.count + 1
+    guard let destination, capacity >= required else { return Int32(clamping: required) }
+    for (offset, byte) in bytes.enumerated() {
+        destination[offset] = CChar(bitPattern: byte)
+    }
+    destination[bytes.count] = 0
+    return Int32(clamping: required)
+}
+
 /// Bounded diagnostic for the shipping MTL4 upload/copy barrier path. The
 /// existing Java ABI deliberately remains unchanged; native regression tests
 /// can use this counter to prove that the encoded dependency was exercised.
@@ -9915,7 +10096,12 @@ public func metallum_MTLDevice_makeComputePipelineState(
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
         do {
-            return retainedPointer(try device.makeComputePipelineState(function: function))
+            let pipeline = try trackedComputePipelineState(
+                device: device,
+                function: function,
+                identity: "java-compute/\(function.label ?? function.name)"
+            )
+            return retainedPointer(pipeline)
         } catch {
             NSLog("[metallum] Failed to create compute pipeline state: %@", String(describing: error))
             return nil
@@ -10003,6 +10189,11 @@ public func metallum_create_sampler_v3(
         descriptor.lodMinClamp = 0.0
         descriptor.lodMaxClamp = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
         descriptor.normalizedCoordinates = normalizedCoordinates != 0
+        // Every Java-visible sampler may be referenced through a compiled
+        // argument buffer. Metal validation aborts if this creation-time
+        // capability is omitted, even when the same sampler also supports the
+        // direct setter fallback used by internal native passes.
+        descriptor.supportArgumentBuffers = true
         if compareFunction >= 0, let compare = MTLCompareFunction(rawValue: UInt(compareFunction)) {
             descriptor.compareFunction = compare
         }
@@ -10252,7 +10443,19 @@ public func metallum_MTLVertexDescriptor_setLayout(
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_create")
 public func metallum_MTLRenderPipelineDescriptor_create() -> UnsafeMutableRawPointer? {
-    retainedPointer(MTLRenderPipelineDescriptor())
+    let descriptor = MTLRenderPipelineDescriptor()
+    return retainedPointer(descriptor)
+}
+
+@_cdecl("metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers")
+public func metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
+    _ desc: MTLRenderPipelineDescriptor,
+    _ enabled: Int32
+) {
+    // ICB-capable PSOs impose stricter shader resource-access rules. Declare
+    // the capability only for compiled argument-buffer layouts consumed by the
+    // inherited-state terrain ICB path.
+    desc.supportIndirectCommandBuffers = enabled != 0
 }
 
 @_cdecl("metallum_create_shader_function")
@@ -10935,6 +11138,20 @@ public func metallum_pso_archive_open(
 ) -> Int32 {
     return autoreleasepool {
         guard let pathPtr else { return 0 }
+        // The macOS 26 GPU-validation interposer crashes inside
+        // MTLMetalScriptBuilder while deserializing an existing AIRNT binary
+        // archive, before Metal can return an NSError.  This cannot be caught
+        // in Swift (the process receives SIGSEGV), so validation sessions must
+        // compile from source and leave the production archive untouched.
+        // MTL_DEBUG_LAYER alone is archive-safe; MTL_SHADER_VALIDATION is the
+        // switch that installs MTLGPUDebugDevice and triggers the bad loader.
+        let shaderValidation = ProcessInfo.processInfo.environment["MTL_SHADER_VALIDATION"]
+        if shaderValidation == "1" || shaderValidation?.lowercased() == "true" {
+            NSLog("[metallum] PSO binary archive disabled under Metal GPU validation")
+            NativeState.binaryArchive = nil
+            NativeState.metal4LookupArchive = nil
+            return 0
+        }
         // Metal 4 path (migration spec M2c). MTL4PipelineDataSetSerializer has no
         // equivalent of MTLBinaryArchive's "an archive loaded from disk can never
         // be re-serialized" defect, so there is no read-only mode here: every
@@ -11087,12 +11304,22 @@ public func metallum_MTLDevice_makeRenderPipelineState(
                     } else {
                         state = try compiler.makeRenderPipelineState(descriptor: metal4Descriptor)
                     }
+                    PipelineCompileTelemetry.record(
+                        render: true,
+                        identity: "java-render-metal4/\(descriptor.label ?? "unlabeled")",
+                        succeeded: true
+                    )
                     if !NativeState.metal4PipelineLogged {
                         NativeState.metal4PipelineLogged = true
                         NSLog("[metallum] Metal 4 pipeline path engaged (MTL4Compiler)")
                     }
                     return retainedPointer(state)
                 } catch {
+                    PipelineCompileTelemetry.record(
+                        render: true,
+                        identity: "java-render-metal4/\(descriptor.label ?? "unlabeled")",
+                        succeeded: false
+                    )
                     NativeState.logMetal4PipelineFallback(
                         "MTL4Compiler rejected the descriptor: \(String(describing: error))"
                     )
@@ -11105,7 +11332,11 @@ public func metallum_MTLDevice_makeRenderPipelineState(
             descriptor.binaryArchives = [archive]
         }
         do {
-            let state = try device.makeRenderPipelineState(descriptor: descriptor)
+            let state = try trackedRenderPipelineState(
+                device: device,
+                descriptor: descriptor,
+                identity: "java-render-metal3/\(descriptor.label ?? "unlabeled")"
+            )
             // Harvest for the next launch; failure only means this PSO is
             // not archived, never a pipeline creation failure. Serialize()
             // rejects entries whose fragment stage the AOT packer stripped

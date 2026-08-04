@@ -7,7 +7,7 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 
 /**
- * Experimental Metal 3 terrain indexed-draw ICB bridge.
+ * Metal 3 terrain indexed-draw ICB bridge.
  *
  * <p>A zero result means the native side executed no draws and the caller must
  * use the ordinary multi-draw path. A one result means the complete batch was
@@ -58,7 +58,7 @@ public final class MetalTerrainIcbBridge {
             ) != 0;
         } catch (Throwable throwable) {
             throw new IllegalStateException(
-                    "Terrain ICB pilot invocation failed after admission",
+                    "Terrain ICB invocation failed after admission",
                     throwable
             );
         }
@@ -74,20 +74,22 @@ public final class MetalTerrainIcbBridge {
                 || (table.buildCapabilities() & CAPABILITY_BIT) == 0L) {
             return null;
         }
-        return Linker.nativeLinker().downcallHandle(
-                table.entry(0),
-                FunctionDescriptor.of(
-                        ValueLayout.JAVA_INT,
-                        ValueLayout.ADDRESS,
-                        ValueLayout.JAVA_LONG,
-                        ValueLayout.JAVA_LONG,
-                        ValueLayout.ADDRESS,
-                        ValueLayout.ADDRESS,
-                        ValueLayout.ADDRESS,
-                        ValueLayout.ADDRESS,
-                        ValueLayout.JAVA_INT,
-                        ValueLayout.JAVA_INT,
-                        ValueLayout.JAVA_INT
+        return MetalFfmCallTelemetry.instrumentDowncall(
+                Linker.nativeLinker().downcallHandle(
+                        table.entry(0),
+                        FunctionDescriptor.of(
+                                ValueLayout.JAVA_INT,
+                                ValueLayout.ADDRESS,
+                                ValueLayout.JAVA_LONG,
+                                ValueLayout.JAVA_LONG,
+                                ValueLayout.ADDRESS,
+                                ValueLayout.ADDRESS,
+                                ValueLayout.ADDRESS,
+                                ValueLayout.ADDRESS,
+                                ValueLayout.JAVA_INT,
+                                ValueLayout.JAVA_INT,
+                                ValueLayout.JAVA_INT
+                        )
                 )
         );
     }

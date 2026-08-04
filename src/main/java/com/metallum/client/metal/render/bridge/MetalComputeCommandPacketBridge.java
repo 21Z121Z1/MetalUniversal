@@ -55,13 +55,15 @@ public final class MetalComputeCommandPacketBridge {
                 || (table.buildCapabilities() & CAPABILITY_BIT) == 0L) {
             return null;
         }
-        return Linker.nativeLinker().downcallHandle(
-                table.entry(0),
-                FunctionDescriptor.of(
-                        ValueLayout.JAVA_INT,
-                        ValueLayout.ADDRESS,
-                        ValueLayout.ADDRESS,
-                        ValueLayout.JAVA_LONG
+        return MetalFfmCallTelemetry.instrumentDowncall(
+                Linker.nativeLinker().downcallHandle(
+                        table.entry(0),
+                        FunctionDescriptor.of(
+                                ValueLayout.JAVA_INT,
+                                ValueLayout.ADDRESS,
+                                ValueLayout.ADDRESS,
+                                ValueLayout.JAVA_LONG
+                        )
                 )
         );
     }

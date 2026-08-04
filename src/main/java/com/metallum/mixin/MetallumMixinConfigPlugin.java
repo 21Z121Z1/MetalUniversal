@@ -1,5 +1,6 @@
 package com.metallum.mixin;
 
+import com.metallum.client.metal.render.MetalTerrainIcbScope;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
@@ -29,6 +30,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.render.MetalRenderPassCommandPacketBoundaryMixin";
     private static final String HOT_PATH_TELEMETRY_REPORT_MIXIN =
             "com.metallum.mixin.render.MetalHotPathTelemetryReportMixin";
+    private static final String VALIDATION_FRAME_DRIVER_MIXIN =
+            "com.metallum.mixin.render.MinecraftMetalFxMixin";
     private static final String TERRAIN_ICB_SCOPE_MIXIN =
             "com.metallum.mixin.sodium.DefaultChunkRendererTerrainIcbScopeMixin";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
@@ -61,6 +64,13 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                 || BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN.equals(mixinClassName)) {
             return Boolean.getBoolean("metallum.backend.compare.enabled");
         }
+        if (VALIDATION_FRAME_DRIVER_MIXIN.equals(mixinClassName)
+                && Boolean.getBoolean("metallum.validation.enabled")) {
+            // The mixin keeps its MetalFX redirects dormant on non-Metal
+            // backends, but its before/after hooks drive the same deterministic
+            // scene for the stock OpenGL differential lane.
+            return true;
+        }
         if (RENDER_COMMAND_PACKET_MIXIN.equals(mixinClassName)
                 || RENDER_COMMAND_PACKET_BOUNDARY_MIXIN.equals(mixinClassName)) {
             return Boolean.getBoolean("metallum.opt.renderCommandPacket")
@@ -71,7 +81,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                     && this.isDefaultGraphicsApi;
         }
         if (TERRAIN_ICB_SCOPE_MIXIN.equals(mixinClassName)) {
-            return Boolean.getBoolean("metallum.opt.terrainIcbPilot")
+            return MetalTerrainIcbScope.configuredEnabled()
                     && FabricLoader.getInstance().isModLoaded("sodium")
                     && this.isDefaultGraphicsApi;
         }

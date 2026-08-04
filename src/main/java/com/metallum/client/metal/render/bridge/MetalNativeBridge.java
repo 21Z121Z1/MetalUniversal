@@ -489,6 +489,11 @@ public final class MetalNativeBridge {
                     "metallum_MTLRenderPipelineDescriptor_create",
                     FunctionDescriptor.of(ValueLayout.ADDRESS)
             );
+            MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers = downcall(
+                    lookup,
+                    "metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT)
+            );
             createShaderFunction = downcallWithoutCritical(
                     lookup,
                     "metallum_create_shader_function",
@@ -571,6 +576,27 @@ public final class MetalNativeBridge {
             gpuEncoderTimingMilliseconds = downcall(lookup, "metallum_gpu_encoder_timing_milliseconds", FunctionDescriptor.of(DOUBLE, INT));
             gpuEncoderTimingKind = downcall(lookup, "metallum_gpu_encoder_timing_kind", FunctionDescriptor.of(INT, INT));
             gpuEncoderTimingCopyLabel = downcall(lookup, "metallum_gpu_encoder_timing_copy_label", FunctionDescriptor.of(INT, INT, ValueLayout.ADDRESS, LONG));
+            pipelineCompileTelemetryReset = downcall(
+                    lookup,
+                    "metallum_pipeline_compile_telemetry_reset",
+                    FunctionDescriptor.ofVoid()
+            );
+            pipelineCompileTelemetryFinish = downcall(
+                    lookup,
+                    "metallum_pipeline_compile_telemetry_finish",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS
+                    )
+            );
+            pipelineCompileTelemetryCopyIdentity = downcall(
+                    lookup,
+                    "metallum_pipeline_compile_telemetry_copy_identity",
+                    FunctionDescriptor.of(INT, INT, ValueLayout.ADDRESS, INT)
+            );
             // The archive open path performs disk IO inside the native call;
             // avoid the critical-linker fast path like other IO-adjacent calls.
             psoArchiveOpen = downcallWithoutCritical(lookup, "metallum_pso_archive_open", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -870,6 +896,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLVertexDescriptorSetAttribute;
     private static final MethodHandle MTLVertexDescriptorSetLayout;
     private static final MethodHandle MTLRenderPipelineDescriptorCreate;
+    private static final MethodHandle MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers;
     private static final MethodHandle createShaderFunction;
     private static final MethodHandle MTLRenderPipelineDescriptorSetCompiledFunctions;
     private static final MethodHandle MTLRenderPipelineDescriptorSetVertexDescriptor;
@@ -906,6 +933,9 @@ public final class MetalNativeBridge {
     private static final MethodHandle gpuEncoderTimingMilliseconds;
     private static final MethodHandle gpuEncoderTimingKind;
     private static final MethodHandle gpuEncoderTimingCopyLabel;
+    private static final MethodHandle pipelineCompileTelemetryReset;
+    private static final MethodHandle pipelineCompileTelemetryFinish;
+    private static final MethodHandle pipelineCompileTelemetryCopyIdentity;
     private static final MethodHandle psoArchiveOpen;
     private static final MethodHandle psoArchiveFlush;
     private static final MethodHandle MTLBlitCommandEncoderUpdateFence;
@@ -956,17 +986,23 @@ public final class MetalNativeBridge {
 
 
     private static MethodHandle downcall(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
-        return LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor, Linker.Option.critical(false));
+        return MetalFfmCallTelemetry.instrumentDowncall(
+                LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor, Linker.Option.critical(false))
+        );
     }
 
     private static MethodHandle optionalDowncall(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
         return lookup.find(symbol)
-                .map(address -> LINKER.downcallHandle(address, descriptor, Linker.Option.critical(false)))
+                .map(address -> MetalFfmCallTelemetry.instrumentDowncall(
+                        LINKER.downcallHandle(address, descriptor, Linker.Option.critical(false))
+                ))
                 .orElse(null);
     }
 
     private static MethodHandle downcallWithoutCritical(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
-        return LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor);
+        return MetalFfmCallTelemetry.instrumentDowncall(
+                LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor)
+        );
     }
 
     public static MemorySegment metallum_create_system_default_device() {
@@ -2390,6 +2426,22 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static void metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
+            final MemorySegment desc,
+            final boolean enabled
+    ) {
+        try {
+            MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers.invokeExact(
+                    segment(desc), enabled ? 1 : 0
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure(
+                    "metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers",
+                    throwable
+            );
+        }
+    }
+
     public static MemorySegment metallum_create_shader_function(
             final MemorySegment device,
             final String source,
@@ -2743,6 +2795,65 @@ public final class MetalNativeBridge {
             gpuEncoderTimingReset.invokeExact();
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gpu_encoder_timing_reset", throwable);
+        }
+    }
+
+    public static void metallum_pipeline_compile_telemetry_reset() {
+        try {
+            pipelineCompileTelemetryReset.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_pipeline_compile_telemetry_reset", throwable);
+        }
+    }
+
+    public static NativePipelineCompilationSnapshot metallum_pipeline_compile_telemetry_finish() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment render = arena.allocate(LONG);
+            MemorySegment compute = arena.allocate(LONG);
+            MemorySegment failures = arena.allocate(LONG);
+            MemorySegment identityCount = arena.allocate(LONG);
+            int available = (int) pipelineCompileTelemetryFinish.invokeExact(
+                    render, compute, failures, identityCount
+            );
+            if (available == 0) {
+                throw new IllegalStateException("Native pipeline compilation telemetry is unavailable");
+            }
+            long count = identityCount.get(LONG, 0L);
+            if (count < 0L || count > 32L) {
+                throw new IllegalStateException("Invalid native pipeline identity count: " + count);
+            }
+            java.util.ArrayList<String> identities = new java.util.ArrayList<>(Math.toIntExact(count));
+            for (int index = 0; index < count; index++) {
+                MemorySegment destination = arena.allocate(1024L, 1L);
+                int copied = (int) pipelineCompileTelemetryCopyIdentity.invokeExact(
+                        index, destination, Math.toIntExact(destination.byteSize())
+                );
+                if (copied <= 0 || copied > destination.byteSize()) {
+                    throw new IllegalStateException(
+                            "Invalid native pipeline identity length at " + index + ": " + copied
+                    );
+                }
+                identities.add(destination.getString(0L));
+            }
+            return new NativePipelineCompilationSnapshot(
+                    render.get(LONG, 0L),
+                    compute.get(LONG, 0L),
+                    failures.get(LONG, 0L),
+                    java.util.List.copyOf(identities)
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_pipeline_compile_telemetry_finish", throwable);
+        }
+    }
+
+    public record NativePipelineCompilationSnapshot(
+            long renderAttempts,
+            long computeAttempts,
+            long failures,
+            java.util.List<String> identities
+    ) {
+        public long attempts() {
+            return renderAttempts + computeAttempts;
         }
     }
 
