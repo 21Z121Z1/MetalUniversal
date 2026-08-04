@@ -114,9 +114,14 @@ def runClientIrisRequested = gradle.startParameter.taskNames.any {
 def runClientMetalFxRequested = gradle.startParameter.taskNames.any {
 	it == "runClientMetalFx" || it.endsWith(":runClientMetalFx")
 }
-if (runClientIrisRequested && runClientMetalFxRequested) {
+
+def runClientMetal4IrisRequested = gradle.startParameter.taskNames.any {
+	it == "runClientMetal4Iris" || it.endsWith(":runClientMetal4Iris")
+}
+if ((runClientIrisRequested && runClientMetalFxRequested)
+		|| (runClientMetal4IrisRequested && (runClientIrisRequested || runClientMetalFxRequested))) {
 	throw new GradleException(
-			"runClientIris and runClientMetalFx are isolated profiles and cannot run together."
+			"runClientIris, runClientMetal4Iris and runClientMetalFx are isolated profiles and cannot run together."
 	)
 }
 def isolatedClientWorld = providers.gradleProperty("world").orNull
@@ -140,7 +145,40 @@ def metalFxClientDefaults = [
 		"metallum.metalfx.frameGeneration"       : "false",
 		"metallum.metalfx.objectMotionProducer"  : "false",
 ]
-def isolatedClientDefaults = runClientIrisRequested
+
+// Full native Metal 4 experience profile. Explicit -D properties still win
+// for diagnostics, but the convenience task keeps MetalFX and Iris isolated.
+def metal4IrisClientDefaults = [
+		"metallum.iris.semantic"                     : "true",
+		"metallum.metalfx.mode"                      : "OFF",
+		"metallum.metalfx.frameGeneration"           : "false",
+		"metallum.metalfx.objectMotionProducer"      : "false",
+		"metallum.metal.hud"                         : "false",
+		"metallum.hotpath.telemetry"                 : "true",
+		"metallum.iris.argumentTables"               : "true",
+		"metallum.iris.experimental.argumentTables"  : "true",
+		"metallum.opt.argumentBuffers"               : "true",
+		"metallum.opt.renderCommandPacket"           : "true",
+		"metallum.opt.computeCommandPacket"          : "true",
+		"metallum.opt.terrainIcb"                    : "true",
+		"metallum.iris.passFusion"                  : "true",
+		"metallum.iris.experimental.passFusion"     : "true",
+		"metallum.iris.computeGrouping"             : "true",
+		"metallum.iris.experimental.computeGrouping": "true",
+		"metallum.iris.depthLiveness"               : "true",
+		"metallum.iris.experimental.resourcePruning": "true",
+		"metallum.opt.encoderStateShadow"           : "true",
+		"metallum.opt.metal4"                       : "true",
+		"metallum.opt.metal4Compiler"               : "true",
+		"metallum.opt.metal4Present"                : "true",
+		"metallum.opt.metal4MainRenderer"           : "true",
+		"metallum.opt.metal4MainQueuePilot"         : "true",
+		"metallum.opt.residencySet"                 : "true",
+]
+
+def isolatedClientDefaults = runClientMetal4IrisRequested
+		? metal4IrisClientDefaults
+		: runClientIrisRequested
 		? irisClientDefaults
 		: runClientMetalFxRequested
 		? metalFxClientDefaults
@@ -869,6 +907,7 @@ tasks.named("check") {
 // motion and reactive-mask ownership have an explicit shared contract.
 //
 //   ./gradlew runClientIris -Pworld="New World"
+//   ./gradlew runClientMetal4Iris -Pworld="New World"
 //   ./gradlew runClientMetalFx -Pworld="New World"
 //
 // Explicit -D properties still win over these defaults for narrow diagnostics,
@@ -886,6 +925,18 @@ tasks.register("runClientIris") {
 	}
 }
 
+tasks.register("runClientMetal4Iris") {
+	group = "application"
+	description = "Runs full Metal 4 Iris with packets, argument tables and terrain ICB enabled."
+	dependsOn "runClient"
+	doFirst {
+		logger.lifecycle("runClientMetal4Iris: Metal 4 + Iris semantic path + packet/argument/ICB hot path enabled" +
+			(isolatedClientWorld ? " world='${isolatedClientWorld}'" : ""))
+		logger.lifecycle("runClientMetal4Iris: MetalFX, frame generation and Metal HUD disabled; " +
+			"shader pack is selected by run/config/iris.properties")
+	}
+}
+
 tasks.register("runClientMetalFx") {
 	group = "application"
 	description = "Runs MetalFX TEMPORAL with Iris semantic rendering and frame generation disabled."
@@ -898,7 +949,7 @@ tasks.register("runClientMetalFx") {
 
 tasks.register("verifyIsolatedClientProfiles") {
 	group = "verification"
-	description = "Verifies that supported Iris and MetalFX launch profiles cannot implicitly overlap."
+	description = "Verifies that supported Iris, Metal 4 Iris and MetalFX launch profiles cannot implicitly overlap."
 	doLast {
 		def failures = []
 		if (irisClientDefaults["metallum.iris.semantic"] != "true"
@@ -913,6 +964,14 @@ tasks.register("verifyIsolatedClientProfiles") {
 				|| metalFxClientDefaults["metallum.metalfx.frameGeneration"] != "false"
 				|| metalFxClientDefaults["metallum.metalfx.objectMotionProducer"] != "false") {
 			failures << "runClientMetalFx defaults do not keep Iris and Frame Generation dormant"
+		}
+		if (metal4IrisClientDefaults["metallum.iris.semantic"] != "true"
+				|| metal4IrisClientDefaults["metallum.metalfx.mode"] != "OFF"
+				|| metal4IrisClientDefaults["metallum.opt.metal4"] != "true"
+				|| metal4IrisClientDefaults["metallum.opt.renderCommandPacket"] != "true"
+				|| metal4IrisClientDefaults["metallum.opt.computeCommandPacket"] != "true"
+				|| metal4IrisClientDefaults["metallum.opt.terrainIcb"] != "true") {
+			failures << "runClientMetal4Iris defaults do not enable the complete Metal 4 experience path"
 		}
 		if (tasks.findByName("runClientAll") != null) {
 			failures << "the unsupported implicit Iris + MetalFX runClientAll profile still exists"
