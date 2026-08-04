@@ -35,10 +35,11 @@ current implementation/debug authority is:
 
 ## Local validation snapshot (2026-08-04)
 
-The implementation tip tested for this snapshot was `1898a38` before this
-documentation-only update. The following evidence was collected in an
-isolated worktree on an Apple M1 Pro with the repository's native validation
-and lifecycle gates enabled:
+The latest remote implementation tip tested for this snapshot was
+`9c772878f54438d816c2e97021299b155fcb88d2` after the branch's fast-forwarded
+Metal 4 merge. The following evidence was collected in an isolated worktree
+on an Apple M1 Pro with the repository's native validation and lifecycle gates
+enabled:
 
 - `./gradlew clean test --stacktrace` passed (383 tests), including the packet,
   native-interface, terrain-scope, state-shadow, destruction-queue, and Mixin
@@ -47,6 +48,13 @@ and lifecycle gates enabled:
   as part of the build graph. The required packet/ICB C exports are present in
   `libmetallum.dylib`: interface table, render-state packet, render-command
   packet, compute-command packet, and terrain-ICB encoder.
+- `./gradlew clean buildMacNative build --stacktrace` passed at the latest tip
+  (`29 actionable tasks`), including `compileJava`, `buildIOSNative`,
+  `metal4ApiProbe`, `metalComputeBackendIntegrationTest`, frame-generation
+  lifecycle/presentation, offscreen/readback, MetalFX performance validation,
+  `metalIrisTargetsIntegrationTest`, `metalMrtBackendIntegrationTest`,
+  `metalMrtSmokeTest`, `test`, and the production build checks. The real
+  presentation gate reported `real=60 generated=60` with no shutdown failure.
 - The full clean test no longer loads a second shipped native image after the
   production bridge has initialized; the earlier Objective-C duplicate-class
   warning was isolated to test-side `libraryLookup` calls and is absent after
@@ -92,28 +100,48 @@ and lifecycle gates enabled:
   `terrainIcbFallbacks=0`. I1 therefore verified the closed direct-resource
   gate, but did not admit an ICB because this scene emitted no qualifying
   ordinary indexed multi-draw.
+- On the latest tip, the explicit compute backend gate with
+  `-Dmetallum.opt.computeCommandPacket=true` and the packet-enabled MRT
+  readback gate both passed with Metal API and GPU validation enabled.
+- The MetalFX-OFF native fullscreen validation entry produced real 3024x1734
+  runs for R0 and R2. Both 256x256 native main-render readbacks passed their
+  non-zero/varying-pixel validity checks and both reported zero packet replay;
+  R2 reported `renderCommandPacketCalls=5593` and
+  `renderCommandOperations=278888` in its final telemetry report. The R0
+  readback checksum was `8c356fb2ef5582d1`, R2 was `1b1a07e0b5eb56fb`, and a
+  repeated R0 was `a7b1aa59de5fc6a8`; the repeated-R0 difference means these
+  single readbacks are not a deterministic framebuffer-equivalence oracle.
+- The dedicated `renderContractMinecraftValidation` task reached the real
+  Metal world and completed all 17 GPU readbacks, but fail-closed on the
+  pre-existing `hand_translucent_motion_series` MetalFX gate (`passed=false`,
+  two failures). That task currently overwrites an explicitly requested
+  MetalFX-OFF mode with TEMPORAL, so it is not usable as a packet-only
+  render-contract oracle in this snapshot. No packet or ICB error caused this
+  failure.
 
-The `./gradlew buildMacNative build --stacktrace` command completed native
-compilation, Java compilation, and lifecycle tests, but its final visible
-MetalFX presentation gate was blocked because the macOS console was locked and
-WindowServer supplied no nonzero `presentedTime` callbacks. The gate was not
-skipped or weakened. This is recorded as an environment-blocked full-build
-result, not as a pass.
+The earlier locked-console presentation attempt is retained in the local
+terminal history as an environment-blocked attempt; after the console was
+unlocked, the same full build completed successfully. No validation switch
+was weakened to obtain that pass.
 
 ## Still unproven
 
 No claim is made yet for:
 
-- framebuffer/image hash equivalence or Iris semantic equivalence;
+- deterministic framebuffer/image hash equivalence or Iris semantic
+  equivalence for the R lanes; the native readback is a validity signal, not a
+  stable baseline/candidate comparison;
 - compute dispatch correctness: the BSL semantic workload created no compute
   encoder/dispatch, so C1 did not exercise packet execution;
 - terrain ICB correctness: I2 was not run because the direct texture/sampler
   resource contract is incomplete and the BSL scene emitted no qualifying
   ordinary indexed multi-draw;
 - physical-GPU ICB validation, sustained visual acceptance, or the prescribed
-  30-second/120-second interleaved performance protocol;
+  three-run 30-second/120-second interleaved hotpath performance protocol;
 - FPS, CPU encode, GPU time, frame-time tails, allocation, GC, or FFM crossing
-  improvements.
+  improvements attributable to the packet path. The short R0/R2 native
+  validation samples are diagnostic only; they are not a performance
+  admission.
 
 Terrain ICB and command-packet experiments remain default-off. Follow the guide
 and addendum for any future I2 or performance work; do not treat this snapshot
