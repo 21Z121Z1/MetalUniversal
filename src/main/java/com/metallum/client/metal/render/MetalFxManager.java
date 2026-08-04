@@ -722,9 +722,17 @@ public final class MetalFxManager {
         }
     }
 
-    public static void close() {
+    public static synchronized void close() {
         MetalFxManager manager = active;
         if (manager != null) {
+            manager.closeInternal();
+            active = null;
+        }
+    }
+
+    static synchronized void close(final MetalDevice device) {
+        MetalFxManager manager = active;
+        if (manager != null && manager.device == device) {
             manager.closeInternal();
             active = null;
         }

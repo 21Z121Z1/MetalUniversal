@@ -556,6 +556,7 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderSetDepthStoreAction = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthStoreAction", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT));
             setDeferredDepthStore = downcall(lookup, "metallum_set_deferred_depth_store", FunctionDescriptor.ofVoid(INT));
             metal4Supported = downcall(lookup, "metallum_metal4_supported", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
+            metalDeviceShutdown = downcall(lookup, "metallum_metal_device_shutdown", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             metal4MainQueuePilotValidate = downcall(lookup, "metallum_metal4_main_queue_pilot_validate", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metal4MainRendererEnable = downcall(lookup, "metallum_metal4_main_renderer_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -888,6 +889,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderSetDepthStoreAction;
     private static final MethodHandle setDeferredDepthStore;
     private static final MethodHandle metal4Supported;
+    private static final MethodHandle metalDeviceShutdown;
     private static final MethodHandle metal4MainQueuePilotValidate;
     private static final MethodHandle metal4MainRendererEnable;
     private static final MethodHandle metal4MainRendererStats;
@@ -2654,6 +2656,14 @@ public final class MetalNativeBridge {
             return (int) metal4MainQueuePilotValidate.invokeExact(segment(device));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metal4_main_queue_pilot_validate", throwable);
+        }
+    }
+
+    public static void metallum_metal_device_shutdown(final MemorySegment device) {
+        try {
+            metalDeviceShutdown.invokeExact(segment(device));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metal_device_shutdown", throwable);
         }
     }
 

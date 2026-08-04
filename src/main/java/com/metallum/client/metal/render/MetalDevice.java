@@ -587,6 +587,8 @@ final class MetalDevice implements GpuDeviceBackend {
             current = null;
         }
 
+        MetalFxManager.close(this);
+
         // Freeze and join background compilation before touching any cache,
         // encoder, residency state or native object it can still populate.
         if (this.prewarmExecutor != null) {
@@ -614,6 +616,7 @@ final class MetalDevice implements GpuDeviceBackend {
             } catch (Throwable ignored) {
             }
         }
+        MetalNativeBridge.metallum_metal_device_shutdown(this.metalDeviceHandle);
         this.commandQueue.close();
         MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
     }

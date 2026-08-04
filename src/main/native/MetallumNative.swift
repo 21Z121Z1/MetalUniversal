@@ -39,6 +39,11 @@ private struct PipelineVariantKey: Hashable {
     let writeColor: Bool
 }
 
+private struct CopyPipelineKey: Hashable {
+    let deviceAddress: UInt
+    let colorFormat: MTLPixelFormat
+}
+
 private struct SamplerKey: Hashable {
     let deviceAddress: UInt
     let addressModeU: UInt
@@ -204,7 +209,14 @@ private enum NativeState {
     static func metal4Compiler(_ device: MTLDevice) -> MTL4Compiler? {
         metal4CompilerLock.lock()
         defer { metal4CompilerLock.unlock() }
-        if let existing = metal4CompilerStorage as? MTL4Compiler { return existing }
+        if let existing = metal4CompilerStorage as? MTL4Compiler {
+            if objectAddress(existing.device) == objectAddress(device) {
+                return existing
+            }
+            metal4CompilerStorage = nil
+            metal4Serializer = nil
+            metal4LookupArchive = nil
+        }
         let descriptor = MTL4CompilerDescriptor()
         descriptor.label = "metallum-compiler"
         if let serializer = metal4Serializer as? MTL4PipelineDataSetSerializer {
@@ -221,7 +233,7 @@ private enum NativeState {
     static var presentPipeline: MTLRenderPipelineState!
     static var presentNearestSampler: MTLSamplerState!
     static var presentLinearSampler: MTLSamplerState!
-    static var copyPipelines: [Int: MTLRenderPipelineState] = [:]
+    static var copyPipelines: [CopyPipelineKey: MTLRenderPipelineState] = [:]
     #if os(macOS)
     // Present mode the game last asked for, so stopping the frame-generation
     // presenter can hand the layer back in the state Minecraft expects instead
@@ -412,6 +424,8 @@ private func finishGpuEncoderTimings(_ commandBuffer: MTLCommandBuffer) {
 private final class Metal4MainQueuePilot {
     private static let validationByteCount = 256
 
+    private let device: MTLDevice
+
     private struct Slot {
         let commandBuffer: MTL4CommandBuffer
         let allocator: MTL4CommandAllocator
@@ -467,11 +481,16 @@ private final class Metal4MainQueuePilot {
         residencySet.commit()
         residencySet.requestResidency()
         queue.addResidencySet(residencySet)
+        self.device = device
         self.queue = queue
         self.slots = slots
         self.sourceBuffer = sourceBuffer
         self.destinationBuffer = destinationBuffer
         self.residencySet = residencySet
+    }
+
+    func owns(_ candidate: MTLDevice) -> Bool {
+        objectAddress(device) == objectAddress(candidate)
     }
 
     func submitAndWait() -> Bool {
@@ -712,6 +731,10 @@ private final class Metal4MainQueueContext {
         if let layer {
             queue.addResidencySet(layer.residencySet)
         }
+    }
+
+    func owns(_ candidate: MTLDevice) -> Bool {
+        objectAddress(device) == objectAddress(candidate)
     }
 
     func commandBuffer(at index: Int) -> MTL4CommandBuffer { slots[index].commandBuffer }
@@ -4150,7 +4173,10 @@ private func buildPresentSampler(device: MTLDevice, filter: MTLSamplerMinMagFilt
 }
 
 private func ensureCopyPipeline(_ device: MTLDevice, _ colorFormat: MTLPixelFormat) -> MTLRenderPipelineState? {
-    let key = Int(colorFormat.rawValue)
+    let key = CopyPipelineKey(
+        deviceAddress: objectAddress(device),
+        colorFormat: colorFormat
+    )
     if let pipeline = NativeState.copyPipelines[key] {
         return pipeline
     }
@@ -7724,9 +7750,11 @@ public func metallum_metal4_main_queue_pilot_validate(_ device: MTLDevice) -> In
         return 0
     }
     let pilot: Metal4MainQueuePilot
-    if let existing = NativeState.metal4MainQueuePilotStorage as? Metal4MainQueuePilot {
+    if let existing = NativeState.metal4MainQueuePilotStorage as? Metal4MainQueuePilot,
+       existing.owns(device) {
         pilot = existing
     } else {
+        NativeState.metal4MainQueuePilotStorage = nil
         guard let created = Metal4MainQueuePilot(device) else { return 0 }
         NativeState.metal4MainQueuePilotStorage = created
         pilot = created
@@ -7746,8 +7774,11 @@ public func metallum_metal4_main_renderer_enable(
     guard #available(macOS 26.0, iOS 26.0, *), device.supportsFamily(.metal4) else {
         return 0
     }
-    if NativeState.metal4MainQueueStorage is Metal4MainQueueContext {
-        return 1
+    if let existing = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext {
+        if existing.owns(device) {
+            return 1
+        }
+        NativeState.metal4MainQueueStorage = nil
     }
     guard let context = Metal4MainQueueContext(device, layer: layer) else {
         return 0
@@ -10089,6 +10120,80 @@ public func metallum_set_metal4_present_enabled(_ enabled: Int32) {
     NativeState.metal4PresentEnabled = enabled != 0
 }
 
+private func teardownMetalDeviceSession(_ device: MTLDevice) {
+    let address = objectAddress(device)
+
+    #if os(macOS) && canImport(MetalFX)
+    metallum_metalfx_shutdown()
+    #endif
+
+    if #available(macOS 26.0, iOS 26.0, *) {
+        if let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext,
+           context.owns(device) {
+            NativeState.metal4MainQueueStorage = nil
+        }
+        if let pilot = NativeState.metal4MainQueuePilotStorage as? Metal4MainQueuePilot,
+           pilot.owns(device) {
+            NativeState.metal4MainQueuePilotStorage = nil
+        }
+        NativeState.metal4CompilerLock.lock()
+        if let compiler = NativeState.metal4CompilerStorage as? MTL4Compiler,
+           objectAddress(compiler.device) == address {
+            NativeState.metal4CompilerStorage = nil
+            NativeState.metal4Serializer = nil
+            NativeState.metal4LookupArchive = nil
+        }
+        NativeState.metal4CompilerLock.unlock()
+    }
+
+    if #available(macOS 15.0, iOS 18.0, *) {
+        NativeState.residencyLock.lock()
+        if let set = NativeState.residencySetStorage as? MTLResidencySet,
+           objectAddress(set.device) == address {
+            set.endResidency()
+            NativeState.residencySetStorage = nil
+            NativeState.residencyDirty = false
+            NativeState.residencyRequested = false
+        }
+        NativeState.residencyLock.unlock()
+    }
+
+    NativeState.depthStencilStates.removeAll()
+    NativeState.samplerStates.removeAll()
+    NativeState.clearPipelines.removeAll()
+    NativeState.copyPipelines.removeAll()
+    NativeState.presentPipeline = nil
+    NativeState.presentLinearSampler = nil
+    NativeState.presentNearestSampler = nil
+    NativeState.functionLibraries.removeAllObjects()
+    NativeState.binaryArchiveLock.lock()
+    NativeState.binaryArchive = nil
+    NativeState.binaryArchiveReadOnly = false
+    NativeState.binaryArchiveLock.unlock()
+
+    NativeState.metal4GenericComputeEncodeCount = 0
+    NativeState.metal4GenericBlitEncodeCount = 0
+    NativeState.metal4GenericRenderEncodeCount = 0
+    NativeState.metal3GenericComputeEncodeCount = 0
+    NativeState.metal3GenericBlitEncodeCount = 0
+    NativeState.metal4LegacyEncoderViolationCount = 0
+    NativeState.metal4AuxiliaryComputeEncodeCount = 0
+    NativeState.metal4SpatialEncodeCount = 0
+    NativeState.metal4TemporalEncodeCount = 0
+    NativeState.metal4FrameGenerationInputCount = 0
+    NativeState.metal4PipelineLogged = false
+    NativeState.metal4PipelineFallbackLogged = false
+    NativeState.metal4CompilerEnabled = false
+    NativeState.metal4PresentEnabled = false
+}
+
+@_cdecl("metallum_metal_device_shutdown")
+public func metallum_metal_device_shutdown(_ device: MTLDevice) {
+    autoreleasepool {
+        teardownMetalDeviceSession(device)
+    }
+}
+
 @_cdecl("metallum_release_object")
 public func metallum_release_object(_ obj: UnsafeMutableRawPointer?) {
     autoreleasepool {
@@ -10707,7 +10812,16 @@ public func metallum_residency_set_enable(_ device: MTLDevice, _ queue: MTLComma
         guard #available(macOS 15.0, iOS 18.0, *) else { return 0 }
         NativeState.residencyLock.lock()
         defer { NativeState.residencyLock.unlock() }
-        if NativeState.residencySetStorage != nil { return 1 }
+        if let existing = NativeState.residencySetStorage as? MTLResidencySet {
+            if objectAddress(existing.device) == objectAddress(device) {
+                queue.addResidencySet(existing)
+                return 1
+            }
+            existing.endResidency()
+            NativeState.residencySetStorage = nil
+            NativeState.residencyDirty = false
+            NativeState.residencyRequested = false
+        }
         let descriptor = MTLResidencySetDescriptor()
         descriptor.label = "metallum-residency"
         descriptor.initialCapacity = 1024
