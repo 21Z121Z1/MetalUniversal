@@ -3,6 +3,7 @@ package com.metallum.mixin.render;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalDynamicBackingPoolTelemetry;
 import com.metallum.client.metal.render.MetalTransientArenaTelemetry;
+import com.metallum.client.metal.render.bridge.MetalTerrainIcbBridge;
 import com.metallum.client.metal.render.mtl.MetalCommandPacketTelemetry;
 import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
 import com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry;
@@ -38,6 +39,7 @@ public abstract class MetalHotPathTelemetryReportMixin {
         MetalRenderStatePacketTelemetry.Snapshot state =
                 MetalRenderStatePacketTelemetry.snapshot();
         MetalCommandPacketTelemetry.Snapshot command = MetalCommandPacketTelemetry.snapshot();
+        MetalTerrainIcbBridge.NativeStats terrainIcbNative = MetalTerrainIcbBridge.nativeStats();
         MetalTransientArenaTelemetry.Snapshot arena = MetalTransientArenaTelemetry.snapshot();
         MetalDynamicBackingPoolTelemetry.Snapshot backing =
                 MetalDynamicBackingPoolTelemetry.snapshot();
@@ -52,7 +54,9 @@ public abstract class MetalHotPathTelemetryReportMixin {
                         + "renderCommandReplays={} computeCommandPacketCalls={} "
                         + "computeCommandOperations={} computeCommandReplays={} "
                         + "terrainIcbAttempts={} terrainIcbAccepted={} terrainIcbDraws={} "
-                        + "terrainIcbFallbacks={} transientWrapperHits={} "
+                        + "terrainIcbFallbacks={} terrainIcbAllocations={} "
+                        + "terrainIcbCompletionReleases={} terrainIcbBudgetFallbacks={} "
+                        + "terrainIcbZeroAllocationFallbacks={} transientWrapperHits={} "
                         + "transientWrapperMisses={} multiUploadCalls={} multiUploadItems={} "
                         + "backingTrims={} backingReleasedBytes={} backingReleasedHandles={} "
                         + "backingRemovedBuckets={} backingPeakBytes={}",
@@ -79,6 +83,10 @@ public abstract class MetalHotPathTelemetryReportMixin {
                 command.terrainIcbAccepted(),
                 command.terrainIcbDraws(),
                 command.terrainIcbFallbacks(),
+                terrainIcbNative.allocations(),
+                terrainIcbNative.completionReleases(),
+                terrainIcbNative.budgetFallbacks(),
+                terrainIcbNative.zeroAllocationFallbacks(),
                 arena.wrapperHits(),
                 arena.wrapperMisses(),
                 arena.multiUploadCalls(),

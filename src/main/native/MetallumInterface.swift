@@ -1014,14 +1014,34 @@ public func metallum_terrain_icb_encode_indexed_v1(
     descriptor.inheritBuffers = true
     descriptor.maxVertexBufferBindCount = 0
     descriptor.maxFragmentBufferBindCount = 0
-    guard let icb = indexBuffer.device.makeIndirectCommandBuffer(
-        descriptor: descriptor,
-        maxCommandCount: drawCount,
-        options: []
-    ) else {
-        return 0
+    let icb: MTLIndirectCommandBuffer
+    if isMetal4Encoder {
+        guard #available(macOS 26.0, iOS 26.0, *),
+              let transient = metallumMetal4AcquireTerrainIcb(
+                  encoderPointer: encoderPointer,
+                  descriptor: descriptor,
+                  device: indexBuffer.device,
+                  commandCount: drawCount
+              ) else {
+            return 0
+        }
+        icb = transient
+    } else {
+        guard let transient = indexBuffer.device.makeIndirectCommandBuffer(
+                  descriptor: descriptor,
+                  maxCommandCount: drawCount,
+                  options: []
+              ),
+              transient.size > 0 else {
+            metallumRecordTerrainIcbZeroAllocation(
+                drawCount: drawCount,
+                indexBytes: indexBuffer.length
+            )
+            return 0
+        }
+        transient.label = "Metallum Sodium Terrain ICB"
+        icb = transient
     }
-    icb.label = "Metallum Sodium Terrain ICB"
 
     for draw in 0..<drawCount {
         let command = icb.indirectRenderCommandAt(draw)
@@ -1050,6 +1070,27 @@ public func metallum_terrain_icb_encode_indexed_v1(
        ) {
         return 1
     }
+    return 0
+}
+
+@_cdecl("metallum_terrain_icb_stats_v1")
+public func metallum_terrain_icb_stats_v1(
+    _ allocations: UnsafeMutablePointer<UInt64>?,
+    _ completionReleases: UnsafeMutablePointer<UInt64>?,
+    _ budgetFallbacks: UnsafeMutablePointer<UInt64>?,
+    _ zeroAllocationFallbacks: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    guard let allocations,
+          let completionReleases,
+          let budgetFallbacks,
+          let zeroAllocationFallbacks else {
+        return -1
+    }
+    let stats = metallumTerrainIcbStatsSnapshot()
+    allocations.pointee = stats.0
+    completionReleases.pointee = stats.1
+    budgetFallbacks.pointee = stats.2
+    zeroAllocationFallbacks.pointee = stats.3
     return 0
 }
 
@@ -1234,6 +1275,15 @@ private func entries(for feature: MetallumInterfaceFeature, version: UInt32) -> 
                         Int32,
                         Int32,
                         Int32
+                    ) -> Int32
+            ),
+            functionPointer(
+                metallum_terrain_icb_stats_v1
+                    as @convention(c) (
+                        UnsafeMutablePointer<UInt64>?,
+                        UnsafeMutablePointer<UInt64>?,
+                        UnsafeMutablePointer<UInt64>?,
+                        UnsafeMutablePointer<UInt64>?
                     ) -> Int32
             )
         ]

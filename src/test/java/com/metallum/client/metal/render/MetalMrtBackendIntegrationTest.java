@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalTerrainIcbBridge;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.metal.render.mtl.MetalCommandPacketTelemetry;
 import com.mojang.blaze3d.GpuFormat;
@@ -237,23 +238,37 @@ final class MetalMrtBackendIntegrationTest {
                      java.util.OptionalDouble.empty()
              ); MetalGpuBuffer indices = (MetalGpuBuffer) device.createBuffer(
                      () -> "terrain ICB indices", GpuBuffer.USAGE_INDEX, indexBytes
-             ); PassWithViews pass = createPass(outputs, null, false)) {
+             )) {
             encoder.writeToTexture(source, sourcePixels, 0, 0, 0, 0, 1, 1);
             IrisMetalArgumentBindingRuntime.resetStats();
             MetalCommandPacketTelemetry.reset();
 
-            pass.pass().setPipeline(pipeline);
-            pass.pass().bindTexture("SourceSampler", sourceView, sampler);
-            pass.pass().setIndexBuffer(indices, IndexType.SHORT);
-            MetalTerrainIcbScope.enter();
-            try {
-                pass.pass().multiDrawIndexed(draws, 1, 0, 16);
-            } finally {
-                MetalTerrainIcbScope.exit();
+            // Four completed submissions prove that the bounded Metal 4 path
+            // executes a real ICB, releases it on feedback, and never reuses an
+            // executed ICB across an MTL4 command-buffer lifecycle.
+            for (int submission = 0; submission < 4; submission++) {
+                try (PassWithViews pass = createPass(outputs, null, false)) {
+                    pass.pass().setPipeline(pipeline);
+                    pass.pass().bindTexture("SourceSampler", sourceView, sampler);
+                    pass.pass().setIndexBuffer(indices, IndexType.SHORT);
+                    MetalTerrainIcbScope.enter();
+                    try {
+                        pass.pass().multiDrawIndexed(draws, 1, 0, 16);
+                        if (Boolean.getBoolean("metallum.opt.metal4")) {
+                            // The second qualifying batch must execute exactly
+                            // once through the zero-execution native multi-draw
+                            // fallback after the per-submission ICB budget is
+                            // consumed.
+                            pass.pass().multiDrawIndexed(draws, 1, 0, 16);
+                        }
+                    } finally {
+                        MetalTerrainIcbScope.exit();
+                    }
+                    encoder.submitRenderPass();
+                }
+                encoder.submit();
+                device.waitForSubmittedGpuWork();
             }
-            encoder.submitRenderPass();
-            encoder.submit();
-            device.waitForSubmittedGpuWork();
 
             ByteBuffer rendered = readback(outputs.getFirst());
             assertByteNear(rendered.get(0), 51, "terrain ICB sampled red");
@@ -262,15 +277,25 @@ final class MetalMrtBackendIntegrationTest {
             assertByteNear(rendered.get(3), 255, "terrain ICB sampled alpha");
 
             MetalCommandPacketTelemetry.Snapshot commands = MetalCommandPacketTelemetry.snapshot();
-            assertEquals(1L, commands.terrainIcbAttempts());
-            assertEquals(1L, commands.terrainIcbAccepted());
-            assertEquals(16L, commands.terrainIcbDraws());
-            assertEquals(0L, commands.terrainIcbFallbacks());
+            boolean metal4 = Boolean.getBoolean("metallum.opt.metal4");
+            assertEquals(metal4 ? 8L : 4L, commands.terrainIcbAttempts());
+            assertEquals(4L, commands.terrainIcbAccepted());
+            assertEquals(metal4 ? 128L : 64L, commands.terrainIcbDraws());
+            assertEquals(metal4 ? 4L : 0L, commands.terrainIcbFallbacks());
             IrisMetalArgumentBindingRuntime.Stats arguments = IrisMetalArgumentBindingRuntime.stats();
             assertTrue(arguments.encodedSnapshots() > 0L, "no argument-buffer snapshot executed");
             assertTrue(arguments.updates() >= 2L, "texture/sampler resources were not encoded");
             assertEquals(0L, arguments.failures());
-            if (Boolean.getBoolean("metallum.opt.metal4")) {
+            if (metal4) {
+                MetalTerrainIcbBridge.NativeStats icb = MetalTerrainIcbBridge.nativeStats();
+                assertTrue(icb.available(), "native ICB lifetime telemetry is unavailable");
+                assertTrue(icb.allocations() >= 4L, "terrain ICBs were not allocated");
+                assertTrue(
+                        icb.completionReleases() >= 4L,
+                        "terrain ICBs were not released after GPU completion"
+                );
+                assertTrue(icb.budgetFallbacks() >= 4L, "ICB budget fallback did not execute");
+                assertEquals(0L, icb.zeroAllocationFallbacks());
                 long[] closure = MetalNativeBridge.metallum_metal4_backend_closure_stats();
                 assertEquals(1L, closure[0], "Metal 4 closure telemetry did not engage");
                 assertTrue(closure[1] > 0L, "Metal 4 recorded no generic render encoder");

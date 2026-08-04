@@ -17,6 +17,7 @@ import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;
 import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.bridge.MetalFfmCallTelemetry;
+import com.metallum.client.metal.render.bridge.MetalTerrainIcbBridge;
 import com.metallum.client.metal.render.mtl.MetalCommandPacketTelemetry;
 import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
 import com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry;
@@ -1028,6 +1029,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         MetalDynamicBackingPoolTelemetry.Snapshot backing = sample.backing();
         MetalPipelineCompilationTelemetry.Snapshot javaPipelines = sample.javaPipelines();
         MetalNativeBridge.NativePipelineCompilationSnapshot nativePipelines = sample.nativePipelines();
+        MetalTerrainIcbBridge.NativeStats terrainIcbNative = MetalTerrainIcbBridge.nativeStats();
         JsonObject counters = new JsonObject();
         counters.addProperty("enabled", Boolean.getBoolean("metallum.hotpath.telemetry"));
         counters.addProperty("measuredFrames", measuredFrames);
@@ -1059,6 +1061,17 @@ public final class MetalValidationClient implements ClientModInitializer {
         counters.addProperty("terrainIcbAccepted", command.terrainIcbAccepted());
         counters.addProperty("terrainIcbDraws", command.terrainIcbDraws());
         counters.addProperty("terrainIcbFallbacks", command.terrainIcbFallbacks());
+        counters.addProperty("terrainIcbNativeStatsAvailable", terrainIcbNative.available());
+        counters.addProperty("terrainIcbAllocations", terrainIcbNative.allocations());
+        counters.addProperty(
+                "terrainIcbCompletionReleases",
+                terrainIcbNative.completionReleases()
+        );
+        counters.addProperty("terrainIcbBudgetFallbacks", terrainIcbNative.budgetFallbacks());
+        counters.addProperty(
+                "terrainIcbZeroAllocationFallbacks",
+                terrainIcbNative.zeroAllocationFallbacks()
+        );
         counters.addProperty("transientWrapperHits", arena.wrapperHits());
         counters.addProperty("transientWrapperMisses", arena.wrapperMisses());
         counters.addProperty("multiUploadCalls", arena.multiUploadCalls());

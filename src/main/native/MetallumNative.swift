@@ -144,6 +144,12 @@ private enum NativeState {
     static let metal4UploadBarrierTelemetryLock = NSLock()
     static var metal4UploadBarrierCount: UInt64 = 0
     static var metal4UploadBarrierLogged = false
+    static let terrainIcbTelemetryLock = NSLock()
+    static var terrainIcbAllocations: UInt64 = 0
+    static var terrainIcbCompletionReleases: UInt64 = 0
+    static var terrainIcbBudgetFallbacks: UInt64 = 0
+    static var terrainIcbZeroAllocationFallbacks: UInt64 = 0
+    static var terrainIcbAllocationFailureLogged = false
     static let metal4CompilerLock = NSLock()
     // Residency set (migration spec M3), enabled by metallum.opt.residencySet.
     // MTLResidencySet is macOS 15 / iOS 18 and needs no Metal 4, so the table of
@@ -202,6 +208,51 @@ private enum NativeState {
         metal4UploadBarrierTelemetryLock.lock()
         defer { metal4UploadBarrierTelemetryLock.unlock() }
         return metal4UploadBarrierCount
+    }
+
+    static func recordTerrainIcbAllocation() {
+        terrainIcbTelemetryLock.lock()
+        terrainIcbAllocations &+= 1
+        terrainIcbTelemetryLock.unlock()
+    }
+
+    static func recordTerrainIcbCompletionRelease() {
+        terrainIcbTelemetryLock.lock()
+        terrainIcbCompletionReleases &+= 1
+        terrainIcbTelemetryLock.unlock()
+    }
+
+    static func recordTerrainIcbBudgetFallback() {
+        terrainIcbTelemetryLock.lock()
+        terrainIcbBudgetFallbacks &+= 1
+        terrainIcbTelemetryLock.unlock()
+    }
+
+    static func recordTerrainIcbZeroAllocation(drawCount: Int, indexBytes: Int) {
+        terrainIcbTelemetryLock.lock()
+        terrainIcbZeroAllocationFallbacks &+= 1
+        let shouldLog = !terrainIcbAllocationFailureLogged
+        terrainIcbAllocationFailureLogged = true
+        terrainIcbTelemetryLock.unlock()
+        if shouldLog {
+            NSLog(
+                "[metallum] terrain ICB allocation returned zero backing; "
+                    + "using zero-execution fallback (draws=%d indexBytes=%d)",
+                drawCount,
+                indexBytes
+            )
+        }
+    }
+
+    static func terrainIcbStats() -> (UInt64, UInt64, UInt64, UInt64) {
+        terrainIcbTelemetryLock.lock()
+        defer { terrainIcbTelemetryLock.unlock() }
+        return (
+            terrainIcbAllocations,
+            terrainIcbCompletionReleases,
+            terrainIcbBudgetFallbacks,
+            terrainIcbZeroAllocationFallbacks
+        )
     }
 
     /// Process-wide compiler, built on first use. Nil means Metal 4 pipeline
@@ -755,6 +806,7 @@ private final class Metal4MainQueuePilot {
 
 @available(macOS 26.0, iOS 26.0, *)
 private final class Metal4MainCommandBufferLease {
+    private static let terrainIcbBudget = 1
     fileprivate let owner: Metal4MainQueueContext
     fileprivate let slotIndex: Int
     private let condition = NSCondition()
@@ -763,6 +815,7 @@ private final class Metal4MainCommandBufferLease {
     private var completionError: Error?
     private var startTime = 0.0
     private var endTime = 0.0
+    private var terrainIcbAllocations = 0
     fileprivate var presentDrawable: CAMetalDrawable?
     private var completionHandlers: [(Error?, CFTimeInterval, CFTimeInterval) -> Void] = []
     fileprivate var postCommitSignals: [(MTLSharedEvent, UInt64)] = []
@@ -773,6 +826,41 @@ private final class Metal4MainCommandBufferLease {
     }
 
     var commandBuffer: MTL4CommandBuffer { owner.commandBuffer(at: slotIndex) }
+
+    func acquireTerrainIcb(
+        descriptor: MTLIndirectCommandBufferDescriptor,
+        device: MTLDevice,
+        commandCount: Int
+    ) -> MTLIndirectCommandBuffer? {
+        // Sodium's visible terrain batches change with camera/chunk state, so
+        // they are not the static command streams Apple recommends retaining
+        // as CPU-encoded ICBs. Reusing an executed ICB on an MTL4 queue also
+        // crashes Metal GPU Validation on macOS 26. Bound admission to one
+        // qualifying batch per submission; later batches take the existing
+        // native multi-draw fallback without any partial ICB execution.
+        guard terrainIcbAllocations < Self.terrainIcbBudget else {
+            NativeState.recordTerrainIcbBudgetFallback()
+            return nil
+        }
+        terrainIcbAllocations += 1
+        guard let buffer = device.makeIndirectCommandBuffer(
+                  descriptor: descriptor,
+                  maxCommandCount: commandCount,
+                  options: []
+              ),
+              buffer.size > 0 else {
+            NativeState.recordTerrainIcbZeroAllocation(drawCount: commandCount, indexBytes: 0)
+            return nil
+        }
+        buffer.label = "Metallum Sodium Terrain ICB"
+        residencyTrackCreated(buffer)
+        addCompletionHandler { [buffer] _, _, _ in
+            residencyRemove(buffer)
+            NativeState.recordTerrainIcbCompletionRelease()
+        }
+        NativeState.recordTerrainIcbAllocation()
+        return buffer
+    }
 
     func markSubmitted() {
         condition.lock()
@@ -883,6 +971,10 @@ private final class Metal4MainQueueContext {
             self.fragmentArguments = fragmentArguments
             self.computeArguments = computeArguments
             self.uniformBuffer = uniformBuffer
+        }
+
+        deinit {
+            residencyRemove(uniformBuffer)
         }
     }
 
@@ -1237,6 +1329,32 @@ private func metal4RenderBridge(_ pointer: UnsafeMutableRawPointer) -> Metal4Mai
 /// bridge. Returning false means no command was encoded, so the Java caller may
 /// use the ordinary multi-draw path without risking duplicate draws.
 @available(macOS 26.0, iOS 26.0, *)
+func metallumMetal4AcquireTerrainIcb(
+    encoderPointer: UnsafeMutableRawPointer,
+    descriptor: MTLIndirectCommandBufferDescriptor,
+    device: MTLDevice,
+    commandCount: Int
+) -> MTLIndirectCommandBuffer? {
+    guard let bridge = metal4RenderBridge(encoderPointer) else { return nil }
+    return bridge.lease.acquireTerrainIcb(
+        descriptor: descriptor,
+        device: device,
+        commandCount: commandCount
+    )
+}
+
+func metallumRecordTerrainIcbZeroAllocation(drawCount: Int, indexBytes: Int) {
+    NativeState.recordTerrainIcbZeroAllocation(
+        drawCount: drawCount,
+        indexBytes: indexBytes
+    )
+}
+
+func metallumTerrainIcbStatsSnapshot() -> (UInt64, UInt64, UInt64, UInt64) {
+    NativeState.terrainIcbStats()
+}
+
+@available(macOS 26.0, iOS 26.0, *)
 func metallumMetal4ExecuteTerrainIcb(
     encoderPointer: UnsafeMutableRawPointer,
     indirectCommandBuffer: MTLIndirectCommandBuffer,
@@ -1244,17 +1362,10 @@ func metallumMetal4ExecuteTerrainIcb(
 ) -> Bool {
     guard commandCount > 0,
           let bridge = metal4RenderBridge(encoderPointer) else { return false }
-    residencyTrackCreated(indirectCommandBuffer)
     bridge.encoder.__executeCommands(
         in: indirectCommandBuffer,
         with: NSRange(location: 0, length: commandCount)
     )
-    // MTL4 queues rely on the explicit residency set. Keep this transient ICB
-    // in it through GPU completion, then release the residency allocation; the
-    // encoded command buffer itself retains the Objective-C resource lifetime.
-    bridge.lease.addCompletionHandler { [indirectCommandBuffer] _, _, _ in
-        residencyRemove(indirectCommandBuffer)
-    }
     return true
 }
 
