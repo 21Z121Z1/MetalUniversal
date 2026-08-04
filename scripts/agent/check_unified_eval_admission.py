@@ -48,6 +48,7 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
     compute = obj(admission.get("computeGroupingRuntime"))
     depth = obj(admission.get("depthLivenessRuntime"))
     argument = obj(admission.get("argumentBindingRuntime"))
+    hot = obj(admission.get("hotPathCounters"))
 
     lanes = {
         "pass-fusion": {
@@ -70,6 +71,46 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
             "evidence": argument,
             "requirement": "argumentBindingRuntime.enabled == true and encodedSnapshots > 0",
         },
+        "render-command-packet": {
+            "admitted": (
+                positive(hot.get("renderCommandPacketCalls"))
+                and positive(hot.get("renderCommandPacketOperations"))
+                and hot.get("renderCommandPacketReplays") == 0
+            ),
+            "evidence": hot,
+            "requirement": "render packet calls/operations > 0 and replays == 0",
+        },
+        "compute-command-packet": {
+            "admitted": (
+                positive(hot.get("computeCommandPacketCalls"))
+                and positive(hot.get("computeCommandPacketOperations"))
+                and hot.get("computeCommandPacketReplays") == 0
+            ),
+            "evidence": hot,
+            "requirement": "compute packet calls/operations > 0 and replays == 0",
+        },
+        "terrain-icb": {
+            "admitted": (
+                positive(hot.get("terrainIcbAttempts"))
+                and positive(hot.get("terrainIcbAccepted"))
+                and positive(hot.get("terrainIcbDraws"))
+                and hot.get("terrainIcbFallbacks") == 0
+            ),
+            "evidence": hot,
+            "requirement": "terrain ICB attempts/accepted/draws > 0 and fallbacks == 0",
+        },
+        "pipeline-prewarm": {
+            "admitted": (
+                isinstance(hot.get("runtimePipelineCompiles"), (int, float))
+                and not isinstance(hot.get("runtimePipelineCompiles"), bool)
+                and hot.get("runtimePipelineCompiles") == 0
+            ),
+            "evidence": {
+                "runtimePipelineCompiles": hot.get("runtimePipelineCompiles"),
+                "runtimePipelineCompileIdentities": hot.get("runtimePipelineCompileIdentities"),
+            },
+            "requirement": "runtimePipelineCompiles is present and equals 0 after warmup",
+        },
     }
 
     if profile == "baseline":
@@ -81,9 +122,27 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
         admitted = bool(lanes[profile]["admitted"])
         reason = lanes[profile]["requirement"]
     elif profile in {"all-safe-lanes", "all-safe-plus-terrain"}:
-        selected = list(lanes)
+        selected = ["pass-fusion", "compute-grouping", "depth-liveness", "argument-tables"]
         admitted = any(bool(lanes[name]["admitted"]) for name in selected)
         reason = "at least one selected Iris optimization lane must prove runtime activation"
+    elif profile == "mobilegl-hotpath":
+        selected = ["render-command-packet", "pipeline-prewarm"]
+        admitted = all(bool(lanes[name]["admitted"]) for name in selected)
+        reason = "the production render command packet must execute with zero replay"
+    elif profile == "mobilegl-complete":
+        selected = [
+            "pass-fusion", "compute-grouping", "depth-liveness", "argument-tables",
+            "render-command-packet", "terrain-icb", "pipeline-prewarm",
+        ]
+        required = ["render-command-packet", "terrain-icb", "pipeline-prewarm"]
+        admitted = (
+            all(bool(lanes[name]["admitted"]) for name in required)
+            and any(bool(lanes[name]["admitted"]) for name in selected[:4])
+        )
+        reason = (
+            "render packet and terrain ICB must execute without replay/fallback, runtime pipeline "
+            "compiles must be zero, and at least one compiled Iris optimization lane must activate"
+        )
     elif profile == "terrain-adaptive":
         result = {
             "schema_version": SCHEMA_VERSION,
@@ -130,11 +189,14 @@ def self_test() -> None:
                 "computeGroupingRuntime": {"admissions": 0, "deferredPassCloses": 0},
                 "depthLivenessRuntime": {"prunedPairs": 0, "captureSkips": 0},
                 "argumentBindingRuntime": {"enabled": True, "encodedSnapshots": 10},
+                "hotPathCounters": {"runtimePipelineCompiles": 0},
             },
         }), encoding="utf-8")
         rejected, code = evaluate(path, "pass-fusion")
         assert code == 3 and rejected["state"] == "rejected-no-admission"
         admitted, code = evaluate(path, "argument-tables")
+        assert code == 0 and admitted["state"] == "admitted"
+        admitted, code = evaluate(path, "pipeline-prewarm")
         assert code == 0 and admitted["state"] == "admitted"
     print("check_unified_eval_admission self-test: PASS")
 

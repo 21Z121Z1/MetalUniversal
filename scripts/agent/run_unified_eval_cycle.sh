@@ -6,6 +6,7 @@ cd "$ROOT"
 
 WORLD="${WORLD:-}"
 CANDIDATE_PROFILE="${CANDIDATE_PROFILE:-all-safe-lanes}"
+METAL4_MODE="${METAL4_MODE:-true}"
 BLOCKS="${BLOCKS:-4}"
 MODE="${MODE:-full}"
 CORRECTNESS_GATE="${METALLUM_CORRECTNESS_GATE:-}"
@@ -48,6 +49,10 @@ if [[ "$MODE" == "performance" || "$MODE" == "full" ]] && (( BLOCKS < 4 )); then
   echo "Performance acceptance requires at least four paired ABBA blocks" >&2
   exit 2
 fi
+case "$METAL4_MODE" in
+  true|false) ;;
+  *) echo "METAL4_MODE must be true or false" >&2; exit 2 ;;
+esac
 if [[ "$MODE" == "performance" ]]; then
   if [[ -z "$CORRECTNESS_GATE" || ! -f "$CORRECTNESS_GATE" ]]; then
     echo "MODE=performance requires METALLUM_CORRECTNESS_GATE pointing to a prior passing gate.json" >&2
@@ -73,6 +78,9 @@ profile_args() {
   local depth_liveness=false
   local argument_tables=false
   local terrain_adaptive=false
+  local render_command_packet=false
+  local compute_command_packet=false
+  local terrain_icb=false
   case "$profile" in
     baseline) ;;
     depth-liveness) depth_liveness=true ;;
@@ -93,6 +101,19 @@ profile_args() {
       argument_tables=true
       terrain_adaptive=true
       ;;
+    mobilegl-hotpath)
+      render_command_packet=true
+      compute_command_packet=true
+      ;;
+    mobilegl-complete)
+      pass_fusion=true
+      compute_grouping=true
+      depth_liveness=true
+      argument_tables=true
+      render_command_packet=true
+      compute_command_packet=true
+      terrain_icb=true
+      ;;
     *) echo "Unknown profile: $profile" >&2; return 2 ;;
   esac
   printf '%s\n' \
@@ -104,6 +125,7 @@ profile_args() {
     "-Dmetallum.iris.performanceCounters=true" \
     "-Dmetallum.validation.gpuTiming=true" \
     "-Dmetallum.validation.gpuPassTiming=true" \
+    "-Dmetallum.hotpath.telemetry=true" \
     "-Dmetallum.validation.warmupSeconds=$warmup_seconds" \
     "-Dmetallum.validation.sampleSeconds=$sample_seconds" \
     "-Dmetallum.iris.experimental.passFusion=$pass_fusion" \
@@ -114,12 +136,20 @@ profile_args() {
     "-Dmetallum.iris.experimental.resourcePruning=$depth_liveness" \
     "-Dmetallum.iris.argumentTables=$argument_tables" \
     "-Dmetallum.iris.experimental.argumentTables=$argument_tables" \
+    "-Dmetallum.opt.argumentBuffers=$argument_tables" \
     "-Dmetallum.opt.terrainAdaptiveScheduling=$terrain_adaptive" \
-    "-Dmetallum.opt.terrainSchedulingTelemetry=$terrain_adaptive"
+    "-Dmetallum.opt.terrainSchedulingTelemetry=$terrain_adaptive" \
+    "-Dmetallum.opt.encoderStateShadow=true" \
+    "-Dmetallum.opt.renderStatePacket=true" \
+    "-Dmetallum.opt.renderCommandPacket=$render_command_packet" \
+    "-Dmetallum.opt.computeCommandPacket=$compute_command_packet" \
+    "-Dmetallum.opt.terrainIcb=$terrain_icb" \
+    "-Dmetallum.opt.metal4=$METAL4_MODE" \
+    "-Dmetallum.opt.metal4MainQueuePilot=$METAL4_MODE"
 }
 
 write_manifest() {
-  python3 - "$OUT" "$WORLD" "$CANDIDATE_PROFILE" "$BLOCKS" "$MODE" \
+  python3 - "$OUT" "$WORLD" "$CANDIDATE_PROFILE" "$BLOCKS" "$MODE" "$METAL4_MODE" \
     "$WARMUP_SECONDS" "$SAMPLE_SECONDS" "$ADMISSION_WARMUP_SECONDS" "$ADMISSION_SAMPLE_SECONDS" <<'PY'
 import hashlib, json, os, pathlib, platform, subprocess, sys
 out = pathlib.Path(sys.argv[1])
@@ -149,11 +179,12 @@ manifest = {
   "candidate_profile": sys.argv[3],
   "paired_blocks": int(sys.argv[4]),
   "mode": sys.argv[5],
+  "metal4_mode": sys.argv[6] == "true",
   "performance_protocol": {
-    "warmup_seconds": int(sys.argv[6]),
-    "sample_seconds": int(sys.argv[7]),
-    "admission_warmup_seconds": int(sys.argv[8]),
-    "admission_sample_seconds": int(sys.argv[9]),
+    "warmup_seconds": int(sys.argv[7]),
+    "sample_seconds": int(sys.argv[8]),
+    "admission_warmup_seconds": int(sys.argv[9]),
+    "admission_sample_seconds": int(sys.argv[10]),
     "source_report": "native-fullscreen-baseline.json",
     "normalization": "one unique report payload per trial; byte-identical copies are allowed",
   },

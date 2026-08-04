@@ -14,11 +14,15 @@ SCHEMA_VERSION = 1
 MIN_PAIRED_BLOCKS = 4
 MIN_DIRECTION_CONSISTENCY = 0.75
 MANDATORY_METRICS = {"fps_median"}
+ZERO_RUNTIME_CANDIDATE_METRICS = {"runtime_pipeline_compiles"}
 GUARDRAILS = {
     "gpu_frame_time_ms_median": 0.02,
     "cpu_render_encode_time_ms_median": 0.02,
+    "frame_time_ms_p99": 0.02,
     "peak_resident_memory_bytes": 0.03,
     "frame_time_stutter_count": 0.0,
+    "frames_over_50_ms": 0.0,
+    "frames_over_100_ms": 0.0,
 }
 
 METRICS = {
@@ -27,8 +31,48 @@ METRICS = {
         "direction": "higher",
         "unit": "FPS",
     },
+    "fps_average": {
+        "aliases": {"fps_average", "average_fps"},
+        "direction": "higher",
+        "unit": "FPS",
+    },
+    "fps_1_percent_low": {
+        "aliases": {"fps_1_percent_low", "one_percent_low_fps", "1_percent_low"},
+        "direction": "higher",
+        "unit": "FPS",
+    },
+    "fps_0_1_percent_low": {
+        "aliases": {"fps_0_1_percent_low", "point_one_percent_low_fps", "0_1_percent_low"},
+        "direction": "higher",
+        "unit": "FPS",
+    },
+    "frame_time_ms_p95": {
+        "aliases": {"frame_time_ms_p95", "frame_interval_p95_milliseconds"},
+        "direction": "lower",
+        "unit": "ms",
+    },
+    "frame_time_ms_p99": {
+        "aliases": {"frame_time_ms_p99", "frame_interval_p99_milliseconds"},
+        "direction": "lower",
+        "unit": "ms",
+    },
+    "frame_time_ms_p999": {
+        "aliases": {"frame_time_ms_p999", "frame_interval_p999_milliseconds"},
+        "direction": "lower",
+        "unit": "ms",
+    },
     "gpu_frame_time_ms_median": {
         "aliases": {"gpu_ms", "gpu_time_ms", "gpu_frame_ms", "gpu_frame_time_ms", "gpu_frame_time_ms_median"},
+        "direction": "lower",
+        "unit": "ms",
+    },
+    "gpu_frame_time_ms_p95": {
+        "aliases": {"gpu_frame_time_ms_p95", "gpu_p95_milliseconds"},
+        "direction": "lower",
+        "unit": "ms",
+    },
+    "gpu_frame_time_ms_p99": {
+        "aliases": {"gpu_frame_time_ms_p99", "gpu_p99_milliseconds"},
         "direction": "lower",
         "unit": "ms",
     },
@@ -64,6 +108,66 @@ METRICS = {
         "aliases": {"stutter_count", "frame_time_stutter_count"},
         "direction": "lower",
         "unit": "events",
+    },
+    "frames_over_33_3_ms": {
+        "aliases": {"frames_over_33_3_ms", "frames_over33_3_milliseconds"},
+        "direction": "lower",
+        "unit": "frames",
+    },
+    "frames_over_50_ms": {
+        "aliases": {"frames_over_50_ms", "frames_over50_milliseconds"},
+        "direction": "lower",
+        "unit": "frames",
+    },
+    "frames_over_100_ms": {
+        "aliases": {"frames_over_100_ms", "frames_over100_milliseconds"},
+        "direction": "lower",
+        "unit": "frames",
+    },
+    "java_to_native_ffm_calls_per_frame": {
+        "aliases": {"java_to_native_ffm_calls_per_frame"},
+        "direction": "lower",
+        "unit": "calls/frame",
+    },
+    "native_setter_operations_per_frame": {
+        "aliases": {"native_setter_operations_per_frame"},
+        "direction": "lower",
+        "unit": "operations/frame",
+    },
+    "render_packet_calls_per_frame": {
+        "aliases": {"render_packet_calls_per_frame"},
+        "direction": "lower",
+        "unit": "calls/frame",
+    },
+    "render_packet_replays": {
+        "aliases": {"render_packet_replays"},
+        "direction": "lower",
+        "unit": "replays",
+    },
+    "compute_packet_calls_per_frame": {
+        "aliases": {"compute_packet_calls_per_frame"},
+        "direction": "lower",
+        "unit": "calls/frame",
+    },
+    "compute_packet_replays": {
+        "aliases": {"compute_packet_replays"},
+        "direction": "lower",
+        "unit": "replays",
+    },
+    "argument_table_updates_per_frame": {
+        "aliases": {"argument_table_updates_per_frame"},
+        "direction": "lower",
+        "unit": "updates/frame",
+    },
+    "terrain_icb_accepted": {
+        "aliases": {"terrain_icb_accepted"},
+        "direction": "higher",
+        "unit": "batches",
+    },
+    "runtime_pipeline_compiles": {
+        "aliases": {"runtime_pipeline_compiles"},
+        "direction": "lower",
+        "unit": "compiles",
     },
 }
 
@@ -290,6 +394,26 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             })
 
     mandatory_missing = sorted(MANDATORY_METRICS.intersection(missing_metrics))
+    zero_runtime_failures: list[dict[str, Any]] = []
+    for metric in ZERO_RUNTIME_CANDIDATE_METRICS:
+        result = comparison["metrics"].get(metric, {})
+        if not result.get("available") or result.get("paired_blocks") != len(blocks):
+            zero_runtime_failures.append({
+                "metric": metric,
+                "reason": "missing from one or more complete candidate blocks",
+            })
+            continue
+        nonzero = [
+            {"block": index + 1, "value": pair["after"]}
+            for index, pair in enumerate(result.get("pairs", []))
+            if pair.get("after") != 0
+        ]
+        if nonzero:
+            zero_runtime_failures.append({
+                "metric": metric,
+                "reason": "candidate compiled pipelines after warmup",
+                "nonzero_blocks": nonzero,
+            })
     if not correctness_passed:
         state = "rejected-correctness-gate"
         reason = "correctness gate did not pass"
@@ -299,6 +423,9 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     elif len(blocks) < MIN_PAIRED_BLOCKS:
         state = "inconclusive-noise"
         reason = f"fewer than {MIN_PAIRED_BLOCKS} paired blocks"
+    elif zero_runtime_failures:
+        state = "rejected-regression"
+        reason = "candidate runtime pipeline compilation gate failed"
     elif guardrail_regressions:
         state = "rejected-regression"
         reason = "one or more guardrail metrics regressed beyond the allowed limit"
@@ -317,6 +444,7 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "any_stable_positive_metric": any_stable_positive,
         "missing_mandatory_metrics": mandatory_missing,
         "guardrail_regressions": guardrail_regressions,
+        "zero_runtime_failures": zero_runtime_failures,
         "minimum_paired_blocks": MIN_PAIRED_BLOCKS,
         "minimum_direction_consistency": MIN_DIRECTION_CONSISTENCY,
         "acceptance_note": (
@@ -391,7 +519,11 @@ def self_test() -> None:
                 trial.mkdir(parents=True)
                 (trial / "exit-status.txt").write_text("0\n", encoding="utf-8")
                 (trial / "source.json").write_text(
-                    json.dumps({"fps": {"median": fps}, "gpu_frame_time_ms": 10.0}),
+                    json.dumps({
+                        "fps": {"median": fps},
+                        "gpu_frame_time_ms": 10.0,
+                        "runtime_pipeline_compiles": 0,
+                    }),
                     encoding="utf-8",
                 )
         _, decision = analyze(root)

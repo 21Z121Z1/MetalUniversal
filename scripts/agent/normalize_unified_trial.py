@@ -94,13 +94,30 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
     encoder_frames = int(encoders.get("measuredFrames") or 0)
     encoder_window_matches = measured_frames > 0 and encoder_frames == measured_frames
     unavailable = report.get("unavailableMetrics", {}) if isinstance(report.get("unavailableMetrics"), dict) else {}
+    hot = report.get("hotPathCounters", {}) if isinstance(report.get("hotPathCounters"), dict) else {}
+    hot_frames = int(hot.get("measuredFrames") or 0)
+    hot_window_matches = measured_frames > 0 and hot_frames == measured_frames and hot.get("enabled") is True
     render_per_frame = finite_number(encoders.get("renderPerFrame"))
     blit_per_frame = finite_number(encoders.get("blitPerFrame"))
     encoder_total = None if render_per_frame is None and blit_per_frame is None else (render_per_frame or 0.0) + (blit_per_frame or 0.0)
 
+    def hot_per_frame(key: str) -> float | None:
+        value = finite_number(hot.get(key))
+        if not hot_window_matches or value is None:
+            return None
+        return value / measured_frames
+
     metrics = {
         "fps_median": metric(report.get("sourceFpsFromP50"), "FPS", "higher", measured_frames),
+        "fps_average": metric(report.get("averageFps"), "FPS", "higher", measured_frames),
+        "fps_1_percent_low": metric(report.get("onePercentLowFps"), "FPS", "higher", measured_frames),
+        "fps_0_1_percent_low": metric(report.get("pointOnePercentLowFps"), "FPS", "higher", measured_frames),
+        "frame_time_ms_p95": metric(report.get("frameIntervalP95Milliseconds"), "ms", "lower", measured_frames),
+        "frame_time_ms_p99": metric(report.get("frameIntervalP99Milliseconds"), "ms", "lower", measured_frames),
+        "frame_time_ms_p999": metric(report.get("frameIntervalP999Milliseconds"), "ms", "lower", measured_frames),
         "gpu_frame_time_ms_median": metric(report.get("gpuP50Milliseconds"), "ms", "lower", measured_frames),
+        "gpu_frame_time_ms_p95": metric(report.get("gpuP95Milliseconds"), "ms", "lower", measured_frames),
+        "gpu_frame_time_ms_p99": metric(report.get("gpuP99Milliseconds"), "ms", "lower", measured_frames),
         "cpu_render_encode_time_ms_median": metric(
             cpu.get("p50Milliseconds") if cpu_window_matches else None,
             "ms", "lower", cpu_samples,
@@ -129,6 +146,45 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             str(unavailable.get("peakResidentMemoryBytes") or "peak resident memory accounting is unavailable"),
         ),
         "frame_time_stutter_count": metric(report.get("frameTimeStutterCount"), "events", "lower", measured_frames),
+        "frames_over_33_3_ms": metric(report.get("framesOver33_3Milliseconds"), "frames", "lower", measured_frames),
+        "frames_over_50_ms": metric(report.get("framesOver50Milliseconds"), "frames", "lower", measured_frames),
+        "frames_over_100_ms": metric(report.get("framesOver100Milliseconds"), "frames", "lower", measured_frames),
+        "java_to_native_ffm_calls_per_frame": metric(
+            hot.get("javaToNativeFfmCallsPerFrame") if hot_window_matches else None,
+            "calls/frame", "lower", hot_frames,
+            None if hot_window_matches else (
+                f"hot-path sample window mismatch or telemetry disabled: hot frames={hot_frames}, "
+                f"measured frames={measured_frames}, enabled={hot.get('enabled')}"
+            ),
+        ),
+        "native_setter_operations_per_frame": metric(
+            hot_per_frame("nativeSetterOperations"), "operations/frame", "lower", hot_frames
+        ),
+        "render_packet_calls_per_frame": metric(
+            hot_per_frame("renderCommandPacketCalls"), "calls/frame", "lower", hot_frames
+        ),
+        "render_packet_replays": metric(
+            hot.get("renderCommandPacketReplays") if hot_window_matches else None,
+            "replays", "lower", hot_frames
+        ),
+        "compute_packet_calls_per_frame": metric(
+            hot_per_frame("computeCommandPacketCalls"), "calls/frame", "lower", hot_frames
+        ),
+        "compute_packet_replays": metric(
+            hot.get("computeCommandPacketReplays") if hot_window_matches else None,
+            "replays", "lower", hot_frames
+        ),
+        "argument_table_updates_per_frame": metric(
+            hot_per_frame("argumentTableUpdates"), "updates/frame", "lower", hot_frames
+        ),
+        "terrain_icb_accepted": metric(
+            hot.get("terrainIcbAccepted") if hot_window_matches else None,
+            "batches", "higher", hot_frames
+        ),
+        "runtime_pipeline_compiles": metric(
+            hot.get("runtimePipelineCompiles") if hot_window_matches else None,
+            "compiles", "lower", hot_frames
+        ),
     }
 
     identity_errors: list[str] = []
@@ -158,11 +214,16 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             "depthLivenessRuntime": report.get("depthLivenessRuntime"),
             "argumentBindingRuntime": report.get("argumentBindingRuntime"),
             "irisPerformanceCounters": report.get("irisPerformanceCounters"),
+            "hotPathCounters": hot,
         },
         "source_summary": {
             "frame_interval_p50_ms": report.get("frameIntervalP50Milliseconds"),
             "frame_interval_p95_ms": report.get("frameIntervalP95Milliseconds"),
+            "frame_interval_p99_ms": report.get("frameIntervalP99Milliseconds"),
+            "frame_interval_p999_ms": report.get("frameIntervalP999Milliseconds"),
             "gpu_p95_ms": report.get("gpuP95Milliseconds"),
+            "gpu_p99_ms": report.get("gpuP99Milliseconds"),
+            "hot_path": hot,
             "readback": report.get("nativeMainReadback"),
             "unavailable_metrics": unavailable,
         },
