@@ -7,7 +7,7 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 
 /**
- * Metal 3 terrain indexed-draw ICB bridge.
+ * Metal 3/Metal 4 terrain indexed-draw ICB bridge.
  *
  * <p>A zero result means the native side executed no draws and the caller must
  * use the ordinary multi-draw path. A one result means the complete batch was

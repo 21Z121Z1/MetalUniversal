@@ -6,6 +6,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -35,6 +36,10 @@ final class MetalMslDiskCacheTest {
                         new MetalCrossShaderCompiler.GenericVertexInput(
                                 5, MetalCrossShaderCompiler.BaseType.UINT, 4
                         )
+                ),
+                Map.of(
+                        0, MetalCrossShaderCompiler.FragmentOutputClass.FLOAT,
+                        2, MetalCrossShaderCompiler.FragmentOutputClass.UINT
                 )
         );
 

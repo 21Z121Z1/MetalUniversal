@@ -160,6 +160,7 @@ final class MetalCrossShaderCompiler {
                         if (device.isDebuggingEnabled()) {
                             Metallum.LOGGER.info("[metallum] MSL cache hit for {}", pipeline.getLocation());
                         }
+                        validateFragmentOutputSignature(pipeline, cached.fragmentOutputs());
                         return new MetalCompiledRenderPipeline(
                                 device,
                                 pipeline,
@@ -221,7 +222,7 @@ final class MetalCrossShaderCompiler {
                     Map.of(),
                     explicitFragmentOutputLocations(fragmentSource)
             );
-            validateFragmentOutputSignature(pipeline, fragmentMsl.stageOutputLocations());
+            validateFragmentOutputSignature(pipeline, fragmentMsl.fragmentOutputs());
             String fragmentMslSource = applySampleLodBias(
                     fragmentMsl.source(),
                     sampleLodBias
@@ -242,7 +243,7 @@ final class MetalCrossShaderCompiler {
             if (cacheKey != null) {
                 diskCache.store(cacheKey, new MetalMslDiskCache.Entry(
                         vertexMsl.source(), fragmentMslSource, vertexEntryPoint, fragmentEntryPoint,
-                        resources, genericVertexInputs
+                        resources, genericVertexInputs, fragmentMsl.fragmentOutputs()
                 ));
             }
             return new MetalCompiledRenderPipeline(
@@ -1318,7 +1319,7 @@ final class MetalCrossShaderCompiler {
         return Map.copyOf(locations);
     }
 
-    private static Set<Integer> applyExplicitFragmentOutputLocations(
+    private static Map<Integer, FragmentOutputClass> applyExplicitFragmentOutputLocations(
             final MemoryStack stack,
             final long compiler,
             final Map<String, Integer> explicitLocations
@@ -1339,10 +1340,10 @@ final class MetalCrossShaderCompiler {
 
         int count = (int) pCount.get(0);
         if (count == 0) {
-            return Set.of();
+            return Map.of();
         }
         SpvcReflectedResource.Buffer outputs = SpvcReflectedResource.create(pList.get(0), count);
-        Set<Integer> activeLocations = new HashSet<>();
+        Map<Integer, FragmentOutputClass> activeOutputs = new HashMap<>();
         for (int index = 0; index < count; index++) {
             SpvcReflectedResource output = outputs.get(index);
             Integer location = explicitLocations.get(output.nameString());
@@ -1354,17 +1355,61 @@ final class MetalCrossShaderCompiler {
             if (!Spvc.spvc_compiler_has_decoration(
                     compiler, output.id(), Spv.SpvDecorationBuiltIn
             )) {
-                activeLocations.add(Spvc.spvc_compiler_get_decoration(
+                int resolvedLocation = Spvc.spvc_compiler_get_decoration(
                         compiler, output.id(), Spv.SpvDecorationLocation
-                ));
+                );
+                long type = Spvc.spvc_compiler_get_type_handle(compiler, output.type_id());
+                FragmentOutputClass outputClass = fragmentOutputClass(
+                        output.nameString(), Spvc.spvc_type_get_basetype(type)
+                );
+                FragmentOutputClass previous = activeOutputs.putIfAbsent(resolvedLocation, outputClass);
+                if (previous != null) {
+                    throw new ShaderCompileException(
+                            "Multiple active fragment outputs use color location " + resolvedLocation
+                    );
+                }
             }
         }
-        return Set.copyOf(activeLocations);
+        return Map.copyOf(activeOutputs);
+    }
+
+    private static FragmentOutputClass fragmentOutputClass(final String name, final int baseType)
+            throws ShaderCompileException {
+        return switch (baseType) {
+            case Spvc.SPVC_BASETYPE_FP16, Spvc.SPVC_BASETYPE_FP32, Spvc.SPVC_BASETYPE_FP64 ->
+                    FragmentOutputClass.FLOAT;
+            case Spvc.SPVC_BASETYPE_INT8, Spvc.SPVC_BASETYPE_INT16,
+                    Spvc.SPVC_BASETYPE_INT32, Spvc.SPVC_BASETYPE_INT64 -> FragmentOutputClass.SINT;
+            case Spvc.SPVC_BASETYPE_UINT8, Spvc.SPVC_BASETYPE_UINT16,
+                    Spvc.SPVC_BASETYPE_UINT32, Spvc.SPVC_BASETYPE_UINT64 -> FragmentOutputClass.UINT;
+            default -> throw new ShaderCompileException(
+                    "Unsupported fragment output base type for " + name + ": " + baseType
+            );
+        };
+    }
+
+    private static FragmentOutputClass colorTargetClass(final GpuFormat format)
+            throws ShaderCompileException {
+        String componentType = format.componentType().name();
+        if (componentType.startsWith("UINT")) {
+            return FragmentOutputClass.UINT;
+        }
+        if (componentType.startsWith("SINT")) {
+            return FragmentOutputClass.SINT;
+        }
+        if (componentType.startsWith("UNORM")
+                || componentType.startsWith("SNORM")
+                || componentType.startsWith("FLOAT")) {
+            return FragmentOutputClass.FLOAT;
+        }
+        throw new ShaderCompileException(
+                "Unsupported color-target component type " + componentType + " for " + format
+        );
     }
 
     static void validateFragmentOutputSignature(
             final RenderPipeline pipeline,
-            final Set<Integer> shaderLocations
+            final Map<Integer, FragmentOutputClass> shaderOutputs
     ) throws ShaderCompileException {
         Set<Integer> targetLocations = new HashSet<>();
         ColorTargetState[] targets = pipeline.getColorTargetStates();
@@ -1373,11 +1418,23 @@ final class MetalCrossShaderCompiler {
                 targetLocations.add(index);
             }
         }
-        if (!targetLocations.containsAll(shaderLocations)) {
+        if (!targetLocations.containsAll(shaderOutputs.keySet())) {
             throw new ShaderCompileException(
                     "Fragment output/color-target location mismatch for " + pipeline.getLocation()
-                            + ": shader=" + shaderLocations + ", targets=" + targetLocations
+                            + ": shader=" + shaderOutputs.keySet() + ", targets=" + targetLocations
             );
+        }
+        for (Map.Entry<Integer, FragmentOutputClass> output : shaderOutputs.entrySet()) {
+            GpuFormat targetFormat = targets[output.getKey()].format();
+            FragmentOutputClass targetClass = colorTargetClass(targetFormat);
+            if (output.getValue() != targetClass) {
+                throw new ShaderCompileException(
+                        "Fragment output/color-target numeric-class mismatch for " + pipeline.getLocation()
+                                + " at location " + output.getKey()
+                                + ": shader=" + output.getValue()
+                                + ", target=" + targetClass + " (" + targetFormat + ')'
+                );
+            }
         }
     }
 
@@ -1489,7 +1546,7 @@ final class MetalCrossShaderCompiler {
                 checkSpvc(Spvc.spvc_compiler_install_compiler_options(compiler, options), "spvc_compiler_install_compiler_options");
 
                 registerIntegerInputConversions(stack, compiler, attributeFormats);
-                Set<Integer> stageOutputLocations = applyExplicitFragmentOutputLocations(
+                Map<Integer, FragmentOutputClass> fragmentOutputs = applyExplicitFragmentOutputLocations(
                         stack, compiler, explicitFragmentOutputLocations
                 );
 
@@ -1564,7 +1621,7 @@ final class MetalCrossShaderCompiler {
                         mslSource,
                         hasPushConstants,
                         activeResources,
-                        stageOutputLocations,
+                        fragmentOutputs,
                         argumentBindings
                 );
             } finally {
@@ -1605,9 +1662,15 @@ final class MetalCrossShaderCompiler {
             String source,
             boolean hasPushConstants,
             Set<String> activeResources,
-            Set<Integer> stageOutputLocations,
+            Map<Integer, FragmentOutputClass> fragmentOutputs,
             Map<Integer, ArgumentResourceBinding> argumentBindings
     ) {
+    }
+
+    enum FragmentOutputClass {
+        FLOAT,
+        SINT,
+        UINT
     }
 
     record ArgumentResourceBinding(int primaryIndex, int secondaryIndex) {

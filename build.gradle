@@ -1053,8 +1053,17 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			: System.getProperty("metallum.metalfx.objectMotionProducer", "false")
 	def requestedFrameGenerationOutputWidth = System.getProperty(
 			"metallum.metalfx.frameGenerationOutputWidth", "1280")
-	def expectedFrameGenerationPresentPath = System.getProperty(
-			"metallum.opt.metal4Present", "false").toBoolean() ? "metal4" : "metal3"
+	def validationMetal4Requested = System.getProperty(
+			"metallum.opt.metal4", "true").toBoolean()
+	def validationMetal4MainRequested = System.getProperty(
+			"metallum.opt.metal4MainRenderer",
+			Boolean.toString(validationMetal4Requested)).toBoolean()
+	def validationMetal4PresentRequested = System.getProperty(
+			"metallum.opt.metal4Present",
+			Boolean.toString(validationMetal4Requested)).toBoolean()
+	def expectedFrameGenerationPresentPath = validationMetal4Requested
+			&& (validationMetal4PresentRequested || validationMetal4MainRequested)
+			? "metal4" : "metal3"
 	def normalizedFrameGenerationOutputWidth = requestedFrameGenerationOutputWidth
 				.trim().toLowerCase(Locale.ROOT)
 	def configuredIrisProperties = new Properties()
@@ -1136,24 +1145,27 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 		// the unified Iris evaluator requests OFF and must not be silently changed
 		// to TEMPORAL merely because it reuses this validation task.
 		def requestedMetalFxMode = System.getProperty("metallum.metalfx.mode")
+		def effectiveRequestedMetalFxMode = (nativeFullscreenBaselineRequested
+				? "OFF"
+				: (requestedMetalFxMode == null ? "TEMPORAL" : requestedMetalFxMode))
+				.trim().toUpperCase(Locale.ROOT)
 		systemProperty "metallum.metalfx.mode",
-				nativeFullscreenBaselineRequested
-						? "OFF"
-						: (requestedMetalFxMode == null ? "TEMPORAL" : requestedMetalFxMode)
+				effectiveRequestedMetalFxMode
 			if (nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested) {
 				systemProperty "metallum.validation.performanceOnly", "true"
 				systemProperty "metallum.validation.gpuTiming", "true"
 			}
 			if (nativeRenderEfficiencyValidationRequested) {
 				systemProperty "metallum.validation.gpuPassTiming", "true"
-				// The default efficiency lane remains Metal 4, while explicit
-				// Metal 3/ICB comparisons must be able to select their real backend.
-				systemProperty "metallum.opt.metal4", System.getProperty(
-						"metallum.opt.metal4", "true")
+				// Profile the shipping backend by default. Explicit Metal 3
+				// comparisons still select the complete fallback with the master
+				// switch instead of leaving a Metal 4 capability pilot engaged.
+				def efficiencyMetal4 = Boolean.toString(validationMetal4Requested)
+				systemProperty "metallum.opt.metal4", efficiencyMetal4
 				systemProperty "metallum.opt.metal4MainQueuePilot", System.getProperty(
-						"metallum.opt.metal4MainQueuePilot", "true")
-				systemProperty "metallum.opt.metal4MainRenderer", System.getProperty(
-						"metallum.opt.metal4MainRenderer", "false")
+						"metallum.opt.metal4MainQueuePilot", "false")
+				systemProperty "metallum.opt.metal4MainRenderer",
+						Boolean.toString(validationMetal4MainRequested)
 			}
 		if (nativeFrameGenerationValidationRequested) {
 			systemProperty "metallum.metalfx.nativeDirectFrameGeneration", "true"
@@ -1253,7 +1265,7 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 						|| !(baseline.nativeMainReadback?.passed as boolean))) {
 					throw new GradleException("Native main-render GPU readback did not complete successfully")
 				}
-				if (System.getProperty("metallum.opt.metal4MainRenderer", "false").toBoolean()) {
+				if (validationMetal4MainRequested) {
 					if (!(baseline.metal4MainRendererEngaged as boolean)) {
 						throw new GradleException("Metal 4 main renderer was requested but did not engage")
 					}
@@ -1261,6 +1273,13 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 							|| (baseline.metal4MainRenderer.commandBuffersCreated as long) != 3L
 							|| (baseline.metal4MainRenderer.commandBufferFactoryCallsAvoided as long) <= 0L) {
 						throw new GradleException("Metal 4 main renderer residency/reuse evidence is incomplete")
+					}
+					if (!(baseline.metal4BackendClosure?.engaged as boolean)
+							|| (baseline.metal4BackendClosure.renderEncodes as long) <= 0L
+							|| (baseline.metal4BackendClosure.blitEncodes as long) <= 0L
+							|| (baseline.metal4BackendClosure.legacyEncoderViolations as long) != 0L
+							|| !(baseline.metal4BackendClosure.noLegacyEncoderViolations as boolean)) {
+						throw new GradleException("Metal 4 backend closure evidence is incomplete or contains a legacy encoder")
 					}
 				}
 				logger.lifecycle(String.format(Locale.ROOT,
@@ -1499,7 +1518,8 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			}
 			def explicitMetal4Master = System.getProperty("metallum.opt.metal4")
 			def explicitMetal4Main = System.getProperty("metallum.opt.metal4MainRenderer")
-			def metal4MainRequested = explicitMetal4Main?.toBoolean() == true
+			def metal4MainRequested = expectedValidationBackend == "Metal"
+					&& validationMetal4MainRequested
 			if (metal4MainRequested) {
 				if (runState.metal4MainRendererEngaged != true) {
 					problems << "Metal 4 main renderer was requested but did not engage".toString()
@@ -1512,8 +1532,10 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 						|| runState.metal4MainRendererFactoryCallsAvoided <= 0) {
 					problems << "Metal 4 main renderer recorded no command-buffer reuse".toString()
 				}
+			}
+			if (metal4MainRequested && effectiveRequestedMetalFxMode in ["TEMPORAL", "AUTO"]) {
 				if (runState.metal4MetalFxEngaged != true) {
-					problems << "Metal 4 main renderer was requested but MetalFX did not receive its queue".toString()
+					problems << "Metal 4 Temporal did not receive the main queue".toString()
 				}
 				if (!(runState.metal4AuxiliaryComputeEncodes instanceof Number)
 						|| runState.metal4AuxiliaryComputeEncodes <= 0) {
@@ -1522,6 +1544,39 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				if (!(runState.metal4TemporalScalerEncodes instanceof Number)
 						|| runState.metal4TemporalScalerEncodes <= 0) {
 					problems << "Metal 4 Temporal scaler recorded no encodes".toString()
+				}
+			} else if (metal4MainRequested && effectiveRequestedMetalFxMode == "SPATIAL") {
+				if (runState.metal4MetalFxEngaged != true
+						|| !(runState.metal4SpatialScalerEncodes instanceof Number)
+						|| runState.metal4SpatialScalerEncodes <= 0) {
+					problems << "Metal 4 Spatial scaler recorded no encodes".toString()
+				}
+			} else if (metal4MainRequested && effectiveRequestedMetalFxMode == "OFF") {
+				def forbiddenMetalFxWork = [
+						runState.metal4AuxiliaryComputeEncodes,
+						runState.metal4SpatialScalerEncodes,
+						runState.metal4TemporalScalerEncodes,
+						runState.metal4FrameGenerationInputSubmissions
+				]
+				if (forbiddenMetalFxWork.any { it instanceof Number && it > 0 }) {
+					problems << "MetalFX OFF recorded Metal 4 scaler work".toString()
+				}
+			}
+			if (runState.metal4MainRendererEngaged == true) {
+				if (runState.metal4BackendClosureEngaged != true) {
+					problems << "Metal 4 backend closure telemetry did not engage".toString()
+				}
+				if (!(runState.metal4GenericRenderEncodes instanceof Number)
+						|| runState.metal4GenericRenderEncodes <= 0) {
+					problems << "Metal 4 backend recorded no generic render encodes".toString()
+				}
+				if (!(runState.metal4GenericBlitEncodes instanceof Number)
+						|| runState.metal4GenericBlitEncodes <= 0) {
+					problems << "Metal 4 backend recorded no generic blit encodes".toString()
+				}
+				if (runState.metal4LegacyEncoderViolations != 0
+						|| runState.metal4NoLegacyEncoderViolations != true) {
+					problems << "Metal 4 backend escaped to a legacy encoder".toString()
 				}
 			}
 			if (explicitMetal4Main != null && !explicitMetal4Main.toBoolean()
@@ -2706,7 +2761,14 @@ def configureRenderContractNativeTest = { Test task, boolean metal4 ->
 		includeTestsMatching "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
 	}
 	task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+	task.systemProperty "metallum.hotpath.telemetry", "true"
+	task.systemProperty "metallum.opt.argumentBuffers", "true"
+	task.systemProperty "metallum.opt.terrainIcb", "true"
 	task.systemProperty "metallum.opt.metal4", metal4.toString()
+	task.systemProperty "metallum.opt.metal4Compiler", metal4.toString()
+	task.systemProperty "metallum.opt.metal4Present", metal4.toString()
+	task.systemProperty "metallum.opt.metal4MainRenderer", metal4.toString()
+	task.systemProperty "metallum.opt.residencySet", metal4.toString()
 	task.environment "MTL_DEBUG_LAYER", metalApiValidation
 	task.environment "MTL_SHADER_VALIDATION", metalShaderValidation
 	task.testLogging {

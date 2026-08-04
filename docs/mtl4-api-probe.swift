@@ -208,7 +208,12 @@ func probeAsync(compiler: MTL4Compiler, rp: MTL4RenderPipelineDescriptor) async 
 // the frame-generation present thread need. Complements mtl4probe.swift.
 
 @available(macOS 26.0, iOS 26.0, *)
-func probeRenderState(enc: MTL4RenderCommandEncoder, buffer: MTLBuffer, dss: MTLDepthStencilState) {
+func probeRenderState(
+    enc: MTL4RenderCommandEncoder,
+    buffer: MTLBuffer,
+    indirectCommands: MTLIndirectCommandBuffer,
+    dss: MTLDepthStencilState
+) {
     enc.setViewport(MTLViewport(originX: 0, originY: 0, width: 8, height: 8, znear: 0, zfar: 1))
     enc.setViewports([MTLViewport(originX: 0, originY: 0, width: 8, height: 8, znear: 0, zfar: 1)])
     enc.setScissorRect(MTLScissorRect(x: 0, y: 0, width: 8, height: 8))
@@ -235,6 +240,12 @@ func probeRenderState(enc: MTL4RenderCommandEncoder, buffer: MTLBuffer, dss: MTL
         instanceCount: 2,
         baseVertex: 0,
         baseInstance: 0
+    )
+    // SwiftPrivate in Metal.apinotes, so the imported spelling retains the
+    // leading double underscore instead of the Metal 3 overlay's Range form.
+    enc.__executeCommands(
+        in: indirectCommands,
+        with: NSRange(location: 0, length: 1)
     )
     enc.drawPrimitives(primitiveType: .triangle, indirectBuffer: buffer.gpuAddress)
     enc.drawIndexedPrimitives(
@@ -279,6 +290,10 @@ func probeCompute(
     cpd.computeFunctionDescriptor = cfn
     cpd.threadGroupSizeIsMultipleOfThreadExecutionWidth = true
     let cps = try compiler.makeComputePipelineState(descriptor: cpd)
+    _ = try compiler.makeComputePipelineState(
+        descriptor: cpd,
+        compilerTaskOptions: MTL4CompilerTaskOptions()
+    )
     cenc.setComputePipelineState(cps)
     cenc.dispatchThreads(threadsPerGrid: MTLSize(width: 8, height: 8, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
     cenc.dispatchThreadgroups(

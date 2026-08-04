@@ -854,6 +854,15 @@ public final class MetalValidationClient implements ClientModInitializer {
             metal4MetalFx.addProperty("temporalScalerEncodes", metal4MetalFxStats[3]);
             metal4MetalFx.addProperty("frameGenerationInputSubmissions", metal4MetalFxStats[4]);
             report.add("metal4MetalFx", metal4MetalFx);
+            long[] metal4BackendStats = MetalNativeBridge.metallum_metal4_backend_closure_stats();
+            JsonObject metal4Backend = new JsonObject();
+            metal4Backend.addProperty("engaged", metal4BackendStats[0] != 0L);
+            metal4Backend.addProperty("renderEncodes", metal4BackendStats[1]);
+            metal4Backend.addProperty("computeEncodes", metal4BackendStats[2]);
+            metal4Backend.addProperty("blitEncodes", metal4BackendStats[3]);
+            metal4Backend.addProperty("legacyEncoderViolations", metal4BackendStats[4]);
+            metal4Backend.addProperty("noLegacyEncoderViolations", metal4BackendStats[5] != 0L);
+            report.add("metal4BackendClosure", metal4Backend);
             MetalGpuTimingRecorder.RenderEncoderLookupStats encoderLookupStats =
                     MetalGpuTimingRecorder.renderEncoderLookupStats();
             JsonObject encoderLookup = new JsonObject();
@@ -2513,12 +2522,36 @@ public final class MetalValidationClient implements ClientModInitializer {
             final int completed,
             final int failures
     ) {
-        String finalStatus = renderContractApplicable()
-                && !RenderContractRuntime.completionGatePassed()
+        long[] metal4BackendStats = MetalNativeBridge.metallum_metal4_backend_closure_stats();
+        boolean metal4ClosureFailed = metal4BackendStats[0] != 0L
+                && (metal4BackendStats[1] <= 0L
+                || metal4BackendStats[3] <= 0L
+                || metal4BackendStats[4] != 0L
+                || metal4BackendStats[5] == 0L);
+        String finalStatus = (renderContractApplicable()
+                && !RenderContractRuntime.completionGatePassed())
+                || metal4ClosureFailed
                 ? "failed"
                 : "passed";
         if ("failed".equals(finalStatus)) {
-            Metallum.LOGGER.error("Render-contract completion gate failed: {}", RenderContractRuntime.snapshot());
+            if (metal4ClosureFailed) {
+                Metallum.LOGGER.error(
+                        "Metal 4 backend closure failed: engaged={} render={} compute={} blit={}"
+                                + " legacyViolations={} noLegacy={}",
+                        metal4BackendStats[0] != 0L,
+                        metal4BackendStats[1],
+                        metal4BackendStats[2],
+                        metal4BackendStats[3],
+                        metal4BackendStats[4],
+                        metal4BackendStats[5] != 0L
+                );
+            }
+            if (renderContractApplicable() && !RenderContractRuntime.completionGatePassed()) {
+                Metallum.LOGGER.error(
+                        "Render-contract completion gate failed: {}",
+                        RenderContractRuntime.snapshot()
+                );
+            }
         }
         finishRunState(finalStatus, completed, failures + ("failed".equals(finalStatus) ? 1 : 0));
         Metallum.LOGGER.info(
@@ -2569,6 +2602,14 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (contractApplicable && contractBeforeClose.enabled() && !contractBeforeClose.ready()
                 && !validationFailureScenarios.contains("render-contract")) {
             validationFailureScenarios.add("render-contract");
+        }
+        long[] metal4BackendStats = MetalNativeBridge.metallum_metal4_backend_closure_stats();
+        if (metal4BackendStats[0] != 0L
+                && (metal4BackendStats[1] <= 0L
+                || metal4BackendStats[3] <= 0L
+                || metal4BackendStats[4] != 0L
+                || metal4BackendStats[5] == 0L)) {
+            validationFailureScenarios.add("metal4-backend-closure");
         }
         if (!"passed".equals(status) && validationFailureScenarios.isEmpty()) {
             validationFailureScenarios.add("validation-run");
@@ -2634,6 +2675,12 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "metal4SpatialScalerEncodes": %d,
                       "metal4TemporalScalerEncodes": %d,
                       "metal4FrameGenerationInputSubmissions": %d,
+                      "metal4BackendClosureEngaged": %s,
+                      "metal4GenericRenderEncodes": %d,
+                      "metal4GenericComputeEncodes": %d,
+                      "metal4GenericBlitEncodes": %d,
+                      "metal4LegacyEncoderViolations": %d,
+                      "metal4NoLegacyEncoderViolations": %s,
                       "renderContractRequested": %s,
                       "renderContractApplicable": %s,
                       "renderContractEnabled": %s,
@@ -2680,6 +2727,12 @@ public final class MetalValidationClient implements ClientModInitializer {
                             metal4MetalFxStats[2],
                             metal4MetalFxStats[3],
                             metal4MetalFxStats[4],
+                            metal4BackendStats[0] != 0L,
+                            metal4BackendStats[1],
+                            metal4BackendStats[2],
+                            metal4BackendStats[3],
+                            metal4BackendStats[4],
+                            metal4BackendStats[5] != 0L,
                             contractRequested,
                             contractApplicable,
                             contract.enabled(),

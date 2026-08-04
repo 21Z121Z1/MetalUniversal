@@ -172,10 +172,6 @@ final class MetalMrtBackendIntegrationTest {
 
     @Test
     void terrainIcbExecutesTextureArgumentBufferResources() {
-        org.junit.jupiter.api.Assumptions.assumeFalse(
-                Boolean.getBoolean("metallum.opt.metal4"),
-                "The terrain ICB is intentionally a Metal 3 execution path"
-        );
         assertTrue(MetalTerrainIcbScope.enabled(), "production terrain ICB gate is disabled");
         assertTrue(IrisMetalArgumentBindingRuntime.enabled(), "argument buffers are disabled");
         assertTrue(
@@ -273,6 +269,14 @@ final class MetalMrtBackendIntegrationTest {
             assertTrue(arguments.encodedSnapshots() > 0L, "no argument-buffer snapshot executed");
             assertTrue(arguments.updates() >= 2L, "texture/sampler resources were not encoded");
             assertEquals(0L, arguments.failures());
+            if (Boolean.getBoolean("metallum.opt.metal4")) {
+                long[] closure = MetalNativeBridge.metallum_metal4_backend_closure_stats();
+                assertEquals(1L, closure[0], "Metal 4 closure telemetry did not engage");
+                assertTrue(closure[1] > 0L, "Metal 4 recorded no generic render encoder");
+                assertTrue(closure[3] > 0L, "Metal 4 recorded no generic blit encoder");
+                assertEquals(0L, closure[4], "Metal 4 escaped through a legacy encoder");
+                assertEquals(1L, closure[5], "Metal 4 no-legacy invariant failed");
+            }
         }
         closeTextures(outputs);
     }
@@ -903,8 +907,13 @@ final class MetalMrtBackendIntegrationTest {
                 null,
                 ColorTargetState.WRITE_ALL
         );
-        MetalCompiledRenderPipeline compiled = device.getOrCompilePipeline(pipeline);
-        assertFalse(compiled.isValid(), "integer output with normalized float target must not create a valid PSO");
+        IllegalStateException mismatch = assertThrows(
+                IllegalStateException.class,
+                () -> device.getOrCompilePipeline(pipeline)
+        );
+        assertTrue(mismatch.getMessage().contains("Failed to compile Metal cross shader"));
+        assertNotNull(mismatch.getCause());
+        assertTrue(mismatch.getCause().getMessage().contains("numeric-class mismatch"));
     }
 
     private RenderPipeline pipeline(

@@ -269,7 +269,6 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             this.argumentLayout = null;
         }
         this.terrainIcbCompatible = MetalTerrainIcbScope.enabled()
-                && !Boolean.getBoolean("metallum.opt.metal4")
                 && this.argumentLayout != null;
         this.validationPipelineId = "sha256:" + sha256(
                 vertexMsl + "\u0000" + fragmentMsl + "\u0000"

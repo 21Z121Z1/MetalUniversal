@@ -949,7 +949,7 @@ public func metallum_render_argument_packet_apply_v1(
     return Int32(entryCount)
 }
 
-// MARK: - Metal 3 Sodium terrain ICB
+// MARK: - Sodium terrain ICB (Metal 3 and Metal 4)
 
 @_cdecl("metallum_terrain_icb_encode_indexed_v1")
 public func metallum_terrain_icb_encode_indexed_v1(
@@ -975,10 +975,15 @@ public func metallum_terrain_icb_encode_indexed_v1(
         return 0
     }
 
-    // Metal 4 uses a private bridge object, not MTLRenderCommandEncoder. The
-    // The ICB path is deliberately Metal 3 only and returns before executing a draw.
     let object = Unmanaged<AnyObject>.fromOpaque(encoderPointer).takeUnretainedValue()
-    guard let encoder = object as? MTLRenderCommandEncoder else {
+    let metal3Encoder = object as? MTLRenderCommandEncoder
+    let isMetal4Encoder: Bool
+    if #available(macOS 26.0, iOS 26.0, *) {
+        isMetal4Encoder = object is Metal4MainRenderEncoderBridge
+    } else {
+        isMetal4Encoder = false
+    }
+    guard metal3Encoder != nil || isMetal4Encoder else {
         return 0
     }
 
@@ -1031,9 +1036,21 @@ public func metallum_terrain_icb_encode_indexed_v1(
             baseInstance: baseInstance
         )
     }
-    encoder.useResource(indexBuffer, usage: .read, stages: .vertex)
-    encoder.executeCommandsInBuffer(icb, range: NSRange(location: 0, length: drawCount))
-    return 1
+    if let metal3Encoder {
+        metal3Encoder.useResource(indexBuffer, usage: .read, stages: .vertex)
+        metal3Encoder.useResource(icb, usage: .read, stages: .vertex)
+        metal3Encoder.executeCommandsInBuffer(icb, range: NSRange(location: 0, length: drawCount))
+        return 1
+    }
+    if #available(macOS 26.0, iOS 26.0, *),
+       metallumMetal4ExecuteTerrainIcb(
+           encoderPointer: encoderPointer,
+           indirectCommandBuffer: icb,
+           commandCount: drawCount
+       ) {
+        return 1
+    }
+    return 0
 }
 
 // MARK: - Versioned native interface

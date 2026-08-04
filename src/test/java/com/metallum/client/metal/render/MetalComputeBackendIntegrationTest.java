@@ -116,9 +116,12 @@ final class MetalComputeBackendIntegrationTest {
             assertEquals(0L, snapshot.renderAttempts());
             assertEquals(1L, snapshot.computeAttempts());
             assertEquals(0L, snapshot.failures());
+            String expectedPrefix = Boolean.getBoolean("metallum.opt.metal4")
+                    ? "metal4/java-compute/"
+                    : "java-compute/";
             assertTrue(
                     snapshot.identities().stream().anyMatch(identity ->
-                            identity.startsWith("java-compute/")),
+                            identity.startsWith(expectedPrefix)),
                     () -> "missing compute pipeline identity: " + snapshot.identities()
             );
         }

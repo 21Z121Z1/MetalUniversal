@@ -566,6 +566,8 @@ public final class MetalNativeBridge {
             metal4MainRendererEnable = downcall(lookup, "metallum_metal4_main_renderer_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            metal4BackendClosureStats = downcall(lookup, "metallum_metal4_backend_closure_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            metal4NoLegacyEncoderViolations = downcall(lookup, "metallum_metal4_no_legacy_encoder_violations", FunctionDescriptor.of(INT));
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
             residencySetEnable = downcall(lookup, "metallum_residency_set_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
@@ -921,6 +923,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle metal4MainRendererEnable;
     private static final MethodHandle metal4MainRendererStats;
     private static final MethodHandle metal4MetalFxStats;
+    private static final MethodHandle metal4BackendClosureStats;
+    private static final MethodHandle metal4NoLegacyEncoderViolations;
     private static final MethodHandle setMetal4CompilerEnabled;
     private static final MethodHandle setMetalHud;
     private static final MethodHandle metalHudStatus;
@@ -2765,6 +2769,29 @@ public final class MetalNativeBridge {
             };
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metal4_metalfx_stats", throwable);
+        }
+    }
+
+    public static long[] metallum_metal4_backend_closure_stats() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment render = arena.allocate(LONG);
+            MemorySegment compute = arena.allocate(LONG);
+            MemorySegment blit = arena.allocate(LONG);
+            MemorySegment legacyViolations = arena.allocate(LONG);
+            int engaged = (int) metal4BackendClosureStats.invokeExact(
+                    render, compute, blit, legacyViolations
+            );
+            int noLegacyViolations = (int) metal4NoLegacyEncoderViolations.invokeExact();
+            return new long[] {
+                    engaged,
+                    render.get(LONG, 0L),
+                    compute.get(LONG, 0L),
+                    blit.get(LONG, 0L),
+                    legacyViolations.get(LONG, 0L),
+                    noLegacyViolations
+            };
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metal4_backend_closure_stats", throwable);
         }
     }
 

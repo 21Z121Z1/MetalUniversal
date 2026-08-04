@@ -83,39 +83,42 @@ final class MetalDevice implements GpuDeviceBackend {
             ));
     private boolean stableTerrainSamplerLogged;
     /**
-     * Master kill switch for every Metal 4 path (migration spec M1, appendix C).
-     * Metal 4 code is a parallel branch: the Metal 3 path stays byte-for-byte
-     * intact and is what runs whenever this is false, whenever the device or SDK
-     * lacks Metal 4, or whenever a sub-switch is off.
+     * Master switch for the shipping Metal 4 backend (migration spec M1,
+     * appendix C). It defaults on and selects the compiler, main renderer,
+     * presentation and residency paths together on supported systems. An
+     * explicit false selects the independently validated Metal 3 fallback.
      */
     private static final boolean METAL4_REQUESTED =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "false"));
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "true"));
     /**
      * Routes render pipeline creation through MTL4Compiler (spec M2). Depends on
      * the master switch; on its own it does nothing.
      */
     private static final boolean METAL4_COMPILER =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"));
+            Boolean.parseBoolean(System.getProperty(
+                    "metallum.opt.metal4Compiler",
+                    Boolean.toString(METAL4_REQUESTED)
+            ));
     /**
      * Runs the frame-generation present thread on a Metal 4 queue (spec M4).
      * Depends on the compiler switch, because the MTL4 frame interpolator is built
      * from an MTL4Compiler.
      */
     private static final boolean METAL4_PRESENT =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Present", "false"));
+            Boolean.parseBoolean(System.getProperty(
+                    "metallum.opt.metal4Present",
+                    Boolean.toString(METAL4_REQUESTED)
+            ));
     private static final boolean METAL4_MAIN_QUEUE_PILOT =
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainQueuePilot", "false"));
     private static final boolean METAL4_MAIN_RENDERER =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainRenderer", "false"));
+            Boolean.parseBoolean(System.getProperty(
+                    "metallum.opt.metal4MainRenderer",
+                    Boolean.toString(METAL4_REQUESTED)
+            ));
     /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
     private final boolean metal4Available;
     private final boolean metal4MainRenderer;
-    /**
-     * Explicit residency tracking (spec M3). MTLResidencySet is macOS 15 / iOS 18
-     * and needs no Metal 4, so this switch is independent of the master one: the
-     * table gets built and measured on the existing Metal 3 queue, and M7 only
-     * has to connect it.
-     */
     /**
      * Appends the Metal 4 barrier map's consumer barriers to the existing Metal 3
      * encoders (spec M6-B). Independent of the master switch: the API is gated on
@@ -124,8 +127,15 @@ final class MetalDevice implements GpuDeviceBackend {
      */
     private static final boolean METAL4_BARRIER =
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Barrier", "false"));
+    /**
+     * Explicit residency tracking. It is part of the default Metal 4 backend,
+     * but remains independently selectable for a Metal 3 diagnostic run.
+     */
     private static final boolean RESIDENCY_SET =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.residencySet", "false"));
+            Boolean.parseBoolean(System.getProperty(
+                    "metallum.opt.residencySet",
+                    Boolean.toString(METAL4_REQUESTED)
+            ));
     private static final boolean RENDER_PIPELINE_IDENTITY_EQUALS = renderPipelineUsesIdentityEquals();
     /**
      * Serializes the whole GLSL→SPIR-V→MSL→PSO chain across threads: the
@@ -214,6 +224,10 @@ final class MetalDevice implements GpuDeviceBackend {
                 ) == 0) {
             throw new IllegalStateException("Metal 4 main renderer initialization failed");
         }
+        // Native built-in clear/present pipelines are initialized below and
+        // must use the same compiler path as Java-created shaders. Publishing
+        // this switch after init silently left those PSOs on Metal 3.
+        MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4.compiler() ? 1 : 0);
         MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
         // Must agree with MetalCommandEncoder.DEFERRED_DEPTH_STORE before the
         // first render encoder: the native side only sets storeAction=.unknown
@@ -221,7 +235,6 @@ final class MetalDevice implements GpuDeviceBackend {
         MetalNativeBridge.metallum_set_deferred_depth_store(
                 MetalCommandEncoder.DEFERRED_DEPTH_STORE ? 1 : 0
         );
-        MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4.compiler() ? 1 : 0);
         MetalNativeBridge.metallum_set_metal4_present_enabled(metal4.present() ? 1 : 0);
         if (metal4.mainQueuePilot()
                 && MetalNativeBridge.metallum_metal4_main_queue_pilot_validate(metalDeviceHandle) == 0) {

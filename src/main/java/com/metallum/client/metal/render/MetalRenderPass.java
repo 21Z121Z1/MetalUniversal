@@ -50,7 +50,6 @@ final class MetalRenderPass implements RenderPassBackend {
             2,
             Integer.getInteger("metallum.opt.nativeMultiDrawBatchThreshold", 4)
     );
-    private static final boolean METAL4_REQUESTED = Boolean.getBoolean("metallum.opt.metal4");
     private static final int TERRAIN_ICB_THRESHOLD = Math.max(
             16,
             Integer.getInteger("metallum.opt.terrainIcbMinDraws", 16)
@@ -372,7 +371,6 @@ final class MetalRenderPass implements RenderPassBackend {
             enc.flushPendingState();
             boolean encodedByIcb = false;
             boolean attemptIcb = MetalTerrainIcbScope.enabled()
-                    && !METAL4_REQUESTED
                     && this.compiledPipeline != null
                     && this.compiledPipeline.terrainIcbCompatible()
                     && MetalTerrainIcbScope.active()
