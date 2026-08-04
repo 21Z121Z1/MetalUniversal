@@ -1,8 +1,8 @@
 # Metal 4 device-session macOS 26 CI receipt
 
 - Conclusion: **PASS**
-- Source commit: `43af5008c5b60b0eb3aa70193b5dca8f1740f814`
-- Workflow trigger: `d67bfe921c7312c53c555ca08781eb4409ba40ad`
+- Source commit: `3a20a99b198ce9ccd396f89e2a289c660d843350`
+- Workflow trigger: `17144aeb3ec696dc7c532598be1175f9fede6e6f`
 - Runner: `macOS / ARM64`
 - Xcode path: `/Applications/Xcode_26.6.0.app/Contents/Developer`
 - Swift: `Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)`
@@ -15,8 +15,6 @@
 ## Patch log
 
 ```text
-/Users/runner/work/MetalUniversal/MetalUniversal/scripts/apply_metal4_device_session_fix.py:28: SyntaxWarning: "\g" is an invalid escape sequence. Such sequences will not work in the future. Did you mean "\\g"? A raw string is also an option.
-  """\g<i>if let existing = metal4CompilerStorage as? MTL4Compiler {
 ```
 
 ## Build log tail
@@ -40,88 +38,88 @@ Starting a Gradle Daemon (subsequent builds will be faster)
 Fabric Loom: 1.16.3
 
 > Task :buildMacNative
-src/main/native/MetallumNative.swift:2404:19: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 1446 | 
- 1447 | @available(macOS 26.0, *)
- 1448 | final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate {
+src/main/native/MetallumNative.swift:2409:19: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
+ 1451 | 
+ 1452 | @available(macOS 26.0, *)
+ 1453 | final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate {
       |             `- note: enclosing scope here
- 1449 |     private struct PendingFrame {
- 1450 |         let sourceFrameID: UInt64
+ 1454 |     private struct PendingFrame {
+ 1455 |         let sourceFrameID: UInt64
       :
- 2402 |         }()
- 2403 |         if let lease = metal4Lease {
- 2404 |             guard #available(macOS 26.0, *),
+ 2407 |         }()
+ 2408 |         if let lease = metal4Lease {
+ 2409 |             guard #available(macOS 26.0, *),
       |                   `- warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 2405 |                   let copies = lease.commandBuffer.makeComputeCommandEncoder() else {
- 2406 |                 completeFrame()
+ 2410 |                   let copies = lease.commandBuffer.makeComputeCommandEncoder() else {
+ 2411 |                 completeFrame()
 
-src/main/native/MetallumNative.swift:6079:12: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6000 | #if os(macOS) && canImport(MetalFX)
- 6001 | @available(macOS 26.0, iOS 26.0, *)
- 6002 | private func metal4MetalFxEncodeV2(
+src/main/native/MetallumNative.swift:6087:12: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
+ 6008 | #if os(macOS) && canImport(MetalFX)
+ 6009 | @available(macOS 26.0, iOS 26.0, *)
+ 6010 | private func metal4MetalFxEncodeV2(
       |              `- note: enclosing scope here
- 6003 |     lease: Metal4MainCommandBufferLease, device: MTLDevice,
- 6004 |     colorTexture: MTLTexture, depthTexture: MTLTexture, handDepthTexture: MTLTexture?,
+ 6011 |     lease: Metal4MainCommandBufferLease, device: MTLDevice,
+ 6012 |     colorTexture: MTLTexture, depthTexture: MTLTexture, handDepthTexture: MTLTexture?,
       :
- 6077 |         descriptor.isAutoExposureEnabled = false
- 6078 |         descriptor.requiresSynchronousInitialization = true
- 6079 |         if #available(macOS 14.4, *) {
+ 6085 |         descriptor.isAutoExposureEnabled = false
+ 6086 |         descriptor.requiresSynchronousInitialization = true
+ 6087 |         if #available(macOS 14.4, *) {
       |            `- warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6080 |             descriptor.isReactiveMaskTextureEnabled = true
- 6081 |             descriptor.reactiveMaskTextureFormat = reactiveTexture.pixelFormat
+ 6088 |             descriptor.isReactiveMaskTextureEnabled = true
+ 6089 |             descriptor.reactiveMaskTextureFormat = reactiveTexture.pixelFormat
 
-src/main/native/MetallumNative.swift:6220:8: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6000 | #if os(macOS) && canImport(MetalFX)
- 6001 | @available(macOS 26.0, iOS 26.0, *)
- 6002 | private func metal4MetalFxEncodeV2(
+src/main/native/MetallumNative.swift:6228:8: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
+ 6008 | #if os(macOS) && canImport(MetalFX)
+ 6009 | @available(macOS 26.0, iOS 26.0, *)
+ 6010 | private func metal4MetalFxEncodeV2(
       |              `- note: enclosing scope here
- 6003 |     lease: Metal4MainCommandBufferLease, device: MTLDevice,
- 6004 |     colorTexture: MTLTexture, depthTexture: MTLTexture, handDepthTexture: MTLTexture?,
+ 6011 |     lease: Metal4MainCommandBufferLease, device: MTLDevice,
+ 6012 |     colorTexture: MTLTexture, depthTexture: MTLTexture, handDepthTexture: MTLTexture?,
       :
- 6218 |     scaler.reset = reset != 0
- 6219 |     scaler.isDepthReversed = depthReversed != 0
- 6220 |     if #available(macOS 14.4, *) { scaler.reactiveMaskTexture = reactiveTexture }
+ 6226 |     scaler.reset = reset != 0
+ 6227 |     scaler.isDepthReversed = depthReversed != 0
+ 6228 |     if #available(macOS 14.4, *) { scaler.reactiveMaskTexture = reactiveTexture }
       |        `- warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6221 |     scaler.fence = fence
- 6222 |     lease.commandBuffer.pushDebugGroup("MetalFX Temporal Upscale V2 (Metal 4)")
+ 6229 |     scaler.fence = fence
+ 6230 |     lease.commandBuffer.pushDebugGroup("MetalFX Temporal Upscale V2 (Metal 4)")
 
-src/main/native/MetallumNative.swift:6726:16: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6697 | ) -> Int32 {
- 6698 |     #if os(macOS) && canImport(MetalFX)
- 6699 |     if #available(macOS 26.0, *) {
+src/main/native/MetallumNative.swift:6734:16: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
+ 6705 | ) -> Int32 {
+ 6706 |     #if os(macOS) && canImport(MetalFX)
+ 6707 |     if #available(macOS 26.0, *) {
       |     `- note: enclosing scope here
- 6700 |         return autoreleasepool {
- 6701 |             let presenter: MetalFrameGenerationPresenter
+ 6708 |         return autoreleasepool {
+ 6709 |             let presenter: MetalFrameGenerationPresenter
       :
- 6724 |             }
- 6725 | 
- 6726 |             if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+ 6732 |             }
+ 6733 | 
+ 6734 |             if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
       |                `- warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6727 |                 lease.commandBuffer.pushDebugGroup("MetalFX Frame Generation Inputs (Metal 4)")
- 6728 |             } else {
+ 6735 |                 lease.commandBuffer.pushDebugGroup("MetalFX Frame Generation Inputs (Metal 4)")
+ 6736 |             } else {
 
-src/main/native/MetallumNative.swift:6750:16: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6697 | ) -> Int32 {
- 6698 |     #if os(macOS) && canImport(MetalFX)
- 6699 |     if #available(macOS 26.0, *) {
+src/main/native/MetallumNative.swift:6758:16: warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
+ 6705 | ) -> Int32 {
+ 6706 |     #if os(macOS) && canImport(MetalFX)
+ 6707 |     if #available(macOS 26.0, *) {
       |     `- note: enclosing scope here
- 6700 |         return autoreleasepool {
- 6701 |             let presenter: MetalFrameGenerationPresenter
+ 6708 |         return autoreleasepool {
+ 6709 |             let presenter: MetalFrameGenerationPresenter
       :
- 6748 |                 globalFence: globalFence
- 6749 |             )
- 6750 |             if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
+ 6756 |                 globalFence: globalFence
+ 6757 |             )
+ 6758 |             if #available(macOS 26.0, *), let lease = metal4MainLease(commandBufferPointer) {
       |                `- warning: unnecessary check for 'macOS'; enclosing scope ensures guard will always be true
- 6751 |                 lease.commandBuffer.popDebugGroup()
- 6752 |             } else {
+ 6759 |                 lease.commandBuffer.popDebugGroup()
+ 6760 |             } else {
 
-src/main/native/MetallumNative.swift:6131:13: warning: variable 'cameraUniforms' was never mutated; consider changing to 'let' constant
- 6129 |     }
- 6130 |     if NativeState.legacyMotionPasses {
- 6131 |         var cameraUniforms = MotionUniforms(
+src/main/native/MetallumNative.swift:6139:13: warning: variable 'cameraUniforms' was never mutated; consider changing to 'let' constant
+ 6137 |     }
+ 6138 |     if NativeState.legacyMotionPasses {
+ 6139 |         var cameraUniforms = MotionUniforms(
       |             `- warning: variable 'cameraUniforms' was never mutated; consider changing to 'let' constant
- 6132 |             currentViewProjection: currentMatrix,
- 6133 |             inverseCurrentViewProjection: inverseMatrix,
+ 6140 |             currentViewProjection: currentMatrix,
+ 6141 |             inverseCurrentViewProjection: inverseMatrix,
 
 > Task :compileJava
 
@@ -184,6 +182,8 @@ clang: warning: using sysroot for 'MacOSX' but targeting 'iPhone' [-Wincompatibl
 > Task :extractIrisNestedJars
 > Task :processTestResources
 > Task :testClasses
+> Task :jar
+> Task :assemble
 > Task :metalComputeBackendIntegrationTest SKIPPED
 > Task :compileMetalFrameGenerationLifecycleTest
 
@@ -220,8 +220,6 @@ WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
 Isolated client profiles: PASS
 
 > Task :check
-> Task :jar
-> Task :assemble
 > Task :build
 
 [Incubating] Problems report is available at: file:///Users/runner/work/MetalUniversal/MetalUniversal/build/reports/problems/problems-report.html
@@ -232,6 +230,6 @@ You can use '--warning-mode all' to show the individual deprecation warnings and
 
 For more on this, please refer to https://docs.gradle.org/9.4.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
 
-BUILD SUCCESSFUL in 1m 58s
+BUILD SUCCESSFUL in 2m 9s
 19 actionable tasks: 19 executed
 ```
