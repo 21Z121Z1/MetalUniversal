@@ -128,7 +128,7 @@ final class MetalComputeBackendIntegrationTest {
             assertEquals(0L, snapshot.renderAttempts());
             assertEquals(1L, snapshot.computeAttempts());
             assertEquals(0L, snapshot.failures());
-            String expectedPrefix = Boolean.getBoolean("metallum.opt.metal4")
+            String expectedPrefix = device.metal4MainRendererEnabled()
                     ? "metal4/java-compute/"
                     : "java-compute/";
             assertTrue(

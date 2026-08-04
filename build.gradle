@@ -742,6 +742,16 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.IrisMetalComputeConformanceTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	systemProperty "metallum.hotpath.telemetry", "true"
+	[
+			"metallum.opt.metal4",
+			"metallum.opt.computeCommandPacket"
+	].each { propertyName ->
+		def requested = System.getProperty(propertyName)
+		if (requested != null) {
+			systemProperty propertyName, requested
+		}
+	}
 	environment "MTL_DEBUG_LAYER", metalApiValidation
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 }
