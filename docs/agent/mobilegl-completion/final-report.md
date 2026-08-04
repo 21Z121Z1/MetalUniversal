@@ -144,8 +144,15 @@ New commits on top of the fetched task baseline:
 - `c87ad88 perf: enable validated command packets by default`
 - `31ff6fa test: wire compute packet validation into native suite`
 - `ea629a1 perf: add Metal 4 Iris launcher profile`
+- `5e6d52a docs: record MobileGL completion evidence`
 
-The task branch is fast-forwardable from the current remote target reference (`bb02de095da4f00ee373a0475eae54f9b2e67bf9` at report creation). The report commit and final push are the remaining delivery actions. No force push is permitted. Runtime artifacts, logs, worlds, shader archives, dylibs, captures and `.codex-run` files are excluded from Git.
+The task branch was fast-forwardable from `bb02de095da4f00ee373a0475eae54f9b2e67bf9`. The delivery command was:
+
+```text
+git push origin HEAD:feature/mobilegl-inspired-hotpath
+```
+
+It completed without force (`bb02de0..5e6d52a`). Post-push verification reported local and remote HEAD as `5e6d52af02ca6c1a9a5cf539b44d30d231587d67`, with a clean worktree. This final-report status update is itself a docs-only follow-up commit; the same equality check is rerun after it is pushed. Runtime artifacts, logs, worlds, shader archives, dylibs, captures and `.codex-run` files are excluded from Git.
 
 ## Final Status
 
