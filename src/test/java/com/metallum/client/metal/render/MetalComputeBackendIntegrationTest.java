@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCompareFunction;
+import com.metallum.client.metal.render.mtl.MetalCommandPacketTelemetry;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -17,6 +18,7 @@ import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuTexture;
 import org.joml.Vector4f;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -75,6 +77,16 @@ final class MetalComputeBackendIntegrationTest {
         if (device != null) {
             device.close();
         }
+    }
+
+    @AfterAll
+    static void verifyComputeCommandPacketTelemetry() {
+        if ("false".equalsIgnoreCase(System.getProperty("metallum.opt.computeCommandPacket"))) {
+            return;
+        }
+        MetalCommandPacketTelemetry.Snapshot packets = MetalCommandPacketTelemetry.snapshot();
+        assertTrue(packets.computePacketCalls() > 0L, "compute command packet never executed");
+        assertEquals(0L, packets.computeLegacyReplays(), "compute packet replayed legacy operations");
     }
 
     @Test

@@ -714,7 +714,9 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 	[
 			"metallum.opt.metal4",
 			"metallum.opt.argumentBuffers",
-			"metallum.opt.terrainIcb"
+			"metallum.opt.terrainIcb",
+			"metallum.opt.renderCommandPacket",
+			"metallum.opt.computeCommandPacket"
 	].each { propertyName ->
 		def requested = System.getProperty(propertyName)
 		if (requested != null) {
@@ -2764,6 +2766,10 @@ def configureRenderContractNativeTest = { Test task, boolean metal4 ->
 	task.systemProperty "metallum.hotpath.telemetry", "true"
 	task.systemProperty "metallum.opt.argumentBuffers", "true"
 	task.systemProperty "metallum.opt.terrainIcb", "true"
+	task.systemProperty "metallum.opt.renderCommandPacket",
+			System.getProperty("metallum.opt.renderCommandPacket", "true")
+	task.systemProperty "metallum.opt.computeCommandPacket",
+			System.getProperty("metallum.opt.computeCommandPacket", "true")
 	task.systemProperty "metallum.opt.metal4", metal4.toString()
 	task.systemProperty "metallum.opt.metal4Compiler", metal4.toString()
 	task.systemProperty "metallum.opt.metal4Present", metal4.toString()

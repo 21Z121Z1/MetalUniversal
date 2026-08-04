@@ -22,9 +22,9 @@ final class MetalComputeCommandPacket implements AutoCloseable {
     static final int OP_DISPATCH = 32;
     static final int OP_DISPATCH_INDIRECT = 33;
 
-    private static final boolean ENABLED = Boolean.getBoolean(
-            "metallum.opt.computeCommandPacket"
-    );
+    private static final boolean ENABLED = !"false".equalsIgnoreCase(System.getProperty(
+            "metallum.opt.computeCommandPacket", "true"
+    ));
     private static final int CAPACITY = Math.clamp(
             Integer.getInteger("metallum.opt.computeCommandPacketEntries", 256),
             16,

@@ -73,7 +73,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (RENDER_COMMAND_PACKET_MIXIN.equals(mixinClassName)
                 || RENDER_COMMAND_PACKET_BOUNDARY_MIXIN.equals(mixinClassName)) {
-            return Boolean.getBoolean("metallum.opt.renderCommandPacket")
+            return !"false".equalsIgnoreCase(System.getProperty(
+                    "metallum.opt.renderCommandPacket", "true"))
                     && this.isDefaultGraphicsApi;
         }
         if (HOT_PATH_TELEMETRY_REPORT_MIXIN.equals(mixinClassName)) {
