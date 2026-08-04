@@ -266,7 +266,12 @@ func probeStoreActions(rpd: MTL4RenderPassDescriptor, texture: MTLTexture) {
 }
 
 @available(macOS 26.0, iOS 26.0, *)
-func probeCompute(cenc: MTL4ComputeCommandEncoder, compiler: MTL4Compiler, lib: MTLLibrary) throws {
+func probeCompute(
+    cenc: MTL4ComputeCommandEncoder,
+    compiler: MTL4Compiler,
+    lib: MTLLibrary,
+    indirectBuffer: MTLBuffer
+) throws {
     let cfn = MTL4LibraryFunctionDescriptor()
     cfn.library = lib
     cfn.name = "k"
@@ -276,6 +281,10 @@ func probeCompute(cenc: MTL4ComputeCommandEncoder, compiler: MTL4Compiler, lib: 
     let cps = try compiler.makeComputePipelineState(descriptor: cpd)
     cenc.setComputePipelineState(cps)
     cenc.dispatchThreads(threadsPerGrid: MTLSize(width: 8, height: 8, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+    cenc.dispatchThreadgroups(
+        indirectBuffer: indirectBuffer.gpuAddress,
+        threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1)
+    )
     cenc.setThreadgroupMemoryLength(0, index: 0)
 }
 
