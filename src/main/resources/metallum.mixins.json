@@ -51,6 +51,7 @@
     "sodium.SodiumWorldRendererTerrainSchedulingMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
+    "sodium.GlBufferArenaReuseFixMixin",
     "sodium.ShaderChunkRendererMetalFxMixin",
     "sodium.DefaultChunkRendererMetalFxMixin",
     "sodium.SodiumPreferredGraphicsApiMixin",

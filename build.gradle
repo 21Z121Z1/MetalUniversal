@@ -114,9 +114,14 @@ def runClientIrisRequested = gradle.startParameter.taskNames.any {
 def runClientMetalFxRequested = gradle.startParameter.taskNames.any {
 	it == "runClientMetalFx" || it.endsWith(":runClientMetalFx")
 }
-if (runClientIrisRequested && runClientMetalFxRequested) {
+
+def runClientMetal4IrisRequested = gradle.startParameter.taskNames.any {
+	it == "runClientMetal4Iris" || it.endsWith(":runClientMetal4Iris")
+}
+if ((runClientIrisRequested && runClientMetalFxRequested)
+		|| (runClientMetal4IrisRequested && (runClientIrisRequested || runClientMetalFxRequested))) {
 	throw new GradleException(
-			"runClientIris and runClientMetalFx are isolated profiles and cannot run together."
+			"runClientIris, runClientMetal4Iris and runClientMetalFx are isolated profiles and cannot run together."
 	)
 }
 def isolatedClientWorld = providers.gradleProperty("world").orNull
@@ -133,7 +138,29 @@ def metalFxClientDefaults = [
 		"metallum.metalfx.frameGeneration"       : "false",
 		"metallum.metalfx.objectMotionProducer"  : "false",
 ]
-def isolatedClientDefaults = runClientIrisRequested
+
+// Metal 4 + Iris is an isolated correctness profile. The arena lifetime
+// property is intentionally part of the profile as a reviewable baseline;
+// the mixin itself also defaults to enabled whenever Metal 4's main renderer
+// is requested with Sodium present, so ad-hoc launches cannot silently lose it.
+def metal4IrisClientDefaults = [
+		"metallum.iris.semantic"                 : "true",
+		"metallum.metalfx.mode"                  : "OFF",
+		"metallum.metalfx.frameGeneration"       : "false",
+		"metallum.metalfx.objectMotionProducer"  : "false",
+		"metallum.metal.hud"                     : "false",
+		"metallum.opt.metal4"                    : "true",
+		"metallum.opt.metal4Compiler"            : "true",
+		"metallum.opt.metal4Present"             : "true",
+		"metallum.opt.metal4MainRenderer"        : "true",
+		"metallum.opt.metal4MainQueuePilot"      : "true",
+		"metallum.opt.residencySet"              : "true",
+		"metallum.opt.sodiumDisableArenaBufferReuse": "true",
+]
+
+def isolatedClientDefaults = runClientMetal4IrisRequested
+		? metal4IrisClientDefaults
+		: runClientIrisRequested
 		? irisClientDefaults
 		: runClientMetalFxRequested
 		? metalFxClientDefaults
@@ -141,7 +168,7 @@ def isolatedClientDefaults = runClientIrisRequested
 
 // Gradle system properties do not automatically reach Loom's forked
 // runClient JVM. Forward explicit metallum properties, then apply one isolated
-// profile when runClientIris or runClientMetalFx was selected. There is
+// profile when runClientIris, runClientMetal4Iris or runClientMetalFx was selected. There is
 // deliberately no supported task that implicitly enables both subsystems.
 tasks.withType(JavaExec).configureEach {
 	if (name == "runClient") {
@@ -798,6 +825,7 @@ tasks.named("check") {
 // motion and reactive-mask ownership have an explicit shared contract.
 //
 //   ./gradlew runClientIris -Pworld="New World"
+//   ./gradlew runClientMetal4Iris -Pworld="New World"
 //   ./gradlew runClientMetalFx -Pworld="New World"
 //
 // Explicit -D properties still win over these defaults for narrow diagnostics,
@@ -815,6 +843,18 @@ tasks.register("runClientIris") {
 	}
 }
 
+tasks.register("runClientMetal4Iris") {
+	group = "application"
+	description = "Runs the isolated Metal 4 + Iris correctness profile with Sodium arena reuse disabled."
+	dependsOn "runClient"
+	doFirst {
+		logger.lifecycle("runClientMetal4Iris: Metal 4 main renderer + Iris semantic path enabled" +
+			(isolatedClientWorld ? " world='${isolatedClientWorld}'" : ""))
+		logger.lifecycle("runClientMetal4Iris: Sodium arena backing reuse is disabled by default; " +
+			"set -Dmetallum.opt.sodiumDisableArenaBufferReuse=false only for diagnosis")
+	}
+}
+
 tasks.register("runClientMetalFx") {
 	group = "application"
 	description = "Runs MetalFX TEMPORAL with Iris semantic rendering and frame generation disabled."
@@ -827,7 +867,7 @@ tasks.register("runClientMetalFx") {
 
 tasks.register("verifyIsolatedClientProfiles") {
 	group = "verification"
-	description = "Verifies that supported Iris and MetalFX launch profiles cannot implicitly overlap."
+	description = "Verifies that supported Iris, Metal 4 Iris and MetalFX launch profiles cannot implicitly overlap."
 	doLast {
 		def failures = []
 		if (irisClientDefaults["metallum.iris.semantic"] != "true"
@@ -842,6 +882,13 @@ tasks.register("verifyIsolatedClientProfiles") {
 				|| metalFxClientDefaults["metallum.metalfx.frameGeneration"] != "false"
 				|| metalFxClientDefaults["metallum.metalfx.objectMotionProducer"] != "false") {
 			failures << "runClientMetalFx defaults do not keep Iris and Frame Generation dormant"
+		}
+		if (metal4IrisClientDefaults["metallum.iris.semantic"] != "true"
+				|| metal4IrisClientDefaults["metallum.metalfx.mode"] != "OFF"
+				|| metal4IrisClientDefaults["metallum.opt.metal4MainRenderer"] != "true"
+				|| metal4IrisClientDefaults["metallum.opt.sodiumDisableArenaBufferReuse"] != "true"
+				|| metal4IrisClientDefaults["metallum.opt.metal4ArenaCopyDrain"] == "true") {
+			failures << "runClientMetal4Iris defaults do not retain the Sodium arena lifetime correctness property"
 		}
 		if (tasks.findByName("runClientAll") != null) {
 			failures << "the unsupported implicit Iris + MetalFX runClientAll profile still exists"

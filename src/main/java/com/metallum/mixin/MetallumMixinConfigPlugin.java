@@ -22,6 +22,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.render.BackendFrameComparisonServerMixin";
     private static final String BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN =
             "com.metallum.mixin.render.BackendFrameComparisonDeltaTrackerMixin";
+    private static final String SODIUM_ARENA_REUSE_FIX_MIXIN =
+            "com.metallum.mixin.sodium.GlBufferArenaReuseFixMixin";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -51,6 +53,16 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                 || BACKEND_FRAME_COMPARISON_SERVER_MIXIN.equals(mixinClassName)
                 || BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN.equals(mixinClassName)) {
             return Boolean.getBoolean("metallum.backend.compare.enabled");
+        }
+        if (SODIUM_ARENA_REUSE_FIX_MIXIN.equals(mixinClassName)) {
+            // Correctness is the default for the M4 main renderer. Setting the
+            // property to false is a diagnostic kill-switch only; it must not
+            // be required to opt into the lifetime fix.
+            return Boolean.parseBoolean(System.getProperty(
+                            "metallum.opt.sodiumDisableArenaBufferReuse", "true"))
+                    && Boolean.parseBoolean(System.getProperty(
+                            "metallum.opt.metal4MainRenderer", "false"))
+                    && FabricLoader.getInstance().isModLoaded("sodium");
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
