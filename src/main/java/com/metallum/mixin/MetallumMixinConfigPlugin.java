@@ -34,6 +34,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.render.MinecraftMetalFxMixin";
     private static final String TERRAIN_ICB_SCOPE_MIXIN =
             "com.metallum.mixin.sodium.DefaultChunkRendererTerrainIcbScopeMixin";
+    private static final String SODIUM_ARENA_REUSE_FIX_MIXIN =
+            "com.metallum.mixin.sodium.GlBufferArenaReuseFixMixin";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -83,6 +85,14 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (TERRAIN_ICB_SCOPE_MIXIN.equals(mixinClassName)) {
             return MetalTerrainIcbScope.configuredEnabled()
+                    && FabricLoader.getInstance().isModLoaded("sodium")
+                    && this.isDefaultGraphicsApi;
+        }
+        if (SODIUM_ARENA_REUSE_FIX_MIXIN.equals(mixinClassName)) {
+            return Boolean.parseBoolean(System.getProperty(
+                            "metallum.opt.sodiumDisableArenaBufferReuse", "false"))
+                    && Boolean.parseBoolean(System.getProperty(
+                            "metallum.opt.metal4MainRenderer", "false"))
                     && FabricLoader.getInstance().isModLoaded("sodium")
                     && this.isDefaultGraphicsApi;
         }

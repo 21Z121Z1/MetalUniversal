@@ -196,6 +196,52 @@ fragment float4 private_rewrite_fs(RewriteOut in [[stage_in]]) {
 }
 """
 
+/// Sodium's packed terrain vertex format: ushort2 position, normalized uchar4
+/// color, ushort2 texture coordinates and ushort4 light/data, all in one 20 B
+/// record. This is intentionally separate from the float-only binding-churn
+/// test because a successful MTL4 address bind does not prove that Metal's
+/// stage-in conversion for these packed integer attributes is correct.
+private let packedTerrainShaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+
+struct PackedTerrainVertex {
+    uint2 a_Position [[attribute(0)]];
+    float4 a_Color [[attribute(1)]];
+    uint2 a_TexCoord [[attribute(2)]];
+    uint4 a_LightAndData [[attribute(3)]];
+};
+
+struct PackedTerrainOut {
+    float4 position [[position]];
+    float4 color;
+};
+
+vertex PackedTerrainOut packed_terrain_vs(PackedTerrainVertex in [[stage_in]]) {
+    PackedTerrainOut output;
+    // Map [0, 65535] to [-1, 3], matching the full-screen triangle used by the
+    // existing path tests so every readback sample is unambiguously covered.
+    float2 ndc = float2(in.a_Position) / 16383.75 - 1.0;
+    float2 texCoord = float2(in.a_TexCoord) / 65535.0;
+    float4 lightAndData = float4(in.a_LightAndData) / 65535.0;
+    float4 packed = float4(
+        (texCoord.x + lightAndData.x) * 0.5,
+        (texCoord.y + lightAndData.y) * 0.5,
+        (lightAndData.z + lightAndData.w) * 0.5,
+        (texCoord.x + texCoord.y
+            + lightAndData.x + lightAndData.y
+            + lightAndData.z + lightAndData.w) / 6.0
+    );
+    output.position = float4(ndc, 0.0, 1.0);
+    output.color = in.a_Color * 0.5 + packed * 0.5;
+    return output;
+}
+
+fragment float4 packed_terrain_fs(PackedTerrainOut in [[stage_in]]) {
+    return in.color;
+}
+"""
+
 private func fail(_ message: String) throws -> Never {
     throw PathFailure.message(message)
 }
@@ -713,6 +759,374 @@ private func runShippingMetal4PrivateBufferRewriteTest(device: MTLDevice, queue:
     try shippingMetal4PrivateBufferRewriteTest(device: device, queue: queue)
 }
 
+/// Isolates the production Sodium vertex contract from the generic MTL4
+/// binding tests. It uses the shipping compiler, main queue, argument table,
+/// dynamic attribute-stride setter, buffer slot 5 and an indexed draw with a
+/// base vertex, but the shader consumes only one tightly controlled 20 B packed
+/// vertex record. A failure here points at packed stage-in conversion or the
+/// descriptor/attribute mapping rather than Minecraft's section allocator.
+@available(macOS 26.0, *)
+private func shippingMetal4PackedTerrainVertexTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    // First build the same packed descriptor through the Metal 3 branch. This
+    // is the control: if it also produces a clear target, the fixture is wrong;
+    // if it passes while MTL4 fails, the boundary is the MTL4 stage-in path.
+    metallum_set_metal4_compiler_enabled(0)
+
+    let vertexFunction = try createShippingFunction(
+        device: device,
+        entryPoint: "packed_terrain_vs",
+        source: packedTerrainShaderSource
+    )
+    let fragmentFunction = try createShippingFunction(
+        device: device,
+        entryPoint: "packed_terrain_fs",
+        source: packedTerrainShaderSource
+    )
+    let descriptor = makeDescriptor(
+        vertexFunction: vertexFunction,
+        fragmentFunction: fragmentFunction,
+        label: "packed-terrain-stage-in"
+    )
+    let vertexDescriptor = MTLVertexDescriptor()
+    vertexDescriptor.attributes[0].format = .ushort2
+    vertexDescriptor.attributes[0].offset = 0
+    vertexDescriptor.attributes[0].bufferIndex = 5
+    vertexDescriptor.attributes[1].format = .uchar4Normalized
+    vertexDescriptor.attributes[1].offset = 4
+    vertexDescriptor.attributes[1].bufferIndex = 5
+    vertexDescriptor.attributes[2].format = .ushort2
+    vertexDescriptor.attributes[2].offset = 8
+    vertexDescriptor.attributes[2].bufferIndex = 5
+    vertexDescriptor.attributes[3].format = .ushort4
+    vertexDescriptor.attributes[3].offset = 12
+    vertexDescriptor.attributes[3].bufferIndex = 5
+    vertexDescriptor.layouts[5].stride = 20
+    vertexDescriptor.layouts[5].stepFunction = .perVertex
+    vertexDescriptor.layouts[5].stepRate = 1
+    descriptor.vertexDescriptor = vertexDescriptor
+    let metal3Pipeline = try createShippingPipeline(device: device, descriptor: descriptor)
+    metallum_set_metal4_compiler_enabled(1)
+    try check(metallum_metal4_main_renderer_enable(device, nil) != 0,
+              "the shipping Metal 4 main renderer could not be enabled for packed terrain validation")
+    let pipeline = try createShippingPipeline(device: device, descriptor: descriptor)
+
+    let vertexBytes = 6 * 20
+    let indexBytes = 3 * MemoryLayout<UInt32>.stride
+    guard let vertexPointer = metallum_create_buffer(device, vertexBytes, .storageModeShared),
+          let vertex = Unmanaged<AnyObject>.fromOpaque(vertexPointer)
+            .takeUnretainedValue() as? MTLBuffer else {
+        try fail("could not allocate the packed terrain vertex buffer")
+    }
+    guard let indexPointer = metallum_create_buffer(device, indexBytes, .storageModeShared),
+          let index = Unmanaged<AnyObject>.fromOpaque(indexPointer)
+            .takeUnretainedValue() as? MTLBuffer else {
+        metallum_release_object(vertexPointer)
+        try fail("could not allocate the packed terrain index buffer")
+    }
+    defer {
+        metallum_release_object(vertexPointer)
+        metallum_release_object(indexPointer)
+    }
+    vertex.label = "packed terrain vertex buffer"
+    index.label = "packed terrain index buffer"
+
+    func writeUShorts(_ values: [UInt16], to buffer: MTLBuffer, offset: Int) {
+        values.withUnsafeBytes { bytes in
+            buffer.contents().advanced(by: offset).copyMemory(
+                from: bytes.baseAddress!,
+                byteCount: bytes.count
+            )
+        }
+    }
+
+    // Keep all attributes identical across both copies of the visible triangle
+    // so the pixel readback checks conversion, not interpolation. The second
+    // copy remains available for a later baseVertex A/B, while this first
+    // isolation run keeps the index translation at zero.
+    let positionValues: [(UInt16, UInt16)] = [
+        (0, 0), (65_535, 0), (0, 65_535)
+    ]
+    let colorValues: [UInt8] = [128, 64, 32, 255]
+    let texCoordValues: [UInt16] = [16_384, 49_152]
+    let lightAndDataValues: [UInt16] = [8_192, 24_576, 40_960, 57_344]
+    for vertexIndex in 0..<6 {
+        let base = vertexIndex * 20
+        let position = positionValues[vertexIndex < 3 ? vertexIndex : vertexIndex - 3]
+        writeUShorts([position.0, position.1], to: vertex, offset: base)
+        colorValues.withUnsafeBytes { bytes in
+            vertex.contents().advanced(by: base + 4).copyMemory(
+                from: bytes.baseAddress!,
+                byteCount: bytes.count
+            )
+        }
+        writeUShorts(texCoordValues, to: vertex, offset: base + 8)
+        writeUShorts(lightAndDataValues, to: vertex, offset: base + 12)
+    }
+    let indexValues: [UInt32] = [0, 1, 2]
+    indexValues.withUnsafeBytes { bytes in
+        index.contents().copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+    }
+
+    let (targetPointer, target) = try "packed terrain target".withCString { label in
+        guard let pointer = metallum_create_texture_2d(
+            device,
+            .rgba8Unorm,
+            8,
+            8,
+            1,
+            1,
+            0,
+            [.renderTarget, .shaderRead],
+            .shared,
+            label
+        ), let texture = Unmanaged<AnyObject>.fromOpaque(pointer)
+            .takeUnretainedValue() as? MTLTexture else {
+            try fail("could not allocate the packed terrain target")
+        }
+        return (pointer, texture)
+    }
+    defer { metallum_release_object(targetPointer) }
+
+    let expected: [UInt8] = [88, 104, 112, 191]
+    guard let metal3CommandBuffer = queue.makeCommandBuffer() else {
+        try fail("could not allocate the packed terrain Metal 3 control command buffer")
+    }
+    let metal3Pass = MTLRenderPassDescriptor()
+    metal3Pass.colorAttachments[0].texture = target
+    metal3Pass.colorAttachments[0].loadAction = .clear
+    metal3Pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+    metal3Pass.colorAttachments[0].storeAction = .store
+    guard let metal3Encoder = metal3CommandBuffer.makeRenderCommandEncoder(descriptor: metal3Pass) else {
+        try fail("could not create the packed terrain Metal 3 control encoder")
+    }
+    metal3Encoder.setViewport(MTLViewport(
+        originX: 0,
+        originY: 0,
+        width: 8,
+        height: 8,
+        znear: 0,
+        zfar: 1
+    ))
+    metal3Encoder.setRenderPipelineState(metal3Pipeline)
+    metal3Encoder.setVertexBuffer(vertex, offset: 0, index: 5)
+    metal3Encoder.drawIndexedPrimitives(
+        type: .triangle,
+        indexCount: 3,
+        indexType: .uint32,
+        indexBuffer: index,
+        indexBufferOffset: 0,
+        instanceCount: 1,
+        baseVertex: 0,
+        baseInstance: 0
+    )
+    metal3Encoder.endEncoding()
+    metal3CommandBuffer.commit()
+    metal3CommandBuffer.waitUntilCompleted()
+    try check(
+        metal3CommandBuffer.status == .completed,
+        "packed terrain Metal 3 control failed: \(String(describing: metal3CommandBuffer.error))"
+    )
+    var metal3Pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
+    target.getBytes(
+        &metal3Pixels,
+        bytesPerRow: 8 * 4,
+        from: MTLRegionMake2D(0, 0, 8, 8),
+        mipmapLevel: 0
+    )
+    let metal3Base = (1 * 8 + 1) * 4
+    let metal3Pixel = Array(metal3Pixels[metal3Base..<(metal3Base + 4)])
+    let metal3WithinTolerance = zip(metal3Pixel, expected).allSatisfy { actual, expected in
+        abs(Int(actual) - Int(expected)) <= 2
+    }
+    try check(
+        metal3WithinTolerance,
+        "packed terrain Metal 3 control expected approximately \(expected), got \(metal3Pixel)"
+    )
+
+    guard let leasePointer = "packed terrain slot".withCString({ label in
+        metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
+    }) else {
+        try fail("could not acquire the packed terrain Metal 4 command-buffer slot")
+    }
+    defer { metallum_release_object(leasePointer) }
+    guard let encoderPointer = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+        leasePointer,
+        target,
+        nil,
+        8,
+        8,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1
+    ) else {
+        try fail("could not create the packed terrain render encoder")
+    }
+    metallum_MTLRenderCommandEncoder_setRenderPipelineState(encoderPointer, pipeline)
+    // Repeat the production combination after the static/base-zero control:
+    // dynamic attribute stride plus a positive base vertex over the second
+    // copy of the same packed records.
+    metallum_MTLRenderCommandEncoder_setVertexBufferWithAttributeStride(
+        encoderPointer,
+        vertex,
+        0,
+        20,
+        5
+    )
+    metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+        encoderPointer,
+        .triangle,
+        3,
+        .uint32,
+        index,
+        0,
+        1,
+        3,
+        0
+    )
+    metallum_MTLCommandEncoder_endEncoding(encoderPointer)
+    metallum_release_object(encoderPointer)
+    metallum_MTLCommandBuffer_commit(leasePointer)
+    try check(
+        metallum_MTLCommandBuffer_waitUntilCompleted(leasePointer, 5_000) == 0,
+        "packed terrain command buffer did not complete"
+    )
+    try check(
+        metallum_MTLCommandBuffer_completedSuccessfully(leasePointer) != 0,
+        "packed terrain command buffer completed with an error"
+    )
+
+    var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
+    target.getBytes(
+        &pixels,
+        bytesPerRow: 8 * 4,
+        from: MTLRegionMake2D(0, 0, 8, 8),
+        mipmapLevel: 0
+    )
+    for (x, y) in [(1, 1), (4, 4), (6, 2)] {
+        let base = (y * 8 + x) * 4
+        let actual = Array(pixels[base..<(base + 4)])
+        let withinTolerance = zip(actual, expected).allSatisfy { actual, expected in
+            abs(Int(actual) - Int(expected)) <= 2
+        }
+        try check(
+            withinTolerance,
+            "packed terrain pixel (\(x),\(y)) expected approximately \(expected), got \(actual)"
+        )
+    }
+    print("Metal 4 packed terrain stage-in: slot 5, 20 B stride, dynamic binding, ushort/normalized-uchar attributes, UInt32 indexed draw and baseVertex=3 exact readback passed")
+
+    // Repeat the same draw against a production-sized terrain allocation and a
+    // base vertex taken from the attended corrupted run. This keeps the data
+    // simple while exercising the large-buffer address and indexed base math.
+    let largeBaseVertex = 192_692
+    let largeVertexBytes = 3_870_720
+    guard let largeVertexPointer = metallum_create_buffer(
+        device,
+        largeVertexBytes,
+        .storageModeShared
+    ), let largeVertex = Unmanaged<AnyObject>.fromOpaque(largeVertexPointer)
+        .takeUnretainedValue() as? MTLBuffer else {
+        try fail("could not allocate the production-sized packed terrain vertex buffer")
+    }
+    defer { metallum_release_object(largeVertexPointer) }
+    largeVertex.label = "packed terrain production-sized vertex buffer"
+    for vertexIndex in 0..<3 {
+        let base = (largeBaseVertex + vertexIndex) * 20
+        let position = positionValues[vertexIndex]
+        writeUShorts([position.0, position.1], to: largeVertex, offset: base)
+        colorValues.withUnsafeBytes { bytes in
+            largeVertex.contents().advanced(by: base + 4).copyMemory(
+                from: bytes.baseAddress!,
+                byteCount: bytes.count
+            )
+        }
+        writeUShorts(texCoordValues, to: largeVertex, offset: base + 8)
+        writeUShorts(lightAndDataValues, to: largeVertex, offset: base + 12)
+    }
+
+    guard let largeLeasePointer = "packed terrain production-sized slot".withCString({ label in
+        metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
+    }) else {
+        try fail("could not acquire the production-sized packed terrain command-buffer slot")
+    }
+    defer { metallum_release_object(largeLeasePointer) }
+    guard let largeEncoderPointer = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+        largeLeasePointer,
+        target,
+        nil,
+        8,
+        8,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1
+    ) else {
+        try fail("could not create the production-sized packed terrain render encoder")
+    }
+    metallum_MTLRenderCommandEncoder_setRenderPipelineState(largeEncoderPointer, pipeline)
+    metallum_MTLRenderCommandEncoder_setVertexBufferWithAttributeStride(
+        largeEncoderPointer,
+        largeVertex,
+        0,
+        20,
+        5
+    )
+    metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+        largeEncoderPointer,
+        .triangle,
+        3,
+        .uint32,
+        index,
+        0,
+        1,
+        largeBaseVertex,
+        0
+    )
+    metallum_MTLCommandEncoder_endEncoding(largeEncoderPointer)
+    metallum_release_object(largeEncoderPointer)
+    metallum_MTLCommandBuffer_commit(largeLeasePointer)
+    try check(
+        metallum_MTLCommandBuffer_waitUntilCompleted(largeLeasePointer, 5_000) == 0,
+        "production-sized packed terrain command buffer did not complete"
+    )
+    try check(
+        metallum_MTLCommandBuffer_completedSuccessfully(largeLeasePointer) != 0,
+        "production-sized packed terrain command buffer completed with an error"
+    )
+    var largePixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
+    target.getBytes(
+        &largePixels,
+        bytesPerRow: 8 * 4,
+        from: MTLRegionMake2D(0, 0, 8, 8),
+        mipmapLevel: 0
+    )
+    let largeBase = (4 * 8 + 4) * 4
+    let largePixel = Array(largePixels[largeBase..<(largeBase + 4)])
+    let largeWithinTolerance = zip(largePixel, expected).allSatisfy { actual, expected in
+        abs(Int(actual) - Int(expected)) <= 2
+    }
+    try check(
+        largeWithinTolerance,
+        "production-sized packed terrain pixel expected approximately \(expected), got \(largePixel)"
+    )
+    print("Metal 4 packed terrain large-buffer stage-in: 3,870,720 B buffer, baseVertex=192692, dynamic stride and exact GPU readback passed")
+}
+
+private func runShippingMetal4PackedTerrainVertexTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 26.0, *) else {
+        print("Metal 4 packed terrain stage-in test skipped: needs macOS 26")
+        return
+    }
+    try shippingMetal4PackedTerrainVertexTest(device: device, queue: queue)
+}
+
 private func makeDescriptor(
     vertexFunction: MTLFunction,
     fragmentFunction: MTLFunction,
@@ -848,20 +1262,85 @@ private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
         try fail("metallum_create_texture_2d returned nil for the memoryless texture")
     }
 
+    // Pipeline states are MTLAllocation objects, but not MTLResource objects.
+    // Create them through the same shipping exports Minecraft uses so this
+    // test catches a residency registry that is accidentally narrowed to
+    // buffers/textures/ICBs. The compiler is disabled by the caller here, so
+    // the test exercises the common M3 fallback as well as the allocation type
+    // boundary; the M4 compiler path registers through the same tracked entry
+    // points above.
+    let residencyLibrary = try device.makeLibrary(source: shaderSource, options: nil)
+    guard let residencyVertex = residencyLibrary.makeFunction(name: "mtl4_path_vs"),
+          let residencyFragment = residencyLibrary.makeFunction(name: "mtl4_path_fs") else {
+        try fail("missing residency render pipeline functions")
+    }
+    guard let renderPipelinePointer = metallum_MTLDevice_makeRenderPipelineState(
+        device,
+        makeDescriptor(
+            vertexFunction: residencyVertex,
+            fragmentFunction: residencyFragment,
+            label: "residency-render-pipeline"
+        )
+    ) else {
+        try fail("metallum_MTLDevice_makeRenderPipelineState returned nil for residency test")
+    }
+    guard Unmanaged<AnyObject>.fromOpaque(renderPipelinePointer)
+        .takeUnretainedValue() is MTLRenderPipelineState else {
+        try fail("residency render pipeline pointer was not an MTLRenderPipelineState")
+    }
+
+    let computeLibrary = try device.makeLibrary(source: """
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void residency_test_compute() {}
+        """, options: nil)
+    guard let computeFunction = computeLibrary.makeFunction(name: "residency_test_compute"),
+          let computePipelinePointer = metallum_MTLDevice_makeComputePipelineState(device, computeFunction) else {
+        try fail("metallum_MTLDevice_makeComputePipelineState returned nil for residency test")
+    }
+    guard Unmanaged<AnyObject>.fromOpaque(computePipelinePointer)
+        .takeUnretainedValue() is MTLComputePipelineState else {
+        try fail("residency compute pipeline pointer was not an MTLComputePipelineState")
+    }
+
     try flushResidency("residency additions")
     let afterCreate = try residencyCount("after create")
-    // Three resources created, but the memoryless one must not be tracked.
-    try check(afterCreate == baseline + 2,
-              "expected \(baseline + 2) tracked allocations after creating a buffer, a texture and a "
-              + "memoryless texture, got \(afterCreate)")
+    // Three resources plus two pipeline allocations are created, but the
+    // memoryless texture must not be tracked.
+    try check(afterCreate == baseline + 4,
+              "expected \(baseline + 4) tracked allocations after creating a buffer, a texture, two "
+              + "pipeline states and a memoryless texture, got \(afterCreate)")
+
+    // A RenderRegion can create its geometry arena after the residency set has
+    // already been committed for the initial visible regions. Keep this
+    // second allocation after the first flush so the test covers the same
+    // incremental membership transition as Sodium's newly visible-region
+    // upload path.
+    guard let incrementalBufferPointer = metallum_create_buffer(device, 2048, []) else {
+        try fail("metallum_create_buffer returned nil for the incremental residency allocation")
+    }
+    try flushResidency("incremental residency addition")
+    let afterIncrementalCreate = try residencyCount("after incremental create")
+    try check(afterIncrementalCreate == afterCreate + 1,
+              "an allocation created after the first commit should raise the tracked count to \(afterCreate + 1), "
+              + "got \(afterIncrementalCreate)")
+
+    metallum_release_object(incrementalBufferPointer)
+    try flushResidency("incremental residency removal")
+    let afterIncrementalRelease = try residencyCount("after incremental release")
+    try check(afterIncrementalRelease == afterCreate,
+              "releasing the incremental allocation should return to \(afterCreate) tracked allocations, "
+              + "got \(afterIncrementalRelease)")
 
     metallum_release_object(bufferPointer)
     try flushResidency("residency removal")
     let afterRelease = try residencyCount("after release")
-    try check(afterRelease == baseline + 1,
-              "releasing the buffer should leave \(baseline + 1) tracked allocations, got \(afterRelease)")
+    try check(afterRelease == baseline + 3,
+              "releasing the buffer should leave \(baseline + 3) tracked allocations, got \(afterRelease)")
 
     metallum_release_object(texturePointer)
+    metallum_release_object(renderPipelinePointer)
+    metallum_release_object(computePipelinePointer)
     metallum_release_object(memorylessPointer)
     try flushResidency("residency drain")
     let afterDrain = try residencyCount("after drain")
@@ -1870,6 +2349,10 @@ private func runPathTest() throws {
 
     // (6c) The queue-barrier contract for asynchronous private-buffer rewrite.
     try runShippingMetal4PrivateBufferRewriteTest(device: device, queue: queue)
+
+    // (6d) The production Sodium packed terrain vertex contract: slot 5,
+    // 20-byte records and Metal's integer/normalized stage-in conversions.
+    try runShippingMetal4PackedTerrainVertexTest(device: device, queue: queue)
 
     // (7) M5: the bump allocator that replaces set*Bytes.
     try runBumpAllocatorTest(device: device)

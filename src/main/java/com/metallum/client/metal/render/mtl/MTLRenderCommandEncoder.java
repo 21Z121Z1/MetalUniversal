@@ -192,6 +192,28 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
         this.stateShadow.recordBuffer(buffer, offset, index, stageMask);
     }
 
+    /**
+     * Diagnostic-only direct path for vertex descriptors whose layout stride is
+     * MTLBufferLayoutStrideDynamic. It deliberately bypasses the ordinary
+     * buffer shadow/packet path so the native Metal 4 argument-table call is
+     * the only binding operation under test.
+     */
+    public void setVertexBufferWithAttributeStride(
+            final MemorySegment buffer,
+            final long offset,
+            final long stride,
+            final long index
+    ) {
+        MetalNativeBridge.MTLRenderCommandEncoder_setVertexBufferWithAttributeStride(
+                handle(),
+                buffer,
+                offset,
+                stride,
+                index
+        );
+        MetalHotPathTelemetry.renderForwarded();
+    }
+
     public void setBufferOffset(final long offset, final long index, final int stageMask) {
         MemorySegment encoder = handle();
         if (this.stateShadow != null

@@ -36,6 +36,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Environment(EnvType.CLIENT)
 final class MetalRenderPass implements RenderPassBackend {
@@ -46,6 +47,51 @@ final class MetalRenderPass implements RenderPassBackend {
     private static final boolean NATIVE_MULTI_DRAW_ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.nativeMultiDrawBatch", "true")
     );
+    /**
+     * Diagnostic escape hatch for distinguishing Java-side vertex-buffer dirty
+     * tracking from the native Metal 4 address/draw path. The normal cache
+     * remains unchanged unless an A/B run explicitly enables this switch.
+     */
+    private static final boolean FORCE_VERTEX_BUFFER_REBIND = Boolean.parseBoolean(
+            System.getProperty("metallum.opt.forceVertexBufferRebind", "false")
+    );
+    /**
+     * Diagnostic escape hatch for stale vertex slots when a pipeline exposes
+     * fewer buffers than the preceding draw. It clears every vertex binding
+     * through the normal encoder ABI before restoring the current pipeline's
+     * buffers; the default path keeps the existing sparse push behavior.
+     */
+    private static final boolean CLEAR_MISSING_VERTEX_BUFFERS = Boolean.parseBoolean(
+            System.getProperty("metallum.opt.clearMissingVertexBuffers", "false")
+    );
+    /**
+     * Diagnostic escape hatch for distinguishing Java-side descriptor dirty
+     * tracking from the native Metal 4 argument-table/address path. It forces
+     * the complete resource set through the normal descriptor setters before
+     * every draw when explicitly enabled.
+     */
+    private static final boolean FORCE_DESCRIPTOR_REBIND = Boolean.parseBoolean(
+            System.getProperty("metallum.opt.forceDescriptorRebind", "false")
+    );
+    /**
+     * Bounded diagnostic snapshot for the first indexed draws. This records
+     * the Java-side pipeline/vertex-slot/index state immediately before the
+     * native draw is submitted; it is intentionally off by default because
+     * it is render-thread logging, not a rendering fix.
+     */
+    private static final boolean VERTEX_BINDING_TELEMETRY = Boolean.parseBoolean(
+            System.getProperty("metallum.opt.metal4VertexBindingTelemetry", "false")
+    );
+    private static final int VERTEX_BINDING_TELEMETRY_LIMIT = Math.max(
+            1,
+            Integer.getInteger("metallum.opt.metal4VertexBindingTelemetryLimit", 32)
+    );
+    private static final AtomicInteger VERTEX_BINDING_TELEMETRY_COUNT = new AtomicInteger();
+    private static final int VERTEX_BINDING_TELEMETRY_NON_TERRAIN_LIMIT = Math.max(
+            0,
+            Integer.getInteger("metallum.opt.metal4VertexBindingTelemetryNonTerrainLimit", 8)
+    );
+    private static final AtomicInteger VERTEX_BINDING_TELEMETRY_NON_TERRAIN_COUNT = new AtomicInteger();
     private static final int NATIVE_MULTI_DRAW_THRESHOLD = Math.max(
             2,
             Integer.getInteger("metallum.opt.nativeMultiDrawBatchThreshold", 4)
@@ -530,7 +576,8 @@ final class MetalRenderPass implements RenderPassBackend {
                 draw.uniformUploaderConsumer().accept(uniformArgument, this::setUniform);
             }
 
-            if (scissorDirty || vertexBuffersDirty || dirtyDescriptorMask != 0L || pipelineDirty) {
+            if (scissorDirty || vertexBuffersDirty || dirtyDescriptorMask != 0L || pipelineDirty
+                    || FORCE_VERTEX_BUFFER_REBIND || FORCE_DESCRIPTOR_REBIND) {
                 bindDrawState(enc);
             }
             MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
@@ -755,6 +802,11 @@ final class MetalRenderPass implements RenderPassBackend {
     private void pushVertexBuffers(final MTLRenderCommandEncoder enc) {
         int firstSlot = compiledPipeline.firstAvailableVertexBufferSlot();
         int count = compiledPipeline.vertexBufferCount();
+        if (CLEAR_MISSING_VERTEX_BUFFERS) {
+            for (int metalSlot = 0; metalSlot < 31; metalSlot++) {
+                enc.setBuffer(null, 0L, metalSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
+            }
+        }
         for (int slot = 0; slot < count; slot++) {
             GpuBufferSlice vertexBuffer = vertexBuffers[slot];
             if (vertexBuffer == null) {
@@ -766,7 +818,16 @@ final class MetalRenderPass implements RenderPassBackend {
 
             MetalGpuBuffer nativeVertexBuffer = (MetalGpuBuffer) vertexBuffer.buffer();
             int metalSlot = firstSlot + slot;
-            enc.setBuffer(nativeVertexBuffer.nativeHandle(), vertexBuffer.offset(), metalSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
+            if (MetalCompiledRenderPipeline.dynamicVertexStridesEnabled()) {
+                enc.setVertexBufferWithAttributeStride(
+                        nativeVertexBuffer.nativeHandle(),
+                        vertexBuffer.offset(),
+                        compiledPipeline.vertexBufferStride(slot),
+                        metalSlot
+                );
+            } else {
+                enc.setBuffer(nativeVertexBuffer.nativeHandle(), vertexBuffer.offset(), metalSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
+            }
         }
 
         int genericSlot = compiledPipeline.genericVertexBufferSlot();
@@ -815,6 +876,17 @@ final class MetalRenderPass implements RenderPassBackend {
         MTLPrimitiveType primitiveType = primitiveTopology();
 
         long indexOffsetBytes = (long) firstIndex * indexType.bytes;
+        recordVertexBindingTelemetry(
+                primitiveType,
+                nativeIndexBuffer,
+                firstIndex,
+                indexCount,
+                indexOffsetBytes,
+                baseVertex,
+                instanceCount,
+                indexType,
+                baseInstance
+        );
         if (primitiveType == MTLPrimitiveType.TriangleFan) {
             long fanSize = Math.multiplyExact(Math.multiplyExact((long) indexCount - 2L, 3L), Integer.BYTES);
             try (GpuBufferSlice.MappedView mapped = commandEncoder.transientMemory().allocateGpuMapped(fanSize, Integer.BYTES, GpuBuffer.USAGE_INDEX)) {
@@ -834,6 +906,111 @@ final class MetalRenderPass implements RenderPassBackend {
         } else {
             enc.drawIndexedPrimitives(primitiveType, indexCount, indexType, nativeIndexBuffer.nativeHandle(), indexOffsetBytes, instanceCount, baseVertex, baseInstance);
         }
+    }
+
+    private void recordVertexBindingTelemetry(
+            final MTLPrimitiveType primitiveType,
+            final MetalGpuBuffer nativeIndexBuffer,
+            final int firstIndex,
+            final int indexCount,
+            final long indexOffsetBytes,
+            final int baseVertex,
+            final int instanceCount,
+            final MTLIndexType drawIndexType,
+            final int baseInstance
+    ) {
+        if (!VERTEX_BINDING_TELEMETRY || compiledPipeline == null) {
+            return;
+        }
+        String pipelineLocation = compiledPipeline.pipelineLocation();
+        if (!pipelineLocation.contains("terrain")) {
+            int nonTerrainId = VERTEX_BINDING_TELEMETRY_NON_TERRAIN_COUNT.getAndIncrement();
+            if (nonTerrainId >= VERTEX_BINDING_TELEMETRY_NON_TERRAIN_LIMIT) {
+                return;
+            }
+        }
+        int snapshotId = VERTEX_BINDING_TELEMETRY_COUNT.getAndIncrement();
+        if (snapshotId >= VERTEX_BINDING_TELEMETRY_LIMIT) {
+            return;
+        }
+
+        int firstSlot = compiledPipeline.firstAvailableVertexBufferSlot();
+        int count = compiledPipeline.vertexBufferCount();
+        StringBuilder snapshot = new StringBuilder(768)
+                .append("[metallum] M4 vertex binding snapshot #")
+                .append(snapshotId)
+                .append(" pipeline=")
+                .append(pipelineLocation)
+                .append(" firstSlot=")
+                .append(firstSlot)
+                .append(" vertexCount=")
+                .append(count)
+                .append(" dynamicStride=")
+                .append(MetalCompiledRenderPipeline.dynamicVertexStridesEnabled())
+                .append(" | ");
+
+        for (int slot = 0; slot < count; slot++) {
+            GpuBufferSlice slice = vertexBuffers[slot];
+            int metalSlot = firstSlot + slot;
+            snapshot.append("v[").append(slot).append("->").append(metalSlot).append("]=");
+            if (slice == null) {
+                snapshot.append("null; ");
+                continue;
+            }
+            if (!(slice.buffer() instanceof MetalGpuBuffer buffer)) {
+                snapshot.append("nonMetal;");
+                continue;
+            }
+            snapshot
+                    .append(buffer.validationDebugId())
+                    .append("@0x")
+                    .append(Long.toHexString(buffer.nativeHandle().address()))
+                    .append("+offset=")
+                    .append(slice.offset())
+                    .append(" length=")
+                    .append(slice.length())
+                    .append(" allocation=")
+                    .append(buffer.allocationSize())
+                    .append(" stride=")
+                    .append(compiledPipeline.vertexBufferStride(slot))
+                    .append("; ");
+        }
+
+        int genericSlot = compiledPipeline.genericVertexBufferSlot();
+        snapshot.append("genericSlot=").append(genericSlot);
+        if (genericSlot >= 0) {
+            MetalGpuBuffer defaults = device.genericVertexAttributeBuffer();
+            snapshot
+                    .append(" generic=")
+                    .append(defaults.validationDebugId())
+                    .append("@0x")
+                    .append(Long.toHexString(defaults.nativeHandle().address()));
+        }
+
+        snapshot
+                .append(" | index=")
+                .append(nativeIndexBuffer.validationDebugId())
+                .append("@0x")
+                .append(Long.toHexString(nativeIndexBuffer.nativeHandle().address()))
+                .append(" allocation=")
+                .append(nativeIndexBuffer.allocationSize())
+                .append(" type=")
+                .append(drawIndexType)
+                .append(" primitive=")
+                .append(primitiveType)
+                .append(" firstIndex=")
+                .append(firstIndex)
+                .append(" indexCount=")
+                .append(indexCount)
+                .append(" indexOffsetBytes=")
+                .append(indexOffsetBytes)
+                .append(" baseVertex=")
+                .append(baseVertex)
+                .append(" instanceCount=")
+                .append(instanceCount)
+                .append(" baseInstance=")
+                .append(baseInstance);
+        Metallum.LOGGER.warn(snapshot.toString());
     }
 
     private void bindDrawState(final MTLRenderCommandEncoder enc) {
@@ -882,9 +1059,13 @@ final class MetalRenderPass implements RenderPassBackend {
             scissorDirty = false;
         }
 
-        if (vertexBuffersDirty) {
+        if (vertexBuffersDirty || FORCE_VERTEX_BUFFER_REBIND) {
             pushVertexBuffers(enc);
             vertexBuffersDirty = false;
+        }
+
+        if (FORCE_DESCRIPTOR_REBIND) {
+            dirtyDescriptorMask |= compiledPipeline.allResourceMask();
         }
 
         if (dirtyDescriptorMask != 0) {
