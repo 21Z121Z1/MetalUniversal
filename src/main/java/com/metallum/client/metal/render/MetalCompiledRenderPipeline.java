@@ -49,6 +49,11 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     static final int STAGE_FRAGMENT = 2;
     static final int STAGE_ALL = STAGE_VERTEX | STAGE_FRAGMENT;
 
+    /** Validation-only: use Metal's dynamic vertex layout/attribute-stride binding path. */
+    private static final boolean DYNAMIC_VERTEX_STRIDES = Boolean.parseBoolean(
+            System.getProperty("metallum.opt.metal4DynamicVertexStrides", "false")
+    );
+
     record ResourceBinding(
             ResourceKind kind,
             String name,
@@ -95,6 +100,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final float depthBiasConstant;
     private final MTLPrimitiveType topology;
     private final int vertexBufferCount;
+    private final long[] vertexBufferStrides;
 
     private final MemorySegment depthStencilState;
     private final boolean hasDepthStencilState;
@@ -152,6 +158,11 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
         this.vertexBufferCount = info.getVertexFormatBindings().length;
+        this.vertexBufferStrides = new long[this.vertexBufferCount];
+        for (int i = 0; i < this.vertexBufferCount; i++) {
+            VertexFormat binding = info.getVertexFormatBindings()[i];
+            this.vertexBufferStrides[i] = binding == null ? 0L : binding.getVertexSize();
+        }
         this.genericVertexBufferSlot = resolveGenericVertexBufferSlot(
                 this.firstAvailableVertexBufferSlot,
                 this.vertexBufferCount,
@@ -489,6 +500,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         }
 
         try (MTLRenderPipelineDescriptor pipelineDesc = new MTLRenderPipelineDescriptor()) {
+            pipelineDesc.setLabel("java-render/" + info.getLocation());
             pipelineDesc.setSupportIndirectCommandBuffers(terrainIcbCompatible);
             pipelineDesc.setCompiledFunctions(vertexFunction, fragmentFunction);
             pipelineDesc.setVertexDescriptor(vertexDescriptor);
@@ -627,6 +639,17 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return this.vertexBufferCount;
     }
 
+    long vertexBufferStride(final int slot) {
+        if (slot < 0 || slot >= this.vertexBufferStrides.length) {
+            throw new IndexOutOfBoundsException("Vertex buffer slot " + slot + " is outside 0.." + (this.vertexBufferStrides.length - 1));
+        }
+        return this.vertexBufferStrides[slot];
+    }
+
+    static boolean dynamicVertexStridesEnabled() {
+        return DYNAMIC_VERTEX_STRIDES;
+    }
+
     int genericVertexBufferSlot() {
         return this.genericVertexBufferSlot;
     }
@@ -642,6 +665,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     String validationPipelineId() {
         return validationPipelineId;
+    }
+
+    String pipelineLocation() {
+        return info.getLocation().toString();
     }
 
     List<String> validationShaderIds() {
@@ -698,7 +725,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
             int metalSlot = firstMetalVertexBufferSlot + i;
 
-            long stride = binding.getVertexSize();
+            // MTLBufferLayoutStrideDynamic is NSUIntegerMax. The native
+            // bridge receives this Int-sized field as a signed long, so -1
+            // preserves the required all-bits-one sentinel on 64-bit macOS.
+            long stride = DYNAMIC_VERTEX_STRIDES ? -1L : binding.getVertexSize();
             long stepRate = binding.getStepRate();
             MTLVertexStepFunction stepFunction = stepRate > 0 ? MTLVertexStepFunction.PerInstance : MTLVertexStepFunction.PerVertex;
             vertexDesc.setLayout(metalSlot, stride, stepFunction, stepRate > 0 ? stepRate : 1);

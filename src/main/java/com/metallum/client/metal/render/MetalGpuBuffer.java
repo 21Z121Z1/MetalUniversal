@@ -23,6 +23,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * must be able to resolve this method-descriptor type at runtime.
  */
 public class MetalGpuBuffer extends GpuBuffer {
+    /**
+     * Diagnostic only: force every newly-created buffer onto Shared storage so
+     * Metal 4 geometry can be separated from the Private-buffer upload/address
+     * path without changing the normal configuration.
+     */
+    private static final boolean FORCE_SHARED_STORAGE = Boolean.parseBoolean(
+            System.getProperty("metallum.opt.metal4SharedBuffers", "false")
+    );
     private static final AtomicLong NEXT_VALIDATION_RESOURCE_ID = new AtomicLong(1L);
     private final MetalDevice device;
     private final long validationResourceId = NEXT_VALIDATION_RESOURCE_ID.getAndIncrement();
@@ -227,7 +235,9 @@ public class MetalGpuBuffer extends GpuBuffer {
     }
 
     private static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {
-        MTLStorageMode storageMode = isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private;
+        MTLStorageMode storageMode = FORCE_SHARED_STORAGE
+                ? MTLStorageMode.Shared
+                : (isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private);
         return MTLResourceOptions.of(storageMode, MTLHazardTrackingMode.Untracked);
     }
 
