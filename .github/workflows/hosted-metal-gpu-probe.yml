@@ -6,6 +6,10 @@ on:
     branches:
       - ci/hosted-metal-gpu-probe-20260810
 
+concurrency:
+  group: hosted-metal-gpu-probe-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   hosted-offscreen-required:
     name: hosted offscreen Metal required
