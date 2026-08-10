@@ -40,22 +40,17 @@ jobs:
       - name: Compile Amethyst GLFW facade against LWJGL 3.4.1
         run: |
           set -euo pipefail
-          MODULE_CP="$(find "$GITHUB_WORKSPACE/lwjgl-modules" -type f -name '*.jar' -print | sort | paste -sd: -)"
-          cd amethyst/JavaApp
-          rm -rf build/abi-classes
-          mkdir -p build/abi-classes
-          "$JAVA_HOME/bin/javac" \
-            -XDignore.symbol.file \
-            -cp "$MODULE_CP:src/launcher:src/lwjgl" \
-            -d build/abi-classes \
-            $(find src/lwjgl/org/lwjgl/glfw -type f -name '*.java' -print | sort)
-          printf '%s' "$MODULE_CP" > build/abi-classpath.txt
+          make -C amethyst/JavaApp \
+            build/lwjgl/org/lwjgl/glfw/GLFW.class \
+            build/lwjgl/org/lwjgl/glfw/GLFWVulkan.class \
+            BOOTJDK="$JAVA_HOME/bin" \
+            LWJGL_MODULES_DIR="$GITHUB_WORKSPACE/lwjgl-modules"
 
       - name: Verify Minecraft 26.x Java ABI surface
         run: |
           set -euo pipefail
-          MODULE_CP="$(cat amethyst/JavaApp/build/abi-classpath.txt)"
-          CLASSPATH="amethyst/JavaApp/build/abi-classes:$MODULE_CP"
+          MODULE_CP="$(find "$GITHUB_WORKSPACE/lwjgl-modules" -type f -name '*.jar' -print | sort | paste -sd: -)"
+          CLASSPATH="amethyst/JavaApp/build/lwjgl:$MODULE_CP"
           SPVC_JAR="$GITHUB_WORKSPACE/lwjgl-modules/lwjgl-spvc/lwjgl-spvc.jar"
           jar tf "$SPVC_JAR" | grep -q '^org/lwjgl/util/spvc/Spvc.class$'
           jar tf "$GITHUB_WORKSPACE/lwjgl-modules/lwjgl-glfw/lwjgl-glfw.jar" | grep -q '^org/lwjgl/glfw/GLFWPreeditCallback.class$'
