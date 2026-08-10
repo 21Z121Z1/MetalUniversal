@@ -6,6 +6,10 @@ on:
     branches:
       - ci/hosted-metal-gpu-probe-20260810
 
+concurrency:
+  group: promote-hosted-metal-production
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -35,6 +39,7 @@ jobs:
           targets = {
               'tasks.register("metalMrtBackendIntegrationTest", Test) {': False,
               'tasks.register("metalComputeBackendIntegrationTest", Test) {': False,
+              'tasks.register("metalIrisTargetsIntegrationTest", Test) {': False,
           }
           active = None
           for i, line in enumerate(lines):
@@ -42,13 +47,17 @@ jobs:
               if stripped in targets:
                   active = stripped
                   continue
+              if active and 'hostedOffscreenMetalValidationAvailable()' in line:
+                  targets[active] = True
+                  active = None
+                  continue
               if active and 'physicalMetalValidationAvailable()' in line:
                   lines[i] = line.replace('physicalMetalValidationAvailable()', 'hostedOffscreenMetalValidationAvailable()')
                   targets[active] = True
                   active = None
           missing = [name for name, changed in targets.items() if not changed]
           if missing:
-              raise SystemExit('failed to promote task gates: ' + ', '.join(missing))
+              raise SystemExit('failed to identify task gates: ' + ', '.join(missing))
           p.write_text(''.join(lines))
           PY
           git diff --check
@@ -67,14 +76,19 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --stacktrace \
             metalMrtBackendIntegrationTest \
-            metalComputeBackendIntegrationTest
+            metalComputeBackendIntegrationTest \
+            metalIrisTargetsIntegrationTest
 
       - name: Commit verified capability gates
         shell: bash
         run: |
           set -euo pipefail
+          if git diff --quiet -- build.gradle; then
+            echo 'Capability gates already promoted; nothing to commit.'
+            exit 0
+          fi
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add build.gradle
-          git commit -m 'ci: run MRT and compute integrations on hosted Metal'
+          git commit -m 'ci: run production Metal integrations on hosted GPU'
           git push origin HEAD:ci/hosted-metal-gpu-probe-20260810
