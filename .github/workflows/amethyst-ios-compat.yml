@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           MODULES="$GITHUB_WORKSPACE/lwjgl-modules"
-          for module in lwjgl lwjgl-glfw lwjgl-spvc; do
+          for module in lwjgl lwjgl-glfw lwjgl-opengl lwjgl-spvc; do
             mkdir -p "$MODULES/$module"
             curl --fail --location --retry 3 \
               -o "$MODULES/$module/$module.jar" \
