@@ -1,0 +1,49 @@
+name: Amethyst iOS Java compatibility
+
+on:
+  push:
+    branches:
+      - feature/ios-amethyst-runtime
+  workflow_dispatch:
+
+jobs:
+  lwjgl-abi:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout MetalUniversal
+        uses: actions/checkout@v4
+
+      - name: Checkout Amethyst integration branch
+        uses: actions/checkout@v4
+        with:
+          repository: 21Z121Z1/Amethyst-iOS
+          ref: feature/metallum-mc26-lwjgl-compat
+          path: amethyst
+
+      - name: Set up build JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Rebuild Amethyst aggregate LWJGL jar
+        run: |
+          make -C amethyst/JavaApp build/lwjgl.jar BOOTJDK="$JAVA_HOME/bin"
+
+      - name: Verify Minecraft 26.x Java ABI surface
+        run: |
+          set -euo pipefail
+          JAR=amethyst/JavaApp/build/lwjgl.jar
+          jar tf "$JAR" | grep -q '^org/lwjgl/util/spvc/Spvc.class$'
+          javap -classpath "$JAR" org.lwjgl.system.Configuration | grep -q 'SPVC_LIBRARY_NAME'
+          javap -classpath "$JAR" org.lwjgl.glfw.GLFW | grep -q 'glfwPlatformSupported'
+          javap -classpath "$JAR" org.lwjgl.glfw.GLFW | grep -q 'GLFW_CURSOR_CAPTURED'
+          javap -classpath "$JAR" org.lwjgl.glfw.GLFW | grep -q 'glfwSetPreeditCallback'
+          javap -classpath "$JAR" org.lwjgl.glfw.GLFW | grep -q 'glfwSetPreeditCandidateCallback'
+          javap -classpath "$JAR" org.lwjgl.glfw.GLFW | grep -q 'glfwSetIMEStatusCallback'
+
+      - name: Verify MetalUniversal iOS native resources are declared
+        run: |
+          grep -q 'buildIOSNative' build.gradle
+          grep -q 'buildIOSSpvc' build.gradle
+          grep -q 'libspvc_metallum.dylib' src/main/java/com/metallum/client/metal/render/bridge/IOSRuntimePreflight.java
