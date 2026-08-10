@@ -38,3 +38,17 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/hosted-metal-gpu-probe"
+
+      - name: Compile existing Metal MRT smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -framework Foundation -framework Metal \
+            src/test/native/MetalMRTSmokeTest.swift \
+            -o "$RUNNER_TEMP/metal-mrt-smoke"
+
+      - name: Run existing offscreen Metal MRT render/readback test
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/metal-mrt-smoke"
