@@ -47,8 +47,9 @@ jobs:
         with:
           java-version: '25'
           distribution: 'temurin'
+          cache: gradle
 
-      - name: Run proven hosted-offscreen Gradle gates
+      - name: Run proven hosted-offscreen production gates
         shell: bash
         run: |
           set -euo pipefail
@@ -56,21 +57,57 @@ jobs:
           ./gradlew --stacktrace \
             metalMrtSmokeTest \
             metalFrameGenerationLifecycleTest \
-            verifyIsolatedClientProfiles
+            verifyIsolatedClientProfiles \
+            metalMrtBackendIntegrationTest \
+            metalComputeBackendIntegrationTest \
+            metalIrisTargetsIntegrationTest
 
-  hosted-offscreen-candidate:
-    name: candidate / ${{ matrix.task }}
+      - name: Preserve required test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-metal-required-${{ github.run_attempt }}
+          path: |
+            hs_err_pid*.log
+            build/reports/tests/**
+            build/test-results/**
+          if-no-files-found: ignore
+
+  hosted-capability-required:
+    name: hosted Metal capability and fallback contract
+    runs-on: macos-26
+    env:
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Compile shipping native module and validate Metal 4 capability fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --stacktrace \
+            metal4PipelineSmokeTest \
+            metal4PipelinePathTest
+
+  hosted-render-contract-candidate:
+    name: render-contract / ${{ matrix.task }}
     runs-on: macos-26
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         task:
-          - metal4PipelineSmokeTest
-          - metal4PipelinePathTest
-          - metalComputeBackendIntegrationTest
-          - metalMrtBackendIntegrationTest
-          - metalIrisTargetsIntegrationTest
+          - renderContractMetal3NativeTest
+          - renderContractMetal4NativeTest
     env:
       MTL_DEBUG_LAYER: '0'
       MTL_SHADER_VALIDATION: '0'
@@ -85,8 +122,9 @@ jobs:
         with:
           java-version: '25'
           distribution: 'temurin'
+          cache: gradle
 
-      - name: Run candidate in isolation
+      - name: Run render-contract candidate in isolation
         shell: bash
         run: |
           set -euo pipefail
@@ -95,11 +133,11 @@ jobs:
             -I .github/ci/hosted-metal-offscreen.gradle \
             "${{ matrix.task }}"
 
-      - name: Preserve native crash evidence
+      - name: Preserve render-contract reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hosted-metal-${{ matrix.task }}-${{ github.run_attempt }}
+          name: hosted-render-contract-${{ matrix.task }}-${{ github.run_attempt }}
           path: |
             hs_err_pid*.log
             build/reports/tests/**
@@ -134,6 +172,7 @@ jobs:
         with:
           java-version: '25'
           distribution: 'temurin'
+          cache: gradle
 
       - name: Run normally CI-excluded class in isolation
         shell: bash
@@ -182,3 +221,103 @@ jobs:
             build/reports/tests/hostedMetalGpuJUnit/**
             build/test-results/hostedMetalGpuJUnit/**
           if-no-files-found: ignore
+
+  ios-native-cross-build-candidate:
+    name: iOS production native arm64 cross-build candidate
+    runs-on: macos-26
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compile shipping Swift native module for iPhoneOS
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+          artifact="$RUNNER_TEMP/libmetallum-ios.dylib"
+          xcrun --sdk iphoneos swiftc \
+            -O \
+            -whole-module-optimization \
+            -emit-library \
+            -module-name metallum_native \
+            -target arm64-apple-ios16.0 \
+            -sdk "$sdk" \
+            -framework Foundation \
+            -framework Metal \
+            -framework MetalFX \
+            -framework QuartzCore \
+            -o "$artifact" \
+            src/main/native/MetalFrameGenerationLifecycle.swift \
+            src/main/native/MetallumInterface.swift \
+            src/main/native/MetallumNative.swift
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+
+      - name: Verify iPhoneOS Mach-O contract and exported ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="${{ steps.build.outputs.artifact }}"
+          file "$artifact"
+          lipo -info "$artifact" | grep -q arm64
+          xcrun vtool -show-build "$artifact" | tee "$RUNNER_TEMP/vtool-ios.txt"
+          grep -Eiq 'platform[[:space:]]+(IOS|2)' "$RUNNER_TEMP/vtool-ios.txt"
+          otool -L "$artifact" | grep -q '/System/Library/Frameworks/Metal.framework/'
+          nm -gU "$artifact" | grep -q 'metallum_create_system_default_device'
+
+  ios-simulator-metal-runtime-candidate:
+    name: iOS Simulator Metal runtime candidate
+    runs-on: macos-26
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Select and boot an iOS Simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          udid="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime, devices in d["devices"].items() if "iOS" in runtime for x in devices if x.get("isAvailable") and x.get("name", "").startswith("iPhone")))')"
+          test -n "$udid"
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$udid" || true
+          xcrun simctl bootstatus "$udid" -b
+
+      - name: Compile Metal compute and MRT probes for iOS Simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          xcrun --sdk iphonesimulator swiftc \
+            -O \
+            -target arm64-apple-ios16.0-simulator \
+            -sdk "$sdk" \
+            -framework Metal \
+            .github/ci/HostedMetalCapabilityProbe.swift \
+            -o "$RUNNER_TEMP/hosted-metal-sim-probe"
+          xcrun --sdk iphonesimulator swiftc \
+            -O \
+            -target arm64-apple-ios16.0-simulator \
+            -sdk "$sdk" \
+            -framework Foundation \
+            -framework Metal \
+            src/test/native/MetalMRTSmokeTest.swift \
+            -o "$RUNNER_TEMP/metal-mrt-sim-probe"
+
+      - name: Execute compute and MRT readback inside iOS Simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          udid="${{ steps.simulator.outputs.udid }}"
+          sim_tmp="$HOME/Library/Developer/CoreSimulator/Devices/$udid/data/tmp"
+          mkdir -p "$sim_tmp"
+          cp "$RUNNER_TEMP/hosted-metal-sim-probe" "$sim_tmp/hosted-metal-sim-probe"
+          cp "$RUNNER_TEMP/metal-mrt-sim-probe" "$sim_tmp/metal-mrt-sim-probe"
+          chmod +x "$sim_tmp/hosted-metal-sim-probe" "$sim_tmp/metal-mrt-sim-probe"
+          xcrun simctl spawn "$udid" /tmp/hosted-metal-sim-probe
+          xcrun simctl spawn "$udid" /tmp/metal-mrt-sim-probe
+
+      - name: Shutdown Simulator
+        if: always()
+        shell: bash
+        run: xcrun simctl shutdown "${{ steps.simulator.outputs.udid }}" || true
