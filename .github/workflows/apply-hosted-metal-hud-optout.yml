@@ -31,33 +31,25 @@ jobs:
           from pathlib import Path
           path = Path('src/main/native/MetallumNative.swift')
           text = path.read_text()
-          old = '''        // Metal's HUD subsystem must be enabled before the device is created.
-          // A mod cannot add MetalHUDEnabled to the host launcher's Info.plist,
-          // so prime the equivalent documented environment switch here. The
-          // persisted Sodium option supplies the layer request at next startup.
-          setenv("MTL_HUD_ENABLED", "1", 1)
-          // MetalFX registers its Temporal and Frame Interpolator sections only
-          // when this separate switch is present before the effects are built.
-          setenv("MTLFX_HUD_ENABLED", "1", 1)
-          '''
-          new = '''        // Metal's HUD subsystem must be enabled before the device is created.
-          // A mod cannot add MetalHUDEnabled to the host launcher's Info.plist,
-          // so prime the equivalent documented environment switch here. Respect
-          // an explicit environment value: hosted/paravirtual GPUs can execute
-          // normal Metal work but may not support the HUD's encoder counter
-          // sampling, and forcing the HUD on there aborts device consumers.
-          if getenv("MTL_HUD_ENABLED") == nil {
-              setenv("MTL_HUD_ENABLED", "1", 1)
-          }
-          // MetalFX registers its Temporal and Frame Interpolator sections only
-          // when this separate switch is present before the effects are built.
-          if getenv("MTLFX_HUD_ENABLED") == nil {
-              setenv("MTLFX_HUD_ENABLED", "1", 1)
-          }
-          '''
-          if old not in text:
-              raise SystemExit('expected HUD priming block not found')
-          path.write_text(text.replace(old, new, 1))
+          hud = '        setenv("MTL_HUD_ENABLED", "1", 1)\n'
+          fx = '        setenv("MTLFX_HUD_ENABLED", "1", 1)\n'
+          if text.count(hud) != 1 or text.count(fx) != 1:
+              raise SystemExit(f'expected one HUD and one MetalFX priming line, got {text.count(hud)} and {text.count(fx)}')
+          text = text.replace(
+              hud,
+              '        if getenv("MTL_HUD_ENABLED") == nil {\n'
+              '            setenv("MTL_HUD_ENABLED", "1", 1)\n'
+              '        }\n',
+              1,
+          )
+          text = text.replace(
+              fx,
+              '        if getenv("MTLFX_HUD_ENABLED") == nil {\n'
+              '            setenv("MTLFX_HUD_ENABLED", "1", 1)\n'
+              '        }\n',
+              1,
+          )
+          path.write_text(text)
           PY
           git diff --check
           git diff -- src/main/native/MetallumNative.swift
