@@ -1,0 +1,27 @@
+// Experimental CI-only bridge used to validate which existing offscreen Metal
+// tasks are safe on GitHub's standard Apple Silicon hosted runner. It does not
+// spoof CI=false and it does not unlock presentation/window tasks.
+
+def hostedOffscreenTasks = [
+        "metalMrtSmokeTest",
+        "metalComputeBackendIntegrationTest",
+        "metalMrtBackendIntegrationTest",
+        "metalIrisTargetsIntegrationTest",
+        "metalFxOffscreenValidation"
+] as Set
+
+gradle.projectsEvaluated {
+    rootProject.tasks.matching { hostedOffscreenTasks.contains(it.name) }.configureEach { task ->
+        task.setOnlyIf {
+            org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+                    && "true".equalsIgnoreCase(System.getenv("METALLUM_HOSTED_METAL_OFFSCREEN"))
+        }
+        if (task instanceof org.gradle.api.tasks.testing.Test) {
+            task.environment "MTL_DEBUG_LAYER", "0"
+            task.environment "MTL_SHADER_VALIDATION", "0"
+        } else if (task instanceof org.gradle.api.tasks.Exec) {
+            task.environment "MTL_DEBUG_LAYER", "0"
+            task.environment "MTL_SHADER_VALIDATION", "0"
+        }
+    }
+}
