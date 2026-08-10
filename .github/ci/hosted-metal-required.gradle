@@ -1,6 +1,6 @@
 // Stable CI capability policy for GitHub's standard Apple Silicon runner.
-// This script never spoofs CI=false. It only enables tests that have been
-// individually proven to execute on the hosted offscreen MTLDevice.
+// This script never spoofs CI=false. It only enables tests whose semantics are
+// offscreen Metal command submission/readback rather than physical display use.
 
 def isHostedMetal = {
     org.gradle.internal.os.OperatingSystem.current().isMacOsX()
@@ -24,7 +24,7 @@ gradle.projectsEvaluated {
 
     rootProject.tasks.register("hostedMetalExtendedIntegrationTest", org.gradle.api.tasks.testing.Test) { task ->
         task.group = "verification"
-        task.description = "Runs redistributable offscreen Metal integration classes proven on GitHub hosted Apple Silicon."
+        task.description = "Runs redistributable offscreen Metal integration classes on GitHub hosted Apple Silicon."
         task.onlyIf { isHostedMetal() }
         task.dependsOn rootProject.tasks.named("buildMacNative")
         task.testClassesDirs = rootProject.sourceSets.test.output.classesDirs
@@ -35,8 +35,12 @@ gradle.projectsEvaluated {
             includeTestsMatching "com.metallum.client.metal.render.IrisMetalBundledTerrainPipelineTest"
             includeTestsMatching "com.metallum.client.metal.render.IrisMetalShadowPipelineTest"
             includeTestsMatching "com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest"
+            includeTestsMatching "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest"
+            includeTestsMatching "com.metallum.client.metal.render.IrisMetalComputeConformanceTest"
+            includeTestsMatching "com.metallum.client.metal.render.IrisMetalExternalLevelSamplerTest"
             includeTestsMatching "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest"
             includeTestsMatching "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest"
+            includeTestsMatching "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
             includeTestsMatching "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
             failOnNoMatchingTests = true
         }
