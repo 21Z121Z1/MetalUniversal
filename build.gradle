@@ -52,16 +52,26 @@ java {
 	}
 }
 
-// GitHub's hosted macOS 26 virtual GPU aborts when libMTLHud tries to enable
-// encoder counter sampling, even with both Metal validation layers disabled.
-// CI still compiles the native backend and GPU harnesses, but executes only
-// headless tests which do not create an MTLDevice. Real GPU/readback/window
-// validation remains part of every local Apple Silicon `build`.
+// GitHub's standard Apple Silicon macOS 26 runner exposes a paravirtual Metal
+// device and can execute proven offscreen command-buffer/readback workloads.
+// Keep capability classes separate: hosted-offscreen is opt-in after a probe,
+// while counter-sampling/MetalFX and presentation remain physical-only until
+// independently proven safe on the hosted device.
 def hostedCi = "true".equalsIgnoreCase(System.getenv("CI"))
 def metalApiValidation = hostedCi ? "0" : "1"
 def metalShaderValidation = hostedCi ? "0" : "1"
-def hardwareMetalValidationAvailable = {
-	org.gradle.internal.os.OperatingSystem.current().isMacOsX() && !hostedCi
+def isMacOSHost = org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+def hostedOffscreenMetalValidationAvailable = {
+	isMacOSHost && (!hostedCi || "true".equalsIgnoreCase(System.getenv("METALLUM_HOSTED_METAL_OFFSCREEN")))
+}
+def physicalMetalValidationAvailable = {
+	isMacOSHost && !hostedCi
+}
+def metalFxValidationAvailable = {
+	physicalMetalValidationAvailable()
+}
+def presentationMetalValidationAvailable = {
+	physicalMetalValidationAvailable()
 }
 def renderContractSourceCommit = System.getProperty("metallum.validation.sourceCommit")
 if (renderContractSourceCommit == null || renderContractSourceCommit.isBlank()) {
@@ -295,7 +305,7 @@ tasks.register("compileMetalMrtSmokeTest", Exec) {
 
 tasks.register("metalMrtSmokeTest", Exec) {
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn "compileMetalMrtSmokeTest"
 	commandLine metalMrtSmokeBinary.absolutePath
@@ -631,7 +641,7 @@ tasks.register("metalFxOffscreenValidation", Exec) {
 	group = "verification"
 	description = "Runs windowless MRT, motion, Temporal Scaler and Frame Interpolator GPU readback validation."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		metalFxValidationAvailable()
 	}
 	dependsOn "compileMetalFxOffscreenValidation"
 	doFirst {
@@ -678,7 +688,7 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Java RenderPass -> FFM -> Swift indexed MRT GPU readback integration suite."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		physicalMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -696,7 +706,7 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS backend and Iris compute/SSBO/image/mipmap GPU readback suites."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		physicalMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -715,7 +725,7 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Iris target framework (ping-pong/depthtex/center-depth/shadow) content-level GPU suite."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		physicalMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -2536,7 +2546,7 @@ tasks.register("renderContractUnitTest", Test) {
 def configureRenderContractNativeTest = { Test task, boolean metal4 ->
 	task.group = "verification"
 	task.description = "Runs render-contract production GPU integration tests with Metal ${metal4 ? 4 : 3}."
-	task.onlyIf { hardwareMetalValidationAvailable() }
+	task.onlyIf { physicalMetalValidationAvailable() }
 	task.dependsOn tasks.named("buildMacNative")
 	task.testClassesDirs = sourceSets.test.output.classesDirs
 	task.classpath = sourceSets.test.runtimeClasspath
