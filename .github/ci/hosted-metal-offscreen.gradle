@@ -19,9 +19,13 @@ gradle.projectsEvaluated {
         if (task instanceof org.gradle.api.tasks.testing.Test) {
             task.environment "MTL_DEBUG_LAYER", "0"
             task.environment "MTL_SHADER_VALIDATION", "0"
+            task.environment "MTL_HUD_ENABLED", "0"
+            task.systemProperty "metallum.metal.hud", "false"
+            task.systemProperty "metallum.validation.gpuPassTiming", "false"
         } else if (task instanceof org.gradle.api.tasks.Exec) {
             task.environment "MTL_DEBUG_LAYER", "0"
             task.environment "MTL_SHADER_VALIDATION", "0"
+            task.environment "MTL_HUD_ENABLED", "0"
         }
     }
 }
