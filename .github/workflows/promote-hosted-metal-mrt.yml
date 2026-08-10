@@ -1,4 +1,4 @@
-name: promote-hosted-metal-mrt
+name: promote-hosted-metal-production
 
 on:
   workflow_dispatch:
@@ -24,31 +24,32 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Promote MRT production integration to hosted-offscreen capability
+      - name: Promote verified production integrations to hosted-offscreen capability
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
           p = Path('build.gradle')
-          s = p.read_text()
-          old = '''tasks.register("metalMrtBackendIntegrationTest", Test) {
-\tgroup = "verification"
-\tdescription = "Runs the macOS Java RenderPass -> FFM -> Swift indexed MRT GPU readback integration suite."
-\tonlyIf {
-\t\tphysicalMetalValidationAvailable()
-\t}
-'''
-          new = '''tasks.register("metalMrtBackendIntegrationTest", Test) {
-\tgroup = "verification"
-\tdescription = "Runs the macOS Java RenderPass -> FFM -> Swift indexed MRT GPU readback integration suite."
-\tonlyIf {
-\t\thostedOffscreenMetalValidationAvailable()
-\t}
-'''
-          if s.count(old) != 1:
-              raise SystemExit(f'expected one MRT task gate block, got {s.count(old)}')
-          p.write_text(s.replace(old, new, 1))
+          lines = p.read_text().splitlines(keepends=True)
+          targets = {
+              'tasks.register("metalMrtBackendIntegrationTest", Test) {': False,
+              'tasks.register("metalComputeBackendIntegrationTest", Test) {': False,
+          }
+          active = None
+          for i, line in enumerate(lines):
+              stripped = line.strip()
+              if stripped in targets:
+                  active = stripped
+                  continue
+              if active and 'physicalMetalValidationAvailable()' in line:
+                  lines[i] = line.replace('physicalMetalValidationAvailable()', 'hostedOffscreenMetalValidationAvailable()')
+                  targets[active] = True
+                  active = None
+          missing = [name for name, changed in targets.items() if not changed]
+          if missing:
+              raise SystemExit('failed to promote task gates: ' + ', '.join(missing))
+          p.write_text(''.join(lines))
           PY
           git diff --check
           git diff -- build.gradle
@@ -59,19 +60,21 @@ jobs:
           java-version: '25'
           distribution: 'temurin'
 
-      - name: Verify promoted gate without CI-only task override
+      - name: Verify promoted gates without CI-only task override
         shell: bash
         run: |
           set -euo pipefail
           chmod +x ./gradlew
-          ./gradlew --stacktrace metalMrtBackendIntegrationTest
+          ./gradlew --stacktrace \
+            metalMrtBackendIntegrationTest \
+            metalComputeBackendIntegrationTest
 
-      - name: Commit verified capability gate
+      - name: Commit verified capability gates
         shell: bash
         run: |
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add build.gradle
-          git commit -m 'ci: run MRT backend integration on hosted Metal'
+          git commit -m 'ci: run MRT and compute integrations on hosted Metal'
           git push origin HEAD:ci/hosted-metal-gpu-probe-20260810
