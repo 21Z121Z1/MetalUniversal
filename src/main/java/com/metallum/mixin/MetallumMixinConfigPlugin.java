@@ -39,13 +39,12 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
-    private boolean isMacOs;
+    private boolean isAppleRuntime;
     private boolean isDefaultGraphicsApi;
 
     @Override
     public void onLoad(String mixinPackage) {
-        String osName = System.getProperty("os.name", "");
-        this.isMacOs = osName.toLowerCase(Locale.ROOT).contains("mac");
+        this.isAppleRuntime = isSupportedAppleRuntime();
         this.isDefaultGraphicsApi = Boolean.getBoolean("metallum.validation.forceMetal")
                 || isDefaultGraphicsApiSelected();
     }
@@ -57,7 +56,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
-        if (!this.isMacOs) {
+        if (!this.isAppleRuntime) {
             return false;
         }
         if (BACKEND_FRAME_COMPARISON_MIXIN.equals(mixinClassName)
@@ -132,6 +131,30 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             String mixinClassName,
             IMixinInfo mixinInfo
     ) {
+    }
+
+    private static boolean isSupportedAppleRuntime() {
+        String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        String osArch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+        if (osName.contains("mac") || osName.contains("ios")) {
+            return true;
+        }
+        if (System.getProperty("pojav.launcher") != null
+                || System.getProperty("org.pojavlauncher") != null) {
+            return true;
+        }
+
+        String tmpDir = System.getProperty("java.io.tmpdir", "");
+        String userHome = System.getProperty("user.home", "");
+        if (isIOSContainerPath(tmpDir) || isIOSContainerPath(userHome)) {
+            return true;
+        }
+
+        return osName.contains("darwin") && osArch.contains("aarch64");
+    }
+
+    private static boolean isIOSContainerPath(final String path) {
+        return path.contains("/var/mobile/") || path.contains("/var/containers/");
     }
 
     private static boolean isDefaultGraphicsApiSelected() {
