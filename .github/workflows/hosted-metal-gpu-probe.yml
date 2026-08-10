@@ -49,18 +49,43 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Run proven hosted-offscreen production gates
+      - name: Run proven production, render-contract and Iris GPU gates
         shell: bash
         run: |
           set -euo pipefail
           chmod +x ./gradlew
           ./gradlew --stacktrace \
+            -I .github/ci/hosted-metal-required.gradle \
             metalMrtSmokeTest \
             metalFrameGenerationLifecycleTest \
             verifyIsolatedClientProfiles \
             metalMrtBackendIntegrationTest \
             metalComputeBackendIntegrationTest \
-            metalIrisTargetsIntegrationTest
+            metalIrisTargetsIntegrationTest \
+            hostedMetalExtendedIntegrationTest \
+            renderContractMetal3NativeTest \
+            renderContractMetal4NativeTest
+
+      - name: Require extended suite to execute rather than skip
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob('build/test-results/hostedMetalExtendedIntegrationTest/TEST-*.xml')
+          if not files:
+              raise SystemExit('hostedMetalExtendedIntegrationTest produced no JUnit XML')
+          tests = skipped = failures = errors = 0
+          for path in files:
+              root = ET.parse(path).getroot()
+              tests += int(root.attrib.get('tests', 0))
+              skipped += int(root.attrib.get('skipped', 0))
+              failures += int(root.attrib.get('failures', 0))
+              errors += int(root.attrib.get('errors', 0))
+          print(f'extended tests={tests} executed={tests-skipped} skipped={skipped} failures={failures} errors={errors}')
+          if tests == 0 or skipped != 0 or failures != 0 or errors != 0:
+              raise SystemExit('extended hosted Metal suite did not fully execute cleanly')
+          PY
 
       - name: Preserve required test reports
         if: always()
@@ -73,8 +98,8 @@ jobs:
             build/test-results/**
           if-no-files-found: ignore
 
-  hosted-capability-required:
-    name: hosted Metal capability and fallback contract
+  hosted-capability-and-physical-harness-compile-required:
+    name: capability fallback and physical-only harness compile
     runs-on: macos-26
     env:
       MTL_HUD_ENABLED: '0'
@@ -89,31 +114,21 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Compile shipping native module and validate Metal 4 capability fallback
+      - name: Validate Metal 4 fallback and compile physical-only harnesses
         shell: bash
         run: |
           set -euo pipefail
           chmod +x ./gradlew
           ./gradlew --stacktrace \
             metal4PipelineSmokeTest \
-            metal4PipelinePathTest
+            metal4PipelinePathTest \
+            compileMetalFxOffscreenValidation \
+            compileMetalFxPerformanceValidation \
+            compileMetalFrameGenerationPresentationValidation
 
-  hosted-render-contract-candidate:
-    name: render-contract / ${{ matrix.task }}
+  ios-native-cross-build-required:
+    name: iPhoneOS arm64 native and SPIRV-Cross required
     runs-on: macos-26
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        task:
-          - renderContractMetal3NativeTest
-          - renderContractMetal4NativeTest
-    env:
-      MTL_DEBUG_LAYER: '0'
-      MTL_SHADER_VALIDATION: '0'
-      MTL_HUD_ENABLED: '0'
-      MTLFX_HUD_ENABLED: '0'
-      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
     steps:
       - uses: actions/checkout@v6
 
@@ -124,113 +139,20 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Run render-contract candidate in isolation
+      - name: Run project iOS native and SPIRV-Cross builds
         shell: bash
         run: |
           set -euo pipefail
           chmod +x ./gradlew
-          ./gradlew --stacktrace \
-            -I .github/ci/hosted-metal-offscreen.gradle \
-            "${{ matrix.task }}"
+          ./gradlew --stacktrace buildIOSNative buildIOSSpvc
+          file src/main/resources/natives/ios/libmetallum.dylib
+          file src/main/resources/natives/ios/libspvc.dylib
+          xcrun vtool -show-build src/main/resources/natives/ios/libmetallum.dylib | grep -Eiq 'platform[[:space:]]+(IOS|2)'
+          xcrun vtool -show-build src/main/resources/natives/ios/libspvc.dylib | grep -Eiq 'platform[[:space:]]+(IOS|2)'
+          lipo -info src/main/resources/natives/ios/libmetallum.dylib | grep -q arm64
+          lipo -info src/main/resources/natives/ios/libspvc.dylib | grep -q arm64
 
-      - name: Preserve render-contract reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hosted-render-contract-${{ matrix.task }}-${{ github.run_attempt }}
-          path: |
-            hs_err_pid*.log
-            build/reports/tests/**
-            build/test-results/**
-          if-no-files-found: ignore
-
-  hosted-junit-candidate:
-    name: junit / ${{ matrix.test_class }}
-    runs-on: macos-26
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        test_class:
-          - com.metallum.client.metal.render.IrisMetalBundledTerrainPipelineTest
-          - com.metallum.client.metal.render.IrisMetalPostChainCompilationTest
-          - com.metallum.client.metal.render.IrisMetalShadowPipelineTest
-          - com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest
-          - com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest
-          - com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest
-          - com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest
-    env:
-      MTL_DEBUG_LAYER: '0'
-      MTL_SHADER_VALIDATION: '0'
-      MTL_HUD_ENABLED: '0'
-      MTLFX_HUD_ENABLED: '0'
-      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Setup Java 25
-        uses: actions/setup-java@v5
-        with:
-          java-version: '25'
-          distribution: 'temurin'
-          cache: gradle
-
-      - name: Run normally CI-excluded class in isolation
-        shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x ./gradlew
-          ./gradlew --stacktrace \
-            -I .github/ci/hosted-metal-offscreen.gradle \
-            -PhostedMetalJUnitClass="${{ matrix.test_class }}" \
-            hostedMetalGpuJUnit
-
-      - name: Report executed versus skipped tests
-        if: always()
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import glob
-          import os
-          import xml.etree.ElementTree as ET
-          files = glob.glob('build/test-results/hostedMetalGpuJUnit/TEST-*.xml')
-          tests = skipped = failures = errors = 0
-          for path in files:
-              root = ET.parse(path).getroot()
-              tests += int(root.attrib.get('tests', 0))
-              skipped += int(root.attrib.get('skipped', 0))
-              failures += int(root.attrib.get('failures', 0))
-              errors += int(root.attrib.get('errors', 0))
-          executed = tests - skipped
-          line = f"tests={tests} executed={executed} skipped={skipped} failures={failures} errors={errors}"
-          print(line)
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
-              f.write(line + '\n')
-              if tests and executed == 0:
-                  f.write('Result is fixture/capability skipped; do not promote as an executed GPU gate.\n')
-          if not files:
-              raise SystemExit('No JUnit XML produced; candidate task did not execute as expected')
-          PY
-
-      - name: Preserve candidate reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hosted-junit-${{ strategy.job-index }}-${{ github.run_attempt }}
-          path: |
-            hs_err_pid*.log
-            build/reports/tests/hostedMetalGpuJUnit/**
-            build/test-results/hostedMetalGpuJUnit/**
-          if-no-files-found: ignore
-
-  ios-native-cross-build-candidate:
-    name: iOS production native arm64 cross-build candidate
-    runs-on: macos-26
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Compile shipping Swift native module for iPhoneOS
+      - name: Independently cross-compile shipping Swift ABI for iPhoneOS
         id: build
         shell: bash
         run: |
@@ -238,23 +160,17 @@ jobs:
           sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
           artifact="$RUNNER_TEMP/libmetallum-ios.dylib"
           xcrun --sdk iphoneos swiftc \
-            -O \
-            -whole-module-optimization \
-            -emit-library \
+            -O -whole-module-optimization -emit-library \
             -module-name metallum_native \
-            -target arm64-apple-ios16.0 \
-            -sdk "$sdk" \
-            -framework Foundation \
-            -framework Metal \
-            -framework MetalFX \
-            -framework QuartzCore \
+            -target arm64-apple-ios16.0 -sdk "$sdk" \
+            -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore \
             -o "$artifact" \
             src/main/native/MetalFrameGenerationLifecycle.swift \
             src/main/native/MetallumInterface.swift \
             src/main/native/MetallumNative.swift
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
 
-      - name: Verify iPhoneOS Mach-O platform contract and exported ABI
+      - name: Verify iPhoneOS Mach-O and exported ABI
         shell: bash
         run: |
           set -euo pipefail
@@ -267,7 +183,7 @@ jobs:
           nm -gU "$artifact" | grep -q 'metallum_create_system_default_device'
 
   ios-simulator-metal-runtime-candidate:
-    name: iOS Simulator Metal runtime candidate
+    name: iOS Simulator host-GPU Metal runtime candidate
     runs-on: macos-26
     continue-on-error: true
     steps:
@@ -284,39 +200,58 @@ jobs:
           xcrun simctl boot "$udid" || true
           xcrun simctl bootstatus "$udid" -b
 
-      - name: Compile Metal compute and MRT probes for iOS Simulator
+      - name: Compile simulator Metal compute and MRT executables
         shell: bash
         run: |
           set -euo pipefail
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
-          xcrun --sdk iphonesimulator swiftc \
-            -O \
-            -target arm64-apple-ios16.0-simulator \
-            -sdk "$sdk" \
-            -framework Metal \
+          xcrun --sdk iphonesimulator swiftc -O \
+            -target arm64-apple-ios16.0-simulator -sdk "$sdk" -framework Metal \
             .github/ci/HostedMetalCapabilityProbe.swift \
-            -o "$RUNNER_TEMP/hosted-metal-sim-probe"
-          xcrun --sdk iphonesimulator swiftc \
-            -O \
-            -target arm64-apple-ios16.0-simulator \
-            -sdk "$sdk" \
-            -framework Foundation \
-            -framework Metal \
+            -o "$RUNNER_TEMP/HostedMetalProbe"
+          xcrun --sdk iphonesimulator swiftc -O \
+            -target arm64-apple-ios16.0-simulator -sdk "$sdk" \
+            -framework Foundation -framework Metal \
             src/test/native/MetalMRTSmokeTest.swift \
-            -o "$RUNNER_TEMP/metal-mrt-sim-probe"
+            -o "$RUNNER_TEMP/MetalMRTProbe"
 
-      - name: Execute compute and MRT readback inside iOS Simulator
+      - name: Package, install and launch probes as Simulator apps
         shell: bash
         run: |
           set -euo pipefail
           udid="${{ steps.simulator.outputs.udid }}"
-          sim_tmp="$HOME/Library/Developer/CoreSimulator/Devices/$udid/data/tmp"
-          mkdir -p "$sim_tmp"
-          cp "$RUNNER_TEMP/hosted-metal-sim-probe" "$sim_tmp/hosted-metal-sim-probe"
-          cp "$RUNNER_TEMP/metal-mrt-sim-probe" "$sim_tmp/metal-mrt-sim-probe"
-          chmod +x "$sim_tmp/hosted-metal-sim-probe" "$sim_tmp/metal-mrt-sim-probe"
-          xcrun simctl spawn "$udid" /tmp/hosted-metal-sim-probe
-          xcrun simctl spawn "$udid" /tmp/metal-mrt-sim-probe
+          make_app() {
+            local exe="$1" name="$2" bundle="$3" expected="$4"
+            local app="$RUNNER_TEMP/${name}.app"
+            mkdir -p "$app"
+            cp "$exe" "$app/$name"
+            cat > "$app/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleExecutable</key><string>${name}</string>
+          <key>CFBundleIdentifier</key><string>${bundle}</string>
+          <key>CFBundleName</key><string>${name}</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleShortVersionString</key><string>1.0</string>
+          <key>CFBundleVersion</key><string>1</string>
+          <key>LSRequiresIPhoneOS</key><true/>
+          <key>MinimumOSVersion</key><string>16.0</string>
+          <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+          </dict></plist>
+          PLIST
+            codesign --force --sign - --timestamp=none "$app"
+            xcrun simctl install "$udid" "$app"
+            set +e
+            output="$(xcrun simctl launch --console "$udid" "$bundle" 2>&1)"
+            rc=$?
+            set -e
+            printf '%s\n' "$output"
+            test "$rc" -eq 0
+            grep -Fq "$expected" <<<"$output"
+          }
+          make_app "$RUNNER_TEMP/HostedMetalProbe" HostedMetalProbe com.metallum.ci.metalprobe HOSTED_METAL_GPU_PROBE_PASS
+          make_app "$RUNNER_TEMP/MetalMRTProbe" MetalMRTProbe com.metallum.ci.mrtprobe 'MRT smoke passed'
 
       - name: Shutdown Simulator
         if: always()
