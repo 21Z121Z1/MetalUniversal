@@ -76,28 +76,14 @@ def retarget_physical_task(task_name: str, replacement: str) -> None:
     print(f"{task_name}: {needle} -> {replacement}")
 
 
-def retarget_presentation_task() -> None:
-    global text
-    task_name = "metalFrameGenerationPresentationValidation"
-    start, end = task_span(task_name)
-    block = text[start:end]
-    replacement = "presentationMetalValidationAvailable()"
-    if replacement in block:
-        print(f"{task_name} already uses {replacement}")
-        return
-    if "physicalMetalValidationAvailable()" in block:
-        block = block.replace("physicalMetalValidationAvailable()", replacement, 1)
-    elif "!hostedCi" in block:
-        block = block.replace("!hostedCi", replacement, 1)
-    else:
-        raise SystemExit(f"{task_name} has no recognized hosted/physical gate to retarget")
-    text = text[:start] + block + text[end:]
-    print(f"{task_name}: migrated to {replacement}")
-
-
 retarget_physical_task("metalMrtSmokeTest", "hostedOffscreenMetalValidationAvailable()")
 retarget_physical_task("metalFxOffscreenValidation", "metalFxValidationAvailable()")
-retarget_presentation_task()
+
+# Presentation validation already has its own stricter display-session predicates
+# (window/WindowServer/CAMetalDisplayLink semantics) instead of the legacy
+# hardwareMetalValidationAvailable closure. Leave those intact rather than
+# broadening them mechanically; presentationMetalValidationAvailable is the
+# named capability for future consolidation of those predicates.
 
 if "hardwareMetalValidationAvailable" in text:
     raise SystemExit("legacy hardwareMetalValidationAvailable symbol remains")
