@@ -1,0 +1,51 @@
+// Stable CI capability policy for GitHub's standard Apple Silicon runner.
+// This script never spoofs CI=false. It only enables tests that have been
+// individually proven to execute on the hosted offscreen MTLDevice.
+
+def isHostedMetal = {
+    org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+            && "true".equalsIgnoreCase(System.getenv("METALLUM_HOSTED_METAL_OFFSCREEN"))
+}
+
+gradle.projectsEvaluated {
+    ["renderContractMetal3NativeTest", "renderContractMetal4NativeTest"].each { name ->
+        rootProject.tasks.named(name).configure { task ->
+            task.setOnlyIf { isHostedMetal() }
+            if (task instanceof org.gradle.api.tasks.testing.Test) {
+                task.environment "MTL_DEBUG_LAYER", "0"
+                task.environment "MTL_SHADER_VALIDATION", "0"
+                task.environment "MTL_HUD_ENABLED", "0"
+                task.environment "MTLFX_HUD_ENABLED", "0"
+                task.systemProperty "metallum.metal.hud", "false"
+                task.systemProperty "metallum.validation.gpuPassTiming", "false"
+            }
+        }
+    }
+
+    rootProject.tasks.register("hostedMetalExtendedIntegrationTest", org.gradle.api.tasks.testing.Test) { task ->
+        task.group = "verification"
+        task.description = "Runs redistributable offscreen Metal integration classes proven on GitHub hosted Apple Silicon."
+        task.onlyIf { isHostedMetal() }
+        task.dependsOn rootProject.tasks.named("buildMacNative")
+        task.testClassesDirs = rootProject.sourceSets.test.output.classesDirs
+        task.classpath = rootProject.sourceSets.test.runtimeClasspath
+        task.useJUnitPlatform()
+        task.filter {
+            includeTestsMatching "com.metallum.client.metal.render.IrisMetalBundledPostChainCompilationTest"
+            includeTestsMatching "com.metallum.client.metal.render.IrisMetalBundledTerrainPipelineTest"
+            includeTestsMatching "com.metallum.client.metal.render.IrisMetalShadowPipelineTest"
+            includeTestsMatching "com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest"
+            includeTestsMatching "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest"
+            includeTestsMatching "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest"
+            includeTestsMatching "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
+            failOnNoMatchingTests = true
+        }
+        task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+        task.environment "MTL_DEBUG_LAYER", "0"
+        task.environment "MTL_SHADER_VALIDATION", "0"
+        task.environment "MTL_HUD_ENABLED", "0"
+        task.environment "MTLFX_HUD_ENABLED", "0"
+        task.systemProperty "metallum.metal.hud", "false"
+        task.systemProperty "metallum.validation.gpuPassTiming", "false"
+    }
+}
