@@ -688,7 +688,7 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Java RenderPass -> FFM -> Swift indexed MRT GPU readback integration suite."
 	onlyIf {
-		physicalMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -706,7 +706,7 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS backend and Iris compute/SSBO/image/mipmap GPU readback suites."
 	onlyIf {
-		physicalMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -725,7 +725,7 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Iris target framework (ping-pong/depthtex/center-depth/shadow) content-level GPU suite."
 	onlyIf {
-		physicalMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
