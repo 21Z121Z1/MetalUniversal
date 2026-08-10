@@ -20,12 +20,41 @@ gradle.projectsEvaluated {
             task.environment "MTL_DEBUG_LAYER", "0"
             task.environment "MTL_SHADER_VALIDATION", "0"
             task.environment "MTL_HUD_ENABLED", "0"
+            task.environment "MTLFX_HUD_ENABLED", "0"
             task.systemProperty "metallum.metal.hud", "false"
             task.systemProperty "metallum.validation.gpuPassTiming", "false"
         } else if (task instanceof org.gradle.api.tasks.Exec) {
             task.environment "MTL_DEBUG_LAYER", "0"
             task.environment "MTL_SHADER_VALIDATION", "0"
             task.environment "MTL_HUD_ENABLED", "0"
+            task.environment "MTLFX_HUD_ENABLED", "0"
+        }
+    }
+
+    def candidateClass = rootProject.providers.gradleProperty("hostedMetalJUnitClass").orNull
+    if (candidateClass != null && !candidateClass.isBlank()) {
+        rootProject.tasks.register("hostedMetalGpuJUnit", org.gradle.api.tasks.testing.Test) { task ->
+            task.group = "verification"
+            task.description = "Runs one normally CI-excluded macOS Metal JUnit class on the hosted offscreen device."
+            task.onlyIf {
+                org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+                        && "true".equalsIgnoreCase(System.getenv("METALLUM_HOSTED_METAL_OFFSCREEN"))
+            }
+            task.dependsOn rootProject.tasks.named("buildMacNative")
+            task.testClassesDirs = rootProject.sourceSets.test.output.classesDirs
+            task.classpath = rootProject.sourceSets.test.runtimeClasspath
+            task.useJUnitPlatform()
+            task.filter {
+                includeTestsMatching candidateClass
+                failOnNoMatchingTests = true
+            }
+            task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+            task.environment "MTL_DEBUG_LAYER", "0"
+            task.environment "MTL_SHADER_VALIDATION", "0"
+            task.environment "MTL_HUD_ENABLED", "0"
+            task.environment "MTLFX_HUD_ENABLED", "0"
+            task.systemProperty "metallum.metal.hud", "false"
+            task.systemProperty "metallum.validation.gpuPassTiming", "false"
         }
     }
 }
