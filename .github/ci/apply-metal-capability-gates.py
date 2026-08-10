@@ -52,14 +52,18 @@ if legacy_calls:
     print(f"migrated {legacy_calls} legacy hardware gate call(s) to physical gate")
 
 
-def retarget_task(task_name: str, replacement: str) -> None:
-    global text
+def task_span(task_name: str) -> tuple[int, int]:
     marker = f'tasks.register("{task_name}"'
     start = text.find(marker)
     if start < 0:
         raise SystemExit(f"task not found: {task_name}")
     next_task = text.find('tasks.register("', start + len(marker))
-    end = len(text) if next_task < 0 else next_task
+    return start, len(text) if next_task < 0 else next_task
+
+
+def retarget_physical_task(task_name: str, replacement: str) -> None:
+    global text
+    start, end = task_span(task_name)
     block = text[start:end]
     needle = "physicalMetalValidationAvailable()"
     if replacement in block:
@@ -72,9 +76,28 @@ def retarget_task(task_name: str, replacement: str) -> None:
     print(f"{task_name}: {needle} -> {replacement}")
 
 
-retarget_task("metalMrtSmokeTest", "hostedOffscreenMetalValidationAvailable()")
-retarget_task("metalFxOffscreenValidation", "metalFxValidationAvailable()")
-retarget_task("metalFrameGenerationPresentationValidation", "presentationMetalValidationAvailable()")
+def retarget_presentation_task() -> None:
+    global text
+    task_name = "metalFrameGenerationPresentationValidation"
+    start, end = task_span(task_name)
+    block = text[start:end]
+    replacement = "presentationMetalValidationAvailable()"
+    if replacement in block:
+        print(f"{task_name} already uses {replacement}")
+        return
+    if "physicalMetalValidationAvailable()" in block:
+        block = block.replace("physicalMetalValidationAvailable()", replacement, 1)
+    elif "!hostedCi" in block:
+        block = block.replace("!hostedCi", replacement, 1)
+    else:
+        raise SystemExit(f"{task_name} has no recognized hosted/physical gate to retarget")
+    text = text[:start] + block + text[end:]
+    print(f"{task_name}: migrated to {replacement}")
+
+
+retarget_physical_task("metalMrtSmokeTest", "hostedOffscreenMetalValidationAvailable()")
+retarget_physical_task("metalFxOffscreenValidation", "metalFxValidationAvailable()")
+retarget_presentation_task()
 
 if "hardwareMetalValidationAvailable" in text:
     raise SystemExit("legacy hardwareMetalValidationAvailable symbol remains")
