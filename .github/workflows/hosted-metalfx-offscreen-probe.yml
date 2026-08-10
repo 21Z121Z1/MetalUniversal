@@ -6,6 +6,10 @@ on:
     branches:
       - ci/hosted-metal-gpu-probe-20260810
 
+concurrency:
+  group: hosted-metalfx-offscreen-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   metalfx-capability:
     name: hosted MetalFX capability
@@ -15,6 +19,7 @@ jobs:
       MTL_DEBUG_LAYER: '0'
       MTL_SHADER_VALIDATION: '0'
       MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
     steps:
       - uses: actions/checkout@v6
 
