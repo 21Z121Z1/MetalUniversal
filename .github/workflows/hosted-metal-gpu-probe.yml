@@ -152,6 +152,7 @@ jobs:
       fail-fast: false
       matrix:
         test_class:
+          - com.metallum.client.metal.render.IrisMetalBundledTerrainPipelineTest
           - com.metallum.client.metal.render.IrisMetalPostChainCompilationTest
           - com.metallum.client.metal.render.IrisMetalShadowPipelineTest
           - com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest
@@ -253,7 +254,7 @@ jobs:
             src/main/native/MetallumNative.swift
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
 
-      - name: Verify iPhoneOS Mach-O contract and exported ABI
+      - name: Verify iPhoneOS Mach-O platform contract and exported ABI
         shell: bash
         run: |
           set -euo pipefail
