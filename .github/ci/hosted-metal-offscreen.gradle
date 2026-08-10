@@ -3,11 +3,8 @@
 // spoof CI=false and it does not unlock presentation/window tasks.
 
 def hostedOffscreenTasks = [
-        "metalMrtSmokeTest",
-        "metalComputeBackendIntegrationTest",
-        "metalMrtBackendIntegrationTest",
-        "metalIrisTargetsIntegrationTest",
-        "metalFxOffscreenValidation"
+        "renderContractMetal3NativeTest",
+        "renderContractMetal4NativeTest"
 ] as Set
 
 gradle.projectsEvaluated {
@@ -23,11 +20,6 @@ gradle.projectsEvaluated {
             task.environment "MTLFX_HUD_ENABLED", "0"
             task.systemProperty "metallum.metal.hud", "false"
             task.systemProperty "metallum.validation.gpuPassTiming", "false"
-        } else if (task instanceof org.gradle.api.tasks.Exec) {
-            task.environment "MTL_DEBUG_LAYER", "0"
-            task.environment "MTL_SHADER_VALIDATION", "0"
-            task.environment "MTL_HUD_ENABLED", "0"
-            task.environment "MTLFX_HUD_ENABLED", "0"
         }
     }
 
