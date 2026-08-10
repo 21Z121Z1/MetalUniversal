@@ -26,15 +26,29 @@ jobs:
           distribution: temurin
           java-version: '8'
 
+      - name: Prepare coherent LWJGL 3.4.1 Java modules
+        run: |
+          set -euo pipefail
+          MODULES="$GITHUB_WORKSPACE/lwjgl-modules"
+          for module in lwjgl lwjgl-glfw lwjgl-spvc; do
+            mkdir -p "$MODULES/$module"
+            curl --fail --location --retry 3 \
+              -o "$MODULES/$module/$module.jar" \
+              "https://repo1.maven.org/maven2/org/lwjgl/$module/3.4.1/$module-3.4.1.jar"
+          done
+
       - name: Rebuild Amethyst aggregate LWJGL jar
         run: |
-          make -C amethyst/JavaApp build/lwjgl.jar BOOTJDK="$JAVA_HOME/bin"
+          make -C amethyst/JavaApp build/lwjgl.jar \
+            BOOTJDK="$JAVA_HOME/bin" \
+            LWJGL_MODULES_DIR="$GITHUB_WORKSPACE/lwjgl-modules"
 
       - name: Verify Minecraft 26.x Java ABI surface
         run: |
           set -euo pipefail
           JAR=amethyst/JavaApp/build/lwjgl.jar
           jar tf "$JAR" | grep -q '^org/lwjgl/util/spvc/Spvc.class$'
+          jar tf "$JAR" | grep -q '^org/lwjgl/glfw/GLFWPreeditCallback.class$'
           javap -classpath "$JAR" org.lwjgl.system.Configuration | grep -q 'SPVC_LIBRARY_NAME'
           javap -classpath "$JAR" org.lwjgl.glfw.GLFW | grep -q 'glfwPlatformSupported'
           javap -classpath "$JAR" org.lwjgl.glfw.GLFW | grep -q 'GLFW_CURSOR_CAPTURED'
@@ -42,8 +56,12 @@ jobs:
           javap -classpath "$JAR" org.lwjgl.glfw.GLFW | grep -q 'glfwSetPreeditCandidateCallback'
           javap -classpath "$JAR" org.lwjgl.glfw.GLFW | grep -q 'glfwSetIMEStatusCallback'
 
-      - name: Verify MetalUniversal iOS native resources are declared
+      - name: Verify pinned iOS runtime integration
         run: |
+          set -euo pipefail
+          grep -q '702c2102a2876cdf67d1d57f6819fa2d458217d9' amethyst/scripts/build_metallum_runtime.sh
+          grep -q 'LWJGL_IOS_NATIVES_DIR' amethyst/JavaApp/Makefile
+          grep -q 'METALLUM_NATIVE_DIR' amethyst/JavaApp/Makefile
           grep -q 'buildIOSNative' build.gradle
           grep -q 'buildIOSSpvc' build.gradle
           grep -q 'libspvc_metallum.dylib' src/main/java/com/metallum/client/metal/render/bridge/IOSRuntimePreflight.java
