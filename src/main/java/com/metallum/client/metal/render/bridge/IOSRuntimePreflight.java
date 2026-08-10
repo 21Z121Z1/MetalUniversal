@@ -39,12 +39,12 @@ public final class IOSRuntimePreflight {
         requireSpvcJavaBindings();
         Path configuredLibrary = configureSpvcLibraryStrict();
 
-        // Let the bridge record its own one-shot state. Its legacy helper may
-        // repeat the load, which is harmless in the same class loader; the
-        // strict bootstrap above guarantees that a valid path is already set
-        // even if the legacy fallback later encounters an iOS loader quirk.
-        MetalNativeBridge.ensureSpvcLibraryConfigured();
-
+        // Do not call MetalNativeBridge.ensureSpvcLibraryConfigured() here on
+        // iOS. That legacy helper always tries the jar-extraction path and can
+        // replace Configuration.SPVC_LIBRARY_NAME after we deliberately chose a
+        // launcher-bundled, code-signed Frameworks dylib. Minecraft's
+        // NativeLibrariesBootstrap initializes Spvc after this pre-launch hook
+        // and will therefore bind directly to the path selected below.
         String configured = Configuration.SPVC_LIBRARY_NAME.get();
         if (configured == null || configured.isBlank()) {
             throw new IllegalStateException(
@@ -55,19 +55,17 @@ public final class IOSRuntimePreflight {
 
         Path effectivePath = Path.of(configured);
         validateNativeImage(effectivePath, "configured iOS SPIRV-Cross library");
+        if (!effectivePath.equals(configuredLibrary)) {
+            throw new IllegalStateException(
+                    "iOS SPIRV-Cross configuration changed unexpectedly during pre-launch: "
+                            + configuredLibrary + " -> " + effectivePath
+            );
+        }
 
         Metallum.LOGGER.info(
                 "iOS/Amethyst runtime preflight ready: SPVC Java bindings present, native library={}",
                 effectivePath
         );
-
-        if (!effectivePath.equals(configuredLibrary)) {
-            Metallum.LOGGER.debug(
-                    "iOS SPVC path was replaced during bridge initialization: {} -> {}",
-                    configuredLibrary,
-                    effectivePath
-            );
-        }
     }
 
     static boolean looksLikeIOSRuntime() {
