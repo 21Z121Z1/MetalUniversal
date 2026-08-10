@@ -3,6 +3,7 @@ package com.metallum.client.metal.render.bridge;
 import com.metallum.Metallum;
 import org.lwjgl.system.Configuration;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -22,7 +23,8 @@ import java.util.Locale;
 public final class IOSRuntimePreflight {
     private static final String SPVC_CLASS = "org.lwjgl.util.spvc.Spvc";
     private static final String SPVC_RESOURCE = "/natives/ios/libspvc.dylib";
-    private static final String EXTRACTED_SPVC_NAME = "libspvc_metallum.dylib";
+    private static final String SPVC_FILE_NAME = "libspvc_metallum.dylib";
+    private static final String SPVC_PATH_PROPERTY = "metallum.ios.spvc.path";
 
     private IOSRuntimePreflight() {
     }
@@ -52,18 +54,7 @@ public final class IOSRuntimePreflight {
         }
 
         Path effectivePath = Path.of(configured);
-        try {
-            if (!Files.isRegularFile(effectivePath) || Files.size(effectivePath) <= 0L) {
-                throw new IllegalStateException(
-                        "Configured iOS SPIRV-Cross library is missing or empty: " + effectivePath
-                );
-            }
-        } catch (IOException e) {
-            throw new IllegalStateException(
-                    "Could not validate the configured iOS SPIRV-Cross library: " + effectivePath,
-                    e
-            );
-        }
+        validateNativeImage(effectivePath, "configured iOS SPIRV-Cross library");
 
         Metallum.LOGGER.info(
                 "iOS/Amethyst runtime preflight ready: SPVC Java bindings present, native library={}",
@@ -120,6 +111,26 @@ public final class IOSRuntimePreflight {
     }
 
     private static Path configureSpvcLibraryStrict() {
+        // Production path: prefer a dylib that the launcher bundled into its
+        // signed Frameworks directory. This avoids relying on Amethyst's dyld
+        // library-validation bypass for a dylib extracted from a mod jar.
+        Path signedLibrary = findBundledSpvcLibrary();
+        if (signedLibrary != null) {
+            try {
+                loadAndConfigure(signedLibrary);
+                Metallum.LOGGER.info("Using launcher-bundled iOS SPIRV-Cross: {}", signedLibrary);
+                return signedLibrary;
+            } catch (UnsatisfiedLinkError | SecurityException failure) {
+                throw new IllegalStateException(
+                        "Found launcher-bundled iOS SPIRV-Cross but dyld refused to load it: "
+                                + signedLibrary,
+                        failure
+                );
+            }
+        }
+
+        // Development fallback: extract the copy carried by the mod. This is
+        // useful on Amethyst builds with the dyld validation bypass enabled.
         final byte[] image;
         try (InputStream stream = IOSRuntimePreflight.class.getResourceAsStream(SPVC_RESOURCE)) {
             if (stream == null) {
@@ -154,7 +165,7 @@ public final class IOSRuntimePreflight {
                 continue;
             }
 
-            Path library = directory.resolve(EXTRACTED_SPVC_NAME);
+            Path library = directory.resolve(SPVC_FILE_NAME).toAbsolutePath();
             try {
                 Files.write(
                         library,
@@ -171,19 +182,66 @@ public final class IOSRuntimePreflight {
                 }
 
                 library.toFile().deleteOnExit();
-                System.load(library.toAbsolutePath().toString());
-                Configuration.SPVC_LIBRARY_NAME.set(library.toAbsolutePath().toString());
-                return library.toAbsolutePath();
+                loadAndConfigure(library);
+                Metallum.LOGGER.warn(
+                        "Using extracted iOS SPIRV-Cross from {}; prefer a signed {} in Amethyst Frameworks",
+                        library,
+                        SPVC_FILE_NAME
+                );
+                return library;
             } catch (IOException | UnsatisfiedLinkError | SecurityException failure) {
                 lastFailure = failure;
             }
         }
 
         throw new IllegalStateException(
-                "Failed to deploy the bundled iOS SPIRV-Cross library to any Amethyst/Pojav "
-                        + "writable directory. JIT/dyld library-validation bypass must be enabled "
-                        + "when loading dylibs extracted from the mod jar.",
+                "Failed to load iOS SPIRV-Cross. No signed " + SPVC_FILE_NAME
+                        + " was found in metallum.ios.spvc.path/java.library.path, and the bundled "
+                        + "fallback could not be loaded from a writable directory. Enable Amethyst's "
+                        + "dyld library-validation bypass for development, or bundle/sign the native "
+                        + "in the launcher Frameworks directory.",
                 lastFailure
         );
+    }
+
+    private static Path findBundledSpvcLibrary() {
+        String explicit = System.getProperty(SPVC_PATH_PROPERTY);
+        if (explicit != null && !explicit.isBlank()) {
+            Path candidate = Path.of(explicit).toAbsolutePath();
+            validateNativeImage(candidate, SPVC_PATH_PROPERTY);
+            return candidate;
+        }
+
+        String libraryPath = System.getProperty("java.library.path", "");
+        for (String rawDirectory : libraryPath.split(File.pathSeparator)) {
+            if (rawDirectory == null || rawDirectory.isBlank()) {
+                continue;
+            }
+            try {
+                Path candidate = Path.of(rawDirectory).resolve(SPVC_FILE_NAME).toAbsolutePath();
+                if (Files.isRegularFile(candidate) && Files.size(candidate) > 0L) {
+                    return candidate;
+                }
+            } catch (IOException | RuntimeException ignored) {
+                // Keep scanning later java.library.path entries.
+            }
+        }
+        return null;
+    }
+
+    private static void loadAndConfigure(final Path library) {
+        validateNativeImage(library, "iOS SPIRV-Cross library");
+        System.load(library.toAbsolutePath().toString());
+        Configuration.SPVC_LIBRARY_NAME.set(library.toAbsolutePath().toString());
+    }
+
+    private static void validateNativeImage(final Path library, final String description) {
+        try {
+            if (!Files.isRegularFile(library) || Files.size(library) <= 0L) {
+                throw new IllegalStateException(description + " is missing or empty: " + library);
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not validate " + description + ": " + library, e);
+        }
     }
 }
