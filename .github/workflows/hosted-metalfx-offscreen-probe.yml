@@ -7,7 +7,8 @@ on:
       - ci/hosted-metal-gpu-probe-20260810
 
 jobs:
-  metalfx-offscreen:
+  metalfx-capability:
+    name: hosted MetalFX capability
     runs-on: macos-26
     env:
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
@@ -23,9 +24,28 @@ jobs:
           java-version: '25'
           distribution: 'temurin'
 
-      - name: Run MetalFX offscreen validation on hosted Metal
+      - name: Classify hosted MetalFX Temporal Scaler capability
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           chmod +x ./gradlew
-          ./gradlew --stacktrace -I .github/ci/hosted-metal-offscreen.gradle metalFxOffscreenValidation
+          set +e
+          ./gradlew --stacktrace \
+            -I .github/ci/hosted-metal-offscreen.gradle \
+            metalFxOffscreenValidation 2>&1 | tee "$RUNNER_TEMP/metalfx-hosted.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$rc" -eq 0 ]; then
+            echo "HOSTED_METALFX_TEMPORAL_SUPPORTED=true" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if grep -Fq 'MTLFXTemporalScaler is unsupported on this device' "$RUNNER_TEMP/metalfx-hosted.log"; then
+            echo "HOSTED_METALFX_TEMPORAL_SUPPORTED=false" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Apple Paravirtual device exposes core Metal but not MTLFXTemporalScaler; keep MetalFX on the physical-device lane." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "Unexpected MetalFX validation failure (exit $rc)." | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
