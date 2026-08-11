@@ -125,6 +125,8 @@ final class SodiumTerrainMeshGenerationContractTest {
         assertNotNull(flags, "Sodium changed RenderRegion.sectionFlags; audit geometry filtering");
         assertTrue((sections.access & Opcodes.ACC_FINAL) != 0);
         assertTrue((flags.access & Opcodes.ACC_FINAL) != 0);
+        assertNotNull(findMethod(region, "delete", "()V"),
+                "Sodium changed RenderRegion.delete; audit cache invalidation after region teardown");
 
         ClassNode renderer = readClass(CHUNK_RENDERER);
         MethodNode render = requireMethod(

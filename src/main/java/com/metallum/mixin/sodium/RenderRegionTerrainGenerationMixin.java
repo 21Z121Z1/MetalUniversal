@@ -70,6 +70,14 @@ public abstract class RenderRegionTerrainGenerationMixin
         this.metallum$terrainMutationRevision++;
     }
 
+    @Inject(method = "delete", at = @At("RETURN"), remap = false, require = 1)
+    private void metallum$regionDeleted(final CallbackInfo ci) {
+        // RenderRegion.delete() clears the section array and all per-section
+        // render state. Invalidate the cached answer even if a stale render
+        // list reaches the renderer before Sodium removes the region.
+        this.metallum$terrainMutationRevision++;
+    }
+
     @Override
     public boolean metallum$isTerrainGenerationCurrent(
             final TerrainMeshGeneration.Stamp expected
