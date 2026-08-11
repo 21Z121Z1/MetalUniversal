@@ -255,7 +255,7 @@ final class MetalMrtBackendIntegrationTest {
                     MetalTerrainIcbScope.enter();
                     try {
                         pass.pass().multiDrawIndexed(draws, 1, 0, 16);
-                        if (Boolean.getBoolean("metallum.opt.metal4")) {
+                        if (device.metal4MainRendererEnabled()) {
                             // The second qualifying batch must execute exactly
                             // once through native multi-draw, but Java already
                             // knows the per-submission budget is consumed and
@@ -278,7 +278,7 @@ final class MetalMrtBackendIntegrationTest {
             assertByteNear(rendered.get(3), 255, "terrain ICB sampled alpha");
 
             MetalCommandPacketTelemetry.Snapshot commands = MetalCommandPacketTelemetry.snapshot();
-            boolean metal4 = Boolean.getBoolean("metallum.opt.metal4");
+            boolean metal4 = device.metal4MainRendererEnabled();
             assertEquals(4L, commands.terrainIcbAttempts());
             assertEquals(4L, commands.terrainIcbAccepted());
             assertEquals(64L, commands.terrainIcbDraws());

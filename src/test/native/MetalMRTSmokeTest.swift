@@ -73,6 +73,14 @@ private func checkNear(_ actual: Float, _ expected: Float, _ tolerance: Float, _
               "\(label): expected \(expected), got \(actual)")
 }
 
+private func persistSimulatorResult(_ message: String) throws {
+#if targetEnvironment(simulator)
+    let resultURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("metallum-ci-result.txt", isDirectory: false)
+    try message.write(to: resultURL, atomically: true, encoding: .utf8)
+#endif
+}
+
 private func makeTexture(
     device: MTLDevice,
     pixelFormat: MTLPixelFormat,
@@ -265,7 +273,9 @@ private func runSmokeTest() throws {
               "null-slot RGBA8 readback mismatch: \(nullRGBA)")
     try checkNear(readR8(nullValidity), 0.25, 0.01, "null-slot R8 validity")
 
-    print("MRT smoke passed: full slots [RGBA8, RG16_FLOAT, R8_UNORM], preserved null slot [RGBA8, unused, R8_UNORM]")
+    let success = "MRT smoke passed: full slots [RGBA8, RG16_FLOAT, R8_UNORM], preserved null slot [RGBA8, unused, R8_UNORM]"
+    print(success)
+    try persistSimulatorResult(success)
 }
 
 do {
