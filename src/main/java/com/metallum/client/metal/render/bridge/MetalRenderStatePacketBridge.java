@@ -48,9 +48,6 @@ public final class MetalRenderStatePacketBridge {
                 || (table.buildCapabilities() & CAPABILITY_BIT) == 0L) {
             return null;
         }
-        // The decoder performs bounded native-only work and has no upcall path.
-        // Match the critical FFM policy already used by individual Metal state
-        // setters; hosted CI measures this candidate against the ordinary control.
         return MetalFfmCallTelemetry.instrumentDowncall(
                 Linker.nativeLinker().downcallHandle(
                         table.entry(0),
@@ -59,8 +56,7 @@ public final class MetalRenderStatePacketBridge {
                                 ValueLayout.ADDRESS,
                                 ValueLayout.ADDRESS,
                                 ValueLayout.JAVA_LONG
-                        ),
-                        Linker.Option.critical(false)
+                        )
                 )
         );
     }
