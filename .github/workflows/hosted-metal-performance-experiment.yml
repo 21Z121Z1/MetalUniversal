@@ -88,22 +88,26 @@ jobs:
           import json, os, pathlib
           path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'hosted-metal-perf' / 'in-jvm-paired.json'
           data = json.loads(path.read_text())
-          delta = data['paired_median_delta_percent']
-          improvement = data['paired_median_improvement_percent']
+          cpu_delta = data['paired_cpu_median_delta_percent']
+          cpu_improvement = data['paired_cpu_median_improvement_percent']
+          wall_delta = data['paired_wall_median_delta_percent']
           print(json.dumps(data, indent=2))
-          print(f"HOSTED_METAL_IN_JVM_RESULT paired_delta={delta:+.3f}% paired_improvement={improvement:+.3f}%")
+          print(f"HOSTED_METAL_IN_JVM_RESULT cpu_delta={cpu_delta:+.3f}% cpu_improvement={cpu_improvement:+.3f}% wall_delta={wall_delta:+.3f}%")
           summary = os.environ.get('GITHUB_STEP_SUMMARY')
           if summary:
               with open(summary, 'a', encoding='utf-8') as out:
                   out.write('## Hosted Metal in-JVM paired experiment\n\n')
-                  out.write('Direct critical FFM setters vs render-state packet serialization/native decode. ') 
+                  out.write('Primary metric: current render-thread CPU time. Wall-clock is retained as a scheduler-noise diagnostic. ') 
                   out.write('Negative delta means packet mode is faster.\n\n')
                   out.write('| Metric | Legacy | Packet |\n|---|---:|---:|\n')
-                  out.write(f"| Median | {data['legacy_median_ns']/1e6:.3f} ms | {data['packet_median_ns']/1e6:.3f} ms |\n")
-                  out.write(f"| p95 | {data['legacy_p95_ns']/1e6:.3f} ms | {data['packet_p95_ns']/1e6:.3f} ms |\n")
-                  out.write(f"| ns/state op | {data['legacy_median_ns_per_state_op']:.2f} | {data['packet_median_ns_per_state_op']:.2f} |\n\n")
-                  out.write(f"Paired median delta: **{delta:+.2f}%**; improvement: **{improvement:+.2f}%**.\n\n")
-                  out.write(f"Order check — legacy-first: {data['legacy_first_median_delta_percent']:+.2f}%; packet-first: {data['packet_first_median_delta_percent']:+.2f}%.\n")
+                  out.write(f"| CPU median | {data['legacy_cpu_median_ns']/1e6:.3f} ms | {data['packet_cpu_median_ns']/1e6:.3f} ms |\n")
+                  out.write(f"| CPU p95 | {data['legacy_cpu_p95_ns']/1e6:.3f} ms | {data['packet_cpu_p95_ns']/1e6:.3f} ms |\n")
+                  out.write(f"| CPU ns/state op | {data['legacy_cpu_median_ns_per_state_op']:.2f} | {data['packet_cpu_median_ns_per_state_op']:.2f} |\n")
+                  out.write(f"| Wall median | {data['legacy_wall_median_ns']/1e6:.3f} ms | {data['packet_wall_median_ns']/1e6:.3f} ms |\n")
+                  out.write(f"| Wall p95 | {data['legacy_wall_p95_ns']/1e6:.3f} ms | {data['packet_wall_p95_ns']/1e6:.3f} ms |\n\n")
+                  out.write(f"CPU paired median delta: **{cpu_delta:+.2f}%**; improvement: **{cpu_improvement:+.2f}%**.\n")
+                  out.write(f"Wall paired median delta: **{wall_delta:+.2f}%**.\n")
+                  out.write(f"CPU order check — legacy-first: {data['legacy_first_cpu_median_delta_percent']:+.2f}%; packet-first: {data['packet_first_cpu_median_delta_percent']:+.2f}%.\n")
           PY
 
       - name: Preserve experiment evidence
