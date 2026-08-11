@@ -18,6 +18,7 @@ import java.util.regex.Pattern;
 public final class IrisMetalGlslLinker {
     public static final String UNIFORM_BLOCK_NAME = "MetallumIrisUniforms";
     public static final String SODIUM_PUSH_CONSTANT_BLOCK_NAME = "MetallumSodiumPushConstants";
+    public static final String IRIS_FOG_BLOCK_NAME = "MetallumIrisFog";
 
     private static final Pattern UNIFORM_STATEMENT =
             Pattern.compile("(?m)^[ \\t]*uniform\\b([^;{}]*);");
@@ -25,6 +26,12 @@ public final class IrisMetalGlslLinker {
             Pattern.compile("[iu]?(sampler|image|texture)\\w*|atomic_uint");
     private static final Pattern UNIFORM_BLOCK = Pattern.compile(
             "(?m)^[ \\t]*(?:layout\\s*\\([^)]*\\)\\s*)?uniform\\s+([A-Za-z_]\\w*)\\s*\\{"
+    );
+    private static final Pattern OPAQUE_DECLARATION = Pattern.compile(
+            "(?m)(?:layout\\s*\\([^)]*\\)\\s*)?uniform\\s+"
+                    + "(?:(?:readonly|writeonly|coherent|volatile|restrict)\\s+)*"
+                    + "((?:[iu]?sampler|[iu]?image|[iu]?texture)\\w*)\\s+"
+                    + "([A-Za-z_]\\w*)"
     );
     private static final Pattern HOSTILE_IDENTIFIER = Pattern.compile(
             "\\b(new|delete|this|template|typename|namespace|operator|private|public|protected|virtual"
@@ -151,7 +158,39 @@ public final class IrisMetalGlslLinker {
     }
 
     private static String normalize(final String source) {
-        return HOSTILE_IDENTIFIER.matcher(stripComments(source)).replaceAll("metallum_id_$1");
+        return remapVanillaBuiltInUniformBlocks(
+                HOSTILE_IDENTIFIER.matcher(stripComments(source)).replaceAll("metallum_id_$1")
+        );
+    }
+
+    /**
+     * Iris prefixes the names of Minecraft's built-in uniform blocks while
+     * patching vanilla programs. RenderSystem.bindDefaultUniforms still
+     * publishes the original Mojang names, so restore those names before
+     * SPIR-V reflection builds the Metal descriptor table.
+     */
+    static String remapVanillaBuiltInUniformBlocks(final String source) {
+        String remapped = source;
+        remapped = renameUniformBlock(remapped, "iris_DynamicTransforms", "DynamicTransforms");
+        remapped = renameUniformBlock(remapped, "iris_Projection", "Projection");
+        // Keep Iris's fog block private: shaderpacks such as BSL use Fog as a
+        // function name. The runtime aliases this block back to Mojang's Fog
+        // buffer when descriptors are pushed.
+        remapped = renameUniformBlock(remapped, "iris_Fog", IRIS_FOG_BLOCK_NAME);
+        remapped = renameUniformBlock(remapped, "iris_Globals", "Globals");
+        remapped = renameUniformBlock(remapped, "iris_CloudInfo", "CloudInfo");
+        return remapped;
+    }
+
+    private static String renameUniformBlock(
+            final String source,
+            final String irisName,
+            final String mojangName
+    ) {
+        Pattern declaration = Pattern.compile(
+                "\\buniform\\s+" + Pattern.quote(irisName) + "\\s*\\{"
+        );
+        return declaration.matcher(source).replaceAll("uniform " + mojangName + " {");
     }
 
     private static LooseExtraction extractLooseUniforms(final String source) {
@@ -336,6 +375,30 @@ public final class IrisMetalGlslLinker {
         }
     }
 
+    /**
+     * Inspects opaque declarations without running Iris transforms or creating
+     * a Metal pipeline. Admission uses this to reject pack-owned texel buffers
+     * before any generation state becomes visible.
+     */
+    public static List<SamplerDecl> inspectSamplerDeclarations(final String source) {
+        Objects.requireNonNull(source, "source");
+        Map<String, String> samplers = new LinkedHashMap<>();
+        Matcher matcher = OPAQUE_DECLARATION.matcher(stripComments(source));
+        while (matcher.find()) {
+            String name = matcher.group(2);
+            String type = matcher.group(1);
+            String previous = samplers.putIfAbsent(name, type);
+            if (previous != null && !previous.equals(type)) {
+                throw new IllegalArgumentException(
+                        "opaque uniform '" + name + "' differs across declarations"
+                );
+            }
+        }
+        return samplers.entrySet().stream()
+                .map(entry -> new SamplerDecl(entry.getKey(), entry.getValue()))
+                .toList();
+    }
+
     private static void collectUniformBlocks(final String source, final Set<String> out) {
         Matcher matcher = UNIFORM_BLOCK.matcher(source);
         while (matcher.find()) {
@@ -447,6 +510,22 @@ public final class IrisMetalGlslLinker {
 
         public boolean sampled() {
             return !storageImage();
+        }
+
+        public boolean texelBuffer() {
+            return glslType.equals("samplerBuffer")
+                    || glslType.equals("isamplerBuffer")
+                    || glslType.equals("usamplerBuffer");
+        }
+
+        /** GLSL separate-image declarations need a separate sampler binding. */
+        public boolean separateImage() {
+            return glslType.startsWith("texture");
+        }
+
+        /** GLSL sampler-object declarations cannot be represented by the combined ABI. */
+        public boolean separateSampler() {
+            return glslType.equals("sampler");
         }
     }
 

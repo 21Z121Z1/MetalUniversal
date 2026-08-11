@@ -161,10 +161,13 @@
     {
       "id": "runtime.pass-order-and-contribution",
       "status": "runtime",
-      "contract": "A physical run records setup, begin, shadow, depthtex, deferred, composite and final in Iris order with final readback.",
+      "contract": "A physical run records setup, begin, either a complete shadow scene or an explicit empty shadow route, depthtex, deferred, composite, final and color-space finalization in Iris order with final readback.",
+      "shadowMode": "scene-or-empty",
+      "shadowEvidence": "scene-content-or-empty",
+      "shadowStageEvidence": "required-when-scene",
       "receiptEvents": [
         "setup", "begin", "shadow.render.begin", "shadow.composite", "depthtex1.capture",
-        "deferred", "depthtex2.capture", "composite", "final"
+        "deferred", "depthtex2.capture", "composite", "final", "color-space.finalized"
       ]
     },
     {

@@ -1,6 +1,7 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.client.metal.render.IrisMetalTerrainBridge;
+import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.textures.GpuTextureView;
@@ -17,6 +18,26 @@ import java.util.function.Supplier;
 /** Replaces Sodium's terrain descriptor and PSO as one Iris generation unit. */
 @Mixin(DefaultChunkRenderer.class)
 public abstract class IrisSodiumDefaultChunkRendererMixin {
+    @Redirect(
+            method = "render",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lcom/mojang/blaze3d/systems/RenderPass;setUniform("
+                            + "Ljava/lang/String;"
+                            + "Lcom/mojang/blaze3d/buffers/GpuBuffer;"
+                            + ")V"
+            ),
+            remap = false
+    )
+    private void metallum$validateSectionTimeInfo(
+            final RenderPass renderPass,
+            final String name,
+            final GpuBuffer value
+    ) {
+        IrisMetalTerrainBridge.validateDrawOwnedTexelBuffer(name, value);
+        renderPass.setUniform(name, value);
+    }
+
     @Redirect(
             method = "render",
             at = @At(
@@ -42,9 +63,15 @@ public abstract class IrisSodiumDefaultChunkRendererMixin {
         RenderPass irisPass = IrisMetalTerrainBridge.createRenderPass(
                 encoder, label, sceneColor, clearColor, sceneDepth, clearDepth
         );
-        return irisPass == null
-                ? encoder.createRenderPass(label, sceneColor, clearColor, sceneDepth, clearDepth)
-                : irisPass;
+        if (irisPass != null) {
+            return irisPass;
+        }
+        if (IrisMetalTerrainBridge.hasActiveGeneration()) {
+            throw new IllegalStateException(
+                    "Iris active generation did not provide an owned Sodium terrain render pass"
+            );
+        }
+        return encoder.createRenderPass(label, sceneColor, clearColor, sceneDepth, clearDepth);
     }
 
 }

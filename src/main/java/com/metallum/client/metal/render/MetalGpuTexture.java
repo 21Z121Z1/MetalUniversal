@@ -27,6 +27,7 @@ final class MetalGpuTexture extends GpuTexture {
     private final MetalDevice device;
     private final MTLPixelFormat mtlPixelFormat;
     private final boolean texture3D;
+    private final boolean texture1D;
     private boolean closed;
     @Nullable
     private Vector4fc materializedColorClear;
@@ -61,38 +62,73 @@ final class MetalGpuTexture extends GpuTexture {
             final int mipLevels,
             final boolean texture3D
     ) {
+        this(
+                device,
+                usage,
+                label,
+                format,
+                width,
+                height,
+                depthOrLayers,
+                mipLevels,
+                texture3D ? MetalTextureDimension.THREE_D : MetalTextureDimension.TWO_D
+        );
+    }
+
+    MetalGpuTexture(
+            final MetalDevice device,
+            @GpuTexture.Usage final int usage,
+            final String label,
+            final GpuFormat format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevels,
+            final MetalTextureDimension dimension
+    ) {
         super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
-        this.texture3D = texture3D;
+        this.texture3D = dimension == MetalTextureDimension.THREE_D;
+        this.texture1D = dimension == MetalTextureDimension.ONE_D;
         this.mtlPixelFormat = MTLPixelFormat.from(format);
 
-        this.nativeHandle = texture3D
-                ? MetalNativeBridge.metallum_create_texture_3d(
+        this.nativeHandle = switch (dimension) {
+            case ONE_D -> MetalNativeBridge.metallum_create_texture_1d(
+                    device.metalDeviceHandle(),
+                    this.mtlPixelFormat,
+                    width,
+                    mipLevels,
+                    toMtlTextureUsage(usage),
+                    MTLStorageMode.Private,
+                    label
+            );
+            case TWO_D -> MetalNativeBridge.metallum_create_texture_2d(
+                    device.metalDeviceHandle(),
+                    this.mtlPixelFormat,
+                    width,
+                    height,
+                    depthOrLayers,
+                    mipLevels,
+                    (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
+                    toMtlTextureUsage(usage),
+                    MTLStorageMode.Private,
+                    label
+            );
+            case THREE_D -> MetalNativeBridge.metallum_create_texture_3d(
                         device.metalDeviceHandle(),
                         this.mtlPixelFormat,
                         width,
                         height,
                         depthOrLayers,
                         mipLevels,
-                        toMtlTextureUsage(usage),
-                        MTLStorageMode.Private,
-                        label
-                )
-                : MetalNativeBridge.metallum_create_texture_2d(
-                        device.metalDeviceHandle(),
-                        this.mtlPixelFormat,
-                        width,
-                        height,
-                        depthOrLayers,
-                        mipLevels,
-                        (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
                         toMtlTextureUsage(usage),
                         MTLStorageMode.Private,
                         label
                 );
+        };
         if (MetalNativeBridge.isNullHandle(this.nativeHandle)) {
             throw new IllegalStateException(
-                    "Failed to create Metal " + (texture3D ? "3D" : "2D") + " texture '" + label + "'"
+                    "Failed to create Metal " + dimension + " texture '" + label + "'"
             );
         }
     }
@@ -103,6 +139,14 @@ final class MetalGpuTexture extends GpuTexture {
 
     boolean isTexture3D() {
         return this.texture3D;
+    }
+
+    boolean isTexture1D() {
+        return this.texture1D;
+    }
+
+    boolean isOwnedBy(final MetalDevice expected) {
+        return this.device == expected;
     }
 
     void recordMaterializedClear(@Nullable final Vector4fc color, @Nullable final Double depth) {

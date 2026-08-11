@@ -90,7 +90,7 @@ final class IrisMetalWorldPrograms implements AutoCloseable {
     /** Resolves a fixed-Iris core draw through the same frontend as terrain and post passes. */
     synchronized Optional<IrisMetalGlslLinker.LinkedRasterProgram> core(final ShaderKey key) {
         Objects.requireNonNull(key, "key");
-        boolean lines = key == ShaderKey.LINES && this.frontend.resolve(ProgramId.Line).isPresent();
+        boolean lines = key == ShaderKey.LINES && this.frontend.has(ProgramId.Line);
         boolean clouds = key == ShaderKey.CLOUDS || key == ShaderKey.CLOUDS_SODIUM;
         ShaderAttributeInputs inputs = key.getVertexFormat() == null
                 ? new ShaderAttributeInputs(true, true, true, true, true)

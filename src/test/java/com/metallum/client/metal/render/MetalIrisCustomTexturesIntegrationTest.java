@@ -69,7 +69,7 @@ final class MetalIrisCustomTexturesIntegrationTest {
             MetalRenderPass.TextureViewAndSampler binding =
                     textures.resolve(TextureStage.COMPOSITE_AND_FINAL, "colortex7");
             assertNotNull(binding);
-            ByteBuffer pixels = readback((MetalGpuTexture) binding.textureView().texture());
+            byte[] pixels = readback((MetalGpuTexture) binding.textureView().texture());
             assertPixel(pixels, 0, 255, 0, 0, 255);
             assertPixel(pixels, 1, 0, 128, 255, 64);
             assertEquals(AddressMode.CLAMP_TO_EDGE, binding.sampler().getAddressModeU());
@@ -148,26 +148,98 @@ final class MetalIrisCustomTexturesIntegrationTest {
     }
 
     @Test
-    void unsupportedKindsFailClosedOnlyWhenTheirStageSamplerIsRequested() {
+    void rawKindsUploadAndReadBackAtTheirDeclaredDimensions() {
+        assertRawTexture(
+                new CustomTextureData.RawData1D(
+                        new byte[]{
+                                (byte) 255, 0, 0, (byte) 255,
+                                0, (byte) 255, 0, (byte) 255
+                        },
+                        filtering(),
+                        InternalTextureFormat.RGBA8,
+                        PixelFormat.RGBA,
+                        PixelType.UNSIGNED_BYTE,
+                        2
+                ),
+                new byte[]{
+                        (byte) 255, 0, 0, (byte) 255,
+                        0, (byte) 255, 0, (byte) 255
+                },
+                true
+        );
+        assertRawTexture(
+                new CustomTextureData.RawData2D(
+                        new byte[]{
+                                0, 0, (byte) 255, (byte) 255,
+                                (byte) 255, (byte) 255, 0, (byte) 255,
+                                0, (byte) 255, (byte) 255, (byte) 255,
+                                (byte) 255, 0, (byte) 255, (byte) 255
+                        },
+                        filtering(),
+                        InternalTextureFormat.RGBA8,
+                        PixelFormat.RGBA,
+                        PixelType.UNSIGNED_BYTE,
+                        2,
+                        2
+                ),
+                new byte[]{
+                        0, 0, (byte) 255, (byte) 255,
+                        (byte) 255, (byte) 255, 0, (byte) 255,
+                        0, (byte) 255, (byte) 255, (byte) 255,
+                        (byte) 255, 0, (byte) 255, (byte) 255
+                },
+                true
+        );
+        assertRawTexture(
+                new CustomTextureData.RawData3D(
+                        new byte[]{
+                                (byte) 255, (byte) 128, 0, (byte) 255,
+                                0, (byte) 128, (byte) 255, (byte) 255
+                        },
+                        filtering(),
+                        InternalTextureFormat.RGBA8,
+                        PixelFormat.RGBA,
+                        PixelType.UNSIGNED_BYTE,
+                        1,
+                        1,
+                        2
+                ),
+                new byte[]{
+                        (byte) 255, (byte) 128, 0, (byte) 255,
+                        0, (byte) 128, (byte) 255, (byte) 255
+                },
+                true
+        );
+        assertRawTexture(
+                new CustomTextureData.RawDataRect(
+                        new byte[]{
+                                (byte) 255, 0, (byte) 255, (byte) 255,
+                                0, (byte) 255, (byte) 255, (byte) 255,
+                                (byte) 255, (byte) 255, 0, (byte) 255,
+                                (byte) 255, 0, 0, (byte) 255
+                        },
+                        clampedFiltering(),
+                        InternalTextureFormat.RGBA8,
+                        PixelFormat.RGBA,
+                        PixelType.UNSIGNED_BYTE,
+                        2,
+                        2
+                ),
+                new byte[]{
+                        (byte) 255, 0, (byte) 255, (byte) 255,
+                        0, (byte) 255, (byte) 255, (byte) 255,
+                        (byte) 255, (byte) 255, 0, (byte) 255,
+                        (byte) 255, 0, 0, (byte) 255
+                },
+                false
+        );
+    }
+
+    @Test
+    void liveAliasesFailClosedOnlyWhenTheirStageSamplerIsRequested() {
         List<CustomTextureData> unsupported = List.of(
                 new CustomTextureData.LightmapMarker(),
-                new CustomTextureData.ResourceData("minecraft", "textures/block/dirt.png"),
-                new CustomTextureData.RawData1D(
-                        new byte[4], filtering(), InternalTextureFormat.RGBA8,
-                        PixelFormat.RGBA, PixelType.UNSIGNED_BYTE, 1
-                ),
-                new CustomTextureData.RawData2D(
-                        new byte[4], filtering(), InternalTextureFormat.RGBA8,
-                        PixelFormat.RGBA, PixelType.UNSIGNED_BYTE, 1, 1
-                ),
-                new CustomTextureData.RawData3D(
-                        new byte[4], filtering(), InternalTextureFormat.RGBA8,
-                        PixelFormat.RGBA, PixelType.UNSIGNED_BYTE, 1, 1, 1
-                ),
-                new CustomTextureData.RawDataRect(
-                        new byte[4], filtering(), InternalTextureFormat.RGBA8,
-                        PixelFormat.RGBA, PixelType.UNSIGNED_BYTE, 1, 1
-                )
+                new CustomTextureData.ResourceData("minecraft", "textures/block/dirt.png")
         );
 
         for (CustomTextureData data : unsupported) {
@@ -196,8 +268,58 @@ final class MetalIrisCustomTexturesIntegrationTest {
         }
     }
 
-    private ByteBuffer readback(final MetalGpuTexture texture) {
-        int size = texture.getWidth(0) * texture.getHeight(0) * texture.pixelSize();
+    @Test
+    void resourceDataNormalAndSpecularPathsResolveToTheSameBaseResource() {
+        IrisMetalCustomTextures.ResourceRequest normal = IrisMetalCustomTextures.resourceRequest(
+                new CustomTextureData.ResourceData("minecraft", "textures/block/stone_n.png")
+        );
+        assertEquals("minecraft:textures/block/stone_n.png", normal.requested().toString());
+        assertEquals("minecraft:textures/block/stone.png", normal.base().toString());
+        assertNotNull(normal.pbrType());
+        assertEquals("_n", normal.pbrType().getSuffix());
+
+        IrisMetalCustomTextures.ResourceRequest specular = IrisMetalCustomTextures.resourceRequest(
+                new CustomTextureData.ResourceData("minecraft", "textures/block/stone_s.png")
+        );
+        assertEquals("minecraft:textures/block/stone_s.png", specular.requested().toString());
+        assertEquals("minecraft:textures/block/stone.png", specular.base().toString());
+        assertNotNull(specular.pbrType());
+        assertEquals("_s", specular.pbrType().getSuffix());
+
+        IrisMetalCustomTextures.ResourceRequest ordinary = IrisMetalCustomTextures.resourceRequest(
+                new CustomTextureData.ResourceData("minecraft", "textures/block/dirt.png")
+        );
+        assertEquals(ordinary.requested(), ordinary.base());
+        assertNull(ordinary.pbrType());
+    }
+
+    private void assertRawTexture(
+            final CustomTextureData.RawData data,
+            final byte[] expected,
+            final boolean normalizedCoordinates
+    ) {
+        try (IrisMetalCustomTextures textures = new IrisMetalCustomTextures(
+                device,
+                definitions(TextureStage.SHADOWCOMP, "rawInput", data)
+        )) {
+            MetalRenderPass.TextureViewAndSampler binding = textures.resolve(
+                    TextureStage.SHADOWCOMP,
+                    "rawInput"
+            );
+            assertNotNull(binding);
+            assertArrayEquals(expected, readback((MetalGpuTexture) binding.textureView().texture()));
+            assertEquals(
+                    normalizedCoordinates,
+                    ((MetalGpuSampler) binding.sampler()).normalizedCoordinates()
+            );
+        }
+    }
+
+    private byte[] readback(final MetalGpuTexture texture) {
+        int size = Math.multiplyExact(
+                Math.multiplyExact(texture.getWidth(0), texture.getHeight(0)),
+                Math.multiplyExact(texture.getDepthOrLayers(), texture.pixelSize())
+        );
         try (MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
                 () -> "iris custom texture readback",
                 GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST,
@@ -211,7 +333,9 @@ final class MetalIrisCustomTexturesIntegrationTest {
             ByteBuffer copy = ByteBuffer.allocate(size);
             copy.put(source);
             copy.flip();
-            return copy;
+            byte[] result = new byte[copy.remaining()];
+            copy.get(result);
+            return result;
         }
     }
 
@@ -246,8 +370,12 @@ final class MetalIrisCustomTexturesIntegrationTest {
         return new TextureFilteringData(false, false);
     }
 
+    private static TextureFilteringData clampedFiltering() {
+        return new TextureFilteringData(false, true);
+    }
+
     private static void assertPixel(
-            final ByteBuffer pixels,
+            final byte[] pixels,
             final int index,
             final int red,
             final int green,
@@ -255,9 +383,9 @@ final class MetalIrisCustomTexturesIntegrationTest {
             final int alpha
     ) {
         int offset = index * 4;
-        assertEquals(red, Byte.toUnsignedInt(pixels.get(offset)), "red at pixel " + index);
-        assertEquals(green, Byte.toUnsignedInt(pixels.get(offset + 1)), "green at pixel " + index);
-        assertEquals(blue, Byte.toUnsignedInt(pixels.get(offset + 2)), "blue at pixel " + index);
-        assertEquals(alpha, Byte.toUnsignedInt(pixels.get(offset + 3)), "alpha at pixel " + index);
+        assertEquals(red, Byte.toUnsignedInt(pixels[offset]), "red at pixel " + index);
+        assertEquals(green, Byte.toUnsignedInt(pixels[offset + 1]), "green at pixel " + index);
+        assertEquals(blue, Byte.toUnsignedInt(pixels[offset + 2]), "blue at pixel " + index);
+        assertEquals(alpha, Byte.toUnsignedInt(pixels[offset + 3]), "alpha at pixel " + index);
     }
 }

@@ -333,6 +333,30 @@ final class IrisMetalPingPongTargetsIntegrationTest {
     }
 
     @Test
+    void shadowSceneMaterializesBothColorSidesBeforeSampling() {
+        try (IrisMetalShadowTargets shadow = new IrisMetalShadowTargets(
+                device,
+                new GpuFormat[]{GpuFormat.RGBA8_UNORM},
+                8,
+                new boolean[]{false},
+                new boolean[]{false},
+                new boolean[]{false, false},
+                new boolean[]{false, false}
+        )) {
+            Vector4f clear = new Vector4f(0.25F, 0.5F, 0.75F, 1.0F);
+            encoder.clearColorTexture(shadow.colorTargets().mainTexture(0), clear);
+            encoder.clearColorTexture(shadow.colorTargets().altTexture(0), clear);
+
+            shadow.materializePendingColorClears(encoder);
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+
+            assertPixel(shadow.colorTargets().mainTexture(0), 64, 128);
+            assertPixel(shadow.colorTargets().altTexture(0), 64, 128);
+        }
+    }
+
+    @Test
     void shadowDepthMipmapsUseFilteredReductionAcrossLevels() {
         try (IrisMetalShadowTargets shadow = new IrisMetalShadowTargets(
                 device,
@@ -360,6 +384,28 @@ final class IrisMetalPingPongTargetsIntegrationTest {
                         "shadowtex1 mip " + level
                 );
             }
+        }
+    }
+
+    @Test
+    void shadowDepthCopyReplacesPendingDestinationClear() {
+        try (IrisMetalShadowTargets shadow = new IrisMetalShadowTargets(
+                device,
+                new GpuFormat[]{GpuFormat.RGBA8_UNORM},
+                4,
+                new boolean[]{false},
+                new boolean[]{false},
+                new boolean[]{false, false},
+                new boolean[]{false, false}
+        )) {
+            writeDepthPattern(shadow.shadowDepthTexture(), 4, 4);
+            encoder.clearDepthTexture(shadow.shadowDepthNoTranslucentsTexture(), 1.0);
+            shadow.captureNoTranslucentsDepth(encoder);
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+
+            assertEquals(0.1F, readDepth(shadow.shadowDepthTexture(), 0), 0.001F);
+            assertEquals(0.1F, readDepth(shadow.shadowDepthNoTranslucentsTexture(), 0), 0.001F);
         }
     }
 

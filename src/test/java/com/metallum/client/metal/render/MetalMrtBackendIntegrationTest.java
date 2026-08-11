@@ -15,6 +15,14 @@ import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.ShaderType;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
+import net.irisshaders.iris.Iris;
+import net.irisshaders.iris.gl.blending.AlphaTest;
+import net.irisshaders.iris.gl.shader.StandardMacros;
+import net.irisshaders.iris.pipeline.programs.ShaderKey;
+import net.irisshaders.iris.shaderpack.ShaderPack;
+import net.irisshaders.iris.shaderpack.loading.ProgramId;
+import net.irisshaders.iris.shaderpack.materialmap.NamespacedId;
+import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import org.joml.Vector4f;
 import org.joml.Vector4fc;
 import org.junit.jupiter.api.AfterEach;
@@ -24,8 +32,13 @@ import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 
 import java.lang.foreign.MemorySegment;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -96,6 +109,59 @@ final class MetalMrtBackendIntegrationTest {
     void oneAndTwoAttachmentReadback() {
         runRgbaAttachmentCount(1);
         runRgbaAttachmentCount(2);
+    }
+
+    @Test
+    void failedUniformBackingCandidateLeavesTheActiveBackingUntouched() throws Exception {
+        Iris.testing = true;
+        try (LoadedPack loaded = loadBslFixture()) {
+            ProgramSet programs = loaded.pack().getProgramSet(new NamespacedId("minecraft", "overworld"));
+            IrisMetalProgramFrontend frontend = new IrisMetalProgramFrontend(programs);
+            IrisMetalGlslLinker.LinkedRasterProgram linked = IrisMetalGlslLinker.linkSodium(
+                    frontend.patchSodium(
+                            frontend.resolve(ProgramId.TerrainSolid).orElseThrow(),
+                            AlphaTest.ALWAYS
+                    )
+            );
+
+            try (IrisMetalUniformValues values = new IrisMetalUniformValues(0.0F)) {
+                values.register(ShaderKey.SODIUM_TERRAIN_SOLID, linked);
+
+                try (IrisMetalUniformValues.BackingTransaction initial =
+                             values.beginBackingTransaction(device)) {
+                    values.prewarm(device, initial);
+                    assertNull(values.slice(ShaderKey.SODIUM_TERRAIN_SOLID));
+                    initial.commit();
+                }
+                GpuBuffer activeBuffer = values.slice(ShaderKey.SODIUM_TERRAIN_SOLID).buffer();
+
+                try (IrisMetalUniformValues.BackingTransaction failed =
+                             values.beginBackingTransaction(device)) {
+                    values.prewarm(device, failed);
+                    assertSame(
+                            activeBuffer,
+                            values.slice(ShaderKey.SODIUM_TERRAIN_SOLID).buffer(),
+                            "candidate preparation must not publish before commit"
+                    );
+                }
+                assertSame(
+                        activeBuffer,
+                        values.slice(ShaderKey.SODIUM_TERRAIN_SOLID).buffer(),
+                        "discarding a candidate must preserve the active backing"
+                );
+
+                try (IrisMetalUniformValues.BackingTransaction replacement =
+                             values.beginBackingTransaction(device)) {
+                    values.prewarm(device, replacement);
+                    replacement.commit();
+                }
+                assertNotSame(
+                        activeBuffer,
+                        values.slice(ShaderKey.SODIUM_TERRAIN_SOLID).buffer(),
+                        "a committed candidate must replace the active backing"
+                );
+            }
+        }
     }
 
     @Test
@@ -300,6 +366,118 @@ final class MetalMrtBackendIntegrationTest {
     @Test
     void perSlotClearLoadStoreBlendAndWriteMask() {
         runPerSlotClearLoadStoreBlendAndWriteMask();
+    }
+
+    @Test
+    void irisMetadataClearLoadDiscardAndNullSlotReadback() {
+        String clearShaderName = "mrt_metadata_clear";
+        fragmentShaders.put(clearShaderName, """
+                #version 450
+                layout(location=0) out vec4 first;
+                layout(location=2) out vec4 third;
+                void main() {
+                    first = vec4(1.0);
+                    third = vec4(1.0);
+                }
+                """);
+        String loadShaderName = "mrt_metadata_load";
+        fragmentShaders.put(loadShaderName, """
+                #version 450
+                layout(location=0) out vec4 first;
+                layout(location=2) out vec4 third;
+                void main() {
+                    first = vec4(1.0, 0.0, 0.0, 1.0);
+                    third = vec4(0.0, 1.0, 0.0, 1.0);
+                }
+                """);
+
+        List<GpuFormat> formats = new ArrayList<>();
+        formats.add(GpuFormat.RGBA8_UNORM);
+        formats.add(null);
+        formats.add(GpuFormat.RGBA8_UNORM);
+        List<MetalGpuTexture> textures = createTextures(formats, "metadata");
+        RenderPipeline clearPipeline = pipeline(
+                clearShaderName, formats, null, ColorTargetState.WRITE_NONE
+        );
+        RenderPipeline loadPipeline = pipelineWithMasks(
+                loadShaderName,
+                formats,
+                new int[]{ColorTargetState.WRITE_RED, ColorTargetState.WRITE_NONE, ColorTargetState.WRITE_GREEN}
+        );
+        IrisMetalRenderPassMetadata clearMetadata = metadata(
+                IrisMetalExecutionGraph.LoadAction.CLEAR,
+                IrisMetalExecutionGraph.StoreAction.STORE,
+                IrisMetalExecutionGraph.LoadAction.CLEAR,
+                IrisMetalExecutionGraph.StoreAction.STORE,
+                IrisMetalExecutionGraph.LoadAction.CLEAR,
+                IrisMetalExecutionGraph.StoreAction.STORE
+        );
+        IrisMetalRenderPassMetadata loadMetadata = metadata(
+                IrisMetalExecutionGraph.LoadAction.LOAD,
+                IrisMetalExecutionGraph.StoreAction.STORE,
+                IrisMetalExecutionGraph.LoadAction.DONT_CARE,
+                IrisMetalExecutionGraph.StoreAction.DISCARD,
+                IrisMetalExecutionGraph.LoadAction.LOAD,
+                IrisMetalExecutionGraph.StoreAction.STORE
+        );
+        IrisMetalRenderPassMetadata discardMetadata = metadata(
+                IrisMetalExecutionGraph.LoadAction.LOAD,
+                IrisMetalExecutionGraph.StoreAction.DISCARD,
+                IrisMetalExecutionGraph.LoadAction.DONT_CARE,
+                IrisMetalExecutionGraph.StoreAction.DISCARD,
+                IrisMetalExecutionGraph.LoadAction.LOAD,
+                IrisMetalExecutionGraph.StoreAction.STORE
+        );
+
+        try {
+            try (PassWithViews pass = createMetadataPass(
+                    textures,
+                    clearMetadata,
+                    clearColors(0.10F, 0.20F, 0.30F, 0.40F, 0.70F, 0.50F)
+            )) {
+                pass.pass().setPipeline(clearPipeline);
+                pass.pass().draw(3, 1, 0, 0);
+                encoder.submitRenderPass();
+                encoder.submit();
+                device.waitForSubmittedGpuWork();
+            }
+
+            assertByteNear(readback(textures.get(0)).get(0), 26, "metadata clear slot 0 red");
+            assertByteNear(readback(textures.get(0)).get(1), 51, "metadata clear slot 0 green");
+            assertByteNear(readback(textures.get(2)).get(0), 179, "metadata clear slot 2 red");
+            assertByteNear(readback(textures.get(2)).get(1), 128, "metadata clear slot 2 green");
+
+            try (PassWithViews pass = createMetadataPass(textures, loadMetadata, null)) {
+                pass.pass().setPipeline(loadPipeline);
+                pass.pass().draw(3, 1, 0, 0);
+                encoder.submitRenderPass();
+                encoder.submit();
+                device.waitForSubmittedGpuWork();
+            }
+
+            ByteBuffer first = readback(textures.get(0));
+            assertByteNear(first.get(0), 255, "metadata load/write-mask slot 0 red");
+            assertByteNear(first.get(1), 51, "metadata load/write-mask slot 0 green");
+            assertByteNear(first.get(2), 77, "metadata load/write-mask slot 0 blue");
+            ByteBuffer third = readback(textures.get(2));
+            assertByteNear(third.get(0), 179, "metadata load/write-mask slot 2 red");
+            assertByteNear(third.get(1), 255, "metadata load/write-mask slot 2 green");
+            assertByteNear(third.get(2), 128, "metadata load/write-mask slot 2 blue");
+
+            // Slot 0 deliberately uses DISCARD on store. The contract is that
+            // the pass completes without treating the discarded value as a
+            // readable producer; slot 2 remains a stored, readable producer.
+            try (PassWithViews pass = createMetadataPass(textures, discardMetadata, null)) {
+                pass.pass().setPipeline(loadPipeline);
+                pass.pass().draw(3, 1, 0, 0);
+                encoder.submitRenderPass();
+                encoder.submit();
+                device.waitForSubmittedGpuWork();
+            }
+            assertByteNear(readback(textures.get(2)).get(1), 255, "metadata stored slot survives discard peer");
+        } finally {
+            closeTextures(textures);
+        }
     }
 
     @Test
@@ -643,6 +821,60 @@ final class MetalMrtBackendIntegrationTest {
         assertFalse(compiled.isValid(), "integer output with normalized float target must not create a valid PSO");
     }
 
+    @Test
+    void deferredClearAfterStorageImageBindingFailsClosed() {
+        String shaderName = "mrt_storage_image_clear_order";
+        fragmentShaders.put(shaderName, """
+                #version 450
+                layout(binding=0, rgba8) writeonly uniform image2D dst;
+                layout(location=0) out vec4 color;
+                void main() {
+                    imageStore(dst, ivec2(gl_FragCoord.xy), vec4(1.0, 0.0, 0.0, 1.0));
+                    color = vec4(1.0, 0.0, 0.0, 1.0);
+                }
+                """);
+        RenderPipeline pipeline = pipeline(
+                shaderName,
+                List.of(GpuFormat.RGBA8_UNORM),
+                null,
+                ColorTargetState.WRITE_ALL
+        );
+        MetalGpuTexture storage = (MetalGpuTexture) device.createTexture(
+                "storage-image-clear-order",
+                TEXTURE_USAGE | MetalGpuTexture.USAGE_SHADER_WRITE,
+                GpuFormat.RGBA8_UNORM,
+                WIDTH,
+                HEIGHT,
+                1,
+                1
+        );
+        MetalGpuTextureView view = new MetalGpuTextureView(storage, 0, 1);
+        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "storage-image-clear-order")
+                .withColorAttachment(view, Optional.empty())
+                .withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+        try {
+            MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+            pass.setPipeline(pipeline);
+            pass.bindStorageImage("dst", view);
+            // A deferred clear inserted after binding cannot be materialized
+            // without replacing the encoder captured by draw(). It must fail
+            // closed instead of issuing the draw through an ended encoder.
+            encoder.clearColorTexture(storage, new Vector4f(0.25F, 0.5F, 0.75F, 1.0F));
+            IllegalStateException failure = assertThrows(
+                    IllegalStateException.class,
+                    () -> pass.draw(3, 1, 0, 0)
+            );
+            assertTrue(failure.getMessage().contains("deferred clear"));
+            encoder.submitRenderPass();
+            encoder.flushPendingClear(storage);
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+        } finally {
+            view.close();
+            storage.close();
+        }
+    }
+
     private RenderPipeline pipeline(
             String shaderName,
             List<GpuFormat> formats,
@@ -681,6 +913,34 @@ final class MetalMrtBackendIntegrationTest {
                 .withCull(false);
         for (int index = 0; index < targets.size(); index++) {
             builder.withColorTargetState(index, targets.get(index));
+        }
+        return builder.build();
+    }
+
+    private RenderPipeline pipelineWithMasks(
+            String shaderName,
+            List<GpuFormat> formats,
+            int[] writeMasks
+    ) {
+        if (formats.size() != writeMasks.length) {
+            throw new IllegalArgumentException("formats and writeMasks must have the same slot count");
+        }
+        RenderPipeline.Builder builder = RenderPipeline.builder()
+                .withLocation("metallum_test/" + shaderName)
+                .withVertexShader("metallum_test/mrt_vertex")
+                .withFragmentShader("metallum_test/" + shaderName)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withCull(false);
+        for (int index = 0; index < formats.size(); index++) {
+            GpuFormat format = formats.get(index);
+            if (format == null) {
+                builder.withUnusedColorTargetState(index);
+            } else {
+                builder.withColorTargetState(
+                        index,
+                        new ColorTargetState(Optional.empty(), format, writeMasks[index])
+                );
+            }
         }
         return builder.build();
     }
@@ -756,6 +1016,77 @@ final class MetalMrtBackendIntegrationTest {
         return new PassWithViews((MetalRenderPass) encoder.createRenderPass(descriptor), views);
     }
 
+    private PassWithViews createMetadataPass(
+            List<MetalGpuTexture> textures,
+            IrisMetalRenderPassMetadata metadata,
+            List<Vector4f> clearColors
+    ) {
+        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "Iris metadata MRT integration");
+        List<MetalGpuTextureView> views = new ArrayList<>();
+        for (int index = 0; index < textures.size(); index++) {
+            MetalGpuTexture texture = textures.get(index);
+            if (texture == null) {
+                descriptor.withUnusedColorAttachment();
+                continue;
+            }
+            MetalGpuTextureView view = new MetalGpuTextureView(texture, 0, 1);
+            views.add(view);
+            Vector4f clear = clearColors == null ? null : clearColors.get(index);
+            descriptor.withColorAttachment(view, clear == null ? Optional.empty() : Optional.of(clear));
+        }
+        descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+        return new PassWithViews(
+                (MetalRenderPass) encoder.createRenderPass(descriptor, metadata),
+                views
+        );
+    }
+
+    private static List<Vector4f> clearColors(
+            final float firstRed,
+            final float firstGreen,
+            final float firstBlue,
+            final float firstAlpha,
+            final float thirdRed,
+            final float thirdGreen
+    ) {
+        List<Vector4f> result = new ArrayList<>();
+        result.add(new Vector4f(firstRed, firstGreen, firstBlue, firstAlpha));
+        result.add(null);
+        result.add(new Vector4f(thirdRed, thirdGreen, 0.50F, 1.0F));
+        return result;
+    }
+
+    private static IrisMetalRenderPassMetadata metadata(
+            final IrisMetalExecutionGraph.LoadAction load0,
+            final IrisMetalExecutionGraph.StoreAction store0,
+            final IrisMetalExecutionGraph.LoadAction load1,
+            final IrisMetalExecutionGraph.StoreAction store1,
+            final IrisMetalExecutionGraph.LoadAction load2,
+            final IrisMetalExecutionGraph.StoreAction store2
+    ) {
+        return IrisMetalRenderPassMetadata.from(List.of(
+                metadataAttachment(0, load0, store0),
+                metadataAttachment(1, load1, store1),
+                metadataAttachment(2, load2, store2)
+        ));
+    }
+
+    private static IrisMetalExecutionGraph.AttachmentState metadataAttachment(
+            final int logicalTarget,
+            final IrisMetalExecutionGraph.LoadAction load,
+            final IrisMetalExecutionGraph.StoreAction store
+    ) {
+        return new IrisMetalExecutionGraph.AttachmentState(
+                logicalTarget,
+                logicalTarget,
+                GpuFormat.RGBA8_UNORM,
+                Optional.empty(),
+                ColorTargetState.WRITE_ALL,
+                load,
+                store
+        );
+    }
+
     private ByteBuffer readback(MetalGpuTexture texture) {
         int size = WIDTH * HEIGHT * texture.pixelSize();
         try (MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
@@ -790,6 +1121,37 @@ final class MetalMrtBackendIntegrationTest {
     private static void closeTextures(List<MetalGpuTexture> textures) {
         for (MetalGpuTexture texture : textures) {
             if (texture != null) texture.close();
+        }
+    }
+
+    private static LoadedPack loadBslFixture() throws IOException {
+        Path zip = Files.createTempFile("bsl-uniform-transaction-", ".zip");
+        zip.toFile().deleteOnExit();
+        try (var input = MetalMrtBackendIntegrationTest.class
+                .getResourceAsStream("/shaderpacks/BSL_v10.1.3.zip")) {
+            assertNotNull(input, "missing BSL integration fixture");
+            Files.copy(input, zip, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+        FileSystem fileSystem = FileSystems.newFileSystem(zip, Map.of());
+        try {
+            return new LoadedPack(
+                    fileSystem,
+                    new ShaderPack(
+                            fileSystem.getPath("/shaders"),
+                            StandardMacros.createStandardEnvironmentDefines(),
+                            false
+                    )
+            );
+        } catch (Throwable failure) {
+            fileSystem.close();
+            throw failure;
+        }
+    }
+
+    private record LoadedPack(FileSystem fileSystem, ShaderPack pack) implements AutoCloseable {
+        @Override
+        public void close() throws IOException {
+            fileSystem.close();
         }
     }
 

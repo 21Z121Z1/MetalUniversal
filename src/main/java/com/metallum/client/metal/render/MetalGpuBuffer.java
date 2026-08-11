@@ -102,6 +102,10 @@ class MetalGpuBuffer extends GpuBuffer {
         return this.dynamic;
     }
 
+    boolean isOwnedBy(final MetalDevice expected) {
+        return this.device == expected;
+    }
+
     long allocationSize() {
         return this.allocationSize;
     }
@@ -125,6 +129,11 @@ class MetalGpuBuffer extends GpuBuffer {
     @Override
     public boolean isClosed() {
         return this.closed || this.nativeHandle == null;
+    }
+
+    @Override
+    public GpuBufferSlice slice(final long offset, final long length) {
+        return super.slice(offset, length);
     }
 
     @Override

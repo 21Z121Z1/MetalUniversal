@@ -90,6 +90,72 @@ public final class MTLCommandBuffer {
         return new MTLRenderCommandEncoder(encoder);
     }
 
+    public MTLRenderCommandEncoder makeRenderCommandEncoderV3(
+            final MemorySegment[] colorTextures,
+            final MemorySegment depthTexture,
+            final double viewportWidth,
+            final double viewportHeight,
+            final int[] clearColorEnabled,
+            final float[] clearColors,
+            final int[] loadActions,
+            final int[] storeActions,
+            final int clearDepthEnabled,
+            final double clearDepth
+    ) {
+        MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeRenderCommandEncoderV3(
+                handle(),
+                colorTextures,
+                depthTexture,
+                viewportWidth,
+                viewportHeight,
+                clearColorEnabled,
+                clearColors,
+                loadActions,
+                storeActions,
+                clearDepthEnabled,
+                clearDepth
+        );
+        if (MetalNativeBridge.isNullHandle(encoder)) {
+            throw new IllegalStateException("Failed to create Iris metadata render command encoder");
+        }
+        return new MTLRenderCommandEncoder(encoder);
+    }
+
+    public MTLRenderCommandEncoder makeRenderCommandEncoderV4(
+            final MemorySegment[] colorTextures,
+            final MemorySegment depthTexture,
+            final double viewportWidth,
+            final double viewportHeight,
+            final int[] clearColorEnabled,
+            final float[] clearColors,
+            final int[] loadActions,
+            final int[] storeActions,
+            final int depthLoadAction,
+            final int depthStoreAction,
+            final int clearDepthEnabled,
+            final double clearDepth
+    ) {
+        MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeRenderCommandEncoderV4(
+                handle(),
+                colorTextures,
+                depthTexture,
+                viewportWidth,
+                viewportHeight,
+                clearColorEnabled,
+                clearColors,
+                loadActions,
+                storeActions,
+                depthLoadAction,
+                depthStoreAction,
+                clearDepthEnabled,
+                clearDepth
+        );
+        if (MetalNativeBridge.isNullHandle(encoder)) {
+            throw new IllegalStateException("Failed to create Iris depth metadata render command encoder");
+        }
+        return new MTLRenderCommandEncoder(encoder);
+    }
+
     public void clearColorDepthTexturesRegion(
             final MemorySegment colorTexture,
             final float clearColorRed,

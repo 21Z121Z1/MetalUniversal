@@ -54,7 +54,10 @@ final class IrisMetalDynamicDrawBindings {
         MetalRenderPass.TextureViewAndSampler gtexture = first(
                 pass.boundTexture("Sampler0"),
                 pass.boundTexture("u_BlockTex"),
-                pass.boundTexture("gtexture")
+                pass.boundTexture("gtexture"),
+                IrisMetalCoreDrawBridge.isCloudAlbedoSampler("gtexture", draw.key())
+                        ? IrisMetalCoreDrawBridge.cloudAtlasBinding()
+                        : null
         );
         int atlasWidth = 0;
         int atlasHeight = 0;

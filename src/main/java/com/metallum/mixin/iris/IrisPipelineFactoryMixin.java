@@ -38,6 +38,18 @@ public abstract class IrisPipelineFactoryMixin {
         if (pack.isEmpty()) {
             return;
         }
-        cir.setReturnValue(new MetalWorldRenderingPipeline(pack.orElseThrow().getProgramSet(dimensionId)));
+        MetalWorldRenderingPipeline candidate = new MetalWorldRenderingPipeline(
+                pack.orElseThrow().getProgramSet(dimensionId)
+        );
+        try {
+            candidate.prepareForPublication();
+            cir.setReturnValue(candidate);
+        } catch (RuntimeException | Error failure) {
+            // PipelineManager publishes the factory result only after this
+            // method returns. A rejected candidate is therefore never active,
+            // but it still owns CPU/GPU state and its receipt writer.
+            candidate.discardUnpublished(failure);
+            throw failure;
+        }
     }
 }

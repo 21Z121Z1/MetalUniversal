@@ -10,6 +10,7 @@ import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.systems.GpuQueryPool;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassBackend;
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.systems.ScissorState;
 import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTextureView;
@@ -43,6 +44,8 @@ final class MetalRenderPass implements RenderPassBackend {
     private final GpuTextureView depthTexture;
     private final RenderPass.RenderArea renderArea;
     @Nullable
+    private final IrisMetalRenderPassMetadata metadata;
+    @Nullable
     private Vector4fc[] clearColors;
     private boolean clearDepthEnabled;
     private final double clearDepthValue;
@@ -55,6 +58,7 @@ final class MetalRenderPass implements RenderPassBackend {
     private long dirtyDescriptorMask;
     @Nullable
     private MetalCompiledRenderPipeline compiledPipeline;
+    private boolean irisCoreUniformsBound;
     @Nullable
     private GpuBuffer indexBuffer;
     private MTLIndexType indexType = MTLIndexType.UInt16;
@@ -62,6 +66,7 @@ final class MetalRenderPass implements RenderPassBackend {
     private boolean scissorDirty = true;
     private boolean vertexBuffersDirty = true;
     private boolean pipelineDirty = true;
+    private long boundEncoderGeneration = -1L;
 
     MetalRenderPass(
             final MetalDevice device,
@@ -72,7 +77,8 @@ final class MetalRenderPass implements RenderPassBackend {
             final RenderPass.RenderArea renderArea,
             @Nullable final Vector4fc[] clearColors,
             final boolean clearDepthEnabled,
-            final double clearDepthValue
+            final double clearDepthValue,
+            @Nullable final IrisMetalRenderPassMetadata metadata
     ) {
         this.device = device;
         this.commandEncoder = encoder;
@@ -80,6 +86,7 @@ final class MetalRenderPass implements RenderPassBackend {
         this.colorTextures = colorTextures.clone();
         this.depthTexture = depthTexture;
         this.renderArea = renderArea;
+        this.metadata = metadata;
         this.clearColors = clearColors == null ? null : clearColors.clone();
         this.clearDepthEnabled = clearDepthEnabled;
         this.clearDepthValue = clearDepthValue;
@@ -112,6 +119,7 @@ final class MetalRenderPass implements RenderPassBackend {
             this.compiledPipeline = compiled;
             vertexBuffersDirty = true;
             pipelineDirty = true;
+            irisCoreUniformsBound = false;
         }
     }
 
@@ -144,6 +152,7 @@ final class MetalRenderPass implements RenderPassBackend {
         this.compiledPipeline = pipeline;
         this.pipelineDirty = true;
         this.vertexBuffersDirty = true;
+        this.irisCoreUniformsBound = false;
     }
 
     private void validateAttachmentSignature(
@@ -273,6 +282,8 @@ final class MetalRenderPass implements RenderPassBackend {
         MTLRenderCommandEncoder enc = renderEncoder();
 
         bindDrawState(enc);
+        IrisMetalTerrainBridge.recordShadowDraw(indexCount);
+        IrisMetalCoreDrawBridge.recordShadowDraw();
         drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, vertexOffset, instanceCount, indexType, firstInstance);
     }
 
@@ -287,6 +298,8 @@ final class MetalRenderPass implements RenderPassBackend {
             int indexCount = drawParameters.get(i * 3 + 1);
             int baseVertex = drawParameters.get(i * 3 + 2);
             if (indexCount > 0) {
+                IrisMetalTerrainBridge.recordShadowDraw(indexCount);
+                IrisMetalCoreDrawBridge.recordShadowDraw();
                 drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
             }
         }
@@ -302,6 +315,8 @@ final class MetalRenderPass implements RenderPassBackend {
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
+        IrisMetalTerrainBridge.recordShadowDraw(drawCount);
+        IrisMetalCoreDrawBridge.recordShadowDraw();
 
         MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
                 enc.handle(),
@@ -327,6 +342,8 @@ final class MetalRenderPass implements RenderPassBackend {
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
+        IrisMetalTerrainBridge.recordShadowDraw(drawCount);
+        IrisMetalCoreDrawBridge.recordShadowDraw();
 
         enc.drawIndexedPrimitivesIndirect(
                 primitiveType,
@@ -365,6 +382,8 @@ final class MetalRenderPass implements RenderPassBackend {
                 bindDrawState(enc);
             }
             MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
+            IrisMetalTerrainBridge.recordShadowDraw(draw.indexCount());
+            IrisMetalCoreDrawBridge.recordShadowDraw();
             drawIndexedNative(enc, nativeIndexBuffer, draw.firstIndex(), draw.indexCount(), draw.baseVertex(), 1, drawIndexType, 0);
         }
     }
@@ -375,6 +394,8 @@ final class MetalRenderPass implements RenderPassBackend {
         MTLRenderCommandEncoder enc = renderEncoder();
 
         bindDrawState(enc);
+        IrisMetalTerrainBridge.recordShadowDraw(vertexCount);
+        IrisMetalCoreDrawBridge.recordShadowDraw();
 
         if (primitiveType == MTLPrimitiveType.TriangleFan) {
             drawTriangleFan(enc, firstVertex, vertexCount, instanceCount, firstInstance);
@@ -402,6 +423,8 @@ final class MetalRenderPass implements RenderPassBackend {
 
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
+        IrisMetalTerrainBridge.recordShadowDraw(drawCount);
+        IrisMetalCoreDrawBridge.recordShadowDraw();
 
         enc.drawPrimitivesIndirect(
                 primitiveType,
@@ -492,10 +515,22 @@ final class MetalRenderPass implements RenderPassBackend {
                 clearColorEnabled,
                 clearColorValues,
                 clearDepthNow,
-                clearDepthValue
+                clearDepthValue,
+                metadata
         );
         clearColors = null;
         clearDepthEnabled = false;
+        long generation = commandEncoder.encoderGeneration();
+        if (generation != boundEncoderGeneration) {
+            // A rebuilt native encoder has no pipeline, vertex, scissor, or
+            // descriptor state, even when this Java pass still has cached
+            // values from the previous encoder.
+            boundEncoderGeneration = generation;
+            pipelineDirty = true;
+            vertexBuffersDirty = true;
+            scissorDirty = true;
+            irisCoreUniformsBound = false;
+        }
         return encoder;
     }
 
@@ -629,6 +664,10 @@ final class MetalRenderPass implements RenderPassBackend {
             dirtyDescriptorMask |= compiledPipeline.allResourceMask();
         }
 
+        if (!irisCoreUniformsBound && IrisMetalCoreDrawBridge.bindPending(this)) {
+            irisCoreUniformsBound = true;
+        }
+
         if (scissorDirty) {
             pushEffectiveScissor(enc);
             scissorDirty = false;
@@ -714,6 +753,7 @@ final class MetalRenderPass implements RenderPassBackend {
 
             MetalGpuTextureView textureView = (MetalGpuTextureView) textureBinding.textureView();
             MetalGpuSampler sampler = (MetalGpuSampler) textureBinding.sampler();
+            requireDescriptorTextureReady(textureView, binding.name());
             enc.setTextureAndSampler(textureView.nativeHandle(), sampler.nativeHandle(), binding.bindingIndex(), binding.stageMask());
             return;
         }
@@ -730,13 +770,23 @@ final class MetalRenderPass implements RenderPassBackend {
                     || view.isClosed() || texture.isClosed()) {
                 throw new IllegalStateException("Missing or invalid storage image " + binding.name());
             }
-            commandEncoder.flushPendingClear(texture);
-            texture.markContentsDirty();
+            // Storage-image clears are materialized when the binding is
+            // installed, before draw() captures its render encoder. Doing it
+            // again here could replace the native encoder after bindDrawState
+            // received `enc`, leaving the rest of this method writing to an
+            // ended encoder.
+            requireDescriptorTextureReady(metalView, binding.name());
             enc.setTexture(metalView.nativeHandle(), binding.bindingIndex(), binding.stageMask());
             return;
         }
 
         GpuBufferSlice uniformSlice = uniforms.get(binding.name());
+        if (uniformSlice == null && IrisMetalGlslLinker.IRIS_FOG_BLOCK_NAME.equals(binding.name())) {
+            uniformSlice = uniforms.get("Fog");
+            if (uniformSlice == null) {
+                uniformSlice = RenderSystem.getShaderFog();
+            }
+        }
         if (uniformSlice == null
                 && binding.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER) {
             int logicalBinding = MetalCrossShaderCompiler.storageBufferLogicalBinding(binding.name());
@@ -758,19 +808,37 @@ final class MetalRenderPass implements RenderPassBackend {
         enc.setBuffer(uniformBuffer.nativeHandle(), uniformSlice.offset(), binding.bindingIndex(), binding.stageMask());
     }
 
+    private void requireDescriptorTextureReady(
+            final MetalGpuTextureView view,
+            final String resourceName
+    ) {
+        MetalGpuTexture texture = (MetalGpuTexture) view.texture();
+        if (commandEncoder.hasPendingClear(texture)) {
+            throw new IllegalStateException(
+                    "Iris descriptor " + resourceName
+                            + " was bound before a deferred clear was materialized"
+            );
+        }
+    }
+
     private void pushTexelBufferDescriptor(final MTLRenderCommandEncoder enc, final MetalCompiledRenderPipeline.ResourceBinding binding) {
         GpuBufferSlice texelSlice = uniforms.get(binding.name());
         if (texelSlice == null) {
             throw new IllegalStateException("Missing texel buffer " + binding.name());
-        }
-        if (VALIDATION && texelSlice.buffer().isClosed()) {
-            throw new IllegalStateException("Texel buffer " + binding.name() + " has been closed");
         }
 
         GpuFormat texelFormat = binding.texelBufferFormat();
         if (texelFormat == null) {
             throw new IllegalStateException("Texel buffer " + binding.name() + " is missing a format");
         }
+
+        IrisMetalTexelBufferAbi.requireSlice(
+                "render-pass",
+                binding.name(),
+                texelSlice,
+                texelFormat,
+                device
+        );
 
         MetalGpuBuffer texelBuffer = (MetalGpuBuffer) texelSlice.buffer();
         long pixelFormat = MTLPixelFormat.from(texelFormat).value;

@@ -331,6 +331,46 @@ public final class MetalNativeBridge {
                             DOUBLE
                     )
             );
+            MTLCommandBufferMakeRenderCommandEncoderV3 = optionalDowncall(
+                    lookup,
+                    "metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            ValueLayout.ADDRESS,
+                            DOUBLE,
+                            DOUBLE,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            DOUBLE
+                    )
+            );
+            MTLCommandBufferMakeRenderCommandEncoderV4 = optionalDowncall(
+                    lookup,
+                    "metallum_MTLCommandBuffer_makeRenderCommandEncoder_v4",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            ValueLayout.ADDRESS,
+                            DOUBLE,
+                            DOUBLE,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            INT,
+                            DOUBLE
+                    )
+            );
             MTLRenderCommandEncoderSetRenderPipelineState = downcall(lookup, "metallum_MTLRenderCommandEncoder_setRenderPipelineState", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLRenderCommandEncoderSetDepthStencilState = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthStencilState", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLRenderCommandEncoderSetDepthBias = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthBias", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, FLOAT, FLOAT, FLOAT));
@@ -416,12 +456,25 @@ public final class MetalNativeBridge {
                     "metallum_create_texture_2d",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, ValueLayout.ADDRESS)
             );
+            createTexture1d = downcall(
+                    lookup,
+                    "metallum_create_texture_1d",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            LONG, LONG, LONG, LONG, LONG, ValueLayout.ADDRESS
+                    )
+            );
             createTexture3d = downcall(
                     lookup,
                     "metallum_create_texture_3d",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, LONG, ValueLayout.ADDRESS)
             );
             createTextureView = downcall(lookup, "metallum_create_texture_view", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
+            createTextureViewAlphaOne = downcall(
+                    lookup,
+                    "metallum_create_texture_view_alpha_one",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG)
+            );
             createBufferTextureView = downcall(
                     lookup,
                     "metallum_create_buffer_texture_view",
@@ -584,6 +637,14 @@ public final class MetalNativeBridge {
                     lookup,
                     "metallum_create_sampler_v2",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, INT, DOUBLE, INT)
+            );
+            createSamplerV3 = optionalDowncall(
+                    lookup,
+                    "metallum_create_sampler_v3",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            LONG, LONG, LONG, LONG, LONG, INT, DOUBLE, INT, INT
+                    )
             );
             // metallum_ios_find_surface_view and metallum_ios_get_view_metal_layer
             // only exist in the iOS build of the dylib (guarded by #if os(iOS)
@@ -766,6 +827,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLDeviceMakeDepthStencilState;
     private static final MethodHandle MTLCommandBufferMakeRenderCommandEncoder;
     private static final @Nullable MethodHandle MTLCommandBufferMakeRenderCommandEncoderV2;
+    private static final @Nullable MethodHandle MTLCommandBufferMakeRenderCommandEncoderV3;
+    private static final @Nullable MethodHandle MTLCommandBufferMakeRenderCommandEncoderV4;
     private static final MethodHandle MTLRenderCommandEncoderSetRenderPipelineState;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthStencilState;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthBias;
@@ -788,8 +851,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawable;
     private static final MethodHandle createBuffer;
     private static final MethodHandle createTexture2d;
+    private static final MethodHandle createTexture1d;
     private static final MethodHandle createTexture3d;
     private static final MethodHandle createTextureView;
+    private static final MethodHandle createTextureViewAlphaOne;
     private static final MethodHandle createBufferTextureView;
     private static final MethodHandle createSampler;
     private static final MethodHandle MTLVertexDescriptorCreate;
@@ -826,6 +891,7 @@ public final class MetalNativeBridge {
     private static final @Nullable MethodHandle MTLComputePipelineStateMaxTotalThreadsPerThreadgroup;
     private static final @Nullable MethodHandle MTLBlitCommandEncoderGenerateMipmaps;
     private static final @Nullable MethodHandle createSamplerV2;
+    private static final @Nullable MethodHandle createSamplerV3;
     private static final MethodHandle initPipelines;
     private static final MethodHandle iosFindSurfaceView; // null on macOS
     private static final MethodHandle iosGetViewMetalLayer; // null on macOS
@@ -1307,11 +1373,49 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static MemorySegment metallum_create_texture_1d(
+            final MemorySegment device,
+            final MTLPixelFormat pixelFormat,
+            final long width,
+            final long mipLevels,
+            final long usage,
+            final MTLStorageMode storageMode,
+            final String label
+    ) {
+        try (Arena arena = Arena.ofConfined()) {
+            return (MemorySegment) createTexture1d.invokeExact(
+                    segment(device),
+                    pixelFormat.value,
+                    width,
+                    mipLevels,
+                    usage,
+                    storageMode.value,
+                    toCString(arena, label)
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_create_texture_1d", throwable);
+        }
+    }
+
     public static MemorySegment metallum_create_texture_view(final MemorySegment texture, final long baseMipLevel, final long mipLevelCount) {
         try {
             return (MemorySegment) createTextureView.invokeExact(segment(texture), baseMipLevel, mipLevelCount);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_texture_view", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_create_texture_view_alpha_one(
+            final MemorySegment texture,
+            final long baseMipLevel,
+            final long mipLevelCount
+    ) {
+        try {
+            return (MemorySegment) createTextureViewAlphaOne.invokeExact(
+                    segment(texture), baseMipLevel, mipLevelCount
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_create_texture_view_alpha_one", throwable);
         }
     }
 
@@ -1467,6 +1571,144 @@ public final class MetalNativeBridge {
                 );
             } catch (Throwable throwable) {
                 throw bridgeFailure("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2", throwable);
+            }
+        }
+    }
+
+    public static MemorySegment MTLCommandBuffer_makeRenderCommandEncoderV3(
+            final MemorySegment commandBuffer,
+            final MemorySegment[] colorTextures,
+            final MemorySegment depthTexture,
+            final double viewportWidth,
+            final double viewportHeight,
+            final int[] clearColorEnabled,
+            final float[] clearColors,
+            final int[] loadActions,
+            final int[] storeActions,
+            final int clearDepthEnabled,
+            final double clearDepth
+    ) {
+        if (colorTextures == null || clearColorEnabled == null || clearColors == null
+                || loadActions == null || storeActions == null
+                || clearColorEnabled.length != colorTextures.length
+                || clearColors.length != colorTextures.length * 4
+                || loadActions.length != colorTextures.length
+                || storeActions.length != colorTextures.length) {
+            throw new IllegalArgumentException("Iris render-pass arrays must have matching color slot lengths");
+        }
+        if (MTLCommandBufferMakeRenderCommandEncoderV3 == null) {
+            throw new IllegalStateException(
+                    "Loaded native bridge does not export metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3; "
+                            + "rebuild libmetallum.dylib before using Iris attachment metadata"
+            );
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            int count = colorTextures.length;
+            MemorySegment textureArray = count == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.ADDRESS, count);
+            MemorySegment clearFlagArray = count == 0 ? MemorySegment.NULL : arena.allocate(INT, count);
+            MemorySegment clearColorArray = count == 0 ? MemorySegment.NULL : arena.allocate(FLOAT, clearColors.length);
+            MemorySegment loadArray = count == 0 ? MemorySegment.NULL : arena.allocate(INT, count);
+            MemorySegment storeArray = count == 0 ? MemorySegment.NULL : arena.allocate(INT, count);
+            for (int index = 0; index < count; index++) {
+                textureArray.setAtIndex(ValueLayout.ADDRESS, index, segment(colorTextures[index]));
+                clearFlagArray.setAtIndex(INT, index, clearColorEnabled[index]);
+                loadArray.setAtIndex(INT, index, loadActions[index]);
+                storeArray.setAtIndex(INT, index, storeActions[index]);
+            }
+            for (int index = 0; index < clearColors.length; index++) {
+                clearColorArray.setAtIndex(FLOAT, index, clearColors[index]);
+            }
+            try {
+                return (MemorySegment) MTLCommandBufferMakeRenderCommandEncoderV3.invokeExact(
+                        segment(commandBuffer),
+                        textureArray,
+                        count,
+                        segment(depthTexture),
+                        viewportWidth,
+                        viewportHeight,
+                        clearColorArray,
+                        clearFlagArray,
+                        loadArray,
+                        storeArray,
+                        clearDepthEnabled,
+                        clearDepth
+                );
+            } catch (Throwable throwable) {
+                throw bridgeFailure("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3", throwable);
+            }
+        }
+    }
+
+    public static MemorySegment MTLCommandBuffer_makeRenderCommandEncoderV4(
+            final MemorySegment commandBuffer,
+            final MemorySegment[] colorTextures,
+            final MemorySegment depthTexture,
+            final double viewportWidth,
+            final double viewportHeight,
+            final int[] clearColorEnabled,
+            final float[] clearColors,
+            final int[] loadActions,
+            final int[] storeActions,
+            final int depthLoadAction,
+            final int depthStoreAction,
+            final int clearDepthEnabled,
+            final double clearDepth
+    ) {
+        if (colorTextures == null || clearColorEnabled == null || clearColors == null
+                || loadActions == null || storeActions == null
+                || clearColorEnabled.length != colorTextures.length
+                || clearColors.length != colorTextures.length * 4
+                || loadActions.length != colorTextures.length
+                || storeActions.length != colorTextures.length) {
+            throw new IllegalArgumentException("Iris render-pass arrays must have matching color slot lengths");
+        }
+        if (depthLoadAction < 0 || depthLoadAction > 2 || depthStoreAction < 0 || depthStoreAction > 1) {
+            throw new IllegalArgumentException(
+                    "Iris depth attachment actions are invalid: load=" + depthLoadAction
+                            + ", store=" + depthStoreAction
+            );
+        }
+        if (MTLCommandBufferMakeRenderCommandEncoderV4 == null) {
+            throw new IllegalStateException(
+                    "Loaded native bridge does not export metallum_MTLCommandBuffer_makeRenderCommandEncoder_v4; "
+                            + "rebuild libmetallum.dylib before using Iris depth metadata"
+            );
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            int count = colorTextures.length;
+            MemorySegment textureArray = count == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.ADDRESS, count);
+            MemorySegment clearFlagArray = count == 0 ? MemorySegment.NULL : arena.allocate(INT, count);
+            MemorySegment clearColorArray = count == 0 ? MemorySegment.NULL : arena.allocate(FLOAT, clearColors.length);
+            MemorySegment loadArray = count == 0 ? MemorySegment.NULL : arena.allocate(INT, count);
+            MemorySegment storeArray = count == 0 ? MemorySegment.NULL : arena.allocate(INT, count);
+            for (int index = 0; index < count; index++) {
+                textureArray.setAtIndex(ValueLayout.ADDRESS, index, segment(colorTextures[index]));
+                clearFlagArray.setAtIndex(INT, index, clearColorEnabled[index]);
+                loadArray.setAtIndex(INT, index, loadActions[index]);
+                storeArray.setAtIndex(INT, index, storeActions[index]);
+            }
+            for (int index = 0; index < clearColors.length; index++) {
+                clearColorArray.setAtIndex(FLOAT, index, clearColors[index]);
+            }
+            try {
+                return (MemorySegment) MTLCommandBufferMakeRenderCommandEncoderV4.invokeExact(
+                        segment(commandBuffer),
+                        textureArray,
+                        count,
+                        segment(depthTexture),
+                        viewportWidth,
+                        viewportHeight,
+                        clearColorArray,
+                        clearFlagArray,
+                        loadArray,
+                        storeArray,
+                        depthLoadAction,
+                        depthStoreAction,
+                        clearDepthEnabled,
+                        clearDepth
+                );
+            } catch (Throwable throwable) {
+                throw bridgeFailure("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v4", throwable);
             }
         }
     }
@@ -2293,6 +2535,53 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_sampler_v2", throwable);
+        }
+    }
+
+    /**
+     * Sampler creation with explicit normalized-coordinate semantics. The v3
+     * ABI is required for rectangle samplers; ordinary normalized samplers
+     * may fall back to v2/v1 when running with an older native bridge.
+     */
+    public static MemorySegment metallum_create_sampler_v3(
+            final MemorySegment device,
+            final MTLSamplerAddressMode addressModeU,
+            final MTLSamplerAddressMode addressModeV,
+            final MTLSamplerMinMagFilter minFilter,
+            final MTLSamplerMinMagFilter magFilter,
+            final MTLSamplerMipFilter mipFilter,
+            final int maxAnisotropy,
+            final double lodMaxClamp,
+            final int compareFunction,
+            final boolean normalizedCoordinates
+    ) {
+        if (createSamplerV3 == null) {
+            if (!normalizedCoordinates) {
+                throw new IllegalStateException(
+                        "Loaded native bridge does not export metallum_create_sampler_v3; "
+                                + "cannot create an unnormalized rectangle sampler"
+                );
+            }
+            return metallum_create_sampler_v2(
+                    device, addressModeU, addressModeV, minFilter, magFilter,
+                    mipFilter, maxAnisotropy, lodMaxClamp, compareFunction
+            );
+        }
+        try {
+            return (MemorySegment) createSamplerV3.invokeExact(
+                    segment(device),
+                    addressModeU.value,
+                    addressModeV.value,
+                    minFilter.value,
+                    magFilter.value,
+                    mipFilter.value,
+                    maxAnisotropy,
+                    lodMaxClamp,
+                    compareFunction,
+                    normalizedCoordinates ? 1 : 0
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_create_sampler_v3", throwable);
         }
     }
 

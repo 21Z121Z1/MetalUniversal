@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalWorldRenderingPipeline;
 import net.irisshaders.iris.Iris;
+import net.irisshaders.iris.gui.option.IrisVideoSettings;
 import net.minecraft.client.Minecraft;
 
 import java.io.BufferedWriter;
@@ -41,6 +42,9 @@ public final class IrisMetalValidationClient {
     );
     private static final int WORLD_TIMEOUT_FRAMES = Integer.getInteger(
             "metallum.iris.validation.worldTimeoutFrames", 3600
+    );
+    private static final int SHADOW_DISTANCE = Integer.getInteger(
+            "metallum.iris.validation.shadowDistance", -1
     );
     private static final Path CONTROL_RECEIPT = Path.of(System.getProperty(
             "metallum.iris.validation.controlReceipt",
@@ -210,8 +214,15 @@ public final class IrisMetalValidationClient {
                 || (DISABLE_FRAME >= 0 && ENABLE_FRAME <= DISABLE_FRAME)
                 || (RELOAD_FRAME >= 0 && RELOAD_FRAME >= STOP_FRAME)
                 || (DISABLE_FRAME >= 0 && DISABLE_FRAME >= STOP_FRAME)
-                || (ENABLE_FRAME >= 0 && ENABLE_FRAME >= STOP_FRAME)) {
+                || (ENABLE_FRAME >= 0 && ENABLE_FRAME >= STOP_FRAME)
+                || SHADOW_DISTANCE < -1 || SHADOW_DISTANCE > 32) {
             throw new IllegalArgumentException("Invalid Iris validation frame schedule");
+        }
+        if (SHADOW_DISTANCE >= 0) {
+            // This is a validation-only override for the Iris video option.
+            // It makes shadow coverage deterministic without touching the
+            // user's Launcher profile or persisted options.
+            IrisVideoSettings.shadowDistance = SHADOW_DISTANCE;
         }
         Path parent = CONTROL_RECEIPT.getParent();
         if (parent != null) {
@@ -232,6 +243,7 @@ public final class IrisMetalValidationClient {
         session.addProperty("enableFrame", ENABLE_FRAME);
         session.addProperty("stopFrame", STOP_FRAME);
         session.addProperty("worldTimeoutFrames", WORLD_TIMEOUT_FRAMES);
+        session.addProperty("shadowDistance", SHADOW_DISTANCE);
         session.addProperty("javaVersion", System.getProperty("java.version", "unknown"));
         session.addProperty("irisVersion", safeIrisVersion());
         session.addProperty("strict", Boolean.parseBoolean(

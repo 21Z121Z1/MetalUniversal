@@ -47,10 +47,14 @@ final class IrisMetalWorldResources implements AutoCloseable {
                 height,
                 programSet.getPackDirectives().getRenderTargetDirectives().getRenderTargetSettings(),
                 mipmappedTargets(programSet),
+                storageImageTargets(programSet),
                 programSet.getPack().getCustomTextureDataMap(),
+                programSet.getPack().getIrisCustomTextureDataMap(),
                 programSet.getPackDirectives().getNoiseTextureResolution(),
                 programSet.getPack().getCustomNoiseTexture(),
-                createShadowTargets(device, programSet),
+                createShadowTargets(
+                        device, programSet, shadowStorageImageTargets(programSet)
+                ),
                 programSet.getPack()
         );
     }
@@ -75,7 +79,9 @@ final class IrisMetalWorldResources implements AutoCloseable {
                 height,
                 targetSettings,
                 mipmappedTargets,
+                Set.of(),
                 customDefinitions,
+                Map.of(),
                 noiseResolution,
                 customNoise,
                 null,
@@ -91,7 +97,9 @@ final class IrisMetalWorldResources implements AutoCloseable {
             final int height,
             final Map<Integer, RenderTargetSettings> targetSettings,
             final Set<Integer> mipmappedTargets,
+            final Set<Integer> storageImageTargets,
             final Map<TextureStage, ? extends Map<String, CustomTextureData>> customDefinitions,
+            final Map<String, CustomTextureData> globalCustomDefinitions,
             final int noiseResolution,
             final @Nullable CustomTextureData customNoise,
             final @Nullable IrisMetalShadowTargets shadowTargets,
@@ -110,15 +118,21 @@ final class IrisMetalWorldResources implements AutoCloseable {
         IrisMetalComputeResources newComputeResources = null;
         try {
             newTargets = new IrisMetalRenderTargets(
-                    device, formats, width, height, targetSettings, mipmappedTargets
+                    device, formats, width, height, targetSettings,
+                    mipmappedTargets, storageImageTargets
             );
-            newCustomTextures = new IrisMetalCustomTextures(device, customDefinitions);
+            newCustomTextures = new IrisMetalCustomTextures(
+                    device, customDefinitions, globalCustomDefinitions
+            );
             newCustomTextures.prewarmAll();
             newNoiseTexture = new IrisMetalNoiseTexture(device, noiseResolution, customNoise);
             if (computePack != null) {
                 newComputeResources = new IrisMetalComputeResources(device, computePack, width, height);
             }
         } catch (RuntimeException | Error failure) {
+            // Constructors can have already submitted texture/SSBO uploads.
+            // Finish them before releasing a partially built candidate.
+            device.waitForSubmittedGpuWork();
             closePartial(newTargets, newShadowTargets, newCustomTextures, newNoiseTexture, newComputeResources);
             throw failure;
         }
@@ -208,6 +222,11 @@ final class IrisMetalWorldResources implements AutoCloseable {
             return;
         }
         this.closed = true;
+        // Resource close methods enqueue native releases. Complete work that
+        // may still reference this generation before enqueuing those releases,
+        // so this owner is safe to retire independently of the execution graph
+        // and compiled-program owners.
+        this.device.waitForSubmittedGpuWork();
         closePartial(
                 this.renderTargets,
                 this.shadowTargets,
@@ -220,7 +239,8 @@ final class IrisMetalWorldResources implements AutoCloseable {
     @Nullable
     private static IrisMetalShadowTargets createShadowTargets(
             final MetalDevice device,
-            final ProgramSet programSet
+            final ProgramSet programSet,
+            final Set<Integer> storageImageTargets
     ) {
         PackDirectives directives = programSet.getPackDirectives();
         PackShadowDirectives shadow = directives.getShadowDirectives();
@@ -235,13 +255,17 @@ final class IrisMetalWorldResources implements AutoCloseable {
         boolean[] nearestColor = new boolean[targetCount];
         boolean[] mipmappedColor = new boolean[targetCount];
         GpuFormat[] colorFormats = new GpuFormat[targetCount];
+        Set<Integer> shadowCompositeMipmapped = shadowCompositeMipmappedTargets(programSet, targetCount);
         for (int index = 0; index < targetCount; index++) {
             PackShadowDirectives.SamplingSettings settings = shadow.getColorSamplingSettings().get(index);
             if (settings == null) {
                 settings = new PackShadowDirectives.SamplingSettings();
             }
             nearestColor[index] = settings.getNearest();
-            mipmappedColor[index] = settings.getMipmap();
+            // A shadow composite pass can request mipmaps independently of
+            // the pack's default shadowcolor sampling settings. Allocation
+            // must cover both declarations before any generation is published.
+            mipmappedColor[index] = settings.getMipmap() || shadowCompositeMipmapped.contains(index);
             colorFormats[index] = IrisMetalRenderTargetFormats.fromInternalName(settings.getFormat().name());
         }
 
@@ -259,15 +283,69 @@ final class IrisMetalWorldResources implements AutoCloseable {
                 nearestColor,
                 mipmappedColor,
                 nearestDepth,
-                mipmappedDepth
+                mipmappedDepth,
+                storageImageTargets
         );
+    }
+
+    private static Set<Integer> storageImageTargets(final ProgramSet programSet) {
+        IrisMetalStorageImageDeclarations.Targets declarations =
+                IrisMetalStorageImageDeclarations.from(programSet);
+        int targetCount = IrisMetalRenderTargetFormats.from(programSet.getPackDirectives()).length;
+        validateStorageImageTargets("colorimg", declarations.color(), targetCount);
+        return declarations.color();
+    }
+
+    private static Set<Integer> shadowStorageImageTargets(final ProgramSet programSet) {
+        IrisMetalStorageImageDeclarations.Targets declarations =
+                IrisMetalStorageImageDeclarations.from(programSet);
+        int targetCount = programSet.getPack().hasFeature(FeatureFlags.HIGHER_SHADOWCOLOR)
+                ? PackShadowDirectives.MAX_SHADOW_COLOR_BUFFERS_IRIS
+                : PackShadowDirectives.MAX_SHADOW_COLOR_BUFFERS_OF;
+        validateStorageImageTargets("shadowcolorimg", declarations.shadowColor(), targetCount);
+        return declarations.shadowColor();
+    }
+
+    private static void validateStorageImageTargets(
+            final String prefix,
+            final Set<Integer> targets,
+            final int targetCount
+    ) {
+        for (Integer target : targets) {
+            if (target == null || target < 0 || target >= targetCount) {
+                throw new IllegalArgumentException(
+                        "Iris storage image " + prefix + target
+                                + " is outside 0.." + (targetCount - 1)
+                );
+            }
+        }
+    }
+
+    private static Set<Integer> shadowCompositeMipmappedTargets(
+            final ProgramSet programSet,
+            final int targetCount
+    ) {
+        Set<Integer> result = new java.util.HashSet<>();
+        for (ProgramSource source : programSet.getComposite(ProgramArrayId.ShadowComposite)) {
+            if (source != null && source.isValid()) {
+                result.addAll(source.getDirectives().getMipmappedBuffers());
+            }
+        }
+        for (Integer target : result) {
+            if (target == null || target < 0 || target >= targetCount) {
+                throw new IllegalArgumentException(
+                        "Iris shadow mipmap target out of range: " + target + " (count=" + targetCount + ")"
+                );
+            }
+        }
+        return Set.copyOf(result);
     }
 
     private static Set<Integer> mipmappedTargets(final ProgramSet programSet) {
         java.util.HashSet<Integer> result = new java.util.HashSet<>();
         for (ProgramArrayId arrayId : new ProgramArrayId[]{
                 ProgramArrayId.Setup, ProgramArrayId.Begin, ProgramArrayId.Prepare,
-                ProgramArrayId.Deferred, ProgramArrayId.Composite, ProgramArrayId.ShadowComposite
+                ProgramArrayId.Deferred, ProgramArrayId.Composite
         }) {
             for (ProgramSource source : programSet.getComposite(arrayId)) {
                 if (source != null && source.isValid()) {
@@ -289,5 +367,13 @@ final class IrisMetalWorldResources implements AutoCloseable {
             }
         }
         return Set.copyOf(result);
+    }
+
+    /** Main colortex mipmaps are never owned by the separate shadow target set. */
+    static boolean ownsMainMipmapTargets(final ProgramArrayId arrayId) {
+        return switch (arrayId) {
+            case Setup, Begin, Prepare, Deferred, Composite -> true;
+            default -> false;
+        };
     }
 }

@@ -53,7 +53,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             final int width,
             final int height
     ) {
-        this(device, colorFormats, width, height, Map.of(), Set.of());
+        this(device, colorFormats, width, height, Map.of(), Set.of(), Set.of());
     }
 
     IrisMetalRenderTargets(
@@ -63,7 +63,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             final int height,
             final Map<Integer, RenderTargetSettings> targetSettings
     ) {
-        this(device, colorFormats, width, height, targetSettings, Set.of());
+        this(device, colorFormats, width, height, targetSettings, Set.of(), Set.of());
     }
 
     IrisMetalRenderTargets(
@@ -74,16 +74,60 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             final Map<Integer, RenderTargetSettings> targetSettings,
             final Set<Integer> mipmappedTargets
     ) {
+        this(device, colorFormats, width, height, targetSettings, mipmappedTargets, Set.of());
+    }
+
+    IrisMetalRenderTargets(
+            final MetalDevice device,
+            final GpuFormat[] colorFormats,
+            final int width,
+            final int height,
+            final Map<Integer, RenderTargetSettings> targetSettings,
+            final Set<Integer> mipmappedTargets,
+            final Set<Integer> storageImageTargets
+    ) {
         this.device = device;
-        this.colorTargets = new IrisMetalPingPongTargets(
-                device, "iris-colortex", colorFormats, width, height, mipmappedTargets
-        );
         this.targetSettings = Map.copyOf(targetSettings);
+        this.colorTargets = new IrisMetalPingPongTargets(
+                device,
+                "iris-colortex",
+                colorFormats,
+                width,
+                height,
+                mipmappedTargets,
+                storageImageTargets,
+                alphaOneSampleTargets(colorFormats.length, this.targetSettings)
+        );
         this.colorSampler = sampler(FilterMode.LINEAR, MTLSamplerMipFilter.NotMipmapped);
         this.nearestSampler = sampler(FilterMode.NEAREST, MTLSamplerMipFilter.NotMipmapped);
         this.colorMipSampler = sampler(FilterMode.LINEAR, MTLSamplerMipFilter.Linear);
         this.nearestMipSampler = sampler(FilterMode.NEAREST, MTLSamplerMipFilter.Linear);
         createDepthTextures(width, height);
+    }
+
+    private static Set<Integer> alphaOneSampleTargets(
+            final int targetCount,
+            final Map<Integer, RenderTargetSettings> settings
+    ) {
+        java.util.LinkedHashSet<Integer> result = new java.util.LinkedHashSet<>();
+        for (Map.Entry<Integer, RenderTargetSettings> entry : settings.entrySet()) {
+            Integer target = entry.getKey();
+            RenderTargetSettings value = entry.getValue();
+            if (target != null && target >= 0 && target < targetCount
+                    && value != null && value.getInternalFormat() != null
+                    && logicalRgbBackedByRgba(value.getInternalFormat().name())) {
+                result.add(target);
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    static boolean logicalRgbBackedByRgba(final String internalFormat) {
+        return switch (internalFormat) {
+            case "RGB8", "RGB8_SNORM", "RGB16", "RGB16_SNORM", "RGB16F", "RGB32F",
+                    "RGB8I", "RGB8UI", "RGB16I", "RGB16UI", "RGB32I", "RGB32UI" -> true;
+            default -> false;
+        };
     }
 
     private MetalGpuSampler sampler(final FilterMode filter, final MTLSamplerMipFilter mipFilter) {
@@ -268,6 +312,20 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             @Nullable final Double clearDepth,
             final int @Nullable [] readTargets
     ) {
+        return createWriteDescriptor(
+                label, drawBuffers, clearColors, withDepth, clearDepth, readTargets, null
+        );
+    }
+
+    RenderPassDescriptorWithViews createWriteDescriptor(
+            final String label,
+            final int[] drawBuffers,
+            @Nullable final Vector4fc[] clearColors,
+            final boolean withDepth,
+            @Nullable final Double clearDepth,
+            final int @Nullable [] readTargets,
+            @Nullable final IrisMetalRenderPassMetadata metadata
+    ) {
         ensureOpen();
         if (drawBuffers.length == 0) {
             throw new IllegalArgumentException("A pass must write at least one draw buffer");
@@ -301,10 +359,10 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             );
         }
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, width, height));
-        return new RenderPassDescriptorWithViews(descriptor, views);
+        return new RenderPassDescriptorWithViews(descriptor, views, metadata);
     }
 
-    RenderPassDescriptor createTerrainWriteDescriptor(
+    RenderPassDescriptorWithViews createTerrainWriteDescriptor(
             final String label,
             final int[] drawBuffers,
             final GpuTextureView mainColor,
@@ -324,6 +382,8 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         }
         RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> label);
         boolean[] written = new boolean[colorTargets.targetCount()];
+        MetalGpuTextureView[] views = new MetalGpuTextureView[drawBuffers.length];
+        int viewCount = 0;
         for (int logicalTarget : drawBuffers) {
             if (logicalTarget < 0 || logicalTarget >= colorTargets.targetCount()) {
                 throw new IllegalArgumentException("Terrain DRAWBUFFERS target out of range: " + logicalTarget);
@@ -335,7 +395,11 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             Optional<Vector4fc> clear = logicalTarget == 0 && mainClearColor != null
                     ? Optional.of(mainClearColor)
                     : Optional.empty();
-            descriptor.withColorAttachment(colorTargets.readView(logicalTarget), clear);
+            MetalGpuTextureView view = new MetalGpuTextureView(
+                    colorTargets.readTexture(logicalTarget), 0, 1
+            );
+            views[viewCount++] = view;
+            descriptor.withColorAttachment(view, clear);
         }
         if (sceneDepth != null) {
             descriptor.withDepthAttachment(
@@ -344,7 +408,11 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             );
         }
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, width, height));
-        return descriptor;
+        return new RenderPassDescriptorWithViews(
+                descriptor,
+                views,
+                IrisMetalRenderPassMetadata.fromDescriptor(descriptor, drawBuffers)
+        );
     }
 
     void resize(final int newWidth, final int newHeight) {
@@ -407,8 +475,16 @@ final class IrisMetalRenderTargets implements AutoCloseable {
 
     record RenderPassDescriptorWithViews(
             RenderPassDescriptor descriptor,
-            MetalGpuTextureView[] views
+            MetalGpuTextureView[] views,
+            @Nullable IrisMetalRenderPassMetadata metadata
     ) implements AutoCloseable {
+        RenderPassDescriptorWithViews(
+                final RenderPassDescriptor descriptor,
+                final MetalGpuTextureView[] views
+        ) {
+            this(descriptor, views, null);
+        }
+
         @Override
         public void close() {
             for (MetalGpuTextureView view : views) {

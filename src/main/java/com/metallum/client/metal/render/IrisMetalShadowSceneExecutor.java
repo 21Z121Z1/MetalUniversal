@@ -37,11 +37,20 @@ import org.jspecify.annotations.Nullable;
 /** Drives Iris shadow scene ownership while leaving pass scheduling to the graph. */
 final class IrisMetalShadowSceneExecutor implements AutoCloseable {
     private final IrisMetalFrameState frameState;
+    private final IrisMetalUniformValues uniformValues;
+    private final IrisMetalRuntimeReceipts receipts;
     private final IrisMetalShadowFeatureSubmitter featureSubmitter;
     private boolean closed;
 
-    IrisMetalShadowSceneExecutor(final Minecraft client, final IrisMetalFrameState frameState) {
+    IrisMetalShadowSceneExecutor(
+            final Minecraft client,
+            final IrisMetalFrameState frameState,
+            final IrisMetalUniformValues uniformValues,
+            final IrisMetalRuntimeReceipts receipts
+    ) {
         this.frameState = frameState;
+        this.uniformValues = uniformValues;
+        this.receipts = receipts;
         this.featureSubmitter = new IrisMetalShadowFeatureSubmitter(client);
     }
 
@@ -58,6 +67,10 @@ final class IrisMetalShadowSceneExecutor implements AutoCloseable {
         IrisMetalShadowTargets targets = resources.shadowTargets();
         if (targets == null) {
             throw new IllegalStateException("Iris shadow scene has no generation-owned shadow targets");
+        }
+        MetalDevice device = MetalDeviceRegistry.getActiveDevice();
+        if (device == null) {
+            throw new IllegalStateException("Iris shadow scene has no active Metal device");
         }
         if (!(levelRenderer instanceof LevelRendererExtension extension)) {
             throw new IllegalStateException("Iris Metal shadows require Sodium's LevelRendererExtension");
@@ -105,6 +118,8 @@ final class IrisMetalShadowSceneExecutor implements AutoCloseable {
                 cullingData,
                 shadowRenderLists
         );
+        Throwable renderFailure = null;
+        boolean shadowUniformsEntered = false;
         try {
             snapshot.enter(
                     this.featureSubmitter.renderBuffers(),
@@ -126,6 +141,8 @@ final class IrisMetalShadowSceneExecutor implements AutoCloseable {
                     shadowView,
                     shadowProjection
             );
+            this.uniformValues.enterShadowFrame(shadowView, shadowProjection);
+            shadowUniformsEntered = true;
             graph.beginShadowScene(resources, shadow);
 
             sodium.scheduleTerrainUpdate();
@@ -152,6 +169,12 @@ final class IrisMetalShadowSceneExecutor implements AutoCloseable {
                 sections.renderGroup(ChunkSectionLayerGroup.OPAQUE, shadowSampler);
                 this.frameState.setPhase(net.irisshaders.iris.pipeline.WorldRenderingPhase.NONE);
             }
+            this.receipts.captureShadowStage(
+                    device,
+                    device.createCommandEncoder(),
+                    targets,
+                    "opaque-terrain"
+            );
             if (needsFeatureSubmission(shadow)) {
                 RenderSystem.getModelViewStack().identity();
                 try {
@@ -168,15 +191,65 @@ final class IrisMetalShadowSceneExecutor implements AutoCloseable {
                 } finally {
                     RenderSystem.getModelViewStack().set(shadowView);
                 }
+                this.receipts.captureShadowStage(
+                        device,
+                        device.createCommandEncoder(),
+                        targets,
+                        "features"
+                );
             }
+            // Iris's shadowtex1 is the opaque snapshot, so entity and block
+            // entity shadow casters belong to this phase before the copy.
+            graph.captureShadowNoTranslucentsDepth(resources);
+            this.receipts.captureShadowStage(
+                    device,
+                    device.createCommandEncoder(),
+                    targets,
+                    "depth-copy"
+            );
             if (shadow.shouldRenderTranslucent()) {
                 this.frameState.setPhase(net.irisshaders.iris.pipeline.WorldRenderingPhase.TERRAIN_TRANSLUCENT);
                 sections.renderGroup(ChunkSectionLayerGroup.TRANSLUCENT, shadowSampler);
                 this.frameState.setPhase(net.irisshaders.iris.pipeline.WorldRenderingPhase.NONE);
             }
+            this.receipts.captureShadowStage(
+                    device,
+                    device.createCommandEncoder(),
+                    targets,
+                    "translucent-terrain"
+            );
+            graph.finishShadowGeometry(resources);
+        } catch (RuntimeException | Error failure) {
+            renderFailure = failure;
+            throw failure;
         } finally {
             this.frameState.setPhase(net.irisshaders.iris.pipeline.WorldRenderingPhase.NONE);
-            snapshot.restore();
+            Throwable cleanupFailure = null;
+            if (shadowUniformsEntered) {
+                try {
+                    this.uniformValues.exitShadowFrame();
+                } catch (RuntimeException | Error restoreUniformFailure) {
+                    cleanupFailure = restoreUniformFailure;
+                }
+            }
+            try {
+                snapshot.restore();
+            } catch (RuntimeException | Error restoreFailure) {
+                if (cleanupFailure != null) {
+                    cleanupFailure.addSuppressed(restoreFailure);
+                } else {
+                    cleanupFailure = restoreFailure;
+                }
+            }
+            if (cleanupFailure != null) {
+                if (renderFailure != null) {
+                    renderFailure.addSuppressed(cleanupFailure);
+                } else if (cleanupFailure instanceof Error error) {
+                    throw error;
+                } else {
+                    throw (RuntimeException) cleanupFailure;
+                }
+            }
         }
     }
 

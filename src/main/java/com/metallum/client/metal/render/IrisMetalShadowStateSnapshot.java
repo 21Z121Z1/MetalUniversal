@@ -15,6 +15,7 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import org.joml.Matrix4f;
 import org.jspecify.annotations.Nullable;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /** Captures every world/Sodium/static shadow value changed by a shadow scene. */
@@ -161,30 +162,64 @@ final class IrisMetalShadowStateSnapshot {
             return;
         }
         this.restored = true;
-        ShadowRenderer.ACTIVE = this.shadowActive;
-        ShadowRenderer.RESOLUTION = this.shadowResolution;
-        ShadowRenderer.MODELVIEW = this.shadowModelView;
-        ShadowRenderer.PROJECTION = this.shadowProjection;
-        ShadowRenderer.FRUSTUM = this.shadowFrustum;
-        ShadowRenderer.visibleBlockEntities = this.visibleBlockEntities;
-        ShadowRenderer.renderDistance = this.shadowRenderDistance;
-        this.client.smartCull = this.smartCull;
-        this.levelRenderer.setRenderBuffers(this.renderBuffers);
-        this.sodiumExtension.sodium$setMatrices(this.sodiumMatrices);
-        this.cameraRenderState.viewRotationMatrix = this.cameraView;
-        this.cameraRenderState.projectionMatrix = this.cameraProjection;
+        List<Runnable> steps = new ArrayList<>(14);
+        steps.add(() -> ShadowRenderer.ACTIVE = this.shadowActive);
+        steps.add(() -> ShadowRenderer.RESOLUTION = this.shadowResolution);
+        steps.add(() -> ShadowRenderer.MODELVIEW = this.shadowModelView);
+        steps.add(() -> ShadowRenderer.PROJECTION = this.shadowProjection);
+        steps.add(() -> ShadowRenderer.FRUSTUM = this.shadowFrustum);
+        steps.add(() -> ShadowRenderer.visibleBlockEntities = this.visibleBlockEntities);
+        steps.add(() -> ShadowRenderer.renderDistance = this.shadowRenderDistance);
+        steps.add(() -> this.client.smartCull = this.smartCull);
+        steps.add(() -> this.levelRenderer.setRenderBuffers(this.renderBuffers));
+        steps.add(() -> this.sodiumExtension.sodium$setMatrices(this.sodiumMatrices));
+        steps.add(() -> this.cameraRenderState.viewRotationMatrix = this.cameraView);
+        steps.add(() -> this.cameraRenderState.projectionMatrix = this.cameraProjection);
         if (this.modelViewPushed) {
-            RenderSystem.getModelViewStack().popMatrix();
-            this.modelViewPushed = false;
+            steps.add(() -> {
+                RenderSystem.getModelViewStack().popMatrix();
+                this.modelViewPushed = false;
+            });
         }
-        RenderSystem.getModelViewStack().set(this.modelView);
+        steps.add(() -> RenderSystem.getModelViewStack().set(this.modelView));
         if (this.shadowListScope) {
-            this.shadowRenderLists.iris$endShadowRenderListScope();
-            this.shadowListScope = false;
+            steps.add(() -> {
+                this.shadowRenderLists.iris$endShadowRenderListScope();
+                this.shadowListScope = false;
+            });
         }
         if (this.cullingSaved) {
-            this.cullingData.restoreState();
-            this.cullingSaved = false;
+            steps.add(() -> {
+                this.cullingData.restoreState();
+                this.cullingSaved = false;
+            });
         }
+        Throwable failure = runRestoreSteps(steps);
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        if (failure instanceof RuntimeException runtime) {
+            throw runtime;
+        }
+        if (failure != null) {
+            throw new IllegalStateException("Iris shadow state restoration failed", failure);
+        }
+    }
+
+    /** Runs every restoration step so one failing integration hook cannot skip the rest. */
+    static @Nullable Throwable runRestoreSteps(final List<? extends Runnable> steps) {
+        Throwable firstFailure = null;
+        for (Runnable step : steps) {
+            try {
+                step.run();
+            } catch (RuntimeException | Error failure) {
+                if (firstFailure == null) {
+                    firstFailure = failure;
+                } else {
+                    firstFailure.addSuppressed(failure);
+                }
+            }
+        }
+        return firstFailure;
     }
 }

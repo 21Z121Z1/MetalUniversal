@@ -42,8 +42,6 @@ import java.util.regex.Pattern;
 public final class MetalCrossShaderCompiler {
     private static final String IRIS_SSBO_DESCRIPTOR_PREFIX = "iris_ssbo/";
     private static final Set<String> BUILT_IN_UNIFORMS = Set.of("Projection", "Lighting", "Fog", "Globals");
-    /** Sodium's stable per-region time buffer is a texel buffer, not a 2D sampler. */
-    private static final GpuFormat SODIUM_SECTION_TIME_FORMAT = GpuFormat.R32_SINT;
     private static final int MSL_VERSION_4_0 = 0x040000;
     private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     private static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
@@ -331,11 +329,11 @@ public final class MetalCrossShaderCompiler {
      *
      * <p><b>Limitations.</b>
      * <ul>
-     *   <li>Geometry and tessellation (tessControl/tessEval) stages are accepted
-     *       for API symmetry with {@code ShaderCreator.link} but are <b>not</b>
-     *       compiled: the current Metal pipeline is vertex+fragment only. A
-     *       warning is logged when any non-null non-vertex/fragment stage is
-     *       present.</li>
+     *   <li>Geometry and tessellation (tessControl/tessEval) stages are
+     *       rejected before any GLSL compilation or cache publication: the
+     *       current Metal pipeline is vertex+fragment only. Dropping those
+     *       stages would change shader semantics and is therefore never a
+     *       valid fallback.</li>
      *   <li>Vertex attribute integer&#8594;MSL conversion
      *       ({@link #registerIntegerInputConversions}) is skipped (empty
      *       attribute-format map); the dry-compiled MSL therefore uses default
@@ -356,12 +354,14 @@ public final class MetalCrossShaderCompiler {
      * @param name             logical program name (also the cache key).
      * @param vertexGlsl       vertex GLSL source (must be non-null and declare
      *                         its own {@code #version}).
-     * @param geometryGlsl     geometry GLSL source (nullable; ignored with a
-     *                         warning if non-null).
+     * @param geometryGlsl     geometry GLSL source (nullable; non-null is
+     *                         rejected because no exact Metal lowering exists).
      * @param tessControlGlsl  tessellation-control GLSL source (nullable;
-     *                         ignored with a warning if non-null).
+     *                         non-null is rejected because no exact Metal
+     *                         lowering exists).
      * @param tessEvalGlsl     tessellation-evaluation GLSL source (nullable;
-     *                         ignored with a warning if non-null).
+     *                         non-null is rejected because no exact Metal
+     *                         lowering exists).
      * @param fragmentGlsl     fragment GLSL source (must be non-null and declare
      *                         its own {@code #version}).
      * @param defines          optional preprocessor defines forwarded to
@@ -388,11 +388,9 @@ public final class MetalCrossShaderCompiler {
             );
         }
         if (geometryGlsl != null || tessControlGlsl != null || tessEvalGlsl != null) {
-            Metallum.LOGGER.warn(
-                    "[MetalUniversal/Iris] Shaderpack program '{}' declares geometry/tessellation stages, "
-                            + "which have no Metal equivalent in the current vertex+fragment pipeline; "
-                            + "they are skipped by tryCompileShaderpackMsl.",
-                    name
+            throw new ShaderCompileException(
+                    "Iris Metal pack admission rejected program '" + name
+                            + "': geometry/tessellation stages have no exact Metal lowering"
             );
         }
 
@@ -1741,8 +1739,9 @@ public final class MetalCrossShaderCompiler {
     }
 
     /**
-     * 反射一段 SPIR-V，提取 shaderpack 程序声明的 uniform buffer、sampled image
-     * （含 separate image）与 separate sampler 资源名。
+     * 反射一段 SPIR-V，提取 shaderpack 程序声明的 uniform buffer、sampled image、
+     * separate image 与 separate sampler 资源名。后两者由固定 Metal ABI
+     * 在 bind-group 构造阶段明确拒绝，不再伪装成可绑定的 combined sampler。
      *
      * <p>本方法与 {@link #spirvToMsl} 共用同一套 SPIRV-Cross context/compiler
      * 创建模式，但只做反射、不做 MSL 编译：创建 {@code SPVC_BACKEND_MSL} compiler
@@ -1798,22 +1797,21 @@ public final class MetalCrossShaderCompiler {
                 checkSpvc(Spvc.spvc_compiler_create_shader_resources(compiler, pResources), "spvc_compiler_create_shader_resources");
                 final long resources = pResources.get(0);
 
-                // 用 LinkedHashSet 保留反射顺序并去重；sampledImages 同时收纳 separate
-                // image，故需去重。复用 collectResourceNames（其签名为 Set<String>，
-                // LinkedHashSet 即 Set<String> 的有序实现）。
+                // 用 LinkedHashSet 保留反射顺序并去重；复用 collectResourceNames
+                // （其签名为 Set<String>，LinkedHashSet 即 Set<String> 的有序实现）。
                 final LinkedHashSet<String> uniformBuffers = new LinkedHashSet<>();
                 final LinkedHashSet<String> sampledImages = new LinkedHashSet<>();
+                final LinkedHashSet<String> separateImages = new LinkedHashSet<>();
                 final LinkedHashSet<String> separateSamplers = new LinkedHashSet<>();
                 collectResourceNames(stack, resources, Spvc.SPVC_RESOURCE_TYPE_UNIFORM_BUFFER, uniformBuffers);
                 collectResourceNames(stack, resources, Spvc.SPVC_RESOURCE_TYPE_SAMPLED_IMAGE, sampledImages);
-                // separate image（无采样器的纯纹理资源）在 Metal 端也是纹理绑定，
-                // 归入 sampledImages 一并映射为 SAMPLED_IMAGE。
-                collectResourceNames(stack, resources, Spvc.SPVC_RESOURCE_TYPE_SEPARATE_IMAGE, sampledImages);
+                collectResourceNames(stack, resources, Spvc.SPVC_RESOURCE_TYPE_SEPARATE_IMAGE, separateImages);
                 collectResourceNames(stack, resources, Spvc.SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS, separateSamplers);
 
                 return new ShaderpackReflection(
                         List.copyOf(uniformBuffers),
                         List.copyOf(sampledImages),
+                        List.copyOf(separateImages),
                         List.copyOf(separateSamplers)
                 );
             } finally {
@@ -1826,27 +1824,35 @@ public final class MetalCrossShaderCompiler {
      * 合并 vertex 与 fragment 的反射结果，构造 shaderpack 的 bind-group 条目列表。
      *
      * <p>顺序与 vanilla {@link #addToBindGroup} 一致：先所有 uniform buffer，
-     * 再 sampled image（含 separate image），最后 separate sampler。vertex 与
+     * 再 sampled image（含 fixed typed buffer），最后 separate sampler。vertex 与
      * fragment 的同名资源经 {@link #addBindingIfAbsent} 去重，保留首次出现的顺序。
-     * 所有 sampler/image 统一映射为 {@link VulkanBindGroupEntryType#SAMPLED_IMAGE}
-     * （shaderpack 路径暂不区分 UTB/纹理缓冲，与 vanilla 的 texel-buffer 判定不同）。
+     * 当前 Metal render-pass ABI 只支持一个名称对应的 texture+sampler 绑定；
+     * separate image/sampler 资源在进入这里前必须被拒绝。
      *
-     * <p><b>TODO: 保留纹理槽对齐。</b> Iris 的
-     * {@code IrisSamplers.WORLD_RESERVED_TEXTURE_UNITS = {0, 1, 2}} 是 vanilla 占用
-     * 的 sampler slot（albedo/overlay/lightmap）。当前实现按反射顺序分配
-     * {@code bindingIndex}（uniform buffer 在前、sampler 在后），尚未与 vanilla 保留
-     * 槽精确错开。若后续 runtime 绑定阶段发现 shaderpack sampler 与 vanilla 抢占槽位，
-     * 需在此重排 sampler 条目使其 bindingIndex 跳过 {0,1,2}，或在
-     * {@code buildResourceBindings} 中按名查保留表赋槽。spec 接受此折衷。
+     * <p>这些 binding index 是每个 Metal pipeline 自己的 argument-table index，
+     * 不是 Iris/OpenGL 的 texture unit。Metal 的 buffer、texture 和 sampler
+     * namespace 独立，且 shaderpack pipeline 不与 vanilla pipeline 共用资源表，
+     * 因此不应把 Iris 的 {@code WORLD_RESERVED_TEXTURE_UNITS = {0, 1, 2}}
+     * 机械搬成 Metal 空洞。紧凑、确定性的索引同时保证 shaderpack 的
+     * {@code setTextureAndSampler} 和 buffer 绑定使用同一份 ABI。
      *
      * @param vertexReflection    vertex SPIR-V 反射结果。
      * @param fragmentReflection  fragment SPIR-V 反射结果。
      * @return 合并去重后的 bind-group 条目（uniform buffer 在前）。
      */
-    private static List<VulkanBindGroupLayout.Entry> buildShaderpackBindGroupEntries(
+    static List<VulkanBindGroupLayout.Entry> buildShaderpackBindGroupEntries(
             final ShaderpackReflection vertexReflection,
             final ShaderpackReflection fragmentReflection
-    ) {
+    ) throws ShaderCompileException {
+        if (!vertexReflection.separateImages().isEmpty()
+                || !fragmentReflection.separateImages().isEmpty()
+                || !vertexReflection.separateSamplers().isEmpty()
+                || !fragmentReflection.separateSamplers().isEmpty()) {
+            throw new ShaderCompileException(
+                    "Shaderpack declares separate image/sampler resources, but the fixed Iris Metal ABI "
+                            + "requires combined texture+sampler bindings"
+            );
+        }
         final List<VulkanBindGroupLayout.Entry> entries = new ArrayList<>();
         for (final String name : vertexReflection.uniformBuffers()) {
             addBindingIfAbsent(entries, VulkanBindGroupEntryType.UNIFORM_BUFFER, name, null);
@@ -1873,14 +1879,15 @@ public final class MetalCrossShaderCompiler {
             final List<VulkanBindGroupLayout.Entry> entries,
             final String name
     ) {
-        if ("u_SectionTimeInfo".equals(name)) {
-            addBindingIfAbsent(entries, VulkanBindGroupEntryType.TEXEL_BUFFER, name, SODIUM_SECTION_TIME_FORMAT);
+        GpuFormat fixedTexelFormat = IrisMetalTexelBufferAbi.formatFor(name);
+        if (fixedTexelFormat != null) {
+            addBindingIfAbsent(entries, VulkanBindGroupEntryType.TEXEL_BUFFER, name, fixedTexelFormat);
         } else {
             addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
         }
     }
 
-    private static Map<String, Integer> shaderpackResourceBindings(
+    static Map<String, Integer> shaderpackResourceBindings(
             final List<VulkanBindGroupLayout.Entry> entries
     ) {
         Map<String, Integer> bindings = new LinkedHashMap<>();
@@ -1902,6 +1909,7 @@ public final class MetalCrossShaderCompiler {
     record ShaderpackReflection(
             List<String> uniformBuffers,
             List<String> sampledImages,
+            List<String> separateImages,
             List<String> separateSamplers
     ) {
     }

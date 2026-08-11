@@ -4,6 +4,8 @@
     "target_pr_head": "88a242b3f10a0632c6f52927c1affde70f2a0e0f",
     "reference_branch": "iris-on-metal",
     "reference_commit": "f5fe101267c97cfbab6d6a814032a69e072d657e",
+    "implementation_commit": "688c4c4",
+    "dirty_reference_inventory": "docs/iris-audit/dirty-reference-inventory.json",
     "minecraft": "26.2",
     "iris": "1.11.2+26.2-fabric",
     "sodium": "mc26.2-0.9.1-fabric",
@@ -15,81 +17,99 @@
       "fixed_iris_source": "ShaderPack/ProgramSet/PackDirectives",
       "pr_executor": "IrisMetalExecutionGraph + IrisMetalPackLifecycle",
       "local_reference_executor": "IrisMetalPackAdmission",
-      "status": "planned",
+      "status": "connected",
       "admission_rule": "Reject unsupported declarations before global or GPU generation mutation",
-      "content_oracle": "Admission unit tests plus failed-candidate generation receipt"
+      "content_oracle": "Admission unit tests plus failed-candidate generation receipt",
+      "verified_evidence": ["IrisMetalPackLifecycleTest", "IrisMetalProgramFrontendTest", "compileJava", "compileTestJava"],
+      "known_gaps": ["real-client rejection receipt for each unsupported capability family"]
     },
     {
       "semantic_id": "generation-lifecycle",
       "fixed_iris_source": "Iris.reload and dimension ProgramSet selection",
       "pr_executor": "MetalWorldRenderingPipeline + IrisMetalWorldResources",
       "local_reference_executor": "IrisMetalPackLifecycle + generation construction paths",
-      "status": "planned",
+      "status": "connected",
       "admission_rule": "Publish only a fully prepared candidate; preserve the selected generation on failure",
-      "content_oracle": "Reload, dimension, resize, disable-enable and retirement receipts"
+      "content_oracle": "Reload, dimension, resize, disable-enable and retirement receipts",
+      "verified_evidence": ["IrisMetalPackLifecycleTest", "IrisMetalPingPongTargetsIntegrationTest", "MetalWorldRenderingPipeline candidate prepare/discard path"],
+      "known_gaps": ["direct device-replacement and failed-candidate runtime receipt", "full runClientIris lifecycle evidence"]
     },
     {
       "semantic_id": "draw-ownership",
       "fixed_iris_source": "IrisPipelines and fixed Iris ShaderKey catalog",
       "pr_executor": "IrisMetalTerrainBridge + CompiledPrograms",
       "local_reference_executor": "IrisMetalPipelineOverrides",
-      "status": "planned",
+      "status": "connected",
       "admission_rule": "Active-pack observed draws cannot silently fall back to native shaders",
-      "content_oracle": "ShaderKey catalog and physical PSO ownership trace"
+      "content_oracle": "ShaderKey catalog and physical PSO ownership trace",
+      "verified_evidence": ["IrisMetalCoreGbufferPipelinesTest", "IrisMetalProgramFrontendTest", "prewarmCoreCatalog"],
+      "known_gaps": ["complete live RenderType catalog trace across a real client session"]
     },
     {
       "semantic_id": "post-execution",
       "fixed_iris_source": "ProgramArrayId stages, DRAWBUFFERS and BufferFlipper",
       "pr_executor": "IrisMetalExecutionGraph",
       "local_reference_executor": "IrisMetalPostChain",
-      "status": "planned",
+      "status": "connected",
       "admission_rule": "Reject invalid attachment, flip, format and resource combinations during planning",
-      "content_oracle": "Per-pass logical trace and GPU content readback"
+      "content_oracle": "Per-pass logical trace and GPU content readback",
+      "verified_evidence": ["IrisMetalExecutionGraphTest", "IrisMetalPingPongTargetsIntegrationTest", "MetalMrtBackendIntegrationTest"],
+      "known_gaps": ["OpenGL-to-Metal pass trace comparison", "real pack final/history content gate"]
     },
     {
       "semantic_id": "shadow-scene",
       "fixed_iris_source": "ShadowRenderer and shadow composite programs",
       "pr_executor": "IrisMetalExecutionGraph shadow plans",
       "local_reference_executor": "IrisMetalShadowPipeline",
-      "status": "planned",
+      "status": "connected",
       "admission_rule": "Shadow programs require generation-owned shadow targets and supported scene submitters",
-      "content_oracle": "Shadow terrain/entity/block-entity readback and state restoration receipt"
+      "content_oracle": "Shadow terrain/entity/block-entity readback and state restoration receipt",
+      "verified_evidence": ["IrisMetalShadowFeatureSubmitterTest", "IrisMetalShadowStateSnapshotTest", "IrisMetalPingPongTargetsIntegrationTest"],
+      "known_gaps": ["live BSL/Potato shadow scene readback for terrain, entities and block entities", "runtime state-restoration receipt"]
     },
     {
       "semantic_id": "resource-sampler-abi",
       "fixed_iris_source": "RenderTargets, ProgramSamplers, ProgramImages and PBR resources",
       "pr_executor": "IrisMetalWorldResources + IrisMetalComputeResources",
       "local_reference_executor": "IrisMetalCustomTextures and external sampler paths",
-      "status": "planned",
+      "status": "connected",
       "admission_rule": "Missing, stale, cross-device or unrepresentable resources fail closed",
-      "content_oracle": "Dimensioned upload/sample/readback and raster-compute binding tests"
+      "content_oracle": "Dimensioned upload/sample/readback and raster-compute binding tests",
+      "verified_evidence": ["MetalIrisCustomTexturesIntegrationTest", "MetalIrisNoiseTextureIntegrationTest", "MetalTexelBufferIntegrationTest"],
+      "known_gaps": ["live ResourceData/PBR producer readback in a shaderpack session"]
     },
     {
       "semantic_id": "uniform-lifetimes",
       "fixed_iris_source": "CommonUniforms, CapturedRenderingState and custom uniform graph",
       "pr_executor": "IrisMetalUniformValues",
       "local_reference_executor": "IrisMetalUniformValues + IrisOpenGlUniformTrace",
-      "status": "planned",
+      "status": "connected",
       "admission_rule": "Unsupported layout or missing required draw binding is a generation failure",
-      "content_oracle": "Normalized OpenGL/Metal uniform trace with same-input capture"
+      "content_oracle": "Normalized OpenGL/Metal uniform trace with same-input capture",
+      "verified_evidence": ["IrisMetalUniformValuesTest", "IrisMetalProgramFrontendTest"],
+      "known_gaps": ["same-input OpenGL/Metal uniform trace comparison"]
     },
     {
       "semantic_id": "compute-ordering",
       "fixed_iris_source": "ComputeSource, indirect dispatch and barrier call sites",
       "pr_executor": "IrisMetalExecutionGraph + IrisMetalComputeResources",
       "local_reference_executor": "IrisMetalComputeResources and serial dispatch behavior",
-      "status": "planned",
+      "status": "connected",
       "admission_rule": "Invalid dispatch or storage declaration fails before execution",
-      "content_oracle": "Compute-only, compute-raster, indirect, resize and retirement readback"
+      "content_oracle": "Compute-only, compute-raster, indirect, resize and retirement readback",
+      "verified_evidence": ["IrisMetalExecutionGraphTest", "MetalComputeBackendIntegrationTest"],
+      "known_gaps": ["real Iris pack compute receipt and OpenGL ordering trace"]
     },
     {
       "semantic_id": "presentation-colorspace",
       "fixed_iris_source": "Iris color-space final pass",
       "pr_executor": "IrisMetalExecutionGraph final stage",
       "local_reference_executor": "IrisMetalPostChain color-space path",
-      "status": "planned",
+      "status": "connected",
       "admission_rule": "Reject incompatible target format or conflicting pack-owned correction",
-      "content_oracle": "Color-space ramp readback and final-stage trace"
+      "content_oracle": "Color-space ramp readback and final-stage trace",
+      "verified_evidence": ["IrisMetalColorSpaceIntegrationTest", "IrisMetalPackLifecycleTest"],
+      "known_gaps": ["real-client final presentation receipt and display-path verification"]
     }
   ],
   "excluded_inputs": [

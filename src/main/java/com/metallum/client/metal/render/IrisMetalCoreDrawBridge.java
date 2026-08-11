@@ -1,12 +1,24 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.blaze3d.GpuFormat;
+import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.systems.CommandEncoder;
+import com.mojang.blaze3d.systems.CommandEncoderBackend;
+import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassBackend;
+import com.mojang.blaze3d.textures.AddressMode;
+import com.mojang.blaze3d.textures.FilterMode;
+import com.mojang.blaze3d.textures.GpuSampler;
+import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import net.irisshaders.iris.pipeline.WorldRenderingPipeline;
 import net.irisshaders.iris.pipeline.programs.ShaderKey;
 import net.irisshaders.iris.shaderpack.properties.PackRenderTargetDirectives;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.texture.AbstractTexture;
+import net.minecraft.client.renderer.texture.TextureAtlas;
 import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
 
@@ -35,9 +47,20 @@ public final class IrisMetalCoreDrawBridge {
         if (!(worldPipeline instanceof MetalWorldRenderingPipeline metal)) {
             return null;
         }
+        // PreparedRenderType is also used for GUI atlas work after the world
+        // pass. Only a draw inside the active world boundary owns Iris targets;
+        // GUI/HUD passes remain an explicit non-owned vanilla path.
+        if (!metal.shouldOverrideCoreShaders(true)) {
+            return null;
+        }
+        IrisMetalCoreGbufferPipelines.DrawOwnership ownership =
+                IrisMetalCoreGbufferPipelines.ownership(source, worldPipeline);
+        if (ownership == IrisMetalCoreGbufferPipelines.DrawOwnership.EXPLICIT_NON_OWNED) {
+            return null;
+        }
         ShaderKey key = IrisMetalCoreGbufferPipelines.resolve(source, worldPipeline);
         if (key == null) {
-            if (metal.shouldOverrideCoreShaders(true)
+            if (ownership == IrisMetalCoreGbufferPipelines.DrawOwnership.UNKNOWN
                     && "minecraft".equals(source.getLocation().getNamespace())) {
                 throw new IllegalStateException(
                         "Iris active pack has no fixed-version ShaderKey route for " + source.getLocation()
@@ -58,6 +81,47 @@ public final class IrisMetalCoreDrawBridge {
         ACTIVE.remove();
     }
 
+    /**
+     * Creates a public RenderPass while carrying Iris-only attachment metadata
+     * through Mojang's CommandEncoder lifecycle. Calling the Metal backend
+     * directly would skip CommandEncoder's in-pass guard and onFinish hook.
+     */
+    public static RenderPass createRenderPass(
+            final CommandEncoder encoder,
+            final IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor
+    ) {
+        java.util.Objects.requireNonNull(encoder, "encoder");
+        java.util.Objects.requireNonNull(descriptor, "descriptor");
+        if (!(encoder instanceof com.metallum.mixin.iris.CommandEncoderBackendAccessor accessor)) {
+            throw new IllegalStateException(
+                    "Iris Metal render pass cannot access CommandEncoder backend; "
+                            + "the CommandEncoderBackendAccessor mixin is not active"
+            );
+        }
+        CommandEncoderBackend backend = accessor.metallum$getBackend();
+        if (!(backend instanceof MetalCommandEncoder metal)) {
+            throw new IllegalStateException(
+                    "Iris Metal render pass was routed through a non-Metal CommandEncoder backend: "
+                            + backend
+            );
+        }
+        metal.prepareIrisRenderPass(descriptor.metadata(), descriptor);
+        try {
+            return encoder.createRenderPass(descriptor.descriptor());
+        } catch (RuntimeException | Error failure) {
+            metal.cancelIrisRenderPass(descriptor);
+            throw failure;
+        }
+    }
+
+    /** Records an actual native draw for a generation-owned shadow core pass. */
+    static void recordShadowDraw() {
+        CoreDrawOverride draw = ACTIVE.get();
+        if (draw != null && draw.key().isShadow()) {
+            draw.pipeline().recordShadowCoreDraw();
+        }
+    }
+
     public static boolean installPipeline(
             final RenderPassBackend backend,
             final RenderPipeline source
@@ -76,8 +140,60 @@ public final class IrisMetalCoreDrawBridge {
             );
         }
         pass.setCompiledPipeline(draw.compiled());
+        return true;
+    }
+
+    /**
+     * Binds core draw-owned uniforms at the first actual draw boundary.
+     * Minecraft's PreparedRenderType sets DynamicTransforms and Projection
+     * after setPipeline, so binding from the setPipeline mixin is too early.
+     */
+    static boolean bindPending(final MetalRenderPass pass) {
+        CoreDrawOverride draw = ACTIVE.get();
+        if (draw == null) {
+            return false;
+        }
         IrisMetalDynamicDrawBindings.bindCore(pass, draw);
         return true;
+    }
+
+    /**
+     * Validates a draw-local typed buffer supplied by Minecraft itself. These
+     * buffers are intentionally not generation resources: their contents and
+     * lifetime belong to the current core draw and must arrive through the
+     * vanilla RenderPass call.
+     */
+    public static void validateDrawOwnedTexelBuffer(
+            final String passName,
+            final String resourceName,
+            final GpuBuffer value
+    ) {
+        CoreDrawOverride draw = ACTIVE.get();
+        if (draw == null || !IrisMetalTexelBufferAbi.isFixedProvider(resourceName)) {
+            return;
+        }
+        MetalDevice device = MetalDeviceRegistry.getActiveDevice();
+        if (device == null) {
+            throw new IllegalStateException(
+                    "Iris core draw " + passName
+                            + " supplied typed texel buffer '" + resourceName
+                            + "' without an active Metal device"
+            );
+        }
+        GpuFormat format = IrisMetalTexelBufferAbi.formatFor(resourceName);
+        if (format == null) {
+            throw new IllegalStateException(
+                    "Iris core draw " + passName
+                            + " supplied an unknown fixed texel buffer '" + resourceName + "'"
+            );
+        }
+        IrisMetalTexelBufferAbi.requireSlice(
+                passName,
+                resourceName,
+                value.slice(),
+                format,
+                device
+        );
     }
 
     /** Resolves core sampler names from real world-generation resources. */
@@ -98,14 +214,86 @@ public final class IrisMetalCoreDrawBridge {
         }
         MetalRenderPass.TextureViewAndSampler alias = switch (name) {
             case "gtexture", "texture", "tex" -> first(bound, "u_BlockTex", "Sampler0");
-            case "lightmap" -> first(bound, "u_LightTex", "Sampler1");
-            case "overlay" -> first(bound, "Sampler1", "u_OverlayTex");
+            case "lightmap" -> first(bound, "u_LightTex", "Sampler2");
+            case "iris_overlay", "overlay" -> first(bound, "Sampler1", "u_OverlayTex");
             default -> null;
         };
         if (alias != null) {
             return alias;
         }
+        if (isCloudAlbedoSampler(name, draw.key())) {
+            MetalRenderPass.TextureViewAndSampler atlas = cloudAtlasBinding();
+            if (atlas != null) {
+                return atlas;
+            }
+        }
+        if ("iris_overlay".equals(name) || "overlay".equals(name)) {
+            return draw.pipeline().mojangExternalOverlay();
+        }
         return resources.standard(name, draw.key().isShadow());
+    }
+
+    /**
+     * The vanilla procedural cloud pass has no sampler write in its
+     * {@code RenderPass}; fixed Iris nevertheless gives {@code texture},
+     * {@code gtexture}, and {@code tex} the level albedo sampler (unit 0).
+     * Resolve that contract from the live block atlas only for cloud draws.
+     */
+    static boolean isCloudAlbedoSampler(final String name, final ShaderKey key) {
+        return !key.isShadow()
+                && (key == ShaderKey.CLOUDS || key == ShaderKey.CLOUDS_SODIUM)
+                && (name.equals("gtexture") || name.equals("texture") || name.equals("tex"));
+    }
+
+    static MetalRenderPass.@Nullable TextureViewAndSampler cloudAtlasBinding() {
+        AbstractTexture texture = Minecraft.getInstance()
+                .getTextureManager()
+                .getTexture(TextureAtlas.LOCATION_BLOCKS);
+        if (!(texture instanceof TextureAtlas)
+                || !(texture.getTextureView() instanceof MetalGpuTextureView view)
+                || !(view.texture() instanceof MetalGpuTexture gpuTexture)
+                || !(texture.getSampler() instanceof MetalGpuSampler sampler)
+                || view.isClosed()
+                || gpuTexture.isClosed()
+                || sampler.isClosed()
+                || (gpuTexture.usage() & GpuTexture.USAGE_TEXTURE_BINDING) == 0) {
+            return null;
+        }
+        MetalDevice activeDevice = MetalDeviceRegistry.getActiveDevice();
+        if (activeDevice == null
+                || !gpuTexture.isOwnedBy(activeDevice)
+                || !sampler.isOwnedBy(activeDevice)) {
+            return null;
+        }
+        return new MetalRenderPass.TextureViewAndSampler(view, sampler);
+    }
+
+    /**
+     * Validates Mojang's externally managed overlay binding without taking
+     * ownership of the texture or sampler. The caller stores only the returned
+     * view/sampler pair and refreshes it when the generation/device changes.
+     */
+    static MetalRenderPass.@Nullable TextureViewAndSampler checkedMojangExternalOverlayBinding(
+            final MetalDevice device,
+            final @Nullable GpuTextureView view,
+            final @Nullable GpuSampler sampler
+    ) {
+        if (!(view instanceof MetalGpuTextureView metalView)
+                || !(metalView.texture() instanceof MetalGpuTexture texture)
+                || !(sampler instanceof MetalGpuSampler metalSampler)
+                || metalView.isClosed()
+                || texture.isClosed()
+                || metalSampler.isClosed()
+                || !texture.isOwnedBy(device)
+                || !metalSampler.isOwnedBy(device)
+                || (texture.usage() & GpuTexture.USAGE_TEXTURE_BINDING) == 0
+                || metalSampler.getAddressModeU() != AddressMode.CLAMP_TO_EDGE
+                || metalSampler.getAddressModeV() != AddressMode.CLAMP_TO_EDGE
+                || metalSampler.getMinFilter() != FilterMode.LINEAR
+                || metalSampler.getMagFilter() != FilterMode.LINEAR) {
+            return null;
+        }
+        return new MetalRenderPass.TextureViewAndSampler(metalView, metalSampler);
     }
 
     private static MetalRenderPass.@Nullable TextureViewAndSampler first(
@@ -127,7 +315,7 @@ public final class IrisMetalCoreDrawBridge {
             ShaderKey key,
             IrisMetalGlslLinker.LinkedRasterProgram program,
             MetalCompiledRenderPipeline compiled,
-            com.mojang.blaze3d.systems.RenderPassDescriptor descriptor
+            IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor
     ) {
         public CoreDrawOverride {
             java.util.Objects.requireNonNull(pipeline, "pipeline");

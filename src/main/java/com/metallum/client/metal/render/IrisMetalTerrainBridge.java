@@ -1,11 +1,12 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.RenderPass;
-import com.mojang.blaze3d.systems.RenderPassDescriptor;
 import com.mojang.blaze3d.systems.RenderPassBackend;
 import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.GpuFormat;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.pipeline.WorldRenderingPipeline;
@@ -39,17 +40,72 @@ public final class IrisMetalTerrainBridge {
                 pipeline.programs().sodium(key.getProgram(), key.getAlphaTest());
         if (linked.isEmpty()) {
             ACTIVE_TERRAIN.remove();
-            return;
+            throw new IllegalStateException(
+                    "Iris active generation " + pipeline.generation()
+                            + " has no linked Sodium terrain program for " + key
+            );
         }
         int[] drawBuffers = linked.orElseThrow().program().drawBuffers();
         if (drawBuffers.length == 0) {
             drawBuffers = new int[]{0};
         }
         ACTIVE_TERRAIN.set(new TerrainContext(pipeline, key, drawBuffers));
+        pipeline.recordShadowTerrainPass(key);
     }
 
     public static void end() {
         ACTIVE_TERRAIN.remove();
+    }
+
+    /**
+     * Validates Sodium's draw-local section-time texel buffer at the exact
+     * call site where Sodium supplies it. It must not be promoted to a
+     * generation-owned provider because Sodium rotates/replaces the buffer.
+     */
+    public static void validateDrawOwnedTexelBuffer(
+            final String resourceName,
+            final GpuBuffer value
+    ) {
+        if (!"u_SectionTimeInfo".equals(resourceName)) {
+            return;
+        }
+        TerrainContext context = currentContext();
+        if (context == null) {
+            if (activePipeline() != null) {
+                throw new IllegalStateException(
+                        "Iris active generation received Sodium texel buffer '"
+                                + resourceName + "' without a terrain draw context"
+                );
+            }
+            return;
+        }
+        MetalDevice device = MetalDeviceRegistry.getActiveDevice();
+        if (device == null) {
+            throw new IllegalStateException(
+                    "Iris Sodium terrain supplied '" + resourceName
+                            + "' without an active Metal device"
+            );
+        }
+        IrisMetalTexelBufferAbi.requireSlice(
+                "sodium-terrain-" + context.key().getName(),
+                resourceName,
+                value.slice(),
+                GpuFormat.R32_SINT,
+                device
+        );
+    }
+
+    /** Records an actual native draw issued while Sodium owns this terrain pass. */
+    static void recordShadowDraw(final int primitiveCount) {
+        TerrainContext context = ACTIVE_TERRAIN.get();
+        if (context != null && context.key().isShadow()) {
+            context.pipeline().recordShadowTerrainDraw(primitiveCount);
+        }
+    }
+
+    /** Returns whether a published Metal Iris generation owns the current world draw. */
+    public static boolean hasActiveGeneration() {
+        return activePipeline() != null;
     }
 
     public static @Nullable RenderPass createRenderPass(
@@ -60,36 +116,48 @@ public final class IrisMetalTerrainBridge {
             final GpuTextureView sceneDepth,
             final OptionalDouble clearDepth
     ) {
-        TerrainContext context = currentContext();
-        if (context == null) {
-            return null;
-        }
-        IrisMetalShadowTargets shadowTargets = context.pipeline().resources().shadowTargets();
-        if (ShadowRenderingState.areShadowsCurrentlyBeingRendered() && shadowTargets != null) {
-            Vector4fc[] shadowClearColors = null;
-            if (clearColor.isPresent()) {
-                shadowClearColors = new Vector4fc[context.drawBuffers().length];
-                shadowClearColors[0] = clearColor.orElseThrow();
+        try {
+            TerrainContext context = currentContext();
+            if (context == null) {
+                if (activePipeline() != null) {
+                    throw new IllegalStateException(
+                            "Iris active generation has no Sodium terrain draw context"
+                    );
+                }
+                return null;
             }
-            IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor =
-                    shadowTargets.createShadowGbufferDescriptor(
+            IrisMetalShadowTargets shadowTargets = context.pipeline().resources().shadowTargets();
+            if (ShadowRenderingState.areShadowsCurrentlyBeingRendered() && shadowTargets != null) {
+                Vector4fc[] shadowClearColors = null;
+                if (clearColor.isPresent()) {
+                    shadowClearColors = new Vector4fc[context.drawBuffers().length];
+                    shadowClearColors[0] = clearColor.orElseThrow();
+                }
+                IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor =
+                        shadowTargets.createShadowGbufferDescriptor(
+                                label.get(),
+                                context.drawBuffers(),
+                                shadowClearColors,
+                                clearDepth.isPresent() ? clearDepth.getAsDouble() : null
+                        );
+                return IrisMetalCoreDrawBridge.createRenderPass(encoder, descriptor);
+            }
+            IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor = context.pipeline().resources().renderTargets()
+                    .createTerrainWriteDescriptor(
                             label.get(),
                             context.drawBuffers(),
-                            shadowClearColors,
+                            sceneColor,
+                            clearColor.orElse(null),
+                            sceneDepth,
                             clearDepth.isPresent() ? clearDepth.getAsDouble() : null
                     );
-            return encoder.createRenderPass(descriptor.descriptor());
+            return IrisMetalCoreDrawBridge.createRenderPass(encoder, descriptor);
+        } catch (RuntimeException | Error failure) {
+            // A failed descriptor/pass construction has no matching Sodium
+            // end callback. Clear the terrain scope before the next draw.
+            ACTIVE_TERRAIN.remove();
+            throw failure;
         }
-        RenderPassDescriptor descriptor = context.pipeline().resources().renderTargets()
-                .createTerrainWriteDescriptor(
-                        label.get(),
-                        context.drawBuffers(),
-                        sceneColor,
-                        clearColor.orElse(null),
-                        sceneDepth,
-                        clearDepth.isPresent() ? clearDepth.getAsDouble() : null
-                );
-        return encoder.createRenderPass(descriptor);
     }
 
     static @Nullable MetalCompiledRenderPipeline compiledPipeline(
@@ -98,6 +166,12 @@ public final class IrisMetalTerrainBridge {
     ) {
         TerrainContext context = currentContext();
         if (context == null) {
+            if (activePipeline() != null && source.getLocation().getNamespace().contains("sodium")) {
+                throw new IllegalStateException(
+                        "Iris active generation has no Sodium terrain draw context for "
+                                + source.getLocation()
+                );
+            }
             return null;
         }
         if (!source.getLocation().getNamespace().contains("sodium")) {
@@ -112,8 +186,18 @@ public final class IrisMetalTerrainBridge {
         var state = IrisMetalCompiledPrograms.RasterState.from(
                 source, source.getVertexFormatBinding(0)
         );
+        GpuFormat[] attachmentFormats = null;
+        if (ShadowRenderingState.areShadowsCurrentlyBeingRendered()) {
+            IrisMetalShadowTargets shadowTargets = context.pipeline().resources().shadowTargets();
+            if (shadowTargets == null) {
+                throw new IllegalStateException(
+                        "Iris shadow terrain draw has no generation-owned shadow targets"
+                );
+            }
+            attachmentFormats = shadowTargets.colorFormats();
+        }
         return context.pipeline().compiledPrograms()
-                .sodium(context.key().getProgram(), context.key().getAlphaTest(), state)
+                .sodium(context.key().getProgram(), context.key().getAlphaTest(), state, attachmentFormats)
                 .orElseThrow(() -> new IllegalStateException(
                         "Iris Metal terrain program disappeared during draw: " + context.key()
                 ));

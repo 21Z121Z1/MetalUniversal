@@ -49,6 +49,11 @@ public final class IrisMetalProgramFrontend {
                 .map(source -> new ResolvedProgram(requested, source));
     }
 
+    /** Returns whether the pack declares this program directly, excluding Iris fallback resolution. */
+    public boolean has(final ProgramId requested) {
+        return this.fallbackResolver.has(Objects.requireNonNull(requested, "requested"));
+    }
+
     public RasterProgram patchSodium(final ResolvedProgram resolved, final AlphaTest fallbackAlpha) {
         Objects.requireNonNull(resolved, "resolved");
         Objects.requireNonNull(fallbackAlpha, "fallbackAlpha");

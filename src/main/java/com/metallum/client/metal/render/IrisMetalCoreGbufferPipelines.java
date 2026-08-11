@@ -13,6 +13,8 @@ import net.minecraft.client.renderer.RenderPipelines;
 import org.jspecify.annotations.Nullable;
 
 import java.util.IdentityHashMap;
+import java.util.EnumSet;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 
@@ -28,6 +30,7 @@ import java.util.Set;
 public final class IrisMetalCoreGbufferPipelines {
     private static final Map<RenderPipeline, Resolver> MAIN = new IdentityHashMap<>();
     private static final Map<RenderPipeline, Resolver> SHADOW = new IdentityHashMap<>();
+    private static final Set<RenderPipeline> EXPLICIT_NON_OWNED = identitySet();
 
     static {
         main(RenderPipelines.SOLID_BLOCK, ShaderKey.TERRAIN_SOLID);
@@ -47,6 +50,7 @@ public final class IrisMetalCoreGbufferPipelines {
         main(RenderPipelines.ENTITY_SHADOW, IrisMetalCoreGbufferPipelines::translucent);
         main(RenderPipelines.LINES, ShaderKey.LINES);
         main(RenderPipelines.LINES_TRANSLUCENT, ShaderKey.LINES);
+        main(RenderPipelines.LINES_DEPTH_BIAS, ShaderKey.LINES);
         main(RenderPipelines.SECONDARY_BLOCK_OUTLINE, ShaderKey.LINES);
         main(RenderPipelines.STARS, ShaderKey.SKY_BASIC);
         main(RenderPipelines.SUNRISE_SUNSET, ShaderKey.SKY_BASIC_COLOR);
@@ -83,11 +87,45 @@ public final class IrisMetalCoreGbufferPipelines {
         main(RenderPipelines.TEXT_BACKGROUND, ShaderKey.TEXT_BG);
         main(RenderPipelines.TEXT_BACKGROUND_SEE_THROUGH, ShaderKey.TEXT_BG);
         main(RenderPipelines.TEXT_GRAYSCALE, IrisMetalCoreGbufferPipelines::intensityText);
+        main(RenderPipelines.TEXT_GRAYSCALE_POLYGON_OFFSET, IrisMetalCoreGbufferPipelines::intensityText);
         main(RenderPipelines.CRUMBLING, ShaderKey.CRUMBLING);
         main(RenderPipelines.LEASH, ShaderKey.LEASH);
         main(RenderPipelines.CLOUDS, ShaderKey.CLOUDS);
         main(RenderPipelines.FLAT_CLOUDS, ShaderKey.CLOUDS);
         main(RenderPipelines.BANNER_PATTERN, IrisMetalCoreGbufferPipelines::translucent);
+
+        // These are deliberately outside the world-generation contract. They
+        // belong to GUI, screen-effect, diagnostics, or presentation paths and
+        // must remain on Mojang's backend after the Iris world boundary ends.
+        nonOwned(
+                RenderPipelines.WIREFRAME,
+                RenderPipelines.DEBUG_POINTS,
+                RenderPipelines.DEBUG_FILLED_BOX,
+                RenderPipelines.DEBUG_QUADS,
+                RenderPipelines.DEBUG_TRIANGLE_FAN,
+                RenderPipelines.GUI,
+                RenderPipelines.GUI_INVERT,
+                RenderPipelines.GUI_TEXT,
+                RenderPipelines.GUI_TEXT_GRAYSCALE,
+                RenderPipelines.GUI_TEXT_HIGHLIGHT,
+                RenderPipelines.GUI_TEXTURED,
+                RenderPipelines.GUI_TEXTURED_PREMULTIPLIED_ALPHA,
+                RenderPipelines.BLOCK_SCREEN_EFFECT,
+                RenderPipelines.FIRE_SCREEN_EFFECT,
+                RenderPipelines.GUI_OPAQUE_TEXTURED_BACKGROUND,
+                RenderPipelines.GUI_NAUSEA_OVERLAY,
+                RenderPipelines.VIGNETTE,
+                RenderPipelines.CROSSHAIR,
+                RenderPipelines.MOJANG_LOGO,
+                RenderPipelines.ENTITY_OUTLINE_BLIT,
+                RenderPipelines.TRACY_BLIT,
+                RenderPipelines.PANORAMA,
+                RenderPipelines.OUTLINE_CULL,
+                RenderPipelines.OUTLINE_NO_CULL,
+                RenderPipelines.LIGHTMAP,
+                RenderPipelines.ANIMATE_SPRITE_BLIT,
+                RenderPipelines.ANIMATE_SPRITE_INTERPOLATE
+        );
 
         shadow(RenderPipelines.SOLID_BLOCK, ShaderKey.SHADOW_TERRAIN_CUTOUT);
         shadow(RenderPipelines.SOLID_TERRAIN, ShaderKey.SHADOW_TERRAIN_CUTOUT);
@@ -96,6 +134,7 @@ public final class IrisMetalCoreGbufferPipelines {
         shadow(RenderPipelines.CUTOUT_BLOCK, ShaderKey.SHADOW_TERRAIN_CUTOUT);
         shadow(RenderPipelines.TRANSLUCENT_BLOCK, ShaderKey.SHADOW_TRANSLUCENT);
         shadow(RenderPipelines.ENTITY_CUTOUT, ShaderKey.SHADOW_ENTITIES_CUTOUT);
+        shadow(RenderPipelines.ENTITY_SHADOW, ShaderKey.SHADOW_ENTITIES_CUTOUT);
         shadow(RenderPipelines.ARMOR_CUTOUT_NO_CULL, ShaderKey.SHADOW_ENTITIES_CUTOUT);
         shadow(RenderPipelines.ARMOR_DECAL_CUTOUT_NO_CULL, ShaderKey.SHADOW_ENTITIES_CUTOUT);
         shadow(RenderPipelines.ENTITY_SOLID, ShaderKey.SHADOW_ENTITIES_CUTOUT);
@@ -129,6 +168,7 @@ public final class IrisMetalCoreGbufferPipelines {
         shadow(RenderPipelines.TEXT_BACKGROUND, ShaderKey.SHADOW_TEXT_BG);
         shadow(RenderPipelines.TEXT_BACKGROUND_SEE_THROUGH, ShaderKey.SHADOW_TEXT_BG);
         shadow(RenderPipelines.TEXT_GRAYSCALE, ShaderKey.SHADOW_TEXT_INTENSITY);
+        shadow(RenderPipelines.TEXT_GRAYSCALE_POLYGON_OFFSET, ShaderKey.SHADOW_TEXT_INTENSITY);
         shadow(RenderPipelines.WATER_MASK, ShaderKey.SHADOW_BASIC);
         shadow(RenderPipelines.BEACON_BEAM_OPAQUE, ShaderKey.SHADOW_BEACON_BEAM);
         shadow(RenderPipelines.BEACON_BEAM_TRANSLUCENT, ShaderKey.SHADOW_BEACON_BEAM);
@@ -147,21 +187,33 @@ public final class IrisMetalCoreGbufferPipelines {
             final RenderPipeline pipeline,
             final @Nullable WorldRenderingPipeline worldPipeline
     ) {
-        HandRenderer hand = HandRenderer.INSTANCE;
-        return resolve(
-                pipeline,
-                new RenderState(
-                        ShadowRenderingState.areShadowsCurrentlyBeingRendered(),
-                        hand.isActive(),
-                        hand.isRenderingSolid(),
-                        worldPipeline != null && worldPipeline.getPhase() == WorldRenderingPhase.BLOCK_ENTITIES
-                )
-        );
+        return resolve(pipeline, liveState(worldPipeline));
+    }
+
+    /**
+     * Classifies every fixed-version pipeline so a null ShaderKey is never
+     * ambiguous between an intentional GUI/non-world path and a missing Iris
+     * route.
+     */
+    public static DrawOwnership ownership(
+            final RenderPipeline pipeline,
+            final @Nullable WorldRenderingPipeline worldPipeline
+    ) {
+        return ownership(pipeline, liveState(worldPipeline));
     }
 
     static @Nullable ShaderKey resolve(final RenderPipeline pipeline, final RenderState state) {
         Resolver resolver = (state.shadow() ? SHADOW : MAIN).get(pipeline);
         return resolver == null ? null : resolver.resolve(state);
+    }
+
+    static DrawOwnership ownership(final RenderPipeline pipeline, final RenderState state) {
+        if ((state.shadow() ? SHADOW : MAIN).containsKey(pipeline)) {
+            return DrawOwnership.IRIS_OWNED;
+        }
+        return EXPLICIT_NON_OWNED.contains(pipeline)
+                ? DrawOwnership.EXPLICIT_NON_OWNED
+                : DrawOwnership.UNKNOWN;
     }
 
     static int mappedPipelineCount(final boolean shadow) {
@@ -172,9 +224,69 @@ public final class IrisMetalCoreGbufferPipelines {
         return Set.copyOf((shadow ? SHADOW : MAIN).keySet());
     }
 
+    /** Returns fixed 26.2 static pipelines that have no ownership decision. */
+    static Set<RenderPipeline> unclassifiedStaticPipelines() {
+        Set<RenderPipeline> unclassified = identitySet();
+        unclassified.addAll(RenderPipelines.getStaticPipelines());
+        unclassified.removeAll(MAIN.keySet());
+        unclassified.removeAll(SHADOW.keySet());
+        unclassified.removeAll(EXPLICIT_NON_OWNED);
+        return Set.copyOf(unclassified);
+    }
+
+    /** Returns every ShaderKey reachable from the fixed Minecraft 26.2 catalog. */
+    static Set<ShaderKey> requiredShaderKeys() {
+        return requiredShaderKeys(true);
+    }
+
+    /**
+     * Returns the fixed catalog with optional shadow routes. Shadow routes are
+     * not observable when Iris has disabled shadow rendering or did not resolve
+     * a shadow generation, so admission must not require their programs in that
+     * case.
+     */
+    static Set<ShaderKey> requiredShaderKeys(final boolean includeShadow) {
+        EnumSet<ShaderKey> keys = EnumSet.noneOf(ShaderKey.class);
+        for (Map.Entry<RenderPipeline, Resolver> entry : MAIN.entrySet()) {
+            collect(keys, entry.getValue(), false);
+        }
+        if (includeShadow) {
+            for (Map.Entry<RenderPipeline, Resolver> entry : SHADOW.entrySet()) {
+                collect(keys, entry.getValue(), true);
+            }
+        }
+        return Set.copyOf(keys);
+    }
+
+    private static void collect(
+            final EnumSet<ShaderKey> keys,
+            final Resolver resolver,
+            final boolean shadow
+    ) {
+        for (boolean handActive : new boolean[]{false, true}) {
+            for (boolean handSolid : new boolean[]{false, true}) {
+                for (boolean blockEntities : new boolean[]{false, true}) {
+                    keys.add(resolver.resolve(new RenderState(
+                            shadow, handActive, handSolid, blockEntities
+                    )));
+                }
+            }
+        }
+    }
+
     /** Preserves the physical vertex ABI of the source Mojang draw. */
     static @Nullable VertexFormat physicalVertexFormat(final RenderPipeline source, final ShaderKey key) {
         return source.getVertexFormatBinding(0);
+    }
+
+    /**
+     * Fixed Minecraft cloud pipelines are procedural: their vertex shader
+     * consumes {@code gl_VertexID} and the renderer supplies only an index
+     * buffer. They are the only catalog routes allowed to omit a physical
+     * vertex stream; ordinary core draws retain an explicit vertex ABI.
+     */
+    static boolean allowsNoPhysicalVertexFormat(final ShaderKey key) {
+        return key == ShaderKey.CLOUDS || key == ShaderKey.CLOUDS_SODIUM;
     }
 
     private static void main(final RenderPipeline pipeline, final ShaderKey key) {
@@ -183,6 +295,10 @@ public final class IrisMetalCoreGbufferPipelines {
 
     private static void main(final RenderPipeline pipeline, final Resolver resolver) {
         MAIN.put(pipeline, resolver);
+    }
+
+    private static void nonOwned(final RenderPipeline... pipelines) {
+        Collections.addAll(EXPLICIT_NON_OWNED, pipelines);
     }
 
     private static void shadow(final RenderPipeline pipeline, final ShaderKey key) {
@@ -219,6 +335,26 @@ public final class IrisMetalCoreGbufferPipelines {
 
     private static ShaderKey intensityText(final RenderState state) {
         return state.blockEntities() ? ShaderKey.TEXT_INTENSITY_BE : ShaderKey.TEXT_INTENSITY;
+    }
+
+    private static RenderState liveState(final @Nullable WorldRenderingPipeline worldPipeline) {
+        HandRenderer hand = HandRenderer.INSTANCE;
+        return new RenderState(
+                ShadowRenderingState.areShadowsCurrentlyBeingRendered(),
+                hand.isActive(),
+                hand.isRenderingSolid(),
+                worldPipeline != null && worldPipeline.getPhase() == WorldRenderingPhase.BLOCK_ENTITIES
+        );
+    }
+
+    private static Set<RenderPipeline> identitySet() {
+        return Collections.newSetFromMap(new IdentityHashMap<>());
+    }
+
+    public enum DrawOwnership {
+        IRIS_OWNED,
+        EXPLICIT_NON_OWNED,
+        UNKNOWN
     }
 
     record RenderState(boolean shadow, boolean handActive, boolean handSolid, boolean blockEntities) {

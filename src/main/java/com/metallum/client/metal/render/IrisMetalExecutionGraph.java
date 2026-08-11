@@ -23,7 +23,9 @@ import net.irisshaders.iris.shaderpack.programs.ComputeSource;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.shaderpack.programs.ProgramSource;
 import net.irisshaders.iris.shaderpack.properties.ProgramDirectives;
+import net.irisshaders.iris.shaderpack.properties.IndirectPointer;
 import net.irisshaders.iris.shaderpack.properties.PackShadowDirectives;
+import net.irisshaders.iris.shaderpack.properties.PackRenderTargetDirectives;
 import net.irisshaders.iris.shaderpack.texture.TextureStage;
 import net.irisshaders.iris.pathways.colorspace.ColorSpace;
 import net.minecraft.resources.Identifier;
@@ -200,10 +202,24 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             ComputeSource source,
             IrisMetalProgramFrontend.ComputeProgram program,
             List<ComputeBinding> bindings,
-            String token
+            String token,
+            BitSet readsFromAlt,
+            BitSet flippedAtLeastOnceBefore
     ) {
         ComputePlan {
             bindings = List.copyOf(bindings);
+            readsFromAlt = (BitSet) readsFromAlt.clone();
+            flippedAtLeastOnceBefore = (BitSet) flippedAtLeastOnceBefore.clone();
+        }
+
+        @Override
+        public BitSet readsFromAlt() {
+            return (BitSet) readsFromAlt.clone();
+        }
+
+        @Override
+        public BitSet flippedAtLeastOnceBefore() {
+            return (BitSet) flippedAtLeastOnceBefore.clone();
         }
     }
 
@@ -226,8 +242,10 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
     private final ProgramSet programSet;
     private final IrisMetalWorldPrograms programs;
     private final int targetCount;
+    private final boolean concurrentCompute;
     private final EnumMap<Stage, List<RasterPlan>> rasterPlans = new EnumMap<>(Stage.class);
     private final EnumMap<Stage, List<ComputePlan>> computePlans = new EnumMap<>(Stage.class);
+    private final List<ComputePlan> shadowStandaloneComputePlans = new ArrayList<>();
     private final List<RasterPlan> shadowRasterPlans = new ArrayList<>();
     private final EnumMap<Stage, List<OrderedOperation>> orderedOperations = new EnumMap<>(Stage.class);
     private final EnumMap<Stage, BitSet> stageInputs = new EnumMap<>(Stage.class);
@@ -236,16 +254,21 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
     private final Map<RasterPlan, MetalCompiledRenderPipeline> shadowRasterPipelines = new IdentityHashMap<>();
     private final Map<ComputePlan, MetalComputePipeline> computePipelines = new IdentityHashMap<>();
     private final List<ComputePlan> finalComputePlans = new ArrayList<>();
+    private final IrisMetalColorSpaceConverter colorSpaceConverter;
     private @Nullable RasterPlan finalPlan;
     private BitSet finalSnapshot = new BitSet();
     private BitSet finalFlippedAtLeastOnce = new BitSet();
     private Set<Integer> finalHistoryTargets = Set.of();
     private @Nullable MetalCompiledRenderPipeline finalPipeline;
     private @Nullable IrisMetalCenterDepthSampler centerDepthSampler;
+    private @Nullable MetalDevice preparedDevice;
+    private IrisMetalTexelBufferAbi.@Nullable Provider texelBufferProvider;
+    private Set<Integer> activeShadowMipTargets = Set.of();
     private BitSet state = new BitSet();
     private BitSet shadowState = new BitSet();
     private boolean shadowFullClearRequired = true;
     private boolean prepared;
+    private @Nullable GpuFormat preparedMainColorFormat;
     private boolean closed;
 
     IrisMetalExecutionGraph(
@@ -264,6 +287,8 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             throw new IllegalArgumentException("Execution graph crossed program generation");
         }
         this.targetCount = targetCount;
+        this.concurrentCompute = programSet.getPackDirectives().getConcurrentCompute();
+        this.colorSpaceConverter = new IrisMetalColorSpaceConverter(generation);
         for (Stage stage : Stage.values()) {
             rasterPlans.put(stage, new ArrayList<>());
             computePlans.put(stage, new ArrayList<>());
@@ -281,7 +306,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
 
         for (ComputeSource source : programSet.getSetup()) {
             if (source != null && source.isValid()) {
-                computePlans.get(Stage.SETUP).add(planCompute(Stage.SETUP, -1, source));
+                computePlans.get(Stage.SETUP).add(
+                        planCompute(Stage.SETUP, -1, source, new BitSet(), new BitSet())
+                );
             }
         }
 
@@ -304,7 +331,11 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 if (index < computes.length && computes[index] != null) {
                     for (ComputeSource compute : computes[index]) {
                         if (compute != null && compute.isValid()) {
-                            computePlans.get(stage).add(planCompute(stage, index, compute));
+                            computePlans.get(stage).add(
+                                    planCompute(
+                                            stage, index, compute, current, flippedAtLeastOnce
+                                    )
+                            );
                         }
                     }
                 }
@@ -317,6 +348,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 }
                 int[] drawBuffers = validateDrawBuffers(
                         source.getName(), source.getDirectives().getDrawBuffers()
+                );
+                validateMipmappedBuffers(
+                        source.getName(), source.getDirectives().getMipmappedBuffers(), targetCount
                 );
                 FlipTransition transition = transition(
                         current,
@@ -353,8 +387,11 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         for (int index = 0; index < shadowComputes.length; index++) {
             ComputeSource source = shadowComputes[index];
             if (source != null && source.isValid()) {
-                computePlans.get(Stage.SHADOW_COMPOSITE).add(
-                        planCompute(Stage.SHADOW_COMPOSITE, index, source)
+                shadowStandaloneComputePlans.add(
+                        planCompute(
+                                Stage.SHADOW_COMPOSITE, index, source,
+                                new BitSet(), new BitSet()
+                        )
                 );
             }
         }
@@ -362,13 +399,33 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         BitSet shadowHistory = new BitSet();
         GpuFormat[] shadowFormats = shadowTargetFormats();
         ProgramSource[] shadowSources = programSet.getComposite(ProgramArrayId.ShadowComposite);
-        for (int index = 0; index < shadowSources.length; index++) {
+        ComputeSource[][] shadowComputeGroups = programSet.getCompute(ProgramArrayId.ShadowComposite);
+        int shadowOperationCount = Math.max(shadowSources.length, shadowComputeGroups.length);
+        for (int index = 0; index < shadowOperationCount; index++) {
+            if (index < shadowComputeGroups.length && shadowComputeGroups[index] != null) {
+                for (ComputeSource compute : shadowComputeGroups[index]) {
+                    if (compute != null && compute.isValid()) {
+                        computePlans.get(Stage.SHADOW_COMPOSITE).add(
+                                planCompute(
+                                        Stage.SHADOW_COMPOSITE, index, compute,
+                                        shadowCurrent, shadowHistory
+                                )
+                        );
+                    }
+                }
+            }
+            if (index >= shadowSources.length) {
+                continue;
+            }
             ProgramSource source = shadowSources[index];
             if (source == null || !source.isValid()) {
                 continue;
             }
             int[] drawBuffers = validateDrawBuffers(
                     source.getName(), source.getDirectives().getDrawBuffers(), shadowTargetCount()
+            );
+            validateMipmappedBuffers(
+                    source.getName(), source.getDirectives().getMipmappedBuffers(), shadowTargetCount()
             );
             FlipTransition transition = transition(
                     shadowCurrent, shadowHistory, drawBuffers,
@@ -400,6 +457,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         if (finalSource.isPresent() && finalSource.get().isValid()) {
             ProgramSource source = finalSource.get();
             int[] drawBuffers = validateDrawBuffers(source.getName(), source.getDirectives().getDrawBuffers());
+            validateMipmappedBuffers(
+                    source.getName(), source.getDirectives().getMipmappedBuffers(), targetCount
+            );
             IrisMetalGlslLinker.LinkedRasterProgram linked = programs.finalProgram();
             if (linked == null) {
                 throw new IllegalStateException("Final program resolution disappeared during graph planning");
@@ -416,7 +476,12 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
 
         for (ComputeSource source : programSet.getFinalCompute()) {
             if (source != null && source.isValid()) {
-                finalComputePlans.add(planCompute(Stage.FINAL, -1, source));
+                finalComputePlans.add(
+                        planCompute(
+                                Stage.FINAL, -1, source,
+                                finalSnapshot, finalFlippedAtLeastOnce
+                        )
+                );
             }
         }
         rebuildOrderedOperations();
@@ -460,17 +525,44 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             final int index,
             final ComputeSource source
     ) {
+        return planCompute(stage, index, source, new BitSet(), new BitSet());
+    }
+
+    private ComputePlan planCompute(
+            final Stage stage,
+            final int index,
+            final ComputeSource source,
+            final BitSet readsFromAlt,
+            final BitSet flippedAtLeastOnceBefore
+    ) {
         IrisMetalProgramFrontend.ComputeProgram patched = programs.compute(source, stage.textureStage);
         return new ComputePlan(
                 stage, index, source, patched,
                 reflectComputeBindings(patched.patchedSource(), source.getName()),
-                token(stage, index, source.getName())
+                token(stage, index, source.getName()),
+                readsFromAlt,
+                flippedAtLeastOnceBefore
         );
     }
 
     void setCenterDepthSampler(final @Nullable IrisMetalCenterDepthSampler sampler) {
         ensureOpen();
         this.centerDepthSampler = sampler;
+    }
+
+    /**
+     * Installs the fixed Iris/Sodium typed-buffer producer before generation
+     * publication. The provider is part of the generation's binding contract;
+     * it cannot be changed after PSO preparation.
+     */
+    void setTexelBufferProvider(final IrisMetalTexelBufferAbi.@Nullable Provider provider) {
+        ensureOpen();
+        if (prepared && this.texelBufferProvider != provider) {
+            throw new IllegalStateException(
+                    "Iris execution graph texel-buffer provider changed after preparation"
+            );
+        }
+        this.texelBufferProvider = provider;
     }
 
     void prepare(
@@ -483,15 +575,48 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         Objects.requireNonNull(device, "device");
         Objects.requireNonNull(resources, "resources");
         Objects.requireNonNull(uniformValues, "uniformValues");
+        Objects.requireNonNull(mainColorFormat, "mainColorFormat");
+        if (resources.generation() != generation) {
+            throw new IllegalStateException(
+                    "Iris execution graph generation " + generation
+                            + " received resources from generation " + resources.generation()
+            );
+        }
+        if (!resources.isOwnedBy(device)) {
+            throw new IllegalStateException(
+                    "Iris execution graph generation " + generation
+                            + " received resources from another Metal device"
+            );
+        }
         IrisMetalRenderTargets targets = resources.renderTargets();
         if (targets.colorTargets().targetCount() != targetCount) {
             throw new IllegalStateException("Execution graph target count changed within generation");
         }
-        if (!prepared) {
+        if (prepared) {
+            if (preparedDevice != device) {
+                throw new IllegalStateException(
+                        "Iris execution graph generation " + generation
+                                + " crossed Metal device ownership"
+                );
+            }
+            if (preparedMainColorFormat != null && !preparedMainColorFormat.equals(mainColorFormat)) {
+                throw new IllegalStateException(
+                        "Iris final target format changed within generation from "
+                                + preparedMainColorFormat + " to " + mainColorFormat
+                );
+            }
+            return;
+        }
+        Map<ComputePlan, MetalComputePipeline> candidateComputePipelines = new IdentityHashMap<>();
+        Map<RasterPlan, MetalCompiledRenderPipeline> candidateRasterPipelines = new IdentityHashMap<>();
+        Map<RasterPlan, MetalCompiledRenderPipeline> candidateShadowRasterPipelines = new IdentityHashMap<>();
+        @Nullable MetalCompiledRenderPipeline candidateFinalPipeline = null;
+        IrisMetalUniformValues.RegistrationCheckpoint uniformCheckpoint = uniformValues.checkpoint();
+        try {
             for (Stage stage : Stage.values()) {
                 for (OrderedOperation operation : orderedOperations.get(stage)) {
                     if (operation.compute() != null) {
-                        computePipelines.put(
+                        candidateComputePipelines.put(
                                 operation.compute(), compileCompute(device, operation.compute())
                         );
                         continue;
@@ -499,16 +624,17 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                     RasterPlan plan = operation.raster();
                     uniformValues.register(plan.uniformToken(), plan.name(), plan.program());
                     MetalCompiledRenderPipeline pipeline = stage == Stage.SHADOW_COMPOSITE
-                            ? compileShadowRaster(
-                                    device, resources.shadowTargets(), plan
-                            )
+                            ? compileShadowRaster(device, resources.shadowTargets(), plan)
                             : compileRaster(device, targets, plan, null);
                     if (stage == Stage.SHADOW_COMPOSITE) {
-                        shadowRasterPipelines.put(plan, pipeline);
+                        candidateShadowRasterPipelines.put(plan, pipeline);
                     } else {
-                        rasterPipelines.put(plan, pipeline);
+                        candidateRasterPipelines.put(plan, pipeline);
                     }
                 }
+            }
+            for (ComputePlan plan : shadowStandaloneComputePlans) {
+                candidateComputePipelines.put(plan, compileCompute(device, plan));
             }
             if (finalPlan != null) {
                 int[] finalBuffers = finalPlan.drawBuffers();
@@ -519,14 +645,193 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                     );
                 }
                 uniformValues.register(finalPlan.uniformToken(), finalPlan.name(), finalPlan.program());
-                finalPipeline = compileRaster(
-                        device, targets, finalPlan, mainColorFormat
+                candidateFinalPipeline = compileRaster(device, targets, finalPlan, mainColorFormat);
+            }
+            validateCandidateBindings(
+                    device,
+                    resources,
+                    candidateRasterPipelines,
+                    candidateShadowRasterPipelines,
+                    candidateFinalPipeline
+            );
+            colorSpaceConverter.prepare(
+                    device,
+                    mainColorFormat,
+                    programSet.getPackDirectives().supportsColorCorrection()
+            );
+
+            computePipelines.putAll(candidateComputePipelines);
+            rasterPipelines.putAll(candidateRasterPipelines);
+            shadowRasterPipelines.putAll(candidateShadowRasterPipelines);
+            finalPipeline = candidateFinalPipeline;
+            preparedDevice = device;
+            preparedMainColorFormat = mainColorFormat;
+            prepared = true;
+        } catch (RuntimeException | Error failure) {
+            uniformValues.rollback(uniformCheckpoint);
+            candidateComputePipelines.values().forEach(MetalComputePipeline::close);
+            candidateRasterPipelines.values().forEach(MetalCompiledRenderPipeline::close);
+            candidateShadowRasterPipelines.values().forEach(MetalCompiledRenderPipeline::close);
+            if (candidateFinalPipeline != null) {
+                candidateFinalPipeline.close();
+            }
+            throw failure;
+        }
+    }
+
+    /**
+     * Resolve every graph-owned binding before publication. Runtime binding
+     * failures must reject the candidate generation while the previous one is
+     * still authoritative, rather than becoming a first-frame fallback.
+     */
+    private void validateCandidateBindings(
+            final MetalDevice device,
+            final IrisMetalWorldResources resources,
+            final Map<RasterPlan, MetalCompiledRenderPipeline> candidateRasterPipelines,
+            final Map<RasterPlan, MetalCompiledRenderPipeline> candidateShadowRasterPipelines,
+            final @Nullable MetalCompiledRenderPipeline candidateFinalPipeline
+    ) {
+        for (Map.Entry<RasterPlan, MetalCompiledRenderPipeline> entry
+                : candidateRasterPipelines.entrySet()) {
+            validateRasterBindings(device, entry.getKey(), entry.getValue(), resources);
+        }
+        for (Map.Entry<RasterPlan, MetalCompiledRenderPipeline> entry
+                : candidateShadowRasterPipelines.entrySet()) {
+            validateRasterBindings(device, entry.getKey(), entry.getValue(), resources);
+        }
+        if (finalPlan != null && candidateFinalPipeline != null) {
+            validateRasterBindings(device, finalPlan, candidateFinalPipeline, resources);
+        }
+        for (Stage stage : Stage.values()) {
+            for (ComputePlan plan : computePlans.get(stage)) {
+                validateComputeBindings(plan, resources);
+            }
+        }
+        for (ComputePlan plan : finalComputePlans) {
+            validateComputeBindings(plan, resources);
+        }
+        for (ComputePlan plan : shadowStandaloneComputePlans) {
+            validateComputeBindings(plan, resources);
+        }
+    }
+
+    private void validateRasterBindings(
+            final MetalDevice device,
+            final RasterPlan plan,
+            final MetalCompiledRenderPipeline pipeline,
+            final IrisMetalWorldResources resources
+    ) {
+        for (IrisMetalGlslLinker.SamplerDecl sampler : plan.program().samplers()) {
+            if (!sampler.sampled()) {
+                continue;
+            }
+            if (sampler.texelBuffer()) {
+                IrisMetalTexelBufferAbi.require(
+                        plan.name(), sampler, texelBufferProvider, device
+                );
+                continue;
+            }
+            if (textureBinding(
+                    sampler.name(), plan.stage().textureStage,
+                    resources.renderTargets(), resources, plan.readsFromAlt(),
+                    plan.flippedAtLeastOnceBefore()
+            ) == null) {
+                throw new IllegalStateException(
+                        "Iris graph pass " + plan.name()
+                                + " is missing required sampler '" + sampler.name() + "'"
                 );
             }
-            prepared = true;
         }
-        if (finalPlan != null && mainColorFormat == null) {
-            throw new IllegalArgumentException("Final Iris pass requires a main color format");
+        for (MetalCompiledRenderPipeline.ResourceBinding binding : pipeline.resources()) {
+            switch (binding.kind()) {
+                case STORAGE_BUFFER -> {
+                    IrisMetalComputeResources computeResources = resources.computeResources();
+                    int logicalBinding = MetalCrossShaderCompiler.storageBufferLogicalBinding(binding.name());
+                    if (computeResources == null || logicalBinding < 0
+                            || computeResources.storageBuffer(logicalBinding) == null) {
+                        throw new IllegalStateException(
+                                "Iris graph pass " + plan.name()
+                                        + " is missing SSBO binding " + logicalBinding
+                        );
+                    }
+                }
+                case STORAGE_IMAGE -> {
+                    if (storageImageBinding(
+                            binding.name(), plan.stage().textureStage,
+                            resources.renderTargets(), resources, plan.readsFromAlt()
+                    ) == null) {
+                        throw new IllegalStateException(
+                                "Iris graph pass " + plan.name()
+                                        + " is missing storage image '" + binding.name() + "'"
+                        );
+                    }
+                }
+                case TEXEL_BUFFER -> {
+                    boolean declared = plan.program().samplers().stream()
+                            .anyMatch(sampler -> sampler.texelBuffer()
+                                    && sampler.name().equals(binding.name()));
+                    if (!declared) {
+                        throw new IllegalStateException(
+                                "Iris graph pass " + plan.name()
+                                        + " has an unreflected texel buffer '" + binding.name() + "'"
+                        );
+                    }
+                }
+                default -> {
+                    // Uniform and sampled resources are checked by the linked
+                    // program and the explicit sampler walk above.
+                }
+            }
+        }
+    }
+
+    private void validateComputeBindings(
+            final ComputePlan plan,
+            final IrisMetalWorldResources resources
+    ) {
+        for (ComputeBinding binding : plan.bindings()) {
+            IrisMetalComputeResources computeResources = resources.computeResources();
+            if (binding.buffer()) {
+                if (computeResources == null || computeResources.storageBuffer(binding.binding()) == null) {
+                    throw new IllegalStateException(
+                            "Iris compute " + plan.source().getName()
+                                    + " is missing SSBO binding " + binding.binding()
+                    );
+                }
+                continue;
+            }
+            if (binding.image()) {
+                if (storageImageBinding(
+                        binding.name(), plan.stage().textureStage,
+                        resources.renderTargets(), resources, plan.readsFromAlt()
+                ) == null) {
+                    throw new IllegalStateException(
+                            "Iris compute " + plan.source().getName()
+                                    + " is missing storage image '" + binding.name() + "'"
+                    );
+                }
+                continue;
+            }
+            if (textureBinding(
+                    binding.name(), plan.stage().textureStage,
+                    resources.renderTargets(), resources, plan.readsFromAlt(),
+                    plan.flippedAtLeastOnceBefore()
+            ) == null) {
+                throw new IllegalStateException(
+                        "Iris compute " + plan.source().getName()
+                                + " is missing sampled image '" + binding.name() + "'"
+                );
+            }
+        }
+        IndirectPointer indirect = plan.source().getIndirectPointer();
+        if (indirect != null) {
+            IrisMetalComputeResources computeResources = resources.computeResources();
+            if (computeResources == null || computeResources.storageBuffer(indirect.buffer()) == null) {
+                throw new IllegalStateException(
+                        "Iris compute " + plan.source().getName()
+                                + " is missing indirect SSBO binding " + indirect.buffer()
+                );
+            }
         }
     }
 
@@ -562,6 +867,23 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         encoder.clearDepthTexture(shadows.shadowDepthTexture(), 1.0);
         encoder.clearDepthTexture(shadows.shadowDepthNoTranslucentsTexture(), 1.0);
 
+        // Iris runs standalone shadow compute after the depth clear but before
+        // the shadow-color clear. Per-slot shadowcomp compute remains in the
+        // ordered composite graph below and executes immediately before its
+        // matching raster slot.
+        this.shadowState = new BitSet();
+        if (!shadowStandaloneComputePlans.isEmpty()) {
+            // A pack that explicitly opts into concurrent compute owns the
+            // hazard decision for this compute group. Otherwise each dispatch
+            // receives its own encoder/fence boundary.
+            executeComputeGroup(
+                    shadowStandaloneComputePlans,
+                    resources,
+                    shadows.resolution(),
+                    shadows.resolution()
+            );
+        }
+
         BitSet main = new BitSet();
         BitSet alternate = new BitSet();
         alternate.set(0, shadows.colorTargets().targetCount());
@@ -578,8 +900,33 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         }
         shadows.publishFlipState(main);
         shadows.resetMipmaps();
-        this.shadowState = new BitSet();
+        this.activeShadowMipTargets = Set.of();
         this.shadowFullClearRequired = false;
+    }
+
+    /** Captures shadowtex1 after all opaque shadow casters and before translucents. */
+    void captureShadowNoTranslucentsDepth(final IrisMetalWorldResources resources) {
+        ensurePrepared();
+        IrisMetalShadowTargets shadows = resources.shadowTargets();
+        if (shadows == null) {
+            throw new IllegalStateException("Shadow depth snapshot has no generation-owned shadow targets");
+        }
+        shadows.captureNoTranslucentsDepth(activeEncoder());
+    }
+
+    /** Completes shadow geometry before any shadow compute or composite pass. */
+    void finishShadowGeometry(final IrisMetalWorldResources resources) {
+        ensurePrepared();
+        IrisMetalShadowTargets shadows = resources.shadowTargets();
+        if (shadows == null) {
+            throw new IllegalStateException("Shadow geometry has no generation-owned shadow targets");
+        }
+        MetalCommandEncoder encoder = activeEncoder();
+        shadows.generateDepthMipmaps(encoder);
+        shadows.generateColorMipmaps(encoder);
+        // Every shadow-color side is observable after geometry, including a
+        // side that was not attached by a depth-only or single-sided draw.
+        shadows.materializePendingColorClears(encoder);
     }
 
     void executeComposite(final IrisMetalWorldResources resources) {
@@ -589,36 +936,70 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
     void executeShadowComposite(final IrisMetalWorldResources resources) {
         ensurePrepared();
         IrisMetalShadowTargets shadows = resources.shadowTargets();
-        if ((!shadowRasterPlans.isEmpty() || !computePlans.get(Stage.SHADOW_COMPOSITE).isEmpty())
+        if ((!shadowRasterPlans.isEmpty()
+                || !computePlans.get(Stage.SHADOW_COMPOSITE).isEmpty()
+                || !shadowStandaloneComputePlans.isEmpty())
                 && shadows == null) {
             throw new IllegalStateException(
                     "Iris generation " + generation + " has shadow passes but no shadow targets"
             );
         }
-        currentResourcesForDispatch = resources.renderTargets();
-        try {
-            for (OrderedOperation operation : orderedOperations.get(Stage.SHADOW_COMPOSITE)) {
-                if (operation.compute() != null) {
-                    executeCompute(operation.compute(), resources, shadowState);
-                    continue;
-                }
-                RasterPlan plan = operation.raster();
+        List<OrderedOperation> operations = orderedOperations.get(Stage.SHADOW_COMPOSITE);
+        for (int cursor = 0; cursor < operations.size();) {
+            OrderedOperation operation = operations.get(cursor);
+            if (operation.compute() != null) {
+                this.activeShadowMipTargets = Set.of();
                 if (shadows == null) {
-                    throw new IllegalStateException("Shadow raster plan has no shadow targets");
+                    throw new IllegalStateException("Shadow compute plan has no shadow targets");
                 }
-                shadows.publishFlipState(plan.readsFromAlt());
-                shadowState = plan.readsFromAlt();
+                int operationIndex = operation.index();
+                List<ComputePlan> group = new ArrayList<>();
+                while (cursor < operations.size()
+                        && operations.get(cursor).compute() != null
+                        && operations.get(cursor).index() == operationIndex) {
+                    group.add(operations.get(cursor).compute());
+                    cursor++;
+                }
+                executeComputeGroup(
+                        group, resources,
+                        shadows.resolution(), shadows.resolution()
+                );
+                continue;
+            }
+            RasterPlan plan = operation.raster();
+            if (shadows == null) {
+                throw new IllegalStateException("Shadow raster plan has no shadow targets");
+            }
+            shadows.publishFlipState(plan.readsFromAlt());
+            shadowState = plan.readsFromAlt();
+            this.activeShadowMipTargets = plan.mipmappedBuffers();
+            try {
                 executeShadowRaster(
                         plan, shadowRasterPipelines.get(plan), resources, shadows
                 );
-                shadows.publishFlipState(plan.stateAfter());
-                shadowState = plan.stateAfter();
+            } finally {
+                this.activeShadowMipTargets = Set.of();
             }
-            if (shadows != null) {
-                shadows.generateDepthMipmaps(activeEncoder());
+            shadows.publishFlipState(plan.stateAfter());
+            shadowState = plan.stateAfter();
+            cursor++;
+        }
+    }
+
+    private static void validateMipmappedBuffers(
+            final String name,
+            final Set<Integer> mipmappedBuffers,
+            final int targetCount
+    ) {
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(mipmappedBuffers, "mipmappedBuffers");
+        for (Integer target : mipmappedBuffers) {
+            if (target == null || target < 0 || target >= targetCount) {
+                throw new IllegalStateException(
+                        "Iris pass " + name + " requests mipmaps for target " + target
+                                + " outside 0.." + (targetCount - 1)
+                );
             }
-        } finally {
-            currentResourcesForDispatch = null;
         }
     }
 
@@ -677,6 +1058,14 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         }
     }
 
+    boolean executeColorSpace(
+            final GpuTextureView mainColor,
+            final ColorSpace colorSpace
+    ) {
+        ensurePrepared();
+        return colorSpaceConverter.execute(mainColor, colorSpace);
+    }
+
     private void executeStage(final Stage stage, final IrisMetalWorldResources resources) {
         ensurePrepared();
         BitSet stageInput = stageInputs.get(stage);
@@ -684,32 +1073,68 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         if (stageInput == null || stageOutput == null) {
             throw new IllegalStateException("Iris stage has no planned flip boundary: " + stage);
         }
-        resources.renderTargets().colorTargets().restore(stageInput);
+        IrisMetalRenderTargets targets = resources.renderTargets();
+        targets.colorTargets().restore(stageInput);
         state = (BitSet) stageInput.clone();
-        currentResourcesForDispatch = resources.renderTargets();
-        try {
-            for (OrderedOperation operation : orderedOperations.get(stage)) {
-                if (operation.compute() != null) {
-                    executeCompute(operation.compute(), resources, state);
-                    continue;
+        List<OrderedOperation> operations = orderedOperations.get(stage);
+        for (int cursor = 0; cursor < operations.size();) {
+            OrderedOperation operation = operations.get(cursor);
+            if (operation.compute() != null) {
+                int operationIndex = operation.index();
+                List<ComputePlan> group = new ArrayList<>();
+                while (cursor < operations.size()
+                        && operations.get(cursor).compute() != null
+                        && operations.get(cursor).index() == operationIndex) {
+                    group.add(operations.get(cursor).compute());
+                    cursor++;
                 }
-                RasterPlan plan = operation.raster();
-                resources.renderTargets().colorTargets().restore(plan.readsFromAlt());
-                executeRaster(plan, rasterPipelines.get(plan), resources, null);
-                resources.renderTargets().colorTargets().restore(plan.stateAfter());
-                state = plan.stateAfter();
+                executeComputeGroup(group, resources, targets.width(), targets.height());
+                continue;
             }
-            resources.renderTargets().colorTargets().restore(stageOutput);
-            state = (BitSet) stageOutput.clone();
-        } finally {
-            currentResourcesForDispatch = null;
+            RasterPlan plan = operation.raster();
+            targets.colorTargets().restore(plan.readsFromAlt());
+            executeRaster(plan, rasterPipelines.get(plan), resources, null);
+            targets.colorTargets().restore(plan.stateAfter());
+            state = plan.stateAfter();
+            cursor++;
+        }
+        targets.colorTargets().restore(stageOutput);
+        state = (BitSet) stageOutput.clone();
+    }
+
+    private void executeComputeGroup(
+            final List<ComputePlan> plans,
+            final IrisMetalWorldResources resources,
+            final int dispatchWidth,
+            final int dispatchHeight
+    ) {
+        if (plans.isEmpty()) {
+            return;
+        }
+        if (this.concurrentCompute) {
+            try (MetalComputePass pass = activeEncoder().createComputePass()) {
+                for (ComputePlan plan : plans) {
+                    executeCompute(pass, plan, resources, dispatchWidth, dispatchHeight);
+                }
+            }
+            return;
+        }
+        // Fixed Iris requires a producer/consumer boundary between dispatches
+        // unless the pack explicitly opts into concurrent compute. The shared
+        // Metal fence is updated when each pass closes.
+        for (ComputePlan plan : plans) {
+            try (MetalComputePass pass = activeEncoder().createComputePass()) {
+                executeCompute(pass, plan, resources, dispatchWidth, dispatchHeight);
+            }
         }
     }
 
     private void executeCompute(
+            final MetalComputePass pass,
             final ComputePlan plan,
             final IrisMetalWorldResources resources,
-            final BitSet readsFromAlt
+            final int dispatchWidth,
+            final int dispatchHeight
     ) {
         MetalComputePipeline pipeline = computePipelines.get(plan);
         if (pipeline == null) {
@@ -717,18 +1142,15 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                     "Iris compute plan has no compiled pipeline: " + plan.source().getName()
             );
         }
-        try (MetalComputePass pass = activeEncoder().createComputePass()) {
-            pass.setPipeline(pipeline);
-            bindCompute(pass, plan, resources, readsFromAlt);
-            dispatchCompute(pass, plan);
-        }
+        pass.setPipeline(pipeline);
+        bindCompute(pass, plan, resources);
+        dispatchCompute(pass, plan, resources, dispatchWidth, dispatchHeight);
     }
 
     private void bindCompute(
             final MetalComputePass pass,
             final ComputePlan plan,
-            final IrisMetalWorldResources resources,
-            final BitSet readsFromAlt
+            final IrisMetalWorldResources resources
     ) {
         IrisMetalRenderTargets targets = resources.renderTargets();
         IrisMetalComputeResources computeResources = resources.computeResources();
@@ -756,10 +1178,11 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                         ? null
                         : computeResources.storageImage(binding.name());
                 if (image == null) {
-                    MetalRenderPass.TextureViewAndSampler target = textureBinding(
-                            binding.name(), plan.stage().textureStage, targets, resources, readsFromAlt
+                    GpuTextureView target = storageImageBinding(
+                            binding.name(), plan.stage().textureStage,
+                            targets, resources, plan.readsFromAlt()
                     );
-                    image = target == null ? null : (MetalGpuTextureView) target.textureView();
+                    image = target == null ? null : (MetalGpuTextureView) target;
                 }
                 if (image == null) {
                     throw new IllegalStateException(
@@ -774,7 +1197,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                         : computeResources.sampledImage(binding.name());
                 if (texture == null) {
                     texture = textureBinding(
-                            binding.name(), plan.stage().textureStage, targets, resources, readsFromAlt
+                            binding.name(), plan.stage().textureStage,
+                            targets, resources, plan.readsFromAlt(),
+                            plan.flippedAtLeastOnceBefore()
                     );
                 }
                 if (texture == null) {
@@ -789,7 +1214,57 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         }
     }
 
-    private void dispatchCompute(final MetalComputePass pass, final ComputePlan plan) {
+    private void dispatchCompute(
+            final MetalComputePass pass,
+            final ComputePlan plan,
+            final IrisMetalWorldResources resources,
+            final int dispatchWidth,
+            final int dispatchHeight
+    ) {
+        net.irisshaders.iris.shaderpack.properties.IndirectPointer indirect =
+                plan.source().getIndirectPointer();
+        if (indirect != null) {
+            IrisMetalComputeResources computeResources = resources.computeResources();
+            if (computeResources == null) {
+                throw new IllegalStateException(
+                        "Iris compute " + plan.source().getName()
+                                + " requests indirect dispatch without generation-owned SSBO resources"
+                );
+            }
+            GpuBufferSlice arguments = computeResources.storageBuffer(indirect.buffer());
+            if (arguments == null) {
+                throw new IllegalStateException(
+                        "Iris compute " + plan.source().getName()
+                                + " is missing indirect dispatch SSBO " + indirect.buffer()
+                );
+            }
+            if (indirect.offset() < 0L || (indirect.offset() & 3L) != 0L
+                    || indirect.offset() > arguments.length() - 12L) {
+                throw new IllegalStateException(
+                        "Iris compute " + plan.source().getName()
+                                + " has an invalid indirect dispatch range "
+                                + indirect.offset() + "+12 for SSBO " + indirect.buffer()
+                        + " length " + arguments.length()
+                );
+            }
+            if (!(arguments.buffer() instanceof MetalGpuBuffer buffer)) {
+                throw new IllegalStateException(
+                        "Iris compute " + plan.source().getName()
+                                + " indirect dispatch SSBO is not backed by Metal"
+                );
+            }
+            if (buffer.isClosed() || (preparedDevice != null && !buffer.isOwnedBy(preparedDevice))) {
+                throw new IllegalStateException(
+                        "Iris compute " + plan.source().getName()
+                                + " indirect dispatch SSBO is stale or belongs to another Metal device"
+                );
+            }
+            pass.dispatchIndirect(
+                    buffer,
+                    Math.addExact(arguments.offset(), indirect.offset())
+            );
+            return;
+        }
         if (plan.source().getWorkGroups() != null) {
             org.joml.Vector3i groups = plan.source().getWorkGroups();
             pass.dispatchGroups(groups.x(), groups.y(), groups.z());
@@ -798,18 +1273,27 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         org.joml.Vector2f relative = plan.source().getWorkGroupRelative();
         float scaleX = relative == null ? 1.0F : relative.x();
         float scaleY = relative == null ? 1.0F : relative.y();
-        IrisMetalRenderTargets targets = currentResourcesForDispatch;
-        if (targets == null) {
-            throw new IllegalStateException("Compute dispatch has no current target extent");
-        }
         pass.dispatchThreadsCovering(
-                Math.max(1, (int) Math.ceil(targets.width() * scaleX)),
-                Math.max(1, (int) Math.ceil(targets.height() * scaleY)),
+                relativeDispatchThreads(dispatchWidth, scaleX),
+                relativeDispatchThreads(dispatchHeight, scaleY),
                 1
         );
     }
 
-    private @Nullable IrisMetalRenderTargets currentResourcesForDispatch;
+    static int relativeDispatchThreads(final int extent, final float scale) {
+        if (extent <= 0 || !Float.isFinite(scale) || scale <= 0.0F) {
+            throw new IllegalArgumentException(
+                    "Relative dispatch extent/scale must be positive and finite: " + extent + " x " + scale
+            );
+        }
+        double scaled = extent * (double) scale;
+        if (scaled > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(
+                    "Relative dispatch exceeds Metal thread-grid limit: " + extent + " x " + scale
+            );
+        }
+        return Math.max(1, (int) Math.ceil(scaled));
+    }
 
     private void executeRaster(
             final RasterPlan plan,
@@ -821,10 +1305,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             throw new IllegalStateException("Iris raster plan has no compiled pipeline: " + plan.name());
         }
         IrisMetalRenderTargets targets = resources.renderTargets();
-        currentResourcesForDispatch = targets;
         try {
             Set<Integer> readTargets = colorSamplerTargets(plan.program());
-            for (int target : plan.program().program().directives().getMipmappedBuffers()) {
+            for (int target : plan.mipmappedBuffers()) {
                 targets.enableReadMipmaps(target);
                 activeEncoder().generateMipmaps(targets.colorTargets().readTexture(target));
             }
@@ -836,17 +1319,25 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 ).withColorAttachment(overrideColor, Optional.empty())
                         .withRenderArea(new RenderPass.RenderArea(0, 0, targets.width(), targets.height()));
                 descriptor = new IrisMetalRenderTargets.RenderPassDescriptorWithViews(
-                        direct, new MetalGpuTextureView[0]
+                        direct,
+                        new MetalGpuTextureView[0],
+                        IrisMetalRenderPassMetadata.forOverride(
+                                plan.attachments(),
+                                overrideColor.texture().getFormat()
+                        )
                 );
             } else {
                 descriptor = targets.createWriteDescriptor(
                         "Iris " + plan.stage().name().toLowerCase() + ": " + plan.name(),
                         plan.drawBuffers(), null, false, null,
-                        readTargets.stream().mapToInt(Integer::intValue).toArray()
+                        readTargets.stream().mapToInt(Integer::intValue).toArray(),
+                        IrisMetalRenderPassMetadata.from(plan.attachments())
                 );
             }
-            try (descriptor) {
-                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
+            try {
+                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(
+                        descriptor.descriptor(), descriptor.metadata()
+                );
                 pass.setCompiledPipeline(pipeline);
                 bindRaster(pass, pipeline, plan, resources, targets);
                 GpuBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer(6);
@@ -854,11 +1345,14 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 pass.setVertexBuffer(0, net.irisshaders.iris.pathways.FullScreenQuadRenderer.INSTANCE.getQuad().slice());
                 pass.drawIndexed(6, 1, 0, 0, 0);
             } finally {
-                encoder.submitRenderPass();
+                try {
+                    encoder.submitRenderPass();
+                } finally {
+                    descriptor.close();
+                }
             }
         } finally {
             targets.resetMipmaps();
-            currentResourcesForDispatch = null;
         }
     }
 
@@ -876,8 +1370,16 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             }
             pass.setUniform(IrisMetalGlslLinker.UNIFORM_BLOCK_NAME, slice);
         }
+        if (plan.program().uniformBlockNames().contains(IrisMetalGlslLinker.IRIS_FOG_BLOCK_NAME)) {
+            GpuBufferSlice fog = RenderSystem.getShaderFog();
+            if (fog == null) {
+                throw new IllegalStateException("Iris pass " + plan.name() + " requires Mojang Fog uniform");
+            }
+            pass.setUniform(IrisMetalGlslLinker.IRIS_FOG_BLOCK_NAME, fog);
+        }
         for (String block : plan.program().uniformBlockNames()) {
-            if (!IrisMetalGlslLinker.UNIFORM_BLOCK_NAME.equals(block)) {
+            if (!IrisMetalGlslLinker.UNIFORM_BLOCK_NAME.equals(block)
+                    && !IrisMetalGlslLinker.IRIS_FOG_BLOCK_NAME.equals(block)) {
                 throw new IllegalStateException(
                         "Iris pass " + plan.name() + " requires unsupported uniform block " + block
                 );
@@ -887,8 +1389,16 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             if (!sampler.sampled()) {
                 continue;
             }
+            if (sampler.texelBuffer()) {
+                IrisMetalTexelBufferAbi.Binding binding = IrisMetalTexelBufferAbi.require(
+                        plan.name(), sampler, texelBufferProvider, preparedDevice
+                );
+                pass.setUniform(sampler.name(), binding.slice());
+                continue;
+            }
             MetalRenderPass.TextureViewAndSampler binding = textureBinding(
-                    sampler.name(), plan.stage().textureStage, targets, resources, plan.readsFromAlt()
+                    sampler.name(), plan.stage().textureStage, targets, resources, plan.readsFromAlt(),
+                    plan.flippedAtLeastOnceBefore()
             );
             if (binding == null) {
                 throw new IllegalStateException(
@@ -934,17 +1444,22 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             final IrisMetalShadowTargets shadows
     ) {
         MetalCommandEncoder encoder = activeEncoder();
-        try (IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor =
-                     shadows.createShadowCompositeDescriptor(
-                             "Iris shadowcomp: " + plan.name(),
-                             plan.drawBuffers(),
-                             plan.readsFromAlt(),
-                             0,
-                             0,
-                             shadows.resolution(),
-                             shadows.resolution()
-                     )) {
-            MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
+        shadows.generatePassColorMipmaps(encoder, plan.readsFromAlt(), plan.mipmappedBuffers());
+        IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor =
+                shadows.createShadowCompositeDescriptor(
+                        "Iris shadowcomp: " + plan.name(),
+                        plan.drawBuffers(),
+                        plan.readsFromAlt(),
+                        0,
+                        0,
+                        shadows.resolution(),
+                        shadows.resolution(),
+                        IrisMetalRenderPassMetadata.from(plan.attachments())
+                );
+        try {
+            MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(
+                    descriptor.descriptor(), descriptor.metadata()
+            );
             pass.setCompiledPipeline(pipeline);
             bindRaster(pass, pipeline, plan, resources, resources.renderTargets());
             GpuBuffer indices = RenderSystem.getSequentialBuffer(PrimitiveTopology.QUADS).getBuffer(6);
@@ -952,9 +1467,12 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             pass.setVertexBuffer(0, net.irisshaders.iris.pathways.FullScreenQuadRenderer.INSTANCE.getQuad().slice());
             pass.drawIndexed(6, 1, 0, 0, 0);
         } finally {
-            encoder.submitRenderPass();
+            try {
+                encoder.submitRenderPass();
+            } finally {
+                descriptor.close();
+            }
         }
-        shadows.generateColorMipmaps(encoder);
     }
 
     private com.mojang.blaze3d.buffers.GpuBufferSlice uniformSlice(final String token) {
@@ -996,6 +1514,29 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             final TextureStage stage,
             final IrisMetalRenderTargets targets,
             final IrisMetalWorldResources resources,
+            final BitSet readsFromAlt,
+            final BitSet flippedAtLeastOnceBefore
+    ) {
+        MetalRenderPass.TextureViewAndSampler standard = standardTextureBinding(
+                name, stage, targets, resources, readsFromAlt
+        );
+        if (allowsCustomTextureOverride(name, flippedAtLeastOnceBefore)) {
+            MetalRenderPass.TextureViewAndSampler override = resources.customTextures().resolve(
+                    stage, customTextureNames(name)
+            );
+            if (override != null) {
+                return override;
+            }
+        }
+        return standard;
+    }
+
+    /** Resolves only backend-owned standard sampled resources. */
+    private MetalRenderPass.TextureViewAndSampler standardTextureBinding(
+            final String name,
+            final TextureStage stage,
+            final IrisMetalRenderTargets targets,
+            final IrisMetalWorldResources resources,
             final BitSet readsFromAlt
     ) {
         MetalRenderPass.TextureViewAndSampler standard = null;
@@ -1011,7 +1552,8 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             standard = new MetalRenderPass.TextureViewAndSampler(targets.noTranslucentsDepthView(), targets.depthSampler());
         } else if (name.equals("depthtex2")) {
             standard = new MetalRenderPass.TextureViewAndSampler(targets.noHandDepthView(), targets.depthSampler());
-        } else if (shadows != null && (name.startsWith("shadowtex") || name.startsWith("shadowcolor"))) {
+        } else if (shadows != null && (name.startsWith("shadowtex")
+                || (name.startsWith("shadowcolor") && !name.startsWith("shadowcolorimg")))) {
             int shadowDepth = name.startsWith("shadowtex1") ? 1 : name.startsWith("shadowtex") ? 0 : -1;
             if (shadowDepth >= 0) {
                 boolean comparison = !name.endsWith("HW");
@@ -1020,40 +1562,34 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                         shadows.depthSampler(shadowDepth, comparison)
                 );
             } else {
-                int shadowColor = name.equals("shadowcolor") ? 0 : parseSuffix(name, "shadowcolor");
+                int shadowColor = name.equals("shadowcolor")
+                        ? 0
+                        : parseSuffix(name, "shadowcolor");
                 if (shadowColor >= 0 && shadowColor < shadowTargetCount()) {
                     standard = new MetalRenderPass.TextureViewAndSampler(
-                            shadows.colorView(shadowColor, shadowState), shadows.colorSampler(shadowColor)
+                            shadows.colorView(shadowColor, shadowState),
+                            shadows.colorSampler(
+                                    shadowColor,
+                                    activeShadowMipTargets.contains(shadowColor)
+                            )
                     );
                 }
             }
         } else {
-            int color = parseSuffix(name, "colortex");
+            int color = renderTargetIndex(name);
             if (color >= 0) {
                 if (color >= targets.colorTargets().targetCount()) {
                     throw new IllegalStateException("Iris sampler target out of range: " + name);
                 }
                 standard = new MetalRenderPass.TextureViewAndSampler(
-                        targets.colorTargets().readView(color, readsFromAlt), targets.colorSampler(color)
+                        targets.colorTargets().sampleReadView(color, readsFromAlt), targets.colorSampler(color)
                 );
-            } else {
-                int image = parseSuffix(name, "colorimg");
-                if (image >= 0) {
-                    if (image >= targets.colorTargets().targetCount()) {
-                        throw new IllegalStateException("Iris image target out of range: " + name);
-                    }
-                    standard = new MetalRenderPass.TextureViewAndSampler(
-                            targets.colorTargets().writeView(image, readsFromAlt), targets.colorSampler(image)
-                    );
-                }
             }
         }
         if (standard == null && resources.computeResources() != null) {
             standard = resources.computeResources().sampledImage(name);
         }
-        MetalRenderPass.TextureViewAndSampler override = resources.customTextures()
-                .resolve(stage, name);
-        return override == null ? standard : override;
+        return standard;
     }
 
     private @Nullable GpuTextureView storageImageBinding(
@@ -1063,6 +1599,27 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             final IrisMetalWorldResources resources,
             final BitSet readsFromAlt
     ) {
+        if (name.startsWith("colorimg")) {
+            int color = parseSuffix(name, "colorimg");
+            if (color < 0 || color >= targets.colorTargets().targetCount()) {
+                throw new IllegalStateException("Iris storage image target out of range: " + name);
+            }
+            if (!targets.colorTargets().isStorageImageTarget(color)) {
+                return null;
+            }
+            return targets.colorTargets().writeView(color, readsFromAlt);
+        }
+        IrisMetalShadowTargets shadows = resources.shadowTargets();
+        if (name.startsWith("shadowcolorimg")) {
+            int shadowColor = parseSuffix(name, "shadowcolorimg");
+            if (shadows == null || shadowColor < 0 || shadowColor >= shadowTargetCount()) {
+                throw new IllegalStateException("Iris shadow storage image target out of range: " + name);
+            }
+            if (!shadows.colorTargets().isStorageImageTarget(shadowColor)) {
+                return null;
+            }
+            return shadows.colorTargets().writeView(shadowColor, readsFromAlt);
+        }
         IrisMetalComputeResources computeResources = resources.computeResources();
         if (computeResources != null) {
             MetalGpuTextureView custom = computeResources.storageImage(name);
@@ -1070,10 +1627,30 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
                 return custom;
             }
         }
-        MetalRenderPass.TextureViewAndSampler standard = textureBinding(
-                name, stage, targets, resources, readsFromAlt
-        );
-        return standard == null ? null : standard.textureView();
+        return null;
+    }
+
+    static boolean allowsCustomTextureOverride(
+            final String samplerName,
+            final BitSet flippedAtLeastOnceBefore
+    ) {
+        Objects.requireNonNull(samplerName, "samplerName");
+        Objects.requireNonNull(flippedAtLeastOnceBefore, "flippedAtLeastOnceBefore");
+        int target = renderTargetIndex(samplerName);
+        return target < 0 || !flippedAtLeastOnceBefore.get(target);
+    }
+
+    private static String[] customTextureNames(final String samplerName) {
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        names.add(samplerName);
+        int target = renderTargetIndex(samplerName);
+        if (target >= 0) {
+            names.add("colortex" + target);
+            if (target < PackRenderTargetDirectives.LEGACY_RENDER_TARGETS.size()) {
+                names.add(PackRenderTargetDirectives.LEGACY_RENDER_TARGETS.get(target));
+            }
+        }
+        return names.toArray(String[]::new);
     }
 
     private MetalCompiledRenderPipeline compileRaster(
@@ -1215,7 +1792,7 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
     private Set<Integer> colorSamplerTargets(final IrisMetalGlslLinker.LinkedRasterProgram program) {
         Set<Integer> result = new LinkedHashSet<>();
         for (IrisMetalGlslLinker.SamplerDecl sampler : program.samplers()) {
-            int target = parseSuffix(sampler.name(), "colortex");
+            int target = renderTargetIndex(sampler.name());
             if (target >= 0) {
                 result.add(target);
             }
@@ -1232,6 +1809,14 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         } catch (NumberFormatException ignored) {
             return -1;
         }
+    }
+
+    static int renderTargetIndex(final String name) {
+        Objects.requireNonNull(name, "name");
+        int canonical = parseSuffix(name, "colortex");
+        return canonical >= 0
+                ? canonical
+                : PackRenderTargetDirectives.LEGACY_RENDER_TARGETS.indexOf(name);
     }
 
     private static List<AttachmentState> attachmentStates(
@@ -1442,6 +2027,9 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
             return;
         }
         closed = true;
+        if (preparedDevice != null) {
+            preparedDevice.waitForSubmittedGpuWork();
+        }
         for (MetalComputePipeline pipeline : computePipelines.values()) {
             pipeline.close();
         }
@@ -1451,10 +2039,13 @@ final class IrisMetalExecutionGraph implements AutoCloseable {
         for (MetalCompiledRenderPipeline pipeline : shadowRasterPipelines.values()) {
             pipeline.close();
         }
+        colorSpaceConverter.close();
         computePipelines.clear();
         rasterPipelines.clear();
         shadowRasterPipelines.clear();
         finalPipeline = null;
+        preparedDevice = null;
+        preparedMainColorFormat = null;
         centerDepthSampler = null;
     }
 }

@@ -75,7 +75,14 @@ public abstract class PreparedRenderTypeIrisMixin {
             return encoder.createRenderPass(label, sceneColor, clearColor, sceneDepth, clearDepth);
         }
         IrisMetalCoreDrawBridge.begin(override);
-        return encoder.createRenderPass(override.descriptor());
+        try {
+            return IrisMetalCoreDrawBridge.createRenderPass(encoder, override.descriptor());
+        } catch (RuntimeException | Error failure) {
+            // The normal RETURN injection cannot run when pass construction
+            // fails. Do not leak the generation-owned draw into the next pass.
+            IrisMetalCoreDrawBridge.clear();
+            throw failure;
+        }
     }
 
     @Inject(

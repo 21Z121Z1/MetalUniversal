@@ -955,6 +955,38 @@ public func metallum_create_texture_2d(
     }
 }
 
+@_cdecl("metallum_create_texture_1d")
+public func metallum_create_texture_1d(
+    _ device: MTLDevice,
+    _ pixelFormat: MTLPixelFormat,
+    _ width: UInt64,
+    _ mipLevels: UInt64,
+    _ usage: MTLTextureUsage,
+    _ storageMode: MTLStorageMode,
+    _ labelPtr: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
+        guard width > 0 else {
+            return nil
+        }
+        let descriptor = MTLTextureDescriptor()
+        descriptor.textureType = MTLTextureType.type1D
+        descriptor.pixelFormat = pixelFormat
+        descriptor.width = Int(width)
+        descriptor.height = 1
+        descriptor.depth = 1
+        descriptor.mipmapLevelCount = max(Int(mipLevels), 1)
+        descriptor.usage = usage
+        descriptor.storageMode = storageMode
+        descriptor.hazardTrackingMode = .untracked
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        texture.label = stringFromOptionalCString(labelPtr)
+        return retainedPointer(texture)
+    }
+}
+
 @_cdecl("metallum_create_texture_3d")
 public func metallum_create_texture_3d(
     _ device: MTLDevice,
@@ -1009,6 +1041,43 @@ public func metallum_create_texture_view(_ texture: MTLTexture, _ baseMipLevel: 
             slices: NSRange(location: 0, length: textureSliceCount(texture))
         )
 
+        return retainedPointer(view)
+    }
+}
+
+@_cdecl("metallum_create_texture_view_alpha_one")
+public func metallum_create_texture_view_alpha_one(
+    _ texture: MTLTexture,
+    _ baseMipLevel: UInt64,
+    _ mipLevelCount: UInt64
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        guard mipLevelCount > 0 else {
+            return nil
+        }
+
+        let baseLevel = Int(baseMipLevel)
+        let levelCount = Int(mipLevelCount)
+        guard baseLevel < texture.mipmapLevelCount, baseLevel + levelCount <= texture.mipmapLevelCount else {
+            return nil
+        }
+
+        let swizzle = MTLTextureSwizzleChannels(
+            red: .red,
+            green: .green,
+            blue: .blue,
+            alpha: .one
+        )
+        let view = texture.__newTextureView(
+            with: texture.pixelFormat,
+            textureType: texture.textureType,
+            levels: NSRange(location: baseLevel, length: levelCount),
+            slices: NSRange(location: 0, length: textureSliceCount(texture)),
+            swizzle: swizzle
+        )
+        guard let view else {
+            return nil
+        }
         return retainedPointer(view)
     }
 }
@@ -1094,7 +1163,11 @@ public func metallum_MTLDevice_makeDepthStencilState(
     _ writeDepth: Int32
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        unretainedPointer(ensureDepthStencilState(device: device, compareOp: depthCompareOp, writeDepth: writeDepth != 0))
+        // The Java pipeline owner releases one native reference when its
+        // generation retires. The state is cached in NativeState as well, so
+        // return a retained reference for each Java-side owner instead of an
+        // unretained cache pointer.
+        retainedPointer(ensureDepthStencilState(device: device, compareOp: depthCompareOp, writeDepth: writeDepth != 0))
     }
 }
 
@@ -1244,6 +1317,257 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
             znear: 0.0,
             zfar: 1.0
         ))
+        return retainedPointer(encoder)
+    }
+}
+
+/// Iris execution-graph render-pass entry point. The Java side supplies the
+/// complete per-slot load/store contract so a logical DRAWBUFFERS slot is not
+/// silently lowered to the backend's default .load/.store pair.
+@_cdecl("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3")
+public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
+    _ commandBuffer: MTLCommandBuffer,
+    _ colorTexturePointers: UnsafePointer<UnsafeMutableRawPointer?>?,
+    _ colorCount: Int32,
+    _ depthTexture: MTLTexture?,
+    _ viewportWidth: Double,
+    _ viewportHeight: Double,
+    _ clearColors: UnsafePointer<Float>?,
+    _ clearColorEnabled: UnsafePointer<Int32>?,
+    _ loadActions: UnsafePointer<Int32>?,
+    _ storeActions: UnsafePointer<Int32>?,
+    _ clearDepthEnabled: Int32,
+    _ clearDepth: Double
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
+        let count = Int(colorCount)
+        guard count >= 0 && count <= 8 else {
+            NSLog("[Metallum] rejected Iris render pass with %d color slots", colorCount)
+            return nil
+        }
+        guard count == 0 || colorTexturePointers != nil else {
+            NSLog("[Metallum] Iris render pass texture array is null for %d slots", colorCount)
+            return nil
+        }
+        guard count == 0 || (clearColors != nil && clearColorEnabled != nil
+                             && loadActions != nil && storeActions != nil) else {
+            NSLog("[Metallum] Iris render pass metadata arrays are incomplete")
+            return nil
+        }
+        guard count > 0 || depthTexture != nil else {
+            NSLog("[Metallum] rejected Iris render pass with no attachment")
+            return nil
+        }
+
+        let depthFormat = depthTexture?.pixelFormat ?? .invalid
+        let stencilFormat = stencilPixelFormat(for: depthFormat)
+        let renderPass = MTLRenderPassDescriptor()
+
+        for index in 0..<count {
+            guard let attachment = renderPass.colorAttachments[index] else {
+                NSLog("[Metallum] Iris color attachment descriptor %d is unavailable", index)
+                return nil
+            }
+            guard let texture = textureFromUnretainedPointer(colorTexturePointers?[index]) else {
+                // Preserve the physical slot without attaching a texture. A
+                // null slot must never inherit a load/store action from an
+                // adjacent logical DRAWBUFFERS target.
+                attachment.loadAction = .dontCare
+                attachment.storeAction = .dontCare
+                continue
+            }
+
+            let load = loadActions![index]
+            let store = storeActions![index]
+            guard load >= 0 && load <= 2 && store >= 0 && store <= 1 else {
+                NSLog("[Metallum] invalid Iris attachment action at slot %d: load=%d store=%d", index, load, store)
+                return nil
+            }
+
+            attachment.texture = texture
+            switch load {
+            case 0:
+                attachment.loadAction = .load
+            case 1:
+                attachment.loadAction = .clear
+                let base = index * 4
+                let colors = clearColors!
+                attachment.clearColor = makeClearColor(
+                    red: colors[base],
+                    green: colors[base + 1],
+                    blue: colors[base + 2],
+                    alpha: colors[base + 3]
+                )
+            case 2:
+                attachment.loadAction = .dontCare
+            default:
+                return nil
+            }
+            // The explicit metadata owns the action. clearColorEnabled is
+            // retained in the ABI for the shared descriptor layout and is
+            // intentionally not allowed to override a declared LOAD/CLEAR.
+            _ = clearColorEnabled![index]
+            attachment.storeAction = store == 0 ? .store : .dontCare
+        }
+
+        if let depthTexture {
+            if depthFormat != .stencil8 {
+                renderPass.depthAttachment.texture = depthTexture
+                renderPass.depthAttachment.loadAction = clearDepthEnabled != 0 ? .clear : .load
+                renderPass.depthAttachment.clearDepth = clearDepth
+                renderPass.depthAttachment.storeAction = .store
+            }
+            if stencilFormat != .invalid || depthFormat == .stencil8 {
+                renderPass.stencilAttachment.texture = depthTexture
+                renderPass.stencilAttachment.loadAction = .dontCare
+                renderPass.stencilAttachment.storeAction = .dontCare
+            }
+        }
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+            return nil
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: viewportWidth,
+            height: viewportHeight,
+            znear: 0.0,
+            zfar: 1.0
+        ))
+        return retainedPointer(encoder)
+    }
+}
+
+/// Iris execution-graph render-pass entry point with an explicit depth
+/// load/store contract. The v3 ABI remains color-only; v4 is selected when a
+/// generation carries Iris depth attachment metadata.
+@_cdecl("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v4")
+public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v4(
+    _ commandBuffer: MTLCommandBuffer,
+    _ colorTexturePointers: UnsafePointer<UnsafeMutableRawPointer?>?,
+    _ colorCount: Int32,
+    _ depthTexture: MTLTexture?,
+    _ viewportWidth: Double,
+    _ viewportHeight: Double,
+    _ clearColors: UnsafePointer<Float>?,
+    _ clearColorEnabled: UnsafePointer<Int32>?,
+    _ loadActions: UnsafePointer<Int32>?,
+    _ storeActions: UnsafePointer<Int32>?,
+    _ depthLoadAction: Int32,
+    _ depthStoreAction: Int32,
+    _ clearDepthEnabled: Int32,
+    _ clearDepth: Double
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
+        let count = Int(colorCount)
+        guard count >= 0 && count <= 8 else {
+            NSLog("[Metallum] rejected Iris v4 render pass with %d color slots", colorCount)
+            return nil
+        }
+        guard count == 0 || colorTexturePointers != nil else {
+            NSLog("[Metallum] Iris v4 texture array is null for %d slots", colorCount)
+            return nil
+        }
+        guard count == 0 || (clearColors != nil && clearColorEnabled != nil
+                             && loadActions != nil && storeActions != nil) else {
+            NSLog("[Metallum] Iris v4 render pass metadata arrays are incomplete")
+            return nil
+        }
+        guard count > 0 || depthTexture != nil else {
+            NSLog("[Metallum] rejected Iris v4 render pass with no attachment")
+            return nil
+        }
+        guard depthTexture != nil else {
+            NSLog("[Metallum] Iris v4 depth metadata requires a depth texture")
+            return nil
+        }
+        guard depthLoadAction >= 0 && depthLoadAction <= 2
+                && depthStoreAction >= 0 && depthStoreAction <= 1 else {
+            NSLog("[Metallum] invalid Iris depth action: load=%d store=%d", depthLoadAction, depthStoreAction)
+            return nil
+        }
+
+        let depthFormat = depthTexture?.pixelFormat ?? .invalid
+        let stencilFormat = stencilPixelFormat(for: depthFormat)
+        let renderPass = MTLRenderPassDescriptor()
+
+        for index in 0..<count {
+            guard let attachment = renderPass.colorAttachments[index] else {
+                NSLog("[Metallum] Iris v4 color attachment descriptor %d is unavailable", index)
+                return nil
+            }
+            guard let texture = textureFromUnretainedPointer(colorTexturePointers?[index]) else {
+                attachment.loadAction = .dontCare
+                attachment.storeAction = .dontCare
+                continue
+            }
+
+            let load = loadActions![index]
+            let store = storeActions![index]
+            guard load >= 0 && load <= 2 && store >= 0 && store <= 1 else {
+                NSLog("[Metallum] invalid Iris v4 color action at slot %d: load=%d store=%d", index, load, store)
+                return nil
+            }
+
+            attachment.texture = texture
+            switch load {
+            case 0:
+                attachment.loadAction = .load
+            case 1:
+                attachment.loadAction = .clear
+                let base = index * 4
+                let colors = clearColors!
+                attachment.clearColor = makeClearColor(
+                    red: colors[base],
+                    green: colors[base + 1],
+                    blue: colors[base + 2],
+                    alpha: colors[base + 3]
+                )
+            case 2:
+                attachment.loadAction = .dontCare
+            default:
+                return nil
+            }
+            _ = clearColorEnabled![index]
+            attachment.storeAction = store == 0 ? .store : .dontCare
+        }
+
+        if let depthTexture {
+            if depthFormat != .stencil8 {
+                renderPass.depthAttachment.texture = depthTexture
+                switch depthLoadAction {
+                case 0:
+                    renderPass.depthAttachment.loadAction = .load
+                case 1:
+                    renderPass.depthAttachment.loadAction = .clear
+                case 2:
+                    renderPass.depthAttachment.loadAction = .dontCare
+                default:
+                    return nil
+                }
+                renderPass.depthAttachment.clearDepth = clearDepth
+                renderPass.depthAttachment.storeAction = depthStoreAction == 0 ? .store : .dontCare
+            }
+            if stencilFormat != .invalid || depthFormat == .stencil8 {
+                renderPass.stencilAttachment.texture = depthTexture
+                renderPass.stencilAttachment.loadAction = .dontCare
+                renderPass.stencilAttachment.storeAction = .dontCare
+            }
+        }
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+            return nil
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: viewportWidth,
+            height: viewportHeight,
+            znear: 0.0,
+            zfar: 1.0
+        ))
+        _ = clearDepthEnabled
         return retainedPointer(encoder)
     }
 }
@@ -1929,6 +2253,39 @@ public func metallum_create_sampler_v2(
         descriptor.maxAnisotropy = max(Int(maxAnisotropy), 1)
         descriptor.lodMinClamp = 0.0
         descriptor.lodMaxClamp = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
+        if compareFunction >= 0, let compare = MTLCompareFunction(rawValue: UInt(compareFunction)) {
+            descriptor.compareFunction = compare
+        }
+        return retainedPointer(device.makeSamplerState(descriptor: descriptor))
+    }
+}
+
+// Sampler creation with explicit normalized-coordinate semantics. Rectangle
+// textures use pixel coordinates and therefore must opt out of normalization.
+@_cdecl("metallum_create_sampler_v3")
+public func metallum_create_sampler_v3(
+    _ device: MTLDevice,
+    _ addressModeU: MTLSamplerAddressMode,
+    _ addressModeV: MTLSamplerAddressMode,
+    _ minFilter: MTLSamplerMinMagFilter,
+    _ magFilter: MTLSamplerMinMagFilter,
+    _ mipFilter: MTLSamplerMipFilter,
+    _ maxAnisotropy: Int32,
+    _ lodMaxClamp: Double,
+    _ compareFunction: Int32,
+    _ normalizedCoordinates: Int32
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        let descriptor = MTLSamplerDescriptor()
+        descriptor.minFilter = minFilter
+        descriptor.magFilter = magFilter
+        descriptor.mipFilter = mipFilter
+        descriptor.sAddressMode = addressModeU
+        descriptor.tAddressMode = addressModeV
+        descriptor.maxAnisotropy = max(Int(maxAnisotropy), 1)
+        descriptor.lodMinClamp = 0.0
+        descriptor.lodMaxClamp = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
+        descriptor.normalizedCoordinates = normalizedCoordinates != 0
         if compareFunction >= 0, let compare = MTLCompareFunction(rawValue: UInt(compareFunction)) {
             descriptor.compareFunction = compare
         }

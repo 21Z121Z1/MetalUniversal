@@ -153,4 +153,27 @@ final class IrisMetalExecutionGraphTest {
                 new IrisMetalGlslLinker.SamplerDecl("voxeltex", "sampler3D").storageImage()
         );
     }
+
+    @Test
+    void relativeDispatchUsesTheSelectedTargetExtent() {
+        assertEquals(512, IrisMetalExecutionGraph.relativeDispatchThreads(1024, 0.5F));
+        assertEquals(960, IrisMetalExecutionGraph.relativeDispatchThreads(1920, 0.5F));
+        assertEquals(1, IrisMetalExecutionGraph.relativeDispatchThreads(1, 0.01F));
+    }
+
+    @Test
+    void relativeDispatchRejectsInvalidExtentOrScale() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> IrisMetalExecutionGraph.relativeDispatchThreads(0, 1.0F)
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> IrisMetalExecutionGraph.relativeDispatchThreads(1024, Float.NaN)
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> IrisMetalExecutionGraph.relativeDispatchThreads(1024, Float.POSITIVE_INFINITY)
+        );
+    }
 }

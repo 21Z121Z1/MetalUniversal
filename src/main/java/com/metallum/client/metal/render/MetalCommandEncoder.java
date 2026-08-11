@@ -37,6 +37,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private final Map<MetalGpuTexture, Vector4fc> pendingColorClears = new IdentityHashMap<>();
     private final Map<MetalGpuTexture, Double> pendingDepthClears = new IdentityHashMap<>();
     private final MemorySegment fence;
+    // A fresh native encoder starts with no Metal state. Render passes use this
+    // counter to invalidate their Java-side binding cache when encoder work
+    // such as a deferred clear replaces the underlying encoder.
+    private long encoderGeneration;
+    private boolean closed;
     @Nullable
     private MetalRenderPass currentRenderPass;
     @Nullable
@@ -45,6 +50,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MTLCommandEncoder currentEncoder;
     private MemorySegment[] renderColorAttachments = new MemorySegment[0];
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
+    @Nullable
+    private IrisMetalRenderPassMetadata renderPassMetadata;
+    @Nullable
+    private IrisMetalRenderPassMetadata pendingIrisMetadata;
+    private IrisMetalRenderTargets.@Nullable RenderPassDescriptorWithViews pendingIrisDescriptor;
+    private IrisMetalRenderTargets.@Nullable RenderPassDescriptorWithViews activeIrisDescriptor;
     private final Long2ObjectOpenHashMap<java.util.ArrayDeque<MemorySegment>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
 
     MetalCommandEncoder(final MetalDevice device) {
@@ -75,6 +86,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         endEncoder();
         MTLBlitCommandEncoder encoder = commandBuffer().makeBlitCommandEncoder();
         encoder.waitForFence(fence);
+        encoderGeneration++;
         currentEncoder = encoder;
         return encoder;
     }
@@ -83,8 +95,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         endEncoder();
         MTLComputeCommandEncoder encoder = commandBuffer().makeComputeCommandEncoder();
         encoder.waitForFence(fence);
+        encoderGeneration++;
         currentEncoder = encoder;
         return encoder;
+    }
+
+    long encoderGeneration() {
+        return encoderGeneration;
     }
 
     void endEncoder() {
@@ -101,6 +118,32 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
         renderColorAttachments = new MemorySegment[0];
         renderDepthAttachment = MemorySegment.NULL;
+        renderPassMetadata = null;
+    }
+
+    /**
+     * Arms the next public CommandEncoder.createRenderPass call with Iris
+     * metadata and its transient attachment views. The public wrapper still
+     * owns the actual pass lifecycle; this is only a one-call side channel for
+     * backend-private state that Mojang's descriptor cannot carry.
+     */
+    void prepareIrisRenderPass(
+            @Nullable final IrisMetalRenderPassMetadata metadata,
+            final IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor
+    ) {
+        if (pendingIrisDescriptor != null || activeIrisDescriptor != null) {
+            throw new IllegalStateException("An Iris render-pass descriptor is already armed");
+        }
+        pendingIrisDescriptor = descriptor;
+        pendingIrisMetadata = metadata;
+    }
+
+    void cancelIrisRenderPass(final IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor) {
+        if (pendingIrisDescriptor == descriptor) {
+            pendingIrisDescriptor = null;
+            pendingIrisMetadata = null;
+            descriptor.close();
+        }
     }
 
     /**
@@ -199,6 +242,23 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final boolean clearDepthEnabled,
             final double clearDepthValue
     ) {
+        return renderCommandEncoder(
+                colorTextureViews, depthTextureView, viewportWidth, viewportHeight,
+                clearColorEnabled, clearColorValues, clearDepthEnabled, clearDepthValue, null
+        );
+    }
+
+    MTLRenderCommandEncoder renderCommandEncoder(
+            final MetalGpuTextureView[] colorTextureViews,
+            @Nullable final MetalGpuTextureView depthTextureView,
+            final int viewportWidth,
+            final int viewportHeight,
+            final int[] clearColorEnabled,
+            final float[] clearColorValues,
+            final boolean clearDepthEnabled,
+            final double clearDepthValue,
+            @Nullable final IrisMetalRenderPassMetadata metadata
+    ) {
         if (colorTextureViews == null
                 || colorTextureViews.length > Math.min(
                         com.mojang.blaze3d.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
@@ -211,34 +271,79 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
 
         MemorySegment[] colorAttachments = new MemorySegment[colorTextureViews.length];
+        boolean[] attachedColors = new boolean[colorTextureViews.length];
         for (int index = 0; index < colorTextureViews.length; index++) {
+            attachedColors[index] = colorTextureViews[index] != null;
             colorAttachments[index] = colorTextureViews[index] == null
                     ? MemorySegment.NULL
                     : colorTextureViews[index].nativeHandle();
         }
         MemorySegment depthAttachment = depthTextureView == null ? MemorySegment.NULL : depthTextureView.nativeHandle();
+        if (metadata != null) {
+            metadata.validateClearInputs(clearColorEnabled, clearDepthEnabled, attachedColors);
+            if (metadata.hasDepthMetadata() && depthTextureView == null) {
+                throw new IllegalArgumentException(
+                        "Iris depth metadata requires a depth attachment"
+                );
+            }
+        }
         boolean sameAttachments = currentEncoder instanceof MTLRenderCommandEncoder
                 && sameAttachmentHandles(renderColorAttachments, colorAttachments)
-                && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment);
+                && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment)
+                && renderPassMetadata == null
+                && metadata == null;
         if (sameAttachments && !clearDepthEnabled && !hasClearColor(clearColorEnabled)) {
             return (MTLRenderCommandEncoder) currentEncoder;
         }
 
         endEncoder();
-        MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoderV2(
-                colorAttachments,
-                depthAttachment,
-                viewportWidth,
-                viewportHeight,
-                clearColorEnabled,
-                clearColorValues,
-                clearDepthEnabled ? 1 : 0,
-                clearDepthValue
-        );
+        MTLRenderCommandEncoder encoder;
+        if (metadata == null) {
+            encoder = commandBuffer().makeRenderCommandEncoderV2(
+                    colorAttachments,
+                    depthAttachment,
+                    viewportWidth,
+                    viewportHeight,
+                    clearColorEnabled,
+                    clearColorValues,
+                    clearDepthEnabled ? 1 : 0,
+                    clearDepthValue
+            );
+        } else if (metadata.hasDepthMetadata()) {
+            encoder = commandBuffer().makeRenderCommandEncoderV4(
+                    colorAttachments,
+                    depthAttachment,
+                    viewportWidth,
+                    viewportHeight,
+                    clearColorEnabled,
+                    clearColorValues,
+                    metadata.nativeLoadActions(clearColorEnabled),
+                    metadata.nativeStoreActions(),
+                    metadata.nativeDepthLoadAction(clearDepthEnabled),
+                    metadata.nativeDepthStoreAction(),
+                    clearDepthEnabled ? 1 : 0,
+                    clearDepthValue
+            );
+        } else {
+            encoder = commandBuffer().makeRenderCommandEncoderV3(
+                    colorAttachments,
+                    depthAttachment,
+                    viewportWidth,
+                    viewportHeight,
+                    clearColorEnabled,
+                    clearColorValues,
+                    metadata.nativeLoadActions(clearColorEnabled),
+                    metadata.nativeStoreActions(),
+                    clearDepthEnabled ? 1 : 0,
+                    clearDepthValue
+            );
+        }
         encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
+        encoderGeneration++;
         currentEncoder = encoder;
         renderColorAttachments = colorAttachments;
         renderDepthAttachment = depthAttachment;
+        renderPassMetadata = metadata;
         return encoder;
     }
 
@@ -265,6 +370,28 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     @Override
     public @NonNull RenderPassBackend createRenderPass(final RenderPassDescriptor descriptor) {
+        IrisMetalRenderTargets.RenderPassDescriptorWithViews armed = pendingIrisDescriptor;
+        IrisMetalRenderPassMetadata armedMetadata = pendingIrisMetadata;
+        pendingIrisDescriptor = null;
+        pendingIrisMetadata = null;
+        try {
+            RenderPassBackend result = createRenderPass(descriptor, armed == null ? null : armedMetadata);
+            if (armed != null) {
+                activeIrisDescriptor = armed;
+            }
+            return result;
+        } catch (RuntimeException | Error failure) {
+            if (armed != null) {
+                armed.close();
+            }
+            throw failure;
+        }
+    }
+
+    @NonNull RenderPassBackend createRenderPass(
+            final RenderPassDescriptor descriptor,
+            @Nullable final IrisMetalRenderPassMetadata metadata
+    ) {
         List<RenderPassDescriptor.Attachment<Optional<Vector4fc>>> colorAttachments = descriptor.colorAttachments();
         int maxColorAttachments = Math.min(
                 com.mojang.blaze3d.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
@@ -274,6 +401,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             throw new IllegalArgumentException(
                     "Metal render pass has " + colorAttachments.size()
                             + " color slots but the backend limit is " + maxColorAttachments
+            );
+        }
+        if (metadata != null && metadata.colorCount() != colorAttachments.size()) {
+            throw new IllegalArgumentException(
+                    "Iris render-pass metadata has " + metadata.colorCount()
+                            + " color slots but descriptor has " + colorAttachments.size()
             );
         }
         RenderPassDescriptor.Attachment<OptionalDouble> depthAttachment = descriptor.depthAttachment();
@@ -306,6 +439,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             GpuTextureView colorTexture = colorAttachment.textureView();
             if (colorTexture.isClosed()) {
                 throw new IllegalStateException("Color texture " + index + " is closed");
+            }
+            if (metadata != null
+                    && !metadata.colorAttachments().get(index).format().equals(colorTexture.texture().getFormat())) {
+                throw new IllegalArgumentException(
+                        "Iris metadata format mismatch at color slot " + index
+                                + ": metadata=" + metadata.colorAttachments().get(index).format()
+                                + ", texture=" + colorTexture.texture().getFormat()
+                );
             }
             if ((colorTexture.texture().usage() & GpuTexture.USAGE_RENDER_ATTACHMENT) == 0) {
                 throw new IllegalStateException("Color texture " + index + " must have USAGE_RENDER_ATTACHMENT");
@@ -357,6 +498,15 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                         "Depth texture dimensions do not match the first non-null color attachment"
                 );
             }
+            if (metadata != null
+                    && metadata.hasDepthMetadata()
+                    && !metadata.depthAttachment().orElseThrow().format().equals(depthTexture.texture().getFormat())) {
+                throw new IllegalArgumentException(
+                        "Iris metadata depth format mismatch: metadata="
+                                + metadata.depthAttachment().orElseThrow().format()
+                                + ", texture=" + depthTexture.texture().getFormat()
+                );
+            }
             MetalGpuTexture metalDepth = (MetalGpuTexture) depthTexture.texture();
             Double pendingDepth = pendingDepthClears.get(metalDepth);
             if (pendingDepth != null && isFullTextureView(depthTexture) && depthClear.isEmpty()) {
@@ -395,7 +545,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 renderArea,
                 hasColorClear ? clearColors : null,
                 depthClear.isPresent(),
-                depthClear.orElse(0.0)
+                depthClear.isPresent()
+                        ? MetalIrisDepthConvention.hardwareClear(depthClear.getAsDouble())
+                        : 0.0,
+                metadata
         );
         currentRenderPass = renderPass;
         renderPass.pushDebugGroup(descriptor.label());
@@ -404,10 +557,28 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     @Override
     public void submitRenderPass() {
-        if (currentRenderPass != null) {
-            currentRenderPass.materializePendingClear();
-            currentRenderPass.popDebugGroup();
+        try {
+            if (currentRenderPass != null) {
+                currentRenderPass.materializePendingClear();
+                currentRenderPass.popDebugGroup();
+            }
+        } finally {
             currentRenderPass = null;
+            if (activeIrisDescriptor != null) {
+                IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor = activeIrisDescriptor;
+                activeIrisDescriptor = null;
+                descriptor.close();
+            }
+            if (pendingIrisDescriptor != null) {
+                IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor = pendingIrisDescriptor;
+                pendingIrisDescriptor = null;
+                pendingIrisMetadata = null;
+                descriptor.close();
+            }
+            // A core Iris draw is scoped to this render pass. Clearing here
+            // also covers callers that do not reach PreparedRenderType's
+            // normal return injection after a pass has been submitted.
+            IrisMetalCoreDrawBridge.clear();
         }
     }
 
@@ -481,7 +652,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 clearColorCopy.z(),
                 clearColorCopy.w(),
                 depth.nativeHandle(),
-                clearDepth,
+                MetalIrisDepthConvention.hardwareClear(clearDepth),
                 regionX,
                 regionY,
                 regionWidth,
@@ -803,6 +974,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     void close() {
+        if (this.closed) {
+            return;
+        }
         submitRenderPass();
         endEncoder();
         for (int slot = 0; slot < inFlight.length; slot++) {
@@ -831,9 +1005,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
         }
         dynamicBackingPool.clear();
+        this.closed = true;
     }
 
     void waitForSubmittedGpuWork() {
+        if (this.closed) {
+            return;
+        }
         if (commandBuffer != null || currentRenderPass != null || currentEncoder != null) {
             submit();
         } else {
@@ -843,6 +1021,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         if (latestSubmit >= MAX_SUBMITS_IN_FLIGHT) {
             awaitSubmitCompletion(latestSubmit, Long.MAX_VALUE);
         }
+    }
+
+    boolean isClosed() {
+        return this.closed;
     }
 
     @Override
@@ -879,9 +1061,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 colorClear != null ? colorClear.z() : 0.0F,
                 colorClear != null ? colorClear.w() : 0.0F,
                 depthClear != null ? 1 : 0,
-                depthClear != null ? depthClear : 1.0
+                depthClear != null ? MetalIrisDepthConvention.hardwareClear(depthClear) : 1.0
         );
         encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
+        encoderGeneration++;
         currentEncoder = encoder;
         texture.recordMaterializedClear(colorClear, depthClear);
     }

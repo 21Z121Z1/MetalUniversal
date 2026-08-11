@@ -43,7 +43,7 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
     private final IrisMetalWorldPrograms sources;
     private final GpuFormat[] targetFormats;
     private final Map<SodiumKey, MetalCompiledRenderPipeline> sodiumPipelines = new HashMap<>();
-    private final Map<RenderPipeline, Map<ShaderKey, MetalCompiledRenderPipeline>> corePipelines =
+    private final Map<RenderPipeline, Map<CoreKey, MetalCompiledRenderPipeline>> corePipelines =
             new IdentityHashMap<>();
     private boolean closed;
 
@@ -87,19 +87,34 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
             final AlphaTest fallbackAlpha,
             final RasterState state
     ) {
+        return sodium(requested, fallbackAlpha, state, null);
+    }
+
+    synchronized Optional<MetalCompiledRenderPipeline> sodium(
+            final ProgramId requested,
+            final AlphaTest fallbackAlpha,
+            final RasterState state,
+            final @Nullable GpuFormat[] attachmentFormats
+    ) {
         ensureOpen();
         Objects.requireNonNull(requested, "requested");
         Objects.requireNonNull(fallbackAlpha, "fallbackAlpha");
         Objects.requireNonNull(state, "state");
+        GpuFormat[] resolvedFormats = resolveAttachmentFormats(attachmentFormats);
         Optional<IrisMetalGlslLinker.LinkedRasterProgram> linked =
                 this.sources.sodium(requested, fallbackAlpha);
         if (linked.isEmpty()) {
             return Optional.empty();
         }
-        SodiumKey key = new SodiumKey(requested, fallbackAlpha, state);
+        SodiumKey key = new SodiumKey(requested, fallbackAlpha, state, formatKey(resolvedFormats));
         return Optional.of(this.sodiumPipelines.computeIfAbsent(
                 key,
-                ignored -> compile("sodium_" + requested.getSourceName(), linked.orElseThrow(), state)
+                ignored -> compile(
+                        "sodium_" + requested.getSourceName(),
+                        linked.orElseThrow(),
+                        state,
+                        resolvedFormats
+                )
         ));
     }
 
@@ -113,25 +128,37 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
             final RenderPipeline source,
             final IrisMetalGlslLinker.LinkedRasterProgram linked
     ) {
+        return core(key, source, linked, null);
+    }
+
+    synchronized MetalCompiledRenderPipeline core(
+            final ShaderKey key,
+            final RenderPipeline source,
+            final IrisMetalGlslLinker.LinkedRasterProgram linked,
+            final @Nullable GpuFormat[] attachmentFormats
+    ) {
         ensureOpen();
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(linked, "linked");
         VertexFormat vertexFormat = source.getVertexFormatBinding(0);
-        if (vertexFormat == null) {
+        if (vertexFormat == null && !IrisMetalCoreGbufferPipelines.allowsNoPhysicalVertexFormat(key)) {
             throw new IllegalStateException(
-                    "Iris core draw " + key + " has no physical vertex format on " + source.getLocation()
+                "Iris core draw " + key + " has no physical vertex format on " + source.getLocation()
             );
         }
-        Map<ShaderKey, MetalCompiledRenderPipeline> byKey = this.corePipelines.computeIfAbsent(
-                source, ignored -> new EnumMap<>(ShaderKey.class)
+        GpuFormat[] resolvedFormats = resolveAttachmentFormats(attachmentFormats);
+        Map<CoreKey, MetalCompiledRenderPipeline> byKey = this.corePipelines.computeIfAbsent(
+                source, ignored -> new HashMap<>()
         );
+        CoreKey cacheKey = new CoreKey(key, formatKey(resolvedFormats));
         return byKey.computeIfAbsent(
-                key,
+                cacheKey,
                 ignored -> compile(
                         "core_" + key.getName(),
                         linked,
-                        RasterState.from(source, vertexFormat)
+                        RasterState.from(source, vertexFormat),
+                        resolvedFormats
                 )
         );
     }
@@ -139,9 +166,10 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
     private MetalCompiledRenderPipeline compile(
             final String role,
             final IrisMetalGlslLinker.LinkedRasterProgram program,
-            final RasterState state
+            final RasterState state,
+            final GpuFormat[] attachmentFormats
     ) {
-        ColorTargetState[] colorTargets = colorTargets(program, state);
+        ColorTargetState[] colorTargets = colorTargets(program, state, attachmentFormats);
         Map<String, GpuFormat> vertexFormats = new LinkedHashMap<>();
         for (VertexFormat binding : state.vertexFormats()) {
             if (binding == null) {
@@ -189,7 +217,8 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
 
     private ColorTargetState[] colorTargets(
             final IrisMetalGlslLinker.LinkedRasterProgram program,
-            final RasterState state
+            final RasterState state,
+            final GpuFormat[] attachmentFormats
     ) {
         int[] drawBuffers = program.program().drawBuffers();
         if (drawBuffers.length == 0) {
@@ -218,11 +247,11 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
         ColorTargetState[] targets = new ColorTargetState[drawBuffers.length];
         for (int slot = 0; slot < drawBuffers.length; slot++) {
             int logicalTarget = drawBuffers[slot];
-            if (logicalTarget < 0 || logicalTarget >= this.targetFormats.length) {
+            if (logicalTarget < 0 || logicalTarget >= attachmentFormats.length) {
                 throw new IllegalArgumentException(
                         "Iris program " + program.name() + " writes colortex" + logicalTarget
                                 + " but generation " + this.generation + " owns only 0.."
-                                + (this.targetFormats.length - 1)
+                                + (attachmentFormats.length - 1)
                 );
             }
             if (!written.add(logicalTarget)) {
@@ -242,11 +271,26 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
             }
             targets[slot] = new ColorTargetState(
                     blend,
-                    this.targetFormats[logicalTarget],
+                    attachmentFormats[logicalTarget],
                     state.writeMask()
             );
         }
         return targets;
+    }
+
+    private GpuFormat[] resolveAttachmentFormats(final @Nullable GpuFormat[] requested) {
+        GpuFormat[] resolved = requested == null ? this.targetFormats.clone() : requested.clone();
+        if (resolved.length == 0) {
+            throw new IllegalArgumentException("Iris generation has no attachment formats");
+        }
+        for (int index = 0; index < resolved.length; index++) {
+            Objects.requireNonNull(resolved[index], "attachmentFormats[" + index + "]");
+        }
+        return resolved;
+    }
+
+    private static List<GpuFormat> formatKey(final GpuFormat[] formats) {
+        return List.copyOf(Arrays.asList(formats.clone()));
     }
 
     private static void validateReflectedResources(
@@ -362,9 +406,11 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
             }
         }
 
-        static RasterState from(final RenderPipeline source, final VertexFormat primaryVertexFormat) {
+        static RasterState from(
+                final RenderPipeline source,
+                final @Nullable VertexFormat primaryVertexFormat
+        ) {
             Objects.requireNonNull(source, "source");
-            Objects.requireNonNull(primaryVertexFormat, "primaryVertexFormat");
             ColorTargetState sourceTarget = source.getColorTargetState();
             int sourceWriteMask = sourceTarget == null
                     ? ColorTargetState.WRITE_ALL
@@ -379,7 +425,7 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
                     source.isCull(),
                     source.getPolygonMode(),
                     source.getPrimitiveTopology(),
-                    List.of(primaryVertexFormat),
+                    primaryVertexFormat == null ? List.of() : List.of(primaryVertexFormat),
                     source.getDepthStencilState(),
                     sourceTarget == null ? Optional.empty() : sourceTarget.blendFunction(),
                     sourceWriteMask
@@ -387,6 +433,14 @@ final class IrisMetalCompiledPrograms implements AutoCloseable {
         }
     }
 
-    private record SodiumKey(ProgramId requested, AlphaTest fallbackAlpha, RasterState state) {
+    private record SodiumKey(
+            ProgramId requested,
+            AlphaTest fallbackAlpha,
+            RasterState state,
+            List<GpuFormat> attachmentFormats
+    ) {
+    }
+
+    private record CoreKey(ShaderKey key, List<GpuFormat> attachmentFormats) {
     }
 }

@@ -64,8 +64,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  *
  * <p><b>Geometry / tessellation stages.</b> {@code link}'s signature accepts
  * geometry/tessControl/tessEval source strings. The current Metal pipeline is
- * vertex+fragment only; they are skipped (logging a warning). Their handling is
- * deferred to a future Metal tessellation/geometry pipeline.
+ * vertex+fragment only; such programs are rejected before any Metal program
+ * is published. Dropping those stages would silently change shaderpack
+ * semantics.
  *
  * <p>When Metal is <em>not</em> active the mixin is a complete no-op and Iris's
  * GL path is untouched.
@@ -89,14 +90,16 @@ public class ShaderCreatorMixin {
             return;
         }
 
-        // Geometry/tessellation stages have no Metal equivalent in the current
-        // vertex+fragment pipeline; warn and proceed with vertex+fragment only.
+        // Geometry/tessellation stages have no exact lowering in the current
+        // vertex+fragment pipeline. Never drop them and continue: doing so
+        // changes shader semantics while making the active pack look healthy.
         if (geometry != null || tessControl != null || tessEval != null) {
-            Metallum.LOGGER.warn(
-                    "[MetalUniversal/Iris] Shaderpack program '{}' declares geometry/tessellation stages, "
-                            + "which have no Metal equivalent in the current vertex+fragment pipeline; "
-                            + "they are skipped.",
-                    name
+            throw new ShaderCompileException(
+                    name,
+                    new UnsupportedOperationException(
+                            "Iris Metal pack admission rejected program '" + name
+                                    + "': geometry/tessellation stages have no exact Metal lowering"
+                    )
             );
         }
 
@@ -140,18 +143,10 @@ public class ShaderCreatorMixin {
         // The constructor reads the cached pipeline from
         // MetalCrossShaderCompiler.SHADERPACK_PIPELINE_CACHE; it can only throw
         // if the cache was not populated, which cannot happen here (compiled
-        // is true). The try/catch is defensive: a registration failure must
-        // not prevent the sentinel PartialShader from being returned, otherwise
-        // Iris's ExtendedShader construction would NPE before the dispatch
-        // mixin can recover.
-        try {
-            MetalIrisProgramRegistry.register(new MetalIrisProgram(name));
-        } catch (final Exception e) {
-            Metallum.LOGGER.error(
-                    "[MetalUniversal/Iris] Failed to register MetalIrisProgram for shaderpack program '{}': {}",
-                    name, e.getMessage(), e
-            );
-        }
+        // is true). Registration is part of the ownership contract, so a
+        // failure must abort admission rather than return a sentinel shader
+        // that would leave this active-pack draw on a native fallback path.
+        MetalIrisProgramRegistry.register(new MetalIrisProgram(name));
 
         Metallum.LOGGER.info(
                 "[MetalUniversal/Iris] Constructed and cached Metal render pipeline for shaderpack program '{}' "

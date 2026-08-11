@@ -251,6 +251,7 @@ final class IrisMetalCenterDepthSampler implements AutoCloseable {
             return;
         }
         this.closed = true;
+        this.device.waitForSubmittedGpuWork();
         this.currentView.close();
         this.historyView.close();
         this.currentTexture.close();

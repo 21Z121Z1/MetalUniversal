@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 /**
  * Foreign Memory & Function API (FFM, {@code java.lang.foreign}) bridge to the
@@ -261,6 +262,8 @@ public final class GlslangBridge {
             "#define METALLUM_GLSLANG_FRONTEND 1",
             ""
     );
+    private static final Pattern GL_VERTEX_ID = Pattern.compile("\\bgl_VertexID\\b");
+    private static final Pattern GL_INSTANCE_ID = Pattern.compile("\\bgl_InstanceID\\b");
 
     static {
         try {
@@ -414,7 +417,8 @@ public final class GlslangBridge {
         // and #version must be the first directive if present. Injecting the
         // compatibility preamble before the source would otherwise violate that.
         final String stripped = stripVersionDirective(source);
-        final String fullSource = buildSourceWithDefines(COMPAT_PREAMBLE + stripped, defines);
+        final String normalized = normalizeVulkanBuiltins(stage, stripped);
+        final String fullSource = buildSourceWithDefines(COMPAT_PREAMBLE + normalized, defines);
 
         synchronized (COMPILE_LOCK) {
             INCLUDE_RESOLVER.set(includeResolver);
@@ -728,6 +732,21 @@ public final class GlslangBridge {
             first = false;
         }
         return sb.toString();
+    }
+
+    /**
+     * Iris's transform output keeps the desktop GLSL vertex built-in names,
+     * while this bridge asks glslang for Vulkan client semantics. Vulkan uses
+     * the explicit index names for the two built-ins whose OpenGL spellings
+     * differ; normalize them at the shared GLSL entry point so every shader
+     * pack receives the same ABI treatment.
+     */
+    static String normalizeVulkanBuiltins(final Stage stage, final String source) {
+        if (stage != Stage.VERTEX) {
+            return source;
+        }
+        return GL_INSTANCE_ID.matcher(GL_VERTEX_ID.matcher(source).replaceAll("gl_VertexIndex"))
+                .replaceAll("gl_InstanceIndex");
     }
 
     private static String buildSourceWithDefines(String source, String defines) {

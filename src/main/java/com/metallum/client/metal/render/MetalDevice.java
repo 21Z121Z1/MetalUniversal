@@ -47,6 +47,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private final Map<Long, Deque<MemorySegment>> bufferPool = new HashMap<>();
     private static final int MAX_POOLED_BUFFERS_PER_SIZE = 16;
     private ShaderSource activeShaderSource;
+    private boolean closed;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -188,18 +189,28 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public void close() {
-        this.waitForSubmittedGpuWork();
-        this.genericVertexAttributeBuffer.close();
-        this.commandEncoder.close();
-        this.clearPipelineCache();
-        this.drainBufferPool();
-        MetalDeviceRegistry.clearActiveDevice(this);
-        try {
-            MetalNativeBridge.metallum_NSView_clearLayer(this.cocoaView);
-        } catch (Throwable ignored) {
+        if (this.closed) {
+            return;
         }
-        this.commandQueue.close();
-        MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
+        try {
+            // Complete all work before any generation-owned resource can be
+            // released directly after this device is gone. This is the
+            // handoff boundary used by transactional Iris device replacement.
+            this.waitForSubmittedGpuWork();
+            this.genericVertexAttributeBuffer.close();
+            this.clearPipelineCache();
+            this.commandEncoder.close();
+            this.drainBufferPool();
+            try {
+                MetalNativeBridge.metallum_NSView_clearLayer(this.cocoaView);
+            } catch (Throwable ignored) {
+            }
+            this.commandQueue.close();
+            MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
+        } finally {
+            this.closed = true;
+            MetalDeviceRegistry.clearActiveDevice(this);
+        }
     }
 
     @Override
@@ -238,6 +249,16 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     void queueResourceRelease(final MemorySegment handle) {
+        if (handle == null || MetalNativeBridge.isNullHandle(handle)) {
+            return;
+        }
+        if (this.closed || this.commandEncoder.isClosed()) {
+            // A closed device has already waited for its submitted work. The
+            // old command encoder cannot accept another deferred release, so
+            // release the retained Objective-C object immediately.
+            MetalNativeBridge.metallum_release_object(handle);
+            return;
+        }
         this.commandEncoder.queueForDestroy(() -> MetalNativeBridge.metallum_release_object(handle));
     }
 
@@ -251,6 +272,15 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     void queueBufferRelease(final MemorySegment handle, final long size, final long resourceOptions) {
+        if (handle == null || MetalNativeBridge.isNullHandle(handle)) {
+            return;
+        }
+        if (this.closed || this.commandEncoder.isClosed()) {
+            // Do not put buffers from a closed device into a pool that can no
+            // longer be drained by that device.
+            MetalNativeBridge.metallum_release_object(handle);
+            return;
+        }
         this.commandEncoder.queueForDestroy(() -> {
             long key = composePoolKey(size, resourceOptions);
             Deque<MemorySegment> bucket = bufferPool.computeIfAbsent(key, k -> new ArrayDeque<>());
@@ -273,6 +303,10 @@ final class MetalDevice implements GpuDeviceBackend {
             }
         }
         bufferPool.clear();
+    }
+
+    boolean isClosed() {
+        return this.closed;
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {

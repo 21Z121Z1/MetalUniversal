@@ -6,8 +6,230 @@ plugins {
 version = project.mod_version
 group = project.maven_group
 
+// Keep Iris lifecycle validation isolated from the normal development client.
+// The generated Loom run uses a private game directory and receipt namespace,
+// so a failed validation cannot be mistaken for a normal `runClient` session.
+def irisValidationDirPath = (System.getProperty("metallum.iris.validation.dir")
+		?: project.findProperty("irisValidationDir")
+		?: "build/iris-runtime").toString()
+def irisValidationDir = file(irisValidationDirPath)
+def irisValidationGameDirPath = (project.findProperty("irisValidationGameDir") ?: "build/iris-runtime/game").toString()
+def irisValidationGameDir = file(irisValidationGameDirPath)
+def irisValidationReceipt = file("${irisValidationDir}/iris-runtime-receipt.jsonl")
+def irisValidationControlReceipt = file("${irisValidationDir}/iris-validation-control.jsonl")
+def irisValidationProperty = { String name, String fallback ->
+	(System.getProperty(name) ?: project.findProperty(name) ?: fallback).toString()
+}
+def irisValidationCodeSource = file(irisValidationProperty(
+	"metallum.iris.validation.expectedCodeSource",
+	project.findProperty("irisValidationCodeSource") ?: "${buildDir}/classes/java/main"
+))
+def irisValidationCodeHash = irisValidationProperty(
+	"metallum.iris.validation.expectedCodeSourceSha256",
+	project.findProperty("irisValidationCodeSourceSha256") ?: ""
+)
+def irisValidationArtifactJar = file(
+		irisValidationProperty(
+				"metallum.iris.artifactJar",
+				"build/libs/metallum-" + project.version + ".jar"
+		)
+)
+def irisValidationArtifactHash = irisValidationProperty(
+	"metallum.iris.validation.expectedArtifactJarSha256",
+	project.findProperty("irisValidationArtifactSha256") ?: ""
+)
+def irisValidationNativeHash = irisValidationProperty(
+	"metallum.iris.validation.expectedNativeDylibSha256",
+	project.findProperty("irisValidationNativeSha256") ?: ""
+)
+def irisValidationShaderPack = (project.findProperty("irisValidationShaderPack") ?: "").toString().trim()
+def irisValidationCaptureDir = file(irisValidationProperty(
+	"metallum.iris.validation.captureDir",
+	"${irisValidationDir}/captures"
+))
+def irisValidationWorld = (project.findProperty("world") ?: "New World").toString()
+
+// Minecraft 26.2 records an unclean client exit in options.txt and forces the
+// next launch to OpenGL. Keep the generated validation profile recoverable
+// after a failed run while leaving its crash reports and logs intact.
+def prepareIrisValidationGameDir = {
+	irisValidationGameDir.mkdirs()
+	File optionsFile = new File(irisValidationGameDir, "options.txt")
+	if (!optionsFile.isFile()) {
+		return
+	}
+	def lines = optionsFile.readLines("UTF-8")
+	boolean foundBackend = false
+	boolean foundCleanState = false
+	def normalizedLines = lines.collect { String line ->
+		if (line.startsWith("preferredGraphicsBackend:")) {
+			foundBackend = true
+			return 'preferredGraphicsBackend:"default"'
+		}
+		if (line.startsWith("startedCleanly:")) {
+			foundCleanState = true
+			return "startedCleanly:true"
+		}
+		return line
+	}
+	if (!foundBackend) {
+		normalizedLines << 'preferredGraphicsBackend:"default"'
+	}
+	if (!foundCleanState) {
+		normalizedLines << "startedCleanly:true"
+	}
+	optionsFile.setText(normalizedLines.join(System.lineSeparator()) + System.lineSeparator(), "UTF-8")
+}
+
+def configureIrisValidationShaderPack = {
+	if (irisValidationShaderPack.isBlank()) {
+		return
+	}
+	File configDir = new File(irisValidationGameDir, "config")
+	configDir.mkdirs()
+	File propertiesFile = new File(configDir, "iris.properties")
+	List<String> lines = propertiesFile.isFile()
+			? propertiesFile.readLines("UTF-8")
+			: ["enableShaders=true"]
+	boolean foundShaderPack = false
+	List<String> normalizedLines = lines.collect { String line ->
+		if (line.startsWith("shaderPack=")) {
+			foundShaderPack = true
+			return "shaderPack=${irisValidationShaderPack}"
+		}
+		return line
+	}
+	if (!foundShaderPack) {
+		normalizedLines << "shaderPack=${irisValidationShaderPack}"
+	}
+	propertiesFile.setText(normalizedLines.join(System.lineSeparator()) + System.lineSeparator(), "UTF-8")
+}
+
 loom {
 	accessWidenerPath = file("src/main/resources/metallum.accesswidener")
+
+	// This is deliberately a separate generated task (`runClientIris`) rather
+	// than a mutation of Loom's ordinary `runClient` configuration. The default
+	// values are strict and receipt-producing; callers may override the pack,
+	// world and identity properties with normal Gradle `-D`/`-P` arguments.
+	runs {
+		clientIris {
+			client()
+			name("Iris semantic validation")
+			configName("Iris semantic validation")
+			runDir(irisValidationGameDirPath)
+			ideConfigGenerated(false)
+			startFirstThread()
+			vmArgs("--enable-native-access=ALL-UNNAMED")
+			property("metallum.iris.strict", "true")
+			property("metallum.iris.validation.enabled", "true")
+			property("metallum.iris.validation.receipt", irisValidationReceipt.absolutePath)
+			property("metallum.iris.validation.controlReceipt", irisValidationControlReceipt.absolutePath)
+			property("metallum.iris.validation.reloadFrame", irisValidationProperty(
+				"metallum.iris.validation.reloadFrame", "120"
+			))
+			property("metallum.iris.validation.disableFrame", irisValidationProperty(
+				"metallum.iris.validation.disableFrame", "260"
+			))
+			property("metallum.iris.validation.enableFrame", irisValidationProperty(
+				"metallum.iris.validation.enableFrame", "320"
+			))
+			property("metallum.iris.validation.stopFrame", irisValidationProperty(
+				"metallum.iris.validation.stopFrame", "420"
+			))
+			property("metallum.iris.validation.worldTimeoutFrames", irisValidationProperty(
+				"metallum.iris.validation.worldTimeoutFrames", "1200"
+			))
+			property("metallum.iris.validation.captureEvery", irisValidationProperty(
+				"metallum.iris.validation.captureEvery", "30"
+			))
+				property("metallum.iris.validation.captureDir", irisValidationCaptureDir.absolutePath)
+			property("metallum.iris.validation.shadowStages", irisValidationProperty(
+					"metallum.iris.validation.shadowStages", "false"
+				))
+			property("metallum.iris.validation.shadowDistance", irisValidationProperty(
+					"metallum.iris.validation.shadowDistance", "32"
+				))
+			property("metallum.iris.validation.expectedCodeSource", irisValidationCodeSource.absolutePath)
+				property("metallum.iris.validation.expectedCodeSourceSha256", irisValidationCodeHash)
+				property("metallum.iris.validation.requireCodeIdentity", "true")
+				property("metallum.iris.artifactJar", irisValidationArtifactJar.absolutePath)
+				property("metallum.iris.validation.expectedArtifactJarSha256", irisValidationArtifactHash)
+				property("metallum.iris.validation.expectedNativeDylibSha256", irisValidationNativeHash)
+			property("metallum.iris.sourceCommit", irisValidationProperty(
+				"metallum.iris.sourceCommit",
+				project.findProperty("irisValidationSourceCommit") ?: "working-tree"
+			))
+			environmentVariable("MTL_DEBUG_LAYER", "1")
+			environmentVariable("MTL_SHADER_VALIDATION", "0")
+		}
+	}
+}
+
+tasks.named("runClientIris") {
+	group = "verification"
+	description = "Runs an isolated strict Iris Metal lifecycle validation client and checks its receipts."
+	dependsOn(tasks.named("buildMacNative"))
+
+	// Runtime receipts append by design across Iris generations. Remove only
+	// these generated validation files before a run so stale evidence cannot
+	// satisfy the post-run gate; user-owned logs and launcher state are untouched.
+	doFirst {
+		prepareIrisValidationGameDir()
+		configureIrisValidationShaderPack()
+		irisValidationReceipt.delete()
+		irisValidationControlReceipt.delete()
+		file("${irisValidationDir}/process-exit.json").delete()
+	}
+
+	doLast {
+		def processExit = file("${irisValidationDir}/process-exit.json")
+		processExit.parentFile.mkdirs()
+		processExit.text = '{"schema":"iris-metal-validation-process-v1","exitCode":0}' + System.lineSeparator()
+
+		if (!irisValidationControlReceipt.isFile()) {
+			throw new GradleException("Iris validation did not produce control receipt: ${irisValidationControlReceipt}")
+		}
+		def controlLines = irisValidationControlReceipt.readLines("UTF-8")
+		if (!controlLines.any { it.contains('"type":"result"') && it.contains('"status":"passed"') }) {
+			throw new GradleException("Iris validation control receipt has no passed result: ${irisValidationControlReceipt}")
+		}
+		if (!irisValidationReceipt.isFile()) {
+			throw new GradleException("Iris validation did not produce runtime receipt: ${irisValidationReceipt}")
+		}
+		def runtimeLines = irisValidationReceipt.readLines("UTF-8")
+		def runtimeRecords = runtimeLines.collect { line ->
+			try {
+				new groovy.json.JsonSlurper().parseText(line)
+			} catch (Exception failure) {
+				throw new GradleException("Iris runtime receipt contains invalid JSON: ${line}", failure)
+			}
+		}
+		if (!runtimeRecords.any { it instanceof Map && it.codeIdentityMatched == true }) {
+			throw new GradleException("Iris runtime receipt has no matching code identity: ${irisValidationReceipt}")
+		}
+		if (!runtimeRecords.any { it instanceof Map
+				&& it.type == "color-space"
+				&& it.event == "color-space.finalized"
+		}) {
+			throw new GradleException("Iris validation has no color-space finalization receipt: ${irisValidationReceipt}")
+		}
+		def deviceRecord = runtimeRecords.find { it instanceof Map && it.type == "device" }
+		if (deviceRecord == null
+				|| !(deviceRecord.nativeDylibSha256 instanceof String)
+				|| deviceRecord.nativeDylibSha256.trim().isEmpty()) {
+			throw new GradleException("Iris runtime receipt has no device/native dylib identity: ${irisValidationReceipt}")
+		}
+	}
+}
+
+// Loom exposes the generated strict profile as `runClientIris` itself. Add
+// Quick Play only to that task so ordinary development runs keep their normal
+// menu behavior. `-Pworld=<name>` selects another existing save.
+tasks.named("runClientIris") {
+	if (!irisValidationWorld.isBlank()) {
+		args "--quickPlaySingleplayer", irisValidationWorld
+	}
 }
 
 repositories {
@@ -189,6 +411,42 @@ tasks.register("metalIrisTexturesIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest"
 		includeTestsMatching "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
 		includeTestsMatching "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+tasks.register("metalIrisTexelBufferIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS fixed-Iris R8_SINT/R32_SINT texel-buffer binding and readback suite."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalTexelBufferIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+tasks.register("metalIrisColorSpaceIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs the macOS fixed-Iris final-output color-space conversion and pack-owned bypass readback suite."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisColorSpaceIntegrationTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", "1"

@@ -15,6 +15,7 @@ import org.jspecify.annotations.Nullable;
 import java.util.BitSet;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.Set;
 
 /** Generation-owned shadowtex0/1 and shadowcolor ping-pong resources. */
 @Environment(EnvType.CLIENT)
@@ -31,6 +32,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
     private final MetalGpuTextureView[] colorMainViews;
     private final MetalGpuTextureView[] colorAltViews;
     private final MetalGpuSampler[] colorSamplers;
+    private final @Nullable MetalGpuSampler[] passMipSamplers;
     private final MetalGpuSampler[] depthSamplers;
     private final MetalGpuSampler[] depthCompareSamplers;
     private final boolean[] colorMipmapped;
@@ -56,7 +58,8 @@ final class IrisMetalShadowTargets implements AutoCloseable {
                 new boolean[shadowColorFormats.length],
                 new boolean[shadowColorFormats.length],
                 new boolean[2],
-                new boolean[2]
+                new boolean[2],
+                Set.of()
         );
     }
 
@@ -75,7 +78,8 @@ final class IrisMetalShadowTargets implements AutoCloseable {
                 nearestColor,
                 new boolean[shadowColorFormats.length],
                 nearestDepth,
-                mipmappedDepth
+                mipmappedDepth,
+                Set.of()
         );
     }
 
@@ -87,6 +91,28 @@ final class IrisMetalShadowTargets implements AutoCloseable {
             final boolean[] colorMipmapped,
             final boolean[] nearestDepth,
             final boolean[] mipmappedDepth
+    ) {
+        this(
+                device,
+                shadowColorFormats,
+                resolution,
+                nearestColor,
+                colorMipmapped,
+                nearestDepth,
+                mipmappedDepth,
+                Set.of()
+        );
+    }
+
+    IrisMetalShadowTargets(
+            final MetalDevice device,
+            final GpuFormat[] shadowColorFormats,
+            final int resolution,
+            final boolean[] nearestColor,
+            final boolean[] colorMipmapped,
+            final boolean[] nearestDepth,
+            final boolean[] mipmappedDepth,
+            final Set<Integer> storageImageTargets
     ) {
         if (nearestColor.length != shadowColorFormats.length
                 || colorMipmapped.length != shadowColorFormats.length) {
@@ -100,7 +126,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         this.device = device;
         this.colorTargets = new IrisMetalPingPongTargets(
                 device, "iris-shadowcolor", shadowColorFormats, resolution, resolution,
-                mipmappedIndices(colorMipmapped)
+                mipmappedIndices(colorMipmapped), storageImageTargets
         );
         this.colorMain = new MetalGpuTexture[shadowColorFormats.length];
         this.colorAlt = new MetalGpuTexture[shadowColorFormats.length];
@@ -108,6 +134,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         this.colorAltViews = new MetalGpuTextureView[shadowColorFormats.length];
         refreshColorSides();
         this.colorSamplers = new MetalGpuSampler[shadowColorFormats.length];
+        this.passMipSamplers = new MetalGpuSampler[shadowColorFormats.length];
         this.colorMipmapped = colorMipmapped.clone();
         for (int index = 0; index < colorSamplers.length; index++) {
             colorSamplers[index] = createSampler(nearestColor[index], colorMipmapped[index], false);
@@ -222,6 +249,34 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         return colorSamplers[checkColorIndex(index)];
     }
 
+    /**
+     * Selects the sampler required by one shadow-composite pass. A pass may
+     * request a mipmap for a target even when the pack's default shadowcolor
+     * sampling mode is non-mipmapped; the request is scoped to that pass.
+     */
+    MetalGpuSampler colorSampler(final int index, final boolean mipmappedForPass) {
+        ensureOpen();
+        int checked = checkColorIndex(index);
+        if (!mipmappedForPass || this.colorMipmapped[checked]) {
+            return colorSamplers[checked];
+        }
+        MetalGpuSampler sampler = this.passMipSamplers[checked];
+        if (sampler == null) {
+            MetalGpuSampler configured = colorSamplers[checked];
+            sampler = new MetalGpuSampler(
+                    device,
+                    configured.getAddressModeU(),
+                    configured.getAddressModeV(),
+                    configured.getMinFilter(),
+                    configured.getMagFilter(),
+                    configured.getMaxAnisotropy(),
+                    OptionalDouble.empty()
+            );
+            this.passMipSamplers[checked] = sampler;
+        }
+        return sampler;
+    }
+
     void resetMipmaps() {
         ensureOpen();
         colorTargets.resetMipmaps();
@@ -238,9 +293,53 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         }
     }
 
+    /**
+     * Materializes clears for both sides of every shadow-color target before
+     * the scene becomes observable through a sampler. A shadow scene may be
+     * depth-only, or may write only one ping-pong side, so relying on a render
+     * pass attachment to consume the deferred clear leaves the other side
+     * pending until the first main-world sample.
+     */
+    void materializePendingColorClears(final MetalCommandEncoder encoder) {
+        ensureOpen();
+        for (int index = 0; index < colorMain.length; index++) {
+            encoder.flushPendingClear(colorMain[index]);
+            encoder.flushPendingClear(colorAlt[index]);
+        }
+    }
+
+    /** Generates only the mipmaps requested by the current shadow composite. */
+    void generatePassColorMipmaps(
+            final MetalCommandEncoder encoder,
+            final BitSet readsFromAlt,
+            final java.util.Set<Integer> requestedTargets
+    ) {
+        ensureOpen();
+        for (int target : requestedTargets) {
+            int checked = checkColorIndex(target);
+            MetalGpuTexture texture = colorTexture(checked, readsFromAlt);
+            if (texture.getMipLevels() <= 1) {
+                throw new IllegalStateException(
+                        "Shadow composite requests mipmaps for shadowcolor" + checked
+                                + " but the generation allocated one mip level"
+                );
+            }
+            encoder.generateMipmaps(texture);
+        }
+    }
+
     GpuFormat colorFormat(final int index) {
         ensureOpen();
         return colorTargets.format(checkColorIndex(index));
+    }
+
+    GpuFormat[] colorFormats() {
+        ensureOpen();
+        GpuFormat[] formats = new GpuFormat[colorTargets.targetCount()];
+        for (int index = 0; index < formats.length; index++) {
+            formats[index] = colorTargets.format(index);
+        }
+        return formats;
     }
 
     MetalGpuTexture colorTexture(final int index, final BitSet readsFromAlt) {
@@ -261,6 +360,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         return resolution;
     }
 
+    /** Copies the complete opaque shadow scene into the no-translucents depth target. */
     void captureNoTranslucentsDepth(final MetalCommandEncoder encoder) {
         ensureOpen();
         encoder.copyTextureToTexture(
@@ -318,7 +418,11 @@ final class IrisMetalShadowTargets implements AutoCloseable {
                 clearDepth == null ? OptionalDouble.empty() : OptionalDouble.of(clearDepth)
         );
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, resolution, resolution));
-        return new IrisMetalRenderTargets.RenderPassDescriptorWithViews(descriptor, views);
+        return new IrisMetalRenderTargets.RenderPassDescriptorWithViews(
+                descriptor,
+                views,
+                IrisMetalRenderPassMetadata.fromDescriptor(descriptor, drawBuffers)
+        );
     }
 
     IrisMetalRenderTargets.RenderPassDescriptorWithViews createShadowCompositeDescriptor(
@@ -329,6 +433,22 @@ final class IrisMetalShadowTargets implements AutoCloseable {
             final int viewportY,
             final int viewportWidth,
             final int viewportHeight
+    ) {
+        return createShadowCompositeDescriptor(
+                label, drawBuffers, readsFromAlt, viewportX, viewportY,
+                viewportWidth, viewportHeight, null
+        );
+    }
+
+    IrisMetalRenderTargets.RenderPassDescriptorWithViews createShadowCompositeDescriptor(
+            final String label,
+            final int[] drawBuffers,
+            final BitSet readsFromAlt,
+            final int viewportX,
+            final int viewportY,
+            final int viewportWidth,
+            final int viewportHeight,
+            @Nullable final IrisMetalRenderPassMetadata metadata
     ) {
         ensureOpen();
         if (drawBuffers.length == 0) {
@@ -355,7 +475,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         descriptor.withRenderArea(new RenderPass.RenderArea(
                 viewportX, viewportY, viewportWidth, viewportHeight
         ));
-        return new IrisMetalRenderTargets.RenderPassDescriptorWithViews(descriptor, views);
+        return new IrisMetalRenderTargets.RenderPassDescriptorWithViews(descriptor, views, metadata);
     }
 
     void publishFlipState(final BitSet finalReadsFromAlt) {
@@ -443,6 +563,11 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         releaseDepthTextures();
         for (MetalGpuSampler sampler : colorSamplers) {
             sampler.close();
+        }
+        for (MetalGpuSampler sampler : passMipSamplers) {
+            if (sampler != null) {
+                sampler.close();
+            }
         }
         for (MetalGpuSampler sampler : depthSamplers) {
             sampler.close();

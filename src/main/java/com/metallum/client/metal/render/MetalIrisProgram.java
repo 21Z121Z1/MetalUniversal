@@ -281,9 +281,14 @@ public final class MetalIrisProgram implements IrisProgram {
             return -1;
         }
         final String blockName = uniformBlockName.toString();
-        MetalCompiledRenderPipeline.ResourceBinding binding = compiledPipeline.resource(blockName);
+        final String metalBlockName = switch (blockName) {
+            case "Fog", "iris_Fog", IrisMetalGlslLinker.IRIS_FOG_BLOCK_NAME ->
+                    IrisMetalGlslLinker.IRIS_FOG_BLOCK_NAME;
+            default -> blockName;
+        };
+        MetalCompiledRenderPipeline.ResourceBinding binding = compiledPipeline.resource(metalBlockName);
         if (binding == null && !blockName.contains("u_")) {
-            binding = compiledPipeline.resource("iris_" + blockName);
+            binding = compiledPipeline.resource("iris_" + metalBlockName);
         }
         return binding != null ? binding.bindingIndex() : -1;
     }

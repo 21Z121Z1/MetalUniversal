@@ -17,7 +17,6 @@ import java.util.Set;
 final class IrisMetalPingPongTargets implements AutoCloseable {
     static final int TEXTURE_USAGE = GpuTexture.USAGE_RENDER_ATTACHMENT
             | GpuTexture.USAGE_TEXTURE_BINDING
-            | MetalGpuTexture.USAGE_SHADER_WRITE
             | GpuTexture.USAGE_COPY_SRC
             | GpuTexture.USAGE_COPY_DST;
 
@@ -28,9 +27,13 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
     private MetalGpuTexture[] alt;
     private MetalGpuTextureView[] mainViews;
     private MetalGpuTextureView[] altViews;
+    private MetalGpuTextureView[] mainSampleViews;
+    private MetalGpuTextureView[] altSampleViews;
     private final BitSet flipped;
     private final BitSet flippedAtLeastOnce;
     private final BitSet mipmappedTargets;
+    private final BitSet storageImageTargets;
+    private final BitSet alphaOneSampleTargets;
     private final BitSet mipmapsOnMain;
     private final BitSet mipmapsOnAlt;
     private int width;
@@ -55,6 +58,31 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
             final int height,
             final Set<Integer> mipmappedTargets
     ) {
+        this(device, labelPrefix, formats, width, height, mipmappedTargets, Set.of(), Set.of());
+    }
+
+    IrisMetalPingPongTargets(
+            final MetalDevice device,
+            final String labelPrefix,
+            final GpuFormat[] formats,
+            final int width,
+            final int height,
+            final Set<Integer> mipmappedTargets,
+            final Set<Integer> storageImageTargets
+    ) {
+        this(device, labelPrefix, formats, width, height, mipmappedTargets, storageImageTargets, Set.of());
+    }
+
+    IrisMetalPingPongTargets(
+            final MetalDevice device,
+            final String labelPrefix,
+            final GpuFormat[] formats,
+            final int width,
+            final int height,
+            final Set<Integer> mipmappedTargets,
+            final Set<Integer> storageImageTargets,
+            final Set<Integer> alphaOneSampleTargets
+    ) {
         if (formats.length == 0) {
             throw new IllegalArgumentException("At least one logical target is required");
         }
@@ -65,6 +93,12 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         this.flippedAtLeastOnce = new BitSet(formats.length);
         this.mipmappedTargets = validatedTargets(
                 Objects.requireNonNull(mipmappedTargets, "mipmappedTargets"), formats.length
+        );
+        this.storageImageTargets = validatedTargets(
+                Objects.requireNonNull(storageImageTargets, "storageImageTargets"), formats.length
+        );
+        this.alphaOneSampleTargets = validatedTargets(
+                Objects.requireNonNull(alphaOneSampleTargets, "alphaOneSampleTargets"), formats.length
         );
         this.mipmapsOnMain = new BitSet(formats.length);
         this.mipmapsOnAlt = new BitSet(formats.length);
@@ -81,16 +115,25 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         this.alt = new MetalGpuTexture[formats.length];
         this.mainViews = new MetalGpuTextureView[formats.length];
         this.altViews = new MetalGpuTextureView[formats.length];
+        this.mainSampleViews = new MetalGpuTextureView[formats.length];
+        this.altSampleViews = new MetalGpuTextureView[formats.length];
         for (int index = 0; index < formats.length; index++) {
             int mipLevels = this.mipmappedTargets.get(index)
                     ? fullMipLevelCount(newWidth, newHeight)
                     : 1;
+            int usage = TEXTURE_USAGE | (this.storageImageTargets.get(index)
+                    ? MetalGpuTexture.USAGE_SHADER_WRITE
+                    : 0);
             main[index] = (MetalGpuTexture) device.createTexture(
-                    labelPrefix + index + "-main", TEXTURE_USAGE, formats[index], newWidth, newHeight, 1, mipLevels);
+                    labelPrefix + index + "-main", usage, formats[index], newWidth, newHeight, 1, mipLevels);
             alt[index] = (MetalGpuTexture) device.createTexture(
-                    labelPrefix + index + "-alt", TEXTURE_USAGE, formats[index], newWidth, newHeight, 1, mipLevels);
+                    labelPrefix + index + "-alt", usage, formats[index], newWidth, newHeight, 1, mipLevels);
             mainViews[index] = new MetalGpuTextureView(main[index], 0, mipLevels);
             altViews[index] = new MetalGpuTextureView(alt[index], 0, mipLevels);
+            if (this.alphaOneSampleTargets.get(index)) {
+                mainSampleViews[index] = new MetalGpuTextureView(main[index], 0, mipLevels, true);
+                altSampleViews[index] = new MetalGpuTextureView(alt[index], 0, mipLevels, true);
+            }
         }
     }
 
@@ -170,6 +213,34 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         return snapshot.get(checked) ? mainViews[checked] : altViews[checked];
     }
 
+    MetalGpuTextureView sampleReadView(final int index) {
+        return sampleReadView(index, snapshot());
+    }
+
+    MetalGpuTextureView sampleReadView(final int index, final BitSet snapshot) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        validateSnapshot(snapshot);
+        if (!alphaOneSampleTargets.get(checked)) {
+            return snapshot.get(checked) ? altViews[checked] : mainViews[checked];
+        }
+        return snapshot.get(checked) ? altSampleViews[checked] : mainSampleViews[checked];
+    }
+
+    MetalGpuTextureView sampleWriteView(final int index) {
+        return sampleWriteView(index, snapshot());
+    }
+
+    MetalGpuTextureView sampleWriteView(final int index, final BitSet snapshot) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        validateSnapshot(snapshot);
+        if (!alphaOneSampleTargets.get(checked)) {
+            return snapshot.get(checked) ? mainViews[checked] : altViews[checked];
+        }
+        return snapshot.get(checked) ? mainSampleViews[checked] : altSampleViews[checked];
+    }
+
     void enableReadMipmaps(final int index) {
         ensureOpen();
         int checked = checkIndex(index);
@@ -212,6 +283,10 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
 
     boolean flippedAtLeastOnce(final int index) {
         return flippedAtLeastOnce.get(checkIndex(index));
+    }
+
+    boolean isStorageImageTarget(final int index) {
+        return storageImageTargets.get(checkIndex(index));
     }
 
     BitSet snapshot() {
@@ -292,6 +367,14 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
 
     private void releaseTextures() {
         for (int index = 0; index < formats.length; index++) {
+            if (mainSampleViews[index] != null) {
+                mainSampleViews[index].close();
+                mainSampleViews[index] = null;
+            }
+            if (altSampleViews[index] != null) {
+                altSampleViews[index].close();
+                altSampleViews[index] = null;
+            }
             if (mainViews[index] != null) {
                 mainViews[index].close();
                 mainViews[index] = null;

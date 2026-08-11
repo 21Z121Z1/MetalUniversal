@@ -46,6 +46,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     private final List<ResourceBinding> resources;
+    private final MetalDevice device;
     private final Map<String, ResourceBinding> resourcesByName;
     private final long allResourceMask;
     private final int firstAvailableVertexBufferSlot;
@@ -63,6 +64,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final MTLPixelFormat[] colorFormats;
     private final Map<PipelineSignature, MemorySegment> pipelineStates;
     private final MemorySegment withoutDepthPipeline;
+    private boolean closed;
 
     private record PipelineSignature(
             List<MTLPixelFormat> colorFormats,
@@ -85,6 +87,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final List<ResourceBinding> resources,
             final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs
     ) {
+        this.device = device;
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
         this.genericVertexInputs = List.copyOf(genericVertexInputs);
@@ -137,10 +140,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             this.depthBiasScaleFactor = 0.0f;
             this.depthBiasConstant = 0.0f;
         } else {
-            depthCompareOp = MTLCompareFunction.from(depthStencilState.depthTest());
+            depthCompareOp = MTLCompareFunction.from(
+                    MetalIrisDepthConvention.hardwareCompare(depthStencilState.depthTest())
+            );
             depthWrite = depthStencilState.writeDepth() ? 1 : 0;
-            this.depthBiasScaleFactor = depthStencilState.depthBiasScaleFactor();
-            this.depthBiasConstant = depthStencilState.depthBiasConstant();
+            this.depthBiasScaleFactor = MetalIrisDepthConvention.hardwareDepthBias(
+                    depthStencilState.depthBiasScaleFactor()
+            );
+            this.depthBiasConstant = MetalIrisDepthConvention.hardwareDepthBias(
+                    depthStencilState.depthBiasConstant()
+            );
         }
 
         this.depthStencilState = MetalNativeBridge.MTLDevice_makeDepthStencilState(
@@ -248,6 +257,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final ColorTargetState[] colorTargets,
             final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs
     ) {
+        this.device = device;
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
 
@@ -299,10 +309,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             this.depthBiasScaleFactor = 0.0f;
             this.depthBiasConstant = 0.0f;
         } else {
-            depthCompareOp = MTLCompareFunction.from(depthStencilState.depthTest());
+            depthCompareOp = MTLCompareFunction.from(
+                    MetalIrisDepthConvention.hardwareCompare(depthStencilState.depthTest())
+            );
             depthWrite = depthStencilState.writeDepth() ? 1 : 0;
-            this.depthBiasScaleFactor = depthStencilState.depthBiasScaleFactor();
-            this.depthBiasConstant = depthStencilState.depthBiasConstant();
+            this.depthBiasScaleFactor = MetalIrisDepthConvention.hardwareDepthBias(
+                    depthStencilState.depthBiasScaleFactor()
+            );
+            this.depthBiasConstant = MetalIrisDepthConvention.hardwareDepthBias(
+                    depthStencilState.depthBiasConstant()
+            );
         }
 
         this.depthStencilState = MetalNativeBridge.MTLDevice_makeDepthStencilState(
@@ -673,12 +689,22 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
+        if (this.closed) {
+            return;
+        }
+        // A pipeline state can be referenced by an already submitted render
+        // encoder. Keep this owner safe when it is closed directly.
+        this.device.waitForSubmittedGpuWork();
+        this.closed = true;
         Set<MemorySegment> uniqueStates = new HashSet<>(this.pipelineStates.values());
         for (MemorySegment state : uniqueStates) {
             if (!MetalNativeBridge.isNullHandle(state)) {
                 MetalNativeBridge.metallum_release_object(state);
             }
+        }
+        if (!MetalNativeBridge.isNullHandle(this.depthStencilState)) {
+            MetalNativeBridge.metallum_release_object(this.depthStencilState);
         }
     }
 }

@@ -1,8 +1,11 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.gl.blending.AlphaTest;
 import net.irisshaders.iris.gl.shader.StandardMacros;
+import net.irisshaders.iris.gl.state.ShaderAttributeInputs;
+import net.irisshaders.iris.pathways.colorspace.ColorSpace;
 import net.irisshaders.iris.pipeline.transform.PatchShaderType;
 import net.irisshaders.iris.shaderpack.ShaderPack;
 import net.irisshaders.iris.shaderpack.loading.ProgramArrayId;
@@ -26,6 +29,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -37,11 +41,37 @@ final class IrisMetalProgramFrontendTest {
     private static final String FIXTURE = "/shaderpacks/BSL_v10.1.3.zip";
 
     @Test
+    void dryCompileRejectsUnsupportedStagesBeforeNativeCompilationOrCachePublication() {
+        ShaderCompileException failure = assertThrows(
+                ShaderCompileException.class,
+                () -> MetalCrossShaderCompiler.tryCompileShaderpackMsl(
+                        "geometry-program",
+                        "#version 330\nvoid main() {}",
+                        "#version 330\nvoid main() {}",
+                        null,
+                        null,
+                        "#version 330\nout vec4 color;\nvoid main() { color = vec4(1.0); }",
+                        null
+                )
+        );
+        assertTrue(failure.getMessage().contains("geometry/tessellation"));
+        assertTrue(
+                MetalCrossShaderCompiler.getCachedShaderpackMsl("geometry-program") == null,
+                "unsupported shader stages must not publish a partial dry-compile result"
+        );
+    }
+
+    @Test
     void realBslProgramSetUsesIrisFallbackAndTransforms() throws Exception {
         Iris.testing = true;
         try (LoadedPack loaded = loadFixture()) {
             ProgramSet programs = loaded.pack().getProgramSet(new NamespacedId("minecraft", "overworld"));
             IrisMetalProgramFrontend frontend = new IrisMetalProgramFrontend(programs);
+
+            assertFalse(
+                    frontend.has(ProgramId.Line),
+                    "Iris fallback resolution must not report the absent direct line program as present"
+            );
 
             IrisMetalProgramFrontend.ResolvedProgram terrain = frontend.resolve(ProgramId.TerrainSolid)
                     .orElseThrow();
@@ -61,6 +91,19 @@ final class IrisMetalProgramFrontendTest {
             assertTrue(linkedTerrain.uniformLayout().stream()
                     .anyMatch(member -> member.name().equals("gbufferModelView")));
             assertCrossCompiles(linkedTerrain);
+
+            IrisMetalProgramFrontend.ResolvedProgram water = frontend.resolve(ProgramId.Water)
+                    .orElseThrow();
+            IrisMetalGlslLinker.LinkedRasterProgram linkedWater = IrisMetalGlslLinker.linkDefault(
+                    frontend.patchVanilla(
+                            water, AlphaTest.ALWAYS, false, false,
+                            new ShaderAttributeInputs(false, false, false, false, false)
+                    )
+            );
+            assertTrue(linkedWater.uniformBlockNames().contains(IrisMetalGlslLinker.IRIS_FOG_BLOCK_NAME));
+            assertFalse(linkedWater.uniformBlockNames().contains("iris_Fog"));
+            assertTrue(linkedWater.fragmentGlsl().contains(
+                    "uniform " + IrisMetalGlslLinker.IRIS_FOG_BLOCK_NAME + " {"));
 
             ProgramSource composite = Arrays.stream(programs.getComposite(ProgramArrayId.Composite))
                     .filter(source -> source != null && source.isValid())
@@ -109,6 +152,17 @@ final class IrisMetalProgramFrontendTest {
                         () -> first.sodium(ProgramId.TerrainSolid, AlphaTest.ALWAYS)
                 );
             }
+        }
+    }
+
+    @Test
+    void strictAdmissionAcceptsTheFixedBslProgramCatalogBeforeMetalAllocation() throws Exception {
+        Iris.testing = true;
+        try (LoadedPack loaded = loadFixture()) {
+            ProgramSet programs = loaded.pack().getProgramSet(new NamespacedId("minecraft", "overworld"));
+            assertDoesNotThrow(
+                    () -> IrisMetalPackAdmission.requireSupported(programs, ColorSpace.SRGB)
+            );
         }
     }
 

@@ -27,7 +27,9 @@
     "iris.IrisMetalValidationMixin",
     "iris.MetalIrisPipelineMixin",
     "iris.MetalIrisClearMixin",
-    "iris.PreparedRenderTypeIrisMixin"
+    "iris.PreparedRenderTypeIrisMixin",
+    "iris.CloudRendererIrisMixin",
+    "iris.CommandEncoderBackendAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

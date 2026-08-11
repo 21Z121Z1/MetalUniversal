@@ -1,6 +1,7 @@
 package net.irisshaders.iris;
 
 import net.irisshaders.iris.config.IrisConfig;
+import net.irisshaders.iris.pipeline.PipelineManager;
 import net.irisshaders.iris.shaderpack.materialmap.NamespacedId;
 
 import java.io.IOException;
@@ -19,6 +20,7 @@ public class Iris {
     public static boolean testing = true;
 
     private static final Map<String, String> OPTION_QUEUE = new HashMap<>();
+    private static final PipelineManager PIPELINE_MANAGER = new PipelineManager(id -> null);
     private static IrisConfig config;
     private static Path scratchDirectory;
 
@@ -39,6 +41,11 @@ public class Iris {
 
     public static Map<String, String> getShaderPackOptionQueue() {
         return OPTION_QUEUE;
+    }
+
+    /** Headless tests have no live world pipeline; production Iris owns this state. */
+    public static PipelineManager getPipelineManager() {
+        return PIPELINE_MANAGER;
     }
 
     public static synchronized Path getShaderpacksDirectory() {

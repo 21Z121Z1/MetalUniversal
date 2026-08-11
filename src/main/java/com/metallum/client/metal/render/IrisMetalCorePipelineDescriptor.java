@@ -1,7 +1,6 @@
 package com.metallum.client.metal.render;
 
 import com.mojang.blaze3d.textures.GpuTextureView;
-import com.mojang.blaze3d.systems.RenderPassDescriptor;
 import org.joml.Vector4fc;
 
 import java.util.Optional;
@@ -13,7 +12,7 @@ final class IrisMetalCorePipelineDescriptor {
     private IrisMetalCorePipelineDescriptor() {
     }
 
-    static RenderPassDescriptor main(
+    static IrisMetalRenderTargets.RenderPassDescriptorWithViews main(
             final IrisMetalWorldResources resources,
             final Supplier<String> label,
             final IrisMetalGlslLinker.LinkedRasterProgram program,
@@ -33,7 +32,7 @@ final class IrisMetalCorePipelineDescriptor {
         );
     }
 
-    static RenderPassDescriptor shadow(
+    static IrisMetalRenderTargets.RenderPassDescriptorWithViews shadow(
             final IrisMetalWorldResources resources,
             final Supplier<String> label,
             final IrisMetalGlslLinker.LinkedRasterProgram program,
@@ -55,7 +54,7 @@ final class IrisMetalCorePipelineDescriptor {
                 drawBuffers,
                 clearColors,
                 clearDepth.isPresent() ? clearDepth.getAsDouble() : null
-        ).descriptor();
+        );
     }
 
     static int[] drawBuffers(final IrisMetalGlslLinker.LinkedRasterProgram program) {
