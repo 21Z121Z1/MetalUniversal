@@ -274,13 +274,34 @@ jobs:
           PLIST
             codesign --force --sign - --timestamp=none "$app"
             xcrun simctl install "$udid" "$app"
+
+            local container result output rc
+            container="$(xcrun simctl get_app_container "$udid" "$bundle" data)"
+            test -n "$container"
+            result="$container/tmp/metallum-ci-result.txt"
+            rm -f "$result"
+
             set +e
             output="$(xcrun simctl launch --console "$udid" "$bundle" 2>&1)"
             rc=$?
             set -e
             printf '%s\n' "$output"
-            test "$rc" -eq 0
-            grep -Fq "$expected" <<<"$output"
+            echo "simctl launch rc=$rc; awaiting app success sentinel at $result"
+
+            for attempt in $(seq 1 30); do
+              if [ -f "$result" ]; then
+                break
+              fi
+              sleep 1
+            done
+            if [ ! -f "$result" ]; then
+              echo "Simulator app did not persist its success sentinel." >&2
+              xcrun simctl spawn "$udid" log show --last 2m --style compact \
+                --predicate "process == '$name'" || true
+              exit 1
+            fi
+            cat "$result"
+            grep -Fq "$expected" "$result"
           }
           make_app "$RUNNER_TEMP/HostedMetalProbe" HostedMetalProbe com.metallum.ci.metalprobe HOSTED_METAL_GPU_PROBE_PASS
           make_app "$RUNNER_TEMP/MetalMRTProbe" MetalMRTProbe com.metallum.ci.mrtprobe 'MRT smoke passed'
