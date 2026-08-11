@@ -7967,10 +7967,14 @@ public func metallum_create_system_default_device() -> UnsafeMutableRawPointer? 
         // A mod cannot add MetalHUDEnabled to the host launcher's Info.plist,
         // so prime the equivalent documented environment switch here. The
         // persisted Sodium option supplies the layer request at next startup.
-        setenv("MTL_HUD_ENABLED", "1", 1)
+        if getenv("MTL_HUD_ENABLED") == nil {
+            setenv("MTL_HUD_ENABLED", "1", 1)
+        }
         // MetalFX registers its Temporal and Frame Interpolator sections only
         // when this separate switch is present before the effects are built.
-        setenv("MTLFX_HUD_ENABLED", "1", 1)
+        if getenv("MTLFX_HUD_ENABLED") == nil {
+            setenv("MTLFX_HUD_ENABLED", "1", 1)
+        }
         #endif
         return retainedPointer(MTLCreateSystemDefaultDevice())
     }

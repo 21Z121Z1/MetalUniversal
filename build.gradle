@@ -52,16 +52,37 @@ java {
 	}
 }
 
-// GitHub's hosted macOS 26 virtual GPU aborts when libMTLHud tries to enable
-// encoder counter sampling, even with both Metal validation layers disabled.
-// CI still compiles the native backend and GPU harnesses, but executes only
-// headless tests which do not create an MTLDevice. Real GPU/readback/window
-// validation remains part of every local Apple Silicon `build`.
+// GitHub's standard Apple Silicon macOS 26 runner exposes a paravirtual Metal
+// device and can execute proven offscreen command-buffer/readback workloads.
+// Keep capability classes separate: hosted-offscreen is opt-in after a probe,
+// while counter-sampling/MetalFX and presentation remain physical-only until
+// independently proven safe on the hosted device.
 def hostedCi = "true".equalsIgnoreCase(System.getenv("CI"))
 def metalApiValidation = hostedCi ? "0" : "1"
 def metalShaderValidation = hostedCi ? "0" : "1"
-def hardwareMetalValidationAvailable = {
-	org.gradle.internal.os.OperatingSystem.current().isMacOsX() && !hostedCi
+def isMacOSHost = org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+def hostedOffscreenMetalValidationAvailable = {
+	isMacOSHost && (hostedCi == false || "true".equalsIgnoreCase(System.getenv("METALLUM_HOSTED_METAL_OFFSCREEN")))
+}
+// Physical-only validation is capability-driven, never a blanket CI exclusion.
+// Every physical capability must document the concrete hardware/display reason.
+def physicalMetalCapabilities = [
+		"metalfx-runtime": "MTLFXTemporalScaler/FrameInterpolator execution requires MetalFX device support; GitHub's Apple Paravirtual device currently reports the Temporal Scaler unsupported.",
+		"presentation-windowserver": "CAMetalLayer/CAMetalDisplayLink pacing, resize, fullscreen and drawable acceptance require an attended WindowServer/display session.",
+		"gpu-counter-sampling": "Encoder-stage GPU counter sampling is not supported by GitHub's Apple Paravirtual Metal device."
+]
+def physicalMetalCapabilityAvailable = { String capability ->
+	def reason = physicalMetalCapabilities[capability]
+	if (reason == null || reason.isBlank()) {
+		throw new GradleException("Physical Metal capability '${capability}' is missing a concrete reason")
+	}
+	isMacOSHost && hostedCi == false
+}
+def metalFxValidationAvailable = {
+	physicalMetalCapabilityAvailable("metalfx-runtime")
+}
+def presentationMetalValidationAvailable = {
+	physicalMetalCapabilityAvailable("presentation-windowserver")
 }
 def renderContractSourceCommit = System.getProperty("metallum.validation.sourceCommit")
 if (renderContractSourceCommit == null || renderContractSourceCommit.isBlank()) {
@@ -93,14 +114,14 @@ tasks.test {
 	exclude "**/IrisMetalExternalLevelSamplerTest.class"
 	exclude "**/MetalIrisShaderTranslationTest.class"
 	exclude "**/MetalIrisSodiumTerrainTest.class"
-	if (hostedCi) {
-		exclude "**/IrisMetalPostChainCompilationTest.class"
-		exclude "**/IrisMetalShadowPipelineTest.class"
-		exclude "**/IrisMetalShadowComputeConformanceTest.class"
-		exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
-		exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
-		exclude "**/MetalRenderContractGpuIntegrationTest.class"
-	}
+	// GPU integrations are routed through explicit capability tasks instead of
+	// changing the generic unit-test suite according to CI=true/false.
+	exclude "**/IrisMetalPostChainCompilationTest.class"
+	exclude "**/IrisMetalShadowPipelineTest.class"
+	exclude "**/IrisMetalShadowComputeConformanceTest.class"
+	exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
+	exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
+	exclude "**/MetalRenderContractGpuIntegrationTest.class"
 	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
 		environment "MTL_DEBUG_LAYER", metalApiValidation
@@ -340,7 +361,7 @@ tasks.register("compileMetalMrtSmokeTest", Exec) {
 
 tasks.register("metalMrtSmokeTest", Exec) {
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn "compileMetalMrtSmokeTest"
 	commandLine metalMrtSmokeBinary.absolutePath
@@ -604,8 +625,8 @@ tasks.register("metalFrameGenerationPresentationValidation", Exec) {
 	group = "verification"
 	description = "Runs an automatic visible-window CAMetalDisplayLink pacing, resize and shutdown validation."
 	onlyIf {
-		if (hostedCi) {
-			logger.lifecycle("metalFrameGenerationPresentationValidation SKIPPED: hosted CI has no attended WindowServer surface")
+		if (!presentationMetalValidationAvailable()) {
+			logger.lifecycle("metalFrameGenerationPresentationValidation SKIPPED: requires physical capability presentation-windowserver")
 			return false
 		}
 		def reason = presentationValidationSkipReason()
@@ -691,7 +712,7 @@ tasks.register("metalFxOffscreenValidation", Exec) {
 	group = "verification"
 	description = "Runs windowless MRT, motion, Temporal Scaler and Frame Interpolator GPU readback validation."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		metalFxValidationAvailable()
 	}
 	dependsOn "compileMetalFxOffscreenValidation"
 	doFirst {
@@ -726,7 +747,7 @@ tasks.register("compileMetalFxPerformanceValidation", Exec) {
 tasks.register("metalFxPerformanceValidation", Exec) {
 	group = "verification"
 	description = "Measures Temporal and FrameInterpolator GPU cost across production resolutions."
-	onlyIf { !hostedCi && presentationValidationSkipReason() == null }
+	onlyIf { metalFxValidationAvailable() && presentationValidationSkipReason() == null }
 	dependsOn "compileMetalFxPerformanceValidation"
 	doFirst { delete file("${buildDir}/metal-validation/performance-current") }
 	environment "MTL_SHADER_VALIDATION", "0"
@@ -738,7 +759,7 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Java RenderPass -> FFM -> Swift indexed MRT GPU readback integration suite."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -769,7 +790,7 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS backend and Iris compute/SSBO/image/mipmap GPU readback suites."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -798,7 +819,7 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Iris target framework (ping-pong/depthtex/center-depth/shadow) content-level GPU suite."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -2821,7 +2842,7 @@ tasks.register("renderContractUnitTest", Test) {
 def configureRenderContractNativeTest = { Test task, boolean metal4 ->
 	task.group = "verification"
 	task.description = "Runs render-contract production GPU integration tests with Metal ${metal4 ? 4 : 3}."
-	task.onlyIf { hardwareMetalValidationAvailable() }
+	task.onlyIf { hostedOffscreenMetalValidationAvailable() }
 	task.dependsOn tasks.named("buildMacNative")
 	task.testClassesDirs = sourceSets.test.output.classesDirs
 	task.classpath = sourceSets.test.runtimeClasspath
@@ -3140,4 +3161,78 @@ tasks.named("renderContractSyntheticValidation").configure {
 }
 tasks.named("renderContractCase").configure {
 	finalizedBy("renderContractPostRunCleanup")
+}
+
+
+// ---- Hosted Metal capability-governed integration suite ----
+// Repository-owned, redistributable tests proven to execute offscreen Metal
+// command submission/readback on GitHub's Apple Silicon macOS runner.
+tasks.register("hostedMetalExtendedIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs redistributable offscreen Metal/Iris integrations on a proven hosted Metal device."
+	onlyIf { hostedOffscreenMetalValidationAvailable() }
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalBundledPostChainCompilationTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalBundledTerrainPipelineTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalShadowPipelineTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalComputeConformanceTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalExternalLevelSamplerTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
+		failOnNoMatchingTests = true
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "0"
+	environment "MTL_SHADER_VALIDATION", "0"
+	environment "MTL_HUD_ENABLED", "0"
+	environment "MTLFX_HUD_ENABLED", "0"
+	systemProperty "metallum.metal.hud", "false"
+	systemProperty "metallum.validation.gpuPassTiming", "false"
+}
+
+// Mechanical guardrail: new blanket CI exclusions or unnamed physical-only
+// gates fail verification. New physical requirements must be centralized in
+// physicalMetalCapabilities with a concrete capability reason.
+tasks.register("verifyMetalCapabilityPolicy") {
+	group = "verification"
+	description = "Rejects blanket CI GPU exclusions and undocumented physical-only Metal gates."
+	inputs.file("build.gradle")
+	doLast {
+		def policyText = file("build.gradle").getText("UTF-8")
+		// Assemble forbidden spellings at runtime so this guard does not match
+		// its own implementation while scanning build.gradle.
+		def forbidden = [
+			"physicalMetal" + "ValidationAvailable",
+			"if (" + "hostedCi)",
+			"onlyIf { " + "!hostedCi",
+			"onlyIf {" + "!hostedCi"
+		]
+		def violations = forbidden.findAll { policyText.contains(it) }
+		if (!violations.isEmpty()) {
+			throw new GradleException("Blanket CI/physical Metal gating is forbidden: ${violations}")
+		}
+		def rawPredicateNeedle = "hostedCi" + " == false"
+		def rawPhysicalLines = policyText.readLines().findAll { it.contains(rawPredicateNeedle) }
+		def allowedRawPhysicalLines = [
+			'	isMacOSHost && (' + rawPredicateNeedle + ' || "true".equalsIgnoreCase(System.getenv("METALLUM_HOSTED_METAL_OFFSCREEN")))',
+			'	isMacOSHost && ' + rawPredicateNeedle
+		]
+		def unexpectedRaw = rawPhysicalLines.findAll { !allowedRawPhysicalLines.contains(it) }
+		if (!unexpectedRaw.isEmpty() || rawPhysicalLines.size() != allowedRawPhysicalLines.size()) {
+			throw new GradleException("Raw hostedCi physical predicates must stay centralized in capability policy: ${rawPhysicalLines}")
+		}
+		def undocumented = physicalMetalCapabilities.findAll { key, value -> value == null || value.trim().isEmpty() }
+		if (!undocumented.isEmpty()) {
+			throw new GradleException("Physical Metal capabilities require concrete reasons: ${undocumented.keySet()}")
+		}
+		logger.lifecycle("Metal capability policy: PASS (${physicalMetalCapabilities.size()} documented physical capabilities)")
+	}
 }
