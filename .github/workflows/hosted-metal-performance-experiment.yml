@@ -1,0 +1,111 @@
+name: hosted-metal-performance-experiment
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - experiment/hosted-metal-performance-ci
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hosted-metal-performance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render-state-packet-abba:
+    name: render state packet ABBA
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v6
+
+      - name: Describe hosted Apple Silicon runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          sw_vers
+          system_profiler SPHardwareDataType SPDisplaysDataType || true
+          test "$(uname -m)" = "arm64"
+
+      - name: Prove real hosted Metal compute and readback
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -framework Metal \
+            .github/ci/HostedMetalCapabilityProbe.swift \
+            -o "$RUNNER_TEMP/hosted-metal-gpu-probe"
+          "$RUNNER_TEMP/hosted-metal-gpu-probe" | tee "$RUNNER_TEMP/hosted-metal-capability.txt"
+          grep -Fq 'HOSTED_METAL_GPU_PROBE_PASS' "$RUNNER_TEMP/hosted-metal-capability.txt"
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Build production native bridge and benchmark classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace buildMacNative testClasses
+
+      - name: Run same-runner legacy/packet ABBA experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/hosted-metal-perf"
+
+          run_case() {
+            local packet_enabled="$1"
+            local label="$2"
+            echo "=== hosted Metal performance case: $label renderStatePacket=$packet_enabled ==="
+            rm -rf build/hosted-metal-perf
+            JAVA_TOOL_OPTIONS="-Dmetallum.perf.hosted=true -Dmetallum.opt.renderCommandPacket=false -Dmetallum.opt.renderStatePacket=${packet_enabled} -Dmetallum.opt.encoderStateShadow=true -Dmetallum.hotpath.telemetry=true" \
+              ./gradlew --no-daemon --stacktrace cleanTest test \
+                --tests com.metallum.client.metal.render.HostedMetalStateSubmissionBenchmark
+            test -s build/hosted-metal-perf/state-submission.json
+            cp build/hosted-metal-perf/state-submission.json \
+              "$RUNNER_TEMP/hosted-metal-perf/${label}.json"
+          }
+
+          # ABBA order controls first-order runner drift without crossing VM/job boundaries.
+          run_case false legacy-a
+          run_case true  packet-a
+          run_case true  packet-b
+          run_case false legacy-b
+
+      - name: Analyze paired measurements
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/ci/analyze_hosted_metal_perf.py \
+            --legacy-a "$RUNNER_TEMP/hosted-metal-perf/legacy-a.json" \
+            --packet-a "$RUNNER_TEMP/hosted-metal-perf/packet-a.json" \
+            --packet-b "$RUNNER_TEMP/hosted-metal-perf/packet-b.json" \
+            --legacy-b "$RUNNER_TEMP/hosted-metal-perf/legacy-b.json" \
+            --output "$RUNNER_TEMP/hosted-metal-perf/summary.json"
+
+      - name: Preserve experiment evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hosted-metal-performance-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/hosted-metal-capability.txt
+            ${{ runner.temp }}/hosted-metal-perf/*.json
+            build/reports/tests/**
+            build/test-results/**
