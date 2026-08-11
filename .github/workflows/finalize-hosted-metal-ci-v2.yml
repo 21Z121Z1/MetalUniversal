@@ -18,20 +18,14 @@ jobs:
           fetch-depth: 0
       - name: Apply final capability policy migration
         run: python3 .github/ci/finalize_hosted_metal_ci.py
-      - name: Commit final CI policy and remove migration scaffolding
+      - name: Commit production Gradle capability policy only
         shell: bash
         run: |
           set -euo pipefail
-          git rm -f .github/ci/hosted-metal-offscreen.gradle
-          git rm -f .github/ci/hosted-metal-required.gradle
-          git rm -f .github/ci/finalize_hosted_metal_ci.py
-          git rm -f .github/workflows/hosted-metal-hud-capability.yml
-          git rm -f .github/workflows/hosted-metalfx-offscreen-probe.yml
-          git rm -f .github/workflows/finalize-hosted-metal-ci-v2.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add build.gradle .github/workflows/hosted-metal-gpu-probe.yml
-          git diff --check
+          git add build.gradle
+          git diff --check --cached
           git diff --cached --stat
-          git commit -m 'ci: formalize hosted Metal capability policy'
+          git commit -m 'build: formalize Metal capability policy'
           git push origin HEAD:ci/hosted-metal-gpu-probe-20260810
