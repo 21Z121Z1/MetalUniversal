@@ -30,6 +30,11 @@ jobs:
     # hosted-metal workflow; only capabilities requiring a physical/display
     # device remain outside GitHub-hosted runtime acceptance.
     runs-on: macos-26
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
@@ -65,7 +70,10 @@ jobs:
       - name: build
         # Keep this lane build-focused to avoid duplicating the dedicated
         # hosted offscreen Metal suite. Physical-only MetalFX/presentation
-        # harnesses are still compiled by the capability workflow.
+        # harnesses are still compiled by the capability workflow. The HUD is
+        # disabled here because encoder-stage counter sampling is unsupported
+        # by GitHub's Apple Paravirtual device; HUD semantics are tested in the
+        # dedicated metalHudRuntimeTest with an explicit opt-in.
         run: >-
           ./gradlew buildMacNative build
           -x metalFrameGenerationPresentationValidation
