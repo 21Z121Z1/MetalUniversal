@@ -19,11 +19,16 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     # Keep release artifacts tied to the current macOS 26 SDK and arm64 ABI.
-    # Hosted runners cannot serve as a visual or physical-GPU acceptance gate;
-    # build.gradle keeps those executions local while CI compiles their code.
+    # Actual hosted offscreen GPU execution/readback lives in the dedicated
+    # hosted-metal workflow; only capabilities requiring a physical/display
+    # device remain outside GitHub-hosted runtime acceptance.
     runs-on: macos-26
     steps:
       - name: checkout repository
@@ -58,10 +63,9 @@ jobs:
           echo "=== MTLFXFrameInterpolator.h ==="
           cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXFrameInterpolator.h" 2>/dev/null
       - name: build
-        # The hosted virtual GPU aborts in libMTLHud counter sampling even when
-        # Metal validation is disabled. CI therefore runs compilation and
-        # headless tests only; physical-GPU readbacks and CAMetalLayer visual
-        # acceptance are local release evidence.
+        # Keep this lane build-focused to avoid duplicating the dedicated
+        # hosted offscreen Metal suite. Physical-only MetalFX/presentation
+        # harnesses are still compiled by the capability workflow.
         run: >-
           ./gradlew buildMacNative build
           -x metalFrameGenerationPresentationValidation
