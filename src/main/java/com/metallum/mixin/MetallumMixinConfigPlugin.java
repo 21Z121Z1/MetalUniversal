@@ -36,6 +36,14 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.DefaultChunkRendererTerrainIcbScopeMixin";
     private static final String SODIUM_ARENA_REUSE_FIX_MIXIN =
             "com.metallum.mixin.sodium.GlBufferArenaReuseFixMixin";
+    private static final Set<String> TERRAIN_MESH_GENERATION_MIXINS = Set.of(
+            "com.metallum.mixin.sodium.TerrainChunkBuildOutputGenerationMixin",
+            "com.metallum.mixin.sodium.TerrainChunkBuilderMeshingGenerationMixin",
+            "com.metallum.mixin.sodium.RenderSectionTerrainGenerationMixin",
+            "com.metallum.mixin.sodium.RenderSectionManagerTerrainGenerationMixin",
+            "com.metallum.mixin.sodium.RenderRegionTerrainGenerationMixin",
+            "com.metallum.mixin.sodium.DefaultChunkRendererTerrainGenerationMixin"
+    );
     static final String SODIUM_ARENA_REUSE_PROTECTION_PROPERTY =
             "metallum.opt.sodiumDisableArenaBufferReuse";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
@@ -95,6 +103,11 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                     && Boolean.parseBoolean(System.getProperty(
                             "metallum.opt.metal4MainRenderer", "false"))
                     && FabricLoader.getInstance().isModLoaded("sodium")
+                    && this.isDefaultGraphicsApi;
+        }
+        if (TERRAIN_MESH_GENERATION_MIXINS.contains(mixinClassName)) {
+            return FabricLoader.getInstance().isModLoaded("sodium")
+                    && FabricLoader.getInstance().isModLoaded("iris")
                     && this.isDefaultGraphicsApi;
         }
         if (mixinClassName.contains(".mixin.sodium.")) {

@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
+import com.metallum.client.terrain.TerrainMeshGeneration;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.systems.CommandEncoder;
@@ -417,6 +418,11 @@ public final class IrisMetalPipelineOverrides {
             return;
         }
         active = instance;
+        TerrainMeshGeneration.publishIris(
+                instance.generation,
+                instance.terrainMaterialMapGeneration
+        );
+        invalidateTerrainMeshes();
         IrisMetalPackLifecycle.onSemanticPipelineSelected(instance.generation());
         IrisMetalPassTrace.activate(instance.programSet, instance.generation());
     }
@@ -433,6 +439,8 @@ public final class IrisMetalPipelineOverrides {
         boolean wasActive = active == expected;
         if (wasActive) {
             active = null;
+            TerrainMeshGeneration.beginShadersOffTransition();
+            invalidateTerrainMeshes();
         }
         expected.close();
         if (wasActive) {
@@ -609,6 +617,43 @@ public final class IrisMetalPipelineOverrides {
     }
 
     /**
+     * Publishes the material maps before Sodium's matching all-chunks rebuild
+     * is queued. Workers that began under the pre-map epoch are then rejected
+     * at the build-result boundary instead of racing the first Iris frame.
+     */
+    static void markTerrainMaterialMappingsReady(final Instance expected) {
+        if (active != expected) {
+            return;
+        }
+        if (expected.terrainMaterialMapGeneration == Integer.MAX_VALUE) {
+            throw new IllegalStateException(
+                    "Terrain material-map generation exhausted for Iris generation "
+                            + expected.generation
+            );
+        }
+        expected.terrainMaterialMapGeneration++;
+        TerrainMeshGeneration.publishIris(
+                expected.generation,
+                expected.terrainMaterialMapGeneration
+        );
+        invalidateTerrainMeshes();
+    }
+
+    /** Called after Iris's real vanilla pipeline has restored the compact ABI. */
+    public static void markShadersOffPipelineReady() {
+        if (active == null && TerrainMeshGeneration.completeShadersOffTransition()) {
+            invalidateTerrainMeshes();
+        }
+    }
+
+    private static void invalidateTerrainMeshes() {
+        Minecraft client = Minecraft.getInstance();
+        if (client != null && client.level != null && client.levelExtractor != null) {
+            client.levelExtractor.allChanged();
+        }
+    }
+
+    /**
      * Pipeline-compile hook. Returns a compiled override for recognized sodium
      * terrain pipelines while a pack runtime is active, or {@code null} to let
      * the caller compile the pipeline natively.
@@ -689,6 +734,8 @@ public final class IrisMetalPipelineOverrides {
         private boolean reportedMissingVertexFormat;
         private boolean closed;
         private int corePipelineSequence;
+        /** Zero until the loaded world's block/material maps are published. */
+        private int terrainMaterialMapGeneration;
 
         private record CorePipelineKey(RenderPipeline source, ShaderKey key) {
         }

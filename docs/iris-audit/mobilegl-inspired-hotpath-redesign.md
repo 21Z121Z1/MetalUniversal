@@ -333,6 +333,50 @@ packet path is then disabled for that encoder.
 - single-entry bypasses;
 - capacity flushes.
 
+### 12. Generation-stamped Sodium terrain mesh ABI
+
+Iris changes Sodium's chunk vertex format before it lazily publishes the
+world-owned block/material maps. A worker may still be meshing while a shader
+pack reload, dimension selection, shaders-off transition or first material-map
+publication changes those inputs. A submission-only pipeline generation is not
+enough: the material-map epoch and every intervening ABI transition are part of
+mesh identity.
+
+`TerrainMeshGeneration.Stamp` is one immutable snapshot containing:
+
+- a monotonically increasing epoch, preventing A-to-B-to-A acceptance;
+- the selected Iris pipeline generation, or the shaders-off sentinel;
+- the material-map generation;
+- whether the destination ABI is ready to accept builds;
+- whether region validation is required.
+
+The meshing task captures a Stamp at `execute` entry and writes it into the
+result at return. Sodium's separate render-thread empty-section result is
+stamped at construction because it does not pass through the worker task.
+`RenderSectionManager.applyBuildOutputs` rejects a non-current result, joins a
+normal rebuild into the existing pending flags and marks the task graph dirty.
+It intentionally does not destroy the result: Sodium's outer
+`processChunkBuilds` loop remains the single result owner and releases it once.
+
+An accepted result stamps its section at the exact `updateWithResult` publish
+boundary. Both `RenderRegion.getStorage` reads in `DefaultChunkRenderer` then
+fail closed while any geometry-bearing section belongs to another epoch. The
+region caches the answer by `(epoch, section-state revision)`, so a stable frame
+does not scan all 256 section slots repeatedly. Empty sections and sections
+containing only block entities do not block terrain because they have no chunk
+mesh ABI.
+
+Shaders-off has two distinct cases:
+
+- a process that never selected Iris remains on the initial bypass Stamp;
+- disabling Iris first publishes a not-ready Stamp, then publishes a ready
+  shaders-off Stamp only after `VanillaRenderingPipeline` restores Sodium's
+  compact vertex format.
+
+This closes the teardown gap in which a worker could otherwise capture a new
+shaders-off identity while still reading the old XHFP format. It is a
+correctness boundary, not a measured FPS optimization.
+
 ## Runtime switches
 
 ```text
@@ -432,7 +476,11 @@ The branch adds or expands tests for:
 - Darwin Metallum image-name filtering;
 - append-only native interface header/entry parsing;
 - render-state packet fixed-width field layout and float-bit encoding;
-- packet close behavior.
+- packet close behavior;
+- terrain pipeline/material-map Stamp publication and A-to-B-to-A rejection;
+- the two-phase Iris-to-compact shaders-off transition;
+- exact Sodium 0.9.1 worker, publish, destruction-owner and dual-storage-read
+  bytecode contracts.
 
 These tests still need to be executed by Gradle/CI; their presence is not itself
 build evidence.

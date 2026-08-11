@@ -282,7 +282,10 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         settings.setBlockTypeIds(BlockMaterialMapping.createBlockTypeMap(
                 this.pack.getIdMap().getBlockRenderTypeMap()
         ));
-        Minecraft.getInstance().levelExtractor.allChanged();
+        // Publish the new map epoch before queuing builds. A worker that began
+        // against the pre-map state retains the older immutable stamp and is
+        // rejected when its result reaches Sodium's render-thread boundary.
+        IrisMetalPipelineOverrides.markTerrainMaterialMappingsReady(this.overrides);
     }
 
     /**
