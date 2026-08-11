@@ -32,6 +32,14 @@ final class SodiumTerrainMeshGenerationContractTest {
             "net/caffeinemc/mods/sodium/client/render/chunk/RenderSectionManager";
     private static final String CHUNK_RENDERER =
             "net/caffeinemc/mods/sodium/client/render/chunk/DefaultChunkRenderer";
+    private static final String TERRAIN_ICB_SCOPE_MIXIN =
+            "com/metallum/mixin/sodium/DefaultChunkRendererTerrainIcbScopeMixin";
+    private static final String TERRAIN_ICB_SCOPE =
+            "com/metallum/client/metal/render/MetalTerrainIcbScope";
+    private static final String WRAP_OPERATION =
+            "com/llamalad7/mixinextras/injector/wrapoperation/Operation";
+    private static final String WRAP_METHOD_ANNOTATION =
+            "Lcom/llamalad7/mixinextras/injector/wrapmethod/WrapMethod;";
     private static final String VANILLA_PIPELINE =
             "net/irisshaders/iris/pipeline/VanillaRenderingPipeline";
     private static final String WORLD_RENDERING_SETTINGS =
@@ -175,6 +183,47 @@ final class SodiumTerrainMeshGenerationContractTest {
         assertTrue(restoresCompact,
                 "Iris VanillaRenderingPipeline no longer restores ChunkMeshFormats.COMPACT;"
                         + " audit the shaders-off ready hook");
+    }
+
+    @Test
+    void terrainIcbScopeWrapperHasAnExceptionFinallyForTheExactRenderer() throws IOException {
+        MethodNode render = requireMethod(
+                readClass(CHUNK_RENDERER),
+                "render",
+                "(Lnet/caffeinemc/mods/sodium/client/render/chunk/ChunkRenderMatrices;"
+                        + "Lnet/caffeinemc/mods/sodium/client/render/chunk/lists/ChunkRenderListIterable;"
+                        + TERRAIN_PASS
+                        + "Lnet/caffeinemc/mods/sodium/client/render/viewport/CameraTransform;"
+                        + "Lnet/caffeinemc/mods/sodium/client/util/FogParameters;Z"
+                        + "Lcom/mojang/blaze3d/textures/GpuSampler;"
+                        + "Lcom/mojang/blaze3d/buffers/GpuBufferSlice;"
+                        + "Lcom/mojang/blaze3d/buffers/GpuBuffer;)V"
+        );
+        assertNotNull(render, "Sodium changed the renderer method wrapped for terrain ICB scope");
+
+        MethodNode wrapper = requireMethod(
+                readClass(TERRAIN_ICB_SCOPE_MIXIN),
+                "metallum$renderInTerrainIcbScope",
+                "(Lnet/caffeinemc/mods/sodium/client/render/chunk/ChunkRenderMatrices;"
+                        + "Lnet/caffeinemc/mods/sodium/client/render/chunk/lists/ChunkRenderListIterable;"
+                        + TERRAIN_PASS
+                        + "Lnet/caffeinemc/mods/sodium/client/render/viewport/CameraTransform;"
+                        + "Lnet/caffeinemc/mods/sodium/client/util/FogParameters;Z"
+                        + "Lcom/mojang/blaze3d/textures/GpuSampler;"
+                        + "Lcom/mojang/blaze3d/buffers/GpuBufferSlice;"
+                        + "Lcom/mojang/blaze3d/buffers/GpuBuffer;"
+                        + "L" + WRAP_OPERATION + ";)V"
+        );
+        assertTrue(wrapper.visibleAnnotations != null
+                        && wrapper.visibleAnnotations.stream()
+                        .anyMatch(annotation -> WRAP_METHOD_ANNOTATION.equals(annotation.desc)),
+                "terrain ICB scope mixin is not registered as a method wrapper");
+        assertEquals(1, countCalls(wrapper, TERRAIN_ICB_SCOPE, "enter", "()V"));
+        assertEquals(2, countCalls(wrapper, TERRAIN_ICB_SCOPE, "exit", "()V"),
+                "the normal and exceptional finally paths must both unwind the scope");
+        assertEquals(1, countCalls(wrapper, WRAP_OPERATION, "call", "([Ljava/lang/Object;)Ljava/lang/Object;"));
+        assertTrue(!wrapper.tryCatchBlocks.isEmpty(),
+                "terrain ICB scope wrapper has no exception handler; a renderer failure would leak scope");
     }
 
     private static ClassNode readClass(final String name) throws IOException {

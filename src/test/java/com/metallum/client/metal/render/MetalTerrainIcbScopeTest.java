@@ -48,4 +48,19 @@ final class MetalTerrainIcbScopeTest {
     void underflowFailsLoudly() {
         assertThrows(IllegalStateException.class, MetalTerrainIcbScope::exit);
     }
+
+    @Test
+    void scopeCanBeUnwoundWhenTheWrappedRendererThrows() {
+        MetalTerrainIcbScope.enter();
+        try {
+            assertThrows(IllegalStateException.class, () -> {
+                throw new IllegalStateException("synthetic renderer failure");
+            });
+        } finally {
+            MetalTerrainIcbScope.exit();
+        }
+
+        assertFalse(MetalTerrainIcbScope.active());
+        assertEquals(0, MetalTerrainIcbScope.depthForTest());
+    }
 }
