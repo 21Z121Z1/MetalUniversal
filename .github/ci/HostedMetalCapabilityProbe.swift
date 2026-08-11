@@ -16,6 +16,14 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     if !condition() { throw ProbeError.message(message) }
 }
 
+func persistSimulatorResult(_ message: String) throws {
+#if targetEnvironment(simulator)
+    let resultURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("metallum-ci-result.txt", isDirectory: false)
+    try message.write(to: resultURL, atomically: true, encoding: .utf8)
+#endif
+}
+
 let source = """
 #include <metal_stdlib>
 using namespace metal;
@@ -98,7 +106,9 @@ do {
         }
     }
 
-    print("HOSTED_METAL_GPU_PROBE_PASS device=\(device.name) elements=\(elementCount) formula=i*3+7")
+    let success = "HOSTED_METAL_GPU_PROBE_PASS device=\(device.name) elements=\(elementCount) formula=i*3+7"
+    print(success)
+    try persistSimulatorResult(success)
 } catch {
     fputs("HOSTED_METAL_GPU_PROBE_FAIL: \(error)\n", stderr)
     exit(1)
