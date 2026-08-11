@@ -9,6 +9,8 @@ import org.junit.jupiter.api.condition.OS;
 
 import java.io.IOException;
 import java.lang.foreign.MemorySegment;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -19,20 +21,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Same-JVM paired benchmark for the two state-submission mechanisms themselves.
  *
- * <p>Both paths use the same process, device, queue, render target, critical FFM
- * setters and native encoder ABI. The packet path explicitly serializes the same
- * five state changes into {@link MetalRenderStatePacket}; the legacy path invokes
- * the corresponding native setters directly. Pair order alternates every sample,
- * so JIT/host load drift affects both sides locally instead of being confounded
- * with separate Gradle test workers.</p>
+ * <p>Wall-clock is retained because it is frame-latency relevant, but current-thread
+ * CPU time is the primary hosted-runner metric. GitHub's virtual CPU can be descheduled
+ * by its host; thread CPU time removes that wait from a CPU-side Java/FFM hot-path
+ * comparison while still accounting for native work executed by the render thread.</p>
  */
 @EnabledOnOs(OS.MAC)
 final class HostedMetalStatePathPairedBenchmark {
-    private static final int WARMUP_PAIRS = 8;
-    private static final int RECORDED_PAIRS = 32;
-    private static final int ITERATIONS_PER_SAMPLE = 2_048;
+    private static final int WARMUP_PAIRS = 4;
+    private static final int RECORDED_PAIRS = 20;
+    private static final int ITERATIONS_PER_SAMPLE = 8_192;
     private static final int STATE_OPS_PER_ITERATION = 5;
     private static final int PACKET_CAPACITY = 256;
+    private static final ThreadMXBean THREAD_BEAN = ManagementFactory.getThreadMXBean();
 
     @Test
     void compareDirectCriticalFfmWithPacketDecodeInOneJvm() throws IOException {
@@ -44,6 +45,14 @@ final class HostedMetalStatePathPairedBenchmark {
                 MetalRenderStatePacketBridge.available(),
                 "render-state packet native ABI is unavailable"
         );
+        assertTrue(
+                THREAD_BEAN.isCurrentThreadCpuTimeSupported(),
+                "current-thread CPU time is unavailable on this runner"
+        );
+        if (!THREAD_BEAN.isThreadCpuTimeEnabled()) {
+            THREAD_BEAN.setThreadCpuTimeEnabled(true);
+        }
+        assertTrue(THREAD_BEAN.getCurrentThreadCpuTime() >= 0L, "thread CPU clock is unavailable");
 
         try (HostedMetalBenchmarkFixture fixture = new HostedMetalBenchmarkFixture()) {
             for (int pair = 0; pair < WARMUP_PAIRS; pair++) {
@@ -56,17 +65,20 @@ final class HostedMetalStatePathPairedBenchmark {
                 }
             }
 
-            long[] legacySamples = new long[RECORDED_PAIRS];
-            long[] packetSamples = new long[RECORDED_PAIRS];
-            double[] pairedDeltaPercent = new double[RECORDED_PAIRS];
-            double[] legacyFirstDeltas = new double[RECORDED_PAIRS / 2];
-            double[] packetFirstDeltas = new double[RECORDED_PAIRS / 2];
+            long[] legacyWall = new long[RECORDED_PAIRS];
+            long[] packetWall = new long[RECORDED_PAIRS];
+            long[] legacyCpu = new long[RECORDED_PAIRS];
+            long[] packetCpu = new long[RECORDED_PAIRS];
+            double[] pairedWallDelta = new double[RECORDED_PAIRS];
+            double[] pairedCpuDelta = new double[RECORDED_PAIRS];
+            double[] legacyFirstCpuDeltas = new double[RECORDED_PAIRS / 2];
+            double[] packetFirstCpuDeltas = new double[RECORDED_PAIRS / 2];
             int legacyFirstIndex = 0;
             int packetFirstIndex = 0;
 
             for (int pair = 0; pair < RECORDED_PAIRS; pair++) {
-                long legacy;
-                long packet;
+                Sample legacy;
+                Sample packet;
                 if ((pair & 1) == 0) {
                     legacy = runLegacySample(fixture);
                     packet = runPacketSample(fixture);
@@ -74,31 +86,38 @@ final class HostedMetalStatePathPairedBenchmark {
                     packet = runPacketSample(fixture);
                     legacy = runLegacySample(fixture);
                 }
-                legacySamples[pair] = legacy;
-                packetSamples[pair] = packet;
-                double delta = percentChange(packet, legacy);
-                pairedDeltaPercent[pair] = delta;
+                legacyWall[pair] = legacy.wallNs();
+                packetWall[pair] = packet.wallNs();
+                legacyCpu[pair] = legacy.cpuNs();
+                packetCpu[pair] = packet.cpuNs();
+                pairedWallDelta[pair] = percentChange(packet.wallNs(), legacy.wallNs());
+                double cpuDelta = percentChange(packet.cpuNs(), legacy.cpuNs());
+                pairedCpuDelta[pair] = cpuDelta;
                 if ((pair & 1) == 0) {
-                    legacyFirstDeltas[legacyFirstIndex++] = delta;
+                    legacyFirstCpuDeltas[legacyFirstIndex++] = cpuDelta;
                 } else {
-                    packetFirstDeltas[packetFirstIndex++] = delta;
+                    packetFirstCpuDeltas[packetFirstIndex++] = cpuDelta;
                 }
             }
 
             writeResult(
-                    legacySamples,
-                    packetSamples,
-                    pairedDeltaPercent,
-                    legacyFirstDeltas,
-                    packetFirstDeltas
+                    legacyWall,
+                    packetWall,
+                    legacyCpu,
+                    packetCpu,
+                    pairedWallDelta,
+                    pairedCpuDelta,
+                    legacyFirstCpuDeltas,
+                    packetFirstCpuDeltas
             );
         }
     }
 
-    private static long runLegacySample(final HostedMetalBenchmarkFixture fixture) {
+    private static Sample runLegacySample(final HostedMetalBenchmarkFixture fixture) {
         MTLRenderCommandEncoder encoder = fixture.makeRenderEncoder();
         MemorySegment handle = encoder.handle();
-        long start = System.nanoTime();
+        long wallStart = System.nanoTime();
+        long cpuStart = THREAD_BEAN.getCurrentThreadCpuTime();
         for (int iteration = 0; iteration < ITERATIONS_PER_SAMPLE; iteration++) {
             boolean alternate = (iteration & 1) != 0;
             MetalNativeBridge.MTLRenderCommandEncoder_setDepthBias(
@@ -128,18 +147,20 @@ final class HostedMetalStatePathPairedBenchmark {
             );
         }
         encoder.endEncoding();
-        long elapsed = System.nanoTime() - start;
+        long cpuElapsed = THREAD_BEAN.getCurrentThreadCpuTime() - cpuStart;
+        long wallElapsed = System.nanoTime() - wallStart;
         fixture.submitAndWait();
-        return elapsed;
+        return new Sample(wallElapsed, cpuElapsed);
     }
 
-    private static long runPacketSample(final HostedMetalBenchmarkFixture fixture) {
+    private static Sample runPacketSample(final HostedMetalBenchmarkFixture fixture) {
         MTLRenderCommandEncoder encoder = fixture.makeRenderEncoder();
         MemorySegment handle = encoder.handle();
         MetalRenderStatePacket packet = new MetalRenderStatePacket(PACKET_CAPACITY);
-        long elapsed;
+        Sample sample;
         try {
-            long start = System.nanoTime();
+            long wallStart = System.nanoTime();
+            long cpuStart = THREAD_BEAN.getCurrentThreadCpuTime();
             for (int iteration = 0; iteration < ITERATIONS_PER_SAMPLE; iteration++) {
                 boolean alternate = (iteration & 1) != 0;
                 packet.appendDepthBias(
@@ -170,36 +191,42 @@ final class HostedMetalStatePathPairedBenchmark {
             }
             packet.flush(handle);
             encoder.endEncoding();
-            elapsed = System.nanoTime() - start;
+            long cpuElapsed = THREAD_BEAN.getCurrentThreadCpuTime() - cpuStart;
+            long wallElapsed = System.nanoTime() - wallStart;
+            sample = new Sample(wallElapsed, cpuElapsed);
             assertTrue(packet.active(), "packet ABI failed and replayed legacy setters");
         } finally {
             packet.close();
         }
         fixture.submitAndWait();
-        return elapsed;
+        return sample;
     }
 
     private static void writeResult(
-            final long[] legacySamples,
-            final long[] packetSamples,
-            final double[] pairedDeltas,
-            final double[] legacyFirstDeltas,
-            final double[] packetFirstDeltas
+            final long[] legacyWall,
+            final long[] packetWall,
+            final long[] legacyCpu,
+            final long[] packetCpu,
+            final double[] pairedWallDelta,
+            final double[] pairedCpuDelta,
+            final double[] legacyFirstCpuDeltas,
+            final double[] packetFirstCpuDeltas
     ) throws IOException {
-        long[] legacySorted = legacySamples.clone();
-        long[] packetSorted = packetSamples.clone();
-        double[] pairedSorted = pairedDeltas.clone();
-        double[] legacyFirstSorted = legacyFirstDeltas.clone();
-        double[] packetFirstSorted = packetFirstDeltas.clone();
-        Arrays.sort(legacySorted);
-        Arrays.sort(packetSorted);
-        Arrays.sort(pairedSorted);
-        Arrays.sort(legacyFirstSorted);
-        Arrays.sort(packetFirstSorted);
+        long[] legacyWallSorted = sorted(legacyWall);
+        long[] packetWallSorted = sorted(packetWall);
+        long[] legacyCpuSorted = sorted(legacyCpu);
+        long[] packetCpuSorted = sorted(packetCpu);
+        double[] pairedWallSorted = sorted(pairedWallDelta);
+        double[] pairedCpuSorted = sorted(pairedCpuDelta);
+        double[] legacyFirstCpuSorted = sorted(legacyFirstCpuDeltas);
+        double[] packetFirstCpuSorted = sorted(packetFirstCpuDeltas);
 
-        double legacyMedian = median(legacySorted);
-        double packetMedian = median(packetSorted);
-        double pairedMedianDelta = median(pairedSorted);
+        double legacyWallMedian = median(legacyWallSorted);
+        double packetWallMedian = median(packetWallSorted);
+        double legacyCpuMedian = median(legacyCpuSorted);
+        double packetCpuMedian = median(packetCpuSorted);
+        double pairedWallMedianDelta = median(pairedWallSorted);
+        double pairedCpuMedianDelta = median(pairedCpuSorted);
         double opsPerSample = ITERATIONS_PER_SAMPLE * (double) STATE_OPS_PER_ITERATION;
 
         Path output = Path.of("build", "hosted-metal-perf", "in-jvm-paired.json");
@@ -208,27 +235,36 @@ final class HostedMetalStatePathPairedBenchmark {
                 Locale.ROOT,
                 """
                 {
-                  \"schema\": 1,
+                  \"schema\": 2,
                   \"benchmark\": \"render-state-path-in-jvm-paired\",
+                  \"primary_metric\": \"current_thread_cpu_time\",
                   \"interpretation\": \"negative delta means packet mode is faster\",
                   \"warmup_pairs\": %d,
                   \"recorded_pairs\": %d,
                   \"iterations_per_sample\": %d,
                   \"state_ops_per_iteration\": %d,
                   \"packet_capacity\": %d,
-                  \"legacy_samples_ns\": %s,
-                  \"packet_samples_ns\": %s,
-                  \"paired_delta_percent\": %s,
-                  \"legacy_median_ns\": %.3f,
-                  \"packet_median_ns\": %.3f,
-                  \"legacy_p95_ns\": %d,
-                  \"packet_p95_ns\": %d,
-                  \"legacy_median_ns_per_state_op\": %.6f,
-                  \"packet_median_ns_per_state_op\": %.6f,
-                  \"paired_median_delta_percent\": %.6f,
-                  \"paired_median_improvement_percent\": %.6f,
-                  \"legacy_first_median_delta_percent\": %.6f,
-                  \"packet_first_median_delta_percent\": %.6f
+                  \"legacy_wall_samples_ns\": %s,
+                  \"packet_wall_samples_ns\": %s,
+                  \"legacy_cpu_samples_ns\": %s,
+                  \"packet_cpu_samples_ns\": %s,
+                  \"paired_wall_delta_percent\": %s,
+                  \"paired_cpu_delta_percent\": %s,
+                  \"legacy_wall_median_ns\": %.3f,
+                  \"packet_wall_median_ns\": %.3f,
+                  \"legacy_wall_p95_ns\": %d,
+                  \"packet_wall_p95_ns\": %d,
+                  \"paired_wall_median_delta_percent\": %.6f,
+                  \"legacy_cpu_median_ns\": %.3f,
+                  \"packet_cpu_median_ns\": %.3f,
+                  \"legacy_cpu_p95_ns\": %d,
+                  \"packet_cpu_p95_ns\": %d,
+                  \"legacy_cpu_median_ns_per_state_op\": %.6f,
+                  \"packet_cpu_median_ns_per_state_op\": %.6f,
+                  \"paired_cpu_median_delta_percent\": %.6f,
+                  \"paired_cpu_median_improvement_percent\": %.6f,
+                  \"legacy_first_cpu_median_delta_percent\": %.6f,
+                  \"packet_first_cpu_median_delta_percent\": %.6f
                 }
                 """,
                 WARMUP_PAIRS,
@@ -236,35 +272,54 @@ final class HostedMetalStatePathPairedBenchmark {
                 ITERATIONS_PER_SAMPLE,
                 STATE_OPS_PER_ITERATION,
                 PACKET_CAPACITY,
-                jsonArray(legacySamples),
-                jsonArray(packetSamples),
-                jsonArray(pairedDeltas),
-                legacyMedian,
-                packetMedian,
-                percentileNearestRank(legacySorted, 0.95),
-                percentileNearestRank(packetSorted, 0.95),
-                legacyMedian / opsPerSample,
-                packetMedian / opsPerSample,
-                pairedMedianDelta,
-                -pairedMedianDelta,
-                median(legacyFirstSorted),
-                median(packetFirstSorted)
+                jsonArray(legacyWall),
+                jsonArray(packetWall),
+                jsonArray(legacyCpu),
+                jsonArray(packetCpu),
+                jsonArray(pairedWallDelta),
+                jsonArray(pairedCpuDelta),
+                legacyWallMedian,
+                packetWallMedian,
+                percentileNearestRank(legacyWallSorted, 0.95),
+                percentileNearestRank(packetWallSorted, 0.95),
+                pairedWallMedianDelta,
+                legacyCpuMedian,
+                packetCpuMedian,
+                percentileNearestRank(legacyCpuSorted, 0.95),
+                percentileNearestRank(packetCpuSorted, 0.95),
+                legacyCpuMedian / opsPerSample,
+                packetCpuMedian / opsPerSample,
+                pairedCpuMedianDelta,
+                -pairedCpuMedianDelta,
+                median(legacyFirstCpuSorted),
+                median(packetFirstCpuSorted)
         );
         Files.writeString(output, json);
         System.out.printf(
                 Locale.ROOT,
-                "HOSTED_METAL_IN_JVM_PAIRED legacy_median_ns=%.0f packet_median_ns=%.0f paired_delta=%+.3f%% paired_improvement=%+.3f%% legacy_first=%+.3f%% packet_first=%+.3f%%%n",
-                legacyMedian,
-                packetMedian,
-                pairedMedianDelta,
-                -pairedMedianDelta,
-                median(legacyFirstSorted),
-                median(packetFirstSorted)
+                "HOSTED_METAL_IN_JVM_PAIRED cpu_delta=%+.3f%% cpu_improvement=%+.3f%% wall_delta=%+.3f%% cpu_ns_per_op_legacy=%.3f cpu_ns_per_op_packet=%.3f%n",
+                pairedCpuMedianDelta,
+                -pairedCpuMedianDelta,
+                pairedWallMedianDelta,
+                legacyCpuMedian / opsPerSample,
+                packetCpuMedian / opsPerSample
         );
     }
 
     private static double percentChange(final long candidate, final long baseline) {
         return (candidate / (double) baseline - 1.0) * 100.0;
+    }
+
+    private static long[] sorted(final long[] values) {
+        long[] result = values.clone();
+        Arrays.sort(result);
+        return result;
+    }
+
+    private static double[] sorted(final double[] values) {
+        double[] result = values.clone();
+        Arrays.sort(result);
+        return result;
     }
 
     private static double median(final long[] sorted) {
@@ -308,5 +363,8 @@ final class HostedMetalStatePathPairedBenchmark {
             result.append(String.format(Locale.ROOT, "%.6f", values[i]));
         }
         return result.append(']').toString();
+    }
+
+    private record Sample(long wallNs, long cpuNs) {
     }
 }
