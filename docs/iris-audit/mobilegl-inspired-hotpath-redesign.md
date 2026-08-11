@@ -378,6 +378,14 @@ packet path is then disabled for that encoder.
 # Submit interval between byte scans. Default: 16.
 -Dmetallum.opt.dynamicBackingPoolTrimInterval=16
 
+# M4 + Sodium correctness default. Old arena backings are closed into the
+# completion-ordered destruction queue instead of entering Sodium's static pool.
+# Set false only to diagnose the upstream reuse path.
+-Dmetallum.opt.sodiumDisableArenaBufferReuse=true
+
+# Global wait after arena copies. Diagnostic only; normal default remains false.
+-Dmetallum.opt.metal4ArenaCopyDrain=false
+
 # Optional counters for shadows, packets, arena and backing pool.
 -Dmetallum.hotpath.telemetry=true
 ```

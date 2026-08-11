@@ -194,6 +194,8 @@ def metal4IrisClientDefaults = [
 		"metallum.opt.metal4Present"                : "true",
 		"metallum.opt.metal4MainRenderer"           : "true",
 		"metallum.opt.metal4MainQueuePilot"         : "true",
+		"metallum.opt.sodiumDisableArenaBufferReuse": "true",
+		"metallum.opt.metal4ArenaCopyDrain"         : "false",
 		"metallum.opt.residencySet"                 : "true",
 ]
 
@@ -948,11 +950,13 @@ tasks.register("runClientIris") {
 
 tasks.register("runClientMetal4Iris") {
 	group = "application"
-	description = "Runs full Metal 4 Iris with packets, argument tables and terrain ICB enabled."
+	description = "Runs full Metal 4 Iris with packets, argument tables, terrain ICB and completion-safe Sodium arena retirement enabled."
 	dependsOn "runClient"
 	doFirst {
 		logger.lifecycle("runClientMetal4Iris: Metal 4 + Iris semantic path + packet/argument/ICB hot path enabled" +
 			(isolatedClientWorld ? " world='${isolatedClientWorld}'" : ""))
+		logger.lifecycle("runClientMetal4Iris: Sodium arena backings use completion-safe retirement; " +
+			"the global Metal 4 arena copy drain remains disabled")
 		logger.lifecycle("runClientMetal4Iris: MetalFX, frame generation and Metal HUD disabled; " +
 			"shader pack is selected by run/config/iris.properties")
 	}
@@ -991,7 +995,9 @@ tasks.register("verifyIsolatedClientProfiles") {
 				|| metal4IrisClientDefaults["metallum.opt.metal4"] != "true"
 				|| metal4IrisClientDefaults["metallum.opt.renderCommandPacket"] != "true"
 				|| metal4IrisClientDefaults["metallum.opt.computeCommandPacket"] != "true"
-				|| metal4IrisClientDefaults["metallum.opt.terrainIcb"] != "true") {
+				|| metal4IrisClientDefaults["metallum.opt.terrainIcb"] != "true"
+				|| metal4IrisClientDefaults["metallum.opt.sodiumDisableArenaBufferReuse"] != "true"
+				|| metal4IrisClientDefaults["metallum.opt.metal4ArenaCopyDrain"] != "false") {
 			failures << "runClientMetal4Iris defaults do not enable the complete Metal 4 experience path"
 		}
 		if (tasks.findByName("runClientAll") != null) {

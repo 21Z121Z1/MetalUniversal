@@ -36,6 +36,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.DefaultChunkRendererTerrainIcbScopeMixin";
     private static final String SODIUM_ARENA_REUSE_FIX_MIXIN =
             "com.metallum.mixin.sodium.GlBufferArenaReuseFixMixin";
+    static final String SODIUM_ARENA_REUSE_PROTECTION_PROPERTY =
+            "metallum.opt.sodiumDisableArenaBufferReuse";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -89,8 +91,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                     && this.isDefaultGraphicsApi;
         }
         if (SODIUM_ARENA_REUSE_FIX_MIXIN.equals(mixinClassName)) {
-            return Boolean.parseBoolean(System.getProperty(
-                            "metallum.opt.sodiumDisableArenaBufferReuse", "false"))
+            return sodiumArenaReuseProtectionConfigured()
                     && Boolean.parseBoolean(System.getProperty(
                             "metallum.opt.metal4MainRenderer", "false"))
                     && FabricLoader.getInstance().isModLoaded("sodium")
@@ -105,6 +106,13 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         return PREFERRED_GRAPHICS_API_MIXIN.equals(mixinClassName)
                 || this.isDefaultGraphicsApi;
+    }
+
+    static boolean sodiumArenaReuseProtectionConfigured() {
+        // Correctness default for M4 raw-address bindings. Only a literal false
+        // is accepted as the diagnostic opt-out; malformed values fail safe.
+        return !"false".equalsIgnoreCase(System.getProperty(
+                SODIUM_ARENA_REUSE_PROTECTION_PROPERTY, "true"));
     }
 
     @Override
