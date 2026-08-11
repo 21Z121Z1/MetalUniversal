@@ -1,0 +1,53 @@
+name: Fix hosted Metal4 capability test
+
+on:
+  push:
+    branches:
+      - integration/hosted-metal-ci-20260811
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch capability-gated Metal 4 assertions
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("src/test/java/com/metallum/client/metal/render/MetalMrtBackendIntegrationTest.java")
+          text = path.read_text()
+
+          old_loop = '                        if (Boolean.getBoolean("metallum.opt.metal4")) {'
+          new_loop = '                        if (device.metal4MainRendererEnabled()) {'
+          old_flag = '            boolean metal4 = Boolean.getBoolean("metallum.opt.metal4");'
+          new_flag = '            boolean metal4 = device.metal4MainRendererEnabled();'
+
+          if text.count(old_loop) != 1:
+              raise SystemExit(f"expected exactly one loop capability guard, found {text.count(old_loop)}")
+          if text.count(old_flag) != 1:
+              raise SystemExit(f"expected exactly one Metal 4 flag assignment, found {text.count(old_flag)}")
+
+          text = text.replace(old_loop, new_loop)
+          text = text.replace(old_flag, new_flag)
+          path.write_text(text)
+
+      - name: Verify and commit minimal fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff -- src/test/java/com/metallum/client/metal/render/MetalMrtBackendIntegrationTest.java
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/test/java/com/metallum/client/metal/render/MetalMrtBackendIntegrationTest.java
+          git rm .github/workflows/fix-hosted-metal4-capability-test.yml
+          git commit -m "test: gate Metal 4 ICB budget by negotiated capability"
+          git push origin HEAD:integration/hosted-metal-ci-20260811
