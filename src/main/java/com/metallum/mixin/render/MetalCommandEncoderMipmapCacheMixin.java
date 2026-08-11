@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.MetalMipmapTrackedTexture;
+import com.metallum.client.metal.render.MetalOptimizationProperties;
 import com.mojang.blaze3d.textures.GpuTexture;
 import org.joml.Vector4fc;
 import org.spongepowered.asm.mixin.Mixin;
@@ -16,8 +17,15 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(targets = "com.metallum.client.metal.render.MetalCommandEncoder")
 public abstract class MetalCommandEncoderMipmapCacheMixin {
+    private static final boolean ENABLED = MetalOptimizationProperties.enabled(
+            MetalOptimizationProperties.MIPMAP_CACHE, false
+    );
+
     @Inject(method = "generateMipmaps", at = @At("HEAD"), cancellable = true)
     private void metallum$skipCurrentMipmaps(@Coerce final Object texture, final CallbackInfo ci) {
+        if (!ENABLED) {
+            return;
+        }
         if (texture instanceof MetalMipmapTrackedTexture tracked && tracked.metallum$mipmapsCurrent()) {
             IrisMetalPerformanceCounters.recordMipmapGenerationSkipped();
             ci.cancel();

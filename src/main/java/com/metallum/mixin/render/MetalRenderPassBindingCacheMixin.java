@@ -37,11 +37,11 @@ import java.util.Map;
 public abstract class MetalRenderPassBindingCacheMixin {
     @Unique
     private static final boolean metallum$TOKENIZED_BINDINGS = !"false".equalsIgnoreCase(
-            System.getProperty("metallum.opt.bindingTokens", "true")
+            System.getProperty("metallum.opt.bindingTokens", "false")
     );
     @Unique
     private static final boolean metallum$COMPILED_BINDING_PLAN = !"false".equalsIgnoreCase(
-            System.getProperty("metallum.opt.compiledBindingPlan", "true")
+            System.getProperty("metallum.opt.compiledBindingPlan", "false")
     );
     @Unique
     private static final BindingState[] metallum$EMPTY_BINDINGS = new BindingState[0];

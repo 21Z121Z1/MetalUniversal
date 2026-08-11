@@ -35,7 +35,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
     static final int OP_SCISSOR = 11;
 
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
-            System.getProperty("metallum.opt.renderStatePacket", "true")
+            System.getProperty("metallum.opt.renderStatePacket", "false")
     );
     private static final int CAPACITY = Math.clamp(
             Integer.getInteger("metallum.opt.renderStatePacketEntries", 256),
@@ -290,7 +290,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
                 );
                 case OP_WINDING -> MetalNativeBridge.MTLRenderCommandEncoder_setFrontFacingWinding(
                         encoder,
-                        a
+                        Math.toIntExact(a)
                 );
                 case OP_CULL_MODE -> MetalNativeBridge.MTLRenderCommandEncoder_setCullMode(
                         encoder,
@@ -298,7 +298,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
                 );
                 case OP_FILL_MODE -> MetalNativeBridge.MTLRenderCommandEncoder_setTriangleFillMode(
                         encoder,
-                        a
+                        Math.toIntExact(a)
                 );
                 case OP_BUFFER -> MetalNativeBridge.MTLRenderCommandEncoder_setBuffer(
                         encoder,

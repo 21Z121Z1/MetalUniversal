@@ -30,10 +30,10 @@ import java.util.Map;
 @Mixin(targets = "com.metallum.client.metal.render.MetalRenderPass")
 public abstract class MetalRenderPassMultiDrawBatchMixin {
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
-            System.getProperty("metallum.opt.nativeMultiDrawBatch", "true")
+            System.getProperty("metallum.opt.nativeMultiDrawBatch", "false")
     );
     private static final boolean NO_TRACE_FAST_PATH = !"false".equalsIgnoreCase(
-            System.getProperty("metallum.opt.noTraceDrawFastPath", "true")
+            System.getProperty("metallum.opt.noTraceDrawFastPath", "false")
     );
     private static final int THRESHOLD = Math.max(
             2,
@@ -147,7 +147,7 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
         if (batchEligible) {
             MemorySegment nativeHandle = ((MetalGpuBufferNativeHandleAccessor) nativeIndexBuffer)
                     .metallum$invokeNativeHandle();
-            ((MetalRenderStateFlushable) encoder).metallum$flushPendingRenderState();
+            ((MetalRenderStateFlushable) (Object) encoder).metallum$flushPendingRenderState();
             MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
                     encoder.handle(),
                     primitiveType.value,

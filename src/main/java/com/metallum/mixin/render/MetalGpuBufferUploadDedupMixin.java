@@ -1,5 +1,6 @@
 package com.metallum.mixin.render;
 
+import com.metallum.client.metal.render.MetalOptimizationProperties;
 import com.metallum.client.metal.render.MetalUploadDedupBuffer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -38,6 +39,11 @@ public abstract class MetalGpuBufferUploadDedupMixin implements MetalUploadDedup
     @Override
     public UploadRange metallum$diffUpload(final long offset, final ByteBuffer data) {
         int length = data.remaining();
+        if (!MetalOptimizationProperties.enabled(
+                MetalOptimizationProperties.BUFFER_UPLOAD_DEDUP, false
+        )) {
+            return UploadRange.full(length);
+        }
         if (!this.isDynamic() || !this.metallum$uploadInitialized || length == 0) {
             return length == 0 ? UploadRange.empty() : UploadRange.full(length);
         }
@@ -45,7 +51,11 @@ public abstract class MetalGpuBufferUploadDedupMixin implements MetalUploadDedup
             return UploadRange.full(length);
         }
 
-        ByteBuffer storage = this.currentStorage();
+        // Never mutate the position/limit of MetalGpuBuffer's shared CPU
+        // backing. The previous implementation changed that object in place,
+        // so a later full upload could observe the last diff range instead of
+        // the complete allocation.
+        ByteBuffer storage = this.currentStorage().duplicate();
         int destinationStart = Math.toIntExact(offset);
         int destinationEnd = Math.addExact(destinationStart, length);
         if (destinationEnd > storage.capacity()) {

@@ -333,31 +333,42 @@ packet path is then disabled for that encoder.
 - single-entry bypasses;
 - capacity flushes.
 
+## Terrain mesh ABI boundary
+
+When the semantic Iris Metal pipeline is active, Sodium build results carry a
+composite terrain generation made from the pipeline generation and the
+material-map epoch. A section accepts only a result from the active generation;
+the renderer hides a region until all built sections are current. Pipeline
+selection and teardown invalidate the level extractor, and the first material
+map rebuild publishes its epoch before scheduling the replacement builds.
+The shaders-off path keeps the guard inert so ordinary Sodium/MetalFX terrain
+does not acquire a second mesh ABI.
+
 ## Runtime switches
 
 ```text
-# Encoder-local render/compute state shadows. Default: true
+# Encoder-local render/compute state shadows. Default: false until physical-GPU equivalence is recorded.
 -Dmetallum.opt.encoderStateShadow=true
 
 # Maximum shadowed binding count, clamped to 8..256. Default: 64
 -Dmetallum.opt.maxShadowedBindings=64
 
-# Process-stable token binding cache. false restores String-keyed cache.
+# Process-stable token binding cache. Default: false; true restores the optimized lane.
 -Dmetallum.opt.bindingTokens=true
 
-# Pipeline-local dense binding-state arrays. Requires bindingTokens=true.
+# Pipeline-local dense binding-state arrays. Default: false; requires bindingTokens=true.
 -Dmetallum.opt.compiledBindingPlan=true
 
-# Allocation-free production draw lane.
+# Allocation-free production draw lane. Default: false.
 -Dmetallum.opt.noTraceDrawFastPath=true
 
-# Interleaved indexed multi-draw collapse.
+# Interleaved indexed multi-draw collapse. Default: false.
 -Dmetallum.opt.nativeMultiDrawBatch=true
 
 # Minimum emitted draws for batching, minimum 2.
 -Dmetallum.opt.nativeMultiDrawBatchThreshold=4
 
-# Render-state packet. Negotiation failure automatically uses legacy setters.
+# Render-state packet. Default: false; negotiation failure also uses legacy setters.
 -Dmetallum.opt.renderStatePacket=true
 
 # Maximum packet entries, clamped to 16..2048. Default: 256.
@@ -377,6 +388,13 @@ packet path is then disabled for that encoder.
 
 # Submit interval between byte scans. Default: 16.
 -Dmetallum.opt.dynamicBackingPoolTrimInterval=16
+
+# Content-deduplication lanes. All default to false until a physical-GPU
+# readback proves that every native write path advances the tracked version.
+-Dmetallum.opt.mipmapCache=true
+-Dmetallum.opt.textureCopyDedup=true
+-Dmetallum.opt.uploadDedup=true
+-Dmetallum.opt.bufferUploadDedup=true
 
 # Optional counters for shadows, packets, arena and backing pool.
 -Dmetallum.hotpath.telemetry=true

@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.MetalUploadDedupBuffer;
+import com.metallum.client.metal.render.MetalOptimizationProperties;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -15,12 +16,19 @@ import java.nio.ByteBuffer;
 /** Suppresses identical uploads and trims changed uploads to their dirty byte range. */
 @Mixin(targets = "com.metallum.client.metal.render.MetalCommandEncoder")
 public abstract class MetalCommandEncoderUploadDedupMixin {
+    private static final boolean ENABLED = MetalOptimizationProperties.enabled(
+            MetalOptimizationProperties.UPLOAD_DEDUP, false
+    );
+
     @Inject(method = "writeToBuffer", at = @At("HEAD"), cancellable = true)
     private void metallum$skipIdenticalUpload(
             final GpuBufferSlice destination,
             final ByteBuffer data,
             final CallbackInfo ci
     ) {
+        if (!ENABLED) {
+            return;
+        }
         if (!(destination.buffer() instanceof MetalUploadDedupBuffer dedup)) {
             return;
         }
@@ -40,6 +48,9 @@ public abstract class MetalCommandEncoderUploadDedupMixin {
             )
     )
     private void metallum$trimDynamicUpload(final Args args) {
+        if (!ENABLED) {
+            return;
+        }
         Object buffer = args.get(0);
         long offset = args.get(1);
         ByteBuffer data = args.get(2);

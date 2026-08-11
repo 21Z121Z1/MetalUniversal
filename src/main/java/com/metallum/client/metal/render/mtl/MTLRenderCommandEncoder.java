@@ -10,7 +10,7 @@ import java.lang.foreign.MemorySegment;
 @Environment(EnvType.CLIENT)
 public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
     private static final boolean STATE_SHADOW_ENABLED = !"false".equalsIgnoreCase(
-            System.getProperty("metallum.opt.encoderStateShadow", "true")
+            System.getProperty("metallum.opt.encoderStateShadow", "false")
     );
 
     private final MetalRenderStateShadow stateShadow = STATE_SHADOW_ENABLED

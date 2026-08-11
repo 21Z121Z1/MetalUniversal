@@ -419,6 +419,7 @@ public final class IrisMetalPipelineOverrides {
         active = instance;
         IrisMetalPackLifecycle.onSemanticPipelineSelected(instance.generation());
         IrisMetalPassTrace.activate(instance.programSet, instance.generation());
+        invalidateTerrainMeshes();
     }
 
     static void deactivate() {
@@ -438,6 +439,7 @@ public final class IrisMetalPipelineOverrides {
         if (wasActive) {
             IrisMetalPackLifecycle.onSemanticPipelineDestroyed(expected.generation());
             IrisMetalPassTrace.close();
+            invalidateTerrainMeshes();
         }
     }
 
@@ -609,6 +611,36 @@ public final class IrisMetalPipelineOverrides {
     }
 
     /**
+     * Scalar identity carried by every Sodium chunk mesh. The low word is a
+     * separate epoch because the first loaded world populates Iris's material
+     * maps after the pipeline itself has already been constructed.
+     */
+    public static long activeTerrainMeshGeneration() {
+        Instance instance = active;
+        return instance == null ? 0L : instance.terrainMeshGeneration();
+    }
+
+    /** A newly selected Iris generation remains hidden until its first map rebuild completes. */
+    public static boolean terrainMeshRenderReady() {
+        Instance instance = active;
+        return instance == null || instance.terrainMaterialMapGeneration > 0;
+    }
+
+    /** Publishes the material-map epoch before the matching rebuild queue boundary. */
+    static void markTerrainMaterialMappingsReady(final Instance expected) {
+        if (active == expected) {
+            expected.terrainMaterialMapGeneration++;
+        }
+    }
+
+    private static void invalidateTerrainMeshes() {
+        Minecraft client = Minecraft.getInstance();
+        if (client != null && client.level != null) {
+            client.levelExtractor.allChanged();
+        }
+    }
+
+    /**
      * Pipeline-compile hook. Returns a compiled override for recognized sodium
      * terrain pipelines while a pack runtime is active, or {@code null} to let
      * the caller compile the pipeline natively.
@@ -627,6 +659,8 @@ public final class IrisMetalPipelineOverrides {
 
     static final class Instance {
         private final int generation;
+        /** Published on the render thread and read by Sodium worker threads. */
+        private volatile int terrainMaterialMapGeneration;
         private final boolean productionLifecycle;
         private final boolean strict;
         private final ProgramSet programSet;
@@ -803,6 +837,12 @@ public final class IrisMetalPipelineOverrides {
 
         int generation() {
             return this.generation;
+        }
+
+        long terrainMeshGeneration() {
+            return com.metallum.client.terrain.TerrainMeshGeneration.token(
+                    this.generation, this.terrainMaterialMapGeneration
+            );
         }
 
         private boolean shadowsEnabled() {

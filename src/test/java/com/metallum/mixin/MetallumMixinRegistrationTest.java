@@ -1,6 +1,7 @@
 package com.metallum.mixin;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -61,6 +62,16 @@ final class MetallumMixinRegistrationTest {
             try (Stream<Path> sources = Files.list(directory)) {
                 List<String> unregistered = sources
                         .filter(path -> path.getFileName().toString().endsWith(".java"))
+                        // Mixin packages also contain implementation helpers
+                        // used by mixins. Only source files carrying the Mixin
+                        // annotation need a config entry.
+                        .filter(path -> {
+                            try {
+                                return Files.readString(path).contains("@Mixin(");
+                            } catch (IOException exception) {
+                                throw new UncheckedIOException(exception);
+                            }
+                        })
                         .map(path -> subpackage + "." + path.getFileName().toString().replace(".java", ""))
                         .filter(name -> !registered.contains(name))
                         .toList();

@@ -282,6 +282,11 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
         settings.setBlockTypeIds(BlockMaterialMapping.createBlockTypeMap(
                 this.pack.getIdMap().getBlockRenderTypeMap()
         ));
+        IrisMetalPipelineOverrides.markTerrainMaterialMappingsReady(this.overrides);
+        // Publish the new material-map epoch before scheduling builds. Any
+        // worker that starts after this point stamps the new ABI; the rebuild
+        // below then becomes the single queue boundary for the published
+        // generation instead of allowing an epoch-0 result to win a race.
         Minecraft.getInstance().levelExtractor.allChanged();
     }
 

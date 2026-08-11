@@ -3,6 +3,7 @@ package com.metallum.mixin.render;
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.MetalCopyTrackedTexture;
 import com.metallum.client.metal.render.MetalMipmapTrackedTexture;
+import com.metallum.client.metal.render.MetalOptimizationProperties;
 import com.mojang.blaze3d.textures.GpuTexture;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -15,6 +16,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(targets = "com.metallum.client.metal.render.MetalCommandEncoder")
 public abstract class MetalCommandEncoderCopyDedupMixin {
+    private static final boolean ENABLED = MetalOptimizationProperties.enabled(
+            MetalOptimizationProperties.TEXTURE_COPY_DEDUP, false
+    );
+
     @Inject(
             method = "copyTextureToTexture(Lcom/mojang/blaze3d/textures/GpuTexture;Lcom/mojang/blaze3d/textures/GpuTexture;IIIIIII)V",
             at = @At("HEAD"),
@@ -32,6 +37,9 @@ public abstract class MetalCommandEncoderCopyDedupMixin {
             final int height,
             final CallbackInfo ci
     ) {
+        if (!ENABLED) {
+            return;
+        }
         if (!metallum$isFullCopy(
                 source, destination, mipLevel,
                 destX, destY, sourceX, sourceY, width, height
@@ -68,6 +76,9 @@ public abstract class MetalCommandEncoderCopyDedupMixin {
             final int height,
             final CallbackInfo ci
     ) {
+        if (!ENABLED) {
+            return;
+        }
         if (!metallum$isFullCopy(
                 source, destination, mipLevel,
                 destX, destY, sourceX, sourceY, width, height
