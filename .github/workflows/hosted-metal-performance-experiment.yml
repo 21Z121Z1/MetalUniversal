@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  render-state-packet-abba:
-    name: render state packet ABBA
+  render-state-in-jvm-paired:
+    name: render state in-JVM paired
     runs-on: macos-26
     timeout-minutes: 45
     env:
@@ -61,47 +61,56 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon --stacktrace buildMacNative testClasses
 
-      - name: Run same-runner legacy/packet ABBA experiment
+      - name: Re-run hosted Metal integration correctness gate
         shell: bash
         run: |
           set -euo pipefail
+          ./gradlew --no-daemon --stacktrace hostedMetalExtendedIntegrationTest
+
+      - name: Run direct-vs-packet pairs inside one JVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf build/hosted-metal-perf
           mkdir -p "$RUNNER_TEMP/hosted-metal-perf"
+          JAVA_TOOL_OPTIONS="-Dmetallum.perf.hosted=true -Dmetallum.opt.renderCommandPacket=false -Dmetallum.opt.renderStatePacket=false -Dmetallum.hotpath.telemetry=false" \
+            ./gradlew --no-daemon --stacktrace cleanTest test \
+              --tests com.metallum.client.metal.render.mtl.HostedMetalStatePathPairedBenchmark
+          test -s build/hosted-metal-perf/in-jvm-paired.json
+          cp build/hosted-metal-perf/in-jvm-paired.json \
+            "$RUNNER_TEMP/hosted-metal-perf/in-jvm-paired.json"
 
-          run_case() {
-            local packet_enabled="$1"
-            local label="$2"
-            echo "=== hosted Metal performance case: $label renderStatePacket=$packet_enabled ==="
-            rm -rf build/hosted-metal-perf
-            JAVA_TOOL_OPTIONS="-Dmetallum.perf.hosted=true -Dmetallum.opt.renderCommandPacket=false -Dmetallum.opt.renderStatePacket=${packet_enabled} -Dmetallum.opt.encoderStateShadow=true -Dmetallum.hotpath.telemetry=true" \
-              ./gradlew --no-daemon --stacktrace cleanTest test \
-                --tests com.metallum.client.metal.render.HostedMetalStateSubmissionBenchmark
-            test -s build/hosted-metal-perf/state-submission.json
-            cp build/hosted-metal-perf/state-submission.json \
-              "$RUNNER_TEMP/hosted-metal-perf/${label}.json"
-          }
-
-          # ABBA order controls first-order runner drift without crossing VM/job boundaries.
-          run_case false legacy-a
-          run_case true  packet-a
-          run_case true  packet-b
-          run_case false legacy-b
-
-      - name: Analyze paired measurements
+      - name: Summarize paired result
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/ci/analyze_hosted_metal_perf.py \
-            --legacy-a "$RUNNER_TEMP/hosted-metal-perf/legacy-a.json" \
-            --packet-a "$RUNNER_TEMP/hosted-metal-perf/packet-a.json" \
-            --packet-b "$RUNNER_TEMP/hosted-metal-perf/packet-b.json" \
-            --legacy-b "$RUNNER_TEMP/hosted-metal-perf/legacy-b.json" \
-            --output "$RUNNER_TEMP/hosted-metal-perf/summary.json"
+          python3 - <<'PY'
+          import json, os, pathlib
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'hosted-metal-perf' / 'in-jvm-paired.json'
+          data = json.loads(path.read_text())
+          delta = data['paired_median_delta_percent']
+          improvement = data['paired_median_improvement_percent']
+          print(json.dumps(data, indent=2))
+          print(f"HOSTED_METAL_IN_JVM_RESULT paired_delta={delta:+.3f}% paired_improvement={improvement:+.3f}%")
+          summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary:
+              with open(summary, 'a', encoding='utf-8') as out:
+                  out.write('## Hosted Metal in-JVM paired experiment\n\n')
+                  out.write('Direct critical FFM setters vs render-state packet serialization/native decode. ') 
+                  out.write('Negative delta means packet mode is faster.\n\n')
+                  out.write('| Metric | Legacy | Packet |\n|---|---:|---:|\n')
+                  out.write(f"| Median | {data['legacy_median_ns']/1e6:.3f} ms | {data['packet_median_ns']/1e6:.3f} ms |\n")
+                  out.write(f"| p95 | {data['legacy_p95_ns']/1e6:.3f} ms | {data['packet_p95_ns']/1e6:.3f} ms |\n")
+                  out.write(f"| ns/state op | {data['legacy_median_ns_per_state_op']:.2f} | {data['packet_median_ns_per_state_op']:.2f} |\n\n")
+                  out.write(f"Paired median delta: **{delta:+.2f}%**; improvement: **{improvement:+.2f}%**.\n\n")
+                  out.write(f"Order check — legacy-first: {data['legacy_first_median_delta_percent']:+.2f}%; packet-first: {data['packet_first_median_delta_percent']:+.2f}%.\n")
+          PY
 
       - name: Preserve experiment evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: hosted-metal-performance-${{ github.run_attempt }}
+          name: hosted-metal-performance-${{ github.run_number }}-${{ github.run_attempt }}
           if-no-files-found: warn
           retention-days: 30
           path: |
