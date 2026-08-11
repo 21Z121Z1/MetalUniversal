@@ -55,7 +55,6 @@ jobs:
           set -euo pipefail
           chmod +x ./gradlew
           ./gradlew --stacktrace \
-            -I .github/ci/hosted-metal-required.gradle \
             metalMrtSmokeTest \
             metalFrameGenerationLifecycleTest \
             verifyIsolatedClientProfiles \
@@ -99,11 +98,13 @@ jobs:
           if-no-files-found: ignore
 
   hosted-capability-and-physical-harness-compile-required:
-    name: capability fallback and physical-only harness compile
+    name: capability policy and physical-only harness compile
     runs-on: macos-26
     env:
       MTL_HUD_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
     steps:
       - uses: actions/checkout@v6
 
@@ -114,17 +115,49 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Validate Metal 4 fallback and compile physical-only harnesses
+      - name: Validate policy, Metal 4 fallback and compile physical-only harnesses
         shell: bash
         run: |
           set -euo pipefail
           chmod +x ./gradlew
           ./gradlew --stacktrace \
+            verifyMetalCapabilityPolicy \
             metal4PipelineSmokeTest \
             metal4PipelinePathTest \
             compileMetalFxOffscreenValidation \
             compileMetalFxPerformanceValidation \
             compileMetalFrameGenerationPresentationValidation
+
+      - name: Execute hosted HUD layer and selector contract
+        shell: bash
+        env:
+          MTL_HUD_ENABLED: '1'
+          MTLFX_HUD_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          ./gradlew --stacktrace metalHudRuntimeTest
+
+      - name: Classify hosted MetalFX runtime capability
+        shell: bash
+        run: |
+          set -uo pipefail
+          binary="build/metal-tests/MetalFXOffscreenValidation"
+          test -x "$binary"
+          out="$RUNNER_TEMP/metalfx-hosted"
+          rm -rf "$out"
+          set +e
+          "$binary" "$out" 2>&1 | tee "$RUNNER_TEMP/metalfx-hosted.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo 'HOSTED_METALFX_TEMPORAL_SUPPORTED=true' | tee -a "$GITHUB_STEP_SUMMARY"
+          elif grep -Fq 'MTLFXTemporalScaler is unsupported on this device' "$RUNNER_TEMP/metalfx-hosted.log"; then
+            echo 'HOSTED_METALFX_TEMPORAL_SUPPORTED=false' | tee -a "$GITHUB_STEP_SUMMARY"
+            echo 'MetalFX runtime remains physical-capability gated; core Metal execution is covered separately.' | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Unexpected MetalFX runtime failure: $rc" >&2
+            exit "$rc"
+          fi
 
   ios-native-cross-build-required:
     name: iPhoneOS arm64 native and SPIRV-Cross required
@@ -182,10 +215,9 @@ jobs:
           otool -L "$artifact" | grep -q '/System/Library/Frameworks/Metal.framework/'
           nm -gU "$artifact" | grep -q 'metallum_create_system_default_device'
 
-  ios-simulator-metal-runtime-candidate:
-    name: iOS Simulator host-GPU Metal runtime candidate
+  ios-simulator-metal-runtime-required:
+    name: iOS Simulator host-GPU Metal runtime required
     runs-on: macos-26
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
 
