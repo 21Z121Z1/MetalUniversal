@@ -22,9 +22,9 @@ dependencies {
 	// Iris ships as an unobfuscated MC 26.2 mod (no refmap); a plain
 	// implementation dependency puts it on the dev classpath where the
 	// Fabric loader discovers and loads it as a mod. The metallum iris.*
-	// compat mixins (gated on the mod being present) keep it dormant on
-	// the Metal backend. The incomplete semantic layer is explicit opt-in via
-	// -Dmetallum.iris.semantic=true until its runtime acceptance gates pass.
+	// compat mixins (gated on the mod being present) replace Iris's GL seams on
+	// the Metal backend. The semantic path is the production default; an
+	// explicit -Dmetallum.iris.semantic=false remains a diagnostic kill switch.
 	implementation "maven.modrinth:iris:${project.iris_version}"
 	testImplementation "org.junit.jupiter:junit-jupiter:5.12.2"
 	testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.12.2"
@@ -52,16 +52,37 @@ java {
 	}
 }
 
-// GitHub's hosted macOS 26 virtual GPU aborts when libMTLHud tries to enable
-// encoder counter sampling, even with both Metal validation layers disabled.
-// CI still compiles the native backend and GPU harnesses, but executes only
-// headless tests which do not create an MTLDevice. Real GPU/readback/window
-// validation remains part of every local Apple Silicon `build`.
+// GitHub's standard Apple Silicon macOS 26 runner exposes a paravirtual Metal
+// device and can execute proven offscreen command-buffer/readback workloads.
+// Keep capability classes separate: hosted-offscreen is opt-in after a probe,
+// while counter-sampling/MetalFX and presentation remain physical-only until
+// independently proven safe on the hosted device.
 def hostedCi = "true".equalsIgnoreCase(System.getenv("CI"))
 def metalApiValidation = hostedCi ? "0" : "1"
 def metalShaderValidation = hostedCi ? "0" : "1"
-def hardwareMetalValidationAvailable = {
-	org.gradle.internal.os.OperatingSystem.current().isMacOsX() && !hostedCi
+def isMacOSHost = org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+def hostedOffscreenMetalValidationAvailable = {
+	isMacOSHost && (hostedCi == false || "true".equalsIgnoreCase(System.getenv("METALLUM_HOSTED_METAL_OFFSCREEN")))
+}
+// Physical-only validation is capability-driven, never a blanket CI exclusion.
+// Every physical capability must document the concrete hardware/display reason.
+def physicalMetalCapabilities = [
+		"metalfx-runtime": "MTLFXTemporalScaler/FrameInterpolator execution requires MetalFX device support; GitHub's Apple Paravirtual device currently reports the Temporal Scaler unsupported.",
+		"presentation-windowserver": "CAMetalLayer/CAMetalDisplayLink pacing, resize, fullscreen and drawable acceptance require an attended WindowServer/display session.",
+		"gpu-counter-sampling": "Encoder-stage GPU counter sampling is not supported by GitHub's Apple Paravirtual Metal device."
+]
+def physicalMetalCapabilityAvailable = { String capability ->
+	def reason = physicalMetalCapabilities[capability]
+	if (reason == null || reason.isBlank()) {
+		throw new GradleException("Physical Metal capability '${capability}' is missing a concrete reason")
+	}
+	isMacOSHost && hostedCi == false
+}
+def metalFxValidationAvailable = {
+	physicalMetalCapabilityAvailable("metalfx-runtime")
+}
+def presentationMetalValidationAvailable = {
+	physicalMetalCapabilityAvailable("presentation-windowserver")
 }
 def renderContractSourceCommit = System.getProperty("metallum.validation.sourceCommit")
 if (renderContractSourceCommit == null || renderContractSourceCommit.isBlank()) {
@@ -93,14 +114,14 @@ tasks.test {
 	exclude "**/IrisMetalExternalLevelSamplerTest.class"
 	exclude "**/MetalIrisShaderTranslationTest.class"
 	exclude "**/MetalIrisSodiumTerrainTest.class"
-	if (hostedCi) {
-		exclude "**/IrisMetalPostChainCompilationTest.class"
-		exclude "**/IrisMetalShadowPipelineTest.class"
-		exclude "**/IrisMetalShadowComputeConformanceTest.class"
-		exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
-		exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
-		exclude "**/MetalRenderContractGpuIntegrationTest.class"
-	}
+	// GPU integrations are routed through explicit capability tasks instead of
+	// changing the generic unit-test suite according to CI=true/false.
+	exclude "**/IrisMetalPostChainCompilationTest.class"
+	exclude "**/IrisMetalShadowPipelineTest.class"
+	exclude "**/IrisMetalShadowComputeConformanceTest.class"
+	exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
+	exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
+	exclude "**/MetalRenderContractGpuIntegrationTest.class"
 	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
 		environment "MTL_DEBUG_LAYER", metalApiValidation
@@ -114,12 +135,24 @@ def runClientIrisRequested = gradle.startParameter.taskNames.any {
 def runClientMetalFxRequested = gradle.startParameter.taskNames.any {
 	it == "runClientMetalFx" || it.endsWith(":runClientMetalFx")
 }
-if (runClientIrisRequested && runClientMetalFxRequested) {
+
+def runClientMetal4IrisRequested = gradle.startParameter.taskNames.any {
+	it == "runClientMetal4Iris" || it.endsWith(":runClientMetal4Iris")
+}
+if ((runClientIrisRequested && runClientMetalFxRequested)
+		|| (runClientMetal4IrisRequested && (runClientIrisRequested || runClientMetalFxRequested))) {
 	throw new GradleException(
-			"runClientIris and runClientMetalFx are isolated profiles and cannot run together."
+			"runClientIris, runClientMetal4Iris and runClientMetalFx are isolated profiles and cannot run together."
 	)
 }
 def isolatedClientWorld = providers.gradleProperty("world").orNull
+def dedicatedValidationWorld = System.getProperty("metallum.validation.world")
+if (dedicatedValidationWorld == null || dedicatedValidationWorld.isBlank()) {
+	dedicatedValidationWorld = isolatedClientWorld
+}
+if (dedicatedValidationWorld == null || dedicatedValidationWorld.isBlank()) {
+	dedicatedValidationWorld = "New World"
+}
 def irisClientDefaults = [
 		"metallum.iris.semantic"                 : "true",
 		"metallum.metalfx.mode"                  : "OFF",
@@ -133,7 +166,40 @@ def metalFxClientDefaults = [
 		"metallum.metalfx.frameGeneration"       : "false",
 		"metallum.metalfx.objectMotionProducer"  : "false",
 ]
-def isolatedClientDefaults = runClientIrisRequested
+
+// Full native Metal 4 experience profile. Explicit -D properties still win
+// for diagnostics, but the convenience task keeps MetalFX and Iris isolated.
+def metal4IrisClientDefaults = [
+		"metallum.iris.semantic"                     : "true",
+		"metallum.metalfx.mode"                      : "OFF",
+		"metallum.metalfx.frameGeneration"           : "false",
+		"metallum.metalfx.objectMotionProducer"      : "false",
+		"metallum.metal.hud"                         : "false",
+		"metallum.hotpath.telemetry"                 : "true",
+		"metallum.iris.argumentTables"               : "true",
+		"metallum.iris.experimental.argumentTables"  : "true",
+		"metallum.opt.argumentBuffers"               : "true",
+		"metallum.opt.renderCommandPacket"           : "true",
+		"metallum.opt.computeCommandPacket"          : "true",
+		"metallum.opt.terrainIcb"                    : "true",
+		"metallum.iris.passFusion"                  : "true",
+		"metallum.iris.experimental.passFusion"     : "true",
+		"metallum.iris.computeGrouping"             : "true",
+		"metallum.iris.experimental.computeGrouping": "true",
+		"metallum.iris.depthLiveness"               : "true",
+		"metallum.iris.experimental.resourcePruning": "true",
+		"metallum.opt.encoderStateShadow"           : "true",
+		"metallum.opt.metal4"                       : "true",
+		"metallum.opt.metal4Compiler"               : "true",
+		"metallum.opt.metal4Present"                : "true",
+		"metallum.opt.metal4MainRenderer"           : "true",
+		"metallum.opt.metal4MainQueuePilot"         : "true",
+		"metallum.opt.residencySet"                 : "true",
+]
+
+def isolatedClientDefaults = runClientMetal4IrisRequested
+		? metal4IrisClientDefaults
+		: runClientIrisRequested
 		? irisClientDefaults
 		: runClientMetalFxRequested
 		? metalFxClientDefaults
@@ -295,7 +361,7 @@ tasks.register("compileMetalMrtSmokeTest", Exec) {
 
 tasks.register("metalMrtSmokeTest", Exec) {
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn "compileMetalMrtSmokeTest"
 	commandLine metalMrtSmokeBinary.absolutePath
@@ -378,6 +444,21 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/Metal4PipelinePathTest.swift"
+}
+
+tasks.register("metal4ApiProbe", Exec) {
+    group = "verification"
+    description = "Typechecks the complete Metal 4 API spelling against the macOS 26 SDK."
+    onlyIf {
+        org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+    }
+    workingDir project.projectDir
+    inputs.file("docs/mtl4-api-probe.swift")
+    commandLine "bash", "-lc", 'xcrun swiftc -typecheck -sdk "$(xcrun --show-sdk-path --sdk macosx)" -target arm64-apple-macosx14.0 docs/mtl4-api-probe.swift'
+}
+
+tasks.named("check") {
+    dependsOn "metal4ApiProbe"
 }
 
 tasks.register("metal4PipelinePathTest", Exec) {
@@ -544,8 +625,8 @@ tasks.register("metalFrameGenerationPresentationValidation", Exec) {
 	group = "verification"
 	description = "Runs an automatic visible-window CAMetalDisplayLink pacing, resize and shutdown validation."
 	onlyIf {
-		if (hostedCi) {
-			logger.lifecycle("metalFrameGenerationPresentationValidation SKIPPED: hosted CI has no attended WindowServer surface")
+		if (!presentationMetalValidationAvailable()) {
+			logger.lifecycle("metalFrameGenerationPresentationValidation SKIPPED: requires physical capability presentation-windowserver")
 			return false
 		}
 		def reason = presentationValidationSkipReason()
@@ -631,7 +712,7 @@ tasks.register("metalFxOffscreenValidation", Exec) {
 	group = "verification"
 	description = "Runs windowless MRT, motion, Temporal Scaler and Frame Interpolator GPU readback validation."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		metalFxValidationAvailable()
 	}
 	dependsOn "compileMetalFxOffscreenValidation"
 	doFirst {
@@ -666,7 +747,7 @@ tasks.register("compileMetalFxPerformanceValidation", Exec) {
 tasks.register("metalFxPerformanceValidation", Exec) {
 	group = "verification"
 	description = "Measures Temporal and FrameInterpolator GPU cost across production resolutions."
-	onlyIf { !hostedCi && presentationValidationSkipReason() == null }
+	onlyIf { metalFxValidationAvailable() && presentationValidationSkipReason() == null }
 	dependsOn "compileMetalFxPerformanceValidation"
 	doFirst { delete file("${buildDir}/metal-validation/performance-current") }
 	environment "MTL_SHADER_VALIDATION", "0"
@@ -678,7 +759,7 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Java RenderPass -> FFM -> Swift indexed MRT GPU readback integration suite."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -688,6 +769,19 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	systemProperty "metallum.hotpath.telemetry", "true"
+	[
+			"metallum.opt.metal4",
+			"metallum.opt.argumentBuffers",
+			"metallum.opt.terrainIcb",
+			"metallum.opt.renderCommandPacket",
+			"metallum.opt.computeCommandPacket"
+	].each { propertyName ->
+		def requested = System.getProperty(propertyName)
+		if (requested != null) {
+			systemProperty propertyName, requested
+		}
+	}
 	environment "MTL_DEBUG_LAYER", metalApiValidation
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 }
@@ -696,7 +790,7 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS backend and Iris compute/SSBO/image/mipmap GPU readback suites."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -707,6 +801,16 @@ tasks.register("metalComputeBackendIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.IrisMetalComputeConformanceTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	systemProperty "metallum.hotpath.telemetry", "true"
+	[
+			"metallum.opt.metal4",
+			"metallum.opt.computeCommandPacket"
+	].each { propertyName ->
+		def requested = System.getProperty(propertyName)
+		if (requested != null) {
+			systemProperty propertyName, requested
+		}
+	}
 	environment "MTL_DEBUG_LAYER", metalApiValidation
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 }
@@ -715,7 +819,7 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS Iris target framework (ping-pong/depthtex/center-depth/shadow) content-level GPU suite."
 	onlyIf {
-		hardwareMetalValidationAvailable()
+		hostedOffscreenMetalValidationAvailable()
 	}
 	dependsOn tasks.named("buildMacNative")
 	testClassesDirs = sourceSets.test.output.classesDirs
@@ -729,6 +833,17 @@ tasks.register("metalIrisTargetsIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	[
+			"metallum.opt.metal4",
+			"metallum.opt.metal4Compiler",
+			"metallum.opt.metal4MainRenderer",
+			"metallum.opt.argumentBuffers"
+	].each { propertyName ->
+		def requested = System.getProperty(propertyName)
+		if (requested != null) {
+			systemProperty propertyName, requested
+		}
+	}
 	environment "MTL_DEBUG_LAYER", metalApiValidation
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 }
@@ -772,7 +887,22 @@ tasks.register("metalIrisShaderTranslationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.MetalIrisSodiumTerrainTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
-	systemProperty "metallum.iris.shaderpack.dir", "${projectDir}/run/shaderpacks"
+	systemProperty "metallum.iris.shaderpack.dir", System.getProperty(
+			"metallum.iris.shaderpack.dir", "${projectDir}/run/shaderpacks"
+	)
+	[
+			"metallum.iris.bsl.path",
+			"metallum.iris.potato.path",
+			"metallum.opt.metal4",
+			"metallum.opt.metal4Compiler",
+			"metallum.opt.metal4MainRenderer",
+			"metallum.opt.argumentBuffers"
+	].each { propertyName ->
+		def requested = System.getProperty(propertyName)
+		if (requested != null) {
+			systemProperty propertyName, requested
+		}
+	}
 	environment "MTL_DEBUG_LAYER", metalApiValidation
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 	testLogging {
@@ -798,6 +928,7 @@ tasks.named("check") {
 // motion and reactive-mask ownership have an explicit shared contract.
 //
 //   ./gradlew runClientIris -Pworld="New World"
+//   ./gradlew runClientMetal4Iris -Pworld="New World"
 //   ./gradlew runClientMetalFx -Pworld="New World"
 //
 // Explicit -D properties still win over these defaults for narrow diagnostics,
@@ -815,6 +946,18 @@ tasks.register("runClientIris") {
 	}
 }
 
+tasks.register("runClientMetal4Iris") {
+	group = "application"
+	description = "Runs full Metal 4 Iris with packets, argument tables and terrain ICB enabled."
+	dependsOn "runClient"
+	doFirst {
+		logger.lifecycle("runClientMetal4Iris: Metal 4 + Iris semantic path + packet/argument/ICB hot path enabled" +
+			(isolatedClientWorld ? " world='${isolatedClientWorld}'" : ""))
+		logger.lifecycle("runClientMetal4Iris: MetalFX, frame generation and Metal HUD disabled; " +
+			"shader pack is selected by run/config/iris.properties")
+	}
+}
+
 tasks.register("runClientMetalFx") {
 	group = "application"
 	description = "Runs MetalFX TEMPORAL with Iris semantic rendering and frame generation disabled."
@@ -827,7 +970,7 @@ tasks.register("runClientMetalFx") {
 
 tasks.register("verifyIsolatedClientProfiles") {
 	group = "verification"
-	description = "Verifies that supported Iris and MetalFX launch profiles cannot implicitly overlap."
+	description = "Verifies that supported Iris, Metal 4 Iris and MetalFX launch profiles cannot implicitly overlap."
 	doLast {
 		def failures = []
 		if (irisClientDefaults["metallum.iris.semantic"] != "true"
@@ -842,6 +985,14 @@ tasks.register("verifyIsolatedClientProfiles") {
 				|| metalFxClientDefaults["metallum.metalfx.frameGeneration"] != "false"
 				|| metalFxClientDefaults["metallum.metalfx.objectMotionProducer"] != "false") {
 			failures << "runClientMetalFx defaults do not keep Iris and Frame Generation dormant"
+		}
+		if (metal4IrisClientDefaults["metallum.iris.semantic"] != "true"
+				|| metal4IrisClientDefaults["metallum.metalfx.mode"] != "OFF"
+				|| metal4IrisClientDefaults["metallum.opt.metal4"] != "true"
+				|| metal4IrisClientDefaults["metallum.opt.renderCommandPacket"] != "true"
+				|| metal4IrisClientDefaults["metallum.opt.computeCommandPacket"] != "true"
+				|| metal4IrisClientDefaults["metallum.opt.terrainIcb"] != "true") {
+			failures << "runClientMetal4Iris defaults do not enable the complete Metal 4 experience path"
 		}
 		if (tasks.findByName("runClientAll") != null) {
 			failures << "the unsupported implicit Iris + MetalFX runClientAll profile still exists"
@@ -994,12 +1145,37 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			: System.getProperty("metallum.metalfx.objectMotionProducer", "false")
 	def requestedFrameGenerationOutputWidth = System.getProperty(
 			"metallum.metalfx.frameGenerationOutputWidth", "1280")
-	def expectedFrameGenerationPresentPath = System.getProperty(
-			"metallum.opt.metal4Present", "false").toBoolean() ? "metal4" : "metal3"
-		def normalizedFrameGenerationOutputWidth = requestedFrameGenerationOutputWidth
+	def validationMetal4Requested = System.getProperty(
+			"metallum.opt.metal4", "true").toBoolean()
+	def validationMetal4MainRequested = System.getProperty(
+			"metallum.opt.metal4MainRenderer",
+			Boolean.toString(validationMetal4Requested)).toBoolean()
+	def validationMetal4PresentRequested = System.getProperty(
+			"metallum.opt.metal4Present",
+			Boolean.toString(validationMetal4Requested)).toBoolean()
+	def expectedFrameGenerationPresentPath = validationMetal4Requested
+			&& (validationMetal4PresentRequested || validationMetal4MainRequested)
+			? "metal4" : "metal3"
+	def normalizedFrameGenerationOutputWidth = requestedFrameGenerationOutputWidth
 				.trim().toLowerCase(Locale.ROOT)
+	def configuredIrisProperties = new Properties()
+	def configuredIrisFile = file("run/config/iris.properties")
+	if (configuredIrisFile.isFile()) {
+		configuredIrisFile.withInputStream { configuredIrisProperties.load(it) }
+	}
+	def configuredIrisPack = configuredIrisProperties.getProperty("shaderPack", "").trim()
+	def configuredIrisPackRequired = "true".equalsIgnoreCase(
+			configuredIrisProperties.getProperty("enableShaders", "false"))
+			&& !configuredIrisPack.isBlank()
 	tasks.named("runClient") {
 		doFirst {
+			def validationWorldDir = file("run/saves/${dedicatedValidationWorld}")
+			if (!validationWorldDir.isDirectory()) {
+				throw new GradleException(
+						"Dedicated Minecraft validation world '${dedicatedValidationWorld}' does not exist at "
+								+ validationWorldDir.absolutePath
+				)
+			}
 			if (lockedBackpressureValidationRequested) {
 				def reason = lockedConsoleValidationReason()
 				if (reason == null || !reason.startsWith("the macOS console is locked")) {
@@ -1015,10 +1191,22 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 		}
 		systemProperty "metallum.validation.enabled", "true"
 		systemProperty "metallum.validation.output", validationOutputDir.absolutePath
-		// Validation must never silently exercise the OpenGL fallback after a
-		// previous client crash persisted preferredGraphicsBackend=opengl.
-		systemProperty "metallum.validation.forceMetal", "true"
-		systemProperty "metallum.validation.requireMetal", "true"
+		systemProperty "metallum.validation.world", dedicatedValidationWorld
+		// Metal remains the fail-closed default. An explicit false is reserved
+		// for the same-harness stock OpenGL differential lane; the run-state then
+		// records the observed backend instead of silently accepting a fallback.
+		def validationForceMetal = System.getProperty("metallum.validation.forceMetal", "true")
+		def validationRequireMetal = System.getProperty(
+				"metallum.validation.requireMetal", validationForceMetal)
+		def validationRequireIrisPack = System.getProperty(
+				"metallum.validation.requireIrisPack", configuredIrisPackRequired.toString())
+		def validationExpectedIrisPack = System.getProperty(
+				"metallum.validation.expectedIrisPack",
+				validationRequireIrisPack.toBoolean() ? configuredIrisPack : "")
+		systemProperty "metallum.validation.forceMetal", validationForceMetal
+		systemProperty "metallum.validation.requireMetal", validationRequireMetal
+		systemProperty "metallum.validation.requireIrisPack", validationRequireIrisPack
+		systemProperty "metallum.validation.expectedIrisPack", validationExpectedIrisPack
 		systemProperty "metallum.renderContract.enabled", renderContractMinecraftValidationRequested ? "true" : "false"
 		systemProperty "metallum.renderContract.runId",
 				renderContractMinecraftDiagnoseRequested ? "minecraft-diagnose-current"
@@ -1045,18 +1233,31 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				systemProperty propertyName, requestedValue
 			}
 		}
+		// Preserve an explicit caller choice for correctness lanes. In particular,
+		// the unified Iris evaluator requests OFF and must not be silently changed
+		// to TEMPORAL merely because it reuses this validation task.
+		def requestedMetalFxMode = System.getProperty("metallum.metalfx.mode")
+		def effectiveRequestedMetalFxMode = (nativeFullscreenBaselineRequested
+				? "OFF"
+				: (requestedMetalFxMode == null ? "TEMPORAL" : requestedMetalFxMode))
+				.trim().toUpperCase(Locale.ROOT)
 		systemProperty "metallum.metalfx.mode",
-				nativeFullscreenBaselineRequested ? "OFF" : "TEMPORAL"
+				effectiveRequestedMetalFxMode
 			if (nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested) {
 				systemProperty "metallum.validation.performanceOnly", "true"
 				systemProperty "metallum.validation.gpuTiming", "true"
 			}
 			if (nativeRenderEfficiencyValidationRequested) {
 				systemProperty "metallum.validation.gpuPassTiming", "true"
-				systemProperty "metallum.opt.metal4", "true"
-				systemProperty "metallum.opt.metal4MainQueuePilot", "true"
-				systemProperty "metallum.opt.metal4MainRenderer", System.getProperty(
-						"metallum.opt.metal4MainRenderer", "false")
+				// Profile the shipping backend by default. Explicit Metal 3
+				// comparisons still select the complete fallback with the master
+				// switch instead of leaving a Metal 4 capability pilot engaged.
+				def efficiencyMetal4 = Boolean.toString(validationMetal4Requested)
+				systemProperty "metallum.opt.metal4", efficiencyMetal4
+				systemProperty "metallum.opt.metal4MainQueuePilot", System.getProperty(
+						"metallum.opt.metal4MainQueuePilot", "false")
+				systemProperty "metallum.opt.metal4MainRenderer",
+						Boolean.toString(validationMetal4MainRequested)
 			}
 		if (nativeFrameGenerationValidationRequested) {
 			systemProperty "metallum.metalfx.nativeDirectFrameGeneration", "true"
@@ -1113,7 +1314,7 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			}
 		}
 		args "--quickPlaySingleplayer",
-				System.getProperty("metallum.validation.world", "New World"),
+				dedicatedValidationWorld,
 				// Pin the window (and with it the framebuffer) size: macOS
 				// window management can zoom/tile the client window, and a
 				// different framebuffer size makes golden captures
@@ -1124,7 +1325,16 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested
 						? System.getProperty("metallum.validation.metalDebugLayer", "0")
 						: System.getProperty("metallum.validation.metalDebugLayer", "1")
-		environment "MTL_SHADER_VALIDATION", "0"
+		// Keep shader validation enabled for the normal Metal correctness lane.
+		// Apple's private MetalFX kernels are not shader-validation clean, so the
+		// native MetalFX performance lanes retain their explicit opt-out.  Callers
+		// may still override this when reproducing an Apple validation-layer issue.
+		def correctnessShaderValidation =
+				nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested
+						? "0"
+						: metalShaderValidation
+		environment "MTL_SHADER_VALIDATION", System.getProperty(
+				"metallum.validation.metalShaderValidation", correctnessShaderValidation)
 		// A run that validated nothing must not pass by omission.
 		// MetalValidationClient.finishRunState is the only writer of
 		// run-state.json, and the client calls minecraft.stop() only on its
@@ -1147,7 +1357,7 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 						|| !(baseline.nativeMainReadback?.passed as boolean))) {
 					throw new GradleException("Native main-render GPU readback did not complete successfully")
 				}
-				if (System.getProperty("metallum.opt.metal4MainRenderer", "false").toBoolean()) {
+				if (validationMetal4MainRequested) {
 					if (!(baseline.metal4MainRendererEngaged as boolean)) {
 						throw new GradleException("Metal 4 main renderer was requested but did not engage")
 					}
@@ -1155,6 +1365,13 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 							|| (baseline.metal4MainRenderer.commandBuffersCreated as long) != 3L
 							|| (baseline.metal4MainRenderer.commandBufferFactoryCallsAvoided as long) <= 0L) {
 						throw new GradleException("Metal 4 main renderer residency/reuse evidence is incomplete")
+					}
+					if (!(baseline.metal4BackendClosure?.engaged as boolean)
+							|| (baseline.metal4BackendClosure.renderEncodes as long) <= 0L
+							|| (baseline.metal4BackendClosure.blitEncodes as long) <= 0L
+							|| (baseline.metal4BackendClosure.legacyEncoderViolations as long) != 0L
+							|| !(baseline.metal4BackendClosure.noLegacyEncoderViolations as boolean)) {
+						throw new GradleException("Metal 4 backend closure evidence is incomplete or contains a legacy encoder")
 					}
 				}
 				logger.lifecycle(String.format(Locale.ROOT,
@@ -1308,12 +1525,19 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			if (completed != expected) {
 				problems << "captured ${completed} of ${expected} GPU readbacks".toString()
 			}
+			// The production lane remains Metal-only. The explicitly requested
+			// differential lane is equally fail-closed: it must observe stock
+			// OpenGL, not merely "anything that was not Metal".
+			def expectedValidationBackend = validationRequireMetal.toBoolean() ? "Metal" : "OpenGL"
 			if (renderContractMinecraftValidationRequested) {
+				def contractApplicable = expectedValidationBackend == "Metal"
 				def contractFields = [
+						requested: runState.renderContractRequested,
+						applicable: runState.renderContractApplicable,
 						enabled: runState.renderContractEnabled,
 						status: runState.renderContractStatus,
 						ready: runState.renderContractReady,
-						requested: runState.renderContractRequestedCaptures,
+						captureRequests: runState.renderContractRequestedCaptures,
 						completed: runState.renderContractCompletedCaptures,
 						failed: runState.renderContractFailedCaptures,
 						pending: runState.renderContractPendingCaptures,
@@ -1322,26 +1546,72 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 						droppedEvents: runState.renderContractDroppedEvents,
 						manifest: runState.renderContractManifestFinalized,
 				]
-				if (contractFields.enabled != true) problems << "render-contract recorder was not enabled"
-				if (contractFields.status != "passed") problems << "render-contract status is ${contractFields.status}"
-				if (contractFields.ready != true) problems << "render-contract completion gate is not ready"
-				if (!(contractFields.requested instanceof Number) || contractFields.requested <= 0)
-					problems << "render-contract recorded no capture requests"
-				if (!(contractFields.completed instanceof Number) || contractFields.completed != contractFields.requested)
-					problems << "render-contract completed ${contractFields.completed} of ${contractFields.requested} captures"
-				if (contractFields.failed != 0 || contractFields.pending != 0 || contractFields.dropped != 0)
-					problems << "render-contract capture lifecycle failed: ${contractFields}"
-				if (contractFields.droppedEvents != 0) problems << "render-contract dropped ${contractFields.droppedEvents} trace events"
-				if (!(contractFields.passes instanceof Number) || contractFields.passes <= 0)
-					problems << "render-contract produced no logical passes"
-				if (contractFields.manifest != true) problems << "render-contract pass manifest was not finalized"
+				if (contractFields.requested != true) problems << "render-contract request was not recorded"
+				if (contractFields.applicable != contractApplicable) {
+					problems << "render-contract applicability is ${contractFields.applicable}, expected ${contractApplicable}"
+				}
+				if (contractApplicable) {
+					if (contractFields.enabled != true) problems << "render-contract recorder was not enabled"
+					if (contractFields.status != "passed") problems << "render-contract status is ${contractFields.status}"
+					if (contractFields.ready != true) problems << "render-contract completion gate is not ready"
+					if (!(contractFields.captureRequests instanceof Number) || contractFields.captureRequests <= 0)
+						problems << "render-contract recorded no capture requests"
+					if (!(contractFields.completed instanceof Number)
+							|| contractFields.completed != contractFields.captureRequests) {
+						problems << "render-contract completed ${contractFields.completed} of "
+								+ "${contractFields.captureRequests} captures"
+					}
+					if (contractFields.failed != 0 || contractFields.pending != 0 || contractFields.dropped != 0)
+						problems << "render-contract capture lifecycle failed: ${contractFields}"
+					if (contractFields.droppedEvents != 0)
+						problems << "render-contract dropped ${contractFields.droppedEvents} trace events"
+					if (!(contractFields.passes instanceof Number) || contractFields.passes <= 0)
+						problems << "render-contract produced no logical passes"
+					if (contractFields.manifest != true)
+						problems << "render-contract pass manifest was not finalized"
+				} else {
+					if (contractFields.enabled != false)
+						problems << "OpenGL differential unexpectedly enabled the Metal render-contract recorder"
+					if (contractFields.status != "not-applicable")
+						problems << "OpenGL differential render-contract status is ${contractFields.status}"
+					if (contractFields.ready != true)
+						problems << "OpenGL differential did not close the render-contract gate as not applicable"
+					if (contractFields.captureRequests != 0 || contractFields.completed != 0
+							|| contractFields.failed != 0 || contractFields.pending != 0
+							|| contractFields.dropped != 0 || contractFields.passes != 0
+							|| contractFields.droppedEvents != 0 || contractFields.manifest != false) {
+						problems << "OpenGL differential fabricated Metal render-contract evidence: ${contractFields}"
+					}
+				}
 			}
-			if (runState.renderBackend != "Metal") {
-				problems << "validation ran on ${runState.renderBackend ?: 'unknown'} instead of Metal"
+			if (runState.renderBackend != expectedValidationBackend) {
+				problems << "validation ran on ${runState.renderBackend ?: 'unknown'}"
+						+ " instead of ${expectedValidationBackend}"
+			}
+			if (validationRequireIrisPack.toBoolean()) {
+				if (runState.irisPackRequired != true) problems << "Iris pack gate was not armed"
+				if (runState.irisShadersEnabled != true) problems << "Iris shaders were not enabled"
+				if (runState.irisPackPresent != true) problems << "Iris reported no active pack"
+				if (runState.irisPackName != validationExpectedIrisPack) {
+					problems << "Iris selected ${runState.irisPackName ?: 'no pack'}"
+							+ " instead of ${validationExpectedIrisPack}"
+				}
+				def pipelineClass = runState.irisPipelineClass instanceof String
+						? runState.irisPipelineClass : ""
+				if (expectedValidationBackend == "Metal"
+						&& !pipelineClass.endsWith(".MetalWorldRenderingPipeline")) {
+					problems << "Iris Metal semantic pipeline was not active (${pipelineClass ?: 'none'})"
+				}
+				if (expectedValidationBackend == "Metal"
+						&& (!(runState.irisMetalGeneration instanceof Number)
+						|| runState.irisMetalGeneration < 0)) {
+					problems << "Iris Metal generation was not published"
+				}
 			}
 			def explicitMetal4Master = System.getProperty("metallum.opt.metal4")
 			def explicitMetal4Main = System.getProperty("metallum.opt.metal4MainRenderer")
-			def metal4MainRequested = explicitMetal4Main?.toBoolean() == true
+			def metal4MainRequested = expectedValidationBackend == "Metal"
+					&& validationMetal4MainRequested
 			if (metal4MainRequested) {
 				if (runState.metal4MainRendererEngaged != true) {
 					problems << "Metal 4 main renderer was requested but did not engage".toString()
@@ -1354,8 +1624,10 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 						|| runState.metal4MainRendererFactoryCallsAvoided <= 0) {
 					problems << "Metal 4 main renderer recorded no command-buffer reuse".toString()
 				}
+			}
+			if (metal4MainRequested && effectiveRequestedMetalFxMode in ["TEMPORAL", "AUTO"]) {
 				if (runState.metal4MetalFxEngaged != true) {
-					problems << "Metal 4 main renderer was requested but MetalFX did not receive its queue".toString()
+					problems << "Metal 4 Temporal did not receive the main queue".toString()
 				}
 				if (!(runState.metal4AuxiliaryComputeEncodes instanceof Number)
 						|| runState.metal4AuxiliaryComputeEncodes <= 0) {
@@ -1364,6 +1636,39 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				if (!(runState.metal4TemporalScalerEncodes instanceof Number)
 						|| runState.metal4TemporalScalerEncodes <= 0) {
 					problems << "Metal 4 Temporal scaler recorded no encodes".toString()
+				}
+			} else if (metal4MainRequested && effectiveRequestedMetalFxMode == "SPATIAL") {
+				if (runState.metal4MetalFxEngaged != true
+						|| !(runState.metal4SpatialScalerEncodes instanceof Number)
+						|| runState.metal4SpatialScalerEncodes <= 0) {
+					problems << "Metal 4 Spatial scaler recorded no encodes".toString()
+				}
+			} else if (metal4MainRequested && effectiveRequestedMetalFxMode == "OFF") {
+				def forbiddenMetalFxWork = [
+						runState.metal4AuxiliaryComputeEncodes,
+						runState.metal4SpatialScalerEncodes,
+						runState.metal4TemporalScalerEncodes,
+						runState.metal4FrameGenerationInputSubmissions
+				]
+				if (forbiddenMetalFxWork.any { it instanceof Number && it > 0 }) {
+					problems << "MetalFX OFF recorded Metal 4 scaler work".toString()
+				}
+			}
+			if (runState.metal4MainRendererEngaged == true) {
+				if (runState.metal4BackendClosureEngaged != true) {
+					problems << "Metal 4 backend closure telemetry did not engage".toString()
+				}
+				if (!(runState.metal4GenericRenderEncodes instanceof Number)
+						|| runState.metal4GenericRenderEncodes <= 0) {
+					problems << "Metal 4 backend recorded no generic render encodes".toString()
+				}
+				if (!(runState.metal4GenericBlitEncodes instanceof Number)
+						|| runState.metal4GenericBlitEncodes <= 0) {
+					problems << "Metal 4 backend recorded no generic blit encodes".toString()
+				}
+				if (runState.metal4LegacyEncoderViolations != 0
+						|| runState.metal4NoLegacyEncoderViolations != true) {
+					problems << "Metal 4 backend escaped to a legacy encoder".toString()
 				}
 			}
 			if (explicitMetal4Main != null && !explicitMetal4Main.toBoolean()
@@ -2176,6 +2481,7 @@ tasks.register("buildIOSNative", Exec) {
 			"-framework", "QuartzCore",
 			"-framework", "UIKit",
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
+			"src/main/native/MetalFrameGenerationLifecycle.swift",
 			"src/main/native/MetallumInterface.swift",
 			"src/main/native/MetallumNative.swift"
 	}
@@ -2536,7 +2842,7 @@ tasks.register("renderContractUnitTest", Test) {
 def configureRenderContractNativeTest = { Test task, boolean metal4 ->
 	task.group = "verification"
 	task.description = "Runs render-contract production GPU integration tests with Metal ${metal4 ? 4 : 3}."
-	task.onlyIf { hardwareMetalValidationAvailable() }
+	task.onlyIf { hostedOffscreenMetalValidationAvailable() }
 	task.dependsOn tasks.named("buildMacNative")
 	task.testClassesDirs = sourceSets.test.output.classesDirs
 	task.classpath = sourceSets.test.runtimeClasspath
@@ -2547,7 +2853,18 @@ def configureRenderContractNativeTest = { Test task, boolean metal4 ->
 		includeTestsMatching "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
 	}
 	task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+	task.systemProperty "metallum.hotpath.telemetry", "true"
+	task.systemProperty "metallum.opt.argumentBuffers", "true"
+	task.systemProperty "metallum.opt.terrainIcb", "true"
+	task.systemProperty "metallum.opt.renderCommandPacket",
+			System.getProperty("metallum.opt.renderCommandPacket", "true")
+	task.systemProperty "metallum.opt.computeCommandPacket",
+			System.getProperty("metallum.opt.computeCommandPacket", "true")
 	task.systemProperty "metallum.opt.metal4", metal4.toString()
+	task.systemProperty "metallum.opt.metal4Compiler", metal4.toString()
+	task.systemProperty "metallum.opt.metal4Present", metal4.toString()
+	task.systemProperty "metallum.opt.metal4MainRenderer", metal4.toString()
+	task.systemProperty "metallum.opt.residencySet", metal4.toString()
 	task.environment "MTL_DEBUG_LAYER", metalApiValidation
 	task.environment "MTL_SHADER_VALIDATION", metalShaderValidation
 	task.testLogging {
@@ -2844,4 +3161,78 @@ tasks.named("renderContractSyntheticValidation").configure {
 }
 tasks.named("renderContractCase").configure {
 	finalizedBy("renderContractPostRunCleanup")
+}
+
+
+// ---- Hosted Metal capability-governed integration suite ----
+// Repository-owned, redistributable tests proven to execute offscreen Metal
+// command submission/readback on GitHub's Apple Silicon macOS runner.
+tasks.register("hostedMetalExtendedIntegrationTest", Test) {
+	group = "verification"
+	description = "Runs redistributable offscreen Metal/Iris integrations on a proven hosted Metal device."
+	onlyIf { hostedOffscreenMetalValidationAvailable() }
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalBundledPostChainCompilationTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalBundledTerrainPipelineTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalShadowPipelineTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalComputeConformanceTest"
+		includeTestsMatching "com.metallum.client.metal.render.IrisMetalExternalLevelSamplerTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
+		includeTestsMatching "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
+		failOnNoMatchingTests = true
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "0"
+	environment "MTL_SHADER_VALIDATION", "0"
+	environment "MTL_HUD_ENABLED", "0"
+	environment "MTLFX_HUD_ENABLED", "0"
+	systemProperty "metallum.metal.hud", "false"
+	systemProperty "metallum.validation.gpuPassTiming", "false"
+}
+
+// Mechanical guardrail: new blanket CI exclusions or unnamed physical-only
+// gates fail verification. New physical requirements must be centralized in
+// physicalMetalCapabilities with a concrete capability reason.
+tasks.register("verifyMetalCapabilityPolicy") {
+	group = "verification"
+	description = "Rejects blanket CI GPU exclusions and undocumented physical-only Metal gates."
+	inputs.file("build.gradle")
+	doLast {
+		def policyText = file("build.gradle").getText("UTF-8")
+		// Assemble forbidden spellings at runtime so this guard does not match
+		// its own implementation while scanning build.gradle.
+		def forbidden = [
+			"physicalMetal" + "ValidationAvailable",
+			"if (" + "hostedCi)",
+			"onlyIf { " + "!hostedCi",
+			"onlyIf {" + "!hostedCi"
+		]
+		def violations = forbidden.findAll { policyText.contains(it) }
+		if (!violations.isEmpty()) {
+			throw new GradleException("Blanket CI/physical Metal gating is forbidden: ${violations}")
+		}
+		def rawPredicateNeedle = "hostedCi" + " == false"
+		def rawPhysicalLines = policyText.readLines().findAll { it.contains(rawPredicateNeedle) }
+		def allowedRawPhysicalLines = [
+			'	isMacOSHost && (' + rawPredicateNeedle + ' || "true".equalsIgnoreCase(System.getenv("METALLUM_HOSTED_METAL_OFFSCREEN")))',
+			'	isMacOSHost && ' + rawPredicateNeedle
+		]
+		def unexpectedRaw = rawPhysicalLines.findAll { !allowedRawPhysicalLines.contains(it) }
+		if (!unexpectedRaw.isEmpty() || rawPhysicalLines.size() != allowedRawPhysicalLines.size()) {
+			throw new GradleException("Raw hostedCi physical predicates must stay centralized in capability policy: ${rawPhysicalLines}")
+		}
+		def undocumented = physicalMetalCapabilities.findAll { key, value -> value == null || value.trim().isEmpty() }
+		if (!undocumented.isEmpty()) {
+			throw new GradleException("Physical Metal capabilities require concrete reasons: ${undocumented.keySet()}")
+		}
+		logger.lifecycle("Metal capability policy: PASS (${physicalMetalCapabilities.size()} documented physical capabilities)")
+	}
 }

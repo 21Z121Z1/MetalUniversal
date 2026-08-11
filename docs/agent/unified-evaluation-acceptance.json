@@ -1,0 +1,117 @@
+{
+  "schema_version": 2,
+  "scope": "Unified Iris-on-Metal render correctness, admission, diagnosis, and performance evaluation",
+  "reference_branch": "integration/iris-metal-next",
+  "suite_model": {
+    "conformance": "Deterministic render-contract manifests, attachment readbacks, expectations, and first-divergence reports.",
+    "admission": "A short real-client probe proves that the selected optimization lane actually executes before expensive paired performance trials begin.",
+    "performance": "Low-overhead structured counters and ABBA-paired baseline/candidate trials with heavy producer capture disabled.",
+    "diagnostic": "Focused producer detail and attachment readback for the first divergent semantic pass only."
+  },
+  "identity_requirements": [
+    "git HEAD and dirty status",
+    "production JAR SHA-256",
+    "validation JAR SHA-256",
+    "native dylib SHA-256",
+    "Iris, Sodium and shader-pack versions or hashes",
+    "world/scenario identity",
+    "resolution, display refresh and UI scale",
+    "render distance and shader options",
+    "macOS, Xcode, Swift and Java versions",
+    "power and thermal state"
+  ],
+  "correctness_gate": {
+    "required": true,
+    "performance_only_reuse_rule": "MODE=performance must receive METALLUM_CORRECTNESS_GATE pointing to a prior passing gate.json from the same source/binary/scenario identity.",
+    "tasks": [
+      "scripts/agent/verify.sh static",
+      "scripts/agent/verify.sh gpu",
+      "renderContractSyntheticValidation",
+      "baseline renderContractMinecraftValidation",
+      "candidate renderContractMinecraftValidation"
+    ],
+    "rules": [
+      "Every requested capture completes and the pass manifest finalizes.",
+      "No dropped trace event, pending capture, Metal validation error, or unexplained attachment/image difference is allowed.",
+      "Unsupported semantics reject or disable before execution; silent approximation is forbidden.",
+      "A screenshot-only match cannot prove depth, motion, reactive, shadow, or HDR attachment correctness."
+    ]
+  },
+  "admission_gate": {
+    "required_before_performance": true,
+    "default_warmup_seconds": 2,
+    "default_sample_seconds": 5,
+    "source": "the unique native-fullscreen-baseline.json payload emitted by the candidate probe",
+    "rules": {
+      "pass-fusion": "renderFusionRuntime.admissions > 0",
+      "compute-grouping": "computeGroupingRuntime.admissions > 0 and deferredPassCloses > 0",
+      "depth-liveness": "depthLivenessRuntime.prunedPairs > 0 or captureSkips > 0",
+      "argument-tables": "argumentBindingRuntime.enabled is true and encodedSnapshots > 0",
+      "terrain-icb": "attempts, accepted batches and draws are positive; attempts and windowed native allocations equal accepted batches; completion lag is within three in-flight submissions; exhausted-budget batches are skipped in Java before FFM; native budget and zero-sized-allocation fallbacks are forbidden",
+      "pipeline-prewarm": "runtimePipelineCompiles is present and equals zero after warmup",
+      "all-safe-lanes": "at least one selected Iris lane proves runtime activation"
+    },
+    "failure_state": "rejected-no-admission",
+    "malformed_or_missing_evidence_state": "inconclusive-admission-evidence"
+  },
+  "measurement_protocol": {
+    "minimum_paired_blocks": 4,
+    "block_order": "ABBA or equivalent randomized interleaving; never run all baselines before all candidates",
+    "warmup_seconds_min": 30,
+    "sample_seconds_min": 120,
+    "aggregation": "Aggregate frames within each completed trial first, then compare baseline and candidate within each block.",
+    "failed_or_incomplete_trial_rule": "A nonzero or missing exit status is excluded from paired analysis and can never contribute to acceptance.",
+    "authoritative_source_report": "native-fullscreen-baseline.json",
+    "source_report_uniqueness": "Exactly one unique report payload is allowed per trial; byte-identical copies are permitted, non-identical copies reject the trial.",
+    "sample_window_rule": "A metric is available only when its sample window matches measuredFrameIntervals; warmup and measured samples may not be mixed.",
+    "structured_metrics_only": true,
+    "log_regex_is_authoritative": false,
+    "minimum_positive_block_fraction": 0.75
+  },
+  "target_metrics": [
+    {"name": "fps_median", "direction": "higher", "mandatory": true},
+    {"name": "gpu_frame_time_ms_median", "direction": "lower"},
+    {"name": "cpu_render_encode_time_ms_median", "direction": "lower"},
+    {"name": "native_encoder_count_per_frame_median", "direction": "lower"},
+    {"name": "render_pass_store_load_bytes_estimate_median", "direction": "lower"},
+    {"name": "resident_render_resource_bytes", "direction": "lower"}
+  ],
+  "guardrails": [
+    {"name": "gpu_frame_time_ms_median", "relative_regression_max": 0.02},
+    {"name": "cpu_render_encode_time_ms_median", "relative_regression_max": 0.02},
+    {"name": "peak_resident_memory_bytes", "relative_regression_max": 0.03},
+    {"name": "frame_time_stutter_count", "relative_regression_max": 0.0},
+    {"name": "validation_errors", "absolute_max": 0}
+  ],
+  "acceptance_rule": "Accept only when correctness and admission pass, mandatory structured FPS exists, at least one target metric improves in at least 75% of four or more paired blocks, and no guardrail exceeds its regression limit.",
+  "decision_states": [
+    "correctness-pass-no-performance-decision",
+    "accepted-candidate",
+    "rejected-correctness-gate",
+    "rejected-no-admission",
+    "inconclusive-admission-evidence",
+    "rejected-regression",
+    "inconclusive-noise",
+    "blocked-environment",
+    "blocked-semantic-ambiguity"
+  ],
+  "required_artifacts": [
+    "run-manifest.json",
+    "acceptance.json",
+    "correctness/gate.json",
+    "correctness baseline/candidate evidence",
+    "admission/candidate/metrics.json when performance was requested",
+    "admission/admission.json when performance was requested",
+    "trials/block-NNN/{baseline,candidate}/metrics.json",
+    "comparison.json when paired performance trials started",
+    "comparison.md when paired performance trials started",
+    "decision.json"
+  ],
+  "human_approval_boundaries": [
+    "force push, rebase shared history, merge or release",
+    "change supported Minecraft, Iris or Sodium versions",
+    "accept a visual/semantic difference as intentional without an existing specification",
+    "delete worlds, shader packs, captures or unrelated files",
+    "enable an optimization by default when admission or runtime evidence is incomplete"
+  ]
+}

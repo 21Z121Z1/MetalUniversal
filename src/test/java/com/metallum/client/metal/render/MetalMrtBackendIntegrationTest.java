@@ -1,11 +1,14 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalTerrainIcbBridge;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
+import com.metallum.client.metal.render.mtl.MetalCommandPacketTelemetry;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.IndexType;
 import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.pipeline.BindGroupLayout;
 import com.mojang.blaze3d.pipeline.BlendFunction;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
@@ -16,6 +19,12 @@ import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.ShaderType;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
+import com.mojang.blaze3d.textures.AddressMode;
+import com.mojang.blaze3d.textures.FilterMode;
+import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import com.mojang.blaze3d.vertex.VertexFormatElement;
+import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException;
 import org.joml.Vector4f;
 import org.joml.Vector4fc;
 import org.junit.jupiter.api.AfterEach;
@@ -27,6 +36,7 @@ import org.junit.jupiter.api.condition.OS;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.IntBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -160,6 +170,243 @@ final class MetalMrtBackendIntegrationTest {
             assertByteNear(rendered.get(2), 0, "triangle fan blue");
         }
         closeTextures(textures);
+    }
+
+    @Test
+    void terrainIcbExecutesTextureArgumentBufferResources() {
+        assertTrue(MetalTerrainIcbScope.enabled(), "production terrain ICB gate is disabled");
+        assertEquals(1, MetalTerrainIcbBridge.submissionBudget());
+        assertTrue(IrisMetalArgumentBindingRuntime.enabled(), "argument buffers are disabled");
+        assertTrue(
+                device.getDeviceInfo().features().multiDrawDirectInterleaved(),
+                "public RenderPass must advertise the interleaved command layout used by Sodium"
+        );
+        assertEquals(
+                MetalDevice.MAX_MULTI_DRAW_DIRECT_INTERLEAVED_DRAWS,
+                device.getDeviceInfo().limits().maxMultiDrawDirectInterleavedDrawCount()
+        );
+
+        String shaderName = "terrain_icb_argument_buffer";
+        fragmentShaders.put(shaderName, """
+                #version 450
+                uniform sampler2D SourceSampler;
+                layout(location=0) out vec4 color;
+                void main() {
+                    color = texture(SourceSampler, vec2(0.5));
+                }
+                """);
+        RenderPipeline pipeline = RenderPipeline.builder()
+                .withLocation("metallum_test/" + shaderName)
+                .withVertexShader("metallum_test/" + shaderName)
+                .withFragmentShader("metallum_test/" + shaderName)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withCull(false)
+                .withBindGroupLayout(BindGroupLayout.builder().withSampler("SourceSampler").build())
+                .withColorTargetState(0, new ColorTargetState(
+                        Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL
+                ))
+                .build();
+
+        ByteBuffer sourcePixels = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        sourcePixels.put((byte) 51).put((byte) 128).put((byte) 230).put((byte) 255).flip();
+        ByteBuffer indexBytes = ByteBuffer.allocateDirect(3 * Short.BYTES).order(ByteOrder.nativeOrder());
+        indexBytes.putShort((short) 0).putShort((short) 1).putShort((short) 2).flip();
+        IntBuffer draws = ByteBuffer.allocateDirect(16 * 3 * Integer.BYTES)
+                .order(ByteOrder.nativeOrder())
+                .asIntBuffer();
+        for (int draw = 0; draw < 16; draw++) {
+            draws.put(draw * 3, 0);
+            draws.put(draw * 3 + 1, 3);
+            draws.put(draw * 3 + 2, 0);
+        }
+
+        List<MetalGpuTexture> outputs = createTextures(List.of(GpuFormat.RGBA8_UNORM), "terrain-icb");
+        try (MetalGpuTexture source = (MetalGpuTexture) device.createTexture(
+                "terrain ICB sampled source",
+                GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
+                GpuFormat.RGBA8_UNORM,
+                1,
+                1,
+                1,
+                1
+        ); MetalGpuTextureView sourceView = (MetalGpuTextureView) device.createTextureView(source);
+             MetalGpuSampler sampler = (MetalGpuSampler) device.createSampler(
+                     AddressMode.CLAMP_TO_EDGE,
+                     AddressMode.CLAMP_TO_EDGE,
+                     FilterMode.NEAREST,
+                     FilterMode.NEAREST,
+                     1,
+                     java.util.OptionalDouble.empty()
+             ); MetalGpuBuffer indices = (MetalGpuBuffer) device.createBuffer(
+                     () -> "terrain ICB indices", GpuBuffer.USAGE_INDEX, indexBytes
+             )) {
+            encoder.writeToTexture(source, sourcePixels, 0, 0, 0, 0, 1, 1);
+            IrisMetalArgumentBindingRuntime.resetStats();
+            MetalCommandPacketTelemetry.reset();
+
+            // Four completed submissions prove that the bounded Metal 4 path
+            // executes a real ICB, releases it on feedback, and never reuses an
+            // executed ICB across an MTL4 command-buffer lifecycle.
+            for (int submission = 0; submission < 4; submission++) {
+                try (PassWithViews pass = createPass(outputs, null, false)) {
+                    pass.pass().setPipeline(pipeline);
+                    pass.pass().bindTexture("SourceSampler", sourceView, sampler);
+                    pass.pass().setIndexBuffer(indices, IndexType.SHORT);
+                    MetalTerrainIcbScope.enter();
+                    try {
+                        pass.pass().multiDrawIndexed(draws, 1, 0, 16);
+                        if (device.metal4MainRendererEnabled()) {
+                            // The second qualifying batch must execute exactly
+                            // once through native multi-draw, but Java already
+                            // knows the per-submission budget is consumed and
+                            // must not cross FFM only to rediscover that fact.
+                            pass.pass().multiDrawIndexed(draws, 1, 0, 16);
+                        }
+                    } finally {
+                        MetalTerrainIcbScope.exit();
+                    }
+                    encoder.submitRenderPass();
+                }
+                encoder.submit();
+                device.waitForSubmittedGpuWork();
+            }
+
+            ByteBuffer rendered = readback(outputs.getFirst());
+            assertByteNear(rendered.get(0), 51, "terrain ICB sampled red");
+            assertByteNear(rendered.get(1), 128, "terrain ICB sampled green");
+            assertByteNear(rendered.get(2), 230, "terrain ICB sampled blue");
+            assertByteNear(rendered.get(3), 255, "terrain ICB sampled alpha");
+
+            MetalCommandPacketTelemetry.Snapshot commands = MetalCommandPacketTelemetry.snapshot();
+            boolean metal4 = device.metal4MainRendererEnabled();
+            assertEquals(4L, commands.terrainIcbAttempts());
+            assertEquals(4L, commands.terrainIcbAccepted());
+            assertEquals(64L, commands.terrainIcbDraws());
+            assertEquals(0L, commands.terrainIcbFallbacks());
+            assertEquals(metal4 ? 4L : 0L, commands.terrainIcbBudgetSkips());
+            assertEquals(metal4 ? 64L : 0L, commands.terrainIcbBudgetSkipDraws());
+            IrisMetalArgumentBindingRuntime.Stats arguments = IrisMetalArgumentBindingRuntime.stats();
+            assertTrue(arguments.encodedSnapshots() > 0L, "no argument-buffer snapshot executed");
+            assertTrue(arguments.updates() >= 2L, "texture/sampler resources were not encoded");
+            assertEquals(0L, arguments.failures());
+            if (metal4) {
+                MetalTerrainIcbBridge.NativeStats icb = MetalTerrainIcbBridge.nativeStats();
+                assertTrue(icb.available(), "native ICB lifetime telemetry is unavailable");
+                assertTrue(icb.allocations() >= 4L, "terrain ICBs were not allocated");
+                assertTrue(
+                        icb.completionReleases() >= 4L,
+                        "terrain ICBs were not released after GPU completion"
+                );
+                assertEquals(0L, icb.budgetFallbacks(), "Java did not suppress exhausted-budget FFM calls");
+                assertEquals(0L, icb.zeroAllocationFallbacks());
+                long[] closure = MetalNativeBridge.metallum_metal4_backend_closure_stats();
+                assertEquals(1L, closure[0], "Metal 4 closure telemetry did not engage");
+                assertTrue(closure[1] > 0L, "Metal 4 recorded no generic render encoder");
+                assertTrue(closure[3] > 0L, "Metal 4 recorded no generic blit encoder");
+                assertEquals(0L, closure[4], "Metal 4 escaped through a legacy encoder");
+                assertEquals(1L, closure[5], "Metal 4 no-legacy invariant failed");
+            }
+        }
+        closeTextures(outputs);
+    }
+
+    @Test
+    void argumentBufferPipelineSwitchRestoresLegacyVertexSlotZero() {
+        assertTrue(IrisMetalArgumentBindingRuntime.enabled(), "argument buffers are disabled");
+
+        String redName = "legacy_slot_zero_red";
+        String argumentName = "argument_slot_zero_green";
+        String blueName = "legacy_slot_zero_blue";
+        String legacyVertex = """
+                #version 450
+                layout(location=0) in vec3 Position;
+                layout(location=1) in vec2 UV0;
+                void main() { gl_Position = vec4(Position, 1.0); }
+                """;
+        vertexShaders.put(redName, legacyVertex);
+        vertexShaders.put(blueName, legacyVertex);
+        vertexShaders.put(argumentName, """
+                #version 450
+                uniform sampler2D SourceSampler;
+                void main() {
+                    vec2 positions[3] = vec2[](
+                        vec2(-1.0, -1.0),
+                        vec2( 3.0, -1.0),
+                        vec2(-1.0,  3.0)
+                    );
+                    float keepSamplerActive = texture(SourceSampler, vec2(0.5)).r;
+                    gl_Position = vec4(positions[gl_VertexIndex], keepSamplerActive * 0.000001, 1.0);
+                }
+                """);
+        fragmentShaders.put(redName, solidFragment(1.0F, 0.0F, 0.0F));
+        fragmentShaders.put(argumentName, solidFragment(0.0F, 1.0F, 0.0F));
+        fragmentShaders.put(blueName, solidFragment(0.0F, 0.0F, 1.0F));
+
+        RenderPipeline red = vertexBackedPipeline(redName);
+        RenderPipeline argument = RenderPipeline.builder()
+                .withLocation("metallum_test/" + argumentName)
+                .withVertexShader("metallum_test/" + argumentName)
+                .withFragmentShader("metallum_test/" + argumentName)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withCull(false)
+                .withBindGroupLayout(BindGroupLayout.builder().withSampler("SourceSampler").build())
+                .withColorTargetState(0, new ColorTargetState(
+                        Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL
+                ))
+                .build();
+        RenderPipeline blue = vertexBackedPipeline(blueName);
+
+        ByteBuffer sourcePixels = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder());
+        sourcePixels.put((byte) 255).put((byte) 255).put((byte) 255).put((byte) 255).flip();
+        List<MetalGpuTexture> outputs = createTextures(List.of(GpuFormat.RGBA8_UNORM), "slot-zero-order");
+        try (MetalGpuBuffer vertices = (MetalGpuBuffer) device.createBuffer(
+                () -> "slot-zero legacy vertices",
+                GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_DST,
+                fullScreenPositionTexTriangle()
+        ); MetalGpuTexture source = (MetalGpuTexture) device.createTexture(
+                "slot-zero argument source",
+                GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_COPY_DST,
+                GpuFormat.RGBA8_UNORM,
+                1,
+                1,
+                1,
+                1
+        ); MetalGpuTextureView sourceView = (MetalGpuTextureView) device.createTextureView(source);
+             MetalGpuSampler sampler = (MetalGpuSampler) device.createSampler(
+                     AddressMode.CLAMP_TO_EDGE,
+                     AddressMode.CLAMP_TO_EDGE,
+                     FilterMode.NEAREST,
+                     FilterMode.NEAREST,
+                     1,
+                     java.util.OptionalDouble.empty()
+             ); PassWithViews pass = createPass(outputs, null, false)) {
+            encoder.writeToTexture(source, sourcePixels, 0, 0, 0, 0, 1, 1);
+            pass.pass().setVertexBuffer(0, vertices.slice());
+
+            pass.pass().setPipeline(red);
+            pass.pass().draw(3, 1, 0, 0);
+
+            pass.pass().setPipeline(argument);
+            pass.pass().bindTexture("SourceSampler", sourceView, sampler);
+            pass.pass().draw(3, 1, 0, 0);
+
+            // The argument pipeline replaced vertex [[buffer(0)]]. This draw
+            // must restore the unchanged Java vertex slice instead of letting
+            // the encoder shadow suppress it as a redundant bind.
+            pass.pass().setPipeline(blue);
+            pass.pass().draw(3, 1, 0, 0);
+
+            encoder.submitRenderPass();
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+
+            ByteBuffer rendered = readback(outputs.getFirst());
+            assertByteNear(rendered.get(0), 0, "restored slot-zero red");
+            assertByteNear(rendered.get(1), 0, "restored slot-zero green");
+            assertByteNear(rendered.get(2), 255, "restored slot-zero blue");
+            assertByteNear(rendered.get(3), 255, "restored slot-zero alpha");
+        }
+        closeTextures(outputs);
     }
 
     @Test
@@ -382,6 +629,49 @@ final class MetalMrtBackendIntegrationTest {
     @Test
     void fragmentOutputFormatMismatchFailsClosed() {
         verifyFragmentOutputFormatMismatchFailsClosed();
+    }
+
+    @Test
+    void packedColorTargetsUseTheirDeclaredNumericClass() {
+        assertDoesNotThrow(() -> MetalCrossShaderCompiler.validateFragmentOutputSignature(
+                pipeline(
+                        "packed_rg11b10_float",
+                        List.of(GpuFormat.RG11B10_FLOAT),
+                        null,
+                        ColorTargetState.WRITE_ALL
+                ),
+                Map.of(0, MetalCrossShaderCompiler.FragmentOutputClass.FLOAT)
+        ));
+        assertDoesNotThrow(() -> MetalCrossShaderCompiler.validateFragmentOutputSignature(
+                pipeline(
+                        "packed_rgb10a2_unorm",
+                        List.of(GpuFormat.RGB10A2_UNORM),
+                        null,
+                        ColorTargetState.WRITE_ALL
+                ),
+                Map.of(0, MetalCrossShaderCompiler.FragmentOutputClass.FLOAT)
+        ));
+        assertDoesNotThrow(() -> MetalCrossShaderCompiler.validateFragmentOutputSignature(
+                pipeline(
+                        "packed_rgb10a2_uint",
+                        List.of(GpuFormat.RGB10A2_UINT),
+                        null,
+                        ColorTargetState.WRITE_ALL
+                ),
+                Map.of(0, MetalCrossShaderCompiler.FragmentOutputClass.UINT)
+        ));
+        assertThrows(
+                ShaderCompileException.class,
+                () -> MetalCrossShaderCompiler.validateFragmentOutputSignature(
+                        pipeline(
+                                "depth_as_color",
+                                List.of(GpuFormat.D32_FLOAT),
+                                null,
+                                ColorTargetState.WRITE_ALL
+                        ),
+                        Map.of(0, MetalCrossShaderCompiler.FragmentOutputClass.FLOAT)
+                )
+        );
     }
 
     @Test
@@ -689,8 +979,13 @@ final class MetalMrtBackendIntegrationTest {
                 null,
                 ColorTargetState.WRITE_ALL
         );
-        MetalCompiledRenderPipeline compiled = device.getOrCompilePipeline(pipeline);
-        assertFalse(compiled.isValid(), "integer output with normalized float target must not create a valid PSO");
+        IllegalStateException mismatch = assertThrows(
+                IllegalStateException.class,
+                () -> device.getOrCompilePipeline(pipeline)
+        );
+        assertTrue(mismatch.getMessage().contains("Failed to compile Metal cross shader"));
+        assertNotNull(mismatch.getCause());
+        assertTrue(mismatch.getCause().getMessage().contains("numeric-class mismatch"));
     }
 
     private RenderPipeline pipeline(
@@ -777,6 +1072,50 @@ final class MetalMrtBackendIntegrationTest {
             encoder.submit();
             device.waitForSubmittedGpuWork();
         }
+    }
+
+    private RenderPipeline vertexBackedPipeline(final String shaderName) {
+        return RenderPipeline.builder()
+                .withLocation("metallum_test/" + shaderName)
+                .withVertexShader("metallum_test/" + shaderName)
+                .withFragmentShader("metallum_test/" + shaderName)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withCull(false)
+                .withVertexBinding(0, DefaultVertexFormat.POSITION_TEX)
+                .withColorTargetState(0, new ColorTargetState(
+                        Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL
+                ))
+                .build();
+    }
+
+    private static String solidFragment(final float red, final float green, final float blue) {
+        return "#version 450\nlayout(location=0) out vec4 color;\nvoid main() { color = vec4("
+                + Float.toString(red) + ", "
+                + Float.toString(green) + ", "
+                + Float.toString(blue) + ", 1.0); }\n";
+    }
+
+    private static ByteBuffer fullScreenPositionTexTriangle() {
+        int stride = DefaultVertexFormat.POSITION_TEX.getVertexSize();
+        VertexFormatElement position = DefaultVertexFormat.POSITION_TEX.getElements().stream()
+                .filter(candidate -> candidate.name().equals("Position"))
+                .findFirst()
+                .orElseThrow();
+        VertexFormatElement uv = DefaultVertexFormat.POSITION_TEX.getElements().stream()
+                .filter(candidate -> candidate.name().equals("UV0"))
+                .findFirst()
+                .orElseThrow();
+        ByteBuffer result = ByteBuffer.allocateDirect(3 * stride).order(ByteOrder.nativeOrder());
+        float[][] points = {{-1.0F, -1.0F}, {3.0F, -1.0F}, {-1.0F, 3.0F}};
+        for (int index = 0; index < points.length; index++) {
+            int base = index * stride;
+            result.putFloat(base + position.offset(), points[index][0]);
+            result.putFloat(base + position.offset() + Float.BYTES, points[index][1]);
+            result.putFloat(base + position.offset() + 2 * Float.BYTES, 0.0F);
+            result.putFloat(base + uv.offset(), 0.0F);
+            result.putFloat(base + uv.offset() + Float.BYTES, 0.0F);
+        }
+        return result;
     }
 
     private PassWithViews createPass(

@@ -5,6 +5,7 @@
   "compatibilityLevel": "JAVA_25",
   "mixins": [],
   "client": [
+    "iris.IrisMetalLifecycleValidationMixin",
     "iris.IrisOpenGlUniformBuilderTraceMixin",
     "iris.IrisOpenGlUniformUpdateTraceMixin",
     "iris.IrisOpenGlProgramUniformsTraceMixin",

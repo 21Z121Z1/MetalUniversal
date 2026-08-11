@@ -17,7 +17,20 @@ import java.nio.ByteOrder;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Environment(EnvType.CLIENT)
-class MetalGpuBuffer extends GpuBuffer {
+/**
+ * Public because MixinExtras generates an {@code Args} bridge for the upload
+ * deduplication hook. The generated bridge lives in a synthetic package and
+ * must be able to resolve this method-descriptor type at runtime.
+ */
+public class MetalGpuBuffer extends GpuBuffer {
+    /**
+     * Diagnostic only: force every newly-created buffer onto Shared storage so
+     * Metal 4 geometry can be separated from the Private-buffer upload/address
+     * path without changing the normal configuration.
+     */
+    private static final boolean FORCE_SHARED_STORAGE = Boolean.parseBoolean(
+            System.getProperty("metallum.opt.metal4SharedBuffers", "false")
+    );
     private static final AtomicLong NEXT_VALIDATION_RESOURCE_ID = new AtomicLong(1L);
     private final MetalDevice device;
     private final long validationResourceId = NEXT_VALIDATION_RESOURCE_ID.getAndIncrement();
@@ -29,6 +42,7 @@ class MetalGpuBuffer extends GpuBuffer {
     private MemorySegment nativeHandle;
     @Nullable
     private ByteBuffer storage;
+    private long backingGeneration = 1L;
     private boolean closed;
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size) {
@@ -117,7 +131,19 @@ class MetalGpuBuffer extends GpuBuffer {
     }
 
     String validationDebugId() {
-        return "metal-buffer-" + validationResourceId;
+        return "metal-buffer-" + validationResourceId + "#" + backingGeneration;
+    }
+
+    long backingGeneration() {
+        return this.backingGeneration;
+    }
+
+    BackingSnapshot backingSnapshot() {
+        return new BackingSnapshot(
+                this.validationResourceId,
+                this.backingGeneration,
+                this.nativeHandle()
+        );
     }
 
     boolean isDynamic() {
@@ -140,8 +166,19 @@ class MetalGpuBuffer extends GpuBuffer {
     }
 
     void swapBacking(final MemorySegment handle, final ByteBuffer storage) {
+        if (this.closed) {
+            throw new IllegalStateException("Cannot replace the backing of a closed Metal buffer");
+        }
+        if (MetalNativeBridge.isNullHandle(handle)) {
+            throw new IllegalArgumentException("Replacement Metal buffer handle must be non-null");
+        }
+        if (storage == null) {
+            throw new IllegalArgumentException("Replacement Metal buffer storage must be non-null");
+        }
+        long nextGeneration = Math.incrementExact(this.backingGeneration);
         this.nativeHandle = handle;
         this.storage = storage;
+        this.backingGeneration = nextGeneration;
     }
 
     @Override
@@ -159,6 +196,7 @@ class MetalGpuBuffer extends GpuBuffer {
         if (this.nativeHandle != null) {
             MemorySegment handle = this.nativeHandle;
             this.nativeHandle = null;
+            this.backingGeneration = Math.incrementExact(this.backingGeneration);
             this.device.queueBufferRelease(handle, this.allocationSize, this.resourceOptions);
         }
     }
@@ -197,7 +235,17 @@ class MetalGpuBuffer extends GpuBuffer {
     }
 
     private static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {
-        MTLStorageMode storageMode = isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private;
+        MTLStorageMode storageMode = FORCE_SHARED_STORAGE
+                ? MTLStorageMode.Shared
+                : (isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private);
         return MTLResourceOptions.of(storageMode, MTLHazardTrackingMode.Untracked);
+    }
+
+    record BackingSnapshot(long resourceId, long generation, MemorySegment handle) {
+        BackingSnapshot {
+            if (resourceId <= 0L || generation <= 0L || MetalNativeBridge.isNullHandle(handle)) {
+                throw new IllegalArgumentException("Metal buffer backing snapshot must be live and positive");
+            }
+        }
     }
 }

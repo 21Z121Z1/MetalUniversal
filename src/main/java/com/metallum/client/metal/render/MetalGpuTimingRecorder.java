@@ -8,14 +8,20 @@ import java.util.List;
 /** Diagnostic capture of completed main-queue Metal command buffers. */
 public final class MetalGpuTimingRecorder {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.validation.gpuTiming")
-            || Boolean.getBoolean("metallum.metalfx.debug");
+            || Boolean.getBoolean("metallum.metalfx.debug")
+            || Boolean.getBoolean("metallum.opt.terrainAdaptiveScheduling")
+            || Boolean.getBoolean("metallum.opt.terrainSchedulingTelemetry");
     private static final boolean PASS_TIMING_ENABLED =
             Boolean.getBoolean("metallum.validation.gpuPassTiming");
-    private static final int CAPACITY = 2048;
+    // Formal acceptance samples at least 120 seconds. Retain enough completed
+    // command-buffer timings for the whole window instead of silently keeping
+    // only the last ~2,048 frames.
+    private static final int CAPACITY = 16_384;
     private static final List<Sample> SAMPLES = new ArrayList<>();
     private static final List<CpuPassSample> CPU_PASS_SAMPLES = new ArrayList<>();
     private static long renderEncoderFactoryCalls;
     private static long renderEncoderCacheHits;
+    private static long latestGpuNanos;
 
     private MetalGpuTimingRecorder() {
     }
@@ -24,14 +30,20 @@ public final class MetalGpuTimingRecorder {
         return PASS_TIMING_ENABLED;
     }
 
-    static synchronized void record(final long submitIndex, final double start, final double end) {
+    static void record(final long submitIndex, final double start, final double end) {
+        // Keep the disabled production path outside the monitor. This method is
+        // reached once per completed frame, and the previous synchronized
+        // declaration acquired the class monitor even when timing was disabled.
         if (!ENABLED || !(start > 0.0) || !(end > start)
                 || !Double.isFinite(start) || !Double.isFinite(end)) {
             return;
         }
-        SAMPLES.add(new Sample(submitIndex, start, end));
-        if (SAMPLES.size() > CAPACITY) {
-            SAMPLES.subList(0, SAMPLES.size() - CAPACITY).clear();
+        synchronized (MetalGpuTimingRecorder.class) {
+            SAMPLES.add(new Sample(submitIndex, start, end));
+            latestGpuNanos = Math.max(1L, Math.round((end - start) * 1_000_000_000.0));
+            if (SAMPLES.size() > CAPACITY) {
+                SAMPLES.subList(0, SAMPLES.size() - CAPACITY).clear();
+            }
         }
     }
 
@@ -40,6 +52,7 @@ public final class MetalGpuTimingRecorder {
         CPU_PASS_SAMPLES.clear();
         renderEncoderFactoryCalls = 0L;
         renderEncoderCacheHits = 0L;
+        latestGpuNanos = 0L;
         if (PASS_TIMING_ENABLED) {
             MetalNativeBridge.metallum_gpu_encoder_timing_reset();
         }
@@ -49,24 +62,42 @@ public final class MetalGpuTimingRecorder {
         return List.copyOf(SAMPLES);
     }
 
-    static synchronized void recordCpuPass(final String label, final long startNanos, final long endNanos) {
-        if (!PASS_TIMING_ENABLED || endNanos <= startNanos) {
-            return;
+    /** Latest completed GPU service duration, or zero when timing is disabled/unavailable. */
+    public static long latestGpuNanos() {
+        if (!ENABLED) {
+            return 0L;
         }
-        CPU_PASS_SAMPLES.add(new CpuPassSample(label, (endNanos - startNanos) / 1_000_000.0));
-        if (CPU_PASS_SAMPLES.size() > CAPACITY * 16) {
-            CPU_PASS_SAMPLES.subList(0, CPU_PASS_SAMPLES.size() - CAPACITY * 16).clear();
+        synchronized (MetalGpuTimingRecorder.class) {
+            return latestGpuNanos;
         }
     }
 
-    static synchronized void recordRenderEncoderLookup(final boolean cacheHit) {
+    static void recordCpuPass(final String label, final long startNanos, final long endNanos) {
+        // renderEncoder()/finishTiming() are on the render thread. Do not enter
+        // a synchronized method for every pass when the validation lane is off.
+        if (!PASS_TIMING_ENABLED || endNanos <= startNanos) {
+            return;
+        }
+        synchronized (MetalGpuTimingRecorder.class) {
+            CPU_PASS_SAMPLES.add(new CpuPassSample(label, (endNanos - startNanos) / 1_000_000.0));
+            if (CPU_PASS_SAMPLES.size() > CAPACITY * 16) {
+                CPU_PASS_SAMPLES.subList(0, CPU_PASS_SAMPLES.size() - CAPACITY * 16).clear();
+            }
+        }
+    }
+
+    static void recordRenderEncoderLookup(final boolean cacheHit) {
+        // This call occurs for every renderEncoder() lookup. The disabled path
+        // must be a plain predictable branch, not an uncontended monitor enter.
         if (!PASS_TIMING_ENABLED) {
             return;
         }
-        if (cacheHit) {
-            renderEncoderCacheHits++;
-        } else {
-            renderEncoderFactoryCalls++;
+        synchronized (MetalGpuTimingRecorder.class) {
+            if (cacheHit) {
+                renderEncoderCacheHits++;
+            } else {
+                renderEncoderFactoryCalls++;
+            }
         }
     }
 

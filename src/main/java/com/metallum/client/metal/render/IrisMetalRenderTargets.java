@@ -4,11 +4,11 @@ import com.metallum.client.metal.render.mtl.MTLSamplerMipFilter;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
-import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.textures.AddressMode;
 import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
+import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.blaze3d.textures.GpuTextureView;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.irisshaders.iris.shaderpack.properties.PackRenderTargetDirectives.RenderTargetSettings;
@@ -24,26 +24,8 @@ import java.util.Set;
 
 /**
  * Metal-side equivalent of Iris {@code targets.RenderTargets}: the colortexN
- * main/alt ping-pong set plus the three world depth textures
- * (main depth / no-translucents / no-hand — Iris depthtex0/1/2 semantics) and
- * the framebuffer factory that maps Iris draw-buffer directives onto
- * {@link RenderPassDescriptor} attachment lists.
- *
- * <p>Draw-buffer mapping: an Iris pass writing {@code DRAWBUFFERS:025} routes
- * fragment output location k to logical target {@code drawBuffers[k]}; here
- * that becomes a COMPACT descriptor whose attachment slot k is the write-side
- * texture of {@code drawBuffers[k]} — matching GL's
- * {@code glDrawBuffers(new int[]{A0, A2, A5})} routing, where the shader's
- * sequential outputs land on the listed attachments in order.</p>
- *
- * <p>Depth-copy semantics: {@link #captureNoTranslucentsDepth} must be called
- * after opaque geometry (depthtex1 excludes translucents), and
- * {@link #captureNoHandDepth} after translucents but before hand rendering
- * (depthtex2 excludes the hand). Both are full-texture GPU copies inside the
- * encoder fence chain — no CPU readback.</p>
- *
- * <p>Lifecycle: {@link #resize(int, int)} rebuilds every texture and resets
- * flip state; {@link #close()} releases everything. Render-thread only.</p>
+ * main/alt ping-pong set plus depthtex0/1/2 and descriptor construction for
+ * compact Iris DRAWBUFFERS lists.
  */
 @Environment(EnvType.CLIENT)
 final class IrisMetalRenderTargets implements AutoCloseable {
@@ -51,10 +33,13 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             | GpuTexture.USAGE_TEXTURE_BINDING
             | GpuTexture.USAGE_COPY_SRC
             | GpuTexture.USAGE_COPY_DST;
+    private static final Vector4fc CLEAR_WHITE = new Vector4f(1.0F, 1.0F, 1.0F, 1.0F);
+    private static final Vector4fc CLEAR_ZERO = new Vector4f(0.0F, 0.0F, 0.0F, 0.0F);
 
     private final MetalDevice device;
     private final IrisMetalPingPongTargets colorTargets;
     private final Map<Integer, RenderTargetSettings> targetSettings;
+    private final BitSet nearestColorTargets;
     private MetalGpuTexture mainDepth;
     private MetalGpuTexture noTranslucentsDepth;
     private MetalGpuTexture noHandDepth;
@@ -111,6 +96,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
     ) {
         this.device = device;
         this.targetSettings = Map.copyOf(targetSettings);
+        this.nearestColorTargets = nearestColorTargets(colorFormats);
         this.colorTargets = new IrisMetalPingPongTargets(
                 device,
                 "iris-colortex",
@@ -168,6 +154,17 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         createDepthTextures(width, height);
     }
 
+    private static BitSet nearestColorTargets(final GpuFormat[] formats) {
+        BitSet result = new BitSet(formats.length);
+        for (int index = 0; index < formats.length; index++) {
+            String componentType = formats[index].componentType().name();
+            if (componentType.startsWith("UINT") || componentType.startsWith("SINT")) {
+                result.set(index);
+            }
+        }
+        return result;
+    }
+
     private static Set<Integer> alphaOneSampleTargets(
             final int targetCount,
             final Map<Integer, RenderTargetSettings> settings
@@ -195,11 +192,6 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         };
     }
 
-    /**
-     * Applies Iris's per-frame render-target clear contract to both physical
-     * sides. Newly allocated or resized targets are fully initialized once;
-     * later frames clear only targets whose pack directive keeps clearing on.
-     */
     boolean clearForFrame(final MetalCommandEncoder encoder, final Vector4fc fogColor) {
         ensureOpen();
         Vector4f fog = new Vector4f(fogColor.x(), fogColor.y(), fogColor.z(), 1.0F);
@@ -219,14 +211,11 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         return fullClear;
     }
 
-    private static Vector4f defaultClearColor(final int index, final Vector4fc fogColor) {
+    private static Vector4fc defaultClearColor(final int index, final Vector4fc fogColor) {
         if (index == 0) {
-            return new Vector4f(fogColor);
+            return fogColor;
         }
-        if (index == 1) {
-            return new Vector4f(1.0F, 1.0F, 1.0F, 1.0F);
-        }
-        return new Vector4f(0.0F, 0.0F, 0.0F, 0.0F);
+        return index == 1 ? CLEAR_WHITE : CLEAR_ZERO;
     }
 
     private void createDepthTextures(final int newWidth, final int newHeight) {
@@ -282,12 +271,11 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         return colorSampler;
     }
 
-    /** Iris uses nearest filtering for integer render targets. */
     GpuSampler colorSampler(final int logicalTarget) {
         ensureOpen();
-        String componentType = colorTargets.format(logicalTarget).componentType().name();
-        boolean nearest = componentType.startsWith("UINT") || componentType.startsWith("SINT");
-        boolean mipmapped = colorTargets.readMipmapsEnabled(logicalTarget);
+        int checked = Math.toIntExact(logicalTarget);
+        boolean nearest = nearestColorTargets.get(checked);
+        boolean mipmapped = colorTargets.readMipmapsEnabled(checked);
         if (nearest) {
             return mipmapped ? nearestMipSampler : nearestSampler;
         }
@@ -317,26 +305,22 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         return height;
     }
 
-    /** depthtex1 capture point: call after opaque, before translucents. */
     void captureNoTranslucentsDepth(final MetalCommandEncoder encoder) {
         ensureOpen();
         encoder.copyTextureToTexture(mainDepth, noTranslucentsDepth, 0, 0, 0, 0, 0, width, height);
     }
 
-    /** Captures depthtex1 from the live Minecraft scene depth attachment. */
     void captureNoTranslucentsDepth(final MetalCommandEncoder encoder, final GpuTexture sourceDepth) {
         ensureOpen();
         checkDepthExtent(sourceDepth);
         encoder.copyTextureToTexture(sourceDepth, noTranslucentsDepth, 0, 0, 0, 0, 0, width, height);
     }
 
-    /** depthtex2 capture point: call after translucents, before hand. */
     void captureNoHandDepth(final MetalCommandEncoder encoder) {
         ensureOpen();
         encoder.copyTextureToTexture(mainDepth, noHandDepth, 0, 0, 0, 0, 0, width, height);
     }
 
-    /** Captures depthtex2 from the live Minecraft scene depth attachment. */
     void captureNoHandDepth(final MetalCommandEncoder encoder, final GpuTexture sourceDepth) {
         ensureOpen();
         checkDepthExtent(sourceDepth);
@@ -352,12 +336,6 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         }
     }
 
-    /**
-     * Builds a render-pass descriptor for a pass writing the given logical
-     * draw buffers (write-side textures at compact attachment slots), with
-     * optional per-slot clears, an optional depth attachment on the main
-     * depth texture and an optional read-set feedback guard.
-     */
     RenderPassDescriptorWithViews createWriteDescriptor(
             final String label,
             final int[] drawBuffers,
@@ -377,11 +355,9 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             colorTargets.checkNoFeedbackLoop(drawBuffers, readTargets);
         }
         RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> label);
-        MetalGpuTextureView[] views = new MetalGpuTextureView[drawBuffers.length + (withDepth ? 1 : 0)];
+        MetalGpuTextureView[] ownedViews = new MetalGpuTextureView[drawBuffers.length + (withDepth ? 1 : 0)];
         for (int slot = 0; slot < drawBuffers.length; slot++) {
-            MetalGpuTexture texture = colorTargets.writeTexture(drawBuffers[slot]);
-            MetalGpuTextureView view = new MetalGpuTextureView(texture, 0, 1);
-            views[slot] = view;
+            MetalGpuTextureView view = colorTargets.writeView(drawBuffers[slot]);
             descriptor.withColorAttachment(
                     view,
                     clearColors == null || clearColors[slot] == null
@@ -391,27 +367,16 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         }
         if (withDepth) {
             MetalGpuTextureView depthView = new MetalGpuTextureView(mainDepth, 0, 1);
-            views[drawBuffers.length] = depthView;
+            ownedViews[drawBuffers.length] = depthView;
             descriptor.withDepthAttachment(
                     depthView,
                     clearDepth == null ? OptionalDouble.empty() : OptionalDouble.of(clearDepth)
             );
         }
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, width, height));
-        return new RenderPassDescriptorWithViews(descriptor, views);
+        return new RenderPassDescriptorWithViews(descriptor, ownedViews);
     }
 
-    /**
-     * Builds a gbuffer descriptor for a compact Iris DRAWBUFFERS list.
-     * Gbuffer programs write the side that is currently readable at their
-     * stage snapshot: main when unflipped, alt when flipped. They do not perform
-     * the write-opposite-then-flip transition used by composite passes.
-     *
-     * <p>Every logical target, including colortex0, belongs to this generation.
-     * The live scene color supplied by Minecraft is used only to verify the
-     * render extent; Iris's final pass is responsible for resolving colortex0
-     * to that scene target. Persistent views are owned until resize/reload.</p>
-     */
     RenderPassDescriptor createTerrainWriteDescriptor(
             final String label,
             final int[] drawBuffers,
@@ -432,8 +397,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         }
         RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> label);
         boolean[] written = new boolean[colorTargets.targetCount()];
-        for (int slot = 0; slot < drawBuffers.length; slot++) {
-            int logicalTarget = drawBuffers[slot];
+        for (int logicalTarget : drawBuffers) {
             if (logicalTarget < 0 || logicalTarget >= colorTargets.targetCount()) {
                 throw new IllegalArgumentException("Terrain DRAWBUFFERS target out of range: " + logicalTarget);
             }
@@ -441,14 +405,10 @@ final class IrisMetalRenderTargets implements AutoCloseable {
                 throw new IllegalArgumentException("Terrain DRAWBUFFERS repeats logical target " + logicalTarget);
             }
             written[logicalTarget] = true;
-
             GpuTextureView view = colorTargets.readView(logicalTarget);
-            Optional<Vector4fc> clear = Optional.empty();
-            if (logicalTarget == 0) {
-                if (mainClearColor != null) {
-                    clear = Optional.of(mainClearColor);
-                }
-            }
+            Optional<Vector4fc> clear = logicalTarget == 0 && mainClearColor != null
+                    ? Optional.of(mainClearColor)
+                    : Optional.empty();
             descriptor.withColorAttachment(view, clear);
         }
         if (sceneDepth != null) {
@@ -457,16 +417,10 @@ final class IrisMetalRenderTargets implements AutoCloseable {
                     clearDepth == null ? OptionalDouble.empty() : OptionalDouble.of(clearDepth)
             );
         }
-        descriptor.withRenderArea(new RenderPass.RenderArea(
-                0, 0, width, height
-        ));
+        descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, width, height));
         return descriptor;
     }
 
-    /**
-     * Rebuilds every color and depth texture at the new extent. Flip state
-     * resets; previous contents are gone by contract.
-     */
     void resize(final int newWidth, final int newHeight) {
         ensureOpen();
         if (newWidth == width && newHeight == height) {
@@ -525,10 +479,6 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         nearestMipSampler.close();
     }
 
-    /**
-     * A descriptor plus the views it references; the caller must keep the
-     * views alive until the pass is submitted and then {@link #close()} them.
-     */
     record RenderPassDescriptorWithViews(
             RenderPassDescriptor descriptor,
             MetalGpuTextureView[] views

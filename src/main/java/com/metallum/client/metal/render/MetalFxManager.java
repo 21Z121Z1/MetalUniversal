@@ -553,6 +553,11 @@ public final class MetalFxManager {
         }
     }
 
+    /** Shared capture schedule for temporal metrics and backend-neutral contract images. */
+    public static boolean isValidationCaptureFrame(final int frame) {
+        return ValidationFrame.shouldCaptureFrame(frame);
+    }
+
     public static void setFlickerCaptureFrame(
             final int frame,
             final String scenario,
@@ -722,9 +727,17 @@ public final class MetalFxManager {
         }
     }
 
-    public static void close() {
+    public static synchronized void close() {
         MetalFxManager manager = active;
         if (manager != null) {
+            manager.closeInternal();
+            active = null;
+        }
+    }
+
+    static synchronized void close(final MetalDevice device) {
+        MetalFxManager manager = active;
+        if (manager != null && manager.device == device) {
             manager.closeInternal();
             active = null;
         }
@@ -2988,9 +3001,9 @@ public final class MetalFxManager {
                             CUTOUT_VISIBLE_COLOR_MIN,
                             cutoutCoveragePixels / 100
                     );
-            // Pure distant-terrain/sky scene: the controlled entity and
-            // first-person hand are intentionally absent, so object validity
-            // must be empty. The separate 24-frame flicker metric owns the
+            // Distant-terrain/sky scene: the ordinary opaque ArmorStand stays
+            // visible as an entity guardrail while the first-person hand is
+            // absent. The separate 24-frame flicker metric owns the terrain
             // output-stability assertion; this capture verifies that the
             // geometry/depth input feeding it is genuinely present.
             case "lod_horizon", "lod_horizon_hold" -> depthContractPassed
@@ -3122,6 +3135,10 @@ public final class MetalFxManager {
             double previousEntityZ
     ) {
         private boolean shouldCapture() {
+            return shouldCaptureFrame(frame);
+        }
+
+        private static boolean shouldCaptureFrame(final int frame) {
             // Frame 46 is the occlusion-wall removal frame: with prioritized
             // synchronous section rebuilds the reveal happens on exactly this
             // frame, and its one-frame disocclusion transient is the signal

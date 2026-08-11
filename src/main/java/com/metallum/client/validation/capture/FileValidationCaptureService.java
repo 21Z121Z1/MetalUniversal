@@ -486,7 +486,11 @@ public final class FileValidationCaptureService implements ValidationCaptureServ
                     blue = bytes[offset + 2] & 0xff;
                     if (bytesPerTexel == 4) alpha = bytes[offset + 3] & 0xff;
                 }
-                image.setRGB(x, y, alpha << 24 | red << 16 | green << 8 | blue);
+                // GPU readback evidence uses the backend-native bottom-left
+                // row order. Keep actual.bin byte-exact, but orient the PNG as
+                // a conventional top-left image for visual inspection.
+                image.setRGB(x, resource.height() - 1 - y,
+                        alpha << 24 | red << 16 | green << 8 | blue);
                 offset += bytesPerTexel;
             }
         }

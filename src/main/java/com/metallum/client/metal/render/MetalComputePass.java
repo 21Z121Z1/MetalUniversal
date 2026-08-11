@@ -8,6 +8,7 @@ import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,10 +33,21 @@ final class MetalComputePass implements AutoCloseable {
     private final MetalCommandEncoder owner;
     private final MTLComputeCommandEncoder encoder;
     private final long contractPassToken;
-    private final Map<String, String> boundResources = new LinkedHashMap<>();
+    private final @Nullable Map<String, String> boundResources;
+    private final Map<Integer, BufferBinding> boundBuffers = new HashMap<>();
+    private final Map<Integer, MemorySegment> boundTextures = new HashMap<>();
+    private final Map<Integer, MemorySegment> boundSamplers = new HashMap<>();
     @Nullable
     private MetalComputePipeline pipeline;
     private boolean closed;
+
+    private record BufferBinding(MetalGpuBuffer buffer, long backingVersion, long offset) {
+        private boolean matches(final MetalGpuBuffer candidate, final long candidateOffset) {
+            return this.buffer == candidate
+                    && this.backingVersion == bindingVersion(candidate)
+                    && this.offset == candidateOffset;
+        }
+    }
 
     MetalComputePass(
             final MetalCommandEncoder owner,
@@ -45,10 +57,17 @@ final class MetalComputePass implements AutoCloseable {
         this.owner = owner;
         this.encoder = encoder;
         this.contractPassToken = contractPassToken;
+        this.boundResources = contractPassToken >= 0L && RenderContractRuntime.producerDetailsCaptured()
+                ? new LinkedHashMap<>()
+                : null;
     }
 
     MetalComputePass setPipeline(final MetalComputePipeline pipeline) {
         ensureOpen();
+        if (this.pipeline == pipeline) {
+            IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
+            return this;
+        }
         this.pipeline = pipeline;
         encoder.setComputePipelineState(pipeline.pipelineStateHandle());
         if (contractPassToken >= 0L) {
@@ -60,9 +79,15 @@ final class MetalComputePass implements AutoCloseable {
 
     MetalComputePass bindBuffer(final int index, final MetalGpuBuffer buffer, final long offset) {
         ensureOpen();
+        BufferBinding previous = this.boundBuffers.get(index);
+        if (previous != null && previous.matches(buffer, offset)) {
+            IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
+            return this;
+        }
         encoder.setBuffer(buffer.nativeHandle(), offset, index);
-        if (contractPassToken >= 0L && RenderContractRuntime.producerDetailsCaptured()) {
-            boundResources.put("buffer[" + index + "]", buffer.validationDebugId() + "+" + offset);
+        this.boundBuffers.put(index, new BufferBinding(buffer, bindingVersion(buffer), offset));
+        if (this.boundResources != null) {
+            this.boundResources.put("buffer[" + index + "]", buffer.validationDebugId() + "+" + offset);
         }
         return this;
     }
@@ -79,27 +104,58 @@ final class MetalComputePass implements AutoCloseable {
                             + " compute pass opened; encode clears before creating the pass"
             );
         }
-        encoder.setTexture(texture.nativeHandle(), index);
-        if (contractPassToken >= 0L && RenderContractRuntime.producerDetailsCaptured()) {
-            boundResources.put("texture[" + index + "]", MetalCommandEncoder.contractResource(texture, 0).stableKey());
+        MemorySegment handle = texture.nativeHandle();
+        MemorySegment previous = this.boundTextures.get(index);
+        if (previous == null || !MetalPipelineSupport.sameHandle(previous, handle)) {
+            encoder.setTexture(handle, index);
+            this.boundTextures.put(index, handle);
+        } else {
+            IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
+        }
+        if (this.boundResources != null) {
+            this.boundResources.put(
+                    "texture[" + index + "]",
+                    MetalCommandEncoder.contractResource(texture, 0).stableKey()
+            );
         }
         return this;
     }
 
     MetalComputePass bindTextureView(final int index, final MetalGpuTextureView view) {
         ensureOpen();
-        encoder.setTexture(view.nativeHandle(), index);
-        if (contractPassToken >= 0L && RenderContractRuntime.producerDetailsCaptured()) {
-            boundResources.put("texture[" + index + "]", MetalCommandEncoder.contractResource(
-                    (MetalGpuTexture) view.texture(), view.baseMipLevel()
-            ).stableKey());
+        MetalGpuTexture texture = (MetalGpuTexture) view.texture();
+        if (owner.hasPendingClear(texture)) {
+            throw new IllegalStateException(
+                    "Texture " + texture.getLabel() + " has an unflushed deferred clear registered after this"
+                            + " compute pass opened; encode clears before creating the pass"
+            );
+        }
+        MemorySegment handle = view.nativeHandle();
+        MemorySegment previous = this.boundTextures.get(index);
+        if (previous == null || !MetalPipelineSupport.sameHandle(previous, handle)) {
+            encoder.setTexture(handle, index);
+            this.boundTextures.put(index, handle);
+        } else {
+            IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
+        }
+        if (this.boundResources != null) {
+            this.boundResources.put(
+                    "texture[" + index + "]",
+                    MetalCommandEncoder.contractResource(texture, view.baseMipLevel()).stableKey()
+            );
         }
         return this;
     }
 
     MetalComputePass bindSampler(final int index, final MemorySegment samplerHandle) {
         ensureOpen();
+        MemorySegment previous = this.boundSamplers.get(index);
+        if (previous != null && MetalPipelineSupport.sameHandle(previous, samplerHandle)) {
+            IrisMetalPerformanceCounters.recordDescriptorBindingSkipped();
+            return this;
+        }
         encoder.setSamplerState(samplerHandle, index);
+        this.boundSamplers.put(index, samplerHandle);
         return this;
     }
 
@@ -120,18 +176,20 @@ final class MetalComputePass implements AutoCloseable {
                 groupsX, groupsY, groupsZ,
                 bound.threadgroupWidth(), bound.threadgroupHeight(), bound.threadgroupDepth()
         );
-        RenderContractRuntime.recordProducer(
-                contractPassToken,
-                ProducerType.DISPATCH,
-                bound.validationPipelineId(),
-                Map.of(
-                        "groupsX", Integer.toString(groupsX),
-                        "groupsY", Integer.toString(groupsY),
-                        "groupsZ", Integer.toString(groupsZ)
-                ),
-                boundResources,
-                List.of()
-        );
+        if (contractPassToken >= 0L) {
+            RenderContractRuntime.recordProducer(
+                    contractPassToken,
+                    ProducerType.DISPATCH,
+                    bound.validationPipelineId(),
+                    Map.of(
+                            "groupsX", Integer.toString(groupsX),
+                            "groupsY", Integer.toString(groupsY),
+                            "groupsZ", Integer.toString(groupsZ)
+                    ),
+                    traceResources(),
+                    List.of()
+            );
+        }
         return this;
     }
 
@@ -161,15 +219,27 @@ final class MetalComputePass implements AutoCloseable {
                 offset,
                 bound.threadgroupWidth(), bound.threadgroupHeight(), bound.threadgroupDepth()
         );
-        RenderContractRuntime.recordProducer(
-                contractPassToken,
-                ProducerType.DISPATCH_INDIRECT,
-                bound.validationPipelineId(),
-                Map.of("offset", Long.toString(offset)),
-                boundResources,
-                List.of()
-        );
+        if (contractPassToken >= 0L) {
+            RenderContractRuntime.recordProducer(
+                    contractPassToken,
+                    ProducerType.DISPATCH_INDIRECT,
+                    bound.validationPipelineId(),
+                    Map.of("offset", Long.toString(offset)),
+                    traceResources(),
+                    List.of()
+            );
+        }
         return this;
+    }
+
+    private Map<String, String> traceResources() {
+        return this.boundResources == null ? Map.of() : this.boundResources;
+    }
+
+    private static long bindingVersion(final MetalGpuBuffer buffer) {
+        return buffer instanceof MetalUploadDedupBuffer versioned
+                ? versioned.metallum$bindingVersion()
+                : 0L;
     }
 
     private MetalComputePipeline requirePipeline() {

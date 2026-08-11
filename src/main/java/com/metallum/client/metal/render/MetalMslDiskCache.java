@@ -17,7 +17,10 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -44,7 +47,7 @@ final class MetalMslDiskCache {
      * native), {@code applySampleLodBias} rewriting, entry-point
      * extraction, or binding assignment in {@code addToBindGroup}.
      */
-    static final String CACHE_SALT = "metallum-msl-v5-raster-storage-resources";
+    static final String CACHE_SALT = "metallum-msl-v7-fragment-output-class";
 
     private static final boolean ENABLED =
             Boolean.parseBoolean(System.getProperty("metallum.opt.mslCache", "true"));
@@ -64,10 +67,12 @@ final class MetalMslDiskCache {
 
     record Entry(String vertexMsl, String fragmentMsl, String vertexEntryPoint, String fragmentEntryPoint,
                  List<MetalCompiledRenderPipeline.ResourceBinding> resources,
-                 List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs) {
+                 List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs,
+                 Map<Integer, MetalCrossShaderCompiler.FragmentOutputClass> fragmentOutputs) {
         Entry {
             resources = List.copyOf(resources);
             genericVertexInputs = List.copyOf(genericVertexInputs);
+            fragmentOutputs = Map.copyOf(fragmentOutputs);
         }
     }
 
@@ -135,7 +140,11 @@ final class MetalMslDiskCache {
                         binding.get("name").getAsString(),
                         binding.get("bindingIndex").getAsInt(),
                         binding.get("stageMask").getAsInt(),
-                        texelFormat == null || texelFormat.isJsonNull() ? null : GpuFormat.valueOf(texelFormat.getAsString())
+                        texelFormat == null || texelFormat.isJsonNull() ? null : GpuFormat.valueOf(texelFormat.getAsString()),
+                        binding.get("vertexArgumentIndex").getAsInt(),
+                        binding.get("vertexSamplerArgumentIndex").getAsInt(),
+                        binding.get("fragmentArgumentIndex").getAsInt(),
+                        binding.get("fragmentSamplerArgumentIndex").getAsInt()
                 ));
             }
             List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs = new ArrayList<>();
@@ -147,13 +156,22 @@ final class MetalMslDiskCache {
                         input.get("components").getAsInt()
                 ));
             }
+            Map<Integer, MetalCrossShaderCompiler.FragmentOutputClass> fragmentOutputs = new HashMap<>();
+            for (Map.Entry<String, JsonElement> output
+                    : root.getAsJsonObject("fragmentOutputs").entrySet()) {
+                fragmentOutputs.put(
+                        Integer.parseInt(output.getKey()),
+                        MetalCrossShaderCompiler.FragmentOutputClass.valueOf(output.getValue().getAsString())
+                );
+            }
             return new Entry(
                     root.get("vertexMsl").getAsString(),
                     root.get("fragmentMsl").getAsString(),
                     root.get("vertexEntryPoint").getAsString(),
                     root.get("fragmentEntryPoint").getAsString(),
                     resources,
-                    genericVertexInputs
+                    genericVertexInputs,
+                    fragmentOutputs
             );
         } catch (Exception e) {
             // Corrupt or stale-schema entry: drop it and recompile.
@@ -181,6 +199,10 @@ final class MetalMslDiskCache {
             serialized.addProperty("name", binding.name());
             serialized.addProperty("bindingIndex", binding.bindingIndex());
             serialized.addProperty("stageMask", binding.stageMask());
+            serialized.addProperty("vertexArgumentIndex", binding.vertexArgumentIndex());
+            serialized.addProperty("vertexSamplerArgumentIndex", binding.vertexSamplerArgumentIndex());
+            serialized.addProperty("fragmentArgumentIndex", binding.fragmentArgumentIndex());
+            serialized.addProperty("fragmentSamplerArgumentIndex", binding.fragmentSamplerArgumentIndex());
             GpuFormat texelFormat = binding.texelBufferFormat();
             serialized.addProperty("texelFormat", texelFormat == null ? null : texelFormat.name());
             resources.add(serialized);
@@ -195,6 +217,12 @@ final class MetalMslDiskCache {
             genericVertexInputs.add(serialized);
         }
         root.add("genericVertexInputs", genericVertexInputs);
+        JsonObject fragmentOutputs = new JsonObject();
+        for (Map.Entry<Integer, MetalCrossShaderCompiler.FragmentOutputClass> output
+                : new TreeMap<>(entry.fragmentOutputs()).entrySet()) {
+            fragmentOutputs.addProperty(Integer.toString(output.getKey()), output.getValue().name());
+        }
+        root.add("fragmentOutputs", fragmentOutputs);
         Path file = this.directory.resolve(key + ".json");
         Path temp = this.directory.resolve(key + ".tmp");
         try {
