@@ -22,10 +22,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add build.gradle
           git diff --check --cached
+          if git diff --cached --quiet; then
+            echo 'Capability policy already up to date.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git diff --cached --stat
-          git commit -m 'build: formalize Metal capability policy'
+          git commit -m 'build: harden Metal capability policy audit'
           git push origin HEAD:ci/hosted-metal-gpu-probe-20260810
