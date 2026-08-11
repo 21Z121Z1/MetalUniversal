@@ -48,6 +48,10 @@ public final class MetalRenderStatePacketBridge {
                 || (table.buildCapabilities() & CAPABILITY_BIT) == 0L) {
             return null;
         }
+        // The packet decoder performs bounded native-only work and never calls
+        // back into Java. Match the critical FFM path used by the individual
+        // Metal state setters so the experiment compares batching itself rather
+        // than an ordinary-vs-critical transition-policy mismatch.
         return MetalFfmCallTelemetry.instrumentDowncall(
                 Linker.nativeLinker().downcallHandle(
                         table.entry(0),
@@ -56,7 +60,8 @@ public final class MetalRenderStatePacketBridge {
                                 ValueLayout.ADDRESS,
                                 ValueLayout.ADDRESS,
                                 ValueLayout.JAVA_LONG
-                        )
+                        ),
+                        Linker.Option.critical(false)
                 )
         );
     }
