@@ -56,6 +56,22 @@ final class MetalRenderStateShadowTest {
     }
 
     @Test
+    void nilBufferWithNewOffsetDoesNotUseOffsetOnlyPath() {
+        MetalRenderStateShadow shadow = new MetalRenderStateShadow(16);
+        shadow.recordBuffer(MemorySegment.NULL, 0L, 5L, 0b11);
+
+        assertEquals(
+                MetalRenderStateShadow.BufferUpdate.SKIP,
+                shadow.classifyBuffer(MemorySegment.NULL, 0L, 5L, 0b11)
+        );
+        assertEquals(
+                MetalRenderStateShadow.BufferUpdate.FULL_BIND,
+                shadow.classifyBuffer(MemorySegment.NULL, 64L, 5L, 0b11),
+                "offset-only Metal calls require a slot that already contains an MTLBuffer"
+        );
+    }
+
+    @Test
     void textureAndSamplerAreTrackedPerStage() {
         MetalRenderStateShadow shadow = new MetalRenderStateShadow(16);
 

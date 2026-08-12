@@ -166,6 +166,13 @@ final class MetalRenderStateShadow {
         if (everyStageHasSameOffset) {
             return BufferUpdate.SKIP;
         }
+        // Metal's offset-only setters require the argument-table entry to
+        // already contain an MTLBuffer. A recorded nil binding has address 0,
+        // so changing its offset must remain a full setBuffer(nil, ...) update
+        // rather than encoding set*BufferOffset against an empty slot.
+        if (address == 0L) {
+            return BufferUpdate.FULL_BIND;
+        }
         return everyStageHasSameBuffer ? BufferUpdate.OFFSET_ONLY : BufferUpdate.FULL_BIND;
     }
 
