@@ -233,11 +233,19 @@ final class MetalRenderPass implements RenderPassBackend {
     @Override
     public void bindTexture(final @NonNull String name, @Nullable final GpuTextureView textureView, @Nullable final GpuSampler sampler) {
         if (textureView != null && sampler != null) {
-            samplers.put(name, new TextureViewAndSampler(textureView, sampler));
             commandEncoder.flushPendingClear((MetalGpuTexture) textureView.texture());
-            markDescriptorDirty(name);
+            TextureViewAndSampler existing = samplers.get(name);
+            if (existing == null || existing.textureView() != textureView || existing.sampler() != sampler) {
+                samplers.put(name, new TextureViewAndSampler(textureView, sampler));
+                markDescriptorDirty(name);
+            }
         } else if (textureView == null && sampler == null) {
-            samplers.remove(name);
+            if (samplers.remove(name) != null) {
+                // A missing sampler is fail-closed in pushDescriptor(). The
+                // dirty bit is therefore part of unbind correctness: without
+                // it a reused native encoder could silently keep the old pair.
+                markDescriptorDirty(name);
+            }
         } else {
             throw new IllegalArgumentException();
         }
