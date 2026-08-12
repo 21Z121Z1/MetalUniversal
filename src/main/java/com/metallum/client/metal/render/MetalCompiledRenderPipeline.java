@@ -105,6 +105,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final MemorySegment depthStencilState;
     private final boolean hasDepthStencilState;
     private final MTLPixelFormat[] colorFormats;
+    /**
+     * Immutable list view over {@link #colorFormats}. The backing array is
+     * populated exactly once in the constructor and never mutated afterwards,
+     * so every pipeline-signature lookup can reuse this view without rebuilding
+     * an Arrays.asList/List.copyOf chain on the render thread.
+     */
+    private final List<MTLPixelFormat> colorFormatsView;
     private final Map<PipelineSignature, MemorySegment> pipelineStates;
     private final MemorySegment withoutDepthPipeline;
     // Lazy-variant support (S9C, active only with metallum.opt.asyncPrecompile):
@@ -247,6 +254,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             ColorTargetState target = colorTargets[index];
             this.colorFormats[index] = target == null ? MTLPixelFormat.Invalid : MTLPixelFormat.from(target.format());
         }
+        this.colorFormatsView = List.of(this.colorFormats);
 
         this.device = device;
         this.info = info;
@@ -412,7 +420,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     private PipelineSignature signatureFor(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
-        return new PipelineSignature(List.copyOf(Arrays.asList(this.colorFormats)), depthFormat, stencilFormat, 1);
+        return new PipelineSignature(this.colorFormatsView, depthFormat, stencilFormat, 1);
     }
 
     /**
@@ -617,6 +625,14 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     boolean hasDepthStencilState() {
         return this.hasDepthStencilState;
+    }
+
+    /**
+     * Allocation-free comparison for the render-thread pipeline/pass
+     * compatibility gate. The internal array never escapes this method.
+     */
+    boolean matchesColorAttachmentFormats(final MTLPixelFormat[] formats) {
+        return Arrays.equals(this.colorFormats, formats);
     }
 
     MTLPixelFormat[] colorAttachmentFormats() {
