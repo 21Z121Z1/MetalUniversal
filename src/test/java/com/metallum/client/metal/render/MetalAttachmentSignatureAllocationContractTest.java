@@ -20,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 final class MetalAttachmentSignatureAllocationContractTest {
     private static final String PIPELINE =
             "com/metallum/client/metal/render/MetalCompiledRenderPipeline";
+    private static final String RENDER_PASS =
+            "com/metallum/client/metal/render/MetalRenderPass";
     private static final String PIXEL_FORMAT =
             "Lcom/metallum/client/metal/render/mtl/MTLPixelFormat;";
     private static final String SIGNATURE =
@@ -59,6 +61,33 @@ final class MetalAttachmentSignatureAllocationContractTest {
                 "attachment compatibility should use one direct array comparison");
         assertEquals(0, countCalls(matches, "[Lcom/metallum/client/metal/render/mtl/MTLPixelFormat;", "clone"),
                 "attachment compatibility must not clone the compiled format array");
+    }
+
+    @Test
+    void renderPassCachesFormatsAndUsesTheNoCopyCompatibilityGate() throws IOException {
+        ClassNode pass = readClass(RENDER_PASS);
+        assertTrue(pass.fields.stream().anyMatch(field ->
+                        "colorAttachmentFormats".equals(field.name)
+                                && ("[" + PIXEL_FORMAT).equals(field.desc)),
+                "render passes must retain one attachment-format snapshot");
+
+        MethodNode setPipeline = requireMethod(
+                pass,
+                "setPipeline",
+                "(Lcom/mojang/blaze3d/pipeline/RenderPipeline;)V"
+        );
+        assertEquals(1, countCalls(setPipeline, PIPELINE, "matchesColorAttachmentFormats"),
+                "setPipeline must compare against the cached pass snapshot without cloning");
+        assertEquals(0, countCalls(setPipeline, RENDER_PASS, "colorAttachmentFormats"),
+                "setPipeline rebuilt or cloned the render-pass attachment signature");
+
+        MethodNode getter = requireMethod(
+                pass,
+                "colorAttachmentFormats",
+                "()[" + PIXEL_FORMAT
+        );
+        assertEquals(0, countCalls(getter, "com/metallum/client/metal/render/MetalGpuTexture", "mtlPixelFormat"),
+                "attachment-format getter still walks textures instead of the cached snapshot");
     }
 
     private static ClassNode readClass(final String name) throws IOException {
