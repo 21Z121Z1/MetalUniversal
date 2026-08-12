@@ -233,11 +233,19 @@ final class MetalRenderPass implements RenderPassBackend {
     @Override
     public void bindTexture(final @NonNull String name, @Nullable final GpuTextureView textureView, @Nullable final GpuSampler sampler) {
         if (textureView != null && sampler != null) {
-            samplers.put(name, new TextureViewAndSampler(textureView, sampler));
             commandEncoder.flushPendingClear((MetalGpuTexture) textureView.texture());
-            markDescriptorDirty(name);
+            TextureViewAndSampler existing = samplers.get(name);
+            if (existing == null || existing.textureView() != textureView || existing.sampler() != sampler) {
+                samplers.put(name, new TextureViewAndSampler(textureView, sampler));
+                markDescriptorDirty(name);
+            }
         } else if (textureView == null && sampler == null) {
-            samplers.remove(name);
+            if (samplers.remove(name) != null) {
+                // Unbinding is an observable encoder-state transition. Mark the
+                // descriptor dirty so a following draw cannot silently reuse
+                // the previous native texture/sampler binding.
+                markDescriptorDirty(name);
+            }
         } else {
             throw new IllegalArgumentException();
         }
@@ -257,6 +265,9 @@ final class MetalRenderPass implements RenderPassBackend {
     void bindStorageBuffer(final int binding, final GpuBufferSlice slice) {
         if (binding < 0 || !(slice.buffer() instanceof MetalGpuBuffer)) {
             throw new IllegalArgumentException("Invalid Metal storage buffer binding " + binding);
+        }
+        if (sameSlice(storageBuffers.get(binding), slice)) {
+            return;
         }
         storageBuffers.put(binding, slice);
         if (compiledPipeline != null) {
@@ -284,9 +295,14 @@ final class MetalRenderPass implements RenderPassBackend {
 
     @Override
     public void setUniform(final @NonNull String name, final @NonNull GpuBufferSlice value) {
-        uniforms.put(name, value);
-        markDescriptorDirty(name);
+        if (!sameSlice(uniforms.get(name), value)) {
+            uniforms.put(name, value);
+            markDescriptorDirty(name);
+        }
         if ("DynamicTransforms".equals(name) || "Projection".equals(name)) {
+            // The Iris aggregate block is materialized from the current bytes
+            // of these buffers at draw time. Even an identical slice can have
+            // new contents, so its derived binding must remain dirty.
             markDescriptorDirty(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME);
         }
     }
