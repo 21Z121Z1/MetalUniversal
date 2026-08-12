@@ -492,6 +492,88 @@ private func runShippingMetal4BindingChurnTest(device: MTLDevice, queue: MTLComm
     try shippingMetal4BindingChurnTest(device: device, queue: queue)
 }
 
+@available(macOS 26.0, *)
+private func shippingMetal4CompletionBarrierTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    try check(metallum_metal4_main_renderer_enable(device, nil) != 0,
+              "the shipping Metal 4 main renderer could not be enabled for completion-barrier validation")
+
+    guard let leasePointer = "completion barrier probe".withCString({ label in
+        metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
+    }) else {
+        try fail("could not acquire the completion-barrier command-buffer slot")
+    }
+
+    let handlerStarted = DispatchSemaphore(value: 0)
+    let releaseHandler = DispatchSemaphore(value: 0)
+    let handlerFinished = DispatchSemaphore(value: 0)
+    let commitReturned = DispatchSemaphore(value: 0)
+    let completionSignal = DispatchSemaphore(value: 0)
+    var handlerReleased = false
+    var handlerFinishedObserved = false
+    var commitReturnedObserved = false
+    defer {
+        if !handlerReleased {
+            releaseHandler.signal()
+        }
+        if !handlerFinishedObserved {
+            _ = handlerFinished.wait(timeout: .now() + 5)
+        }
+        if !commitReturnedObserved {
+            _ = commitReturned.wait(timeout: .now() + 5)
+        }
+        metallum_release_object(leasePointer)
+    }
+
+    try check(
+        metallumInstallCompletionBarrierProbe(leasePointer) {
+            handlerStarted.signal()
+            _ = releaseHandler.wait(timeout: .now() + 5)
+            handlerFinished.signal()
+        },
+        "could not install the completion-barrier probe"
+    )
+
+    // Commit off-thread so this remains deterministic even if a future Metal
+    // implementation invokes feedback synchronously from commit().
+    DispatchQueue.global().async {
+        metallum_MTLCommandBuffer_commitWithSignal(leasePointer, completionSignal)
+        commitReturned.signal()
+    }
+
+    try check(handlerStarted.wait(timeout: .now() + 5) == .success,
+              "the completion-barrier handler never started")
+    try check(metallum_MTLCommandBuffer_isCompleted(leasePointer) == 0,
+              "the lease became completed while its lifetime handler was blocked")
+    try check(metallum_MTLCommandBuffer_waitUntilCompleted(leasePointer, 0) != 0,
+              "waitUntilCompleted crossed a blocked lifetime handler")
+    try check(metallum_semaphore_wait(completionSignal, 0) != 0,
+              "the Java completion semaphore was signalled before lifetime handlers drained")
+
+    handlerReleased = true
+    releaseHandler.signal()
+    handlerFinishedObserved = handlerFinished.wait(timeout: .now() + 5) == .success
+    try check(handlerFinishedObserved,
+              "the completion-barrier handler did not finish")
+    try check(metallum_semaphore_wait(completionSignal, 5_000) == 0,
+              "the Java completion semaphore was not signalled after lifetime handlers drained")
+    commitReturnedObserved = commitReturned.wait(timeout: .now() + 5) == .success
+    try check(commitReturnedObserved,
+              "the completion-barrier commit did not return")
+    try check(metallum_MTLCommandBuffer_isCompleted(leasePointer) != 0,
+              "the lease did not become completed after lifetime handlers drained")
+    try check(metallum_MTLCommandBuffer_completedSuccessfully(leasePointer) != 0,
+              "the completion-barrier command buffer completed with an error")
+    print("Metal 4 completion barrier: lifetime handlers drain before completed state, waiters and the Java semaphore passed")
+}
+
+private func runShippingMetal4CompletionBarrierTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 26.0, *) else {
+        print("shipping Metal 4 completion-barrier test skipped: needs macOS 26")
+        return
+    }
+    try shippingMetal4CompletionBarrierTest(device: device, queue: queue)
+}
+
 /// Rewrites the same private vertex/index buffers from three per-slot staging
 /// buffers and commits all three shipping MTL4 leases before waiting on any of
 /// them. The queue barrier is the only GPU ordering between one slot's vertex
@@ -2346,6 +2428,10 @@ private func runPathTest() throws {
     // (6b) The shipping M4 main renderer under Minecraft-style per-draw
     // vertex/index/uniform binding churn across all reusable queue slots.
     try runShippingMetal4BindingChurnTest(device: device, queue: queue)
+
+    // (6b.1) GPU completion is not a teardown barrier until every native
+    // residency/lifetime callback has drained and Java has been signalled.
+    try runShippingMetal4CompletionBarrierTest(device: device, queue: queue)
 
     // (6c) The queue-barrier contract for asynchronous private-buffer rewrite.
     try runShippingMetal4PrivateBufferRewriteTest(device: device, queue: queue)

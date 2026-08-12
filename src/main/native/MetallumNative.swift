@@ -1177,21 +1177,41 @@ private final class Metal4MainCommandBufferLease {
         condition.unlock()
     }
 
-    func markCompleted(
+    func receiveFeedback(
         error: Error?,
         gpuStartTime: CFTimeInterval,
         gpuEndTime: CFTimeInterval
-    ) -> [(Error?, CFTimeInterval, CFTimeInterval) -> Void] {
+    ) {
         condition.lock()
         completionError = error
         startTime = gpuStartTime
         endTime = gpuEndTime
-        completed = true
-        let handlers = completionHandlers
-        completionHandlers.removeAll()
-        condition.broadcast()
         condition.unlock()
-        return handlers
+    }
+
+    /// Drains every handler registered before the completion barrier closes.
+    /// A handler may enqueue another handler, so the empty check and the
+    /// completed transition stay under the same lock. Waiters must not observe
+    /// completion until residency/lifetime callbacks are finished.
+    func drainCompletionHandlers() {
+        while true {
+            condition.lock()
+            let handlers = completionHandlers
+            completionHandlers.removeAll()
+            let error = completionError
+            let gpuStartTime = startTime
+            let gpuEndTime = endTime
+            if handlers.isEmpty {
+                completed = true
+                condition.broadcast()
+                condition.unlock()
+                return
+            }
+            condition.unlock()
+            for handler in handlers {
+                handler(error, gpuStartTime, gpuEndTime)
+            }
+        }
     }
 
     func addCompletionHandler(_ handler: @escaping (Error?, CFTimeInterval, CFTimeInterval) -> Void) {
@@ -1466,7 +1486,7 @@ private final class Metal4MainQueueContext {
         lease.markSubmitted()
         let options = MTL4CommitOptions()
         options.addFeedbackHandler { [self, lease] feedback in
-            let completionHandlers = lease.markCompleted(
+            lease.receiveFeedback(
                 error: feedback.error,
                 gpuStartTime: feedback.gpuStartTime,
                 gpuEndTime: feedback.gpuEndTime
@@ -1478,12 +1498,13 @@ private final class Metal4MainQueueContext {
             self.slots[lease.slotIndex].state = .free
             self.slotCondition.broadcast()
             self.slotCondition.unlock()
-            semaphore?.signal()
             // A completion callback may start encoding the next unit of work.
             // Run it only after the completed slot is visible to acquire.
-            for handler in completionHandlers {
-                handler(feedback.error, feedback.gpuStartTime, feedback.gpuEndTime)
-            }
+            lease.drainCompletionHandlers()
+            // Java treats this semaphore as the terminal GPU/lifetime barrier
+            // before device teardown. Signalling before the handlers above can
+            // race ICB residency release against session destruction.
+            semaphore?.signal()
         }
         if let drawable = lease.presentDrawable {
             queue.waitForDrawable(drawable)
@@ -1805,6 +1826,18 @@ private func metal3ComputeEncoder(_ pointer: UnsafeMutableRawPointer) -> MTLComp
 @available(macOS 26.0, iOS 26.0, *)
 private func metal4MainLease(_ pointer: UnsafeMutableRawPointer) -> Metal4MainCommandBufferLease? {
     return Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? Metal4MainCommandBufferLease
+}
+
+/// Internal regression hook used only by the same-module native path test. It
+/// deliberately has no @_cdecl export and does not extend the Java/native ABI.
+@available(macOS 26.0, iOS 26.0, *)
+func metallumInstallCompletionBarrierProbe(
+    _ pointer: UnsafeMutableRawPointer,
+    _ handler: @escaping () -> Void
+) -> Bool {
+    guard let lease = metal4MainLease(pointer) else { return false }
+    lease.addCompletionHandler { _, _, _ in handler() }
+    return true
 }
 
 private func metal3CommandBuffer(_ pointer: UnsafeMutableRawPointer) -> MTLCommandBuffer {
