@@ -45,4 +45,25 @@ final class MetalRuntimeEnvironmentTest {
         assertTrue(MetalRuntimeEnvironment.renderCommandPacketEnabled("true", true));
         assertFalse(MetalRuntimeEnvironment.renderCommandPacketEnabled("false", false));
     }
+
+    @Test
+    void detectsExplicitIosAndLauncherSignals() {
+        assertTrue(MetalRuntimeEnvironment.isIOS(
+                "iOS", "aarch64", "/tmp", "/Users/example", false, false
+        ));
+        assertTrue(MetalRuntimeEnvironment.isIOS(
+                "Mac OS X", "aarch64", "/tmp", "/Users/example", true, false
+        ));
+        assertTrue(MetalRuntimeEnvironment.isIOS(
+                "Darwin", "aarch64", "/tmp", "/Users/example", false, false
+        ));
+    }
+
+    @Test
+    void appleMetalPlatformAcceptsMacAndIosButRejectsOtherDesktop() {
+        assertTrue(MetalRuntimeEnvironment.isAppleMetalPlatform("Mac OS X", false));
+        assertTrue(MetalRuntimeEnvironment.isAppleMetalPlatform("iOS", true));
+        assertTrue(MetalRuntimeEnvironment.isAppleMetalPlatform("Darwin", true));
+        assertFalse(MetalRuntimeEnvironment.isAppleMetalPlatform("Linux", false));
+    }
 }

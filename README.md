@@ -61,7 +61,7 @@ App 的 `Frameworks/`，发布打包流程可用 App 的签名身份重新签名
 
 ### CI/CD
 
-GitHub Actions 工作流（`.github/workflows/build.yml`）在 `macos-15` 上构建，推送带 `v*` tag 时自动发布到 Modrinth 和 GitHub Releases。
+GitHub Actions 工作流（`.github/workflows/build.yml`）在 `macos-26` 上构建；发布前会验证 JAR 内 iOS dylib 的 arm64 设备平台、关键导出、SPIRV-Cross MSL C API 和严格代码签名，推送带 `v*` tag 时自动发布到 Modrinth 和 GitHub Releases。
 
 ## iOS 使用说明
 

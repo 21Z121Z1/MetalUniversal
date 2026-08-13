@@ -33,6 +33,15 @@ public final class MetalRuntimeEnvironment {
         );
     }
 
+    /** Returns whether Metal mixins are valid on this Apple runtime. */
+    public static boolean isAppleMetalPlatform() {
+        return isAppleMetalPlatform(System.getProperty("os.name", ""), isIOS());
+    }
+
+    static boolean isAppleMetalPlatform(final String osName, final boolean ios) {
+        return ios || osName.toLowerCase(Locale.ROOT).contains("mac");
+    }
+
     /**
      * Resolves the ordered render-command packet switch.
      *

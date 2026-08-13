@@ -2504,6 +2504,69 @@ def adHocSignIOSDylib = { File dylib, String taskLabel ->
 	logger.lifecycle("[${taskLabel}] Verified ad-hoc signature: ${dylib}")
 }
 
+
+def inspectNativeCommand = { List<String> requestedCommand ->
+	try {
+		def command = new ArrayList<String>(requestedCommand)
+		def proc = new ProcessBuilder(command)
+				.redirectErrorStream(true)
+				.start()
+		def output = proc.inputStream.getText("UTF-8")
+		def exitCode = proc.waitFor()
+		return [exitCode: exitCode, output: output]
+	} catch (IOException error) {
+		return [exitCode: -1, output: error.toString()]
+	}
+}
+
+def iosDylibContractFailure = { File dylib, List<String> requiredSymbolFragments ->
+	if (!dylib.isFile()) {
+		return "missing file: ${dylib}"
+	}
+	if (!hasValidIOSCodeSignature(dylib)) {
+		return "invalid or missing code signature: ${dylib}"
+	}
+
+	def arch = inspectNativeCommand(["xcrun", "lipo", "-archs", dylib.absolutePath])
+	if (arch.exitCode != 0) {
+		return "could not inspect architecture: ${arch.output}".toString()
+	}
+	def archs = arch.output.trim().split(/\s+/).findAll { !it.isBlank() }
+	if (archs != ["arm64"]) {
+		return "expected arm64-only iOS device binary, found: ${arch.output.trim()}".toString()
+	}
+
+	def loadCommands = inspectNativeCommand(["xcrun", "otool", "-l", dylib.absolutePath])
+	if (loadCommands.exitCode != 0) {
+		return "could not inspect Mach-O load commands: ${loadCommands.output}".toString()
+	}
+	def otool = loadCommands.output
+	def iosPlatform = otool.contains("LC_VERSION_MIN_IPHONEOS")
+			|| ((otool =~ /(?s)cmd LC_BUILD_VERSION.*?platform\s+2\b/).find())
+	if (!iosPlatform) {
+		return "Mach-O does not declare the iOS device platform".toString()
+	}
+
+	def symbols = inspectNativeCommand(["xcrun", "nm", "-gU", dylib.absolutePath])
+	if (symbols.exitCode != 0) {
+		return "could not inspect exported symbols: ${symbols.output}".toString()
+	}
+	for (String required : requiredSymbolFragments) {
+		if (!symbols.output.contains(required)) {
+			return "missing required exported symbol fragment '${required}'".toString()
+		}
+	}
+	return null
+}
+
+def verifyIOSDylibContract = { File dylib, String taskLabel, List<String> requiredSymbolFragments ->
+	def failure = iosDylibContractFailure(dylib, requiredSymbolFragments)
+	if (failure != null) {
+		throw new GradleException("[${taskLabel}] iOS native artifact contract failed: ${failure}")
+	}
+	logger.lifecycle("[${taskLabel}] Verified iOS arm64 platform, exports and code signature: ${dylib}")
+}
+
 tasks.register("buildIOSNative", Exec) {
 	onlyIf { iosSdkPath != null }
 
@@ -2533,9 +2596,12 @@ tasks.register("buildIOSNative", Exec) {
 	}
 
 	doLast {
-		adHocSignIOSDylib(
-				file("src/main/resources/natives/ios/libmetallum.dylib"),
-				"buildIOSNative"
+		def output = file("src/main/resources/natives/ios/libmetallum.dylib")
+		adHocSignIOSDylib(output, "buildIOSNative")
+		verifyIOSDylibContract(
+				output,
+				"buildIOSNative",
+				["metallum_create_system_default_device"]
 		)
 	}
 }
@@ -2564,14 +2630,28 @@ tasks.register("buildIOSSpvc") {
 	outputs.file spvcOutput
 	// A pre-existing unsigned dylib is not a reusable task output. This makes
 	// an ordinary jar/build invocation repair it before processResources runs.
-	outputs.upToDateWhen { hasValidIOSCodeSignature(spvcOutput) }
+	outputs.upToDateWhen {
+		iosDylibContractFailure(
+				spvcOutput,
+				["spvc_context_create_compiler", "spvc_compiler_msl_"]
+		) == null
+	}
 
 	doLast {
 		file("src/main/resources/natives/ios").mkdirs()
 		if (spvcOutput.exists()) {
-			logger.lifecycle("[buildIOSSpvc] libspvc.dylib already exists, reusing binary")
-			adHocSignIOSDylib(spvcOutput, "buildIOSSpvc")
-			return
+			def reusableFailure = iosDylibContractFailure(
+					spvcOutput,
+					["spvc_context_create_compiler", "spvc_compiler_msl_"]
+			)
+			if (reusableFailure == null) {
+				logger.lifecycle("[buildIOSSpvc] existing libspvc.dylib satisfies the complete iOS contract")
+				return
+			}
+			logger.lifecycle("[buildIOSSpvc] existing libspvc.dylib is not reusable; rebuilding: ${reusableFailure}")
+			if (!spvcOutput.delete()) {
+				throw new GradleException("[buildIOSSpvc] could not remove invalid reusable artifact: ${spvcOutput}")
+			}
 		}
 
 		// Helper: run a command and throw on failure
@@ -2729,6 +2809,31 @@ tasks.register("buildIOSSpvc") {
 		}
 
 		adHocSignIOSDylib(spvcOutput, "buildIOSSpvc")
+		verifyIOSDylibContract(
+				spvcOutput,
+				"buildIOSSpvc",
+				["spvc_context_create_compiler", "spvc_compiler_msl_"]
+		)
+	}
+}
+
+tasks.register("verifyIOSNativeArtifacts") {
+	group = "verification"
+	description = "Verifies packaged iOS natives are arm64 device Mach-O binaries with required exports and valid signatures."
+	onlyIf { iosSdkPath != null }
+	dependsOn(tasks.named("buildIOSNative"))
+	dependsOn(tasks.named("buildIOSSpvc"))
+	doLast {
+		verifyIOSDylibContract(
+				file("src/main/resources/natives/ios/libmetallum.dylib"),
+				"verifyIOSNativeArtifacts",
+				["metallum_create_system_default_device"]
+		)
+		verifyIOSDylibContract(
+				file("src/main/resources/natives/ios/libspvc.dylib"),
+				"verifyIOSNativeArtifacts",
+				["spvc_context_create_compiler", "spvc_compiler_msl_"]
+		)
 	}
 }
 
@@ -2737,8 +2842,7 @@ tasks.named("processResources") {
 	// The iOS native is only built on a macOS host with the iOS SDK installed.
 	// It is optional: if the toolchain is missing the task is skipped and the
 	// iOS dylib is simply not packaged in the jar.
-	dependsOn(tasks.named("buildIOSNative"))
-	dependsOn(tasks.named("buildIOSSpvc"))
+	dependsOn(tasks.named("verifyIOSNativeArtifacts"))
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -2760,8 +2864,7 @@ java {
 // task is created by that block.
 tasks.named("sourcesJar") {
 	dependsOn(tasks.named("buildMacNative"))
-	dependsOn(tasks.named("buildIOSNative"))
-	dependsOn(tasks.named("buildIOSSpvc"))
+	dependsOn(tasks.named("verifyIOSNativeArtifacts"))
 }
 
 jar {

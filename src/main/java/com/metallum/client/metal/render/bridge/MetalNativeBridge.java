@@ -71,9 +71,12 @@ public final class MetalNativeBridge {
             }
             try {
                 configureBundledSpvcLibrary();
-            } catch (Throwable t) {
-            } finally {
                 spvcConfigured = true;
+            } catch (IOException | UnsatisfiedLinkError e) {
+                throw new IllegalStateException(
+                        "Failed to configure bundled iOS SPIRV-Cross MSL library",
+                        e
+                );
             }
         }
     }
@@ -85,41 +88,42 @@ public final class MetalNativeBridge {
      */
     private static void configureBundledSpvcLibrary() throws IOException {
         String resourcePath = "/natives/ios/libspvc.dylib";
-        try (InputStream stream = MetalNativeBridge.class.getResourceAsStream(resourcePath)) {
-            if (stream == null) {
-                return;
-            }
-            // 抽取到可写目录（与 createIOSSymbolLookup 相同的策略）
-            Path tempLib = null;
-            IOException lastError = null;
-            for (String dirProperty : new String[]{"pojav.launcher.home", "POJAV_HOME", "user.home", "java.io.tmpdir"}) {
-                String dir = System.getProperty(dirProperty);
-                if (dir == null || dir.isBlank()) continue;
-                Path dirPath = Path.of(dir);
-                if (!Files.isDirectory(dirPath)) continue;
-                try {
-                    tempLib = dirPath.resolve("libspvc_metallum.dylib");
-                    Files.copy(stream, tempLib, StandardCopyOption.REPLACE_EXISTING);
-                    break;
-                } catch (IOException e) {
-                    lastError = e;
-                    tempLib = null;
-                }
-            }
-            if (tempLib == null) {
-                if (lastError != null) throw lastError;
-                throw new IOException("No writable directory available for libspvc.dylib extraction");
-            }
-            tempLib.toFile().deleteOnExit();
-
-            // buildIOSSpvc gives the packaged Mach-O an ad-hoc CodeDirectory.
-            // Amethyst's hooked dlopen then supplies the JIT/library-validation
-            // part of the writable-directory loading contract.
-            System.load(tempLib.toString());
-            // 让 LWJGL 在 Spvc 类初始化时用该绝对路径直接 dlopen，避免
-            // dlsym(RTLD_DEFAULT) 被 MoltenVK 抢占
-            Configuration.SPVC_LIBRARY_NAME.set(tempLib.toString());
+        if (MetalNativeBridge.class.getResource(resourcePath) == null) {
+            throw new IOException("Missing native library resource: " + resourcePath);
         }
+
+        Path tempLib = null;
+        IOException lastError = null;
+        for (String dirProperty : new String[]{"pojav.launcher.home", "POJAV_HOME", "user.home", "java.io.tmpdir"}) {
+            String dir = System.getProperty(dirProperty);
+            if (dir == null || dir.isBlank()) continue;
+            Path dirPath = Path.of(dir);
+            if (!Files.isDirectory(dirPath)) continue;
+            Path candidate = dirPath.resolve("libspvc_metallum.dylib");
+            try (InputStream stream = MetalNativeBridge.class.getResourceAsStream(resourcePath)) {
+                if (stream == null) {
+                    throw new IOException("Missing native library resource: " + resourcePath);
+                }
+                Files.copy(stream, candidate, StandardCopyOption.REPLACE_EXISTING);
+                tempLib = candidate;
+                break;
+            } catch (IOException e) {
+                lastError = e;
+            }
+        }
+        if (tempLib == null) {
+            if (lastError != null) throw lastError;
+            throw new IOException("No writable directory available for libspvc.dylib extraction");
+        }
+        tempLib.toFile().deleteOnExit();
+
+        // The bundled Mach-O carries an ad-hoc CodeDirectory. Amethyst's
+        // hooked dlopen supplies the JIT/library-validation part of the
+        // writable-directory loading contract. Failure is fatal for Direct Metal:
+        // silently falling back to MoltenVK's stripped SPIRV-Cross would later
+        // fail SPVC_BACKEND_MSL with an opaque -4 error.
+        System.load(tempLib.toString());
+        Configuration.SPVC_LIBRARY_NAME.set(tempLib.toString());
     }
 
     static {

@@ -79,7 +79,7 @@ jobs:
         run: >-
           ./gradlew buildMacNative build
           -x metalFrameGenerationPresentationValidation
-      - name: verify packaged iOS native signatures
+      - name: verify packaged iOS native contract
         shell: bash
         run: |
           set -euo pipefail
@@ -94,8 +94,31 @@ jobs:
             'natives/ios/libmetallum.dylib' \
             'natives/ios/libspvc.dylib' \
             -d "${VERIFY_DIR}"
-          /usr/bin/codesign --verify --strict "${VERIFY_DIR}/natives/ios/libmetallum.dylib"
-          /usr/bin/codesign --verify --strict "${VERIFY_DIR}/natives/ios/libspvc.dylib"
+
+          verify_ios_binary() {
+            local dylib="$1"
+            local label="$2"
+            local archs
+            archs="$(xcrun lipo -archs "${dylib}")"
+            if [ "${archs}" != "arm64" ]; then
+              echo "${label}: expected arm64-only iOS binary, got '${archs}'" >&2
+              exit 1
+            fi
+            xcrun otool -l "${dylib}" > "${VERIFY_DIR}/${label}.otool"
+            if ! grep -q 'LC_VERSION_MIN_IPHONEOS' "${VERIFY_DIR}/${label}.otool"; then
+              python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); raise SystemExit(0 if re.search(r"cmd LC_BUILD_VERSION.*?platform\s+(?:2|IOS)\b", text, re.S | re.I) else "Mach-O does not declare the iOS device platform")' "${VERIFY_DIR}/${label}.otool"
+            fi
+            /usr/bin/codesign --verify --strict "${dylib}"
+            xcrun nm -gU "${dylib}" > "${VERIFY_DIR}/${label}.nm"
+          }
+
+          METALLUM="${VERIFY_DIR}/natives/ios/libmetallum.dylib"
+          SPVC="${VERIFY_DIR}/natives/ios/libspvc.dylib"
+          verify_ios_binary "${METALLUM}" metallum
+          verify_ios_binary "${SPVC}" spvc
+          grep -q 'metallum_create_system_default_device' "${VERIFY_DIR}/metallum.nm"
+          grep -q 'spvc_context_create_compiler' "${VERIFY_DIR}/spvc.nm"
+          grep -q 'spvc_compiler_msl_' "${VERIFY_DIR}/spvc.nm"
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:
