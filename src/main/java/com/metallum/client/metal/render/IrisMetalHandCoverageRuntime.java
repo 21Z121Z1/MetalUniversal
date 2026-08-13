@@ -59,7 +59,7 @@ public final class IrisMetalHandCoverageRuntime {
             MetalFxManager.class, "HAND_OVERLAY_REACTIVE_BOOST"
     );
 
-    private static @Nullable IrisMetalPipelineOverrides.Instance owner;
+    private static IrisMetalPipelineOverrides.Instance owner;
     private static @Nullable MetalGpuTexture coverageTexture;
     private static @Nullable MetalGpuTextureView coverageView;
     private static int coverageWidth;
