@@ -1,6 +1,6 @@
 package com.metallum.mixin.iris;
 
-import com.metallum.client.metal.render.IrisMetalHandCoverageRuntime;
+import com.metallum.client.metal.render.IrisMetalHandCoverageRoute;
 import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
 import com.mojang.blaze3d.IndexType;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -35,6 +35,7 @@ public abstract class PreparedRenderTypeIrisMixin {
     @Unique
     private static final ThreadLocal<IrisMetalPipelineOverrides.CoreDrawOverride> METALLUM_CORE_DRAW =
             new ThreadLocal<>();
+
     @Inject(
             method = "drawFromBuffer(Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/IndexType;III)V",
             at = @At("HEAD")
@@ -88,7 +89,11 @@ public abstract class PreparedRenderTypeIrisMixin {
         }
         METALLUM_CORE_DRAW.set(override);
         return encoder.createRenderPass(
-                IrisMetalHandCoverageRuntime.appendToHandDescriptor(override.descriptor())
+                IrisMetalHandCoverageRoute.appendIfHand(
+                        this.pipeline,
+                        worldPipeline,
+                        override.descriptor()
+                )
         );
     }
 
