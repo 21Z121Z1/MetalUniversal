@@ -79,6 +79,23 @@ jobs:
         run: >-
           ./gradlew buildMacNative build
           -x metalFrameGenerationPresentationValidation
+      - name: verify packaged iOS native signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAR_PATH="$(find build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-dev.jar' ! -name '*-sources.jar' | head -n1)"
+          if [ -z "${JAR_PATH}" ]; then
+            echo "Could not find main build jar" >&2
+            exit 1
+          fi
+          VERIFY_DIR="$(mktemp -d)"
+          trap 'rm -rf "${VERIFY_DIR}"' EXIT
+          unzip -q "${JAR_PATH}" \
+            'natives/ios/libmetallum.dylib' \
+            'natives/ios/libspvc.dylib' \
+            -d "${VERIFY_DIR}"
+          /usr/bin/codesign --verify --strict "${VERIFY_DIR}/natives/ios/libmetallum.dylib"
+          /usr/bin/codesign --verify --strict "${VERIFY_DIR}/natives/ios/libspvc.dylib"
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:
