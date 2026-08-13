@@ -44,6 +44,7 @@
     "render.MetalRenderPassNoTraceDrawMixin",
     "render.IrisMetalCommandEncoderComputeGroupingMixin",
     "render.IrisMetalRenderFusionBoundaryMixin",
+    "render.MetalCommandEncoderIrisHandCoverageMixin",
     "sodium.MinecraftTerrainSchedulingMixin",
     "sodium.RenderRegionManagerTerrainSchedulingMixin",
     "sodium.RenderSectionManagerTerrainSchedulingMixin",
@@ -79,6 +80,8 @@
     "iris.IrisMetalDepthLivenessMixin",
     "iris.IrisMetalDepthAllocationMixin",
     "iris.IrisMetalCutoutCoveragePipelineMixin",
+    "iris.IrisMetalHandCoveragePipelineMixin",
+    "iris.IrisMetalHandCoverageBoundaryMixin",
     "iris.IrisMetalPostChainComputeGroupingMixin",
     "iris.IrisMetalRenderFusionPolicyMixin"
   ],
