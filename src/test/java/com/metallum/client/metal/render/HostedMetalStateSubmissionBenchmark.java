@@ -56,7 +56,7 @@ final class HostedMetalStateSubmissionBenchmark {
 
     @BeforeEach
     void createDevice() {
-        assertTrue(
+        org.junit.jupiter.api.Assumptions.assumeTrue(
                 Boolean.getBoolean("metallum.perf.hosted"),
                 "Hosted Metal performance benchmark must be explicitly enabled with -Dmetallum.perf.hosted=true"
         );

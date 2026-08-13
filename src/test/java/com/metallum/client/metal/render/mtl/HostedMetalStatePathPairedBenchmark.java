@@ -37,7 +37,7 @@ final class HostedMetalStatePathPairedBenchmark {
 
     @Test
     void compareDirectCriticalFfmWithPacketDecodeInOneJvm() throws IOException {
-        assertTrue(
+        org.junit.jupiter.api.Assumptions.assumeTrue(
                 Boolean.getBoolean("metallum.perf.hosted"),
                 "Hosted Metal performance benchmark requires -Dmetallum.perf.hosted=true"
         );
