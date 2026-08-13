@@ -2,6 +2,7 @@ package com.metallum.client.metal.render.mtl;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.bridge.MetalRenderCommandPacketBridge;
+import com.metallum.client.metal.render.bridge.MetalRuntimeEnvironment;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.Arena;
@@ -40,9 +41,7 @@ final class MetalRenderCommandPacket implements AutoCloseable {
     static final int OP_DRAW_PRIMITIVES_INDIRECT = 34;
     static final int OP_DRAW_INDEXED_INDIRECT = 35;
 
-    private static final boolean ENABLED = !"false".equalsIgnoreCase(System.getProperty(
-            "metallum.opt.renderCommandPacket", "true"
-    ));
+    private static final boolean ENABLED = MetalRuntimeEnvironment.renderCommandPacketEnabled();
     private static final int CAPACITY = Math.clamp(
             Integer.getInteger("metallum.opt.renderCommandPacketEntries", 512),
             32,

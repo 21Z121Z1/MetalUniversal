@@ -1,6 +1,7 @@
 package com.metallum;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.bridge.MetalRuntimeEnvironment;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.loader.api.entrypoint.PreLaunchEntrypoint;
 
@@ -17,6 +18,16 @@ public class Metallum implements ModInitializer, PreLaunchEntrypoint {
 
     @Override
     public void onPreLaunch() {
+        if (MetalRuntimeEnvironment.isIOS()
+                && System.getProperty(
+                        MetalRuntimeEnvironment.RENDER_COMMAND_PACKET_PROPERTY
+                ) == null) {
+            LOGGER.info(
+                    "[metallum] iOS safety policy: {} defaults to false; "
+                            + "set it explicitly to override",
+                    MetalRuntimeEnvironment.RENDER_COMMAND_PACKET_PROPERTY
+            );
+        }
         // PreLaunch 是 Fabric Loader 提供的最早入口点，在游戏启动之前调用，
         // 早于任何 Minecraft 类（包括 VulkanBackend、GlBackend、MetalBackend）被加载。
         // 必须在这里设置 Configuration.SPVC_LIBRARY_NAME，因为 LWJGL 的 Spvc.SPVC 是

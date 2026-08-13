@@ -30,41 +30,9 @@ public final class MetalNativeBridge {
     private static final ThreadLocal<MetalFxMatrixScratch> METALFX_MATRIX_SCRATCH =
             ThreadLocal.withInitial(MetalFxMatrixScratch::new);
 
-    /**
-     * iOS (e.g. via PojavLauncher) forbids dlopen of unsigned dylibs from the app's
-     * tmp/writable directories due to code-signing restrictions. The native bridge
-     * must therefore be loaded as a signed, embedded framework or be statically
-     * linked into the launcher binary. We detect that environment and avoid the
-     * temp-file extraction path used on macOS.
-     */
+    /** Returns whether the current JVM is hosted by an iOS launcher. */
     public static boolean isIOS() {
-        String osName = System.getProperty("os.name", "");
-        String osArch = System.getProperty("os.arch", "");
-        if (osName.toLowerCase().contains("ios")) {
-            return true;
-        }
-        // PojavLauncher / Amethyst on iOS
-        if (System.getProperty("pojav.launcher") != null
-                || System.getProperty("org.pojavlauncher") != null) {
-            return true;
-        }
-        // The JVM on iOS (Azul Zulu via PojavLauncher/Amethyst) often reports
-        // os.name as "Mac OS X" or "Darwin" because it doesn't distinguish the
-        // underlying platform. The most reliable signal is the sandbox path:
-        // on iOS, java.io.tmpdir and user.home are always under
-        // /private/var/mobile/Containers/Data/Application/<UUID>/, which never
-        // exists on macOS. This catches all PojavLauncher/Amethyst variants
-        // regardless of how the JDK reports os.name.
-        String tmpDir = System.getProperty("java.io.tmpdir", "");
-        String userHome = System.getProperty("user.home", "");
-        if (tmpDir.contains("/var/mobile/") || tmpDir.contains("/var/containers/")
-                || userHome.contains("/var/mobile/") || userHome.contains("/var/containers/")) {
-            return true;
-        }
-        // Fallback: Darwin + aarch64 without a "Mac" os.name
-        return osName.toLowerCase().contains("darwin")
-                && osArch.toLowerCase().contains("aarch64")
-                && !osName.toLowerCase().contains("mac");
+        return MetalRuntimeEnvironment.isIOS();
     }
 
     /**
@@ -144,7 +112,9 @@ public final class MetalNativeBridge {
             }
             tempLib.toFile().deleteOnExit();
 
-            // System.load 经 Amethyst 的 hooked dlopen 加载（能绕过 iOS 代码签名）
+            // buildIOSSpvc gives the packaged Mach-O an ad-hoc CodeDirectory.
+            // Amethyst's hooked dlopen then supplies the JIT/library-validation
+            // part of the writable-directory loading contract.
             System.load(tempLib.toString());
             // 让 LWJGL 在 Spvc 类初始化时用该绝对路径直接 dlopen，避免
             // dlsym(RTLD_DEFAULT) 被 MoltenVK 抢占
@@ -748,19 +718,16 @@ public final class MetalNativeBridge {
      *       any library loaded via the JVM's standard loader.</li>
      *   <li>If the dylib is not in Frameworks (e.g. shipped only inside the
      *       Metallum jar), extract it to a writable directory and load it via
-     *       {@code System.load}. Amethyst installs a fishhook'd
-     *       {@code hooked_dlopen} (see Amethyst {@code Natives/main_hook.m})
-     *       that recognises paths under {@code $HOME} or {@code $TMPDIR} and,
-     *       together with the in-memory dyld {@code mmap}/{@code fcntl} bypass
-     *       ({@code Natives/dyld_bypass_validation.m}), allows unsigned dylibs
-     *       from those directories to load when JIT is enabled (TrollStore /
-     *       jailbreak). {@code System.load} routes through the JVM's
+     *       {@code System.load}. The Gradle iOS tasks ad-hoc sign the packaged
+     *       Mach-O before it enters the jar; this CodeDirectory survives byte
+     *       extraction. Amethyst's fishhook'd {@code hooked_dlopen} (see
+     *       {@code Natives/main_hook.m}) and in-memory dyld validation bypass
+     *       ({@code Natives/dyld_bypass_validation.m}) provide the remaining
+     *       JIT/library-validation support for {@code $HOME}/{@code $TMPDIR}.
+     *       {@code System.load} routes through the JVM's
      *       {@code JVM_LoadLibrary} → {@code dlopen}, which is the exact path
-     *       Amethyst's hooks are built around — using it instead of FFM's
-     *       {@code libraryLookup} ensures the hooked {@code dlopen} is invoked.
-     *       There is NO {@code ldid} binary bundled in Amethyst, so ad-hoc
-     *       signing the extracted file would be a no-op; the dyld bypass is
-     *       the only mechanism that makes tmp extraction work.</li>
+     *       Amethyst's hooks are built around. A completely unsigned Mach-O is
+     *       intentionally not a supported jar fallback.</li>
      * </ol>
      */
     private static SymbolLookup createIOSSymbolLookup() throws IOException {
@@ -819,9 +786,9 @@ public final class MetalNativeBridge {
             "      <Amethyst.app>/Frameworks/libmetallum.dylib and signed at\n" +
             "      IPA build time (the supported path — Amethyst loads all its\n" +
             "      natives this way via java.library.path); OR\n" +
-            "  (b) the device must have JIT enabled (TrollStore / jailbreak)\n" +
-            "      so Amethyst's dyld library-validation bypass can load the\n" +
-            "      unsigned dylib extracted from the jar.\n" +
+            "  (b) the jar must contain the build-produced ad-hoc-signed dylib\n" +
+            "      and the device must have JIT plus Amethyst's dyld\n" +
+            "      library-validation bypass enabled for writable extraction.\n" +
             "See README.md -> iOS Installation for details.",
             lastError);
     }

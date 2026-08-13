@@ -2426,12 +2426,12 @@ tasks.register("nonIrisRegressionCompare", JavaExec) {
 	}
 }
 
-// Builds the Metallum native bridge as a dylib targeting iOS arm64. The
-// resulting artifact must be embedded in the iOS app bundle's Frameworks
-// directory and signed with the app's signing identity; iOS forbids loading
-// unsigned dylibs from writable tmp directories at runtime, so the produced
-// file is consumed by PojavLauncher's packaging step rather than extracted
-// from the jar at runtime.
+// Builds the Metallum native bridge as a dylib targeting iOS arm64. Every iOS
+// dylib packaged in the jar receives an ad-hoc Mach-O signature. Physical iOS
+// devices reject executable pages with no CodeDirectory even when a launcher
+// has a JIT/library-validation bypass. App distributors may replace the ad-hoc
+// signature with the app's signing identity when embedding the dylib in
+// Frameworks/.
 //
 // Requires Xcode with an iOS toolchain. Skipped automatically if the host
 // is not macOS or if the iOS SDK is unavailable.
@@ -2457,6 +2457,52 @@ def iosSdkPath = {
 	}
 	return null
 }()
+
+def hasValidIOSCodeSignature = { File dylib ->
+	if (!dylib.isFile()) {
+		return false
+	}
+	try {
+		def command = new ArrayList<String>([
+				"/usr/bin/codesign", "--verify", "--strict", dylib.absolutePath
+		])
+		def proc = new ProcessBuilder(command)
+				.redirectErrorStream(true)
+				.start()
+		proc.inputStream.eachLine { ignored -> }
+		return proc.waitFor() == 0
+	} catch (IOException ignored) {
+		return false
+	}
+}
+
+def adHocSignIOSDylib = { File dylib, String taskLabel ->
+	if (!dylib.isFile()) {
+		throw new GradleException("[${taskLabel}] iOS dylib is missing: ${dylib}")
+	}
+	def runChecked = { List<String> requestedCommand ->
+		def command = new ArrayList<String>(requestedCommand)
+		logger.lifecycle("[${taskLabel}] Running: " + command.join(" "))
+		def proc = new ProcessBuilder(command)
+				.redirectErrorStream(true)
+				.start()
+		proc.inputStream.eachLine { line ->
+			if (!line.isBlank()) {
+				logger.lifecycle("[${taskLabel}] " + line)
+			}
+		}
+		def exitCode = proc.waitFor()
+		if (exitCode != 0) {
+			throw new GradleException(
+					"[${taskLabel}] command failed (exit ${exitCode}): "
+							+ command.join(" ")
+			)
+		}
+	}
+	runChecked(["/usr/bin/codesign", "--force", "--sign", "-", dylib.absolutePath])
+	runChecked(["/usr/bin/codesign", "--verify", "--strict", dylib.absolutePath])
+	logger.lifecycle("[${taskLabel}] Verified ad-hoc signature: ${dylib}")
+}
 
 tasks.register("buildIOSNative", Exec) {
 	onlyIf { iosSdkPath != null }
@@ -2485,6 +2531,13 @@ tasks.register("buildIOSNative", Exec) {
 			"src/main/native/MetallumInterface.swift",
 			"src/main/native/MetallumNative.swift"
 	}
+
+	doLast {
+		adHocSignIOSDylib(
+				file("src/main/resources/natives/ios/libmetallum.dylib"),
+				"buildIOSNative"
+		)
+	}
 }
 
 // Builds a full-featured libspvc.dylib (SPIRV-Cross C API with MSL backend)
@@ -2509,11 +2562,15 @@ tasks.register("buildIOSSpvc") {
 
 	inputs.property "tag", spvcTag
 	outputs.file spvcOutput
+	// A pre-existing unsigned dylib is not a reusable task output. This makes
+	// an ordinary jar/build invocation repair it before processResources runs.
+	outputs.upToDateWhen { hasValidIOSCodeSignature(spvcOutput) }
 
 	doLast {
 		file("src/main/resources/natives/ios").mkdirs()
 		if (spvcOutput.exists()) {
-			logger.lifecycle("[buildIOSSpvc] libspvc.dylib already exists, skipping build")
+			logger.lifecycle("[buildIOSSpvc] libspvc.dylib already exists, reusing binary")
+			adHocSignIOSDylib(spvcOutput, "buildIOSSpvc")
 			return
 		}
 
@@ -2670,6 +2727,8 @@ tasks.register("buildIOSSpvc") {
 		} catch (IOException ignored) {
 			logger.lifecycle("[buildIOSSpvc] lipo/otool not available, skipping platform verification")
 		}
+
+		adHocSignIOSDylib(spvcOutput, "buildIOSSpvc")
 	}
 }
 

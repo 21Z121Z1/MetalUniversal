@@ -50,8 +50,14 @@ MetalUniversal 是一个基于 Apple Metal API 的 Minecraft 渲染后端模组�
 
 构建产物：
 - `src/main/resources/natives/macos/libmetallum.dylib` — macOS arm64, target 14.0
-- `src/main/resources/natives/ios/libmetallum.dylib` — iOS arm64, target 14.0
-- `src/main/resources/natives/ios/libspvc.dylib` — SPIRV-Cross C API（MSL 后端），iOS arm64
+- `src/main/resources/natives/ios/libmetallum.dylib` — iOS arm64, target 14.0，带 ad-hoc 签名
+- `src/main/resources/natives/ios/libspvc.dylib` — SPIRV-Cross C API（MSL 后端），iOS arm64，带 ad-hoc 签名
+
+`buildIOSNative` 和 `buildIOSSpvc` 会在打包前执行 `codesign --sign -`
+并立即用 `codesign --verify --strict` 校验。这个 Mach-O CodeDirectory 是从
+jar 解压到可写目录后仍能在真机上建立可执行映射的必要条件；
+启动器仍需要提供 JIT 和 library-validation 支持。如果将 dylib 直接嵌入
+App 的 `Frameworks/`，发布打包流程可用 App 的签名身份重新签名。
 
 ### CI/CD
 
@@ -65,6 +71,9 @@ GitHub Actions 工作流（`.github/workflows/build.yml`）在 `macos-15` 上构
 ### 注意事项
 
 - `libmetallum.dylib` 和 `libspvc.dylib` 由启动器在运行时加载，无需手动嵌入
+- Amethyst/iOS 默认禁用 `metallum.opt.renderCommandPacket`，保留已验证稳定的
+  state-packet/直接 draw 路径；显式设置
+  `-Dmetallum.opt.renderCommandPacket=true` 仅建议用于诊断
 - 必须使用 Fabric Loader
 - 如遇渲染问题，先尝试禁用其他渲染相关模组
 

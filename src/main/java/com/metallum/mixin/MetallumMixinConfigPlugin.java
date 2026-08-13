@@ -1,6 +1,7 @@
 package com.metallum.mixin;
 
 import com.metallum.client.metal.render.MetalTerrainIcbScope;
+import com.metallum.client.metal.render.bridge.MetalRuntimeEnvironment;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
@@ -75,8 +76,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (RENDER_COMMAND_PACKET_MIXIN.equals(mixinClassName)
                 || RENDER_COMMAND_PACKET_BOUNDARY_MIXIN.equals(mixinClassName)) {
-            return !"false".equalsIgnoreCase(System.getProperty(
-                    "metallum.opt.renderCommandPacket", "true"))
+            return MetalRuntimeEnvironment.renderCommandPacketEnabled()
                     && this.isDefaultGraphicsApi;
         }
         if (HOT_PATH_TELEMETRY_REPORT_MIXIN.equals(mixinClassName)) {
