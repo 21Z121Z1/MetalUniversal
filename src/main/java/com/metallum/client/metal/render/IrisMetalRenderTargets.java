@@ -33,6 +33,10 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             | GpuTexture.USAGE_TEXTURE_BINDING
             | GpuTexture.USAGE_COPY_SRC
             | GpuTexture.USAGE_COPY_DST;
+    private static final int COVERAGE_USAGE = GpuTexture.USAGE_RENDER_ATTACHMENT
+            | GpuTexture.USAGE_TEXTURE_BINDING
+            | GpuTexture.USAGE_COPY_SRC
+            | GpuTexture.USAGE_COPY_DST;
     private static final Vector4fc CLEAR_WHITE = new Vector4f(1.0F, 1.0F, 1.0F, 1.0F);
     private static final Vector4fc CLEAR_ZERO = new Vector4f(0.0F, 0.0F, 0.0F, 0.0F);
 
@@ -43,9 +47,11 @@ final class IrisMetalRenderTargets implements AutoCloseable {
     private MetalGpuTexture mainDepth;
     private MetalGpuTexture noTranslucentsDepth;
     private MetalGpuTexture noHandDepth;
+    private MetalGpuTexture metalFxCutoutCoverage;
     private MetalGpuTextureView mainDepthView;
     private MetalGpuTextureView noTranslucentsDepthView;
     private MetalGpuTextureView noHandDepthView;
+    private MetalGpuTextureView metalFxCutoutCoverageView;
     private final MetalGpuSampler colorSampler;
     private final MetalGpuSampler nearestSampler;
     private final MetalGpuSampler colorMipSampler;
@@ -152,6 +158,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
                 MTLSamplerMipFilter.Linear
         );
         createDepthTextures(width, height);
+        createMetalFxCoverageTexture(width, height);
     }
 
     private static BitSet nearestColorTargets(final GpuFormat[] formats) {
@@ -194,6 +201,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
 
     boolean clearForFrame(final MetalCommandEncoder encoder, final Vector4fc fogColor) {
         ensureOpen();
+        encoder.clearColorTexture(metalFxCutoutCoverage, CLEAR_ZERO);
         Vector4f fog = new Vector4f(fogColor.x(), fogColor.y(), fogColor.z(), 1.0F);
         boolean fullClear = this.fullClearRequired;
         for (int index = 0; index < colorTargets.targetCount(); index++) {
@@ -232,6 +240,19 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         this.noHandDepthView = new MetalGpuTextureView(this.noHandDepth, 0, 1);
     }
 
+    private void createMetalFxCoverageTexture(final int newWidth, final int newHeight) {
+        this.metalFxCutoutCoverage = (MetalGpuTexture) device.createTexture(
+                "iris-metalfx-cutout-coverage",
+                COVERAGE_USAGE,
+                GpuFormat.R8_UNORM,
+                newWidth,
+                newHeight,
+                1,
+                1
+        );
+        this.metalFxCutoutCoverageView = new MetalGpuTextureView(this.metalFxCutoutCoverage, 0, 1);
+    }
+
     IrisMetalPingPongTargets colorTargets() {
         return colorTargets;
     }
@@ -264,6 +285,11 @@ final class IrisMetalRenderTargets implements AutoCloseable {
     MetalGpuTextureView noHandDepthView() {
         ensureOpen();
         return noHandDepthView;
+    }
+
+    MetalGpuTexture metalFxCutoutCoverageTexture() {
+        ensureOpen();
+        return metalFxCutoutCoverage;
     }
 
     GpuSampler colorSampler() {
@@ -385,6 +411,20 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             @Nullable final GpuTextureView sceneDepth,
             @Nullable final Double clearDepth
     ) {
+        return createTerrainWriteDescriptor(
+                label, drawBuffers, mainColor, mainClearColor, sceneDepth, clearDepth, false
+        );
+    }
+
+    RenderPassDescriptor createTerrainWriteDescriptor(
+            final String label,
+            final int[] drawBuffers,
+            final GpuTextureView mainColor,
+            @Nullable final Vector4fc mainClearColor,
+            @Nullable final GpuTextureView sceneDepth,
+            @Nullable final Double clearDepth,
+            final boolean withMetalFxCutoutCoverage
+    ) {
         ensureOpen();
         if (drawBuffers.length == 0) {
             throw new IllegalArgumentException("A gbuffer pass must write at least one draw buffer");
@@ -411,6 +451,14 @@ final class IrisMetalRenderTargets implements AutoCloseable {
                     : Optional.empty();
             descriptor.withColorAttachment(view, clear);
         }
+        if (withMetalFxCutoutCoverage) {
+            if (drawBuffers.length >= com.mojang.blaze3d.pipeline.ColorTargetState.MAX_COLOR_TARGETS) {
+                throw new IllegalArgumentException(
+                        "No free color attachment remains for Iris/MetalFX CUTOUT coverage"
+                );
+            }
+            descriptor.withColorAttachment(metalFxCutoutCoverageView, Optional.empty());
+        }
         if (sceneDepth != null) {
             descriptor.withDepthAttachment(
                     sceneDepth,
@@ -421,6 +469,31 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         return descriptor;
     }
 
+    void copyMetalFxCutoutCoverageTo(
+            final MetalCommandEncoder encoder,
+            final MetalGpuTexture destination
+    ) {
+        ensureOpen();
+        if (destination.getFormat() != GpuFormat.R8_UNORM
+                || destination.getWidth(0) != width
+                || destination.getHeight(0) != height) {
+            throw new IllegalArgumentException(
+                    "MetalFX CUTOUT destination must be R8_UNORM " + width + "x" + height
+            );
+        }
+        encoder.copyTextureToTexture(
+                metalFxCutoutCoverage,
+                destination,
+                0,
+                0,
+                0,
+                0,
+                0,
+                width,
+                height
+        );
+    }
+
     void resize(final int newWidth, final int newHeight) {
         ensureOpen();
         if (newWidth == width && newHeight == height) {
@@ -428,7 +501,9 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         }
         colorTargets.resize(newWidth, newHeight);
         releaseDepthTextures();
+        releaseMetalFxCoverageTexture();
         createDepthTextures(newWidth, newHeight);
+        createMetalFxCoverageTexture(newWidth, newHeight);
         this.fullClearRequired = true;
     }
 
@@ -459,6 +534,17 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         }
     }
 
+    private void releaseMetalFxCoverageTexture() {
+        if (metalFxCutoutCoverageView != null) {
+            metalFxCutoutCoverageView.close();
+            metalFxCutoutCoverageView = null;
+        }
+        if (metalFxCutoutCoverage != null) {
+            metalFxCutoutCoverage.close();
+            metalFxCutoutCoverage = null;
+        }
+    }
+
     private void ensureOpen() {
         if (closed) {
             throw new IllegalStateException("Iris render targets are closed");
@@ -473,6 +559,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         closed = true;
         colorTargets.close();
         releaseDepthTextures();
+        releaseMetalFxCoverageTexture();
         colorSampler.close();
         nearestSampler.close();
         colorMipSampler.close();
