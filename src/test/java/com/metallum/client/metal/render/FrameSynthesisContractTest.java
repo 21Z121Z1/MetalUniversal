@@ -30,6 +30,20 @@ final class FrameSynthesisContractTest {
     }
 
     @Test
+    void depthConventionRejectsItsOwnFarPlaneClear() {
+        FrameSynthesisContract.DepthConvention reversed =
+                FrameSynthesisContract.DepthConvention.REVERSED_ZERO_TO_ONE;
+        FrameSynthesisContract.DepthConvention forward =
+                FrameSynthesisContract.DepthConvention.FORWARD_ZERO_TO_ONE;
+        assertTrue(reversed.farDepth(0.0F));
+        assertFalse(reversed.validDepth(0.0F));
+        assertTrue(reversed.validDepth(0.75F));
+        assertTrue(forward.farDepth(1.0F));
+        assertFalse(forward.validDepth(1.0F));
+        assertTrue(forward.validDepth(0.75F));
+    }
+
+    @Test
     void producerCoverageRequiresExactlyOneReceiptPerDomain() {
         List<FrameSynthesisContract.ProducerReceipt> complete = completeCoverage(
                 REAL_MOTION,
@@ -111,14 +125,36 @@ final class FrameSynthesisContractTest {
                         1.0F / 60.0F
                 )
         );
-        assertThrows(
-                IllegalArgumentException.class,
+        FrameSynthesisContract.CameraFrameInput resetCamera = assertDoesNotThrow(
                 () -> new FrameSynthesisContract.CameraFrameInput(
                         70.0F,
                         0.05F,
                         1_000.0F,
                         16.0F / 9.0F,
                         0.0F
+                )
+        );
+        FrameSynthesisContract.ProducerCoverageSet coverage =
+                new FrameSynthesisContract.ProducerCoverageSet(
+                        completeCoverage(REAL_MOTION, REAL_MOTION)
+                );
+        assertDoesNotThrow(
+                () -> new FrameSynthesisContract.FrameGenerationAdmission(
+                        new FrameSynthesisContract.FrameStamp(1L, 1L),
+                        coverage,
+                        resetCamera,
+                        FrameSynthesisContract.DepthConvention.REVERSED_ZERO_TO_ONE,
+                        true
+                )
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new FrameSynthesisContract.FrameGenerationAdmission(
+                        new FrameSynthesisContract.FrameStamp(1L, 1L),
+                        coverage,
+                        resetCamera,
+                        FrameSynthesisContract.DepthConvention.FORWARD_ZERO_TO_ONE,
+                        false
                 )
         );
     }

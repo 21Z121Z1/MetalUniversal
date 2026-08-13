@@ -149,6 +149,11 @@ public final class MetalFxManager {
     private int phaseCount;
     private int phase;
     private boolean historyReset = true;
+    private long sourceFrameId;
+    private long historyEpoch = 1L;
+    private FrameSynthesisContract.@Nullable FrameStamp currentFrameStamp;
+    private FrameSynthesisContract.@Nullable FrameGenerationAdmission frameGenerationAdmission;
+    private boolean frameDepthReversed = true;
     private boolean previousMatrixValid;
     private final Matrix4f previousViewProjection = new Matrix4f();
     private final Matrix4f currentViewProjection = new Matrix4f();
@@ -208,6 +213,7 @@ public final class MetalFxManager {
     private boolean loggedTransparencyTargets;
     private boolean loggedCutoutReactive;
     private boolean loggedHandOverlay;
+    private boolean loggedIrisFrameHandoff;
     private boolean frameResetForPresent = true;
     private float frameFieldOfView = 70.0F;
     private float frameFarPlane = 1000.0F;
@@ -682,6 +688,21 @@ public final class MetalFxManager {
         return manager != null && manager.frameGenerationEnabled && !manager.runtimeDisabled;
     }
 
+    static FrameSynthesisContract.@Nullable FrameStamp currentFrameStamp() {
+        MetalFxManager manager = active;
+        return manager == null ? null : manager.currentFrameStamp;
+    }
+
+    public static IrisFrameHandoffDiagnostics irisFrameHandoffDiagnostics() {
+        IrisMetalFxFrameHandoff.Diagnostics diagnostics = IrisMetalFxFrameHandoff.diagnostics();
+        return new IrisFrameHandoffDiagnostics(
+                diagnostics.acceptedFrames(),
+                diagnostics.rejectedFrames(),
+                diagnostics.lastAcceptedGeneration(),
+                diagnostics.lastFailureReason()
+        );
+    }
+
     public static void addTransparencyReactivePass(final FrameGraphBuilder frame, final LevelTargetBundle targets) {
         MetalFxManager manager = active;
         if (manager != null) {
@@ -848,6 +869,8 @@ public final class MetalFxManager {
         reloadConfigIfRequested();
         recordFramePacingDiagnostics();
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
+            this.currentFrameStamp = null;
+            this.frameGenerationAdmission = null;
             this.sceneFrame = false;
             this.frameDepthTexture = null;
             this.frameNativeSceneTexture = null;
@@ -866,6 +889,13 @@ public final class MetalFxManager {
             frameGenerationEncodeObserved = false;
             resetHistoryInternal("frame generation resumed; suspend condition cleared");
         }
+        this.sourceFrameId = nextPositive(this.sourceFrameId);
+        this.currentFrameStamp = new FrameSynthesisContract.FrameStamp(
+                this.sourceFrameId,
+                this.historyEpoch
+        );
+        this.frameDepthReversed = MetalIrisDepthConvention.metalFxDepthReversed();
+        this.frameGenerationAdmission = null;
         this.sceneFrame = false;
         this.reactiveMaskPrepared = false;
         this.cutoutReactivePassObserved = false;
@@ -1161,6 +1191,7 @@ public final class MetalFxManager {
             MetalEntityMotionCapture.recordMotionDrawSkip("scene-frame-inactive");
             return;
         }
+
         if (!motionInputsPrepared) {
             MetalEntityMotionCapture.recordMotionDrawSkip("motion-inputs-unprepared");
             return;
@@ -1423,6 +1454,35 @@ public final class MetalFxManager {
             return;
         }
 
+        IrisMetalFxFrameHandoff.Admission irisAdmission = IrisMetalFxFrameHandoff.admit(
+                IrisMetalPipelineOverrides.activeGenerationForFrameHandoff(),
+                this.currentFrameStamp,
+                this.renderWidth,
+                this.renderHeight,
+                FrameSynthesisContract.DepthConvention.fromReversed(this.frameDepthReversed)
+        );
+        if (irisAdmission.irisActive() && !irisAdmission.accepted()) {
+            fallbackCurrentSceneToUi(
+                    renderer,
+                    "Iris/MetalFX frame handoff rejected: " + irisAdmission.reason()
+            );
+            return;
+        }
+        if (irisAdmission.irisActive() && config.debug && !loggedIrisFrameHandoff) {
+            loggedIrisFrameHandoff = true;
+            IrisMetalFxFrameHandoff.Receipt receipt = irisAdmission.receipt();
+            Metallum.LOGGER.info(
+                    "Iris/MetalFX shared frame handoff accepted: generation={} stamp={} epoch={} "
+                            + "size={}x{} depthConvention={}",
+                    receipt == null ? 0 : receipt.irisGeneration(),
+                    receipt == null ? 0 : receipt.stamp().frameId(),
+                    receipt == null ? 0 : receipt.stamp().historyEpoch(),
+                    renderWidth,
+                    renderHeight,
+                    receipt == null ? null : receipt.depthConvention()
+            );
+        }
+
         // The feature-frame hook normally flushes while staged buffers are
         // alive. This also guarantees a clear-only pass on static/reset frames
         // before the hand overlay and final motion merge consume the textures.
@@ -1465,8 +1525,8 @@ public final class MetalFxManager {
                 && candidateHandDepth.getWidth(0) == renderWidth
                 && candidateHandDepth.getHeight(0) == renderHeight) {
             handDepth = candidateHandDepth;
-            // Vanilla clears the reversed-Z depth buffer right before the
-            // first-person pass, so at this point it contains only hand,
+            // Vanilla clears the active depth buffer right before the first-
+            // person pass, so at this point it contains only hand,
             // held-item, and screen-effect coverage. Those pixels are
             // camera-locked: stamp zero object motion with full validity so
             // the merge pass does not apply world reprojection to them.
@@ -1477,12 +1537,14 @@ public final class MetalFxManager {
             if (LEGACY_MOTION_PASSES || emitMotionDiagnostics) {
                 handPrepared = encoder.encodeHandOverlayMotion(
                         handDepth,
+                        frameDepthTexture,
                         objectMotionTexture,
                         objectValidityTexture,
                         reactiveTexture,
                         renderWidth,
                         renderHeight,
-                        HAND_OVERLAY_REACTIVE_BOOST
+                        HAND_OVERLAY_REACTIVE_BOOST,
+                        frameDepthReversed
                 );
             }
             if (config.debug && handPrepared && !loggedHandOverlay) {
@@ -1537,7 +1599,7 @@ public final class MetalFxManager {
                         renderWidth,
                         renderHeight,
                         historyReset,
-                        true,
+                        frameDepthReversed,
                         (config.transparencyReactiveMask && reactiveMaskPrepared)
                                 || cutoutReactivePrepared,
                         emitMotionDiagnostics
@@ -1573,7 +1635,7 @@ public final class MetalFxManager {
             // beginFrame disables jitter for this path.
             historyTransactionEncoded = encoded && effectiveMode == MetalFxConfig.Mode.TEMPORAL;
             if (historyTransactionEncoded && depth != null && !usesNativeDirectFrameGeneration()) {
-                captureValidationFrameIfRequested(color, depth, output);
+                captureValidationFrameIfRequested(color, depth, handDepth, output);
                 captureFlickerFrameIfRequested(output, depth);
             }
         }
@@ -1625,15 +1687,27 @@ public final class MetalFxManager {
                     width, height, reactiveMaskPrepared);
             if (effectiveMode == MetalFxConfig.Mode.TEMPORAL) {
                 Metallum.LOGGER.info(
-                        "MetalFX temporal state: jitterPixels=({}, {}), motionVectorScale=({}, {}), inputContent={}x{}, fieldOfView={}deg, depthReversed=true, motion=previousScreen-currentScreen",
+                        "MetalFX temporal state: jitterPixels=({}, {}), motionVectorScale=({}, {}), inputContent={}x{}, fieldOfView={}deg, depthReversed={}, motion=previousScreen-currentScreen",
                         pixelJitter.x, pixelJitter.y, renderWidth * 0.5F, renderHeight * 0.5F,
-                        renderWidth, renderHeight, frameFieldOfView
+                        renderWidth, renderHeight, frameFieldOfView, frameDepthReversed
                 );
             }
         }
 
         if (scalerOutputAccepted) {
             this.metalFxScalerEncodeObserved = true;
+        }
+
+        if (frameGenerationEnabled) {
+            String contractFailure = prepareFrameGenerationAdmission();
+            if (contractFailure != null) {
+                suspendFrameGenerationInternal("the frame-synthesis contract rejected this source frame");
+                resetHistoryInternal("frame-synthesis contract rejected: " + contractFailure);
+                Metallum.LOGGER.warn(
+                        "MetalFX frame generation source rejected; presenting one real frame instead: {}",
+                        contractFailure
+                );
+            }
         }
 
         if (frameGenerationEnabled) {
@@ -1681,6 +1755,95 @@ public final class MetalFxManager {
         }
     }
 
+    private void fallbackCurrentSceneToUi(final GameRenderer renderer, final String reason) {
+        if (frameGenerationEnabled) {
+            suspendFrameGenerationInternal(reason);
+        }
+        resetHistoryInternal(reason);
+        GpuTexture scene = renderer.mainRenderTarget().getColorTexture();
+        boolean copied = scene instanceof MetalGpuTexture source
+                && uiTarget != null
+                && uiTarget.getColorTexture() instanceof MetalGpuTexture destination
+                && device.commandEncoder().encodeTextureCopy(source, destination, true);
+        if (!copied) {
+            RenderSystem.getDevice().createCommandEncoder().clearColorAndDepthTextures(
+                    uiTarget.getColorTexture(), UI_CLEAR, uiTarget.getDepthTexture(), 0.0
+            );
+            disableForSession(renderer, reason + "; fallback copy failed");
+            return;
+        }
+        RenderSystem.getDevice().createCommandEncoder().clearDepthTexture(uiTarget.getDepthTexture(), 0.0);
+        this.frameUsesUpscaledTarget = true;
+        Metallum.LOGGER.warn("{}; using single-frame fullscreen copy", reason);
+    }
+
+    private @Nullable String prepareFrameGenerationAdmission() {
+        FrameSynthesisContract.FrameStamp stamp = this.currentFrameStamp;
+        if (stamp == null || frameDepthTexture == null || motionTexture == null || reactiveTexture == null) {
+            this.frameGenerationAdmission = null;
+            return "the finalized motion frame is incomplete";
+        }
+        try {
+            FrameSynthesisContract.ProducerCoverageSet coverage = frameGenerationProducerCoverage();
+            new FrameSynthesisContract.FinalizedMotionFrame(
+                    stamp,
+                    frameDepthTexture,
+                    motionTexture,
+                    reactiveTexture,
+                    renderWidth,
+                    renderHeight,
+                    pixelJitter,
+                    MetalMotionContract.motionVectorScale(renderWidth, renderHeight),
+                    FrameSynthesisContract.DepthConvention.fromReversed(frameDepthReversed),
+                    frameResetForPresent,
+                    coverage
+            );
+            FrameSynthesisContract.CameraFrameInput camera = new FrameSynthesisContract.CameraFrameInput(
+                    frameFieldOfView,
+                    0.05F,
+                    frameFarPlane,
+                    displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
+                    sceneFrameDeltaSeconds
+            );
+            this.frameGenerationAdmission = new FrameSynthesisContract.FrameGenerationAdmission(
+                    stamp,
+                    coverage,
+                    camera,
+                    FrameSynthesisContract.DepthConvention.fromReversed(frameDepthReversed),
+                    frameResetForPresent
+            );
+            return null;
+        } catch (IllegalArgumentException failure) {
+            this.frameGenerationAdmission = null;
+            return failure.getMessage();
+        }
+    }
+
+    private FrameSynthesisContract.ProducerCoverageSet frameGenerationProducerCoverage() {
+        int cameraSamples = Math.max(1, Math.multiplyExact(renderWidth, renderHeight));
+        int dynamicSamples = Math.max(1, MetalEntityMotionCapture.diagnostics().motionDrawsEncoded());
+        List<FrameSynthesisContract.ProducerReceipt> receipts = new ArrayList<>();
+        for (FrameSynthesisContract.ProducerDomain domain : FrameSynthesisContract.ProducerDomain.values()) {
+            FrameSynthesisContract.ProducerCoverage coverage;
+            int samples;
+            if (domain == FrameSynthesisContract.ProducerDomain.CAMERA_DEPTH) {
+                coverage = FrameSynthesisContract.ProducerCoverage.REAL_MOTION;
+                samples = cameraSamples;
+            } else if (domain == FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT) {
+                coverage = objectMotionProducerConnected()
+                        ? FrameSynthesisContract.ProducerCoverage.REAL_MOTION
+                        : FrameSynthesisContract.ProducerCoverage.UNSUPPORTED;
+                samples = coverage == FrameSynthesisContract.ProducerCoverage.REAL_MOTION
+                        ? dynamicSamples : 0;
+            } else {
+                coverage = FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY;
+                samples = 0;
+            }
+            receipts.add(new FrameSynthesisContract.ProducerReceipt(domain, coverage, samples));
+        }
+        return new FrameSynthesisContract.ProducerCoverageSet(receipts);
+    }
+
     private void preserveWorldDepthBeforeHandInternal(final GameRenderer renderer) {
         if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled
                 || !sceneFrame || sceneDepthTexture == null) {
@@ -1712,6 +1875,7 @@ public final class MetalFxManager {
     private void captureValidationFrameIfRequested(
             final MetalGpuTexture inputColor,
             final MetalGpuTexture depth,
+            final @Nullable MetalGpuTexture handDepth,
             final MetalGpuTexture temporalOutput
     ) {
         ValidationFrame requested = this.validationFrame;
@@ -1727,6 +1891,9 @@ public final class MetalFxManager {
         List<ValidationReadback> readbacks = new ArrayList<>();
         readbacks.add(validationReadback("input-color", inputColor));
         readbacks.add(validationReadback("depth", depth));
+        if (handDepth != null) {
+            readbacks.add(validationReadback("hand-depth", handDepth));
+        }
         readbacks.add(validationReadback("camera-motion", cameraMotionTexture));
         readbacks.add(validationReadback("object-motion", objectMotionTexture));
         readbacks.add(validationReadback("object-validity", objectValidityTexture));
@@ -1738,6 +1905,8 @@ public final class MetalFxManager {
 
         Matrix4f submittedCurrent = new Matrix4f(currentViewProjection);
         Matrix4f submittedPrevious = new Matrix4f(previousViewProjection);
+        FrameSynthesisContract.DepthConvention submittedDepthConvention =
+                FrameSynthesisContract.DepthConvention.fromReversed(frameDepthReversed);
         int submittedCutoutRadius = MetalFxMath.cutoutReactiveRadius(config.scale, pixelJitter);
         MetalEntityMotionCapture.Diagnostics producerDiagnostics =
                 MetalEntityMotionCapture.diagnostics();
@@ -1760,6 +1929,7 @@ public final class MetalFxManager {
                                     readbacks,
                                     submittedCurrent,
                                     submittedPrevious,
+                                    submittedDepthConvention,
                                     submittedCutoutRadius,
                                     producerDiagnostics
                             )
@@ -2621,6 +2791,7 @@ public final class MetalFxManager {
             final List<ValidationReadback> readbacks,
             final Matrix4f submittedCurrent,
             final Matrix4f submittedPrevious,
+            final FrameSynthesisContract.DepthConvention submittedDepthConvention,
             final int submittedCutoutRadius,
             final MetalEntityMotionCapture.Diagnostics producerDiagnostics
     ) {
@@ -2656,6 +2827,7 @@ public final class MetalFxManager {
                     bytesByName.get("temporal-output"),
                     submittedCurrent,
                     submittedPrevious,
+                    submittedDepthConvention,
                     submittedCutoutRadius,
                     producerDiagnostics
             );
@@ -2727,6 +2899,7 @@ public final class MetalFxManager {
             final byte[] temporalOutput,
             final Matrix4f submittedCurrent,
             final Matrix4f submittedPrevious,
+            final FrameSynthesisContract.DepthConvention depthConvention,
             final int cutoutRadius,
             final MetalEntityMotionCapture.Diagnostics producerDiagnostics
     ) {
@@ -2827,7 +3000,7 @@ public final class MetalFxManager {
         ByteBuffer depths = ByteBuffer.wrap(depth).order(ByteOrder.nativeOrder());
         for (int pixel = 0; pixel < pixelCount; pixel++) {
             float value = depths.getFloat(pixel * Float.BYTES);
-            if (Float.isFinite(value) && value > 0.00001F && value <= 1.00001F) {
+            if (depthConvention.validDepth(value)) {
                 depthValidPixels++;
             }
         }
@@ -3027,6 +3200,7 @@ public final class MetalFxManager {
         return new MotionMetrics(
                 validPixels,
                 depthValidPixels,
+                depthConvention,
                 disocclusionPixels,
                 objectDisocclusionPixels,
                 lowReactiveValidityPixels,
@@ -3159,6 +3333,7 @@ public final class MetalFxManager {
     private record MotionMetrics(
             int validPixels,
             int depthValidPixels,
+            FrameSynthesisContract.DepthConvention depthConvention,
             int disocclusionPixels,
             int objectDisocclusionPixels,
             int lowReactiveValidityPixels,
@@ -3199,6 +3374,7 @@ public final class MetalFxManager {
                       "height": %d,
                       "validPixels": %d,
                       "depthValidPixels": %d,
+                      "depthReversed": %s,
                       "disocclusionPixels": %d,
                       "objectDisocclusionPixels": %d,
                       "lowReactiveValidityPixels": %d,
@@ -3232,6 +3408,7 @@ public final class MetalFxManager {
                     height,
                     validPixels,
                     depthValidPixels,
+                    depthConvention.reversed(),
                     disocclusionPixels,
                     objectDisocclusionPixels,
                     lowReactiveValidityPixels,
@@ -3556,6 +3733,10 @@ public final class MetalFxManager {
     }
 
     private void resetHistoryInternal(final String reason) {
+        this.historyEpoch = nextPositive(this.historyEpoch);
+        this.currentFrameStamp = null;
+        this.frameGenerationAdmission = null;
+        IrisMetalFxFrameHandoff.invalidateCurrent(reason);
         historyReset = true;
         previousMatrixValid = false;
         previousCameraProjectionValid = false;
@@ -3568,6 +3749,10 @@ public final class MetalFxManager {
             Metallum.LOGGER.info("MetalFX history reset: {}", reason);
             lastLoggedResetReason = reason;
         }
+    }
+
+    private static long nextPositive(final long value) {
+        return value == Long.MAX_VALUE ? 1L : value + 1L;
     }
 
     private void disableForSession(final GameRenderer renderer, final String reason) {
@@ -3705,7 +3890,9 @@ public final class MetalFxManager {
         if (!frameGenerationEnabled || runtimeDisabled || !frameUsesUpscaledTarget
                 || sceneOutputTarget == null || frameNativeSceneTexture == null || uiTarget == null
                 || uiTarget.getColorTexture() != presentedUiTexture
-                || frameDepthTexture == null || motionTexture == null || !motionInputsPrepared) {
+                || frameDepthTexture == null || motionTexture == null || !motionInputsPrepared
+                || frameGenerationAdmission == null || currentFrameStamp == null
+                || !frameGenerationAdmission.stamp().equals(currentFrameStamp)) {
             return null;
         }
         GpuTexture sceneTexture = sceneOutputTarget.getColorTexture();
@@ -3727,6 +3914,7 @@ public final class MetalFxManager {
                 frameFarPlane,
                 displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
                 sceneFrameDeltaSeconds,
+                frameGenerationAdmission.depthConvention().reversed(),
                 frameResetForPresent
         );
     }
@@ -3766,6 +3954,7 @@ public final class MetalFxManager {
             float farPlane,
             float aspectRatio,
             float deltaSeconds,
+            boolean depthReversed,
             boolean reset
     ) {
     }
@@ -3776,6 +3965,14 @@ public final class MetalFxManager {
             int auxiliaryTextureCount,
             int frameGenerationTargetCount,
             boolean motionCaptureEnabled
+    ) {
+    }
+
+    public record IrisFrameHandoffDiagnostics(
+            long acceptedFrames,
+            long rejectedFrames,
+            int lastAcceptedGeneration,
+            @Nullable String lastFailureReason
     ) {
     }
 

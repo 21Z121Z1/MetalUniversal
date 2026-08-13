@@ -59,6 +59,25 @@ public final class MetalCutoutReactivePipeline {
         return ACTIVE_CUTOUT_PASS.get();
     }
 
+    /**
+     * Whether MetalFX may replace Sodium's CUTOUT pipeline for this pass.
+     *
+     * <p>An active Iris generation owns the terrain shader and every declared
+     * DRAWBUFFERS attachment. Appending MetalFX's independent R8 target would
+     * alias an Iris colortex/shadowcolor slot, so the combined path keeps the
+     * Iris program and derives reactivity from transparency and depth instead.</p>
+     */
+    public static boolean shouldSubstitute(final boolean irisSemanticActive) {
+        return shouldSubstitute(isActiveCutoutPass(), irisSemanticActive);
+    }
+
+    static boolean shouldSubstitute(
+            final boolean activeCutoutPass,
+            final boolean irisSemanticActive
+    ) {
+        return activeCutoutPass && !irisSemanticActive;
+    }
+
     public static RenderPipeline forVertexFormat(final VertexFormat vertexFormat) {
         return CACHE.computeIfAbsent(vertexFormat, MetalCutoutReactivePipeline::build);
     }

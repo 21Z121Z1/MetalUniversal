@@ -2239,6 +2239,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         // one, measured by the game at scene-frame start. 0 or non-finite
         // means "unknown"; the presenter then falls back to enqueue spacing.
         let sourceDelta: Float
+        let depthReversed: Bool
         let reset: Bool
     }
 
@@ -3059,6 +3060,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         farPlane: Float,
         aspectRatio: Float,
         sourceDeltaSeconds: Float = 0.0,
+        depthReversed: Bool,
         reset: Bool,
         globalFence: MTLFence?
     ) -> Int32 {
@@ -3318,6 +3320,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             farPlane: farPlane,
             aspectRatio: aspectRatio,
             sourceDelta: sourceDeltaSeconds,
+            depthReversed: depthReversed,
             reset: reset
         )
 
@@ -3687,7 +3690,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameInterpolator.farPlane = frame.farPlane
             frameInterpolator.aspectRatio = frame.aspectRatio
             frameInterpolator.deltaTime = work.deltaTime
-            frameInterpolator.isDepthReversed = true
+            frameInterpolator.isDepthReversed = frame.depthReversed
             frameInterpolator.shouldResetHistory = work.shouldResetHistory
             frameInterpolator.encode(commandBuffer: commandBuffer)
             MetalFxNativeHudMetrics.updateFrameInterpolator(deltaTime: work.deltaTime)
@@ -3829,7 +3832,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             interpolator.farPlane = frame.farPlane
             interpolator.aspectRatio = frame.aspectRatio
             interpolator.deltaTime = work.deltaTime
-            interpolator.isDepthReversed = true
+            interpolator.isDepthReversed = frame.depthReversed
             interpolator.shouldResetHistory = work.shouldResetHistory
             interpolator.encode(commandBuffer: commandBuffer)
             MetalFxNativeHudMetrics.updateFrameInterpolator(deltaTime: work.deltaTime)
@@ -5208,27 +5211,43 @@ private func handOverlayMslSource() -> String {
       uint width;
       uint height;
       float reactiveBoost;
-      float reserved;
+      uint depthReversed;
     };
+
+    inline bool handValidDepth(float depth, bool reversed) {
+      if (!isfinite(depth) || depth < -0.00001 || depth > 1.00001) return false;
+      return reversed ? depth > 0.0000001 : depth < 0.9999999;
+    }
 
     kernel void metallum_hand_overlay_motion(
       texture2d<float, access::read> handDepthTexture [[texture(0)]],
       texture2d<half, access::write> objectMotionTexture [[texture(1)]],
       texture2d<half, access::write> objectValidityTexture [[texture(2)]],
       texture2d<half, access::read_write> reactiveTexture [[texture(3)]],
+      texture2d<float, access::read> worldDepthTexture [[texture(4)]],
       constant HandOverlayUniforms& u [[buffer(0)]],
       uint2 pixel [[thread_position_in_grid]]) {
       if (pixel.x >= u.width || pixel.y >= u.height) return;
 
-      // Vanilla clears the reversed-Z depth buffer (to 0.0) right before the
-      // first-person hand pass, so at upscale time any covered depth pixel is
-      // camera-locked first-person content: hand, held item, and screen
-      // effects. Their correct screen-space motion under camera movement is
-      // zero; camera reprojection through the world depth behind them would
-      // smear them during rotation. The residual swing/bob animation is
-      // handled with a moderate reactive boost instead of motion vectors.
+      // The hand phase clears to the active far plane (0 for Mojang reverse-Z,
+      // 1 for Iris forward-Z). A non-clear sample is camera-locked first-person
+      // content: hand, held item, or screen effect. Its correct base motion is
+      // zero; swing/bob residuals are covered by the reactive boost.
+      bool reversed = u.depthReversed != 0u;
       float depth = handDepthTexture.read(pixel).r;
-      if (!(isfinite(depth) && depth > 0.0000001)) return;
+      if (!handValidDepth(depth, reversed)) return;
+      // Iris can retain world depth through its hand phase instead of leaving
+      // only the post-clear hand silhouette. Reverse-Z hand coverage is still
+      // exact: it must be strictly nearer than the world depth captured at the
+      // begin-hand boundary. Equal depth is ordinary world content and must
+      // not erase the entity motion already replayed at that pixel.
+      float worldDepth = worldDepthTexture.read(pixel).r;
+      float separation = max(0.000001, abs(worldDepth) * 0.00001);
+      bool worldValid = handValidDepth(worldDepth, reversed);
+      bool nearer = reversed
+          ? depth > worldDepth + separation
+          : depth < worldDepth - separation;
+      if (worldValid && !nearer) return;
 
       objectMotionTexture.write(half4(half(0.0)), pixel);
       objectValidityTexture.write(
@@ -5251,7 +5270,7 @@ private struct HandOverlayUniforms {
     var width: UInt32
     var height: UInt32
     var reactiveBoost: Float
-    var reserved: Float
+    var depthReversed: UInt32
 }
 
 private func ensureHandOverlayPipeline(_ device: MTLDevice) -> MTLComputePipelineState? {
@@ -5458,8 +5477,19 @@ private func motionCameraV2MslSource() -> String {
       float4 params;  // x = depth-edge reactive cap
     };
 
-    inline bool validDepth(float depth) {
-      return isfinite(depth) && depth > 0.00001 && depth <= 1.00001;
+    inline bool validDepth(float depth, bool reversed) {
+      if (!isfinite(depth) || depth < -0.00001 || depth > 1.00001) return false;
+      return reversed ? depth > 0.00001 : depth < 0.99999;
+    }
+
+    inline bool farDepth(float depth, bool reversed) {
+      return isfinite(depth) && (reversed
+          ? depth >= 0.0 && depth <= 0.00001
+          : depth >= 0.99999 && depth <= 1.00001);
+    }
+
+    inline float farReconstructionDepth(bool reversed) {
+      return reversed ? 0.00002 : 0.99998;
     }
 
     inline float depthBoundary(
@@ -5468,9 +5498,10 @@ private func motionCameraV2MslSource() -> String {
       uint width,
       uint height,
       float depth,
-      float cap
+      float cap,
+      bool reversed
     ) {
-      bool centerValid = validDepth(depth);
+      bool centerValid = validDepth(depth, reversed);
       float gradient = 0.0;
       bool validityBoundary = false;
       for (int offsetY = -1; offsetY <= 1; ++offsetY) {
@@ -5480,7 +5511,7 @@ private func motionCameraV2MslSource() -> String {
           if (samplePosition.x < 0 || samplePosition.y < 0
               || samplePosition.x >= int(width) || samplePosition.y >= int(height)) continue;
           float neighborDepth = depthTexture.read(uint2(samplePosition)).r;
-          bool neighborValid = validDepth(neighborDepth);
+          bool neighborValid = validDepth(neighborDepth, reversed);
           if (centerValid != neighborValid) {
             validityBoundary = true;
           } else if (centerValid) {
@@ -5509,15 +5540,16 @@ private func motionCameraV2MslSource() -> String {
       float2 motion = float2(0.0);
       float reactive = u.flags.x != 0u ? float(reactiveTexture.read(pixel).r) : 0.0;
       float disocclusion = 0.0;
-      bool reconstruct = validDepth(depth);
+      bool reversed = u.flags.w != 0u;
+      bool reconstruct = validDepth(depth, reversed);
       if (!reconstruct && u.flags.y != 0u
-          && isfinite(depth) && depth >= 0.0 && depth <= 0.00001) {
-        // Cleared reversed-Z far plane: the sky. Reconstruct at a far-plane
+          && farDepth(depth, reversed)) {
+        // Cleared far plane: the sky. Reconstruct just inside the far plane
         // depth so camera rotation produces correct flow and the sky keeps
         // temporal accumulation on both sides of geometry silhouettes;
         // translation is negligible at the far plane. Without this the sky
         // is fully reactive every frame and silhouettes against it strobe.
-        depth = 0.00002;
+        depth = farReconstructionDepth(reversed);
         reconstruct = true;
       }
       if (!reconstruct) {
@@ -5553,7 +5585,10 @@ private func motionCameraV2MslSource() -> String {
         }
       }
 
-      reactive = max(reactive, depthBoundary(depthTexture, pixel, width, height, depth, u.params.x));
+      reactive = max(
+        reactive,
+        depthBoundary(depthTexture, pixel, width, height, depth, u.params.x, reversed)
+      );
       if (!isfinite(motion.x) || !isfinite(motion.y)) {
         motion = float2(0.0);
         disocclusion = 1.0;
@@ -5577,8 +5612,19 @@ private func motionMergeV2MslSource() -> String {
       float4 params; // x = disocclusion reactive cap
     };
 
-    inline bool validDepth(float depth) {
-      return isfinite(depth) && depth > 0.00001 && depth <= 1.00001;
+    inline bool validDepth(float depth, bool reversed) {
+      if (!isfinite(depth) || depth < -0.00001 || depth > 1.00001) return false;
+      return reversed ? depth > 0.00001 : depth < 0.99999;
+    }
+
+    inline bool farDepth(float depth, bool reversed) {
+      return isfinite(depth) && (reversed
+          ? depth >= 0.0 && depth <= 0.00001
+          : depth >= 0.99999 && depth <= 1.00001);
+    }
+
+    inline float farReconstructionDepth(bool reversed) {
+      return reversed ? 0.00002 : 0.99998;
     }
 
     kernel void metallum_motion_merge_v2(
@@ -5605,19 +5651,19 @@ private func motionMergeV2MslSource() -> String {
         }
       }
       float disocclusion = disocclusionTexture.read(pixel).r;
+      bool reversed = u.viewport.w != 0u;
       if (u.viewport.z != 0u) {
         float currentDepth = currentDepthTexture.read(pixel).r;
-        // Far-plane substitution mirrors the camera pass: cleared reversed-Z
+        // Far-plane substitution mirrors the camera pass: cleared sky
         // sky participates in reprojection so sky-onto-sky is valid history
         // instead of a permanent per-frame disocclusion.
-        bool skyCurrent = u.flags.x != 0u && isfinite(currentDepth)
-            && currentDepth >= 0.0 && currentDepth <= 0.00001;
+        bool skyCurrent = u.flags.x != 0u && farDepth(currentDepth, reversed);
         if (skyCurrent) {
-          currentDepth = 0.00002;
+          currentDepth = farReconstructionDepth(reversed);
         }
         float2 previousPixel = float2(pixel) + 0.5
             + selected * float2(u.viewport.xy) * 0.5;
-        if (!validDepth(currentDepth)
+        if (!validDepth(currentDepth, reversed)
             || !all(isfinite(previousPixel))
             || previousPixel.x < 0.0 || previousPixel.y < 0.0
             || previousPixel.x >= float(u.viewport.x)
@@ -5643,10 +5689,9 @@ private func motionMergeV2MslSource() -> String {
                 continue;
               }
               float probeDepth = previousDepthTexture.read(uint2(probe)).r;
-              bool probeSky = u.flags.x != 0u && isfinite(probeDepth)
-                  && probeDepth >= 0.0 && probeDepth <= 0.00001;
+              bool probeSky = u.flags.x != 0u && farDepth(probeDepth, reversed);
               if (probeSky) {
-                probeDepth = 0.00002;
+                probeDepth = farReconstructionDepth(reversed);
               }
               float delta = isfinite(probeDepth)
                   ? abs(probeDepth - currentDepth)
@@ -5665,10 +5710,10 @@ private func motionMergeV2MslSource() -> String {
             disocclusion = 1.0;
           } else {
             float threshold = max(0.0025, abs(currentDepth) * 0.01);
-            bool wasOccluded = u.viewport.w != 0u
+            bool wasOccluded = reversed
                 ? previousDepth > currentDepth + threshold
                 : previousDepth < currentDepth - threshold;
-            if (!validDepth(previousDepth) || wasOccluded) {
+            if (!validDepth(previousDepth, reversed) || wasOccluded) {
               disocclusion = 1.0;
             }
           }
@@ -5714,8 +5759,19 @@ private func motionFusedV2MslSource() -> String {
       float4 params;
     };
 
-    inline bool fusedValidDepth(float depth) {
-      return isfinite(depth) && depth > 0.00001 && depth <= 1.00001;
+    inline bool fusedValidDepth(float depth, bool reversed) {
+      if (!isfinite(depth) || depth < -0.00001 || depth > 1.00001) return false;
+      return reversed ? depth > 0.00001 : depth < 0.99999;
+    }
+
+    inline bool fusedFarDepth(float depth, bool reversed) {
+      return isfinite(depth) && (reversed
+          ? depth >= 0.0 && depth <= 0.00001
+          : depth >= 0.99999 && depth <= 1.00001);
+    }
+
+    inline float fusedFarReconstructionDepth(bool reversed) {
+      return reversed ? 0.00002 : 0.99998;
     }
 
     inline float fusedDepthBoundary(
@@ -5724,9 +5780,10 @@ private func motionFusedV2MslSource() -> String {
       uint width,
       uint height,
       float depth,
-      float cap
+      float cap,
+      bool reversed
     ) {
-      bool centerValid = fusedValidDepth(depth);
+      bool centerValid = fusedValidDepth(depth, reversed);
       float gradient = 0.0;
       bool validityBoundary = false;
       for (int offsetY = -1; offsetY <= 1; ++offsetY) {
@@ -5736,7 +5793,7 @@ private func motionFusedV2MslSource() -> String {
           if (samplePosition.x < 0 || samplePosition.y < 0
               || samplePosition.x >= int(width) || samplePosition.y >= int(height)) continue;
           float neighborDepth = depthTexture.read(uint2(samplePosition)).r;
-          bool neighborValid = fusedValidDepth(neighborDepth);
+          bool neighborValid = fusedValidDepth(neighborDepth, reversed);
           if (centerValid != neighborValid) {
             validityBoundary = true;
           } else if (centerValid) {
@@ -5772,11 +5829,11 @@ private func motionFusedV2MslSource() -> String {
       float2 cameraMotion = float2(0.0);
       float reactive = u.flags.x != 0u ? float(reactiveTexture.read(pixel).r) : 0.0;
       float disocclusion = 0.0;
-      bool reconstruct = fusedValidDepth(reconstructionDepth);
+      bool reversed = u.flags.w != 0u;
+      bool reconstruct = fusedValidDepth(reconstructionDepth, reversed);
       if (!reconstruct && u.flags.y != 0u
-          && isfinite(reconstructionDepth)
-          && reconstructionDepth >= 0.0 && reconstructionDepth <= 0.00001) {
-        reconstructionDepth = 0.00002;
+          && fusedFarDepth(reconstructionDepth, reversed)) {
+        reconstructionDepth = fusedFarReconstructionDepth(reversed);
         reconstruct = true;
       }
       if (!reconstruct) {
@@ -5829,7 +5886,8 @@ private func motionFusedV2MslSource() -> String {
           width,
           height,
           reconstructionDepth,
-          u.params.x
+          u.params.x,
+          reversed
         )
       );
       if (!all(isfinite(cameraMotion))) {
@@ -5857,10 +5915,18 @@ private func motionFusedV2MslSource() -> String {
 
       if (u.options.z != 0u) {
         float handDepth = handDepthTexture.read(pixel).r;
-        if (isfinite(handDepth) && handDepth > 0.0000001) {
-          // The hand target is cleared immediately before first-person
-          // rendering. Covered pixels are camera-locked, so zero motion is the
-          // exact camera component; swing/bob remains protected by reactivity.
+        float separation = max(0.000001, abs(currentDepth) * 0.00001);
+        bool handValid = fusedValidDepth(handDepth, reversed);
+        bool worldValid = fusedValidDepth(currentDepth, reversed);
+        bool handNearer = reversed
+            ? handDepth > currentDepth + separation
+            : handDepth < currentDepth - separation;
+        bool handCovered = handValid && (!worldValid || handNearer);
+        if (handCovered) {
+          // Vanilla may leave only post-clear hand depth, while Iris may retain
+          // the world depth and overwrite it only where the hand is nearer.
+          // Comparing against the begin-hand world snapshot supports both
+          // lifecycles without classifying the whole Iris scene as a hand.
           selected = float2(0.0);
           reactive = max(reactive, quantizeUnorm8(u.params.z));
         }
@@ -5868,14 +5934,14 @@ private func motionFusedV2MslSource() -> String {
 
       if (u.flags.z != 0u) {
         float reprojectedCurrentDepth = currentDepth;
-        bool skyCurrent = u.flags.y != 0u && isfinite(reprojectedCurrentDepth)
-            && reprojectedCurrentDepth >= 0.0 && reprojectedCurrentDepth <= 0.00001;
+        bool skyCurrent = u.flags.y != 0u
+            && fusedFarDepth(reprojectedCurrentDepth, reversed);
         if (skyCurrent) {
-          reprojectedCurrentDepth = 0.00002;
+          reprojectedCurrentDepth = fusedFarReconstructionDepth(reversed);
         }
         float2 previousPixel = float2(pixel) + 0.5
             + selected * float2(width, height) * 0.5;
-        if (!fusedValidDepth(reprojectedCurrentDepth)
+        if (!fusedValidDepth(reprojectedCurrentDepth, reversed)
             || !all(isfinite(previousPixel))
             || previousPixel.x < 0.0 || previousPixel.y < 0.0
             || previousPixel.x >= float(width) || previousPixel.y >= float(height)) {
@@ -5892,10 +5958,9 @@ private func motionFusedV2MslSource() -> String {
               if (probe.x < 0 || probe.y < 0
                   || probe.x >= int(width) || probe.y >= int(height)) continue;
               float probeDepth = previousDepthTexture.read(uint2(probe)).r;
-              bool probeSky = u.flags.y != 0u && isfinite(probeDepth)
-                  && probeDepth >= 0.0 && probeDepth <= 0.00001;
+              bool probeSky = u.flags.y != 0u && fusedFarDepth(probeDepth, reversed);
               if (probeSky) {
-                probeDepth = 0.00002;
+                probeDepth = fusedFarReconstructionDepth(reversed);
               }
               float delta = isfinite(probeDepth)
                   ? abs(probeDepth - reprojectedCurrentDepth)
@@ -5911,10 +5976,10 @@ private func motionFusedV2MslSource() -> String {
             disocclusion = 1.0;
           } else {
             float threshold = max(0.0025, abs(reprojectedCurrentDepth) * 0.01);
-            bool wasOccluded = u.flags.w != 0u
+            bool wasOccluded = reversed
                 ? previousDepth > reprojectedCurrentDepth + threshold
                 : previousDepth < reprojectedCurrentDepth - threshold;
-            if (!fusedValidDepth(previousDepth) || wasOccluded) {
+            if (!fusedValidDepth(previousDepth, reversed) || wasOccluded) {
               disocclusion = 1.0;
             }
           }
@@ -6281,12 +6346,14 @@ public func metallum_metalfx_supports_hand_overlay(_ device: MTLDevice) -> Int32
 private func metal3MetalFxEncodeHandOverlay(
     _ commandBuffer: MTLCommandBuffer,
     _ handDepthTexture: MTLTexture,
+    _ worldDepthTexture: MTLTexture,
     _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture,
     _ reactiveTexture: MTLTexture,
     _ inputWidth: Int32,
     _ inputHeight: Int32,
     _ reactiveBoost: Float,
+    _ depthReversed: Int32,
     _ fence: MTLFence?
 ) -> Int32 {
     #if os(macOS) && canImport(MetalFX)
@@ -6294,6 +6361,8 @@ private func metal3MetalFxEncodeHandOverlay(
         guard inputWidth > 0, inputHeight > 0,
               handDepthTexture.width == Int(inputWidth),
               handDepthTexture.height == Int(inputHeight),
+              worldDepthTexture.width == Int(inputWidth),
+              worldDepthTexture.height == Int(inputHeight),
               objectMotionTexture.width == Int(inputWidth),
               objectMotionTexture.height == Int(inputHeight),
               objectValidityTexture.width == Int(inputWidth),
@@ -6320,7 +6389,7 @@ private func metal3MetalFxEncodeHandOverlay(
             width: UInt32(inputWidth),
             height: UInt32(inputHeight),
             reactiveBoost: reactiveBoost,
-            reserved: 0.0
+            depthReversed: depthReversed != 0 ? 1 : 0
         )
         encoder.setComputePipelineState(pipeline)
         encoder.setBytes(
@@ -6332,6 +6401,7 @@ private func metal3MetalFxEncodeHandOverlay(
         encoder.setTexture(objectMotionTexture, index: 1)
         encoder.setTexture(objectValidityTexture, index: 2)
         encoder.setTexture(reactiveTexture, index: 3)
+        encoder.setTexture(worldDepthTexture, index: 4)
         let threadWidth = max(1, min(pipeline.threadExecutionWidth, 64))
         let threadHeight = max(
             1,
@@ -6359,17 +6429,20 @@ private func metal3MetalFxEncodeHandOverlay(
 public func metallum_metalfx_encode_hand_overlay(
     _ commandBuffer: MTLCommandBuffer,
     _ handDepthTexture: MTLTexture,
+    _ worldDepthTexture: MTLTexture,
     _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture,
     _ reactiveTexture: MTLTexture,
     _ inputWidth: Int32,
     _ inputHeight: Int32,
     _ reactiveBoost: Float,
+    _ depthReversed: Int32,
     _ fence: MTLFence?
 ) -> Int32 {
     metallumMetalFxEncodeHandOverlayEntry(
-        commandBufferPointer(commandBuffer), handDepthTexture, objectMotionTexture,
-        objectValidityTexture, reactiveTexture, inputWidth, inputHeight, reactiveBoost, fence
+        commandBufferPointer(commandBuffer), handDepthTexture, worldDepthTexture, objectMotionTexture,
+        objectValidityTexture, reactiveTexture, inputWidth, inputHeight, reactiveBoost,
+        depthReversed, fence
     )
 }
 
@@ -6377,18 +6450,21 @@ public func metallum_metalfx_encode_hand_overlay(
 public func metallumMetalFxEncodeHandOverlayEntry(
     _ commandBufferPointer: UnsafeMutableRawPointer,
     _ handDepthTexture: MTLTexture,
+    _ worldDepthTexture: MTLTexture,
     _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture,
     _ reactiveTexture: MTLTexture,
     _ inputWidth: Int32,
     _ inputHeight: Int32,
     _ reactiveBoost: Float,
+    _ depthReversed: Int32,
     _ fence: MTLFence?
 ) -> Int32 {
     #if os(macOS) && canImport(MetalFX)
     if #available(macOS 26.0, iOS 26.0, *),
        let lease = metal4MainLease(commandBufferPointer), inputWidth > 0, inputHeight > 0,
        handDepthTexture.width == Int(inputWidth), handDepthTexture.height == Int(inputHeight),
+       worldDepthTexture.width == Int(inputWidth), worldDepthTexture.height == Int(inputHeight),
        objectMotionTexture.width == Int(inputWidth), objectMotionTexture.height == Int(inputHeight),
        objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
        reactiveTexture.width == Int(inputWidth), reactiveTexture.height == Int(inputHeight),
@@ -6397,20 +6473,23 @@ public func metallumMetalFxEncodeHandOverlayEntry(
        let pipeline = ensureHandOverlayPipeline(handDepthTexture.device) {
         let uniforms = HandOverlayUniforms(
             width: UInt32(inputWidth), height: UInt32(inputHeight),
-            reactiveBoost: reactiveBoost, reserved: 0
+            reactiveBoost: reactiveBoost,
+            depthReversed: depthReversed != 0 ? 1 : 0
         )
         return encodeMetal4Compute(
             lease: lease, label: "MetalFX Hand Overlay Motion (Metal 4)",
             pipeline: pipeline, uniforms: uniforms,
             textures: [(0, handDepthTexture), (1, objectMotionTexture),
-                       (2, objectValidityTexture), (3, reactiveTexture)],
+                       (2, objectValidityTexture), (3, reactiveTexture),
+                       (4, worldDepthTexture)],
             width: Int(inputWidth), height: Int(inputHeight)
         ) ? 1 : 0
     }
     #endif
     return metal3MetalFxEncodeHandOverlay(
-        metal3CommandBuffer(commandBufferPointer), handDepthTexture, objectMotionTexture,
-        objectValidityTexture, reactiveTexture, inputWidth, inputHeight, reactiveBoost, fence
+        metal3CommandBuffer(commandBufferPointer), handDepthTexture, worldDepthTexture, objectMotionTexture,
+        objectValidityTexture, reactiveTexture, inputWidth, inputHeight, reactiveBoost,
+        depthReversed, fence
     )
 }
 
@@ -6957,7 +7036,8 @@ private func metal4MetalFxEncodeV2(
             viewport: SIMD4(Float(inputWidth), Float(inputHeight),
                             1 / Float(inputWidth), 1 / Float(inputHeight)),
             flags: SIMD4(preserveReactiveMask != 0 ? 1 : 0,
-                         NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0, 0, 0),
+                         NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
+                         0, depthReversed != 0 ? 1 : 0),
             params: SIMD4(NativeState.reactiveTuning.z, 0, 0, 0)
         )
         guard encodeMetal4Compute(
@@ -7250,7 +7330,7 @@ private func metal3MetalFxEncodeV2(
                         preserveReactiveMask != 0 ? 1 : 0,
                         NativeState.skyFarPlaneMotion > 0.5 ? 1 : 0,
                         0,
-                        0
+                        depthReversed != 0 ? 1 : 0
                     ),
                     params: SIMD4<Float>(NativeState.reactiveTuning.z, 0.0, 0.0, 0.0)
                 )
@@ -7515,6 +7595,7 @@ public func metallumMetalFxFrameGenerationEncodeEntry(
     _ aspectRatio: Float,
     _ sourceDeltaSeconds: Float,
     _ reset: Int32,
+    _ depthReversed: Int32,
     _ globalFence: MTLFence?
 ) -> Int32 {
     #if os(macOS) && canImport(MetalFX)
@@ -7566,6 +7647,7 @@ public func metallumMetalFxFrameGenerationEncodeEntry(
                 farPlane: farPlane,
                 aspectRatio: aspectRatio,
                 sourceDeltaSeconds: sourceDeltaSeconds,
+                depthReversed: depthReversed != 0,
                 reset: reset != 0,
                 globalFence: globalFence
             )
@@ -7615,12 +7697,14 @@ public func metallum_metalfx_frame_generation_encode(
     _ aspectRatio: Float,
     _ sourceDeltaSeconds: Float,
     _ reset: Int32,
+    _ depthReversed: Int32,
     _ globalFence: MTLFence?
 ) -> Int32 {
     metallumMetalFxFrameGenerationEncodeEntry(
         commandBufferPointer(commandBuffer), device, layer, sceneColor, nativeSceneColor,
         uiColor, depthTexture, motionTexture, inputWidth, inputHeight, jitterX, jitterY,
-        fieldOfView, nearPlane, farPlane, aspectRatio, sourceDeltaSeconds, reset, globalFence
+        fieldOfView, nearPlane, farPlane, aspectRatio, sourceDeltaSeconds, reset,
+        depthReversed, globalFence
     )
 }
 

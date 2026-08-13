@@ -38,6 +38,7 @@ private struct Scenario {
     var illegalMotion: Bool = false
     var sceneCut: Bool = false
     var historyReset: Bool = false
+    var forwardDepth: Bool = false
 }
 
 private struct FrameTextures {
@@ -113,7 +114,8 @@ fragment FragmentOut synthetic_fs(
     );
     output.objectMotion = half2(0.0);
     output.validity = 0.0;
-    output.depth = 0.20;
+    bool forwardDepth = uniforms.flags.w != 0u;
+    output.depth = forwardDepth ? 0.80 : 0.20;
 
     if (insideObject) {
         if (uniforms.flags.x != 0u) {
@@ -130,7 +132,7 @@ fragment FragmentOut synthetic_fs(
         output.color = float4(0.92, 0.18 + 0.25 * local.y / 8.0, 0.08, 1.0);
         output.objectMotion = half2(motion);
         output.validity = 1.0;
-        output.depth = 0.70;
+        output.depth = forwardDepth ? 0.30 : 0.70;
     }
 
     // The occluder is closer in reversed-depth space and is a valid static
@@ -139,7 +141,7 @@ fragment FragmentOut synthetic_fs(
         output.color = float4(0.18, 0.72, 0.82, 1.0);
         output.objectMotion = half2(0.0);
         output.validity = 1.0;
-        output.depth = 0.92;
+        output.depth = forwardDepth ? 0.08 : 0.92;
     }
     return output;
 }
@@ -305,7 +307,7 @@ private final class OffscreenHarness {
         pass.colorAttachments[2].storeAction = .store
         pass.depthAttachment.texture = frame.depth
         pass.depthAttachment.loadAction = .clear
-        pass.depthAttachment.clearDepth = 0.0
+        pass.depthAttachment.clearDepth = scenario.forwardDepth ? 1.0 : 0.0
         pass.depthAttachment.storeAction = .store
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             try fail("could not create \(label) MRT encoder")
@@ -314,7 +316,7 @@ private final class OffscreenHarness {
             scenario.alphaTest ? 1 : 0,
             scenario.occluder ? 1 : 0,
             scenario.illegalMotion ? 1 : 0,
-            0
+            scenario.forwardDepth ? 1 : 0
         )
         var uniforms = SyntheticUniforms(
             centers: SIMD4<Float>(
@@ -406,7 +408,8 @@ private final class OffscreenHarness {
         preserveReactiveMask: Bool,
         label: String,
         handDepth: MTLTexture? = nil,
-        emitMotionDiagnostics: Bool = true
+        emitMotionDiagnostics: Bool = true,
+        depthReversed: Bool = true
     ) throws {
         guard let commandBuffer = queue.makeCommandBuffer() else {
             try fail("could not create \(label) temporal command buffer")
@@ -417,12 +420,14 @@ private final class OffscreenHarness {
             let handResult = metallum_metalfx_encode_hand_overlay(
                 commandBuffer,
                 handDepth!,
+                frame.depth,
                 objectMotion,
                 validity,
                 reactive,
                 Int32(width),
                 Int32(height),
                 0.35,
+                depthReversed ? 1 : 0,
                 nil
             )
             try require(handResult == 1, "\(label) legacy hand overlay encode was rejected")
@@ -455,7 +460,7 @@ private final class OffscreenHarness {
                         Int32(width),
                         Int32(height),
                         reset ? 1 : 0,
-                        1,
+                        depthReversed ? 1 : 0,
                         preserveReactiveMask ? 1 : 0,
                         emitMotionDiagnostics ? 1 : 0
                     )
@@ -518,7 +523,8 @@ private final class OffscreenHarness {
         motion: MTLTexture,
         output: MTLTexture,
         reset: Bool,
-        label: String
+        label: String,
+        depthReversed: Bool = true
     ) throws {
         let ui = try makeWorkingTexture(
             format: .rgba8Unorm,
@@ -546,7 +552,7 @@ private final class OffscreenHarness {
             1.0 / 30.0,
             0,
             reset ? 1 : 0,
-            1
+            depthReversed ? 1 : 0
         )
         try require(result == 1, "\(label) MetalFX Frame Interpolator encode was rejected")
         try commitAndWait(commandBuffer, label: label)
@@ -832,6 +838,15 @@ private func scenarios() -> [Scenario] {
             cameraPrevious: identity
         ),
         Scenario(
+            name: "forward_depth_translation",
+            start: Transform(center: SIMD2<Float>(26, 32), angle: 0),
+            middle: Transform(center: SIMD2<Float>(32, 32), angle: 0),
+            end: Transform(center: SIMD2<Float>(38, 32), angle: 0),
+            cameraPrevious: identity,
+            alphaTest: true,
+            forwardDepth: true
+        ),
+        Scenario(
             name: "rotation",
             start: Transform(center: SIMD2<Float>(32, 32), angle: -0.55),
             middle: Transform(center: SIMD2<Float>(32, 32), angle: 0),
@@ -940,7 +955,8 @@ private func runScenario(
         previousViewProjection: matrix_identity_float4x4,
         reset: true,
         preserveReactiveMask: scenario.alphaTest,
-        label: "\(scenario.name) temporal t0"
+        label: "\(scenario.name) temporal t0",
+        depthReversed: !scenario.forwardDepth
     )
     try harness.clearColor(reactive)
     if scenario.alphaTest {
@@ -963,7 +979,8 @@ private func runScenario(
         previousViewProjection: scenario.cameraPrevious,
         reset: scenario.sceneCut || scenario.historyReset,
         preserveReactiveMask: scenario.alphaTest,
-        label: "\(scenario.name) temporal t1"
+        label: "\(scenario.name) temporal t1",
+        depthReversed: !scenario.forwardDepth
     )
 
     let interpolatedOutput = try harness.makeWorkingTexture(
@@ -976,7 +993,8 @@ private func runScenario(
         motion: mergedMotion,
         output: interpolatedOutput,
         reset: scenario.sceneCut || scenario.historyReset,
-        label: scenario.name
+        label: scenario.name,
+        depthReversed: !scenario.forwardDepth
     )
 
     _ = try exportTexture(harness: harness, texture: frame0.color, name: "input_color_t0", directory: directory)
@@ -1227,10 +1245,106 @@ private func runHandFusionScenario(
         minimumReactive >= 88,
         "fused hand path did not preserve the 0.35 reactive boost"
     )
+
+    // Iris may retain the scene depth across its hand phase. Feeding that
+    // unchanged world depth as the post-hand depth must not classify every
+    // world pixel as first-person coverage and erase real object motion.
+    try harness.clearColor(reactive)
+    try harness.encodeTemporal(
+        frame: frame,
+        cameraMotion: cameraMotion,
+        objectMotion: frame.objectMotion,
+        validity: frame.validity,
+        disocclusion: disocclusion,
+        mergedMotion: mergedMotion,
+        reactive: reactive,
+        output: temporalOutput,
+        previousViewProjection: matrix_identity_float4x4,
+        reset: true,
+        preserveReactiveMask: false,
+        label: "retained world depth hand discrimination",
+        handDepth: frame.depth,
+        emitMotionDiagnostics: false
+    )
+    let retainedWorldMotionBytes = try exportTexture(
+        harness: harness,
+        texture: mergedMotion,
+        name: "retained_world_merged_motion",
+        directory: directory
+    )
+    let retainedWorldMotion = motionMetrics(
+        motion: retainedWorldMotionBytes,
+        validity: handBytes
+    )
+    try require(
+        ((retainedWorldMotion["max_magnitude"] as? Double) ?? 0.0) > 0.001,
+        "retained Iris world depth incorrectly erased dynamic object motion"
+    )
+
+    // Iris uses forward zero-to-one depth. Its hand phase clears to 1.0, so
+    // that clear value must be rejected as far-plane background instead of
+    // being interpreted as a nearer reverse-Z hand over the entire scene.
+    var forwardScenario = scenario
+    forwardScenario.name = "hand_fusion_forward_clear"
+    forwardScenario.forwardDepth = true
+    let forwardFrame = try harness.render(
+        current: forwardScenario.end,
+        previous: forwardScenario.start,
+        scenario: forwardScenario,
+        label: "forward-depth hand fusion input"
+    )
+    let forwardHandClear = try harness.makeWorkingTexture(
+        format: .r8Unorm,
+        label: "forward-depth hand far clear"
+    )
+    try harness.clearColor(
+        forwardHandClear,
+        color: MTLClearColor(red: 1.0, green: 0.0, blue: 0.0, alpha: 0.0)
+    )
+    try harness.clearColor(reactive)
+    try harness.encodeTemporal(
+        frame: forwardFrame,
+        cameraMotion: cameraMotion,
+        objectMotion: forwardFrame.objectMotion,
+        validity: forwardFrame.validity,
+        disocclusion: disocclusion,
+        mergedMotion: mergedMotion,
+        reactive: reactive,
+        output: temporalOutput,
+        previousViewProjection: matrix_identity_float4x4,
+        reset: true,
+        preserveReactiveMask: false,
+        label: "forward-depth hand far-clear discrimination",
+        handDepth: forwardHandClear,
+        emitMotionDiagnostics: false,
+        depthReversed: false
+    )
+    let forwardMotionBytes = try exportTexture(
+        harness: harness,
+        texture: mergedMotion,
+        name: "forward_clear_merged_motion",
+        directory: directory
+    )
+    let forwardValidityBytes = try exportTexture(
+        harness: harness,
+        texture: forwardFrame.validity,
+        name: "forward_clear_object_validity",
+        directory: directory
+    )
+    let forwardMotion = motionMetrics(
+        motion: forwardMotionBytes,
+        validity: forwardValidityBytes
+    )
+    try require(
+        ((forwardMotion["max_magnitude"] as? Double) ?? 0.0) > 0.001,
+        "forward-Z hand clear incorrectly erased dynamic object motion"
+    )
     return [
         "scenario": scenario.name,
         "hand_pixels": covered.count,
         "hand_motion": handMotion,
+        "retained_world_motion": retainedWorldMotion,
+        "forward_clear_world_motion": forwardMotion,
         "minimum_hand_reactive_byte": minimumReactive,
         "history_reset": true
     ]

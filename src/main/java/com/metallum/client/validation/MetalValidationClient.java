@@ -2679,6 +2679,8 @@ public final class MetalValidationClient implements ClientModInitializer {
         Object irisPipeline = Iris.getPipelineManager().getPipelineNullable();
         String irisPipelineClass = irisPipeline == null ? null : irisPipeline.getClass().getName();
         int irisMetalGeneration = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+        MetalFxManager.IrisFrameHandoffDiagnostics irisMetalFxHandoff =
+                MetalFxManager.irisFrameHandoffDiagnostics();
         try {
             ValidationStorageBudget storage = ValidationStorageBudget.shared(outputDirectory);
             writeStateArtifact(
@@ -2748,6 +2750,10 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "irisPackName": %s,
                       "irisPipelineClass": %s,
                       "irisMetalGeneration": %d,
+                      "irisMetalFxHandoffAcceptedFrames": %d,
+                      "irisMetalFxHandoffRejectedFrames": %d,
+                      "irisMetalFxHandoffLastAcceptedGeneration": %d,
+                      "irisMetalFxHandoffLastFailureReason": %s,
                       "renderBackend": "%s",
                       "status": "%s"
                     }
@@ -2800,6 +2806,10 @@ public final class MetalValidationClient implements ClientModInitializer {
                             jsonStringOrNull(irisPackName),
                             jsonStringOrNull(irisPipelineClass),
                             irisMetalGeneration,
+                            irisMetalFxHandoff.acceptedFrames(),
+                            irisMetalFxHandoff.rejectedFrames(),
+                            irisMetalFxHandoff.lastAcceptedGeneration(),
+                            jsonStringOrNull(irisMetalFxHandoff.lastFailureReason()),
                             jsonEscape(observedBackend),
                             jsonEscape(status)
                     )

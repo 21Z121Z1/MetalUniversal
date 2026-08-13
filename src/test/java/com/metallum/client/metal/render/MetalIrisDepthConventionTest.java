@@ -19,6 +19,12 @@ final class MetalIrisDepthConventionTest {
     }
 
     @Test
+    void metalFxDepthPolarityTracksTheActiveHardwareConvention() {
+        assertEquals(true, MetalIrisDepthConvention.depthReversed(true));
+        assertEquals(false, MetalIrisDepthConvention.depthReversed(false));
+    }
+
+    @Test
     void reversesMojangDepthStateOnlyWhenEnabled() {
         Map.ofEntries(
                 Map.entry(CompareOp.ALWAYS_PASS, CompareOp.ALWAYS_PASS),

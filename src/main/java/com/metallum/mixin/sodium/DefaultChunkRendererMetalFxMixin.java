@@ -7,8 +7,11 @@ import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import net.caffeinemc.mods.sodium.client.render.chunk.DefaultChunkRenderer;
+import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
+import net.minecraft.client.Minecraft;
 import org.joml.Vector4fc;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -20,6 +23,22 @@ import java.util.function.Supplier;
 
 @Mixin(DefaultChunkRenderer.class)
 public abstract class DefaultChunkRendererMetalFxMixin {
+    @Redirect(
+            method = "render",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/caffeinemc/mods/sodium/client/render/chunk/terrain/TerrainRenderPass;"
+                            + "getTarget()Lcom/mojang/blaze3d/pipeline/RenderTarget;"
+            ),
+            remap = false
+    )
+    private RenderTarget metallum$avoidUnavailableFrameGraphTarget(final TerrainRenderPass pass) {
+        if (IrisMetalPipelineOverrides.shouldBypassTerrainTargetEvaluation()) {
+            return Minecraft.getInstance().gameRenderer.mainRenderTarget();
+        }
+        return pass.getTarget();
+    }
+
     @Redirect(
             method = "render",
             at = @At(

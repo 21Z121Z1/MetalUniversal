@@ -37,6 +37,38 @@ final class FrameSynthesisContract {
         UNSUPPORTED
     }
 
+    enum DepthConvention {
+        REVERSED_ZERO_TO_ONE(true),
+        FORWARD_ZERO_TO_ONE(false);
+
+        private final boolean reversed;
+
+        DepthConvention(final boolean reversed) {
+            this.reversed = reversed;
+        }
+
+        boolean reversed() {
+            return reversed;
+        }
+
+        boolean validDepth(final float depth) {
+            if (!Float.isFinite(depth) || depth < -0.00001F || depth > 1.00001F) {
+                return false;
+            }
+            return reversed ? depth > 0.00001F : depth < 0.99999F;
+        }
+
+        boolean farDepth(final float depth) {
+            return Float.isFinite(depth) && (reversed
+                    ? depth >= 0.0F && depth <= 0.00001F
+                    : depth >= 0.99999F && depth <= 1.00001F);
+        }
+
+        static DepthConvention fromReversed(final boolean reversed) {
+            return reversed ? REVERSED_ZERO_TO_ONE : FORWARD_ZERO_TO_ONE;
+        }
+    }
+
     enum ProducerDomain {
         CAMERA_DEPTH,
         DYNAMIC_CONTENT,
@@ -110,7 +142,7 @@ final class FrameSynthesisContract {
         CameraFrameInput {
             if (!(fieldOfViewDegrees > 0.0F && fieldOfViewDegrees < 180.0F)
                     || !(nearPlane > 0.0F && farPlane > nearPlane)
-                    || !(aspectRatio > 0.0F && deltaSeconds > 0.0F)
+                    || !(aspectRatio > 0.0F && deltaSeconds >= 0.0F)
                     || !Float.isFinite(fieldOfViewDegrees)
                     || !Float.isFinite(nearPlane)
                     || !Float.isFinite(farPlane)
@@ -130,6 +162,7 @@ final class FrameSynthesisContract {
             int inputHeight,
             Vector2f jitterPixels,
             Vector2f motionScale,
+            DepthConvention depthConvention,
             boolean reset,
             ProducerCoverageSet producerCoverage
     ) {
@@ -140,6 +173,7 @@ final class FrameSynthesisContract {
             Objects.requireNonNull(reactive, "reactive");
             Objects.requireNonNull(jitterPixels, "jitterPixels");
             Objects.requireNonNull(motionScale, "motionScale");
+            Objects.requireNonNull(depthConvention, "depthConvention");
             Objects.requireNonNull(producerCoverage, "producerCoverage");
             jitterPixels = new Vector2f(jitterPixels);
             motionScale = new Vector2f(motionScale);
@@ -182,14 +216,24 @@ final class FrameSynthesisContract {
             FrameStamp stamp,
             ProducerCoverageSet producerCoverage,
             CameraFrameInput camera,
+            DepthConvention depthConvention,
             boolean reset
     ) {
         FrameGenerationAdmission {
             Objects.requireNonNull(stamp, "stamp");
             Objects.requireNonNull(producerCoverage, "producerCoverage");
             Objects.requireNonNull(camera, "camera");
+            Objects.requireNonNull(depthConvention, "depthConvention");
             if (!producerCoverage.frameGenerationEligible()) {
                 throw new IllegalArgumentException("Producer coverage is incomplete for Frame Generation");
+            }
+            // A reset source has no preceding source-frame interval. It is a
+            // valid baseline input but cannot interpolate by itself. Every
+            // subsequent source must carry a positive measured interval.
+            if (!reset && camera.deltaSeconds() <= 0.0F) {
+                throw new IllegalArgumentException(
+                        "A non-reset Frame Generation source requires a positive frame interval"
+                );
             }
         }
     }

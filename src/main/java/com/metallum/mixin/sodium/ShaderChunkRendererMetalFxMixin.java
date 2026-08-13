@@ -20,7 +20,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(ShaderChunkRenderer.class)
 public abstract class ShaderChunkRendererMetalFxMixin {
     @Unique
-    private static final AtomicBoolean metallum$namespaceWarned = new AtomicBoolean();
+    private static final AtomicBoolean metallum$irisFallbackLogged = new AtomicBoolean();
 
     @Shadow @Final protected VertexFormat vertexFormat;
 
@@ -49,19 +49,15 @@ public abstract class ShaderChunkRendererMetalFxMixin {
             final TerrainRenderPass pass,
             final CallbackInfoReturnable<RenderPipeline> cir
     ) {
-        if (MetalCutoutReactivePipeline.isActiveCutoutPass()) {
-            // The substituted pipeline's location is metallum:pipeline/terrain_cutout_reactive.
-            // Shader-pack integrations that decide whether to override a terrain pipeline by
-            // matching "sodium" in its namespace (Iris' IrisMetalPipelineOverrides.isSodiumPipeline
-            // does exactly this) will not match it, and will skip CUTOUT terrain without logging
-            // anything. Reachable only once MetalFX Temporal is on, so say so where it is visible.
-            if (metallum$namespaceWarned.compareAndSet(false, true)) {
-                Metallum.LOGGER.warn(
-                        "MetalFX CUTOUT reactive pipeline is namespaced 'metallum', not 'sodium': "
-                                + "shader-pack overrides keyed on a sodium namespace will silently "
-                                + "skip CUTOUT terrain while MetalFX Temporal is enabled");
-            }
+        boolean irisSemanticActive = IrisMetalPipelineOverrides.isActiveForTerrainOwnership();
+        if (MetalCutoutReactivePipeline.shouldSubstitute(irisSemanticActive)) {
             cir.setReturnValue(MetalCutoutReactivePipeline.forVertexFormat(this.vertexFormat));
+        } else if (MetalCutoutReactivePipeline.isActiveCutoutPass()
+                && irisSemanticActive
+                && metallum$irisFallbackLogged.compareAndSet(false, true)) {
+            Metallum.LOGGER.info(
+                    "Iris owns the CUTOUT terrain pipeline; MetalFX keeps the pack shader and "
+                            + "uses transparency/depth reactive fallback instead of aliasing an Iris attachment");
         }
     }
 

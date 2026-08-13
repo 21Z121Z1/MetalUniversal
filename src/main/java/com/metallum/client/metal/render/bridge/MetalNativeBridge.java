@@ -222,9 +222,11 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
                             INT,
                             INT,
                             FLOAT,
+                            INT,
                             ValueLayout.ADDRESS
                     )
             );
@@ -265,7 +267,7 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS,
                             INT, INT,
                             FLOAT, FLOAT, FLOAT, FLOAT, FLOAT, FLOAT, FLOAT,
-                            INT, ValueLayout.ADDRESS
+                            INT, INT, ValueLayout.ADDRESS
                     )
             );
 
@@ -1291,12 +1293,14 @@ public final class MetalNativeBridge {
     public static boolean metallum_metalfx_encode_hand_overlay(
             final MemorySegment commandBuffer,
             final MemorySegment handDepth,
+            final MemorySegment worldDepth,
             final MemorySegment objectMotion,
             final MemorySegment objectValidity,
             final MemorySegment reactive,
             final int inputWidth,
             final int inputHeight,
             final float reactiveBoost,
+            final boolean depthReversed,
             final MemorySegment fence
     ) {
         if (metalfxEncodeHandOverlay == null) {
@@ -1306,12 +1310,14 @@ public final class MetalNativeBridge {
             return (int) metalfxEncodeHandOverlay.invokeExact(
                     segment(commandBuffer),
                     segment(handDepth),
+                    segment(worldDepth),
                     segment(objectMotion),
                     segment(objectValidity),
                     segment(reactive),
                     inputWidth,
                     inputHeight,
                     reactiveBoost,
+                    depthReversed ? 1 : 0,
                     segment(fence)
             ) != 0;
         } catch (Throwable throwable) {
@@ -1453,6 +1459,7 @@ public final class MetalNativeBridge {
             final float aspectRatio,
             final float sourceDeltaSeconds,
             final boolean reset,
+            final boolean depthReversed,
             final MemorySegment fence
     ) {
         try {
@@ -1462,7 +1469,7 @@ public final class MetalNativeBridge {
                     inputWidth, inputHeight,
                     jitterX, jitterY, fieldOfView, nearPlane, farPlane, aspectRatio,
                     sourceDeltaSeconds,
-                    reset ? 1 : 0, segment(fence)
+                    reset ? 1 : 0, depthReversed ? 1 : 0, segment(fence)
             ) != 0;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metalfx_frame_generation_encode", throwable);

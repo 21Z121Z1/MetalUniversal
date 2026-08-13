@@ -39,6 +39,15 @@ public final class MetalIrisDepthConvention {
         );
     }
 
+    /** Depth polarity consumed by MetalFX for the current Iris render lane. */
+    static boolean metalFxDepthReversed() {
+        return depthReversed(!active());
+    }
+
+    static boolean depthReversed(final boolean mojangReverseDepthActive) {
+        return mojangReverseDepthActive;
+    }
+
     /**
      * Iris exposes this method in the fixed 1.11.2 runtime, but focused tests
      * can run against an un-mixed nested Iris class. Treat that classpath

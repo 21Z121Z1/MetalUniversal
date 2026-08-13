@@ -879,6 +879,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     frameInput.aspectRatio(),
                     frameInput.deltaSeconds(),
                     frameInput.reset(),
+                    frameInput.depthReversed(),
                     fence
             );
             if (queued) {
@@ -1089,14 +1090,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     boolean encodeHandOverlayMotion(
             final MetalGpuTexture handDepth,
+            final MetalGpuTexture worldDepth,
             final MetalGpuTexture objectMotion,
             final MetalGpuTexture objectValidity,
             final MetalGpuTexture reactive,
             final int inputWidth,
             final int inputHeight,
-            final float reactiveBoost
+            final float reactiveBoost,
+            final boolean depthReversed
     ) {
         flushPendingClear(handDepth);
+        flushPendingClear(worldDepth);
         flushPendingClear(objectMotion);
         flushPendingClear(objectValidity);
         flushPendingClear(reactive);
@@ -1108,12 +1112,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return MetalNativeBridge.metallum_metalfx_encode_hand_overlay(
                 commandBuffer().nativeHandle(),
                 handDepth.nativeHandle(),
+                worldDepth.nativeHandle(),
                 objectMotion.nativeHandle(),
                 objectValidity.nativeHandle(),
                 reactive.nativeHandle(),
                 inputWidth,
                 inputHeight,
                 reactiveBoost,
+                depthReversed,
                 fence
         );
     }

@@ -302,8 +302,27 @@ public final class IrisMetalPipelineOverrides {
     private IrisMetalPipelineOverrides() {
     }
 
-    static boolean isShadowPassActive() {
+    public static boolean isShadowPassActive() {
         return net.irisshaders.iris.shadows.ShadowRenderingState.areShadowsCurrentlyBeingRendered();
+    }
+
+    /**
+     * Sodium evaluates {@code TerrainRenderPass.getTarget()} before the mixin
+     * can replace the RenderPass descriptor. The main FrameGraph translucent
+     * handle is unavailable inside Iris's shadow subgraph, so an admitted Iris
+     * shadow draw must bypass that argument evaluation and use a live dummy
+     * target; the returned color/depth views are ignored by the Iris-owned
+     * descriptor.
+     */
+    public static boolean shouldBypassTerrainTargetEvaluation() {
+        return shouldBypassTerrainTargetEvaluation(active != null, isShadowPassActive());
+    }
+
+    static boolean shouldBypassTerrainTargetEvaluation(
+            final boolean irisSemanticActive,
+            final boolean shadowPassActive
+    ) {
+        return irisSemanticActive && shadowPassActive;
     }
 
     enum TerrainKind {
@@ -441,6 +460,17 @@ public final class IrisMetalPipelineOverrides {
         }
     }
 
+    /** True while an admitted Iris generation owns Sodium terrain programs and attachments. */
+    public static boolean isActiveForTerrainOwnership() {
+        return active != null;
+    }
+
+    /** Stable generation identity used by the Iris/MetalFX per-frame handoff. */
+    static int activeGenerationForFrameHandoff() {
+        Instance instance = active;
+        return instance == null ? 0 : instance.generation();
+    }
+
     /** Per-frame uniform refresh; driven by {@link MetalWorldRenderingPipeline#beginLevelRendering()}. */
     static void updateFrame() {
         Instance instance = active;
@@ -463,6 +493,18 @@ public final class IrisMetalPipelineOverrides {
         IrisMetalPassTrace.observeFogState("prewarm_complete");
         IrisMetalPassTrace.beginFrame(instance.uniformValues.frameCounter());
         instance.beginFrame();
+        FrameSynthesisContract.FrameStamp frameStamp = MetalFxManager.currentFrameStamp();
+        if (frameStamp != null && instance.renderTargets != null) {
+            IrisMetalFxFrameHandoff.beginFrame(
+                    instance.generation(),
+                    frameStamp,
+                    instance.renderTargets.width(),
+                    instance.renderTargets.height(),
+                    FrameSynthesisContract.DepthConvention.fromReversed(
+                            MetalIrisDepthConvention.metalFxDepthReversed()
+                    )
+            );
+        }
         instance.uniformValues.updateFrame();
         IrisMetalPassTrace.observeLifecycle("uniform_update_complete");
         IrisMetalPassTrace.observeFogState("uniform_update_complete");
@@ -2068,6 +2110,7 @@ public final class IrisMetalPipelineOverrides {
             IrisMetalPassTrace.observePhase(
                     "final", receipt.mainTargetResolved() ? "executed" : "failed"
             );
+            IrisMetalFxFrameHandoff.recordFinal(this.generation, receipt.mainTargetResolved());
         }
 
         private void executeColorSpace(final ColorSpace colorSpace) {
@@ -2087,6 +2130,9 @@ public final class IrisMetalPipelineOverrides {
                     colorSpace
             );
             IrisMetalPassTrace.observePhase("color-space", executed ? colorSpace.name() : "bypassed");
+            // Bypass is still a completed ownership boundary: it means the
+            // pack requested no conversion, not that the scene is unfinished.
+            IrisMetalFxFrameHandoff.recordColorSpace(this.generation);
         }
 
         private final IrisMetalPostChain.ResourceProvider postResources =
