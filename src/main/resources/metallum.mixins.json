@@ -78,6 +78,7 @@
     "iris.IrisMetalOptimizationBootstrapMixin",
     "iris.IrisMetalDepthLivenessMixin",
     "iris.IrisMetalDepthAllocationMixin",
+    "iris.IrisMetalCutoutCoveragePipelineMixin",
     "iris.IrisMetalPostChainComputeGroupingMixin",
     "iris.IrisMetalRenderFusionPolicyMixin"
   ],

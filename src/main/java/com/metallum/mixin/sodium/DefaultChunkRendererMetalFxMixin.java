@@ -1,5 +1,6 @@
 package com.metallum.mixin.sodium;
 
+import com.metallum.client.metal.render.IrisMetalCutoutCoverageRuntime;
 import com.metallum.client.metal.render.MetalCutoutReactivePipeline;
 import com.metallum.client.metal.render.MetalFxManager;
 import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
@@ -61,10 +62,16 @@ public abstract class DefaultChunkRendererMetalFxMixin {
             final GpuTextureView depthTexture,
             final OptionalDouble clearDepth
     ) {
-        // Iris owns every gbuffer target, including the single [0] path. A
-        // shader-pack draw therefore takes precedence over the independent
-        // MetalFX coverage attachment; mixing both layouts would make final
-        // read a different colortex0 than terrain wrote.
+        // Iris CUTOUT keeps the pack's compact DRAWBUFFERS list and appends a
+        // generation-owned R8 coverage attachment after it. This descriptor
+        // must match the synthetic CUTOUT PSO even on frames where MetalFX is
+        // disabled, otherwise the pipeline cache would see two signatures.
+        RenderPass irisCutoutPass = IrisMetalCutoutCoverageRuntime.createTerrainRenderPass(
+                encoder, label, colorTexture, clearColor, depthTexture, clearDepth
+        );
+        if (irisCutoutPass != null) {
+            return irisCutoutPass;
+        }
         RenderPass irisPass = IrisMetalPipelineOverrides.createTerrainRenderPass(
                 encoder, label, colorTexture, clearColor, depthTexture, clearDepth
         );
