@@ -75,6 +75,14 @@ jobs:
 
       - name: Run real Minecraft 26.2 production Client GameTest
         shell: bash
+        env:
+          # Keep Metal API Validation enabled, but bypass the optional render-state
+          # packet batching in this evidence lane. The hosted Apple paravirtual
+          # driver exposed a packet-decoder ordering defect where Java had queued
+          # a valid PSO yet Metal reached the draw without renderPipelineState.
+          # The legacy setters are the same production Metal bindings, only without
+          # the batching optimization, and make the validation result auditable.
+          JAVA_TOOL_OPTIONS: '-Dmetallum.opt.renderStatePacket=false'
         run: |
           set -euo pipefail
           ./gradlew \
