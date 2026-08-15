@@ -86,22 +86,26 @@ jobs:
           set -euo pipefail
           chmod +x ./gradlew
 
-          native_skip=()
-          if [[ "${{ steps.mac-native-cache.outputs.cache-hit }}" == "true" ]]; then
-            native_skip=(-x buildMacNative)
-            echo "Using cached src/main/resources/natives/macos/libmetallum.dylib"
-          fi
-
           # This lane executes only on macOS. Do not spend runner time compiling
           # iOS dylibs or cloning/building the iOS SPIRV-Cross library merely
           # because processResources normally packages every Apple target.
-          ./gradlew \
-            --build-cache \
-            --stacktrace \
-            -x buildIOSNative \
-            -x buildIOSSpvc \
-            "${native_skip[@]}" \
-            jar
+          if [[ "${{ steps.mac-native-cache.outputs.cache-hit }}" == "true" ]]; then
+            echo "Using cached src/main/resources/natives/macos/libmetallum.dylib"
+            ./gradlew \
+              --build-cache \
+              --stacktrace \
+              -x buildMacNative \
+              -x buildIOSNative \
+              -x buildIOSSpvc \
+              jar
+          else
+            ./gradlew \
+              --build-cache \
+              --stacktrace \
+              -x buildIOSNative \
+              -x buildIOSSpvc \
+              jar
+          fi
 
           jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
             ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' \
