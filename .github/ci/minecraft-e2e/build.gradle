@@ -59,7 +59,10 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.opt.metal4Compiler=true")
     jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=true")
     jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=true")
-    jvmArgs.add("-Dmetallum.opt.residencySet=true")
+    // GitHub's Apple Paravirtual device has already proven it does not support
+    // residency sets. Do not request a physical-only capability in hosted E2E;
+    // with Metal API validation enabled, asking for one is a hard assertion.
+    jvmArgs.add("-Dmetallum.opt.residencySet=false")
     jvmArgs.add("-Dmetallum.ci.evidenceDir=${file("${buildDir}/evidence").absolutePath}")
 
     // Xvfb is Linux-only. macos-26 has an Aqua session and a paravirtual Metal
