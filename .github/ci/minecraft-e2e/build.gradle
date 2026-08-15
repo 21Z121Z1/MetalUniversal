@@ -26,7 +26,7 @@ java {
 def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
 
 tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.ClientProductionRunTask) {
-    dependsOn tasks.named("remapJar")
+    dependsOn tasks.named("jar")
 
     doFirst {
         def metallumJar = metallumJarProvider.get()
@@ -35,9 +35,9 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         }
     }
 
-    // Keep the CI-only gametest mod and the production MetalUniversal JAR
-    // explicit. Dependencies used only by the test stay out of MetalUniversal.
-    mods.from(tasks.named("remapJar"))
+    // Minecraft 26.2 uses Loom's non-obfuscated plugin, so ordinary JARs are
+    // the production artifacts; there is intentionally no remapJar task.
+    mods.from(tasks.named("jar"))
     mods.from(metallumJarProvider)
     mods.from(configurations.productionRuntimeMods)
 

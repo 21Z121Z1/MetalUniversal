@@ -57,7 +57,7 @@ jobs:
           set -euo pipefail
           chmod +x ./gradlew
           ./gradlew --stacktrace buildMacNative
-          ./gradlew --stacktrace remapJar
+          ./gradlew --stacktrace jar
           jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
             ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' \
             -print | head -n 1)"
