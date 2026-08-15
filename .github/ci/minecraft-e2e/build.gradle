@@ -1,0 +1,63 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+repositories {
+    maven { url "https://api.modrinth.com/maven" }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+    // Production runtime mirrors MetalUniversal's shipping client dependencies.
+    productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
+    productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
+
+tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.ClientProductionRunTask) {
+    dependsOn tasks.named("remapJar")
+
+    doFirst {
+        def metallumJar = metallumJarProvider.get()
+        if (!metallumJar.isFile()) {
+            throw new GradleException("MetalUniversal production JAR does not exist: ${metallumJar}")
+        }
+    }
+
+    // Keep the CI-only gametest mod and the production MetalUniversal JAR
+    // explicit. Dependencies used only by the test stay out of MetalUniversal.
+    mods.from(tasks.named("remapJar"))
+    mods.from(metallumJarProvider)
+    mods.from(configurations.productionRuntimeMods)
+
+    jvmArgs.add("-Dfabric.client.gametest")
+    jvmArgs.add("-Dmetallum.ci.e2e=true")
+    jvmArgs.add("-Dmetallum.iris.semantic=true")
+    jvmArgs.add("-Dmetallum.metalfx.mode=OFF")
+    jvmArgs.add("-Dmetallum.metalfx.frameGeneration=false")
+    jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
+    jvmArgs.add("-Dmetallum.metal.hud=false")
+    jvmArgs.add("-Dmetallum.hotpath.telemetry=true")
+    jvmArgs.add("-Dmetallum.opt.metal4=true")
+    jvmArgs.add("-Dmetallum.opt.metal4Compiler=true")
+    jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=true")
+    jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=true")
+    jvmArgs.add("-Dmetallum.opt.residencySet=true")
+    jvmArgs.add("-Dmetallum.ci.evidenceDir=${file("${buildDir}/evidence").absolutePath}")
+
+    // Xvfb is Linux-only. macos-26 has an Aqua session and a paravirtual Metal
+    // device; the screenshot assertion below reads Minecraft's own framebuffer.
+    useXVFB = false
+    runDir = file("${buildDir}/run/clientGameTest")
+}

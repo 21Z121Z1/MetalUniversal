@@ -1,0 +1,153 @@
+name: Minecraft 26.2 production client E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci/minecraft-client-e2e-*'
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-client-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  minecraft-client-e2e:
+    name: Real Minecraft / MetalUniversal / framebuffer evidence
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Describe free hosted Apple Silicon runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          sw_vers
+          test "$(uname -m)" = "arm64"
+          system_profiler SPHardwareDataType SPDisplaysDataType || true
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle dependency cache
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build production MetalUniversal JAR and native backend
+        id: metallum
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --stacktrace buildMacNative
+          ./gradlew --stacktrace remapJar
+          jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' \
+            -print | head -n 1)"
+          test -n "$jar"
+          test -s "$jar"
+          jar="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
+          echo "jar=$jar" >> "$GITHUB_OUTPUT"
+          echo "MetalUniversal production JAR: $jar"
+          unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
+
+      - name: Prove hosted Metal command execution before Minecraft
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --stacktrace metalMrtSmokeTest verifyIsolatedClientProfiles
+
+      - name: Run real Minecraft 26.2 production Client GameTest
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew \
+            -p .github/ci/minecraft-e2e \
+            --stacktrace \
+            -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
+            runProductionClientGameTest
+
+      - name: Verify runtime evidence and real game screenshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          e2e=".github/ci/minecraft-e2e"
+          evidence="$e2e/build/evidence/runtime-evidence.json"
+          screenshot_dir="$e2e/build/run/clientGameTest/screenshots"
+
+          test -s "$evidence"
+          screenshot="$(find "$screenshot_dir" -maxdepth 1 -type f -name '*.png' -print | head -n 1)"
+          test -n "$screenshot"
+          test -s "$screenshot"
+
+          python3 - "$evidence" <<'PY'
+          import json, sys
+          path = sys.argv[1]
+          with open(path, encoding="utf-8") as f:
+              data = json.load(f)
+          required_true = (
+              "productionRuntime",
+              "clientGameTest",
+              "metallumLoaded",
+              "sodiumLoaded",
+              "irisLoaded",
+              "worldLoaded",
+              "chunksRendered",
+          )
+          for key in required_true:
+              if data.get(key) is not True:
+                  raise SystemExit(f"{key} was not true in {path}: {data.get(key)!r}")
+          if str(data.get("backend", "")).lower() != "metal":
+              raise SystemExit(f"expected Metal backend, got {data.get('backend')!r}")
+          if data.get("minecraft") != "26.2":
+              raise SystemExit(f"expected Minecraft 26.2, got {data.get('minecraft')!r}")
+          print(json.dumps(data, indent=2, sort_keys=True))
+          PY
+
+          xcrun swiftc -O \
+            -framework Foundation \
+            -framework CoreGraphics \
+            -framework ImageIO \
+            .github/ci/VerifyMinecraftScreenshot.swift \
+            -o "$RUNNER_TEMP/verify-minecraft-screenshot"
+
+          "$RUNNER_TEMP/verify-minecraft-screenshot" \
+            "$screenshot" \
+            "$e2e/build/evidence/screenshot-stats.json"
+
+          shasum -a 256 "$screenshot" | tee "$e2e/build/evidence/screenshot.sha256"
+          file "$screenshot"
+          ls -lh "$screenshot" "$evidence" "$e2e/build/evidence/screenshot-stats.json"
+
+      - name: Upload Minecraft E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: minecraft-26.2-metaluniversal-e2e-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            .github/ci/minecraft-e2e/build/evidence/**
+            .github/ci/minecraft-e2e/build/run/clientGameTest/screenshots/**
+            .github/ci/minecraft-e2e/build/run/clientGameTest/logs/**
+            .github/ci/minecraft-e2e/build/run/clientGameTest/crash-reports/**
+            .github/ci/minecraft-e2e/build/reports/**
+            .github/ci/minecraft-e2e/build/test-results/**
+            hs_err_pid*.log
