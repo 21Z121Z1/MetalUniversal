@@ -29,7 +29,7 @@ jobs:
       MTLFX_HUD_ENABLED: '0'
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
       # Let setup-gradle persist Gradle's local build cache on master so Java,
-      # Loom transforms and other cacheable work can be reused by later PRs.
+      # Loom transforms, Minecraft assets and other cacheable state can be reused.
       GRADLE_OPTS: '-Dorg.gradle.caching=true'
 
     steps:
@@ -74,8 +74,8 @@ jobs:
       - name: Setup Gradle dependency and build cache
         uses: gradle/actions/setup-gradle@v6
         with:
-          # GitHub's default-branch cache is visible to PRs. Keep large Gradle
-          # cache writes on master only to avoid branch-scoped cache churn.
+          # Default-branch entries are visible to PR/feature-branch jobs. Keep
+          # large Gradle/Loom cache writes on master only to avoid cache churn.
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
           cache-cleanup: on-success
 
@@ -124,14 +124,6 @@ jobs:
 
       - name: Run real Minecraft 26.2 production Client GameTest
         shell: bash
-        env:
-          # Keep Metal API Validation enabled, but bypass the optional render-state
-          # packet batching in this evidence lane. The hosted Apple paravirtual
-          # driver exposed a packet-decoder ordering defect where Java had queued
-          # a valid PSO yet Metal reached the draw without renderPipelineState.
-          # The legacy setters are the same production Metal bindings, only without
-          # the batching optimization, and make the validation result auditable.
-          JAVA_TOOL_OPTIONS: '-Dmetallum.opt.renderStatePacket=false'
         run: |
           set -euo pipefail
           ./gradlew \
@@ -209,13 +201,38 @@ jobs:
           print(json.dumps(runtime, indent=2))
           PY
 
-      - name: Stage Minecraft E2E evidence
-        if: always()
+      - name: Stage canonical Minecraft E2E evidence
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          e2e=".github/ci/minecraft-e2e"
+          stage="build/minecraft-e2e-artifact"
+          rm -rf "$stage"
+          mkdir -p "$stage/evidence/readback-control" "$stage/logs"
+          cp "$e2e/build/evidence/metal-framebuffer.png" "$stage/evidence/"
+          cp "$e2e/build/evidence/metal-framebuffer-samples.json" "$stage/evidence/"
+          cp "$e2e/build/evidence/runtime-evidence.json" "$stage/evidence/"
+          cp "$e2e/build/evidence/readback-control/suite.json" "$stage/evidence/readback-control/"
+          cp "$e2e/build/run/clientGameTest/logs/latest.log" "$stage/logs/"
+          find "$stage" -type f -print | sort
+
+      - name: Upload canonical Minecraft Metal framebuffer
+        uses: actions/upload-artifact@v7
+        with:
+          name: minecraft-26.2-metal-framebuffer-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
+          path: build/minecraft-e2e-artifact/**
+
+      - name: Stage full E2E diagnostics on failure
+        if: failure()
         shell: bash
         run: |
           set -u
           e2e=".github/ci/minecraft-e2e"
-          stage="build/minecraft-e2e-artifact"
+          stage="build/minecraft-e2e-failure"
           rm -rf "$stage"
           mkdir -p "$stage"
           if [ -d "$e2e/build/evidence" ]; then cp -R "$e2e/build/evidence" "$stage/evidence"; fi
@@ -235,22 +252,6 @@ jobs:
           if [ -d "$e2e/build/test-results" ]; then cp -R "$e2e/build/test-results" "$stage/test-results"; fi
           find "$stage" -type f -maxdepth 12 -print | sort || true
 
-      - name: Upload canonical Minecraft Metal framebuffer
-        uses: actions/upload-artifact@v7
-        with:
-          name: minecraft-26.2-metal-framebuffer-${{ github.sha }}
-          if-no-files-found: error
-          retention-days: 1
-          # PNG/JSON/log files are already compact; avoid spending runner CPU
-          # recompressing them for a one-day evidence artifact.
-          compression-level: 0
-          path: |
-            build/minecraft-e2e-artifact/evidence/metal-framebuffer.png
-            build/minecraft-e2e-artifact/evidence/metal-framebuffer-samples.json
-            build/minecraft-e2e-artifact/evidence/runtime-evidence.json
-            build/minecraft-e2e-artifact/evidence/readback-control/suite.json
-            build/minecraft-e2e-artifact/logs/latest.log
-
       - name: Upload full E2E diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v7
@@ -258,4 +259,4 @@ jobs:
           name: minecraft-26.2-metaluniversal-failure-${{ github.run_attempt }}
           if-no-files-found: warn
           retention-days: 1
-          path: build/minecraft-e2e-artifact/**
+          path: build/minecraft-e2e-failure/**
