@@ -84,18 +84,25 @@ jobs:
             -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
             runProductionClientGameTest
 
-      - name: Verify runtime evidence and real game screenshot
+      - name: Verify authoritative Metal framebuffer evidence
         shell: bash
         run: |
           set -euo pipefail
           e2e=".github/ci/minecraft-e2e"
           evidence="$e2e/build/evidence/runtime-evidence.json"
-          screenshot_dir="$e2e/build/run/clientGameTest/screenshots"
+          window_screenshot_dir="$e2e/build/run/clientGameTest/screenshots"
+          metal_capture_dir="$e2e/build/evidence/metal-framebuffer"
 
           test -s "$evidence"
-          screenshot="$(find "$screenshot_dir" -maxdepth 1 -type f -name '*.png' -print | head -n 1)"
-          test -n "$screenshot"
-          test -s "$screenshot"
+          window_screenshot="$(find "$window_screenshot_dir" -maxdepth 1 -type f -name '*.png' -print | head -n 1)"
+          test -n "$window_screenshot"
+          test -s "$window_screenshot"
+
+          metal_screenshot="$(find "$metal_capture_dir" -type f -name 'actual.png' -print0 \
+            | xargs -0 ls -1t 2>/dev/null | head -n 1)"
+          test -n "$metal_screenshot"
+          test -s "$metal_screenshot"
+          cp "$metal_screenshot" "$e2e/build/evidence/metal-framebuffer.png"
 
           python3 - "$evidence" <<'PY'
           import json, sys
@@ -118,6 +125,12 @@ jobs:
               raise SystemExit(f"expected Metal backend, got {data.get('backend')!r}")
           if data.get("minecraft") != "26.2":
               raise SystemExit(f"expected Minecraft 26.2, got {data.get('minecraft')!r}")
+          if data.get("renderContractCompletedCaptures", 0) < 1:
+              raise SystemExit("no completed Metal framebuffer captures")
+          if data.get("renderContractFailedCaptures") != 0:
+              raise SystemExit(f"Metal framebuffer capture failures: {data.get('renderContractFailedCaptures')!r}")
+          if data.get("renderContractDroppedCaptures") != 0:
+              raise SystemExit(f"Metal framebuffer captures dropped: {data.get('renderContractDroppedCaptures')!r}")
           print(json.dumps(data, indent=2, sort_keys=True))
           PY
 
@@ -129,25 +142,57 @@ jobs:
             -o "$RUNNER_TEMP/verify-minecraft-screenshot"
 
           "$RUNNER_TEMP/verify-minecraft-screenshot" \
-            "$screenshot" \
-            "$e2e/build/evidence/screenshot-stats.json"
+            "$e2e/build/evidence/metal-framebuffer.png" \
+            "$e2e/build/evidence/metal-framebuffer-stats.json"
 
-          shasum -a 256 "$screenshot" | tee "$e2e/build/evidence/screenshot.sha256"
-          file "$screenshot"
-          ls -lh "$screenshot" "$evidence" "$e2e/build/evidence/screenshot-stats.json"
+          shasum -a 256 "$e2e/build/evidence/metal-framebuffer.png" \
+            | tee "$e2e/build/evidence/metal-framebuffer.sha256"
+          shasum -a 256 "$window_screenshot" \
+            | tee "$e2e/build/evidence/window-screenshot.sha256"
+          file "$e2e/build/evidence/metal-framebuffer.png" "$window_screenshot"
+          ls -lh \
+            "$e2e/build/evidence/metal-framebuffer.png" \
+            "$evidence" \
+            "$e2e/build/evidence/metal-framebuffer-stats.json"
+
+      - name: Stage Minecraft E2E artifact outside hidden directories
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          e2e=".github/ci/minecraft-e2e"
+          stage="build/minecraft-e2e-artifact"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          if [ -d "$e2e/build/evidence" ]; then
+            cp -R "$e2e/build/evidence" "$stage/evidence"
+          fi
+          if [ -d "$e2e/build/run/clientGameTest/screenshots" ]; then
+            mkdir -p "$stage/window-screenshots"
+            cp -R "$e2e/build/run/clientGameTest/screenshots/." "$stage/window-screenshots/"
+          fi
+          if [ -d "$e2e/build/run/clientGameTest/logs" ]; then
+            mkdir -p "$stage/logs"
+            cp -R "$e2e/build/run/clientGameTest/logs/." "$stage/logs/"
+          fi
+          if [ -d "$e2e/build/run/clientGameTest/crash-reports" ]; then
+            mkdir -p "$stage/crash-reports"
+            cp -R "$e2e/build/run/clientGameTest/crash-reports/." "$stage/crash-reports/"
+          fi
+          if [ -d "$e2e/build/reports" ]; then
+            cp -R "$e2e/build/reports" "$stage/reports"
+          fi
+          if [ -d "$e2e/build/test-results" ]; then
+            cp -R "$e2e/build/test-results" "$stage/test-results"
+          fi
+          find . -maxdepth 2 -type f -name 'hs_err_pid*.log' -exec cp {} "$stage/" \; || true
+          find "$stage" -type f -maxdepth 8 -print | sort || true
 
       - name: Upload Minecraft E2E evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: minecraft-26.2-metaluniversal-e2e-${{ github.run_attempt }}
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
-          path: |
-            .github/ci/minecraft-e2e/build/evidence/**
-            .github/ci/minecraft-e2e/build/run/clientGameTest/screenshots/**
-            .github/ci/minecraft-e2e/build/run/clientGameTest/logs/**
-            .github/ci/minecraft-e2e/build/run/clientGameTest/crash-reports/**
-            .github/ci/minecraft-e2e/build/reports/**
-            .github/ci/minecraft-e2e/build/test-results/**
-            hs_err_pid*.log
+          path: build/minecraft-e2e-artifact/**
