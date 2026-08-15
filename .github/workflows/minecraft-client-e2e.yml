@@ -50,6 +50,31 @@ jobs:
       - name: Setup Gradle dependency cache
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Validate framebuffer capture ordering fix in checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path("src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java")
+          text = path.read_text()
+          early = "        recordPresentAndMaybeCapture(source, textureView);\n        MetalFxManager.FrameGenerationInput frameInput"
+          if text.count(early) != 1:
+              raise SystemExit(f"expected exactly one early present capture hook, found {text.count(early)}")
+          text = text.replace(
+              early,
+              "        MetalFxManager.FrameGenerationInput frameInput",
+              1,
+          )
+          anchor = """        flushPendingClear(source);\n        submitRenderPass();\n        endEncoder();\n        MTLCommandBuffer commandBuffer = commandBuffer();\n        commandBuffer.encodePresentTextureToDrawable(layer, source.nativeHandle(), fence);\n"""
+          if text.count(anchor) != 1:
+              raise SystemExit(f"expected exactly one present submission anchor, found {text.count(anchor)}")
+          replacement = """        flushPendingClear(source);\n        submitRenderPass();\n        endEncoder();\n        // Capture only after the final render pass has been encoded. Capturing before\n        // submitRenderPass() observes the previous/uninitialized texture contents.\n        recordPresentAndMaybeCapture(source, textureView);\n        MTLCommandBuffer commandBuffer = commandBuffer();\n        commandBuffer.encodePresentTextureToDrawable(layer, source.nativeHandle(), fence);\n"""
+          path.write_text(text.replace(anchor, replacement, 1))
+          PY
+          git diff --check
+          git diff -- src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java
+
       - name: Build production MetalUniversal JAR and native backend
         id: metallum
         shell: bash
