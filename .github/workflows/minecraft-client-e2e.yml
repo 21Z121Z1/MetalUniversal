@@ -111,6 +111,54 @@ jobs:
               raise SystemExit(f"control suite did not pass: {data}")
           PY
 
+      - name: Verify real Minecraft Metal framebuffer evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=".github/ci/minecraft-e2e/build/evidence"
+          png="$root/metal-framebuffer.png"
+          samples="$root/metal-framebuffer-samples.json"
+          runtime="$root/runtime-evidence.json"
+          test -s "$png"
+          test -s "$samples"
+          test -s "$runtime"
+          python3 - "$png" "$samples" "$runtime" <<'PY'
+          import json, struct, sys
+          from pathlib import Path
+
+          png, samples_path, runtime_path = map(Path, sys.argv[1:])
+          raw = png.read_bytes()
+          if len(raw) < 24 or raw[:8] != b'\x89PNG\r\n\x1a\n' or raw[12:16] != b'IHDR':
+              raise SystemExit(f"not a valid PNG header: {png}")
+          width, height = struct.unpack('>II', raw[16:24])
+          if width <= 1 or height <= 1:
+              raise SystemExit(f"invalid framebuffer dimensions: {width}x{height}")
+
+          samples = json.loads(samples_path.read_text(encoding='utf-8'))
+          frames = samples.get('samples', [])
+          selected_id = samples.get('selectedFrameId')
+          if len(frames) != 8:
+              raise SystemExit(f"expected 8 Metal framebuffer samples, got {len(frames)}")
+          selected = next((x for x in frames if x.get('frameId') == selected_id), None)
+          if not selected:
+              raise SystemExit(f"selected frame {selected_id} is absent")
+          if selected.get('byteCount', 0) != width * height * 4:
+              raise SystemExit(
+                  f"RGBA8 byte count does not match PNG dimensions: {selected.get('byteCount')} vs {width}x{height}x4"
+              )
+          if selected.get('nonBlackPixels', 0) <= 0:
+              raise SystemExit(f"selected framebuffer is black: {selected}")
+          if selected.get('distinctRgb', 0) <= 1:
+              raise SystemExit(f"selected framebuffer is constant-color: {selected}")
+          if selected.get('lumaStddev', 0.0) <= 0.0:
+              raise SystemExit(f"selected framebuffer has no luminance variation: {selected}")
+
+          runtime = json.loads(runtime_path.read_text(encoding='utf-8'))
+          print(f"verified Metal framebuffer: {width}x{height}, selected frame={selected_id}")
+          print(json.dumps(selected, indent=2))
+          print(json.dumps(runtime, indent=2))
+          PY
+
       - name: Stage Minecraft E2E artifact outside hidden directories
         if: always()
         shell: bash
@@ -136,6 +184,17 @@ jobs:
           if [ -d "$e2e/build/reports" ]; then cp -R "$e2e/build/reports" "$stage/reports"; fi
           if [ -d "$e2e/build/test-results" ]; then cp -R "$e2e/build/test-results" "$stage/test-results"; fi
           find "$stage" -type f -maxdepth 12 -print | sort || true
+
+      - name: Upload canonical Minecraft Metal framebuffer
+        uses: actions/upload-artifact@v7
+        with:
+          name: minecraft-26.2-metal-framebuffer-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/minecraft-e2e-artifact/evidence/metal-framebuffer.png
+            build/minecraft-e2e-artifact/evidence/metal-framebuffer-samples.json
+            build/minecraft-e2e-artifact/evidence/runtime-evidence.json
 
       - name: Upload Minecraft E2E evidence
         if: always()
