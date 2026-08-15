@@ -29,16 +29,16 @@ public final class MetalReadbackControlGameTest implements FabricClientGameTest 
             );
             require("Metal".equalsIgnoreCase(backend), "Expected Metal backend, got " + backend);
 
-            MetalCiFramebufferProbe.ProbeResult result = context.computeOnClient(
-                    client -> MetalCiFramebufferProbe.runKnownColorReadback(
-                            evidenceDir.resolve("known-color-control")
-                    )
+            MetalCiFramebufferProbe.ProbeSuite suite = context.computeOnClient(
+                    client -> MetalCiFramebufferProbe.run(evidenceDir.resolve("readback-control"))
             );
 
-            require(result.nonZeroBytes() > 0,
-                    "Known-color Metal texture readback returned only zero bytes: " + result);
-            require(result.looksLikeMagentaClear(),
-                    "Known-color Metal texture readback did not preserve the GPU magenta clear: " + result);
+            require(suite.bufferCopy().exact(),
+                    "GPU buffer-to-buffer copy did not round-trip exactly: " + suite.bufferCopy());
+            require(suite.textureRoundTrip().exact(),
+                    "GPU buffer-texture-buffer copy did not round-trip exactly: " + suite.textureRoundTrip());
+            require(suite.renderClear().exact(),
+                    "GPU render clear did not survive texture readback: " + suite.renderClear());
         }
     }
 
