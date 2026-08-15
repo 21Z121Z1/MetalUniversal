@@ -59,6 +59,10 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.opt.metal4Compiler=true")
     jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=true")
     jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=true")
+    // Keep the hosted Apple-paravirtual workaround scoped to the Minecraft JVM.
+    // Do not put this in JAVA_TOOL_OPTIONS: doing so changes the Gradle daemon's
+    // JVM identity and prevents reuse of the daemon already started by root tasks.
+    jvmArgs.add("-Dmetallum.opt.renderStatePacket=false")
     // GitHub's Apple Paravirtual device has already proven it does not support
     // residency sets. Do not request a physical-only capability in hosted E2E;
     // with Metal API validation enabled, asking for one is a hard assertion.
