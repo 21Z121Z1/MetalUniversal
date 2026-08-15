@@ -6,10 +6,18 @@ repositories {
     maven { url "https://api.modrinth.com/maven" }
 }
 
+def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
+
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+    // The CI probe lives in com.metallum.client.metal.render so it can exercise
+    // the exact package-private production MetalDevice/MetalCommandEncoder
+    // texture -> buffer path. Keep this compile-only: the runtime still loads
+    // the independently-built production MetalUniversal JAR below.
+    compileOnly files(metallumJarProvider)
 
     // Production runtime mirrors MetalUniversal's shipping client dependencies.
     productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
@@ -22,8 +30,6 @@ java {
         languageVersion = JavaLanguageVersion.of(25)
     }
 }
-
-def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
 
 tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.ClientProductionRunTask) {
     dependsOn tasks.named("jar")
@@ -57,7 +63,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.ci.evidenceDir=${file("${buildDir}/evidence").absolutePath}")
 
     // Xvfb is Linux-only. macos-26 has an Aqua session and a paravirtual Metal
-    // device; the screenshot assertion below reads Minecraft's own framebuffer.
+    // device; authoritative evidence is read from Metal textures, not scan-out.
     useXVFB = false
     runDir = file("${buildDir}/run/clientGameTest")
 }
