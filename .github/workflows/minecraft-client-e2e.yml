@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - master
       - 'ci/minecraft-client-e2e-*'
   pull_request:
     branches:
@@ -27,6 +28,9 @@ jobs:
       MTL_HUD_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      # Let setup-gradle persist Gradle's local build cache on master so Java,
+      # Loom transforms and other cacheable work can be reused by later PRs.
+      GRADLE_OPTS: '-Dorg.gradle.caching=true'
 
     steps:
       - name: Checkout repository
@@ -47,17 +51,58 @@ jobs:
           distribution: temurin
           java-version: '25'
 
-      - name: Setup Gradle dependency cache
-        uses: gradle/actions/setup-gradle@v6
+      - name: Fingerprint hosted Metal toolchain
+        id: metal-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            swiftc -version
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+          } | tee /tmp/metallum-metal-toolchain.txt
+          fingerprint="$(shasum -a 256 /tmp/metallum-metal-toolchain.txt | awk '{print $1}')"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
 
-      - name: Build production MetalUniversal JAR and native backend
+      - name: Restore cached macOS Metal native backend
+        id: mac-native-cache
+        uses: actions/cache@v5
+        with:
+          path: src/main/resources/natives/macos/libmetallum.dylib
+          key: metallum-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.metal-toolchain.outputs.fingerprint }}-${{ hashFiles('src/main/native/*.swift') }}
+
+      - name: Setup Gradle dependency and build cache
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          # GitHub's default-branch cache is visible to PRs. Keep large Gradle
+          # cache writes on master only to avoid branch-scoped cache churn.
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+          cache-cleanup: on-success
+
+      - name: Build macOS E2E production JAR
         id: metallum
         shell: bash
         run: |
           set -euo pipefail
           chmod +x ./gradlew
-          ./gradlew --stacktrace buildMacNative
-          ./gradlew --stacktrace jar
+
+          native_skip=()
+          if [[ "${{ steps.mac-native-cache.outputs.cache-hit }}" == "true" ]]; then
+            native_skip=(-x buildMacNative)
+            echo "Using cached src/main/resources/natives/macos/libmetallum.dylib"
+          fi
+
+          # This lane executes only on macOS. Do not spend runner time compiling
+          # iOS dylibs or cloning/building the iOS SPIRV-Cross library merely
+          # because processResources normally packages every Apple target.
+          ./gradlew \
+            --build-cache \
+            --stacktrace \
+            -x buildIOSNative \
+            -x buildIOSSpvc \
+            "${native_skip[@]}" \
+            jar
+
           jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
             ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' \
             -print | head -n 1)"
@@ -71,7 +116,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew --stacktrace metalMrtSmokeTest verifyIsolatedClientProfiles
+          ./gradlew --build-cache --stacktrace metalMrtSmokeTest verifyIsolatedClientProfiles
 
       - name: Run real Minecraft 26.2 production Client GameTest
         shell: bash
@@ -87,6 +132,7 @@ jobs:
           set -euo pipefail
           ./gradlew \
             -p .github/ci/minecraft-e2e \
+            --build-cache \
             --stacktrace \
             -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
             runProductionClientGameTest
@@ -159,7 +205,7 @@ jobs:
           print(json.dumps(runtime, indent=2))
           PY
 
-      - name: Stage Minecraft E2E artifact outside hidden directories
+      - name: Stage Minecraft E2E evidence
         if: always()
         shell: bash
         run: |
@@ -190,17 +236,22 @@ jobs:
         with:
           name: minecraft-26.2-metal-framebuffer-${{ github.sha }}
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
+          # PNG/JSON/log files are already compact; avoid spending runner CPU
+          # recompressing them for a one-day evidence artifact.
+          compression-level: 0
           path: |
             build/minecraft-e2e-artifact/evidence/metal-framebuffer.png
             build/minecraft-e2e-artifact/evidence/metal-framebuffer-samples.json
             build/minecraft-e2e-artifact/evidence/runtime-evidence.json
+            build/minecraft-e2e-artifact/evidence/readback-control/suite.json
+            build/minecraft-e2e-artifact/logs/latest.log
 
-      - name: Upload Minecraft E2E evidence
-        if: always()
+      - name: Upload full E2E diagnostics on failure
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: minecraft-26.2-metaluniversal-e2e-${{ github.run_attempt }}
-          if-no-files-found: error
-          retention-days: 14
+          name: minecraft-26.2-metaluniversal-failure-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 1
           path: build/minecraft-e2e-artifact/**
