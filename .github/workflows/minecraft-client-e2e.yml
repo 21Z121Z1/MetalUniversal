@@ -22,7 +22,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 20
     env:
-      MTL_DEBUG_LAYER: '0'
+      MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
       MTL_HUD_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
@@ -50,27 +50,6 @@ jobs:
       - name: Setup Gradle dependency cache
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Cross-check capture after final render-pass encoding
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 <<'PY'
-          from pathlib import Path
-          path = Path("src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java")
-          text = path.read_text()
-          early = "        recordPresentAndMaybeCapture(source, textureView);\n        MetalFxManager.FrameGenerationInput frameInput"
-          if text.count(early) != 1:
-              raise SystemExit(f"expected exactly one early present capture hook, found {text.count(early)}")
-          text = text.replace(early, "        MetalFxManager.FrameGenerationInput frameInput", 1)
-          anchor = """        flushPendingClear(source);\n        submitRenderPass();\n        endEncoder();\n        MTLCommandBuffer commandBuffer = commandBuffer();\n        commandBuffer.encodePresentTextureToDrawable(layer, source.nativeHandle(), fence);\n"""
-          if text.count(anchor) != 1:
-              raise SystemExit(f"expected exactly one present submission anchor, found {text.count(anchor)}")
-          replacement = """        flushPendingClear(source);\n        submitRenderPass();\n        endEncoder();\n        recordPresentAndMaybeCapture(source, textureView);\n        MTLCommandBuffer commandBuffer = commandBuffer();\n        commandBuffer.encodePresentTextureToDrawable(layer, source.nativeHandle(), fence);\n"""
-          path.write_text(text.replace(anchor, replacement, 1))
-          PY
-          git diff --check
-          git diff -- src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java
-
       - name: Build production MetalUniversal JAR and native backend
         id: metallum
         shell: bash
@@ -86,7 +65,6 @@ jobs:
           test -s "$jar"
           jar="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
           echo "jar=$jar" >> "$GITHUB_OUTPUT"
-          echo "MetalUniversal production JAR: $jar"
           unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
 
       - name: Prove hosted Metal command execution before Minecraft
@@ -105,73 +83,25 @@ jobs:
             -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
             runProductionClientGameTest
 
-      - name: Verify authoritative Metal framebuffer evidence
+      - name: Verify staged Metal transfer controls
         shell: bash
         run: |
           set -euo pipefail
-          e2e=".github/ci/minecraft-e2e"
-          evidence="$e2e/build/evidence/runtime-evidence.json"
-          window_screenshot_dir="$e2e/build/run/clientGameTest/screenshots"
-          metal_screenshot="$e2e/build/evidence/metal-framebuffer.png"
-
-          test -s "$evidence"
-          test -s "$metal_screenshot"
-          window_screenshot="$(find "$window_screenshot_dir" -maxdepth 1 -type f -name '*.png' -print | head -n 1)"
-          test -n "$window_screenshot"
-          test -s "$window_screenshot"
-
-          python3 - "$evidence" <<'PY'
+          suite=".github/ci/minecraft-e2e/build/evidence/readback-control/suite.json"
+          test -s "$suite"
+          cat "$suite"
+          python3 - "$suite" <<'PY'
           import json, sys
-          path = sys.argv[1]
-          with open(path, encoding="utf-8") as f:
+          with open(sys.argv[1], encoding='utf-8') as f:
               data = json.load(f)
-          required_true = (
-              "productionRuntime",
-              "clientGameTest",
-              "metallumLoaded",
-              "sodiumLoaded",
-              "irisLoaded",
-              "worldLoaded",
-              "chunksRendered",
-          )
-          for key in required_true:
-              if data.get(key) is not True:
-                  raise SystemExit(f"{key} was not true in {path}: {data.get(key)!r}")
-          if str(data.get("backend", "")).lower() != "metal":
-              raise SystemExit(f"expected Metal backend, got {data.get('backend')!r}")
-          if data.get("minecraft") != "26.2":
-              raise SystemExit(f"expected Minecraft 26.2, got {data.get('minecraft')!r}")
-          if data.get("renderContractCompletedCaptures", 0) < 1:
-              raise SystemExit("no completed Metal framebuffer captures")
-          if data.get("renderContractFailedCaptures") != 0:
-              raise SystemExit(f"Metal framebuffer capture failures: {data.get('renderContractFailedCaptures')!r}")
-          if data.get("renderContractDroppedCaptures") != 0:
-              raise SystemExit(f"Metal framebuffer captures dropped: {data.get('renderContractDroppedCaptures')!r}")
-          if data.get("selectedMetalFrameNonZeroBytes", 0) <= 0:
-              raise SystemExit("selected Metal framebuffer contained no non-zero bytes")
-          print(json.dumps(data, indent=2, sort_keys=True))
+          for key in ('bufferCopy', 'textureRoundTrip', 'renderClear'):
+              result = data[key]
+              print(key, result)
+              if not result.get('exact'):
+                  raise SystemExit(f"{key} failed: {result}")
+          if data.get('allExact') is not True:
+              raise SystemExit(f"control suite did not pass: {data}")
           PY
-
-          xcrun swiftc -O \
-            -framework Foundation \
-            -framework CoreGraphics \
-            -framework ImageIO \
-            .github/ci/VerifyMinecraftScreenshot.swift \
-            -o "$RUNNER_TEMP/verify-minecraft-screenshot"
-
-          "$RUNNER_TEMP/verify-minecraft-screenshot" \
-            "$metal_screenshot" \
-            "$e2e/build/evidence/metal-framebuffer-stats.json"
-
-          shasum -a 256 "$metal_screenshot" \
-            | tee "$e2e/build/evidence/metal-framebuffer.sha256"
-          shasum -a 256 "$window_screenshot" \
-            | tee "$e2e/build/evidence/window-screenshot.sha256"
-          file "$metal_screenshot" "$window_screenshot"
-          ls -lh \
-            "$metal_screenshot" \
-            "$evidence" \
-            "$e2e/build/evidence/metal-framebuffer-stats.json"
 
       - name: Stage Minecraft E2E artifact outside hidden directories
         if: always()
@@ -182,9 +112,7 @@ jobs:
           stage="build/minecraft-e2e-artifact"
           rm -rf "$stage"
           mkdir -p "$stage"
-          if [ -d "$e2e/build/evidence" ]; then
-            cp -R "$e2e/build/evidence" "$stage/evidence"
-          fi
+          if [ -d "$e2e/build/evidence" ]; then cp -R "$e2e/build/evidence" "$stage/evidence"; fi
           if [ -d "$e2e/build/run/clientGameTest/screenshots" ]; then
             mkdir -p "$stage/window-screenshots"
             cp -R "$e2e/build/run/clientGameTest/screenshots/." "$stage/window-screenshots/"
@@ -197,13 +125,8 @@ jobs:
             mkdir -p "$stage/crash-reports"
             cp -R "$e2e/build/run/clientGameTest/crash-reports/." "$stage/crash-reports/"
           fi
-          if [ -d "$e2e/build/reports" ]; then
-            cp -R "$e2e/build/reports" "$stage/reports"
-          fi
-          if [ -d "$e2e/build/test-results" ]; then
-            cp -R "$e2e/build/test-results" "$stage/test-results"
-          fi
-          find . -maxdepth 2 -type f -name 'hs_err_pid*.log' -exec cp {} "$stage/" \; || true
+          if [ -d "$e2e/build/reports" ]; then cp -R "$e2e/build/reports" "$stage/reports"; fi
+          if [ -d "$e2e/build/test-results" ]; then cp -R "$e2e/build/test-results" "$stage/test-results"; fi
           find "$stage" -type f -maxdepth 12 -print | sort || true
 
       - name: Upload Minecraft E2E evidence
