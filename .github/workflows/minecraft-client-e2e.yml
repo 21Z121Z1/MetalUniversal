@@ -50,31 +50,6 @@ jobs:
       - name: Setup Gradle dependency cache
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Validate framebuffer capture ordering fix in checkout
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 <<'PY'
-          from pathlib import Path
-          path = Path("src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java")
-          text = path.read_text()
-          early = "        recordPresentAndMaybeCapture(source, textureView);\n        MetalFxManager.FrameGenerationInput frameInput"
-          if text.count(early) != 1:
-              raise SystemExit(f"expected exactly one early present capture hook, found {text.count(early)}")
-          text = text.replace(
-              early,
-              "        MetalFxManager.FrameGenerationInput frameInput",
-              1,
-          )
-          anchor = """        flushPendingClear(source);\n        submitRenderPass();\n        endEncoder();\n        MTLCommandBuffer commandBuffer = commandBuffer();\n        commandBuffer.encodePresentTextureToDrawable(layer, source.nativeHandle(), fence);\n"""
-          if text.count(anchor) != 1:
-              raise SystemExit(f"expected exactly one present submission anchor, found {text.count(anchor)}")
-          replacement = """        flushPendingClear(source);\n        submitRenderPass();\n        endEncoder();\n        // Capture only after the final render pass has been encoded. Capturing before\n        // submitRenderPass() observes the previous/uninitialized texture contents.\n        recordPresentAndMaybeCapture(source, textureView);\n        MTLCommandBuffer commandBuffer = commandBuffer();\n        commandBuffer.encodePresentTextureToDrawable(layer, source.nativeHandle(), fence);\n"""
-          path.write_text(text.replace(anchor, replacement, 1))
-          PY
-          git diff --check
-          git diff -- src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java
-
       - name: Build production MetalUniversal JAR and native backend
         id: metallum
         shell: bash
@@ -116,18 +91,13 @@ jobs:
           e2e=".github/ci/minecraft-e2e"
           evidence="$e2e/build/evidence/runtime-evidence.json"
           window_screenshot_dir="$e2e/build/run/clientGameTest/screenshots"
-          metal_capture_dir="$e2e/build/evidence/metal-framebuffer"
+          metal_screenshot="$e2e/build/evidence/metal-framebuffer.png"
 
           test -s "$evidence"
+          test -s "$metal_screenshot"
           window_screenshot="$(find "$window_screenshot_dir" -maxdepth 1 -type f -name '*.png' -print | head -n 1)"
           test -n "$window_screenshot"
           test -s "$window_screenshot"
-
-          metal_screenshot="$(find "$metal_capture_dir" -type f -name 'actual.png' -print0 \
-            | xargs -0 ls -1t 2>/dev/null | head -n 1)"
-          test -n "$metal_screenshot"
-          test -s "$metal_screenshot"
-          cp "$metal_screenshot" "$e2e/build/evidence/metal-framebuffer.png"
 
           python3 - "$evidence" <<'PY'
           import json, sys
@@ -156,6 +126,8 @@ jobs:
               raise SystemExit(f"Metal framebuffer capture failures: {data.get('renderContractFailedCaptures')!r}")
           if data.get("renderContractDroppedCaptures") != 0:
               raise SystemExit(f"Metal framebuffer captures dropped: {data.get('renderContractDroppedCaptures')!r}")
+          if data.get("selectedMetalFrameNonZeroBytes", 0) <= 0:
+              raise SystemExit("selected Metal framebuffer contained no non-zero bytes")
           print(json.dumps(data, indent=2, sort_keys=True))
           PY
 
@@ -167,16 +139,16 @@ jobs:
             -o "$RUNNER_TEMP/verify-minecraft-screenshot"
 
           "$RUNNER_TEMP/verify-minecraft-screenshot" \
-            "$e2e/build/evidence/metal-framebuffer.png" \
+            "$metal_screenshot" \
             "$e2e/build/evidence/metal-framebuffer-stats.json"
 
-          shasum -a 256 "$e2e/build/evidence/metal-framebuffer.png" \
+          shasum -a 256 "$metal_screenshot" \
             | tee "$e2e/build/evidence/metal-framebuffer.sha256"
           shasum -a 256 "$window_screenshot" \
             | tee "$e2e/build/evidence/window-screenshot.sha256"
-          file "$e2e/build/evidence/metal-framebuffer.png" "$window_screenshot"
+          file "$metal_screenshot" "$window_screenshot"
           ls -lh \
-            "$e2e/build/evidence/metal-framebuffer.png" \
+            "$metal_screenshot" \
             "$evidence" \
             "$e2e/build/evidence/metal-framebuffer-stats.json"
 
@@ -211,7 +183,7 @@ jobs:
             cp -R "$e2e/build/test-results" "$stage/test-results"
           fi
           find . -maxdepth 2 -type f -name 'hs_err_pid*.log' -exec cp {} "$stage/" \; || true
-          find "$stage" -type f -maxdepth 8 -print | sort || true
+          find "$stage" -type f -maxdepth 12 -print | sort || true
 
       - name: Upload Minecraft E2E evidence
         if: always()
