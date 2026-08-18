@@ -50,6 +50,36 @@ private struct SamplerKey: Hashable {
     let lodMaxClampBits: UInt32
 }
 
+#if os(macOS) && canImport(MetalFX)
+private enum MetalFxBackend: UInt8, Hashable {
+    case metal3
+    case metal4
+}
+
+private enum MetalFxScalerKind: UInt8, Hashable {
+    case spatial
+    case temporal
+}
+
+/// Numeric identity for a MetalFX scaler configuration. Every field that can
+/// affect descriptor construction is represented directly so cache lookup does
+/// not allocate, format or hash a String on each encode.
+private struct MetalFxScalerKey: Hashable {
+    let deviceAddress: UInt
+    let backend: MetalFxBackend
+    let kind: MetalFxScalerKind
+    let colorFormat: MTLPixelFormat
+    let depthFormat: MTLPixelFormat
+    let motionFormat: MTLPixelFormat
+    let outputFormat: MTLPixelFormat
+    let reactiveFormat: MTLPixelFormat
+    let inputWidth: Int
+    let inputHeight: Int
+    let outputWidth: Int
+    let outputHeight: Int
+}
+#endif
+
 private enum NativeState {
     static var debugLabelsEnabled = false
     // When true, makeRenderCommandEncoder_v2 leaves the depth attachment with
@@ -220,10 +250,10 @@ private enum NativeState {
     static var immediatePresentModeRequested = false
     #endif
     #if os(macOS) && canImport(MetalFX)
-    static var metalFxScalers: [String: AnyObject] = [:]
-    static var metalFxPreviousDepthTextures: [String: MTLTexture] = [:]
-    static var metalFxValidationReactiveTextures: [String: MTLTexture] = [:]
-    static var metalFxPreviousDepthValid: Set<String> = []
+    static var metalFxScalers: [MetalFxScalerKey: AnyObject] = [:]
+    static var metalFxPreviousDepthTextures: [MetalFxScalerKey: MTLTexture] = [:]
+    static var metalFxValidationReactiveTextures: [MetalFxScalerKey: MTLTexture] = [:]
+    static var metalFxPreviousDepthValid: Set<MetalFxScalerKey> = []
     static let metalFxHistoryLock = NSLock()
     static var motionPipeline: MTLComputePipelineState?
     static var motionV2Pipeline: MTLComputePipelineState?
@@ -902,8 +932,11 @@ private final class Metal4MainRenderEncoderBridge {
     let lease: Metal4MainCommandBufferLease
     private let vertexArguments: MTL4ArgumentTable
     private let fragmentArguments: MTL4ArgumentTable
-    private var vertexBuffers = Array<MTLBuffer?>(repeating: nil, count: 31)
-    private var fragmentBuffers = Array<MTLBuffer?>(repeating: nil, count: 31)
+    // Fixed-size binding shadows are part of the bridge allocation itself.
+    // Keep the original MTLBuffer retain semantics while removing the two
+    // growable Array backing allocations and their COW machinery.
+    private var vertexBuffers: InlineArray<31, MTLBuffer?> = .init(repeating: nil)
+    private var fragmentBuffers: InlineArray<31, MTLBuffer?> = .init(repeating: nil)
 
     init(
         encoder: MTL4RenderCommandEncoder,
@@ -3265,7 +3298,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     }
 
     private func applyLifecycleActionsLocked(
-        _ actions: [MetalFrameGenerationLifecycleAction],
+        _ actions: MetalFrameGenerationLifecycleAction,
         eventValue: UInt64
     ) {
         if actions.contains(.invalidateHistory) {
@@ -3289,7 +3322,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     }
 
     private func applyQueuedLifecycleActionsLocked(
-        _ actions: [MetalFrameGenerationLifecycleAction],
+        _ actions: MetalFrameGenerationLifecycleAction,
         eventValue: UInt64
     ) {
         if actions.contains(.invalidateHistory) {
@@ -5162,8 +5195,31 @@ private func ensureMotionV2Pipelines(_ device: MTLDevice) -> (
     }
 }
 
-private func metalFxScalerKey(_ device: MTLDevice, _ temporal: Bool, _ color: MTLTexture, _ output: MTLTexture) -> String {
-    "\(objectAddress(device))-\(temporal ? 1 : 0)-\(color.pixelFormat.rawValue)-\(output.pixelFormat.rawValue)-\(color.width)x\(color.height)-\(output.width)x\(output.height)"
+@inline(__always)
+private func metalFxScalerKey(
+    _ device: MTLDevice,
+    backend: MetalFxBackend,
+    kind: MetalFxScalerKind,
+    color: MTLTexture,
+    output: MTLTexture,
+    depth: MTLTexture? = nil,
+    motion: MTLTexture? = nil,
+    reactive: MTLTexture? = nil
+) -> MetalFxScalerKey {
+    MetalFxScalerKey(
+        deviceAddress: objectAddress(device),
+        backend: backend,
+        kind: kind,
+        colorFormat: color.pixelFormat,
+        depthFormat: depth?.pixelFormat ?? .invalid,
+        motionFormat: motion?.pixelFormat ?? .invalid,
+        outputFormat: output.pixelFormat,
+        reactiveFormat: reactive?.pixelFormat ?? .invalid,
+        inputWidth: color.width,
+        inputHeight: color.height,
+        outputWidth: output.width,
+        outputHeight: output.height
+    )
 }
 #endif
 
@@ -5804,7 +5860,15 @@ private func metal3MetalFxEncode(
     if #available(macOS 13.0, *) {
         return autoreleasepool {
             let temporal = motionTexture != nil && depthTexture != nil
-            let key = metalFxScalerKey(device, temporal, colorTexture, outputTexture)
+            let key = metalFxScalerKey(
+                device,
+                backend: .metal3,
+                kind: temporal ? .temporal : .spatial,
+                color: colorTexture,
+                output: outputTexture,
+                depth: depthTexture,
+                motion: motionTexture
+            )
             let scalerObject: AnyObject?
             if temporal {
                 // Temporal upscaling lives in metallum_metalfx_encode_v2, which
@@ -5910,7 +5974,13 @@ public func metallumMetalFxEncodeEntry(
         guard depthTexture == nil, motionTexture == nil,
               inputWidth > 0, inputHeight > 0,
               let compiler = NativeState.metal4Compiler(device) else { return 0 }
-        let key = "m4-spatial-" + metalFxScalerKey(device, false, colorTexture, outputTexture)
+        let key = metalFxScalerKey(
+            device,
+            backend: .metal4,
+            kind: .spatial,
+            color: colorTexture,
+            output: outputTexture
+        )
         let scaler: any MTL4FXSpatialScaler
         if let cached = NativeState.metalFxScalers[key] as? any MTL4FXSpatialScaler {
             scaler = cached
@@ -5994,8 +6064,16 @@ private func metal4MetalFxEncodeV2(
         return 0
     }
 
-    let baseKey = metalFxScalerKey(device, true, colorTexture, outputTexture)
-    let key = "m4-temporal-" + baseKey
+    let key = metalFxScalerKey(
+        device,
+        backend: .metal4,
+        kind: .temporal,
+        color: colorTexture,
+        output: outputTexture,
+        depth: depthTexture,
+        motion: motionTexture,
+        reactive: reactiveTexture
+    )
     let previousDepthTexture: MTLTexture
     let previousDepthIsValid: Bool
     NativeState.metalFxHistoryLock.lock()
@@ -6279,7 +6357,16 @@ private func metal3MetalFxEncodeV2(
                 return 0
             }
 
-            let key = metalFxScalerKey(device, true, colorTexture, outputTexture)
+            let key = metalFxScalerKey(
+                device,
+                backend: .metal3,
+                kind: .temporal,
+                color: colorTexture,
+                output: outputTexture,
+                depth: depthTexture,
+                motion: motionTexture,
+                reactive: reactiveTexture
+            )
             let previousDepthTexture: MTLTexture
             let previousDepthIsValid: Bool
             NativeState.metalFxHistoryLock.lock()
@@ -6998,6 +7085,7 @@ public func metallum_metalfx_release_scalers() {
     NativeState.lastTemporalScalerForInterpolation = nil
     NativeState.metalFxHistoryLock.lock()
     NativeState.metalFxPreviousDepthTextures.removeAll()
+    NativeState.metalFxValidationReactiveTextures.removeAll()
     NativeState.metalFxPreviousDepthValid.removeAll()
     NativeState.metalFxHistoryLock.unlock()
     #endif

@@ -12,9 +12,11 @@ import java.lang.foreign.ValueLayout;
  * Reusable off-heap render-state packet for one native render encoder.
  *
  * <p>Entries are appended only after the Java state shadow admits a real
- * change. A draw flushes the packet through one ordinary FFM call. The native
- * decoder validates the complete packet before applying it; a failure is
- * replayed through the legacy setters and disables packet use for this encoder.</p>
+ * change. A draw flushes the packet through one ordinary FFM call. Structural
+ * packet failures apply no native state; an invalid later entry may report a
+ * partially applied prefix, in which case the complete packet is replayed
+ * through idempotent legacy setters and packet use is disabled for this
+ * encoder.</p>
  */
 final class MetalRenderStatePacket implements AutoCloseable {
     static final int MAGIC = 0x4D525350;
@@ -290,7 +292,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
                 );
                 case OP_WINDING -> MetalNativeBridge.MTLRenderCommandEncoder_setFrontFacingWinding(
                         encoder,
-                        a
+                        (int) a
                 );
                 case OP_CULL_MODE -> MetalNativeBridge.MTLRenderCommandEncoder_setCullMode(
                         encoder,
@@ -298,7 +300,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
                 );
                 case OP_FILL_MODE -> MetalNativeBridge.MTLRenderCommandEncoder_setTriangleFillMode(
                         encoder,
-                        a
+                        (int) a
                 );
                 case OP_BUFFER -> MetalNativeBridge.MTLRenderCommandEncoder_setBuffer(
                         encoder,

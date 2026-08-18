@@ -8,7 +8,7 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
-public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
+public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements MetalRenderStateFlushable {
     private static final boolean STATE_SHADOW_ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.encoderStateShadow", "true")
     );
@@ -487,6 +487,11 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
                 this.statePacket.close();
             }
         }
+    }
+
+    @Override
+    public void metallum$flushPendingRenderState() {
+        flushState(handle());
     }
 
     private void flushState(final MemorySegment encoder) {

@@ -4,9 +4,11 @@ import Metal
 // MARK: - Versioned render-state packet ABI
 //
 // Java writes one fixed-width packet into a persistently allocated off-heap
-// segment and submits it immediately before a draw. The decoder validates the
-// whole packet before mutating the encoder, so Java can replay the entries
-// through the legacy per-symbol bridge if negotiation or validation fails.
+// segment and submits it immediately before a draw. Structural header failures
+// apply no state. Entry validation is intentionally fused with application: if
+// a later entry is invalid, the function returns the number already applied and
+// Java replays the complete packet through idempotent legacy setters before
+// disabling packet use for that encoder.
 //
 // Header (16 bytes, little-endian):
 //   0  UInt32 magic     = 'MRSP'
@@ -95,56 +97,30 @@ private func validRenderStageMask(_ mask: UInt32) -> Bool {
     mask != 0 && (mask & ~renderStageAll) == 0
 }
 
-private func validateRenderStateEntry(_ entry: RenderStatePacketEntry) -> Bool {
-    guard Int(exactly: entry.index) != nil else { return false }
-    switch entry.opcode {
-    case .pipeline:
-        return packetObject(entry.a) as? MTLRenderPipelineState != nil
-    case .depthStencil:
-        return packetObject(entry.a) as? MTLDepthStencilState != nil
-    case .depthBias, .scissor:
-        return true
-    case .winding:
-        return MTLWinding(rawValue: UInt(entry.a)) != nil
-    case .cullMode:
-        return MTLCullMode(rawValue: UInt(entry.a)) != nil
-    case .fillMode:
-        return MTLTriangleFillMode(rawValue: UInt(entry.a)) != nil
-    case .buffer:
-        return validRenderStageMask(entry.stageMask)
-            && (entry.a == 0 || packetObject(entry.a) as? MTLBuffer != nil)
-    case .bufferOffset:
-        return validRenderStageMask(entry.stageMask)
-    case .texture:
-        return validRenderStageMask(entry.stageMask)
-            && (entry.a == 0 || packetObject(entry.a) as? MTLTexture != nil)
-    case .textureAndSampler:
-        return validRenderStageMask(entry.stageMask)
-            && packetObject(entry.a) as? MTLTexture != nil
-            && packetObject(entry.b) as? MTLSamplerState != nil
-    }
-}
-
-/// Reuse the shipping setter functions rather than duplicating Metal 3 / Metal
-/// 4 dispatch here. Those functions accept the raw encoder handle, route to the
-/// Metal4MainRenderEncoderBridge when appropriate, and otherwise use the Metal 3
-/// encoder. Java still crosses FFM once for the whole packet.
-private func applyRenderStateEntry(
+/// Validate and apply one fixed-width render-state entry without constructing
+/// intermediate collections or repeating Objective-C protocol casts. A false
+/// return means this entry has not mutated the encoder; the caller reports the
+/// already-applied prefix length and Java replays the complete packet.
+private func validateAndApplyRenderStateEntry(
     _ encoderPointer: UnsafeMutableRawPointer,
     _ entry: RenderStatePacketEntry
-) {
+) -> Bool {
+    guard Int(exactly: entry.index) != nil else { return false }
     let stageMask = Int32(bitPattern: entry.stageMask)
+
     switch entry.opcode {
     case .pipeline:
-        metallum_MTLRenderCommandEncoder_setRenderPipelineState(
-            encoderPointer,
-            packetObject(entry.a) as! MTLRenderPipelineState
-        )
+        guard let pipeline = packetObject(entry.a) as? MTLRenderPipelineState else {
+            return false
+        }
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(encoderPointer, pipeline)
+
     case .depthStencil:
-        metallum_MTLRenderCommandEncoder_setDepthStencilState(
-            encoderPointer,
-            packetObject(entry.a) as? MTLDepthStencilState
-        )
+        guard let depthStencil = packetObject(entry.a) as? MTLDepthStencilState else {
+            return false
+        }
+        metallum_MTLRenderCommandEncoder_setDepthStencilState(encoderPointer, depthStencil)
+
     case .depthBias:
         metallum_MTLRenderCommandEncoder_setDepthBias(
             encoderPointer,
@@ -152,52 +128,85 @@ private func applyRenderStateEntry(
             Float(bitPattern: UInt32(truncatingIfNeeded: entry.b)),
             Float(bitPattern: UInt32(truncatingIfNeeded: entry.c))
         )
+
     case .winding:
-        metallum_MTLRenderCommandEncoder_setFrontFacingWinding(
-            encoderPointer,
-            MTLWinding(rawValue: UInt(entry.a))!
-        )
+        guard let winding = MTLWinding(rawValue: UInt(entry.a)) else { return false }
+        metallum_MTLRenderCommandEncoder_setFrontFacingWinding(encoderPointer, winding)
+
     case .cullMode:
-        metallum_MTLRenderCommandEncoder_setCullMode(
-            encoderPointer,
-            MTLCullMode(rawValue: UInt(entry.a))!
-        )
+        guard let cullMode = MTLCullMode(rawValue: UInt(entry.a)) else { return false }
+        metallum_MTLRenderCommandEncoder_setCullMode(encoderPointer, cullMode)
+
     case .fillMode:
-        metallum_MTLRenderCommandEncoder_setTriangleFillMode(
-            encoderPointer,
-            MTLTriangleFillMode(rawValue: UInt(entry.a))!
-        )
+        guard let fillMode = MTLTriangleFillMode(rawValue: UInt(entry.a)) else { return false }
+        metallum_MTLRenderCommandEncoder_setTriangleFillMode(encoderPointer, fillMode)
+
     case .buffer:
+        guard validRenderStageMask(entry.stageMask), Int(exactly: entry.b) != nil else {
+            return false
+        }
+        let buffer: MTLBuffer?
+        if entry.a == 0 {
+            buffer = nil
+        } else {
+            guard let typedBuffer = packetObject(entry.a) as? MTLBuffer else { return false }
+            buffer = typedBuffer
+        }
         metallum_MTLRenderCommandEncoder_setBuffer(
             encoderPointer,
-            packetObject(entry.a) as? MTLBuffer,
+            buffer,
             entry.b,
             entry.index,
             stageMask
         )
+
     case .bufferOffset:
+        guard validRenderStageMask(entry.stageMask), Int(exactly: entry.a) != nil else {
+            return false
+        }
         metallum_MTLRenderCommandEncoder_setBufferOffset(
             encoderPointer,
             entry.a,
             entry.index,
             stageMask
         )
+
     case .texture:
+        guard validRenderStageMask(entry.stageMask) else { return false }
+        let texture: MTLTexture?
+        if entry.a == 0 {
+            texture = nil
+        } else {
+            guard let typedTexture = packetObject(entry.a) as? MTLTexture else { return false }
+            texture = typedTexture
+        }
         metallum_MTLRenderCommandEncoder_setTexture(
             encoderPointer,
-            packetObject(entry.a) as? MTLTexture,
+            texture,
             entry.index,
             stageMask
         )
+
     case .textureAndSampler:
+        guard validRenderStageMask(entry.stageMask),
+              let texture = packetObject(entry.a) as? MTLTexture,
+              let sampler = packetObject(entry.b) as? MTLSamplerState else {
+            return false
+        }
         metallum_MTLRenderCommandEncoder_setTextureAndSampler(
             encoderPointer,
-            packetObject(entry.a) as? MTLTexture,
-            packetObject(entry.b) as? MTLSamplerState,
+            texture,
+            sampler,
             entry.index,
             stageMask
         )
+
     case .scissor:
+        guard Int(exactly: entry.a) != nil,
+              Int(exactly: entry.b) != nil,
+              Int(exactly: entry.c) != nil else {
+            return false
+        }
         metallum_MTLRenderCommandEncoder_setScissorRect(
             encoderPointer,
             entry.index,
@@ -206,10 +215,14 @@ private func applyRenderStateEntry(
             entry.c
         )
     }
+    return true
 }
 
-/// Returns the number of applied entries. Negative values indicate that no
-/// state was applied and Java may safely replay the packet through legacy calls.
+/// Returns the number of applied entries. Negative values are reserved for
+/// structural packet failures that apply no state. A nonnegative value smaller
+/// than entryCount means a validated prefix was applied before an invalid entry;
+/// Java's packet contract replays the complete packet through idempotent legacy
+/// setters and disables packet use for that encoder.
 @_cdecl("metallum_render_state_packet_apply_v1")
 public func metallum_render_state_packet_apply_v1(
     _ encoderPointer: UnsafeMutableRawPointer,
@@ -235,18 +248,18 @@ public func metallum_render_state_packet_apply_v1(
         return -4
     }
 
-    // Validate the complete packet first. This makes failure atomic from the
-    // Java caller's perspective and permits exact legacy replay.
+    // Decode each fixed-width entry exactly once. Java intentionally treats a
+    // partial positive return as replay-required, so preserving an all-or-nothing
+    // native mutation contract would only duplicate decode/type-check work.
+    var appliedCount: Int32 = 0
     for index in 0..<entryCount {
         guard let entry = decodeRenderStateEntry(packet, index),
-              validateRenderStateEntry(entry) else {
-            return -5
+              validateAndApplyRenderStateEntry(encoderPointer, entry) else {
+            return appliedCount
         }
+        appliedCount += 1
     }
-    for index in 0..<entryCount {
-        applyRenderStateEntry(encoderPointer, decodeRenderStateEntry(packet, index)!)
-    }
-    return Int32(entryCount)
+    return appliedCount
 }
 
 // MARK: - Versioned native interface

@@ -52,9 +52,11 @@ enum MetalFrameGenerationPresentationStep: Equatable {
     case real
 }
 
-enum MetalFrameGenerationLifecycleAction: Equatable {
-    case releaseOwnership
-    case invalidateHistory
+struct MetalFrameGenerationLifecycleAction: OptionSet, Equatable {
+    let rawValue: UInt8
+
+    static let releaseOwnership = MetalFrameGenerationLifecycleAction(rawValue: 1 << 0)
+    static let invalidateHistory = MetalFrameGenerationLifecycleAction(rawValue: 1 << 1)
 }
 
 /// Identifies which source most recently established each presenter history.
@@ -146,7 +148,7 @@ struct MetalFrameGenerationLifecycle {
         return nil
     }
 
-    mutating func submitInput() -> [MetalFrameGenerationLifecycleAction] {
+    mutating func submitInput() -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased, !inputSubmitted else {
             return []
         }
@@ -169,7 +171,7 @@ struct MetalFrameGenerationLifecycle {
 
     mutating func submitPresentation(
         _ step: MetalFrameGenerationPresentationStep
-    ) -> [MetalFrameGenerationLifecycleAction] {
+    ) -> MetalFrameGenerationLifecycleAction {
         guard nextPresentationStep == step else {
             return []
         }
@@ -187,7 +189,7 @@ struct MetalFrameGenerationLifecycle {
     mutating func failBeforeSubmission(
         _ step: MetalFrameGenerationPresentationStep,
         reason: String
-    ) -> [MetalFrameGenerationLifecycleAction] {
+    ) -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased, nextPresentationStep == step else {
             return []
         }
@@ -214,7 +216,7 @@ struct MetalFrameGenerationLifecycle {
         _ work: MetalFrameGenerationGPUWork,
         succeeded: Bool,
         reason: String? = nil
-    ) -> [MetalFrameGenerationLifecycleAction] {
+    ) -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased else {
             return []
         }
@@ -252,7 +254,7 @@ struct MetalFrameGenerationLifecycle {
                 // Preserve the source long enough to try its real frame.
                 return [.invalidateHistory]
             }
-            return [.invalidateHistory] + terminalActions()
+            return MetalFrameGenerationLifecycleAction.invalidateHistory.union(terminalActions())
         }
 
         switch work {
@@ -286,7 +288,7 @@ struct MetalFrameGenerationLifecycle {
     mutating func recordPresented(
         _ step: MetalFrameGenerationPresentationStep,
         presentedTime: CFTimeInterval
-    ) -> [MetalFrameGenerationLifecycleAction] {
+    ) -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased else {
             return []
         }
@@ -324,26 +326,26 @@ struct MetalFrameGenerationLifecycle {
         }
     }
 
-    mutating func cancel(reason: String) -> [MetalFrameGenerationLifecycleAction] {
+    mutating func cancel(reason: String) -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased else {
             return []
         }
         cancellationRequested = true
         failureReason = reason
         phase = .cancelled
-        return [.invalidateHistory] + terminalActions()
+        return MetalFrameGenerationLifecycleAction.invalidateHistory.union(terminalActions())
     }
 
-    mutating func failPendingPresentation(reason: String) -> [MetalFrameGenerationLifecycleAction] {
+    mutating func failPendingPresentation(reason: String) -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased, realSubmitted, realCompleted, !realPresentedCallbackReceived else {
             return []
         }
         failureReason = reason
         phase = .failed
-        return [.invalidateHistory] + terminalActions()
+        return MetalFrameGenerationLifecycleAction.invalidateHistory.union(terminalActions())
     }
 
-    private mutating func terminalActions() -> [MetalFrameGenerationLifecycleAction] {
+    private mutating func terminalActions() -> MetalFrameGenerationLifecycleAction {
         guard gpuWorkInFlight == 0, !ownershipReleased else {
             return []
         }
