@@ -1,4 +1,6 @@
 import org.gradle.api.tasks.testing.Test
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
 
 // CI-only capability harness for GitHub's macOS 26 Apple Silicon runner.
 // The workflow must execute HostedMetalCapabilityProbe.swift successfully before
@@ -25,7 +27,32 @@ gradle.projectsEvaluated {
                 tests.each { testName -> includeTestsMatching(testName) }
                 failOnNoMatchingTests = true
             }
-            task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+
+            // A fatal error in the hosted Apple GPU/JVM path must remain
+            // diagnosable after the runner exits. Keep one class per worker so
+            // the first crashing class is unambiguous and direct HotSpot's
+            // native-fatal report into the existing Agent Metal Lab artifact.
+            task.maxParallelForks = 1
+            task.forkEvery = 1
+            def crashEvidenceDir = project.layout.buildDirectory.dir("agent-evidence").get().asFile
+            task.doFirst {
+                crashEvidenceDir.mkdirs()
+            }
+            task.jvmArgs(
+                    "--enable-native-access=ALL-UNNAMED",
+                    "-XX:ErrorFile=${new File(crashEvidenceDir, name + '-hs_err_pid%p.log').absolutePath}"
+            )
+            task.testLogging {
+                events(
+                        TestLogEvent.STARTED,
+                        TestLogEvent.PASSED,
+                        TestLogEvent.SKIPPED,
+                        TestLogEvent.FAILED
+                )
+                exceptionFormat = TestExceptionFormat.FULL
+                showStandardStreams = true
+            }
+
             task.environment "MTL_DEBUG_LAYER", "0"
             task.environment "MTL_SHADER_VALIDATION", "0"
             task.environment "MTL_HUD_ENABLED", "0"
