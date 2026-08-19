@@ -59,6 +59,7 @@ jobs:
       MTL_DEBUG_LAYER: '0'
       MTL_SHADER_VALIDATION: '0'
       MTL_HUD_ENABLED: '0'
+      MTL_HUD_ENCODER_TIMING_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
     steps:
@@ -147,6 +148,7 @@ jobs:
         run: |
           set -euo pipefail
           ./gradlew --stacktrace \
+            -I .github/ci/HostedMetalGradle.init.gradle \
             buildMacNative \
             verifyProductionJarIsolation \
             metalFrameGenerationLifecycleTest \
@@ -182,6 +184,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import glob
+          import json
           import xml.etree.ElementTree as ET
 
           task_names = [
@@ -212,7 +215,6 @@ jobs:
                   "errors": errors,
               }
 
-          import json
           with open("agent-evidence/hosted-shipping-tests.json", "w", encoding="utf-8") as handle:
               json.dump(summary, handle, indent=2, sort_keys=True)
               handle.write("\n")
@@ -226,7 +228,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, re, urllib.parse, urllib.request
+          import json, os, re, time, urllib.parse, urllib.request
 
           source_sha = os.environ.get("METALLUM_SOURCE_SHA", "").strip().lower()
           if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
@@ -237,6 +239,7 @@ jobs:
               "raw_metal_compute_readback": "pass",
               "native_mrt_smoke": "pass",
               "metal4_shipping_path_contract": "pass",
+              "layerless_device_presentation_contract": "pass",
               "shipping_java_ffm_swift_core_gpu": "pass",
               "shipping_iris_gpu": "pass",
               "p1_hotpath_static_contract": "pass",
@@ -249,6 +252,7 @@ jobs:
           activation = {
               "source_sha": source_sha,
               "raw_hosted_metal_gpu": "active-and-readback-verified",
+              "offscreen_presentation_state": "absent-by-layer-contract",
               "shipping_java_ffm_swift_gpu": "active-and-tests-executed",
               "shipping_iris_gpu": "active-and-tests-executed",
               "required_hosted_tests_skipped": 0,
@@ -260,41 +264,74 @@ jobs:
 
           repository = os.environ["GITHUB_REPOSITORY"]
           token = os.environ.get("GH_TOKEN", "")
-          query = urllib.parse.urlencode({"head_sha": source_sha, "event": "pull_request", "per_page": 100})
-          request = urllib.request.Request(
-              f"https://api.github.com/repos/{repository}/actions/runs?{query}",
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "Authorization": f"Bearer {token}",
-                  "X-GitHub-Api-Version": "2022-11-28",
-              },
-          )
-          with urllib.request.urlopen(request, timeout=30) as response:
-              payload = json.load(response)
-
           required_external = [
               "Minecraft 26.2 production client E2E",
               "Unified eval verification",
               "29/merge",
           ]
-          latest = {}
-          for run in payload.get("workflow_runs", []):
-              name = run.get("name")
-              if name in required_external and name not in latest:
-                  latest[name] = {
-                      "run_id": run.get("id"),
-                      "status": run.get("status"),
-                      "conclusion": run.get("conclusion"),
-                      "head_sha": run.get("head_sha"),
-                  }
 
-          external_complete = all(
-              name in latest
-              and latest[name]["head_sha"] == source_sha
-              and latest[name]["status"] == "completed"
-              and latest[name]["conclusion"] == "success"
-              for name in required_external
-          )
+          def load_latest_required():
+              query = urllib.parse.urlencode({"head_sha": source_sha, "event": "pull_request", "per_page": 100})
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{repository}/actions/runs?{query}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  payload = json.load(response)
+              latest = {}
+              for run in payload.get("workflow_runs", []):
+                  name = run.get("name")
+                  if name in required_external and name not in latest:
+                      latest[name] = {
+                          "run_id": run.get("id"),
+                          "status": run.get("status"),
+                          "conclusion": run.get("conclusion"),
+                          "head_sha": run.get("head_sha"),
+                      }
+              return latest
+
+          latest = {}
+          external_complete = False
+          failure_reason = None
+          for attempt in range(81):
+              latest = load_latest_required()
+              malformed = [
+                  name for name, run in latest.items()
+                  if run.get("head_sha") != source_sha
+              ]
+              if malformed:
+                  failure_reason = f"source SHA mismatch for required workflows: {malformed}"
+                  break
+
+              failed = [
+                  name for name in required_external
+                  if name in latest
+                  and latest[name].get("status") == "completed"
+                  and latest[name].get("conclusion") != "success"
+              ]
+              if failed:
+                  failure_reason = f"required workflows failed: {failed}"
+                  break
+
+              external_complete = all(
+                  name in latest
+                  and latest[name].get("head_sha") == source_sha
+                  and latest[name].get("status") == "completed"
+                  and latest[name].get("conclusion") == "success"
+                  for name in required_external
+              )
+              if external_complete:
+                  break
+              if attempt < 80:
+                  time.sleep(15)
+
+          if not external_complete and failure_reason is None:
+              failure_reason = "required exact-head workflows did not all reach success before the bounded decision timeout"
+
           decision_value = (
               "CLOUD_COMPLETE_FINAL_PHYSICAL_PENDING"
               if external_complete
@@ -311,11 +348,14 @@ jobs:
               "physical_acceptance": "pending",
               "default_enablement_allowed": False,
               "next_cloud_stage_allowed_after_merge": external_complete,
+              "failure_reason": failure_reason,
           }
           with open("agent-evidence/decision.json", "w", encoding="utf-8") as handle:
               json.dump(decision, handle, indent=2, sort_keys=True)
               handle.write("\n")
           print(json.dumps(decision, sort_keys=True))
+          if not external_complete:
+              raise SystemExit(failure_reason)
           PY
           python3 -m json.tool agent-evidence/correctness.json >/dev/null
           python3 -m json.tool agent-evidence/activation.json >/dev/null
