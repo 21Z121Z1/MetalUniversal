@@ -239,6 +239,33 @@ jobs:
             exit 1
           fi
 
+      - name: Verify resource reload recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          reload=".github/ci/minecraft-e2e/build/evidence/reload-evidence.json"
+          test -s "$reload"
+          cat "$reload"
+          python3 - "$reload" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding='utf-8') as f:
+              data = json.load(f)
+          if data.get('reloadCompleted') is not True:
+              raise SystemExit(f"resource reload did not complete: {data}")
+          if str(data.get('backendAfterReload', '')).lower() != 'metal':
+              raise SystemExit(f"backend was not Metal after reload: {data}")
+          if data.get('worldLoadedAfterReload') is not True:
+              raise SystemExit(f"client world was lost after reload: {data}")
+          encoded = int(data.get('postReloadPresentEncodeCalls', 0))
+          submitted = int(data.get('postReloadPresentCommandBuffersSubmitted', -1))
+          completed = int(data.get('postReloadPresentCommandBuffersCompleted', -1))
+          failed = int(data.get('postReloadPresentCommandBuffersFailed', -1))
+          if encoded <= 0 or submitted != encoded or completed != submitted or failed != 0:
+              raise SystemExit(f"post-reload presentation lifecycle is incomplete: {data}")
+          if data.get('postReloadPresentationHealthy') is not True:
+              raise SystemExit(f"post-reload presentation did not recover: {data}")
+          PY
+
       - name: Stage canonical Minecraft E2E evidence
         if: success()
         shell: bash
@@ -252,6 +279,7 @@ jobs:
           cp "$e2e/build/evidence/metal-framebuffer-samples.json" "$stage/evidence/"
           cp "$e2e/build/evidence/runtime-evidence.json" "$stage/evidence/"
           cp "$e2e/build/evidence/presentation-evidence.json" "$stage/evidence/"
+          cp "$e2e/build/evidence/reload-evidence.json" "$stage/evidence/"
           cp "$e2e/build/evidence/readback-control/suite.json" "$stage/evidence/readback-control/"
           cp "$e2e/build/run/clientGameTest/logs/latest.log" "$stage/logs/"
           printf '{"schema":1,"candidateSha":"%s","workflowEventSha":"%s"}\n' \
