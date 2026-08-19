@@ -11,6 +11,8 @@ MATRIX = ROOT / "docs/agent/branch-migration-matrix.json"
 P1 = ROOT / "docs/agent/metal4-main-production-acceptance.json"
 WORKFLOW = ROOT / ".github/workflows/metal-capabilities.yml"
 PROBE = ROOT / ".github/ci/HostedMetalCapabilityProbe.swift"
+HOSTED_GRADLE = ROOT / ".github/ci/HostedMetalGradle.init.gradle"
+PRESENTATION_TEST = ROOT / "src/test/java/com/metallum/client/metal/render/MetalDevicePresentationContractTest.java"
 
 
 def fail(message: str) -> None:
@@ -124,6 +126,10 @@ def validate_migration_records(matrix: dict, audited: set[str]) -> list[dict]:
             "C0 must record the proven master hosted-Metal source lineage")
     require(all(record["destination_branch"] == "agent/metal-eval-v3" for record in c0_records),
             "all C0 migration records must target the bounded active branch")
+    require(any(
+        "MetalDevicePresentationContractTest" in record["tests_newly_added"]
+        for record in c0_records
+    ), "C0 migration record must include the layerless-device presentation contract test")
     return records
 
 
@@ -209,6 +215,34 @@ def main() -> None:
             "cloud contract job must bind evidence to the exact candidate SHA")
     require("metallum_source_sha" in workflow_text,
             "workflow must carry an explicit exact candidate SHA identity")
+    require(workflow_text.count("-i .github/ci/hostedmetalgradle.init.gradle") >= 2,
+            "Mac-only hosted Gradle policy must apply to compile and shipping GPU execution")
+    require("cloud_complete_final_physical_pending" in workflow_text,
+            "hosted lane must emit the formal C0 success decision")
+    require("raise systemexit(failure_reason)" in workflow_text,
+            "hosted lane must fail closed when exact-head external gates are incomplete")
+
+    require(HOSTED_GRADLE.is_file(), "missing hosted Gradle capability harness")
+    hosted_gradle_text = HOSTED_GRADLE.read_text(encoding="utf-8").lower()
+    require("buildiosnative" in hosted_gradle_text and "buildiosspvc" in hosted_gradle_text,
+            "Mac-only harness must explicitly neutralize transitive iOS packaging producers")
+    require("task.enabled = false" in hosted_gradle_text,
+            "Mac-only harness must disable transitive iOS packaging producers")
+    require("metalde..." not in hosted_gradle_text, "invalid hosted Gradle sentinel")
+    require("metalde..." not in workflow_text, "invalid workflow sentinel")
+    require("metaldevicepresentationcontracttest" in hosted_gradle_text,
+            "hosted core suite must execute the layerless-device presentation contract")
+    require("-xx:errorfile=" in hosted_gradle_text,
+            "hosted JVM crashes must preserve HotSpot native-fatal evidence")
+    require("mtl_hud_encoder_timing_enabled" in hosted_gradle_text,
+            "hosted runner must explicitly disable unsupported HUD encoder timing")
+
+    require(PRESENTATION_TEST.is_file(), "missing layerless-device presentation contract test")
+    presentation_test_text = PRESENTATION_TEST.read_text(encoding="utf-8").lower()
+    require("memorysegment.null" in presentation_test_text,
+            "presentation contract test must cover the real layerless sentinel")
+    require("memorysegment.ofaddress(1l)" in presentation_test_text,
+            "presentation contract test must cover a non-null layer handle")
 
     require(PROBE.is_file(), "missing hosted Metal probe")
     probe_text = PROBE.read_text(encoding="utf-8").lower()
@@ -233,6 +267,8 @@ def main() -> None:
         },
         "live_remote_inventory_verified": remote is not None,
         "live_remote_branch_count": len(remote) if remote is not None else None,
+        "hosted_mac_only_task_policy": True,
+        "layerless_presentation_contract": True,
         "physical_acceptance_deferred_not_waived": True,
         "amethyst_specific_compatibility": False,
         "ios_specific_adaptation": False,
