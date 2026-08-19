@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "metaluniversal_minecraft_e2e",
+  "version": "1.0.0",
+  "name": "MetalUniversal Minecraft E2E",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-client-gametest": [
+      "com.metallum.e2e.MetalReadbackControlGameTest",
+      "com.metallum.e2e.MetalUniversalClientGameTest"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "fabric-api": "*",
+    "minecraft": "~26.2-",
+    "java": ">=25",
+    "metallum": "*"
+  }
+}

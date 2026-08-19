@@ -1,0 +1,262 @@
+name: Minecraft 26.2 production client E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - 'ci/minecraft-client-e2e-*'
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-client-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  minecraft-client-e2e:
+    name: Real Minecraft / MetalUniversal / framebuffer evidence
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      # Let setup-gradle persist Gradle's local build cache on master so Java,
+      # Loom transforms, Minecraft assets and other cacheable state can be reused.
+      GRADLE_OPTS: '-Dorg.gradle.caching=true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Describe free hosted Apple Silicon runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          sw_vers
+          test "$(uname -m)" = "arm64"
+          system_profiler SPHardwareDataType SPDisplaysDataType || true
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Fingerprint hosted Metal toolchain
+        id: metal-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            swiftc -version
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+          } | tee /tmp/metallum-metal-toolchain.txt
+          fingerprint="$(shasum -a 256 /tmp/metallum-metal-toolchain.txt | awk '{print $1}')"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached macOS Metal native backend
+        id: mac-native-cache
+        uses: actions/cache@v5
+        with:
+          path: src/main/resources/natives/macos/libmetallum.dylib
+          key: metallum-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.metal-toolchain.outputs.fingerprint }}-${{ hashFiles('src/main/native/*.swift') }}
+
+      - name: Setup Gradle dependency and build cache
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          # Default-branch entries are visible to PR/feature-branch jobs. Keep
+          # large Gradle/Loom cache writes on master only to avoid cache churn.
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+          cache-cleanup: on-success
+
+      - name: Build macOS E2E production JAR
+        id: metallum
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+
+          # This lane executes only on macOS. Do not spend runner time compiling
+          # iOS dylibs or cloning/building the iOS SPIRV-Cross library merely
+          # because processResources normally packages every Apple target.
+          if [[ "${{ steps.mac-native-cache.outputs.cache-hit }}" == "true" ]]; then
+            echo "Using cached src/main/resources/natives/macos/libmetallum.dylib"
+            ./gradlew \
+              --build-cache \
+              --stacktrace \
+              -x buildMacNative \
+              -x buildIOSNative \
+              -x buildIOSSpvc \
+              jar
+          else
+            ./gradlew \
+              --build-cache \
+              --stacktrace \
+              -x buildIOSNative \
+              -x buildIOSSpvc \
+              jar
+          fi
+
+          jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' \
+            -print | head -n 1)"
+          test -n "$jar"
+          test -s "$jar"
+          jar="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
+          echo "jar=$jar" >> "$GITHUB_OUTPUT"
+          unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
+
+      - name: Prove hosted Metal command execution before Minecraft
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --build-cache --stacktrace metalMrtSmokeTest verifyIsolatedClientProfiles
+
+      - name: Run real Minecraft 26.2 production Client GameTest
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew \
+            -p .github/ci/minecraft-e2e \
+            --build-cache \
+            --stacktrace \
+            -PmetallumJar="${{ steps.metallum.outputs.jar }}" \
+            runProductionClientGameTest
+
+      - name: Verify staged Metal transfer controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          suite=".github/ci/minecraft-e2e/build/evidence/readback-control/suite.json"
+          test -s "$suite"
+          cat "$suite"
+          python3 - "$suite" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding='utf-8') as f:
+              data = json.load(f)
+          for key in ('bufferCopy', 'textureRoundTrip', 'renderClear'):
+              result = data[key]
+              print(key, result)
+              if not result.get('exact'):
+                  raise SystemExit(f"{key} failed: {result}")
+          if data.get('allExact') is not True:
+              raise SystemExit(f"control suite did not pass: {data}")
+          PY
+
+      - name: Verify real Minecraft Metal framebuffer evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=".github/ci/minecraft-e2e/build/evidence"
+          png="$root/metal-framebuffer.png"
+          samples="$root/metal-framebuffer-samples.json"
+          runtime="$root/runtime-evidence.json"
+          test -s "$png"
+          test -s "$samples"
+          test -s "$runtime"
+          python3 - "$png" "$samples" "$runtime" <<'PY'
+          import json, struct, sys
+          from pathlib import Path
+
+          png, samples_path, runtime_path = map(Path, sys.argv[1:])
+          raw = png.read_bytes()
+          if len(raw) < 24 or raw[:8] != b'\x89PNG\r\n\x1a\n' or raw[12:16] != b'IHDR':
+              raise SystemExit(f"not a valid PNG header: {png}")
+          width, height = struct.unpack('>II', raw[16:24])
+          if width <= 1 or height <= 1:
+              raise SystemExit(f"invalid framebuffer dimensions: {width}x{height}")
+
+          samples = json.loads(samples_path.read_text(encoding='utf-8'))
+          frames = samples.get('samples', [])
+          selected_id = samples.get('selectedFrameId')
+          if len(frames) != 8:
+              raise SystemExit(f"expected 8 Metal framebuffer samples, got {len(frames)}")
+          selected = next((x for x in frames if x.get('frameId') == selected_id), None)
+          if not selected:
+              raise SystemExit(f"selected frame {selected_id} is absent")
+          if selected.get('byteCount', 0) != width * height * 4:
+              raise SystemExit(
+                  f"RGBA8 byte count does not match PNG dimensions: {selected.get('byteCount')} vs {width}x{height}x4"
+              )
+          if selected.get('nonBlackPixels', 0) <= 0:
+              raise SystemExit(f"selected framebuffer is black: {selected}")
+          if selected.get('distinctRgb', 0) <= 1:
+              raise SystemExit(f"selected framebuffer is constant-color: {selected}")
+          if selected.get('lumaStddev', 0.0) <= 0.0:
+              raise SystemExit(f"selected framebuffer has no luminance variation: {selected}")
+
+          runtime = json.loads(runtime_path.read_text(encoding='utf-8'))
+          print(f"verified Metal framebuffer: {width}x{height}, selected frame={selected_id}")
+          print(json.dumps(selected, indent=2))
+          print(json.dumps(runtime, indent=2))
+          PY
+
+      - name: Stage canonical Minecraft E2E evidence
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          e2e=".github/ci/minecraft-e2e"
+          stage="build/minecraft-e2e-artifact"
+          rm -rf "$stage"
+          mkdir -p "$stage/evidence/readback-control" "$stage/logs"
+          cp "$e2e/build/evidence/metal-framebuffer.png" "$stage/evidence/"
+          cp "$e2e/build/evidence/metal-framebuffer-samples.json" "$stage/evidence/"
+          cp "$e2e/build/evidence/runtime-evidence.json" "$stage/evidence/"
+          cp "$e2e/build/evidence/readback-control/suite.json" "$stage/evidence/readback-control/"
+          cp "$e2e/build/run/clientGameTest/logs/latest.log" "$stage/logs/"
+          find "$stage" -type f -print | sort
+
+      - name: Upload canonical Minecraft Metal framebuffer
+        uses: actions/upload-artifact@v7
+        with:
+          name: minecraft-26.2-metal-framebuffer-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
+          path: build/minecraft-e2e-artifact/**
+
+      - name: Stage full E2E diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          set -u
+          e2e=".github/ci/minecraft-e2e"
+          stage="build/minecraft-e2e-failure"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          if [ -d "$e2e/build/evidence" ]; then cp -R "$e2e/build/evidence" "$stage/evidence"; fi
+          if [ -d "$e2e/build/run/clientGameTest/screenshots" ]; then
+            mkdir -p "$stage/window-screenshots"
+            cp -R "$e2e/build/run/clientGameTest/screenshots/." "$stage/window-screenshots/"
+          fi
+          if [ -d "$e2e/build/run/clientGameTest/logs" ]; then
+            mkdir -p "$stage/logs"
+            cp -R "$e2e/build/run/clientGameTest/logs/." "$stage/logs/"
+          fi
+          if [ -d "$e2e/build/run/clientGameTest/crash-reports" ]; then
+            mkdir -p "$stage/crash-reports"
+            cp -R "$e2e/build/run/clientGameTest/crash-reports/." "$stage/crash-reports/"
+          fi
+          if [ -d "$e2e/build/reports" ]; then cp -R "$e2e/build/reports" "$stage/reports"; fi
+          if [ -d "$e2e/build/test-results" ]; then cp -R "$e2e/build/test-results" "$stage/test-results"; fi
+          find "$stage" -type f -maxdepth 12 -print | sort || true
+
+      - name: Upload full E2E diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: minecraft-26.2-metaluniversal-failure-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 1
+          path: build/minecraft-e2e-failure/**
