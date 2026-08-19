@@ -39,6 +39,13 @@ fi
 
 mkdir -p "$OUT/profiles"
 cp "$CORRECTNESS_GATE" "$OUT/physical-correctness-decision.json"
+cat > "$OUT/matrix-contract.json" <<'JSON'
+{
+  "required_state": "accepted-candidate",
+  "required_profiles": ["V1", "I0", "I1"],
+  "correctness_identity_keys": ["production_jar_sha256", "native_dylib_sha256"]
+}
+JSON
 
 read -r CORRECTNESS_JAR_SHA CORRECTNESS_DYLIB_SHA < <(
   python3 - "$CORRECTNESS_GATE" "$HEAD_SHA" <<'PY'
