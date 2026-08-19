@@ -5,6 +5,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src/main/native/MetallumNative.swift"
+QUEUE_SOURCE = ROOT / "src/main/java/com/metallum/client/metal/render/mtl/MTLCommandQueue.java"
+BUFFER_SOURCE = ROOT / "src/main/java/com/metallum/client/metal/render/mtl/MTLCommandBuffer.java"
+TELEMETRY_SOURCE = ROOT / "src/main/java/com/metallum/client/metal/render/mtl/Metal4MainRendererTelemetry.java"
 CLASS_START = "private final class Metal4MainQueueContext {"
 CLASS_END = "private final class Metal4MainRenderEncoderBridge {"
 
@@ -85,8 +88,40 @@ def main() -> None:
     require(free > feedback, "slot becomes free before Metal completion feedback is handled")
     require("slotCondition.broadcast()" in submit[free:], "free slot does not wake blocked acquisition")
 
+    queue = QUEUE_SOURCE.read_text(encoding="utf-8")
+    buffer = BUFFER_SOURCE.read_text(encoding="utf-8")
+    telemetry = TELEMETRY_SOURCE.read_text(encoding="utf-8")
+    require(
+        "Metal4MainRendererTelemetry.shouldMeasureSlotWait()" in queue,
+        "command queue does not gate conservative slot-wait measurement on three-slot pressure",
+    )
+    require(
+        "Metal4MainRendererTelemetry.recordCommandBufferAcquired" in queue,
+        "command-buffer acquire is not recorded",
+    )
+    require(
+        "Metal4MainRendererTelemetry.recordCommit()" in buffer,
+        "command-buffer commit is not recorded",
+    )
+    require(
+        "Metal4MainRendererTelemetry.recordCompletion()" in buffer,
+        "command-buffer retirement is not recorded",
+    )
+    require(
+        "metallum_metal4_main_renderer_stats()" in telemetry,
+        "runtime snapshot is not cross-checked against native main-renderer stats",
+    )
+    require(
+        "conservative" in telemetry and "upper bound" in telemetry,
+        "slot-wait metric does not document its conservative upper-bound semantics",
+    )
+    require(
+        'System.getProperty("metallum.hotpath.telemetry", "false")' in telemetry,
+        "runtime telemetry is not opt-in",
+    )
+
     evidence = {
-        "schema": 1,
+        "schema": 2,
         "source": str(SOURCE.relative_to(ROOT)),
         "argumentTableModel": "one-long-lived-table-per-stage-family-per-in-flight-slot",
         "argumentTablesPerSlot": 3,
@@ -94,8 +129,15 @@ def main() -> None:
         "computeTableOverflow": 0,
         "renderTableHighWater": 1,
         "allocatorResetAfterFreeSlotAcquire": True,
+        "allocatorResetsPerAcquire": 1,
         "slotFreeOnlyAfterCompletionFeedback": True,
         "forbiddenLegacyPoolTokensPresent": False,
+        "runtimeTelemetry": {
+            "enabledBy": "metallum.hotpath.telemetry",
+            "nativeCrossCheck": "metallum_metal4_main_renderer_stats",
+            "slotWaitNanos": "conservative-upper-bound-under-three-unretired-submissions",
+            "hotPathFfmStatsQueryPerFrame": False,
+        },
         "status": "pass",
     }
 

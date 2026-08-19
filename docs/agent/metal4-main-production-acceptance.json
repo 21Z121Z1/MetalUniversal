@@ -1,9 +1,10 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "stage": "P1-metal4-main-production",
   "base_stage": {
     "name": "P0-minecraft-metal-e2e",
-    "validated_sha": "4e6be7b27edbed43731dc5ddee58ab28c9f2cd9a"
+    "validated_sha": "4e6be7b27edbed43731dc5ddee58ab28c9f2cd9a",
+    "merged_to_canonical_as": "5f1fa66e8a08576dfe026a41888107f3c842c947"
   },
   "scope": {
     "platform": "macOS",
@@ -19,10 +20,14 @@
     "compute_table_overflow": 0,
     "render_table_high_water": 1,
     "allocator_reset_requires_free_slot": true,
+    "allocator_resets_per_acquire": 1,
     "free_slot_requires_metal_completion_feedback": true
   },
   "runtime_gates": {
     "main_renderer_engagement_fraction": 1.0,
+    "native_begin_must_equal_java_acquire_delta": true,
+    "native_submit_must_equal_java_commit_delta": true,
+    "outstanding_submissions_after_gpu_drain": 0,
     "metal_validation_errors": 0,
     "failed_command_buffers": 0,
     "failed_present_command_buffers": 0,
@@ -33,12 +38,24 @@
   "required_runtime_metrics": [
     "metal4.commandAllocatorResets",
     "metal4.slotWaitNanos",
+    "metal4.slotWaitCount",
     "metal4.commandBuffersPerFrame",
     "metal4.commitCallsPerFrame",
     "metal4.argumentTableAllocationsDuringEncoding",
     "metal4.computeTableOverflow",
     "metal4.renderTableHighWater"
   ],
+  "runtime_telemetry": {
+    "enabled_by": "metallum.hotpath.telemetry=true",
+    "native_cross_check": "metallum_metal4_main_renderer_stats",
+    "command_allocator_resets": "derived one-for-one from successful Metal4 acquire; the native static gate independently proves exactly one allocator.reset after free-slot acquisition",
+    "slot_wait_nanos": "conservative upper bound: wall time of native command-buffer acquisition only when all three Java-side submissions are still unretired",
+    "slot_wait_safety": "the conservative upper bound may reject noise but cannot hide a real slot-wait regression",
+    "per_frame_rates": "computed from cumulative counter deltas divided by presentation encode delta over the same measurement window",
+    "hot_path_stats_ffm_queries_per_frame": 0,
+    "evidence_producer": ".github/ci/minecraft-e2e/src/main/java/com/metallum/client/metal/render/Metal4MainRendererEvidenceGameTest.java",
+    "evidence_artifact": "metal4-main-renderer-evidence.json"
+  },
   "capability_policy": {
     "metal4_required": true,
     "residency_set_required": true,
@@ -51,6 +68,11 @@
     "headless_harness_must_pass": true,
     "macos_26_native_compile_must_pass": true,
     "ordinary_build_must_pass": true
+  },
+  "physical_mac_evidence": {
+    "command": "./gradlew -p .github/ci/minecraft-e2e -PmetallumJar=<production-jar> -Pp1Metal4MainRenderer=true runProductionClientGameTest",
+    "required_environment": "physical Apple GPU with Metal 4 and MTLResidencySet support",
+    "amethyst_or_ios_required": false
   },
   "performance_policy": {
     "correctness_before_performance": true,

@@ -9,10 +9,17 @@ import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
 public final class MTLCommandQueue {
-    private MemorySegment handle;
+    private static final boolean METAL4_REQUESTED =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "false"));
+    private static final boolean METAL4_MAIN_RENDERER_REQUESTED =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainRenderer", "false"));
 
-    private MTLCommandQueue(final MemorySegment handle) {
+    private MemorySegment handle;
+    private final boolean trackMetal4MainRenderer;
+
+    private MTLCommandQueue(final MemorySegment handle, final boolean trackMetal4MainRenderer) {
         this.handle = handle;
+        this.trackMetal4MainRenderer = trackMetal4MainRenderer;
     }
 
     public static MTLCommandQueue create(final MemorySegment device) {
@@ -20,7 +27,11 @@ public final class MTLCommandQueue {
         if (MetalNativeBridge.isNullHandle(handle)) {
             throw new IllegalStateException("Failed to create Metal command queue");
         }
-        return new MTLCommandQueue(handle);
+        boolean trackMetal4MainRenderer = Metal4MainRendererTelemetry.enabled()
+                && METAL4_REQUESTED
+                && METAL4_MAIN_RENDERER_REQUESTED
+                && MetalNativeBridge.metallum_metal4_supported(device) != 0;
+        return new MTLCommandQueue(handle, trackMetal4MainRenderer);
     }
 
     /**
@@ -36,11 +47,17 @@ public final class MTLCommandQueue {
     }
 
     public MTLCommandBuffer makeCommandBuffer(@Nullable final String label) {
+        boolean pressure = trackMetal4MainRenderer && Metal4MainRendererTelemetry.shouldMeasureSlotWait();
+        long acquireStart = pressure ? System.nanoTime() : 0L;
         MemorySegment commandBuffer = MetalNativeBridge.MTLCommandQueue_makeCommandBuffer(handle, label);
         if (MetalNativeBridge.isNullHandle(commandBuffer)) {
             throw new IllegalStateException("Failed to create MTLCommandBuffer");
         }
-        return new MTLCommandBuffer(commandBuffer);
+        if (trackMetal4MainRenderer) {
+            long waitUpperBound = pressure ? Math.max(1L, System.nanoTime() - acquireStart) : 0L;
+            Metal4MainRendererTelemetry.recordCommandBufferAcquired(waitUpperBound);
+        }
+        return new MTLCommandBuffer(commandBuffer, trackMetal4MainRenderer);
     }
 
     public void close() {
