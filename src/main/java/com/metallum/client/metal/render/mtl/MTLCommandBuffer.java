@@ -9,6 +9,9 @@ import java.lang.foreign.MemorySegment;
 @Environment(EnvType.CLIENT)
 public final class MTLCommandBuffer {
     private MemorySegment handle;
+    private boolean presentEncodeCalled;
+    private boolean presentSubmitted;
+    private boolean presentCompletionRecorded;
 
     MTLCommandBuffer(final MemorySegment handle) {
         this.handle = handle;
@@ -123,16 +126,24 @@ public final class MTLCommandBuffer {
         );
     }
 
-    public void encodePresentTextureToDrawable(final MemorySegment layer, final MemorySegment sourceTexture, final MemorySegment globalFence) {
+    public void encodePresentTextureToDrawable(
+            final MemorySegment layer,
+            final MemorySegment sourceTexture,
+            final MemorySegment globalFence
+    ) {
+        MetalPresentationTelemetry.recordEncodeCall();
+        presentEncodeCalled = true;
         MetalNativeBridge.MTLCommandBuffer_encodePresentTextureToDrawable(handle(), layer, sourceTexture, globalFence);
     }
 
     public void commit() {
         MetalNativeBridge.MTLCommandBuffer_commit(handle());
+        recordPresentSubmitted();
     }
 
     public void commitWithSignal(final MemorySegment semaphore) {
         MetalNativeBridge.MTLCommandBuffer_commitWithSignal(handle(), semaphore);
+        recordPresentSubmitted();
     }
 
     public boolean isCompleted() {
@@ -146,7 +157,12 @@ public final class MTLCommandBuffer {
         if (MetalNativeBridge.isNullHandle(handle)) {
             return false;
         }
-        return MetalNativeBridge.MTLCommandBuffer_completedSuccessfully(handle()) == 1;
+        boolean success = MetalNativeBridge.MTLCommandBuffer_completedSuccessfully(handle()) == 1;
+        if (presentSubmitted && !presentCompletionRecorded) {
+            presentCompletionRecorded = true;
+            MetalPresentationTelemetry.recordCompletion(success);
+        }
+        return success;
     }
 
     public double gpuStartTime() {
@@ -184,6 +200,13 @@ public final class MTLCommandBuffer {
 
     public MemorySegment nativeHandle() {
         return handle();
+    }
+
+    private void recordPresentSubmitted() {
+        if (presentEncodeCalled && !presentSubmitted) {
+            presentSubmitted = true;
+            MetalPresentationTelemetry.recordSubmitted();
+        }
     }
 
     private MemorySegment handle() {
