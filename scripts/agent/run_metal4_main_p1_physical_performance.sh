@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+PROFILE_ID="${PROFILE_ID:-V1}"
 WORLD="${WORLD:-}"
 BLOCKS="${BLOCKS:-4}"
 WARMUP_SECONDS="${WARMUP_SECONDS:-30}"
@@ -11,16 +12,50 @@ SAMPLE_SECONDS="${SAMPLE_SECONDS:-120}"
 CORRECTNESS_GATE="${P1_CORRECTNESS_GATE:-}"
 UI_SCALE="${UI_SCALE:-3}"
 RENDER_DISTANCE="${RENDER_DISTANCE:-16}"
-PROFILE_ID="V1"
 WORLD_SCENARIO_ID="metal-validation-fixed-camera-v1"
 EXPECTED_FRAMEBUFFER_WIDTH=1708
 EXPECTED_FRAMEBUFFER_HEIGHT=960
 CAMERA_POLICY="world-player-pose snapped to x/z block centers, y half-block, yaw nearest 90 degrees, pitch 0; held fixed by MetalValidationClient"
 RUN_ROOT="${METALLUM_AGENT_RUN_ROOT:-$ROOT/build/agent-runs}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-OUT="${METALLUM_P1_PERFORMANCE_OUT:-$RUN_ROOT/p1-metal4-main-performance-$STAMP}"
+OUT="${METALLUM_P1_PERFORMANCE_OUT:-$RUN_ROOT/p1-metal4-main-${PROFILE_ID,,}-performance-$STAMP}"
 OPTIONS_FILE="$ROOT/run/options.txt"
 IRIS_CONFIG="$ROOT/run/config/iris.properties"
+SHADERPACK_DIR="$ROOT/run/shaderpacks"
+SHADER_PACK_PATH=""
+SHADER_PACK_VERSION=""
+SHADER_PACK_LABEL=""
+SHADER_OPTIONS_PATH=""
+IRIS_SEMANTIC=false
+STAGED_PACK_NAME=""
+STAGED_PACK_PATH=""
+STAGED_OPTIONS_PATH=""
+SHADER_PACK_SHA=""
+SHADER_OPTIONS_SHA=""
+
+case "$PROFILE_ID" in
+  V1)
+    IRIS_SEMANTIC=false
+    ;;
+  I0)
+    IRIS_SEMANTIC=true
+    SHADER_PACK_PATH="${POTATO_SHADER_PACK:-}"
+    SHADER_PACK_VERSION="${POTATO_SHADER_PACK_VERSION:-}"
+    SHADER_OPTIONS_PATH="${POTATO_SHADER_OPTIONS:-}"
+    SHADER_PACK_LABEL="Potato"
+    ;;
+  I1)
+    IRIS_SEMANTIC=true
+    SHADER_PACK_PATH="${BSL_SHADER_PACK:-}"
+    SHADER_PACK_VERSION="${BSL_SHADER_PACK_VERSION:-}"
+    SHADER_OPTIONS_PATH="${BSL_SHADER_OPTIONS:-}"
+    SHADER_PACK_LABEL="BSL"
+    ;;
+  *)
+    echo "PROFILE_ID must be V1, I0, or I1 (got $PROFILE_ID)" >&2
+    exit 2
+    ;;
+esac
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   echo "P1 physical performance requires an Apple-silicon Mac" >&2
@@ -33,6 +68,20 @@ fi
 if [[ -z "$CORRECTNESS_GATE" || ! -s "$CORRECTNESS_GATE" ]]; then
   echo "P1_CORRECTNESS_GATE must point to a passing pair-decision.json from the physical correctness runner" >&2
   exit 2
+fi
+if [[ "$PROFILE_ID" != "V1" ]]; then
+  if [[ -z "$SHADER_PACK_PATH" || ! -f "$SHADER_PACK_PATH" ]]; then
+    echo "$PROFILE_ID requires an explicit content-addressed shader pack file" >&2
+    exit 2
+  fi
+  if [[ -z "$SHADER_PACK_VERSION" ]]; then
+    echo "$PROFILE_ID requires an explicit shader-pack version identity" >&2
+    exit 2
+  fi
+  if [[ -n "$SHADER_OPTIONS_PATH" && ! -f "$SHADER_OPTIONS_PATH" ]]; then
+    echo "shader options file does not exist: $SHADER_OPTIONS_PATH" >&2
+    exit 2
+  fi
 fi
 if ! [[ "$BLOCKS" =~ ^[0-9]+$ ]] || (( BLOCKS < 4 )); then
   echo "P1 performance requires BLOCKS >= 4" >&2
@@ -110,6 +159,10 @@ if [[ -f "$IRIS_CONFIG" ]]; then
   IRIS_EXISTED=true
 fi
 
+sha256_file() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
 restore_runtime_config() {
   if [[ "$OPTIONS_EXISTED" == true ]]; then
     mkdir -p "$(dirname "$OPTIONS_FILE")"
@@ -122,6 +175,12 @@ restore_runtime_config() {
     cp "$IRIS_BACKUP" "$IRIS_CONFIG"
   else
     rm -f "$IRIS_CONFIG"
+  fi
+  if [[ -n "$STAGED_PACK_PATH" ]]; then
+    rm -f "$STAGED_PACK_PATH"
+  fi
+  if [[ -n "$STAGED_OPTIONS_PATH" ]]; then
+    rm -f "$STAGED_OPTIONS_PATH"
   fi
 }
 
@@ -180,17 +239,36 @@ path.write_text("\n".join(out) + "\n", encoding="utf-8")
 PY
 }
 
-# V1 is explicitly the no-shader Sodium/Metal profile. Pin mutable client
-# settings before snapshotting any measurements, then restore them on exit.
+# Pin mutable client inputs. Shader packs are never downloaded here: I0/I1
+# only accept caller-supplied files and record their exact hashes.
 pin_colon_option "$OPTIONS_FILE" "guiScale" "$UI_SCALE"
 pin_colon_option "$OPTIONS_FILE" "renderDistance" "$RENDER_DISTANCE"
-pin_equals_property "$IRIS_CONFIG" "enableShaders" "false"
+if [[ "$PROFILE_ID" == "V1" ]]; then
+  pin_equals_property "$IRIS_CONFIG" "enableShaders" "false"
+  pin_equals_property "$IRIS_CONFIG" "shaderPack" ""
+else
+  mkdir -p "$SHADERPACK_DIR"
+  SHADER_PACK_SHA="$(sha256_file "$SHADER_PACK_PATH")"
+  safe_base="$(basename "$SHADER_PACK_PATH")"
+  STAGED_PACK_NAME="metallum-p1-${PROFILE_ID}-${SHADER_PACK_SHA:0:12}-${safe_base}"
+  STAGED_PACK_PATH="$SHADERPACK_DIR/$STAGED_PACK_NAME"
+  STAGED_OPTIONS_PATH="$SHADERPACK_DIR/$STAGED_PACK_NAME.txt"
+  cp "$SHADER_PACK_PATH" "$STAGED_PACK_PATH"
+  if [[ -n "$SHADER_OPTIONS_PATH" ]]; then
+    cp "$SHADER_OPTIONS_PATH" "$STAGED_OPTIONS_PATH"
+  else
+    : > "$STAGED_OPTIONS_PATH"
+  fi
+  SHADER_OPTIONS_SHA="$(sha256_file "$STAGED_OPTIONS_PATH")"
+  [[ "$(sha256_file "$STAGED_PACK_PATH")" == "$SHADER_PACK_SHA" ]] || {
+    echo "staged shader pack hash mismatch" >&2
+    exit 2
+  }
+  pin_equals_property "$IRIS_CONFIG" "shaderPack" "$STAGED_PACK_NAME"
+  pin_equals_property "$IRIS_CONFIG" "enableShaders" "true"
+fi
 
 cp -a "run/saves/$WORLD" "$SNAPSHOT"
-
-sha256_file() {
-  shasum -a 256 "$1" | awk '{print $1}'
-}
 
 world_sha256() {
   python3 - "$SNAPSHOT" <<'PY'
@@ -216,7 +294,7 @@ reset_eval_world() {
 
 common_args() {
   printf '%s\n' \
-    "-Dmetallum.iris.semantic=false" \
+    "-Dmetallum.iris.semantic=$IRIS_SEMANTIC" \
     "-Dmetallum.metalfx.mode=OFF" \
     "-Dmetallum.metalfx.frameGeneration=false" \
     "-Dmetallum.metalfx.objectMotionProducer=false" \
@@ -254,9 +332,9 @@ lane_args() {
 }
 
 validate_trial_identity() {
-  local report="$1" lane="$2"
+  local report="$1" lane="$2" log="$3"
   python3 - "$report" "$lane" "$HEAD_SHA" "$EXPECTED_FRAMEBUFFER_WIDTH" "$EXPECTED_FRAMEBUFFER_HEIGHT" <<'PY'
-import json, math, pathlib, sys
+import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 lane, head = sys.argv[2], sys.argv[3]
 width, height = int(sys.argv[4]), int(sys.argv[5])
@@ -278,8 +356,14 @@ if engaged != (lane == "candidate"):
 if data.get("residencySetEnabled") is not True:
     problems.append("explicit residency is not active")
 if problems:
-    raise SystemExit("P1 V1 trial identity/guardrail failed: " + "; ".join(problems))
+    raise SystemExit("P1 trial identity/guardrail failed: " + "; ".join(problems))
 PY
+  if [[ "$PROFILE_ID" != "V1" ]]; then
+    grep -F "Using shaderpack: $STAGED_PACK_NAME" "$log" >/dev/null || {
+      echo "$PROFILE_ID trial did not prove exact shader-pack activation: $STAGED_PACK_NAME" >&2
+      return 2
+    }
+  fi
 }
 
 run_trial() {
@@ -318,7 +402,7 @@ run_trial() {
     printf '2\n' > "$trial_dir/exit-status.txt"
     return 2
   fi
-  validate_trial_identity "$report" "$lane"
+  validate_trial_identity "$report" "$lane" "$trial_dir/client.log"
   python3 scripts/agent/check_metal4_main_trial.py "$report" \
     --expected "$lane" --output "$trial_dir/metal4-main-admission.json"
   python3 scripts/agent/normalize_unified_trial.py "$trial_dir"
@@ -332,6 +416,7 @@ IRIS_CONFIG_SHA="$(sha256_file "$IRIS_CONFIG")"
 python3 - "$OUT/environment.json" "$HEAD_SHA" "$CORRECTNESS_JAR_SHA" "$CORRECTNESS_DYLIB_SHA" \
   "$WORLD" "$WORLD_SHA" "$PROFILE_ID" "$WORLD_SCENARIO_ID" "$UI_SCALE" "$RENDER_DISTANCE" \
   "$CAMERA_POLICY" "$CAMERA_SCRIPT_SHA" "$OPTIONS_SHA" "$IRIS_CONFIG_SHA" \
+  "$SHADER_PACK_LABEL" "$SHADER_PACK_VERSION" "$SHADER_PACK_SHA" "$SHADER_OPTIONS_SHA" \
   "$BLOCKS" "$WARMUP_SECONDS" "$SAMPLE_SECONDS" <<'PY'
 import json, os, pathlib, platform, subprocess, sys
 path = pathlib.Path(sys.argv[1])
@@ -350,8 +435,9 @@ def properties(path):
         out[key.strip()] = value.strip()
     return out
 props = properties("gradle.properties")
+profile = sys.argv[7]
 identity = {
-    "profile_id": sys.argv[7],
+    "profile_id": profile,
     "candidate_sha": sys.argv[2],
     "production_jar_sha256": sys.argv[3],
     "native_dylib_sha256": sys.argv[4],
@@ -367,16 +453,40 @@ identity = {
     "macos_version": cmd("sw_vers", "-productVersion"),
     "java_version": cmd("java", "-version"),
 }
-required = {
-    "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
-    "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
-    "camera_script_sha256", "minecraft_version", "sodium_version", "macos_version", "java_version"
+if profile in ("I0", "I1"):
+    identity.update({
+        "shader_pack_name": sys.argv[15],
+        "shader_pack_version": sys.argv[16],
+        "shader_pack_sha256": sys.argv[17],
+        "shader_options_sha256": sys.argv[18],
+        "iris_version": props.get("iris_version", "unknown"),
+    })
+required_by_profile = {
+    "V1": {
+        "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
+        "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
+        "camera_script_sha256", "minecraft_version", "sodium_version", "macos_version", "java_version"
+    },
+    "I0": {
+        "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
+        "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
+        "camera_script_sha256", "shader_pack_name", "shader_pack_version", "shader_pack_sha256",
+        "shader_options_sha256", "minecraft_version", "sodium_version", "iris_version",
+        "macos_version", "java_version"
+    },
+    "I1": {
+        "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
+        "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
+        "camera_script_sha256", "shader_pack_name", "shader_pack_version", "shader_pack_sha256",
+        "shader_options_sha256", "minecraft_version", "sodium_version", "iris_version",
+        "macos_version", "java_version"
+    },
 }
-missing = sorted(key for key in required if identity.get(key) in (None, "", "unknown"))
+missing = sorted(key for key in required_by_profile[profile] if identity.get(key) in (None, "", "unknown"))
 if missing:
-    raise SystemExit(f"V1 benchmark identity is incomplete: {missing}")
+    raise SystemExit(f"{profile} benchmark identity is incomplete: {missing}")
 path.write_text(json.dumps({
-    "schema_version": 2,
+    "schema_version": 3,
     "stage": "P1-metal4-main-production",
     "kind": "physical-performance-abba",
     "benchmark_contract": "docs/agent/benchmark-profiles.json",
@@ -385,22 +495,22 @@ path.write_text(json.dumps({
     "pinned_runtime_config": {
         "options_sha256": sys.argv[13],
         "iris_properties_sha256": sys.argv[14],
-        "iris_semantic": False,
-        "shader_pack": None,
+        "iris_semantic": profile in ("I0", "I1"),
+        "shader_pack": None if profile == "V1" else sys.argv[15],
         "metalfx_mode": "OFF",
         "frame_generation": False,
         "expected_framebuffer": [1708, 960],
     },
-    "pairedBlocks": int(sys.argv[15]),
-    "warmupSeconds": int(sys.argv[16]),
-    "sampleSeconds": int(sys.argv[17]),
+    "pairedBlocks": int(sys.argv[19]),
+    "warmupSeconds": int(sys.argv[20]),
+    "sampleSeconds": int(sys.argv[21]),
     "pairing": "ABBA-equivalent alternating order",
     "machine": platform.machine(),
     "xcode": cmd("xcodebuild", "-version"),
     "display": os.environ.get("METALLUM_EVAL_DISPLAY", "unrecorded"),
     "powerState": os.environ.get("METALLUM_EVAL_POWER_STATE", "unrecorded"),
     "laneContract": {
-        "common": "V1 no-shader + Metal4 compiler/present + explicit residency; MetalFX/FG and unrelated experimental lanes off",
+        "common": f"{profile} benchmark stack + Metal4 compiler/present + explicit residency; MetalFX/FG and unrelated experimental lanes off",
         "baseline": "metal4MainRenderer=false",
         "candidate": "metal4MainRenderer=true"
     }
@@ -431,5 +541,5 @@ if data.get("state") != "accepted-candidate":
     )
 PY
 
-echo "P1 physical paired performance: ACCEPTED"
+echo "P1 $PROFILE_ID physical paired performance: ACCEPTED"
 echo "Evidence: $OUT"
