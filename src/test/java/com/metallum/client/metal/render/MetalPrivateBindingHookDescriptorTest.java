@@ -4,11 +4,13 @@ import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -18,7 +20,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  *
  * <p>Mixin's defaultRequire catches a stale redirect when a client applies the
  * mixin. This test moves that failure into ordinary {@code gradlew test}, where
- * dependency upgrades can name the exact Sodium/Iris call shape that changed.</p>
+ * dependency upgrades can name the exact Sodium/Iris call shape that changed.
+ * The Sodium checks also pin the literal resource names: the private path uses
+ * pre-resolved tokens, so retaining a call descriptor while renaming a resource
+ * must fail here instead of pairing an old token with a new compatibility key.</p>
  */
 final class MetalPrivateBindingHookDescriptorTest {
     private static final String RENDER_PASS = "com/mojang/blaze3d/systems/RenderPass";
@@ -44,12 +49,15 @@ final class MetalPrivateBindingHookDescriptorTest {
                 "DefaultChunkRenderer.render changed shape; review the P1c Sodium redirects");
         MethodNode render = renderMethods.getFirst();
 
-        assertEquals(1, invocationCount(render, RENDER_PASS, "setUniform", SET_UNIFORM_SLICE),
-                "u_Globals redirect no longer has exactly one GpuBufferSlice call site");
-        assertEquals(1, invocationCount(render, RENDER_PASS, "setUniform", SET_UNIFORM_BUFFER),
-                "u_SectionTimeInfo redirect no longer has exactly one GpuBuffer call site");
-        assertEquals(2, invocationCount(render, RENDER_PASS, "bindTexture", BIND_TEXTURE),
-                "u_LightTex/u_BlockTex ordinals are no longer the only two texture binding call sites");
+        assertEquals(List.of("u_Globals"),
+                invocationStringKeys(render, RENDER_PASS, "setUniform", SET_UNIFORM_SLICE),
+                "the GpuBufferSlice terrain binding is no longer the fixed u_Globals resource");
+        assertEquals(List.of("u_SectionTimeInfo"),
+                invocationStringKeys(render, RENDER_PASS, "setUniform", SET_UNIFORM_BUFFER),
+                "the GpuBuffer terrain binding is no longer the fixed u_SectionTimeInfo resource");
+        assertEquals(List.of("u_LightTex", "u_BlockTex"),
+                invocationStringKeys(render, RENDER_PASS, "bindTexture", BIND_TEXTURE),
+                "the two texture ordinals no longer map to u_LightTex then u_BlockTex");
     }
 
     @Test
@@ -68,6 +76,35 @@ final class MetalPrivateBindingHookDescriptorTest {
                 "the token cursor expects exactly one sampled-texture binding call site");
         assertEquals(1, invocationCount(bindResources, METAL_RENDER_PASS, "bindStorageImage", BIND_STORAGE_IMAGE),
                 "the token cursor expects exactly one storage-image binding call site");
+    }
+
+    private static List<String> invocationStringKeys(
+            final MethodNode method,
+            final String owner,
+            final String name,
+            final String descriptor
+    ) {
+        List<String> keys = new ArrayList<>();
+        String lastStringConstant = null;
+        for (var instruction : method.instructions) {
+            if (instruction instanceof LdcInsnNode ldc && ldc.cst instanceof String value) {
+                lastStringConstant = value;
+            }
+            if (instruction instanceof MethodInsnNode invoke
+                    && invoke.owner.equals(owner)
+                    && invoke.name.equals(name)
+                    && invoke.desc.equals(descriptor)) {
+                if (lastStringConstant == null) {
+                    throw new AssertionError(
+                            "binding invocation " + owner + "." + name + descriptor
+                                    + " no longer has a preceding String constant"
+                    );
+                }
+                keys.add(lastStringConstant);
+                lastStringConstant = null;
+            }
+        }
+        return keys;
     }
 
     private static int invocationCount(
