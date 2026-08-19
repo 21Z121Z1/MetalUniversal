@@ -9,6 +9,7 @@ python3 -m json.tool docs/agent/metal4-main-production-acceptance.json >/dev/nul
 python3 scripts/agent/verify_benchmark_profiles.py
 python3 scripts/agent/verify_metal4_main_hotpath.py \
   --output build/agent-evidence/metal4-main-hotpath.json
+python3 scripts/agent/verify_p1_performance_route.py
 python3 scripts/agent/check_metal4_main_e2e_pair.py --self-test
 python3 scripts/agent/check_metal4_main_trial.py --self-test
 python3 scripts/agent/analyze_unified_eval.py --self-test
@@ -17,6 +18,7 @@ python3 scripts/agent/check_unified_eval_admission.py --self-test
 python3 -m py_compile \
   scripts/agent/verify_benchmark_profiles.py \
   scripts/agent/verify_metal4_main_hotpath.py \
+  scripts/agent/verify_p1_performance_route.py \
   scripts/agent/check_metal4_main_e2e_pair.py \
   scripts/agent/check_metal4_main_trial.py \
   scripts/agent/analyze_unified_eval.py \
