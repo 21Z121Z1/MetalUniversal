@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "stage": "P1-metal4-main-production",
+  "base_stage": {
+    "name": "P0-minecraft-metal-e2e",
+    "validated_sha": "4e6be7b27edbed43731dc5ddee58ab28c9f2cd9a"
+  },
+  "scope": {
+    "platform": "macOS",
+    "amethyst_specific_compatibility": false,
+    "metalfx_required": false,
+    "frame_generation_required": false,
+    "default_enablement_allowed_before_acceptance": false
+  },
+  "structural_gates": {
+    "argument_table_model": "one-long-lived-table-per-stage-family-per-in-flight-slot",
+    "argument_tables_per_slot": 3,
+    "argument_table_allocations_during_encoding": 0,
+    "compute_table_overflow": 0,
+    "render_table_high_water": 1,
+    "allocator_reset_requires_free_slot": true,
+    "free_slot_requires_metal_completion_feedback": true
+  },
+  "runtime_gates": {
+    "main_renderer_engagement_fraction": 1.0,
+    "metal_validation_errors": 0,
+    "failed_command_buffers": 0,
+    "failed_present_command_buffers": 0,
+    "nil_drawables": 0,
+    "framebuffer_equivalence_required": true,
+    "resource_reload_recovery_required": true
+  },
+  "required_runtime_metrics": [
+    "metal4.commandAllocatorResets",
+    "metal4.slotWaitNanos",
+    "metal4.commandBuffersPerFrame",
+    "metal4.commitCallsPerFrame",
+    "metal4.argumentTableAllocationsDuringEncoding",
+    "metal4.computeTableOverflow",
+    "metal4.renderTableHighWater"
+  ],
+  "capability_policy": {
+    "metal4_required": true,
+    "residency_set_required": true,
+    "unsupported_hosted_runner_result": "blocked-capability",
+    "blocked_capability_is_stage_pass": false,
+    "physical_mac_activation_required_to_close_stage": true
+  },
+  "regression_gates": {
+    "p0_default_renderer_e2e_must_pass": true,
+    "headless_harness_must_pass": true,
+    "macos_26_native_compile_must_pass": true,
+    "ordinary_build_must_pass": true
+  },
+  "performance_policy": {
+    "correctness_before_performance": true,
+    "use_benchmark_profiles_contract": "docs/agent/benchmark-profiles.json",
+    "candidate_must_not_increase_commit_calls_per_frame": true,
+    "candidate_must_not_increase_failed_or_waiting_frames": true,
+    "paired_performance_required_before_default_enablement": true
+  },
+  "stage_transition": {
+    "next_stage": "P2-iris-tbdr-render-graph-v3",
+    "allowed_only_if_all_structural_runtime_regression_and_performance_gates_pass": true
+  }
+}
