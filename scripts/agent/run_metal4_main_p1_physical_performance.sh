@@ -9,9 +9,18 @@ BLOCKS="${BLOCKS:-4}"
 WARMUP_SECONDS="${WARMUP_SECONDS:-30}"
 SAMPLE_SECONDS="${SAMPLE_SECONDS:-120}"
 CORRECTNESS_GATE="${P1_CORRECTNESS_GATE:-}"
+UI_SCALE="${UI_SCALE:-3}"
+RENDER_DISTANCE="${RENDER_DISTANCE:-16}"
+PROFILE_ID="V1"
+WORLD_SCENARIO_ID="metal-validation-fixed-camera-v1"
+EXPECTED_FRAMEBUFFER_WIDTH=1708
+EXPECTED_FRAMEBUFFER_HEIGHT=960
+CAMERA_POLICY="world-player-pose snapped to x/z block centers, y half-block, yaw nearest 90 degrees, pitch 0; held fixed by MetalValidationClient"
 RUN_ROOT="${METALLUM_AGENT_RUN_ROOT:-$ROOT/build/agent-runs}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${METALLUM_P1_PERFORMANCE_OUT:-$RUN_ROOT/p1-metal4-main-performance-$STAMP}"
+OPTIONS_FILE="$ROOT/run/options.txt"
+IRIS_CONFIG="$ROOT/run/config/iris.properties"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   echo "P1 physical performance requires an Apple-silicon Mac" >&2
@@ -37,6 +46,14 @@ if ! [[ "$SAMPLE_SECONDS" =~ ^[0-9]+$ ]] || (( SAMPLE_SECONDS < 120 )); then
   echo "P1 performance requires SAMPLE_SECONDS >= 120" >&2
   exit 2
 fi
+if ! [[ "$UI_SCALE" =~ ^[0-9]+$ ]] || (( UI_SCALE < 1 )); then
+  echo "UI_SCALE must be a positive integer" >&2
+  exit 2
+fi
+if ! [[ "$RENDER_DISTANCE" =~ ^[0-9]+$ ]] || (( RENDER_DISTANCE < 2 )); then
+  echo "RENDER_DISTANCE must be an integer >= 2" >&2
+  exit 2
+fi
 if [[ -n "$(git status --porcelain=v1)" ]]; then
   echo "P1 physical performance requires a clean worktree" >&2
   git status --short >&2
@@ -46,7 +63,8 @@ fi
 HEAD_SHA="$(git rev-parse HEAD)"
 mkdir -p "$OUT/correctness" "$OUT/trials"
 
-python3 - "$CORRECTNESS_GATE" "$HEAD_SHA" <<'PY'
+read -r CORRECTNESS_JAR_SHA CORRECTNESS_DYLIB_SHA < <(
+  python3 - "$CORRECTNESS_GATE" "$HEAD_SHA" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 head = sys.argv[2]
@@ -55,24 +73,124 @@ if data.get("state") != "pass":
     raise SystemExit(f"P1 physical correctness gate is not passing: {data.get('state')}")
 identity = data.get("identity")
 if not isinstance(identity, dict) or identity.get("sourceSha") != head:
-    raise SystemExit(
-        f"P1 correctness gate does not belong to current HEAD {head}: {identity}"
-    )
+    raise SystemExit(f"P1 correctness gate does not belong to current HEAD {head}: {identity}")
+jar = identity.get("productionJarSha256")
+dylib = identity.get("nativeDylibSha256")
+if not isinstance(jar, str) or len(jar) != 64 or not isinstance(dylib, str) or len(dylib) != 64:
+    raise SystemExit(f"P1 correctness gate has incomplete binary identity: {identity}")
+print(jar, dylib)
 PY
+)
 cp "$CORRECTNESS_GATE" "$OUT/correctness/physical-pair-decision.json"
+python3 - "$OUT/correctness/gate.json" "$HEAD_SHA" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "schema_version": 1,
+    "status": "pass",
+    "source_sha": sys.argv[2],
+    "reason": "exact-production physical Metal 4/residency baseline+candidate correctness pair passed before performance"
+}, indent=2) + "\n", encoding="utf-8")
+PY
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/metallum-p1-perf.XXXXXX")"
 SNAPSHOT="$TMP_ROOT/world"
 EVAL_WORLD="metallum-p1-perf-$$"
 EVAL_WORLD_PATH="$ROOT/run/saves/$EVAL_WORLD"
+OPTIONS_BACKUP="$TMP_ROOT/options.txt"
+IRIS_BACKUP="$TMP_ROOT/iris.properties"
+OPTIONS_EXISTED=false
+IRIS_EXISTED=false
+
+if [[ -f "$OPTIONS_FILE" ]]; then
+  cp "$OPTIONS_FILE" "$OPTIONS_BACKUP"
+  OPTIONS_EXISTED=true
+fi
+if [[ -f "$IRIS_CONFIG" ]]; then
+  cp "$IRIS_CONFIG" "$IRIS_BACKUP"
+  IRIS_EXISTED=true
+fi
+
+restore_runtime_config() {
+  if [[ "$OPTIONS_EXISTED" == true ]]; then
+    mkdir -p "$(dirname "$OPTIONS_FILE")"
+    cp "$OPTIONS_BACKUP" "$OPTIONS_FILE"
+  else
+    rm -f "$OPTIONS_FILE"
+  fi
+  if [[ "$IRIS_EXISTED" == true ]]; then
+    mkdir -p "$(dirname "$IRIS_CONFIG")"
+    cp "$IRIS_BACKUP" "$IRIS_CONFIG"
+  else
+    rm -f "$IRIS_CONFIG"
+  fi
+}
 
 cleanup() {
   rm -rf "$EVAL_WORLD_PATH"
+  restore_runtime_config
   rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT INT TERM
 
+pin_colon_option() {
+  local path="$1" key="$2" value="$3"
+  mkdir -p "$(dirname "$path")"
+  touch "$path"
+  python3 - "$path" "$key" "$value" <<'PY'
+import pathlib, sys
+path, key, value = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+prefix = key + ":"
+out = []
+replaced = False
+for line in lines:
+    if line.startswith(prefix):
+        if not replaced:
+            out.append(prefix + value)
+            replaced = True
+    else:
+        out.append(line)
+if not replaced:
+    out.append(prefix + value)
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+}
+
+pin_equals_property() {
+  local path="$1" key="$2" value="$3"
+  mkdir -p "$(dirname "$path")"
+  touch "$path"
+  python3 - "$path" "$key" "$value" <<'PY'
+import pathlib, sys
+path, key, value = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+prefix = key + "="
+out = []
+replaced = False
+for line in lines:
+    if line.startswith(prefix):
+        if not replaced:
+            out.append(prefix + value)
+            replaced = True
+    else:
+        out.append(line)
+if not replaced:
+    out.append(prefix + value)
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+}
+
+# V1 is explicitly the no-shader Sodium/Metal profile. Pin mutable client
+# settings before snapshotting any measurements, then restore them on exit.
+pin_colon_option "$OPTIONS_FILE" "guiScale" "$UI_SCALE"
+pin_colon_option "$OPTIONS_FILE" "renderDistance" "$RENDER_DISTANCE"
+pin_equals_property "$IRIS_CONFIG" "enableShaders" "false"
+
 cp -a "run/saves/$WORLD" "$SNAPSHOT"
+
+sha256_file() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
 
 world_sha256() {
   python3 - "$SNAPSHOT" <<'PY'
@@ -98,7 +216,7 @@ reset_eval_world() {
 
 common_args() {
   printf '%s\n' \
-    "-Dmetallum.iris.semantic=true" \
+    "-Dmetallum.iris.semantic=false" \
     "-Dmetallum.metalfx.mode=OFF" \
     "-Dmetallum.metalfx.frameGeneration=false" \
     "-Dmetallum.metalfx.objectMotionProducer=false" \
@@ -106,6 +224,7 @@ common_args() {
     "-Dmetallum.iris.performanceCounters=true" \
     "-Dmetallum.validation.gpuTiming=true" \
     "-Dmetallum.validation.gpuPassTiming=true" \
+    "-Dmetallum.validation.metalDebugLayer=0" \
     "-Dmetallum.iris.experimental.passFusion=false" \
     "-Dmetallum.iris.passFusion=false" \
     "-Dmetallum.iris.computeGrouping=false" \
@@ -134,29 +253,58 @@ lane_args() {
   esac
 }
 
-run_task() {
-  local lane="$1" task="$2" trial_dir="$3" warmup="$4" sample="$5" normalize="$6"
+validate_trial_identity() {
+  local report="$1" lane="$2"
+  python3 - "$report" "$lane" "$HEAD_SHA" "$EXPECTED_FRAMEBUFFER_WIDTH" "$EXPECTED_FRAMEBUFFER_HEIGHT" <<'PY'
+import json, math, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+lane, head = sys.argv[2], sys.argv[3]
+width, height = int(sys.argv[4]), int(sys.argv[5])
+data = json.loads(path.read_text(encoding="utf-8"))
+problems = []
+if data.get("drawableWidth") != width or data.get("drawableHeight") != height:
+    problems.append(f"drawable {data.get('drawableWidth')}x{data.get('drawableHeight')} != {width}x{height}")
+if not isinstance(data.get("measuredFrameIntervals"), int) or data.get("measuredFrameIntervals") <= 0:
+    problems.append("no measured frame intervals")
+readback = data.get("nativeMainReadback")
+if not isinstance(readback, dict) or readback.get("completed") is not True or readback.get("passed") is not True:
+    problems.append(f"native main readback did not pass: {readback}")
+source = data.get("sourceCommit")
+if source is not None and source != head:
+    problems.append(f"report sourceCommit {source} != {head}")
+engaged = data.get("metal4MainRendererEngaged") is True
+if engaged != (lane == "candidate"):
+    problems.append(f"main renderer engagement={engaged} does not match lane={lane}")
+if data.get("residencySetEnabled") is not True:
+    problems.append("explicit residency is not active")
+if problems:
+    raise SystemExit("P1 V1 trial identity/guardrail failed: " + "; ".join(problems))
+PY
+}
+
+run_trial() {
+  local lane="$1" trial_dir="$2"
   local args=() arg status report
   reset_eval_world
   mkdir -p "$trial_dir/artifacts/validation"
   while IFS= read -r arg; do args+=("$arg"); done < <(lane_args "$lane")
   args+=(
-    "-Dmetallum.validation.warmupSeconds=$warmup"
-    "-Dmetallum.validation.sampleSeconds=$sample"
+    "-Dmetallum.validation.warmupSeconds=$WARMUP_SECONDS"
+    "-Dmetallum.validation.sampleSeconds=$SAMPLE_SECONDS"
     "-Dmetallum.validation.output=$trial_dir/artifacts/validation"
     "-Dmetallum.validation.sourceCommit=$HEAD_SHA"
   )
   printf '%s\n' "${args[@]}" > "$trial_dir/properties.txt"
   {
-    printf '[command] ./gradlew --no-daemon %q -Pworld=%q' "$task" "$EVAL_WORLD"
+    printf '[command] ./gradlew --no-daemon minecraftNativeRenderEfficiencyValidation -Pworld=%q' "$EVAL_WORLD"
     printf ' %q' "${args[@]}"
     printf '\n'
   } > "$trial_dir/command.txt"
 
   set +e
-  MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=0 \
-    ./gradlew --no-daemon "$task" "-Pworld=$EVAL_WORLD" "${args[@]}" \
-      2>&1 | tee "$trial_dir/client.log"
+  MTL_DEBUG_LAYER=0 MTL_SHADER_VALIDATION=0 \
+    ./gradlew --no-daemon minecraftNativeRenderEfficiencyValidation \
+      "-Pworld=$EVAL_WORLD" "${args[@]}" 2>&1 | tee "$trial_dir/client.log"
   status=${PIPESTATUS[0]}
   set -e
   printf '%d\n' "$status" > "$trial_dir/exit-status.txt"
@@ -164,21 +312,26 @@ run_task() {
     return "$status"
   fi
 
-  if [[ "$normalize" == "true" ]]; then
-    report="$(find "$trial_dir" -type f -name native-fullscreen-baseline.json -print | head -n 1)"
-    if [[ -z "$report" ]]; then
-      echo "P1 performance trial produced no native-fullscreen-baseline.json: $trial_dir" >&2
-      printf '2\n' > "$trial_dir/exit-status.txt"
-      return 2
-    fi
-    python3 scripts/agent/check_metal4_main_trial.py "$report" \
-      --expected "$lane" --output "$trial_dir/metal4-main-admission.json"
-    python3 scripts/agent/normalize_unified_trial.py "$trial_dir"
+  report="$(find "$trial_dir" -type f -name native-fullscreen-baseline.json -print | head -n 1)"
+  if [[ -z "$report" ]]; then
+    echo "P1 performance trial produced no native-fullscreen-baseline.json: $trial_dir" >&2
+    printf '2\n' > "$trial_dir/exit-status.txt"
+    return 2
   fi
+  validate_trial_identity "$report" "$lane"
+  python3 scripts/agent/check_metal4_main_trial.py "$report" \
+    --expected "$lane" --output "$trial_dir/metal4-main-admission.json"
+  python3 scripts/agent/normalize_unified_trial.py "$trial_dir"
 }
 
 WORLD_SHA="$(world_sha256)"
-python3 - "$OUT/environment.json" "$HEAD_SHA" "$WORLD" "$WORLD_SHA" \
+CAMERA_SCRIPT_SHA="$(sha256_file src/main/java/com/metallum/client/validation/MetalValidationClient.java)"
+OPTIONS_SHA="$(sha256_file "$OPTIONS_FILE")"
+IRIS_CONFIG_SHA="$(sha256_file "$IRIS_CONFIG")"
+
+python3 - "$OUT/environment.json" "$HEAD_SHA" "$CORRECTNESS_JAR_SHA" "$CORRECTNESS_DYLIB_SHA" \
+  "$WORLD" "$WORLD_SHA" "$PROFILE_ID" "$WORLD_SCENARIO_ID" "$UI_SCALE" "$RENDER_DISTANCE" \
+  "$CAMERA_POLICY" "$CAMERA_SCRIPT_SHA" "$OPTIONS_SHA" "$IRIS_CONFIG_SHA" \
   "$BLOCKS" "$WARMUP_SECONDS" "$SAMPLE_SECONDS" <<'PY'
 import json, os, pathlib, platform, subprocess, sys
 path = pathlib.Path(sys.argv[1])
@@ -187,43 +340,70 @@ def cmd(*args):
         return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT).strip()
     except Exception as exc:
         return f"unavailable: {exc}"
+def properties(path):
+    out = {}
+    for raw in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        out[key.strip()] = value.strip()
+    return out
+props = properties("gradle.properties")
+identity = {
+    "profile_id": sys.argv[7],
+    "candidate_sha": sys.argv[2],
+    "production_jar_sha256": sys.argv[3],
+    "native_dylib_sha256": sys.argv[4],
+    "world_sha256": sys.argv[6],
+    "world_scenario_id": sys.argv[8],
+    "resolution": [1708, 960],
+    "ui_scale": int(sys.argv[9]),
+    "render_distance": int(sys.argv[10]),
+    "camera_pose": sys.argv[11],
+    "camera_script_sha256": sys.argv[12],
+    "minecraft_version": props.get("minecraft_version", "unknown"),
+    "sodium_version": props.get("sodium_version", "unknown"),
+    "macos_version": cmd("sw_vers", "-productVersion"),
+    "java_version": cmd("java", "-version"),
+}
+required = {
+    "candidate_sha", "production_jar_sha256", "native_dylib_sha256", "world_sha256",
+    "world_scenario_id", "resolution", "ui_scale", "render_distance", "camera_pose",
+    "camera_script_sha256", "minecraft_version", "sodium_version", "macos_version", "java_version"
+}
+missing = sorted(key for key in required if identity.get(key) in (None, "", "unknown"))
+if missing:
+    raise SystemExit(f"V1 benchmark identity is incomplete: {missing}")
 path.write_text(json.dumps({
-    "schema_version": 1,
+    "schema_version": 2,
     "stage": "P1-metal4-main-production",
     "kind": "physical-performance-abba",
-    "sourceSha": sys.argv[2],
-    "world": sys.argv[3],
-    "worldSha256": sys.argv[4],
-    "pairedBlocks": int(sys.argv[5]),
-    "warmupSeconds": int(sys.argv[6]),
-    "sampleSeconds": int(sys.argv[7]),
+    "benchmark_contract": "docs/agent/benchmark-profiles.json",
+    "identity": identity,
+    "world": sys.argv[5],
+    "pinned_runtime_config": {
+        "options_sha256": sys.argv[13],
+        "iris_properties_sha256": sys.argv[14],
+        "iris_semantic": False,
+        "shader_pack": None,
+        "metalfx_mode": "OFF",
+        "frame_generation": False,
+        "expected_framebuffer": [1708, 960],
+    },
+    "pairedBlocks": int(sys.argv[15]),
+    "warmupSeconds": int(sys.argv[16]),
+    "sampleSeconds": int(sys.argv[17]),
     "pairing": "ABBA-equivalent alternating order",
-    "platform": platform.platform(),
     "machine": platform.machine(),
-    "macOS": cmd("sw_vers"),
     "xcode": cmd("xcodebuild", "-version"),
-    "java": cmd("java", "-version"),
-    "display": os.environ.get("METALLUM_EVAL_DISPLAY", "operator-must-record"),
-    "powerState": os.environ.get("METALLUM_EVAL_POWER_STATE", "operator-must-record"),
+    "display": os.environ.get("METALLUM_EVAL_DISPLAY", "unrecorded"),
+    "powerState": os.environ.get("METALLUM_EVAL_POWER_STATE", "unrecorded"),
     "laneContract": {
-        "common": "Metal4 compiler + present + explicit residency; MetalFX/FG and unrelated experimental lanes off",
+        "common": "V1 no-shader + Metal4 compiler/present + explicit residency; MetalFX/FG and unrelated experimental lanes off",
         "baseline": "metal4MainRenderer=false",
         "candidate": "metal4MainRenderer=true"
     }
-}, indent=2) + "\n", encoding="utf-8")
-PY
-
-# Re-prove semantic correctness on the immutable performance world before timing.
-run_task baseline renderContractMinecraftValidation \
-  "$OUT/correctness/render-contract-baseline" 0 0 false
-run_task candidate renderContractMinecraftValidation \
-  "$OUT/correctness/render-contract-candidate" 0 0 false
-python3 - "$OUT/correctness/gate.json" <<'PY'
-import json, pathlib, sys
-pathlib.Path(sys.argv[1]).write_text(json.dumps({
-    "schema_version": 1,
-    "status": "pass",
-    "reason": "physical production pair gate plus same-world baseline/candidate render-contract validation passed"
 }, indent=2) + "\n", encoding="utf-8")
 PY
 
@@ -236,8 +416,7 @@ for ((block=1; block<=BLOCKS; block++)); do
     order=(candidate baseline)
   fi
   for lane in "${order[@]}"; do
-    run_task "$lane" minecraftNativeRenderEfficiencyValidation \
-      "$block_dir/$lane" "$WARMUP_SECONDS" "$SAMPLE_SECONDS" true
+    run_trial "$lane" "$block_dir/$lane"
   done
 done
 
