@@ -80,6 +80,7 @@ fi
 
 case "$MODE" in
   static)
+    run_logged benchmark-profiles python3 scripts/agent/verify_benchmark_profiles.py
     run_logged unit-tests ./gradlew --no-daemon clean test
     # Do not call `build`: this repository's `check` task includes attended
     # WindowServer and hardware-GPU validation. Static verification intentionally
@@ -105,6 +106,7 @@ case "$MODE" in
     run_logged focused ./gradlew --no-daemon $TASKS
     ;;
   full)
+    run_logged benchmark-profiles python3 scripts/agent/verify_benchmark_profiles.py
     run_logged unit-tests ./gradlew --no-daemon clean test
     run_logged native-and-assemble ./gradlew --no-daemon \
       buildMacNative assemble validationJar verifyProductionJarIsolation
