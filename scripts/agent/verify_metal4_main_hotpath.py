@@ -10,6 +10,8 @@ BUFFER_SOURCE = ROOT / "src/main/java/com/metallum/client/metal/render/mtl/MTLCo
 TELEMETRY_SOURCE = ROOT / "src/main/java/com/metallum/client/metal/render/mtl/Metal4MainRendererTelemetry.java"
 E2E_BUILD = ROOT / ".github/ci/minecraft-e2e/build.gradle"
 E2E_TEST = ROOT / ".github/ci/minecraft-e2e/src/main/java/com/metallum/client/metal/render/Metal4MainRendererEvidenceGameTest.java"
+PHYSICAL_CORRECTNESS = ROOT / "scripts/agent/run_metal4_main_p1_physical_correctness.sh"
+PHYSICAL_PERFORMANCE = ROOT / "scripts/agent/run_metal4_main_p1_physical_performance.sh"
 CLASS_START = "private final class Metal4MainQueueContext {"
 CLASS_END = "private final class Metal4MainRenderEncoderBridge {"
 
@@ -168,9 +170,57 @@ def main() -> None:
         "result.mainRendererEngaged() == candidate" in e2e_test,
         "production GameTest does not prove requested main-renderer engagement",
     )
+    for identity_property in (
+        "metallum.ci.p1SourceSha",
+        "metallum.ci.p1ProductionJarSha256",
+        "metallum.ci.p1NativeDylibSha256",
+    ):
+        require(identity_property in e2e_build and identity_property in e2e_test,
+                f"production E2E does not carry exact identity field {identity_property}")
+
+    physical_correctness = PHYSICAL_CORRECTNESS.read_text(encoding="utf-8")
+    require("buildMacNative jar verifyProductionJarIsolation" in physical_correctness,
+            "physical correctness runner does not build production bits once")
+    require("p1Metal4Lane=$lane" in physical_correctness,
+            "physical correctness runner does not use explicit baseline/candidate lanes")
+    require("check_metal4_main_e2e_pair.py" in physical_correctness,
+            "physical correctness runner does not invoke the exact-bits pair gate")
+    require("MTL_DEBUG_LAYER=1" in physical_correctness,
+            "physical correctness runner does not enable Metal API validation")
+
+    physical_performance = PHYSICAL_PERFORMANCE.read_text(encoding="utf-8")
+    require('PROFILE_ID="V1"' in physical_performance,
+            "P1 performance runner is not pinned to benchmark profile V1")
+    require('"-Dmetallum.iris.semantic=false"' in physical_performance,
+            "V1 performance runner must keep Iris semantic rendering disabled")
+    require('pin_equals_property "$IRIS_CONFIG" "enableShaders" "false"' in physical_performance,
+            "V1 performance runner does not disable mutable shader-pack activation")
+    require('pin_colon_option "$OPTIONS_FILE" "guiScale" "$UI_SCALE"' in physical_performance,
+            "V1 performance runner does not pin UI scale")
+    require('pin_colon_option "$OPTIONS_FILE" "renderDistance" "$RENDER_DISTANCE"' in physical_performance,
+            "V1 performance runner does not pin render distance")
+    require("EXPECTED_FRAMEBUFFER_WIDTH=1708" in physical_performance
+            and "EXPECTED_FRAMEBUFFER_HEIGHT=960" in physical_performance,
+            "V1 performance runner does not pin the validated Retina framebuffer")
+    require("CAMERA_SCRIPT_SHA" in physical_performance and "CAMERA_POLICY" in physical_performance,
+            "V1 performance runner does not content-address the fixed-camera driver")
+    require("P1_CORRECTNESS_GATE" in physical_performance and "sourceSha" in physical_performance,
+            "performance runner does not require a correctness result for the same source SHA")
+    require("BLOCKS < 4" in physical_performance
+            and "WARMUP_SECONDS < 30" in physical_performance
+            and "SAMPLE_SECONDS < 120" in physical_performance,
+            "performance runner does not enforce the benchmark minimum sample protocol")
+    require("block % 2" in physical_performance
+            and "order=(baseline candidate)" in physical_performance
+            and "order=(candidate baseline)" in physical_performance,
+            "performance runner does not implement ABBA-equivalent interleaving")
+    require("MTL_DEBUG_LAYER=0" in physical_performance,
+            "performance measurements must not run with Metal API validation overhead")
+    require("restore_runtime_config" in physical_performance,
+            "performance runner does not restore the user's mutable client config")
 
     evidence = {
-        "schema": 3,
+        "schema": 4,
         "source": str(SOURCE.relative_to(ROOT)),
         "argumentTableModel": "one-long-lived-table-per-stage-family-per-in-flight-slot",
         "argumentTablesPerSlot": 3,
@@ -195,6 +245,21 @@ def main() -> None:
             "sameMetal4Present": True,
             "sameResidency": True,
             "onlyIntendedDifference": "metallum.opt.metal4MainRenderer",
+            "exactBinaryIdentity": True,
+        },
+        "performanceProtocol": {
+            "profile": "V1",
+            "irisSemantic": False,
+            "shaderPack": None,
+            "fixedFramebuffer": [1708, 960],
+            "fixedUiScale": True,
+            "fixedRenderDistance": True,
+            "contentAddressedCameraDriver": True,
+            "minimumBlocks": 4,
+            "minimumWarmupSeconds": 30,
+            "minimumSampleSeconds": 120,
+            "interleaved": True,
+            "metalDebugLayer": False,
         },
         "status": "pass",
     }
