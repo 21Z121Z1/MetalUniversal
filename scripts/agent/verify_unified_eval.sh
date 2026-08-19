@@ -4,10 +4,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 python3 -m json.tool docs/agent/unified-evaluation-acceptance.json >/dev/null
+python3 -m json.tool docs/agent/benchmark-profiles.json >/dev/null
+python3 scripts/agent/verify_benchmark_profiles.py
 python3 scripts/agent/analyze_unified_eval.py --self-test
 python3 scripts/agent/normalize_unified_trial.py --self-test
 python3 scripts/agent/check_unified_eval_admission.py --self-test
 python3 -m py_compile \
+  scripts/agent/verify_benchmark_profiles.py \
   scripts/agent/analyze_unified_eval.py \
   scripts/agent/normalize_unified_trial.py \
   scripts/agent/check_unified_eval_admission.py
