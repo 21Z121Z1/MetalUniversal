@@ -8,6 +8,8 @@ SOURCE = ROOT / "src/main/native/MetallumNative.swift"
 QUEUE_SOURCE = ROOT / "src/main/java/com/metallum/client/metal/render/mtl/MTLCommandQueue.java"
 BUFFER_SOURCE = ROOT / "src/main/java/com/metallum/client/metal/render/mtl/MTLCommandBuffer.java"
 TELEMETRY_SOURCE = ROOT / "src/main/java/com/metallum/client/metal/render/mtl/Metal4MainRendererTelemetry.java"
+E2E_BUILD = ROOT / ".github/ci/minecraft-e2e/build.gradle"
+E2E_TEST = ROOT / ".github/ci/minecraft-e2e/src/main/java/com/metallum/client/metal/render/Metal4MainRendererEvidenceGameTest.java"
 CLASS_START = "private final class Metal4MainQueueContext {"
 CLASS_END = "private final class Metal4MainRenderEncoderBridge {"
 
@@ -100,6 +102,20 @@ def main() -> None:
         "command-buffer acquire is not recorded",
     )
     require(
+        "private final boolean metal4Supported;" in queue
+        and "public boolean metal4Supported()" in queue,
+        "command queue does not retain runtime Metal 4 capability evidence",
+    )
+    require(
+        "private boolean residencySetEnabled;" in queue
+        and "public boolean residencySetEnabled()" in queue,
+        "command queue does not retain runtime residency activation evidence",
+    )
+    require(
+        "this.residencySetEnabled = enabled;" in queue,
+        "residency evidence is not tied to the native enable result",
+    )
+    require(
         "Metal4MainRendererTelemetry.recordCommit()" in buffer,
         "command-buffer commit is not recorded",
     )
@@ -120,8 +136,41 @@ def main() -> None:
         "runtime telemetry is not opt-in",
     )
 
+    e2e_build = E2E_BUILD.read_text(encoding="utf-8")
+    e2e_test = E2E_TEST.read_text(encoding="utf-8")
+    require("p1Metal4Lane" in e2e_build, "production E2E has no explicit P1 lane selector")
+    require(
+        'p1Metal4Lane in ["off", "baseline", "candidate"]' in e2e_build,
+        "production E2E does not fail closed on the three P1 lanes",
+    )
+    for property_line in (
+        'jvmArgs.add("-Dmetallum.opt.metal4=true")',
+        'jvmArgs.add("-Dmetallum.opt.metal4Compiler=true")',
+        'jvmArgs.add("-Dmetallum.opt.metal4Present=true")',
+        'jvmArgs.add("-Dmetallum.opt.residencySet=true")',
+        'jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")',
+    ):
+        require(property_line in e2e_build, f"matched physical lane is missing {property_line}")
+    require(
+        'jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=${requireMetal4MainRenderer}")' in e2e_build,
+        "baseline/candidate lane does not isolate the main-renderer toggle",
+    )
+    require(
+        "device.commandQueue.metal4Supported()" in e2e_test
+        and "device.commandQueue.residencySetEnabled()" in e2e_test,
+        "production GameTest does not consume queue capability/residency evidence",
+    )
+    require(
+        'lane.equals("baseline")' in e2e_test and 'lane.equals("candidate")' in e2e_test,
+        "production GameTest does not validate both P1 lanes",
+    )
+    require(
+        "result.mainRendererEngaged() == candidate" in e2e_test,
+        "production GameTest does not prove requested main-renderer engagement",
+    )
+
     evidence = {
-        "schema": 2,
+        "schema": 3,
         "source": str(SOURCE.relative_to(ROOT)),
         "argumentTableModel": "one-long-lived-table-per-stage-family-per-in-flight-slot",
         "argumentTablesPerSlot": 3,
@@ -137,6 +186,15 @@ def main() -> None:
             "nativeCrossCheck": "metallum_metal4_main_renderer_stats",
             "slotWaitNanos": "conservative-upper-bound-under-three-unretired-submissions",
             "hotPathFfmStatsQueryPerFrame": False,
+            "metal4CapabilityRecorded": True,
+            "residencyActivationRecorded": True,
+        },
+        "physicalAB": {
+            "lanes": ["baseline", "candidate"],
+            "sameMetal4Compiler": True,
+            "sameMetal4Present": True,
+            "sameResidency": True,
+            "onlyIntendedDifference": "metallum.opt.metal4MainRenderer",
         },
         "status": "pass",
     }
