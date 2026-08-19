@@ -9,6 +9,7 @@ python3 scripts/agent/verify_benchmark_profiles.py
 python3 scripts/agent/verify_metal4_main_hotpath.py \
   --output build/agent-evidence/metal4-main-hotpath.json
 python3 scripts/agent/check_metal4_main_e2e_pair.py --self-test
+python3 scripts/agent/check_metal4_main_trial.py --self-test
 python3 scripts/agent/analyze_unified_eval.py --self-test
 python3 scripts/agent/normalize_unified_trial.py --self-test
 python3 scripts/agent/check_unified_eval_admission.py --self-test
@@ -16,11 +17,13 @@ python3 -m py_compile \
   scripts/agent/verify_benchmark_profiles.py \
   scripts/agent/verify_metal4_main_hotpath.py \
   scripts/agent/check_metal4_main_e2e_pair.py \
+  scripts/agent/check_metal4_main_trial.py \
   scripts/agent/analyze_unified_eval.py \
   scripts/agent/normalize_unified_trial.py \
   scripts/agent/check_unified_eval_admission.py
 bash -n scripts/agent/run_unified_eval_cycle.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_correctness.sh
+bash -n scripts/agent/run_metal4_main_p1_physical_performance.sh
 bash -n scripts/agent/verify.sh
 
 ./gradlew --no-daemon compileJava test \
