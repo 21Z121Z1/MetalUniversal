@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "stage": "P1-metal4-main-production",
   "base_stage": {
     "name": "P0-minecraft-metal-e2e",
@@ -24,7 +24,10 @@
     "free_slot_requires_metal_completion_feedback": true
   },
   "runtime_gates": {
-    "main_renderer_engagement_fraction": 1.0,
+    "metal4_supported": true,
+    "residency_set_enabled": true,
+    "candidate_main_renderer_engagement_fraction": 1.0,
+    "baseline_main_renderer_engagement_fraction": 0.0,
     "native_begin_must_equal_java_acquire_delta": true,
     "native_submit_must_equal_java_commit_delta": true,
     "outstanding_submissions_after_gpu_drain": 0,
@@ -48,6 +51,10 @@
   "runtime_telemetry": {
     "enabled_by": "metallum.hotpath.telemetry=true",
     "native_cross_check": "metallum_metal4_main_renderer_stats",
+    "queue_capability_evidence": [
+      "MTLCommandQueue.metal4Supported()",
+      "MTLCommandQueue.residencySetEnabled()"
+    ],
     "command_allocator_resets": "derived one-for-one from successful Metal4 acquire; the native static gate independently proves exactly one allocator.reset after free-slot acquisition",
     "slot_wait_nanos": "conservative upper bound: wall time of native command-buffer acquisition only when all three Java-side submissions are still unretired",
     "slot_wait_safety": "the conservative upper bound may reject noise but cannot hide a real slot-wait regression",
@@ -55,6 +62,24 @@
     "hot_path_stats_ffm_queries_per_frame": 0,
     "evidence_producer": ".github/ci/minecraft-e2e/src/main/java/com/metallum/client/metal/render/Metal4MainRendererEvidenceGameTest.java",
     "evidence_artifact": "metal4-main-renderer-evidence.json"
+  },
+  "physical_ab_contract": {
+    "lanes": [
+      "baseline",
+      "candidate"
+    ],
+    "identical_properties": [
+      "metallum.opt.metal4=true",
+      "metallum.opt.metal4Compiler=true",
+      "metallum.opt.metal4Present=true",
+      "metallum.opt.residencySet=true",
+      "metallum.opt.metal4MainQueuePilot=false",
+      "metallum.metalfx.mode=OFF",
+      "metallum.metalfx.frameGeneration=false"
+    ],
+    "only_intended_lane_difference": "metallum.opt.metal4MainRenderer",
+    "baseline_value": false,
+    "candidate_value": true
   },
   "capability_policy": {
     "metal4_required": true,
@@ -70,16 +95,23 @@
     "ordinary_build_must_pass": true
   },
   "physical_mac_evidence": {
-    "command": "./gradlew -p .github/ci/minecraft-e2e -PmetallumJar=<production-jar> -Pp1Metal4MainRenderer=true runProductionClientGameTest",
+    "baseline_command": "./gradlew -p .github/ci/minecraft-e2e -PmetallumJar=<production-jar> -Pp1Metal4Lane=baseline runProductionClientGameTest",
+    "candidate_command": "./gradlew -p .github/ci/minecraft-e2e -PmetallumJar=<production-jar> -Pp1Metal4Lane=candidate runProductionClientGameTest",
+    "legacy_candidate_alias": "-Pp1Metal4MainRenderer=true",
     "required_environment": "physical Apple GPU with Metal 4 and MTLResidencySet support",
+    "same_exact_product_sha_required": true,
+    "same_exact_production_jar_required": true,
     "amethyst_or_ios_required": false
   },
   "performance_policy": {
     "correctness_before_performance": true,
     "use_benchmark_profiles_contract": "docs/agent/benchmark-profiles.json",
+    "baseline_candidate_dependencies_must_match": true,
     "candidate_must_not_increase_commit_calls_per_frame": true,
     "candidate_must_not_increase_failed_or_waiting_frames": true,
-    "paired_performance_required_before_default_enablement": true
+    "paired_performance_required_before_default_enablement": true,
+    "minimum_paired_blocks": 4,
+    "minimum_positive_block_fraction": 0.75
   },
   "stage_transition": {
     "next_stage": "P2-iris-tbdr-render-graph-v3",
