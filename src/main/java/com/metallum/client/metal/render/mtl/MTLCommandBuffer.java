@@ -9,12 +9,20 @@ import java.lang.foreign.MemorySegment;
 @Environment(EnvType.CLIENT)
 public final class MTLCommandBuffer {
     private MemorySegment handle;
+    private final boolean trackMetal4MainRenderer;
+    private boolean metal4Submitted;
+    private boolean metal4CompletionRecorded;
     private boolean presentEncodeCalled;
     private boolean presentSubmitted;
     private boolean presentCompletionRecorded;
 
     MTLCommandBuffer(final MemorySegment handle) {
+        this(handle, false);
+    }
+
+    MTLCommandBuffer(final MemorySegment handle, final boolean trackMetal4MainRenderer) {
         this.handle = handle;
+        this.trackMetal4MainRenderer = trackMetal4MainRenderer;
     }
 
     public MTLBlitCommandEncoder makeBlitCommandEncoder(final String label) {
@@ -138,11 +146,13 @@ public final class MTLCommandBuffer {
 
     public void commit() {
         MetalNativeBridge.MTLCommandBuffer_commit(handle());
+        recordMetal4Submitted();
         recordPresentSubmitted();
     }
 
     public void commitWithSignal(final MemorySegment semaphore) {
         MetalNativeBridge.MTLCommandBuffer_commitWithSignal(handle(), semaphore);
+        recordMetal4Submitted();
         recordPresentSubmitted();
     }
 
@@ -150,7 +160,11 @@ public final class MTLCommandBuffer {
         if (MetalNativeBridge.isNullHandle(handle)) {
             return true;
         }
-        return MetalNativeBridge.MTLCommandBuffer_isCompleted(handle()) == 1;
+        boolean completed = MetalNativeBridge.MTLCommandBuffer_isCompleted(handle()) == 1;
+        if (completed) {
+            recordMetal4Completion();
+        }
+        return completed;
     }
 
     public boolean completedSuccessfully() {
@@ -158,6 +172,10 @@ public final class MTLCommandBuffer {
             return false;
         }
         boolean success = MetalNativeBridge.MTLCommandBuffer_completedSuccessfully(handle()) == 1;
+        if (trackMetal4MainRenderer && metal4Submitted && !metal4CompletionRecorded
+                && MetalNativeBridge.MTLCommandBuffer_isCompleted(handle()) == 1) {
+            recordMetal4Completion();
+        }
         if (presentSubmitted && !presentCompletionRecorded) {
             presentCompletionRecorded = true;
             MetalPresentationTelemetry.recordCompletion(success);
@@ -179,7 +197,13 @@ public final class MTLCommandBuffer {
         if (MetalNativeBridge.isNullHandle(handle)) {
             return true;
         }
-        return MetalNativeBridge.MTLCommandBuffer_waitUntilCompleted(handle(), Math.max(timeoutMs, 0L)) == 0;
+        boolean completed = MetalNativeBridge.MTLCommandBuffer_waitUntilCompleted(
+                handle(), Math.max(timeoutMs, 0L)
+        ) == 0;
+        if (completed) {
+            recordMetal4Completion();
+        }
+        return completed;
     }
 
     public void pushDebugGroup(final String label) {
@@ -194,12 +218,30 @@ public final class MTLCommandBuffer {
         if (MetalNativeBridge.isNullHandle(handle)) {
             return;
         }
+        if (trackMetal4MainRenderer && metal4Submitted && !metal4CompletionRecorded
+                && MetalNativeBridge.MTLCommandBuffer_isCompleted(handle()) == 1) {
+            recordMetal4Completion();
+        }
         MetalNativeBridge.metallum_release_object(handle);
         handle = MemorySegment.NULL;
     }
 
     public MemorySegment nativeHandle() {
         return handle();
+    }
+
+    private void recordMetal4Submitted() {
+        if (trackMetal4MainRenderer && !metal4Submitted) {
+            metal4Submitted = true;
+            Metal4MainRendererTelemetry.recordCommit();
+        }
+    }
+
+    private void recordMetal4Completion() {
+        if (trackMetal4MainRenderer && metal4Submitted && !metal4CompletionRecorded) {
+            metal4CompletionRecorded = true;
+            Metal4MainRendererTelemetry.recordCompletion();
+        }
     }
 
     private void recordPresentSubmitted() {
