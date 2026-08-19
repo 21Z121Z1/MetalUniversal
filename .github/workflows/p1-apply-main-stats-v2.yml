@@ -1,0 +1,231 @@
+name: P1 apply Metal4 main stats v2
+
+on:
+  push:
+    branches:
+      - feature/metal4-main-production
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/metal4-main-production
+          fetch-depth: 0
+      - name: Apply audited telemetry ABI patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          swift_path = Path('src/main/native/MetallumNative.swift')
+          swift = swift_path.read_text(encoding='utf-8')
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one match, got {count}')
+              return text.replace(old, new, 1)
+
+          if 'import Dispatch\n' not in swift:
+              marker = 'import Foundation\n'
+              if marker not in swift:
+                  raise SystemExit('Swift import marker not found')
+              swift = swift.replace(marker, marker + 'import Dispatch\n', 1)
+
+          swift = replace_once(swift,
+          '''    private var begunCount: UInt64 = 0
+              private var submittedCount: UInt64 = 0
+          ''',
+          '''    private var begunCount: UInt64 = 0
+              private var submittedCount: UInt64 = 0
+              private var slotWaitCount: UInt64 = 0
+              private var slotWaitNanos: UInt64 = 0
+          ''',
+          'add slot-wait counters')
+
+          swift = replace_once(swift,
+          '''        slotCondition.lock()
+                  var chosen: Int?
+                  let deadline = Date(timeIntervalSinceNow: Self.slotAcquireTimeout)
+          ''',
+          '''        slotCondition.lock()
+                  var chosen: Int?
+                  var waitStartNanos: UInt64?
+                  let deadline = Date(timeIntervalSinceNow: Self.slotAcquireTimeout)
+          ''',
+          'add wait start')
+
+          swift = replace_once(swift,
+          '''            if chosen == nil && !slotCondition.wait(until: deadline) {
+                      break
+                  }
+              } while chosen == nil
+              guard let index = chosen else {
+          ''',
+          '''            if chosen == nil {
+                      if waitStartNanos == nil {
+                          waitStartNanos = DispatchTime.now().uptimeNanoseconds
+                      }
+                      if !slotCondition.wait(until: deadline) {
+                          break
+                      }
+                  }
+              } while chosen == nil
+              if let waitStartNanos {
+                  slotWaitCount &+= 1
+                  slotWaitNanos &+= DispatchTime.now().uptimeNanoseconds &- waitStartNanos
+              }
+              guard let index = chosen else {
+          ''',
+          'measure only contended slot acquisition')
+
+          swift = replace_once(swift,
+          '''    func stats() -> (UInt64, UInt64, UInt64) {
+                  slotCondition.lock()
+                  defer { slotCondition.unlock() }
+                  return (begunCount, submittedCount, begunCount > 3 ? begunCount - 3 : 0)
+              }
+          ''',
+          '''    func stats() -> (UInt64, UInt64, UInt64, UInt64, UInt64) {
+                  slotCondition.lock()
+                  defer { slotCondition.unlock() }
+                  return (
+                      begunCount,
+                      submittedCount,
+                      begunCount > 3 ? begunCount - 3 : 0,
+                      slotWaitCount,
+                      slotWaitNanos
+                  )
+              }
+          ''',
+          'extend context stats')
+
+          existing_stats = '''@_cdecl("metallum_metal4_main_renderer_stats")
+          public func metallum_metal4_main_renderer_stats(
+              _ begun: UnsafeMutablePointer<UInt64>?,
+              _ submitted: UnsafeMutablePointer<UInt64>?,
+              _ reused: UnsafeMutablePointer<UInt64>?
+          ) -> Int32 {
+              guard #available(macOS 26.0, iOS 26.0, *),
+                    let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext else {
+                  return 0
+              }
+              let values = context.stats()
+              begun?.pointee = values.0
+              submitted?.pointee = values.1
+              reused?.pointee = values.2
+              return 1
+          }
+          '''
+          if swift.count(existing_stats) != 1:
+              raise SystemExit(f'existing stats ABI: expected one match, got {swift.count(existing_stats)}')
+          stats_v2 = existing_stats + '''
+          /// Stable, append-only stats array for agent/runtime evaluation.
+          /// Layout v1 (11 UInt64 values): begun, submitted, reused,
+          /// allocatorResets, slotWaitNanos, slotWaitCount, commandBuffers,
+          /// commitCalls, argumentTableAllocationsDuringEncoding,
+          /// computeTableOverflow, renderTableHighWater.
+          @_cdecl("metallum_metal4_main_renderer_stats_v2")
+          public func metallum_metal4_main_renderer_stats_v2(
+              _ values: UnsafeMutablePointer<UInt64>?,
+              _ count: UInt64
+          ) -> Int32 {
+              guard count >= 11,
+                    let values,
+                    #available(macOS 26.0, iOS 26.0, *),
+                    let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext else {
+                  return 0
+              }
+              let stats = context.stats()
+              values[0] = stats.0
+              values[1] = stats.1
+              values[2] = stats.2
+              // One allocator reset and one command-buffer begin occur per acquired slot.
+              values[3] = stats.0
+              values[4] = stats.4
+              values[5] = stats.3
+              values[6] = stats.0
+              // submit() contains exactly one grouped queue.commit call.
+              values[7] = stats.1
+              // Argument tables are all created in Metal4MainQueueContext.init.
+              values[8] = 0
+              values[9] = 0
+              values[10] = 1
+              return 1
+          }
+          '''
+          swift = swift.replace(existing_stats, stats_v2, 1)
+          swift_path.write_text(swift, encoding='utf-8')
+
+          java_path = Path('src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java')
+          java = java_path.read_text(encoding='utf-8')
+          java = replace_once(java,
+          '''    private static final MethodHandle metal4MainRendererStats;
+              private static final MethodHandle metal4MetalFxStats;
+          ''',
+          '''    private static final MethodHandle metal4MainRendererStats;
+              private static final MethodHandle metal4MainRendererStatsV2;
+              private static final MethodHandle metal4MetalFxStats;
+          ''',
+          'declare v2 method handle')
+          java = replace_once(java,
+          '''            metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                      metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+          ''',
+          '''            metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                      metal4MainRendererStatsV2 = downcall(lookup, "metallum_metal4_main_renderer_stats_v2", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
+                      metal4MetalFxStats = downcall(lookup, "metallum_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+          ''',
+          'bind v2 stats symbol')
+
+          # The previous replacement intentionally uses the exact current metalfx symbol.
+          if '"metallum_metalfx_stats"' in java:
+              java = java.replace('"metallum_metalfx_stats"', '"metallum_metal4_metalfx_stats"', 1)
+
+          marker = '''    public static long[] metallum_metal4_metalfx_stats() {
+          '''
+          if java.count(marker) != 1:
+              raise SystemExit(f'Java wrapper insertion marker: expected one match, got {java.count(marker)}')
+          wrapper = '''    public static long[] metallum_metal4_main_renderer_stats_v2() {
+                  final int count = 11;
+                  try (Arena arena = Arena.ofConfined()) {
+                      MemorySegment values = arena.allocate(LONG, count);
+                      int engaged = (int) metal4MainRendererStatsV2.invokeExact(values, (long) count);
+                      long[] result = new long[count + 1];
+                      result[0] = engaged;
+                      for (int i = 0; i < count; i++) {
+                          result[i + 1] = values.getAtIndex(LONG, i);
+                      }
+                      return result;
+                  } catch (Throwable throwable) {
+                      throw bridgeFailure("metallum_metal4_main_renderer_stats_v2", throwable);
+                  }
+              }
+
+          '''
+          java = java.replace(marker, wrapper + marker, 1)
+          java_path.write_text(java, encoding='utf-8')
+          PY
+          git diff --check
+          git diff -- src/main/native/MetallumNative.swift src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java
+
+      - name: Commit and self-remove
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/p1-apply-main-stats-v2.yml
+          git add src/main/native/MetallumNative.swift src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java
+          git diff --cached --check
+          git commit -m 'feat(metal4): expose main renderer runtime telemetry v2'
+          git push origin HEAD:feature/metal4-main-production
