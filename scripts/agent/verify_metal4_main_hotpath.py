@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src/main/native/MetallumNative.swift"
 CLASS_START = "private final class Metal4MainQueueContext {"
-CLASS_END = "private final class Metal4MainCommandBufferLease {"
+CLASS_END = "private final class Metal4MainRenderEncoderBridge {"
 
 
 def fail(message: str) -> None:
