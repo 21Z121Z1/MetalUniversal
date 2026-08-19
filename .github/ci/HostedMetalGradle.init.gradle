@@ -1,0 +1,63 @@
+import org.gradle.api.tasks.testing.Test
+
+// CI-only capability harness for GitHub's macOS 26 Apple Silicon runner.
+// The workflow must execute HostedMetalCapabilityProbe.swift successfully before
+// invoking these tasks. This script does not change production defaults and does
+// not weaken any physical-only acceptance contract; it only gives cloud CI a
+// dedicated route to existing shipping Java -> FFM -> Swift GPU integration tests.
+
+gradle.projectsEvaluated {
+    def project = gradle.rootProject
+    def sourceSets = project.extensions.findByName("sourceSets")
+    if (sourceSets == null) {
+        throw new GradleException("sourceSets extension is unavailable")
+    }
+
+    def configureHostedTest = { String name, String description, List<String> tests ->
+        project.tasks.register(name, Test) { task ->
+            task.group = "verification"
+            task.description = description
+            task.dependsOn(project.tasks.named("buildMacNative"))
+            task.testClassesDirs = sourceSets.test.output.classesDirs
+            task.classpath = sourceSets.test.runtimeClasspath
+            task.useJUnitPlatform()
+            task.filter {
+                tests.each { testName -> includeTestsMatching(testName) }
+                failOnNoMatchingTests = true
+            }
+            task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+            task.environment "MTL_DEBUG_LAYER", "0"
+            task.environment "MTL_SHADER_VALIDATION", "0"
+            task.environment "MTL_HUD_ENABLED", "0"
+            task.environment "MTLFX_HUD_ENABLED", "0"
+            task.systemProperty "metallum.metal.hud", "false"
+            task.systemProperty "metallum.validation.gpuPassTiming", "false"
+        }
+    }
+
+    configureHostedTest(
+        "hostedMetalCoreIntegrationTest",
+        "Runs shipping Java/FFM/Swift core Metal GPU integration tests after the hosted capability probe.",
+        [
+            "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
+            "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
+            "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
+        ]
+    )
+
+    configureHostedTest(
+        "hostedMetalIrisIntegrationTest",
+        "Runs shipping Iris-on-Metal GPU integration tests after the hosted capability probe.",
+        [
+            "com.metallum.client.metal.render.IrisMetalPostChainCompilationTest",
+            "com.metallum.client.metal.render.IrisMetalShadowPipelineTest",
+            "com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest",
+            "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest",
+            "com.metallum.client.metal.render.IrisMetalComputeConformanceTest",
+            "com.metallum.client.metal.render.IrisMetalExternalLevelSamplerTest",
+            "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest",
+            "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest",
+            "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
+        ]
+    )
+}
