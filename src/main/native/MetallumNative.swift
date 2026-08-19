@@ -123,12 +123,6 @@ private enum NativeState {
     // macOS 26, not on Metal 4 family support.
     static var metal4BarrierEnabled = false
     static var gpuEncoderTimingEnabled = false
-    // Validation-only A/B for MTL4 argument-table lifetime. This is outside the
-    // MetalFX conditional block because the MTL4 main queue is shared by the
-    // platform native builds.
-    static let freshComputeArgumentTables = ProcessInfo.processInfo.environment[
-        "METALLUM_METALFX_FRESH_COMPUTE_ARGUMENT_TABLE"
-    ] == "1"
     // MTL4LibraryFunctionDescriptor requires the MTLLibrary a function came
     // from, and MTLFunction does not expose it, so the association is kept
     // beside it. Weak keys: the entry disappears when the function is released,
@@ -632,11 +626,10 @@ private final class Metal4MainCommandBufferLease {
 
 @available(macOS 26.0, iOS 26.0, *)
 private final class Metal4MainQueueContext {
-    // Each compute dispatch needs an argument-table snapshot that will not be
-    // mutated by a later dispatch before the command buffer executes. Eight
-    // tables cover the current clear/transparency/CUTOUT/hand/fused chain plus
-    // the legacy camera+merge probe, while remaining bounded per slot.
-    private static let computeArgumentTableCount = 8
+    // Metal 4 collects argument-table bindings when a draw or dispatch is
+    // encoded. A table can therefore be rebound between commands and shared
+    // by multiple encoders. Keep one long-lived table per stage family and
+    // in-flight slot; the three slots isolate concurrent GPU submissions.
 
     private enum SlotState {
         case free
@@ -649,12 +642,9 @@ private final class Metal4MainQueueContext {
         let allocator: MTL4CommandAllocator
         let vertexArguments: MTL4ArgumentTable
         let fragmentArguments: MTL4ArgumentTable
-        let computeArgumentTables: [MTL4ArgumentTable]
-        var renderArgumentTables: [(vertex: MTL4ArgumentTable, fragment: MTL4ArgumentTable)] = []
+        let computeArguments: MTL4ArgumentTable
         let uniformBuffer: MTLBuffer
         var uniformOffset = 0
-        var nextComputeArgumentTable = 0
-        var nextRenderArgumentTable = 0
         var state: SlotState = .free
 
         init(
@@ -662,14 +652,14 @@ private final class Metal4MainQueueContext {
             allocator: MTL4CommandAllocator,
             vertexArguments: MTL4ArgumentTable,
             fragmentArguments: MTL4ArgumentTable,
-            computeArgumentTables: [MTL4ArgumentTable],
+            computeArguments: MTL4ArgumentTable,
             uniformBuffer: MTLBuffer
         ) {
             self.commandBuffer = commandBuffer
             self.allocator = allocator
             self.vertexArguments = vertexArguments
             self.fragmentArguments = fragmentArguments
-            self.computeArgumentTables = computeArgumentTables
+            self.computeArguments = computeArguments
             self.uniformBuffer = uniformBuffer
         }
     }
@@ -711,20 +701,17 @@ private final class Metal4MainQueueContext {
             tableDescriptor.initializeBindings = true
             tableDescriptor.supportAttributeStrides = true
             tableDescriptor.label = "Metallum Main Arguments \(index) (Metal 4)"
-            var computeArgumentTables: [MTL4ArgumentTable] = []
-            for _ in 0..<Self.computeArgumentTableCount {
-                guard let table = try? device.makeArgumentTable(descriptor: tableDescriptor) else {
-                    return nil
-                }
-                computeArgumentTables.append(table)
-            }
             guard let allocator = try? device.makeCommandAllocator(descriptor: allocatorDescriptor),
-                  let commandBuffer = device.makeCommandBuffer(),
-                  let vertexArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
-                  let fragmentArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
-                  let uniformBuffer = device.makeBuffer(length: 65_536, options: .storageModeShared) else {
-                return nil
-            }
+              let commandBuffer = device.makeCommandBuffer(),
+              let vertexArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
+              let fragmentArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
+              let computeArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
+              let uniformBuffer = device.makeBuffer(length: 65_536, options: .storageModeShared) else {
+            return nil
+        }
+        vertexArguments.label = "Metallum Vertex Arguments \(index) (Metal 4)"
+        fragmentArguments.label = "Metallum Fragment Arguments \(index) (Metal 4)"
+        computeArguments.label = "Metallum Compute Arguments \(index) (Metal 4)"
             uniformBuffer.label = "Metallum Uniforms \(index) (Metal 4)"
             residencyTrackCreated(uniformBuffer)
             commandBuffer.label = "Metallum Main Buffer \(index) (Metal 4)"
@@ -733,7 +720,7 @@ private final class Metal4MainQueueContext {
                 allocator: allocator,
                 vertexArguments: vertexArguments,
                 fragmentArguments: fragmentArguments,
-                computeArgumentTables: computeArgumentTables,
+                computeArguments: computeArguments,
                 uniformBuffer: uniformBuffer
             ))
         }
@@ -750,62 +737,11 @@ private final class Metal4MainQueueContext {
 
     func argumentTables(at index: Int) -> (MTL4ArgumentTable, MTL4ArgumentTable) {
         let slot = slots[index]
-        if slot.nextRenderArgumentTable >= slot.renderArgumentTables.count {
-            let descriptor = MTL4ArgumentTableDescriptor()
-            descriptor.maxBufferBindCount = 31
-            descriptor.maxTextureBindCount = 128
-            descriptor.maxSamplerStateBindCount = 16
-            descriptor.initializeBindings = true
-            descriptor.supportAttributeStrides = true
-            descriptor.label = "Metallum Render Arguments (index) #(slot.nextRenderArgumentTable) (Metal 4)"
-            if let vertex = try? device.makeArgumentTable(descriptor: descriptor),
-               let fragment = try? device.makeArgumentTable(descriptor: descriptor) {
-                slot.renderArgumentTables.append((vertex: vertex, fragment: fragment))
-            } else {
-                // Keep the renderer fail-soft if the driver refuses a table
-                // allocation. The shared pair is still valid for the legacy
-                // path, while normal MTL4 devices use one pair per encoder.
-                return (slot.vertexArguments, slot.fragmentArguments)
-            }
-        }
-        let tables = slot.renderArgumentTables[slot.nextRenderArgumentTable]
-        slot.nextRenderArgumentTable += 1
-        return (tables.vertex, tables.fragment)
+        return (slot.vertexArguments, slot.fragmentArguments)
     }
 
     func computeArgumentTable(at index: Int) -> MTL4ArgumentTable {
-        if NativeState.freshComputeArgumentTables {
-            let descriptor = MTL4ArgumentTableDescriptor()
-            descriptor.maxBufferBindCount = 31
-            descriptor.maxTextureBindCount = 128
-            descriptor.maxSamplerStateBindCount = 16
-            descriptor.initializeBindings = true
-            descriptor.supportAttributeStrides = true
-            descriptor.label = "Metallum Compute Dispatch Arguments (fresh)"
-            if let table = try? device.makeArgumentTable(descriptor: descriptor) {
-                return table
-            }
-        }
-        let slot = slots[index]
-        if slot.nextComputeArgumentTable < slot.computeArgumentTables.count {
-            let table = slot.computeArgumentTables[slot.nextComputeArgumentTable]
-            slot.nextComputeArgumentTable += 1
-            return table
-        }
-        // Keep correctness if a future producer adds another dispatch before
-        // this bounded pool is resized. Never silently alias an in-flight table.
-        NSLog("[metallum] Metal 4 compute argument-table pool exhausted; allocating a fallback table")
-        let descriptor = MTL4ArgumentTableDescriptor()
-        descriptor.maxBufferBindCount = 31
-        descriptor.maxTextureBindCount = 128
-        descriptor.maxSamplerStateBindCount = 16
-        descriptor.initializeBindings = true
-        descriptor.supportAttributeStrides = true
-        descriptor.label = "Metallum Compute Dispatch Arguments (overflow)"
-        if let table = try? device.makeArgumentTable(descriptor: descriptor) {
-            return table
-        }
-        return slot.computeArgumentTables[slot.computeArgumentTables.count - 1]
+        slots[index].computeArguments
     }
 
     func writeClearUniforms(_ uniforms: MetallumClearUniforms, at slotIndex: Int) -> (MTLBuffer, Int)? {
@@ -862,8 +798,6 @@ private final class Metal4MainQueueContext {
         slotCondition.unlock()
         let slot = slots[index]
         slot.uniformOffset = 0
-        slot.nextComputeArgumentTable = 0
-        slot.nextRenderArgumentTable = 0
         slot.allocator.reset()
         slot.commandBuffer.beginCommandBuffer(allocator: slot.allocator)
         if NativeState.debugLabelsEnabled {
