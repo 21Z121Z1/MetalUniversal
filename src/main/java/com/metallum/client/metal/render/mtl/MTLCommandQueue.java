@@ -16,6 +16,7 @@ public final class MTLCommandQueue {
 
     private MemorySegment handle;
     private final boolean trackMetal4MainRenderer;
+    private boolean residencySetEnabled;
 
     private MTLCommandQueue(final MemorySegment handle, final boolean trackMetal4MainRenderer) {
         this.handle = handle;
@@ -43,7 +44,14 @@ public final class MTLCommandQueue {
      * @return true when the set is active
      */
     public boolean enableResidencySet(final MemorySegment device) {
-        return MetalNativeBridge.metallum_residency_set_enable(device, handle) != 0;
+        boolean enabled = MetalNativeBridge.metallum_residency_set_enable(device, handle) != 0;
+        this.residencySetEnabled = enabled;
+        return enabled;
+    }
+
+    /** Runtime evidence seam: true only after the native set was created and attached. */
+    public boolean residencySetEnabled() {
+        return this.residencySetEnabled;
     }
 
     public MTLCommandBuffer makeCommandBuffer(@Nullable final String label) {
