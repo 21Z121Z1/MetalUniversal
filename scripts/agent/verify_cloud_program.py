@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -27,17 +28,20 @@ def load(path: Path):
         return json.load(handle)
 
 
-def live_remote_branches() -> set[str]:
+def run_git(*args: str) -> str:
     try:
-        output = subprocess.check_output(
-            ["git", "ls-remote", "--heads", "origin"],
+        return subprocess.check_output(
+            ["git", *args],
             cwd=ROOT,
             text=True,
             stderr=subprocess.STDOUT,
-        )
+        ).strip()
     except (OSError, subprocess.CalledProcessError) as exc:
-        fail(f"unable to query live GitHub branch inventory from origin: {exc}")
+        fail(f"git {' '.join(args)} failed: {exc}")
 
+
+def live_remote_branches() -> set[str]:
+    output = run_git("ls-remote", "--heads", "origin")
     branches: set[str] = set()
     prefix = "refs/heads/"
     for raw_line in output.splitlines():
@@ -57,11 +61,25 @@ def main() -> None:
         action="store_true",
         help="fail closed unless the migration matrix exactly matches git ls-remote --heads origin",
     )
+    parser.add_argument(
+        "--expected-source-sha",
+        help="require the checkout HEAD to equal this exact 40-hex candidate SHA",
+    )
     args = parser.parse_args()
 
     program = load(PROGRAM)
     matrix = load(MATRIX)
     p1 = load(P1)
+
+    checked_out_sha = run_git("rev-parse", "HEAD").lower()
+    require(re.fullmatch(r"[0-9a-f]{40}", checked_out_sha) is not None,
+            f"checkout HEAD is not a full Git SHA: {checked_out_sha!r}")
+    if args.expected_source_sha:
+        expected_source_sha = args.expected_source_sha.strip().lower()
+        require(re.fullmatch(r"[0-9a-f]{40}", expected_source_sha) is not None,
+                f"expected source SHA is malformed: {expected_source_sha!r}")
+        require(checked_out_sha == expected_source_sha,
+                f"checkout/source SHA mismatch: checkout={checked_out_sha} expected={expected_source_sha}")
 
     require(program["canonical_branch"] == "integration/iris-metal-next", "canonical branch changed unexpectedly")
     require(program["program_branch"] == "agent/metal-eval-v3", "program branch mismatch")
@@ -111,6 +129,10 @@ def main() -> None:
     require("hostedmetalcapabilityprobe.swift" in workflow_text, "workflow does not compile the repository-owned hosted Metal probe")
     require("--verify-remote-branches" in workflow_text,
             "cloud contract job must verify the migration matrix against live GitHub branches")
+    require("--expected-source-sha" in workflow_text,
+            "cloud contract job must bind evidence to the exact candidate SHA")
+    require("metallum_source_sha" in workflow_text,
+            "workflow must carry an explicit exact candidate SHA identity")
 
     require(PROBE.is_file(), "missing hosted Metal probe")
     probe_text = PROBE.read_text(encoding="utf-8").lower()
@@ -122,6 +144,7 @@ def main() -> None:
 
     evidence = {
         "decision": "cloud-program-contract-pass",
+        "source_sha": checked_out_sha,
         "canonical_branch": program["canonical_branch"],
         "program_branch": program["program_branch"],
         "audited_branch_count": len(branches),
