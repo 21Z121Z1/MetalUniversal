@@ -7,7 +7,8 @@
   "entrypoints": {
     "fabric-client-gametest": [
       "com.metallum.e2e.MetalReadbackControlGameTest",
-      "com.metallum.e2e.MetalUniversalClientGameTest"
+      "com.metallum.e2e.MetalUniversalClientGameTest",
+      "com.metallum.client.metal.render.MetalPresentationEvidenceGameTest"
     ]
   },
   "depends": {
