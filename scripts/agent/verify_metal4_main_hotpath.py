@@ -12,6 +12,7 @@ E2E_BUILD = ROOT / ".github/ci/minecraft-e2e/build.gradle"
 E2E_TEST = ROOT / ".github/ci/minecraft-e2e/src/main/java/com/metallum/client/metal/render/Metal4MainRendererEvidenceGameTest.java"
 PHYSICAL_CORRECTNESS = ROOT / "scripts/agent/run_metal4_main_p1_physical_correctness.sh"
 PHYSICAL_PERFORMANCE = ROOT / "scripts/agent/run_metal4_main_p1_physical_performance.sh"
+PHYSICAL_MATRIX = ROOT / "scripts/agent/run_metal4_main_p1_physical_matrix.sh"
 CLASS_START = "private final class Metal4MainQueueContext {"
 CLASS_END = "private final class Metal4MainRenderEncoderBridge {"
 
@@ -53,8 +54,6 @@ def main() -> None:
     for token in forbidden:
         require(token not in cls and token not in text, f"obsolete table-pool token remains: {token}")
 
-    # Exactly one vertex, fragment and compute table are created for each slot.
-    # No makeArgumentTable call is allowed after initialization in this context.
     make_count = cls.count("device.makeArgumentTable(descriptor: tableDescriptor)")
     require(make_count == 3, f"expected exactly three per-slot table factories, got {make_count}")
 
@@ -187,23 +186,33 @@ def main() -> None:
             "physical correctness runner does not invoke the exact-bits pair gate")
     require("MTL_DEBUG_LAYER=1" in physical_correctness,
             "physical correctness runner does not enable Metal API validation")
+    require("env -u METALLUM_HOSTED_METAL_OFFSCREEN" in physical_correctness,
+            "physical correctness runner must forbid the hosted offscreen override")
 
     physical_performance = PHYSICAL_PERFORMANCE.read_text(encoding="utf-8")
-    require('PROFILE_ID="V1"' in physical_performance,
-            "P1 performance runner is not pinned to benchmark profile V1")
-    require('"-Dmetallum.iris.semantic=false"' in physical_performance,
-            "V1 performance runner must keep Iris semantic rendering disabled")
+    require('PROFILE_ID="${PROFILE_ID:-V1}"' in physical_performance,
+            "P1 performance runner does not expose a fail-closed profile selector")
+    for profile in ("V1)", "I0)", "I1)"):
+        require(profile in physical_performance, f"P1 performance runner is missing {profile[:-1]}")
+    require("POTATO_SHADER_PACK" in physical_performance and "BSL_SHADER_PACK" in physical_performance,
+            "Iris profiles do not require explicit shader-pack inputs")
+    require("SHADER_PACK_SHA" in physical_performance and "SHADER_OPTIONS_SHA" in physical_performance,
+            "Iris profiles are not content-addressed")
     require('pin_equals_property "$IRIS_CONFIG" "enableShaders" "false"' in physical_performance,
             "V1 performance runner does not disable mutable shader-pack activation")
+    require('pin_equals_property "$IRIS_CONFIG" "enableShaders" "true"' in physical_performance,
+            "I0/I1 performance runner does not enable the staged shader pack")
+    require('grep -F "Using shaderpack: $STAGED_PACK_NAME"' in physical_performance,
+            "Iris profile trial does not prove exact staged shader-pack activation")
     require('pin_colon_option "$OPTIONS_FILE" "guiScale" "$UI_SCALE"' in physical_performance,
-            "V1 performance runner does not pin UI scale")
+            "performance runner does not pin UI scale")
     require('pin_colon_option "$OPTIONS_FILE" "renderDistance" "$RENDER_DISTANCE"' in physical_performance,
-            "V1 performance runner does not pin render distance")
+            "performance runner does not pin render distance")
     require("EXPECTED_FRAMEBUFFER_WIDTH=1708" in physical_performance
             and "EXPECTED_FRAMEBUFFER_HEIGHT=960" in physical_performance,
-            "V1 performance runner does not pin the validated Retina framebuffer")
+            "performance runner does not pin the validated Retina framebuffer")
     require("CAMERA_SCRIPT_SHA" in physical_performance and "CAMERA_POLICY" in physical_performance,
-            "V1 performance runner does not content-address the fixed-camera driver")
+            "performance runner does not content-address the fixed-camera driver")
     require("P1_CORRECTNESS_GATE" in physical_performance and "sourceSha" in physical_performance,
             "performance runner does not require a correctness result for the same source SHA")
     require("BLOCKS < 4" in physical_performance
@@ -218,9 +227,19 @@ def main() -> None:
             "performance measurements must not run with Metal API validation overhead")
     require("restore_runtime_config" in physical_performance,
             "performance runner does not restore the user's mutable client config")
+    require("${PROFILE_ID,,}" not in physical_performance,
+            "performance runner uses Bash 4-only lowercase expansion on macOS")
+
+    physical_matrix = PHYSICAL_MATRIX.read_text(encoding="utf-8")
+    for profile in ("V1", "I0", "I1"):
+        require(profile in physical_matrix, f"physical matrix does not require {profile}")
+    require("accepted-candidate" in physical_matrix,
+            "physical matrix does not require every profile to accept the candidate")
+    require("production_jar_sha256" in physical_matrix and "native_dylib_sha256" in physical_matrix,
+            "physical matrix does not cross-check exact production binary identity")
 
     evidence = {
-        "schema": 4,
+        "schema": 5,
         "source": str(SOURCE.relative_to(ROOT)),
         "argumentTableModel": "one-long-lived-table-per-stage-family-per-in-flight-slot",
         "argumentTablesPerSlot": 3,
@@ -248,9 +267,9 @@ def main() -> None:
             "exactBinaryIdentity": True,
         },
         "performanceProtocol": {
-            "profile": "V1",
-            "irisSemantic": False,
-            "shaderPack": None,
+            "profiles": ["V1", "I0", "I1"],
+            "shaderProfilesContentAddressed": True,
+            "shaderActivationProven": True,
             "fixedFramebuffer": [1708, 960],
             "fixedUiScale": True,
             "fixedRenderDistance": True,
@@ -260,6 +279,7 @@ def main() -> None:
             "minimumSampleSeconds": 120,
             "interleaved": True,
             "metalDebugLayer": False,
+            "macOSBashCompatible": True,
         },
         "status": "pass",
     }
