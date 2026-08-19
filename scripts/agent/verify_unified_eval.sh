@@ -27,6 +27,7 @@ python3 -m py_compile \
 bash -n scripts/agent/run_unified_eval_cycle.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_correctness.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_performance.sh
+bash -n scripts/agent/run_metal4_main_p1_physical_matrix.sh
 bash -n scripts/agent/verify.sh
 
 ./gradlew --no-daemon compileJava test \
