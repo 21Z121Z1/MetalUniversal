@@ -7,10 +7,19 @@ repositories {
 }
 
 def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
-def requireMetal4MainRenderer = providers.gradleProperty("p1Metal4MainRenderer")
+def legacyRequireMetal4MainRenderer = providers.gradleProperty("p1Metal4MainRenderer")
         .map { it.toBoolean() }
         .orElse(false)
         .get()
+def p1Metal4Lane = providers.gradleProperty("p1Metal4Lane")
+        .map { it.trim().toLowerCase() }
+        .orElse(legacyRequireMetal4MainRenderer ? "candidate" : "off")
+        .get()
+if (!(p1Metal4Lane in ["off", "baseline", "candidate"])) {
+    throw new GradleException("p1Metal4Lane must be off, baseline, or candidate (got ${p1Metal4Lane})")
+}
+def requireMetal4MainRenderer = p1Metal4Lane == "candidate"
+def requireP1Metal4Evidence = p1Metal4Lane != "off"
 
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -53,6 +62,9 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
 
     jvmArgs.add("-Dfabric.client.gametest")
     jvmArgs.add("-Dmetallum.ci.e2e=true")
+    jvmArgs.add("-Dmetallum.ci.p1Metal4Lane=${p1Metal4Lane}")
+    // Compatibility seam for older invocations while P1 switches to the
+    // explicit off/baseline/candidate lane contract.
     jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
     jvmArgs.add("-Dmetallum.iris.semantic=true")
     jvmArgs.add("-Dmetallum.metalfx.mode=OFF")
@@ -62,12 +74,14 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.hotpath.telemetry=true")
     jvmArgs.add("-Dmetallum.presentation.telemetry=true")
 
-    if (requireMetal4MainRenderer) {
-        // P1 physical-Mac acceptance. The main renderer requires explicit
-        // residency and runs without Amethyst/iOS-specific compatibility flags.
+    if (requireP1Metal4Evidence) {
+        // Physical-Mac P1 A/B contract. Both lanes keep Metal 4 compilation,
+        // presentation, and explicit residency identical. The only intended
+        // execution-model difference is whether the main renderer is enabled.
         jvmArgs.add("-Dmetallum.opt.metal4=true")
         jvmArgs.add("-Dmetallum.opt.metal4Compiler=true")
-        jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=true")
+        jvmArgs.add("-Dmetallum.opt.metal4Present=true")
+        jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=${requireMetal4MainRenderer}")
         jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
         jvmArgs.add("-Dmetallum.opt.residencySet=true")
     } else {
@@ -76,6 +90,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
         // cannot close P1 activation and must not pretend to do so.
         jvmArgs.add("-Dmetallum.opt.metal4=false")
         jvmArgs.add("-Dmetallum.opt.metal4Compiler=false")
+        jvmArgs.add("-Dmetallum.opt.metal4Present=false")
         jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=false")
         jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
         // Keep the hosted Apple-paravirtual workaround scoped to the Minecraft JVM.
