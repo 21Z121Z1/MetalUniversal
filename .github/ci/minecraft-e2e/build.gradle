@@ -18,6 +18,9 @@ def p1Metal4Lane = providers.gradleProperty("p1Metal4Lane")
 if (!(p1Metal4Lane in ["off", "baseline", "candidate"])) {
     throw new GradleException("p1Metal4Lane must be off, baseline, or candidate (got ${p1Metal4Lane})")
 }
+def p1SourceSha = providers.gradleProperty("p1SourceSha").orElse("unrecorded").get().trim()
+def p1ProductionJarSha256 = providers.gradleProperty("p1ProductionJarSha256").orElse("unrecorded").get().trim()
+def p1NativeDylibSha256 = providers.gradleProperty("p1NativeDylibSha256").orElse("unrecorded").get().trim()
 def requireMetal4MainRenderer = p1Metal4Lane == "candidate"
 def requireP1Metal4Evidence = p1Metal4Lane != "off"
 
@@ -63,6 +66,9 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dfabric.client.gametest")
     jvmArgs.add("-Dmetallum.ci.e2e=true")
     jvmArgs.add("-Dmetallum.ci.p1Metal4Lane=${p1Metal4Lane}")
+    jvmArgs.add("-Dmetallum.ci.p1SourceSha=${p1SourceSha}")
+    jvmArgs.add("-Dmetallum.ci.p1ProductionJarSha256=${p1ProductionJarSha256}")
+    jvmArgs.add("-Dmetallum.ci.p1NativeDylibSha256=${p1NativeDylibSha256}")
     // Compatibility seam for older invocations while P1 switches to the
     // explicit off/baseline/candidate lane contract.
     jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
