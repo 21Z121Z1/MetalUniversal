@@ -1,4 +1,4 @@
-name: P1 apply Metal4 main stats v2
+name: P1 finalize Metal4 main runtime telemetry
 
 on:
   push:
@@ -9,72 +9,95 @@ permissions:
   contents: write
 
 concurrency:
-  group: p1-apply-main-stats-v2
+  group: p1-finalize-metal4-main-runtime
   cancel-in-progress: true
 
 jobs:
   patch:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
         with:
           ref: feature/metal4-main-production
           fetch-depth: 0
-      - name: Apply audited telemetry ABI patch
+
+      - name: Apply audited P1 runtime telemetry contract
         shell: bash
         run: |
           set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
-
-          swift_path = Path('src/main/native/MetallumNative.swift')
-          swift = swift_path.read_text(encoding='utf-8')
+          from textwrap import dedent, indent
+          import json
 
           def replace_once(text, old, new, label):
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f'{label}: expected one match, got {count}')
+                  raise SystemExit(f"{label}: expected one match, got {count}")
               return text.replace(old, new, 1)
 
-          if 'import Dispatch\n' not in swift:
-              marker = 'import Foundation\n'
-              if marker not in swift:
-                  raise SystemExit('Swift import marker not found')
-              swift = swift.replace(marker, marker + 'import Dispatch\n', 1)
+          def block(text, spaces):
+              return indent(dedent(text), " " * spaces)
 
-          swift = replace_once(swift,
-          '''    private var begunCount: UInt64 = 0
-              private var submittedCount: UInt64 = 0
-          ''',
-          '''    private var begunCount: UInt64 = 0
-              private var submittedCount: UInt64 = 0
-              private var slotWaitCount: UInt64 = 0
-              private var slotWaitNanos: UInt64 = 0
-          ''',
-          'add slot-wait counters')
+          root = Path(".")
 
-          swift = replace_once(swift,
-          '''        slotCondition.lock()
+          swift_path = root / "src/main/native/MetallumNative.swift"
+          swift = swift_path.read_text(encoding="utf-8")
+          if "import Dispatch\n" not in swift:
+              swift = replace_once(
+                  swift,
+                  "import Foundation\n",
+                  "import Foundation\nimport Dispatch\n",
+                  "Swift Dispatch import",
+              )
+
+          swift = replace_once(
+              swift,
+              block("""\
+                  private var nextSlot = 0
+                  private var begunCount: UInt64 = 0
+                  private var submittedCount: UInt64 = 0
+              """, 4),
+              block("""\
+                  private var nextSlot = 0
+                  private var begunCount: UInt64 = 0
+                  private var submittedCount: UInt64 = 0
+                  private var allocatorResetCount: UInt64 = 0
+                  private var commandBufferBeginCount: UInt64 = 0
+                  private var commitCallCount: UInt64 = 0
+                  private var slotWaitCount: UInt64 = 0
+                  private var slotWaitNanos: UInt64 = 0
+              """, 4),
+              "Swift telemetry counters",
+          )
+
+          swift = replace_once(
+              swift,
+              block("""\
+                  slotCondition.lock()
                   var chosen: Int?
                   let deadline = Date(timeIntervalSinceNow: Self.slotAcquireTimeout)
-          ''',
-          '''        slotCondition.lock()
+              """, 8),
+              block("""\
+                  slotCondition.lock()
                   var chosen: Int?
                   var waitStartNanos: UInt64?
                   let deadline = Date(timeIntervalSinceNow: Self.slotAcquireTimeout)
-          ''',
-          'add wait start')
+              """, 8),
+              "Swift wait start",
+          )
 
-          swift = replace_once(swift,
-          '''            if chosen == nil && !slotCondition.wait(until: deadline) {
+          swift = replace_once(
+              swift,
+              block("""\
+                  if chosen == nil && !slotCondition.wait(until: deadline) {
                       break
                   }
-              } while chosen == nil
-              guard let index = chosen else {
-          ''',
-          '''            if chosen == nil {
+              """, 12),
+              block("""\
+                  if chosen == nil {
                       if waitStartNanos == nil {
                           waitStartNanos = DispatchTime.now().uptimeNanoseconds
                       }
@@ -82,116 +105,219 @@ jobs:
                           break
                       }
                   }
-              } while chosen == nil
-              if let waitStartNanos {
-                  slotWaitCount &+= 1
-                  slotWaitNanos &+= DispatchTime.now().uptimeNanoseconds &- waitStartNanos
-              }
-              guard let index = chosen else {
-          ''',
-          'measure only contended slot acquisition')
+              """, 12),
+              "Swift contended wait body",
+          )
 
-          swift = replace_once(swift,
-          '''    func stats() -> (UInt64, UInt64, UInt64) {
+          swift = replace_once(
+              swift,
+              block("""\
+                  } while chosen == nil
+                  guard let index = chosen else {
+              """, 8),
+              block("""\
+                  } while chosen == nil
+                  if let waitStartNanos {
+                      slotWaitCount &+= 1
+                      slotWaitNanos &+= DispatchTime.now().uptimeNanoseconds &- waitStartNanos
+                  }
+                  guard let index = chosen else {
+              """, 8),
+              "Swift contended wait accounting",
+          )
+
+          swift = replace_once(
+              swift,
+              block("""\
+                  slotCondition.unlock()
+                  let slot = slots[index]
+                  slot.uniformOffset = 0
+                  slot.allocator.reset()
+                  slot.commandBuffer.beginCommandBuffer(allocator: slot.allocator)
+              """, 8),
+              block("""\
+                  slotCondition.unlock()
+                  let slot = slots[index]
+                  slot.uniformOffset = 0
+                  slot.allocator.reset()
+                  slot.commandBuffer.beginCommandBuffer(allocator: slot.allocator)
                   slotCondition.lock()
-                  defer { slotCondition.unlock() }
-                  return (begunCount, submittedCount, begunCount > 3 ? begunCount - 3 : 0)
-              }
-          ''',
-          '''    func stats() -> (UInt64, UInt64, UInt64, UInt64, UInt64) {
+                  allocatorResetCount &+= 1
+                  commandBufferBeginCount &+= 1
+                  slotCondition.unlock()
+              """, 8),
+              "Swift reset/begin accounting",
+          )
+
+          swift = replace_once(
+              swift,
+              block("""\
+                  queue.commit([commandBuffer], options: options)
+                  for (event, value) in lease.postCommitSignals {
+              """, 8),
+              block("""\
                   slotCondition.lock()
-                  defer { slotCondition.unlock() }
-                  return (
-                      begunCount,
-                      submittedCount,
-                      begunCount > 3 ? begunCount - 3 : 0,
-                      slotWaitCount,
-                      slotWaitNanos
-                  )
-              }
-          ''',
-          'extend context stats')
+                  commitCallCount &+= 1
+                  slotCondition.unlock()
+                  queue.commit([commandBuffer], options: options)
+                  for (event, value) in lease.postCommitSignals {
+              """, 8),
+              "Swift grouped commit accounting",
+          )
 
-          existing_stats = '''@_cdecl("metallum_metal4_main_renderer_stats")
-          public func metallum_metal4_main_renderer_stats(
-              _ begun: UnsafeMutablePointer<UInt64>?,
-              _ submitted: UnsafeMutablePointer<UInt64>?,
-              _ reused: UnsafeMutablePointer<UInt64>?
-          ) -> Int32 {
-              guard #available(macOS 26.0, iOS 26.0, *),
-                    let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext else {
-                  return 0
-              }
-              let values = context.stats()
-              begun?.pointee = values.0
-              submitted?.pointee = values.1
-              reused?.pointee = values.2
-              return 1
-          }
-          '''
-          if swift.count(existing_stats) != 1:
-              raise SystemExit(f'existing stats ABI: expected one match, got {swift.count(existing_stats)}')
-          stats_v2 = existing_stats + '''
-          /// Stable, append-only stats array for agent/runtime evaluation.
-          /// Layout v1 (11 UInt64 values): begun, submitted, reused,
-          /// allocatorResets, slotWaitNanos, slotWaitCount, commandBuffers,
-          /// commitCalls, argumentTableAllocationsDuringEncoding,
-          /// computeTableOverflow, renderTableHighWater.
-          @_cdecl("metallum_metal4_main_renderer_stats_v2")
-          public func metallum_metal4_main_renderer_stats_v2(
-              _ values: UnsafeMutablePointer<UInt64>?,
-              _ count: UInt64
-          ) -> Int32 {
-              guard count >= 11,
-                    let values,
-                    #available(macOS 26.0, iOS 26.0, *),
-                    let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext else {
-                  return 0
-              }
-              let stats = context.stats()
-              values[0] = stats.0
-              values[1] = stats.1
-              values[2] = stats.2
-              values[3] = stats.0
-              values[4] = stats.4
-              values[5] = stats.3
-              values[6] = stats.0
-              values[7] = stats.1
-              values[8] = 0
-              values[9] = 0
-              values[10] = 1
-              return 1
-          }
-          '''
-          swift = swift.replace(existing_stats, stats_v2, 1)
-          swift_path.write_text(swift, encoding='utf-8')
+          swift = replace_once(
+              swift,
+              block("""\
+                  func stats() -> (UInt64, UInt64, UInt64) {
+                      slotCondition.lock()
+                      defer { slotCondition.unlock() }
+                      return (begunCount, submittedCount, begunCount > 3 ? begunCount - 3 : 0)
+                  }
+              """, 4),
+              block("""\
+                  struct Stats {
+                      let begunCount: UInt64
+                      let submittedCount: UInt64
+                      let reusedCount: UInt64
+                      let allocatorResetCount: UInt64
+                      let slotWaitNanos: UInt64
+                      let slotWaitCount: UInt64
+                      let commandBufferBeginCount: UInt64
+                      let commitCallCount: UInt64
+                  }
 
-          java_path = Path('src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java')
-          java = java_path.read_text(encoding='utf-8')
-          java = replace_once(java,
-          '''    private static final MethodHandle metal4MainRendererStats;
-              private static final MethodHandle metal4MetalFxStats;
-          ''',
-          '''    private static final MethodHandle metal4MainRendererStats;
-              private static final MethodHandle metal4MainRendererStatsV2;
-              private static final MethodHandle metal4MetalFxStats;
-          ''',
-          'declare v2 method handle')
-          java = replace_once(java,
-          '''            metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-                      metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-          ''',
-          '''            metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-                      metal4MainRendererStatsV2 = downcall(lookup, "metallum_metal4_main_renderer_stats_v2", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
-                      metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-          ''',
-          'bind v2 stats symbol')
+                  func stats() -> Stats {
+                      slotCondition.lock()
+                      defer { slotCondition.unlock() }
+                      return Stats(
+                          begunCount: begunCount,
+                          submittedCount: submittedCount,
+                          reusedCount: begunCount > UInt64(slots.count) ? begunCount - UInt64(slots.count) : 0,
+                          allocatorResetCount: allocatorResetCount,
+                          slotWaitNanos: slotWaitNanos,
+                          slotWaitCount: slotWaitCount,
+                          commandBufferBeginCount: commandBufferBeginCount,
+                          commitCallCount: commitCallCount
+                      )
+                  }
+              """, 4),
+              "Swift named stats snapshot",
+          )
 
-          marker = '''    public static long[] metallum_metal4_metalfx_stats() {
-          '''
+          old_abi = dedent("""\
+              @_cdecl("metallum_metal4_main_renderer_stats")
+              public func metallum_metal4_main_renderer_stats(
+                  _ begun: UnsafeMutablePointer<UInt64>?,
+                  _ submitted: UnsafeMutablePointer<UInt64>?,
+                  _ reused: UnsafeMutablePointer<UInt64>?
+              ) -> Int32 {
+                  guard #available(macOS 26.0, iOS 26.0, *),
+                        let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext else {
+                      return 0
+                  }
+                  let values = context.stats()
+                  begun?.pointee = values.0
+                  submitted?.pointee = values.1
+                  reused?.pointee = values.2
+                  return 1
+              }
+          """)
+          new_abi = dedent("""\
+              @_cdecl("metallum_metal4_main_renderer_stats")
+              public func metallum_metal4_main_renderer_stats(
+                  _ begun: UnsafeMutablePointer<UInt64>?,
+                  _ submitted: UnsafeMutablePointer<UInt64>?,
+                  _ reused: UnsafeMutablePointer<UInt64>?
+              ) -> Int32 {
+                  guard #available(macOS 26.0, iOS 26.0, *),
+                        let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext else {
+                      return 0
+                  }
+                  let values = context.stats()
+                  begun?.pointee = values.begunCount
+                  submitted?.pointee = values.submittedCount
+                  reused?.pointee = values.reusedCount
+                  return 1
+              }
+
+              /// Append-only structured counters for P1 runtime acceptance.
+              /// Values are cumulative process counters; evaluators derive per-frame
+              /// rates from deltas over a measured presentation window.
+              ///
+              /// Layout v1 (11 UInt64 values):
+              /// 0 begun
+              /// 1 submitted
+              /// 2 reused
+              /// 3 commandAllocatorResets
+              /// 4 slotWaitNanos
+              /// 5 slotWaitCount
+              /// 6 commandBufferBegins
+              /// 7 commitCalls
+              /// 8 argumentTableAllocationsDuringEncoding
+              /// 9 computeTableOverflow
+              /// 10 renderTableHighWater
+              @_cdecl("metallum_metal4_main_renderer_stats_v2")
+              public func metallum_metal4_main_renderer_stats_v2(
+                  _ outValues: UnsafeMutablePointer<UInt64>?,
+                  _ count: UInt64
+              ) -> Int32 {
+                  guard count >= 11,
+                        let outValues,
+                        #available(macOS 26.0, iOS 26.0, *),
+                        let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext else {
+                      return 0
+                  }
+                  let values = context.stats()
+                  outValues[0] = values.begunCount
+                  outValues[1] = values.submittedCount
+                  outValues[2] = values.reusedCount
+                  outValues[3] = values.allocatorResetCount
+                  outValues[4] = values.slotWaitNanos
+                  outValues[5] = values.slotWaitCount
+                  outValues[6] = values.commandBufferBeginCount
+                  outValues[7] = values.commitCallCount
+                  outValues[8] = 0
+                  outValues[9] = 0
+                  outValues[10] = 1
+                  return 1
+              }
+          """)
+          swift = replace_once(swift, old_abi, new_abi, "Swift stats ABI v2")
+          swift_path.write_text(swift, encoding="utf-8")
+
+          java_path = root / "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java"
+          java = java_path.read_text(encoding="utf-8")
+          java = replace_once(
+              java,
+              block("""\
+                  private static final MethodHandle metal4MainRendererStats;
+                  private static final MethodHandle metal4MetalFxStats;
+              """, 4),
+              block("""\
+                  private static final MethodHandle metal4MainRendererStats;
+                  private static final MethodHandle metal4MainRendererStatsV2;
+                  private static final MethodHandle metal4MetalFxStats;
+              """, 4),
+              "Java v2 handle declaration",
+          )
+          java = replace_once(
+              java,
+              block("""\
+                  metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                  metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+              """, 12),
+              block("""\
+                  metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                  metal4MainRendererStatsV2 = downcall(lookup, "metallum_metal4_main_renderer_stats_v2", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
+                  metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+              """, 12),
+              "Java v2 symbol binding",
+          )
+          marker = "    public static long[] metallum_metal4_metalfx_stats() {\n"
           if java.count(marker) != 1:
-              raise SystemExit(f'Java wrapper insertion marker: expected one match, got {java.count(marker)}')
-          wrapper = '''    public static long[] metallum_metal4_main_renderer_stats_v2() {
+              raise SystemExit(f"Java v2 wrapper marker: expected one match, got {java.count(marker)}")
+          wrapper = block("""\
+              public static long[] metallum_metal4_main_renderer_stats_v2() {
                   final int count = 11;
                   try (Arena arena = Arena.ofConfined()) {
                       MemorySegment values = arena.allocate(LONG, count);
@@ -207,21 +333,404 @@ jobs:
                   }
               }
 
-          '''
+          """, 4)
           java = java.replace(marker, wrapper + marker, 1)
-          java_path.write_text(java, encoding='utf-8')
-          PY
-          git diff --check
-          git diff -- src/main/native/MetallumNative.swift src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java
+          java_path.write_text(java, encoding="utf-8")
 
-      - name: Commit and self-remove
+          telemetry_path = root / "src/main/java/com/metallum/client/metal/render/mtl/Metal4MainRendererTelemetry.java"
+          if telemetry_path.exists():
+              raise SystemExit(f"unexpected pre-existing file: {telemetry_path}")
+          telemetry_path.write_text(dedent("""\
+              package com.metallum.client.metal.render.mtl;
+
+              import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+              import net.fabricmc.api.EnvType;
+              import net.fabricmc.api.Environment;
+
+              @Environment(EnvType.CLIENT)
+              public final class Metal4MainRendererTelemetry {
+                  private Metal4MainRendererTelemetry() {
+                  }
+
+                  public static Snapshot snapshot() {
+                      long[] raw = MetalNativeBridge.metallum_metal4_main_renderer_stats_v2();
+                      if (raw.length != 12) {
+                          throw new IllegalStateException("Unexpected Metal 4 main renderer telemetry length: " + raw.length);
+                      }
+                      return new Snapshot(
+                              raw[0] != 0L,
+                              raw[1],
+                              raw[2],
+                              raw[3],
+                              raw[4],
+                              raw[5],
+                              raw[6],
+                              raw[7],
+                              raw[8],
+                              raw[9],
+                              raw[10],
+                              raw[11]
+                      );
+                  }
+
+                  public record Snapshot(
+                          boolean engaged,
+                          long begun,
+                          long submitted,
+                          long reused,
+                          long commandAllocatorResets,
+                          long slotWaitNanos,
+                          long slotWaitCount,
+                          long commandBufferBegins,
+                          long commitCalls,
+                          long argumentTableAllocationsDuringEncoding,
+                          long computeTableOverflow,
+                          long renderTableHighWater
+                  ) {
+                  }
+              }
+          """), encoding="utf-8")
+
+          e2e_path = root / ".github/ci/minecraft-e2e/src/main/java/com/metallum/client/metal/render/Metal4MainRendererEvidenceGameTest.java"
+          if e2e_path.exists():
+              raise SystemExit(f"unexpected pre-existing file: {e2e_path}")
+          e2e_path.write_text(dedent("""\
+              package com.metallum.client.metal.render;
+
+              import com.metallum.client.metal.render.mtl.Metal4MainRendererTelemetry;
+              import com.metallum.client.metal.render.mtl.MetalPresentationTelemetry;
+              import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
+              import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
+              import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
+
+              import java.io.IOException;
+              import java.nio.charset.StandardCharsets;
+              import java.nio.file.Files;
+              import java.nio.file.Path;
+
+              @SuppressWarnings("UnstableApiUsage")
+              public final class Metal4MainRendererEvidenceGameTest implements FabricClientGameTest {
+                  @Override
+                  public void runTest(ClientGameTestContext context) {
+                      if (!Boolean.getBoolean("metallum.ci.requireMetal4MainRenderer")) {
+                          return;
+                      }
+
+                      Path evidenceDir = Path.of(System.getProperty("metallum.ci.evidenceDir", "build/evidence"))
+                              .toAbsolutePath().normalize();
+
+                      Metal4MainRendererTelemetry.Snapshot before = context.computeOnClient(client -> {
+                          MetalDevice device = requireDevice();
+                          device.waitForSubmittedGpuWork();
+                          MetalPresentationTelemetry.reset();
+                          return Metal4MainRendererTelemetry.snapshot();
+                      });
+                      require(before.engaged(), "Metal 4 main renderer telemetry is not engaged");
+
+                      try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
+                          singleplayer.getClientLevel().waitForChunksRender();
+                          context.waitTicks(60);
+
+                          Result result = context.computeOnClient(client -> {
+                              MetalDevice device = requireDevice();
+                              device.waitForSubmittedGpuWork();
+                              return evaluate(
+                                      before,
+                                      Metal4MainRendererTelemetry.snapshot(),
+                                      MetalPresentationTelemetry.snapshot()
+                              );
+                          });
+
+                          require(result.mainRendererEngagementFraction() == 1.0,
+                                  "main renderer engagement fraction was not 1.0: " + result);
+                          require(result.presentFrames() > 0L, "no presented frames in P1 measurement window");
+                          require(result.commandBufferBegins() > 0L, "no Metal 4 main command buffers were begun");
+                          require(result.submitted() > 0L, "no Metal 4 main command buffers were submitted");
+                          require(result.commandAllocatorResets() == result.commandBufferBegins(),
+                                  "allocator reset count diverged from command-buffer begins: " + result);
+                          require(result.commitCalls() == result.submitted(),
+                                  "grouped commit count diverged from submitted command buffers: " + result);
+                          require(result.argumentTableAllocationsDuringEncoding() == 0L,
+                                  "argument table allocated during encoding: " + result);
+                          require(result.computeTableOverflow() == 0L,
+                                  "compute argument-table overflow occurred: " + result);
+                          require(result.renderTableHighWater() == 1L,
+                                  "render argument-table high-water changed: " + result);
+                          require(result.presentationHealthy(),
+                                  "presentation lifecycle failed in P1 measurement window: " + result);
+
+                          writeEvidence(evidenceDir.resolve("metal4-main-renderer-evidence.json"), result);
+                      }
+                  }
+
+                  private static Result evaluate(
+                          Metal4MainRendererTelemetry.Snapshot before,
+                          Metal4MainRendererTelemetry.Snapshot after,
+                          MetalPresentationTelemetry.Snapshot presentation
+                  ) {
+                      require(after.engaged(), "Metal 4 main renderer disengaged during measurement");
+                      long begun = delta(after.begun(), before.begun(), "begun");
+                      long submitted = delta(after.submitted(), before.submitted(), "submitted");
+                      long resets = delta(after.commandAllocatorResets(), before.commandAllocatorResets(), "allocator resets");
+                      long waitNanos = delta(after.slotWaitNanos(), before.slotWaitNanos(), "slot wait nanos");
+                      long waitCount = delta(after.slotWaitCount(), before.slotWaitCount(), "slot wait count");
+                      long commandBufferBegins = delta(after.commandBufferBegins(), before.commandBufferBegins(), "command-buffer begins");
+                      long commitCalls = delta(after.commitCalls(), before.commitCalls(), "commit calls");
+                      long presentFrames = presentation.encodeCalls();
+                      double commandBuffersPerFrame = presentFrames == 0L
+                              ? Double.NaN
+                              : (double) commandBufferBegins / presentFrames;
+                      double commitCallsPerFrame = presentFrames == 0L
+                              ? Double.NaN
+                              : (double) commitCalls / presentFrames;
+                      return new Result(
+                              1.0,
+                              presentFrames,
+                              begun,
+                              submitted,
+                              resets,
+                              waitNanos,
+                              waitCount,
+                              commandBufferBegins,
+                              commitCalls,
+                              commandBuffersPerFrame,
+                              commitCallsPerFrame,
+                              after.argumentTableAllocationsDuringEncoding(),
+                              after.computeTableOverflow(),
+                              after.renderTableHighWater(),
+                              presentation.completeAndSuccessful()
+                      );
+                  }
+
+                  private static long delta(long after, long before, String name) {
+                      if (after < before) {
+                          throw new IllegalStateException(
+                                  "Metal 4 counter regressed for " + name + ": " + before + " -> " + after
+                          );
+                      }
+                      return after - before;
+                  }
+
+                  private static MetalDevice requireDevice() {
+                      MetalDevice device = MetalDevice.current();
+                      if (device == null) {
+                          throw new IllegalStateException("MetalDevice.current() is null inside production Minecraft");
+                      }
+                      return device;
+                  }
+
+                  private static void writeEvidence(Path path, Result result) {
+                      String json = """
+                              {
+                                "schema": 1,
+                                "status": "pass",
+                                "mainRendererEngagementFraction": %.6f,
+                                "presentFrames": %d,
+                                "metrics": {
+                                  "metal4.commandAllocatorResets": %d,
+                                  "metal4.slotWaitNanos": %d,
+                                  "metal4.slotWaitCount": %d,
+                                  "metal4.commandBuffersPerFrame": %.9f,
+                                  "metal4.commitCallsPerFrame": %.9f,
+                                  "metal4.argumentTableAllocationsDuringEncoding": %d,
+                                  "metal4.computeTableOverflow": %d,
+                                  "metal4.renderTableHighWater": %d
+                                },
+                                "rawWindow": {
+                                  "begun": %d,
+                                  "submitted": %d,
+                                  "commandBufferBegins": %d,
+                                  "commitCalls": %d
+                                },
+                                "presentationHealthy": %s
+                              }
+                              """.formatted(
+                              result.mainRendererEngagementFraction(),
+                              result.presentFrames(),
+                              result.commandAllocatorResets(),
+                              result.slotWaitNanos(),
+                              result.slotWaitCount(),
+                              result.commandBuffersPerFrame(),
+                              result.commitCallsPerFrame(),
+                              result.argumentTableAllocationsDuringEncoding(),
+                              result.computeTableOverflow(),
+                              result.renderTableHighWater(),
+                              result.begun(),
+                              result.submitted(),
+                              result.commandBufferBegins(),
+                              result.commitCalls(),
+                              result.presentationHealthy()
+                      );
+                      try {
+                          Files.createDirectories(path.getParent());
+                          Files.writeString(path, json, StandardCharsets.UTF_8);
+                      } catch (IOException exception) {
+                          throw new IllegalStateException(
+                                  "Could not write Metal 4 main renderer evidence " + path,
+                                  exception
+                          );
+                      }
+                  }
+
+                  private static void require(boolean condition, String message) {
+                      if (!condition) {
+                          throw new IllegalStateException(message);
+                      }
+                  }
+
+                  private record Result(
+                          double mainRendererEngagementFraction,
+                          long presentFrames,
+                          long begun,
+                          long submitted,
+                          long commandAllocatorResets,
+                          long slotWaitNanos,
+                          long slotWaitCount,
+                          long commandBufferBegins,
+                          long commitCalls,
+                          double commandBuffersPerFrame,
+                          double commitCallsPerFrame,
+                          long argumentTableAllocationsDuringEncoding,
+                          long computeTableOverflow,
+                          long renderTableHighWater,
+                          boolean presentationHealthy
+                  ) {
+                  }
+              }
+          """), encoding="utf-8")
+
+          mod_path = root / ".github/ci/minecraft-e2e/src/main/resources/fabric.mod.json"
+          mod = json.loads(mod_path.read_text(encoding="utf-8"))
+          entrypoints = mod["entrypoints"]["fabric-client-gametest"]
+          main_test = "com.metallum.client.metal.render.Metal4MainRendererEvidenceGameTest"
+          if main_test not in entrypoints:
+              entrypoints.append(main_test)
+          mod_path.write_text(json.dumps(mod, indent=2) + "\n", encoding="utf-8")
+
+          gradle_path = root / ".github/ci/minecraft-e2e/build.gradle"
+          gradle = gradle_path.read_text(encoding="utf-8")
+          old_flags = block("""\
+              // P0 validates the shipping renderer lifecycle exactly as configured by
+              // default. Metal 4 main-renderer/compiler/queue activation belongs to P1;
+              // forcing those pilots here would make P0 depend on P1 and, on GitHub's
+              // paravirtual device, would also conflict with the required residency set.
+              jvmArgs.add("-Dmetallum.opt.metal4=false")
+              jvmArgs.add("-Dmetallum.opt.metal4Compiler=false")
+              jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=false")
+              jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
+              // Keep the hosted Apple-paravirtual workaround scoped to the Minecraft JVM.
+              // Do not put this in JAVA_TOOL_OPTIONS: doing so changes the Gradle daemon's
+              // JVM identity and prevents reuse of the daemon already started by root tasks.
+              jvmArgs.add("-Dmetallum.opt.renderStatePacket=false")
+              // GitHub's Apple Paravirtual device has already proven it does not support
+              // residency sets. Do not request a physical-only capability in hosted E2E;
+              // with Metal API validation enabled, asking for one is a hard assertion.
+              jvmArgs.add("-Dmetallum.opt.residencySet=false")
+          """, 4)
+          new_flags = block("""\
+              boolean requireMetal4MainRenderer = providers.gradleProperty("p1Metal4MainRenderer")
+                      .map { it.toBoolean() }
+                      .orElse(false)
+                      .get()
+              jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
+              if (requireMetal4MainRenderer) {
+                  // P1 physical-Mac acceptance: activate the complete main-renderer
+                  // dependency set. No Amethyst/iOS compatibility switches participate.
+                  jvmArgs.add("-Dmetallum.opt.metal4=true")
+                  jvmArgs.add("-Dmetallum.opt.metal4Compiler=true")
+                  jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=true")
+                  jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
+                  jvmArgs.add("-Dmetallum.opt.residencySet=true")
+              } else {
+                  // P0 hosted regression keeps the shipping renderer defaults and the
+                  // Apple-paravirtual workaround exactly as previously validated.
+                  jvmArgs.add("-Dmetallum.opt.metal4=false")
+                  jvmArgs.add("-Dmetallum.opt.metal4Compiler=false")
+                  jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=false")
+                  jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
+                  jvmArgs.add("-Dmetallum.opt.renderStatePacket=false")
+                  jvmArgs.add("-Dmetallum.opt.residencySet=false")
+              }
+          """, 4)
+          gradle = replace_once(gradle, old_flags, new_flags, "E2E P0/P1 flag split")
+          gradle_path.write_text(gradle, encoding="utf-8")
+
+          verifier_path = root / "scripts/agent/verify_metal4_main_hotpath.py"
+          verifier = verifier_path.read_text(encoding="utf-8")
+          anchor = block("""\
+              require("slotCondition.broadcast()" in submit[free:], "free slot does not wake blocked acquisition")
+
+              evidence = {
+          """, 4)
+          replacement = block("""\
+              require("slotCondition.broadcast()" in submit[free:], "free slot does not wake blocked acquisition")
+              for token in (
+                  "allocatorResetCount",
+                  "slotWaitNanos",
+                  "slotWaitCount",
+                  "commandBufferBeginCount",
+                  "commitCallCount",
+              ):
+                  require(token in cls, f"missing runtime telemetry counter: {token}")
+              require(
+                  '@_cdecl("metallum_metal4_main_renderer_stats_v2")' in text,
+                  "missing append-only runtime telemetry ABI",
+              )
+
+              evidence = {
+          """, 4)
+          verifier = replace_once(verifier, anchor, replacement, "static telemetry ABI gate")
+          verifier = replace_once(
+              verifier,
+              block("""\
+                  "slotFreeOnlyAfterCompletionFeedback": True,
+                  "forbiddenLegacyPoolTokensPresent": False,
+                  "status": "pass",
+              """, 8),
+              block("""\
+                  "slotFreeOnlyAfterCompletionFeedback": True,
+                  "forbiddenLegacyPoolTokensPresent": False,
+                  "runtimeTelemetryAbi": "metallum_metal4_main_renderer_stats_v2",
+                  "runtimeTelemetrySemantics": "cumulative-counters-delta-over-presentation-window",
+                  "status": "pass",
+              """, 8),
+              "static evidence telemetry metadata",
+          )
+          verifier_path.write_text(verifier, encoding="utf-8")
+
+          acceptance_path = root / "docs/agent/metal4-main-production-acceptance.json"
+          acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+          acceptance["runtime_evidence"] = {
+              "producer": ".github/ci/minecraft-e2e/src/main/java/com/metallum/client/metal/render/Metal4MainRendererEvidenceGameTest.java",
+              "artifact": "metal4-main-renderer-evidence.json",
+              "counter_semantics": "cumulative counters sampled as deltas over an ordinary presentation window",
+              "physical_mac_command": "./gradlew -p .github/ci/minecraft-e2e -PmetallumJar=<production-jar> -Pp1Metal4MainRenderer=true runProductionClientGameTest",
+          }
+          acceptance_path.write_text(json.dumps(acceptance, indent=2) + "\n", encoding="utf-8")
+          PY
+
+          python3 scripts/agent/verify_metal4_main_hotpath.py \
+            --output build/agent-evidence/metal4-main-hotpath.json
+          python3 -m json.tool docs/agent/metal4-main-production-acceptance.json >/dev/null
+          git diff --check
+          git diff --stat
+
+      - name: Commit source changes and remove one-shot workflow
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git rm .github/workflows/p1-apply-main-stats-v2.yml
-          git add src/main/native/MetallumNative.swift src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java
+          git add \
+            src/main/native/MetallumNative.swift \
+            src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java \
+            src/main/java/com/metallum/client/metal/render/mtl/Metal4MainRendererTelemetry.java \
+            scripts/agent/verify_metal4_main_hotpath.py \
+            docs/agent/metal4-main-production-acceptance.json \
+            .github/ci/minecraft-e2e/build.gradle \
+            .github/ci/minecraft-e2e/src/main/resources/fabric.mod.json \
+            .github/ci/minecraft-e2e/src/main/java/com/metallum/client/metal/render/Metal4MainRendererEvidenceGameTest.java
           git diff --cached --check
-          git commit -m 'feat(metal4): expose main renderer runtime telemetry v2'
+          git commit -m 'feat(metal4): complete P1 runtime telemetry contract'
           git push origin HEAD:feature/metal4-main-production
