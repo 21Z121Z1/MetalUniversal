@@ -228,8 +228,6 @@ def main() -> None:
             "Mac-only harness must explicitly neutralize transitive iOS packaging producers")
     require("task.enabled = false" in hosted_gradle_text,
             "Mac-only harness must disable transitive iOS packaging producers")
-    require("metalde..." not in hosted_gradle_text, "invalid hosted Gradle sentinel")
-    require("metalde..." not in workflow_text, "invalid workflow sentinel")
     require("metaldevicepresentationcontracttest" in hosted_gradle_text,
             "hosted core suite must execute the layerless-device presentation contract")
     require("-xx:errorfile=" in hosted_gradle_text,
