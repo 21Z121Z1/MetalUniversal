@@ -16,11 +16,17 @@ public final class MTLCommandQueue {
 
     private MemorySegment handle;
     private final boolean trackMetal4MainRenderer;
+    private final boolean metal4Supported;
     private boolean residencySetEnabled;
 
-    private MTLCommandQueue(final MemorySegment handle, final boolean trackMetal4MainRenderer) {
+    private MTLCommandQueue(
+            final MemorySegment handle,
+            final boolean trackMetal4MainRenderer,
+            final boolean metal4Supported
+    ) {
         this.handle = handle;
         this.trackMetal4MainRenderer = trackMetal4MainRenderer;
+        this.metal4Supported = metal4Supported;
     }
 
     public static MTLCommandQueue create(final MemorySegment device) {
@@ -28,11 +34,12 @@ public final class MTLCommandQueue {
         if (MetalNativeBridge.isNullHandle(handle)) {
             throw new IllegalStateException("Failed to create Metal command queue");
         }
+        boolean metal4Supported = MetalNativeBridge.metallum_metal4_supported(device) != 0;
         boolean trackMetal4MainRenderer = Metal4MainRendererTelemetry.enabled()
                 && METAL4_REQUESTED
                 && METAL4_MAIN_RENDERER_REQUESTED
-                && MetalNativeBridge.metallum_metal4_supported(device) != 0;
-        return new MTLCommandQueue(handle, trackMetal4MainRenderer);
+                && metal4Supported;
+        return new MTLCommandQueue(handle, trackMetal4MainRenderer, metal4Supported);
     }
 
     /**
@@ -47,6 +54,11 @@ public final class MTLCommandQueue {
         boolean enabled = MetalNativeBridge.metallum_residency_set_enable(device, handle) != 0;
         this.residencySetEnabled = enabled;
         return enabled;
+    }
+
+    /** Runtime evidence seam for the exact device backing this command queue. */
+    public boolean metal4Supported() {
+        return this.metal4Supported;
     }
 
     /** Runtime evidence seam: true only after the native set was created and attached. */
