@@ -10,28 +10,39 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 
 @SuppressWarnings("UnstableApiUsage")
 public final class Metal4MainRendererEvidenceGameTest implements FabricClientGameTest {
     @Override
     public void runTest(final ClientGameTestContext context) {
-        if (!Boolean.getBoolean("metallum.ci.requireMetal4MainRenderer")) {
+        String lane = requestedLane();
+        if (lane.equals("off")) {
             return;
+        }
+        if (!lane.equals("baseline") && !lane.equals("candidate")) {
+            throw new IllegalStateException("Unsupported P1 Metal 4 lane: " + lane);
         }
         if (!Metal4MainRendererTelemetry.enabled()) {
             throw new IllegalStateException("P1 requires metallum.hotpath.telemetry=true");
         }
+        boolean candidate = lane.equals("candidate");
 
         Path evidenceDir = Path.of(System.getProperty("metallum.ci.evidenceDir", "build/evidence"))
                 .toAbsolutePath().normalize();
 
-        Metal4MainRendererTelemetry.Snapshot before = context.computeOnClient(client -> {
+        DeviceState before = context.computeOnClient(client -> {
             MetalDevice device = requireDevice();
             device.waitForSubmittedGpuWork();
             MetalPresentationTelemetry.reset();
-            return Metal4MainRendererTelemetry.snapshot();
+            return deviceState(device);
         });
-        require(before.engaged(), "Metal 4 main renderer did not engage before the P1 measurement window");
+        require(before.metal4Supported(), "P1 lane requires a device with Metal 4 support");
+        require(before.residencySetEnabled(), "P1 lane requires explicit residency on the production queue");
+        require(before.mainRendererEnabled() == candidate,
+                "P1 lane did not configure the requested main-renderer state: " + before);
+        require(before.telemetry().engaged() == candidate,
+                "native main-renderer engagement disagrees with requested P1 lane: " + before);
 
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
             singleplayer.getClientLevel().waitForChunksRender();
@@ -40,60 +51,103 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
             Result result = context.computeOnClient(client -> {
                 MetalDevice device = requireDevice();
                 device.waitForSubmittedGpuWork();
+                DeviceState after = deviceState(device);
                 return evaluate(
-                        before,
-                        Metal4MainRendererTelemetry.snapshot(),
+                        lane,
+                        candidate,
+                        before.telemetry(),
+                        after,
                         MetalPresentationTelemetry.snapshot()
                 );
             });
 
-            require(result.mainRendererEngagementFraction() == 1.0,
-                    "Metal 4 main renderer did not remain engaged: " + result);
+            require(result.metal4Supported(), "Metal 4 capability disappeared during P1 window: " + result);
+            require(result.residencySetEnabled(), "residency set was not active during P1 window: " + result);
+            require(result.mainRendererEnabled() == candidate,
+                    "main-renderer state changed during P1 window: " + result);
+            require(result.mainRendererEngaged() == candidate,
+                    "native main-renderer engagement changed during P1 window: " + result);
             require(result.presentFrames() > 0L, "no presented frames in P1 measurement window");
-            require(result.commandBufferBegins() > 0L, "no Metal 4 command buffers began in P1 window");
-            require(result.commandBufferBegins() == result.nativeBegun(),
-                    "Java/native command-buffer begin counters diverged: " + result);
-            require(result.commitCalls() == result.nativeSubmitted(),
-                    "Java/native command-buffer submit counters diverged: " + result);
-            require(result.commandAllocatorResets() == result.commandBufferBegins(),
-                    "allocator-reset derivation diverged from proven beginLease invariant: " + result);
-            require(result.argumentTableAllocationsDuringEncoding() == 0L,
-                    "argument-table allocation occurred during encoding: " + result);
-            require(result.computeTableOverflow() == 0L,
-                    "compute argument-table overflow occurred: " + result);
-            require(result.renderTableHighWater() == 1L,
-                    "render argument-table high-water changed: " + result);
             require(result.outstandingSubmissions() == 0L,
                     "submitted Metal 4 command buffers remained unretired after GPU drain: " + result);
             require(result.presentationHealthy(),
                     "ordinary Metal presentation lifecycle failed in P1 window: " + result);
 
+            if (candidate) {
+                require(result.mainRendererEngagementFraction() == 1.0,
+                        "Metal 4 main renderer did not remain engaged: " + result);
+                require(result.commandBufferBegins() > 0L,
+                        "no Metal 4 command buffers began in P1 candidate window");
+                require(result.commandBufferBegins() == result.nativeBegun(),
+                        "Java/native command-buffer begin counters diverged: " + result);
+                require(result.commitCalls() == result.nativeSubmitted(),
+                        "Java/native command-buffer submit counters diverged: " + result);
+                require(result.commandAllocatorResets() == result.commandBufferBegins(),
+                        "allocator-reset derivation diverged from proven beginLease invariant: " + result);
+                require(result.argumentTableAllocationsDuringEncoding() == 0L,
+                        "argument-table allocation occurred during encoding: " + result);
+                require(result.computeTableOverflow() == 0L,
+                        "compute argument-table overflow occurred: " + result);
+                require(result.renderTableHighWater() == 1L,
+                        "render argument-table high-water changed: " + result);
+            } else {
+                require(result.mainRendererEngagementFraction() == 0.0,
+                        "P1 baseline unexpectedly engaged the main renderer: " + result);
+                require(result.nativeBegun() == 0L && result.nativeSubmitted() == 0L,
+                        "P1 baseline executed native main-renderer work: " + result);
+                require(result.commandBufferBegins() == 0L && result.commitCalls() == 0L,
+                        "P1 baseline recorded Java main-renderer work: " + result);
+                require(result.commandAllocatorResets() == 0L,
+                        "P1 baseline recorded main-renderer allocator resets: " + result);
+            }
+
             writeEvidence(evidenceDir.resolve("metal4-main-renderer-evidence.json"), result);
         }
     }
 
+    private static String requestedLane() {
+        String fallback = Boolean.getBoolean("metallum.ci.requireMetal4MainRenderer") ? "candidate" : "off";
+        return System.getProperty("metallum.ci.p1Metal4Lane", fallback).trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static DeviceState deviceState(final MetalDevice device) {
+        return new DeviceState(
+                device.commandQueue.metal4Supported(),
+                device.commandQueue.residencySetEnabled(),
+                device.metal4MainRendererEnabled(),
+                Metal4MainRendererTelemetry.snapshot()
+        );
+    }
+
     private static Result evaluate(
+            final String lane,
+            final boolean candidate,
             final Metal4MainRendererTelemetry.Snapshot before,
-            final Metal4MainRendererTelemetry.Snapshot after,
+            final DeviceState after,
             final MetalPresentationTelemetry.Snapshot presentation
     ) {
-        require(after.engaged(), "Metal 4 main renderer disengaged during P1 window");
-        long nativeBegun = delta(after.nativeBegun(), before.nativeBegun(), "native begun");
-        long nativeSubmitted = delta(after.nativeSubmitted(), before.nativeSubmitted(), "native submitted");
+        Metal4MainRendererTelemetry.Snapshot telemetry = after.telemetry();
+        long nativeBegun = delta(telemetry.nativeBegun(), before.nativeBegun(), "native begun");
+        long nativeSubmitted = delta(telemetry.nativeSubmitted(), before.nativeSubmitted(), "native submitted");
         long allocatorResets = delta(
-                after.commandAllocatorResets(), before.commandAllocatorResets(), "allocator resets"
+                telemetry.commandAllocatorResets(), before.commandAllocatorResets(), "allocator resets"
         );
-        long slotWaitNanos = delta(after.slotWaitNanos(), before.slotWaitNanos(), "slot wait nanos");
-        long slotWaitCount = delta(after.slotWaitCount(), before.slotWaitCount(), "slot wait count");
+        long slotWaitNanos = delta(telemetry.slotWaitNanos(), before.slotWaitNanos(), "slot wait nanos");
+        long slotWaitCount = delta(telemetry.slotWaitCount(), before.slotWaitCount(), "slot wait count");
         long commandBufferBegins = delta(
-                after.commandBufferBegins(), before.commandBufferBegins(), "command-buffer begins"
+                telemetry.commandBufferBegins(), before.commandBufferBegins(), "command-buffer begins"
         );
-        long commitCalls = delta(after.commitCalls(), before.commitCalls(), "commit calls");
+        long commitCalls = delta(telemetry.commitCalls(), before.commitCalls(), "commit calls");
         long frames = presentation.encodeCalls();
         double commandBuffersPerFrame = frames == 0L ? Double.NaN : (double) commandBufferBegins / frames;
         double commitCallsPerFrame = frames == 0L ? Double.NaN : (double) commitCalls / frames;
         return new Result(
-                1.0,
+                lane,
+                after.metal4Supported(),
+                after.residencySetEnabled(),
+                after.mainRendererEnabled(),
+                telemetry.engaged(),
+                candidate ? 1.0 : 0.0,
                 frames,
                 nativeBegun,
                 nativeSubmitted,
@@ -104,10 +158,10 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
                 commitCalls,
                 commandBuffersPerFrame,
                 commitCallsPerFrame,
-                after.outstandingSubmissions(),
-                after.argumentTableAllocationsDuringEncoding(),
-                after.computeTableOverflow(),
-                after.renderTableHighWater(),
+                telemetry.outstandingSubmissions(),
+                telemetry.argumentTableAllocationsDuringEncoding(),
+                telemetry.computeTableOverflow(),
+                telemetry.renderTableHighWater(),
                 presentation.completeAndSuccessful()
         );
     }
@@ -132,8 +186,13 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
     private static void writeEvidence(final Path path, final Result result) {
         String json = """
                 {
-                  "schema": 1,
+                  "schema": 2,
                   "status": "pass",
+                  "lane": "%s",
+                  "metal4Supported": %s,
+                  "residencySetEnabled": %s,
+                  "mainRendererEnabled": %s,
+                  "mainRendererEngaged": %s,
                   "mainRendererEngagementFraction": %.6f,
                   "presentFrames": %d,
                   "metrics": {
@@ -157,6 +216,11 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
                   "presentationHealthy": %s
                 }
                 """.formatted(
+                result.lane(),
+                result.metal4Supported(),
+                result.residencySetEnabled(),
+                result.mainRendererEnabled(),
+                result.mainRendererEngaged(),
                 result.mainRendererEngagementFraction(),
                 result.presentFrames(),
                 result.commandAllocatorResets(),
@@ -188,7 +252,20 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
         }
     }
 
+    private record DeviceState(
+            boolean metal4Supported,
+            boolean residencySetEnabled,
+            boolean mainRendererEnabled,
+            Metal4MainRendererTelemetry.Snapshot telemetry
+    ) {
+    }
+
     private record Result(
+            String lane,
+            boolean metal4Supported,
+            boolean residencySetEnabled,
+            boolean mainRendererEnabled,
+            boolean mainRendererEngaged,
             double mainRendererEngagementFraction,
             long presentFrames,
             long nativeBegun,
