@@ -90,6 +90,7 @@ for profile in V1 I0 I1; do
   if [[ "$profile" == "I0" || "$profile" == "I1" ]]; then
     semantic=true
   fi
+
   # build.gradle forwards metallum.opt.* generically but not the semantic Iris
   # switch. JAVA_TOOL_OPTIONS is inherited by Loom's client JVM, so inject the
   # immutable startup property there; I0/I1 trials still have to prove both the
@@ -101,9 +102,9 @@ for profile in V1 I0 I1; do
   WORLD="$WORLD" \
   P1_CORRECTNESS_GATE="$CORRECTNESS_GATE" \
     bash scripts/agent/run_metal4_main_p1_physical_performance.sh
+
   test -s "$profile_out/environment.json"
   test -s "$profile_out/decision.json"
-
   if [[ "$profile" == "I0" || "$profile" == "I1" ]]; then
     while IFS= read -r log; do
       grep -F "Iris-on-Metal semantic layer active:" "$log" >/dev/null || {
@@ -114,95 +115,11 @@ for profile in V1 I0 I1; do
   fi
 done
 
-python3 - "$OUT" "$HEAD_SHA" "$CORRECTNESS_JAR_SHA" "$CORRECTNESS_DYLIB_SHA" <<'PY'
-import json
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-head = sys.argv[2]
-correctness_jar = sys.argv[3]
-correctness_dylib = sys.argv[4]
-profiles = ("V1", "I0", "I1")
-identities = {}
-decisions = {}
-errors = []
-
-for profile in profiles:
-    profile_root = root / "profiles" / profile
-    environment = json.loads((profile_root / "environment.json").read_text(encoding="utf-8"))
-    decision = json.loads((profile_root / "decision.json").read_text(encoding="utf-8"))
-    identity = environment.get("identity")
-    if not isinstance(identity, dict):
-        errors.append(f"{profile}: missing identity object")
-        continue
-    if identity.get("profile_id") != profile:
-        errors.append(f"{profile}: identity profile_id={identity.get('profile_id')!r}")
-    if identity.get("candidate_sha") != head:
-        errors.append(f"{profile}: candidate_sha does not equal current HEAD")
-    if identity.get("production_jar_sha256") != correctness_jar:
-        errors.append(f"{profile}: production JAR identity differs from correctness gate")
-    if identity.get("native_dylib_sha256") != correctness_dylib:
-        errors.append(f"{profile}: native dylib identity differs from correctness gate")
-    if decision.get("state") != "accepted-candidate":
-        errors.append(f"{profile}: decision={decision.get('state')!r}")
-    identities[profile] = identity
-    decisions[profile] = decision
-
-common_keys = (
-    "candidate_sha",
-    "production_jar_sha256",
-    "native_dylib_sha256",
-    "world_sha256",
-    "world_scenario_id",
-    "resolution",
-    "ui_scale",
-    "render_distance",
-    "camera_pose",
-    "camera_script_sha256",
-    "minecraft_version",
-    "sodium_version",
-    "macos_version",
-    "java_version",
-)
-if len(identities) == len(profiles):
-    reference = identities["V1"]
-    for profile in ("I0", "I1"):
-        for key in common_keys:
-            if identities[profile].get(key) != reference.get(key):
-                errors.append(
-                    f"{profile}: common identity mismatch for {key}: "
-                    f"{identities[profile].get(key)!r} != {reference.get(key)!r}"
-                )
-    for profile in ("I0", "I1"):
-        for key in ("shader_pack_name", "shader_pack_version", "shader_pack_sha256", "shader_options_sha256", "iris_version"):
-            value = identities[profile].get(key)
-            if not isinstance(value, str) or not value or value == "unknown":
-                errors.append(f"{profile}: missing shader identity field {key}")
-
-state = "accepted-candidate" if not errors else "rejected-candidate"
-result = {
-    "schema_version": 2,
-    "stage": "P1-metal4-main-production",
-    "state": state,
-    "source_sha": head,
-    "correctness_production_jar_sha256": correctness_jar,
-    "correctness_native_dylib_sha256": correctness_dylib,
-    "required_profiles": list(profiles),
-    "profile_states": {profile: decisions.get(profile, {}).get("state", "missing") for profile in profiles},
-    "shared_identity_fields": list(common_keys),
-    "errors": errors,
-    "reason": (
-        "V1, I0 and I1 independently accepted the exact correctness-approved P1 production bits under matched physical Metal 4/residency trials"
-        if not errors
-        else "one or more P1 physical performance profiles or cross-profile identity invariants failed"
-    ),
-}
-(root / "decision.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(json.dumps(result, indent=2, sort_keys=True))
-if errors:
-    raise SystemExit(3)
-PY
+python3 scripts/agent/check_metal4_main_profile_matrix.py "$OUT" \
+  --expected-head "$HEAD_SHA" \
+  --expected-jar-sha "$CORRECTNESS_JAR_SHA" \
+  --expected-dylib-sha "$CORRECTNESS_DYLIB_SHA" \
+  --output "$OUT/decision.json"
 
 echo "P1 physical performance matrix: ACCEPTED"
 echo "Evidence: $OUT"
