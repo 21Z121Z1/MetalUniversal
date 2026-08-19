@@ -10,6 +10,34 @@ P1 = ROOT / "docs/agent/metal4-main-production-acceptance.json"
 WORKFLOW = ROOT / ".github/workflows/metal-capabilities.yml"
 PROBE = ROOT / ".github/ci/HostedMetalCapabilityProbe.swift"
 
+EXPECTED_BRANCHES = {
+    "agent/metal-eval-v3",
+    "archive/metal4-geometry-handoff-2026-07-28",
+    "archive/metal-iris-beta-2026-08-02",
+    "archive/metalfx-v1-prototype-2026-08-02",
+    "ci/minecraft-client-e2e-20260815",
+    "ci/minecraft-client-e2e-p0-20260819",
+    "codex/amethyst-ios-runtime-262",
+    "codex/autonomous-metal-next",
+    "codex/autonomous-metal-next-20260813",
+    "codex/bsl-metalfx-framegen-cutout-20260813",
+    "codex/p1-binding-shadow-safe",
+    "codex/p1-uniform-token-ci",
+    "feature/ios-amethyst-runtime",
+    "feature/iris-semantic-completion",
+    "feature/metal4-main-production",
+    "feature/metalfx-framegen-contracts",
+    "feature/token-native-private-bindings",
+    "fix/metal4-arena-lifetime",
+    "integration/iris-metal-next",
+    "master",
+    "perf/swift-performance-by-design-20260819",
+    "perf/swift-performance-by-design-final-20260819",
+    "perf/swift-performance-by-design-final-validation-20260819",
+    "perf/swift-performance-by-design-ready-20260819",
+    "research/iris-semantic-contracts-alt",
+}
+
 
 def fail(message: str) -> None:
     raise SystemExit(f"Cloud Metal program invariant failed: {message}")
@@ -46,13 +74,22 @@ def main() -> None:
 
     branches = matrix.get("branches", [])
     names = [entry.get("branch") for entry in branches]
-    require(len(branches) == 24, f"expected 24 audited branches, got {len(branches)}")
-    require(len(set(names)) == 24, "branch migration matrix contains duplicate branch names")
+    require(len(names) == len(set(names)), "branch migration matrix contains duplicate branch names")
+    actual = set(names)
+    missing = sorted(EXPECTED_BRANCHES - actual)
+    unexpected = sorted(actual - EXPECTED_BRANCHES)
+    require(not missing and not unexpected,
+            f"branch migration matrix inventory drifted: missing={missing}, unexpected={unexpected}")
+    require(len(branches) == len(EXPECTED_BRANCHES),
+            f"expected {len(EXPECTED_BRANCHES)} audited branches, got {len(branches)}")
     require("integration/iris-metal-next" in names, "canonical branch missing from migration matrix")
-    require("feature/ios-amethyst-runtime" in names and "codex/amethyst-ios-runtime-262" in names, "out-of-scope platform branches must be explicitly recorded")
+    require("agent/metal-eval-v3" in names, "active C0 branch missing from migration matrix")
+    require("feature/ios-amethyst-runtime" in names and "codex/amethyst-ios-runtime-262" in names,
+            "out-of-scope platform branches must be explicitly recorded")
     for entry in branches:
         if entry.get("role") == "out-of-scope-platform-lineage":
-            require("do-not-port" in entry.get("disposition", ""), f"{entry['branch']} must remain non-portable as a platform lineage")
+            require("do-not-port" in entry.get("disposition", ""),
+                    f"{entry['branch']} must remain non-portable as a platform lineage")
 
     require(p1["scope"]["default_enablement_allowed_before_acceptance"] is False, "P1 default enablement gate was weakened")
     require(p1["capability_policy"]["blocked_capability_is_stage_pass"] is False, "blocked physical capability may not count as a P1 pass")
@@ -80,6 +117,7 @@ def main() -> None:
         "canonical_branch": program["canonical_branch"],
         "program_branch": program["program_branch"],
         "audited_branch_count": len(branches),
+        "audited_branches": sorted(actual),
         "physical_acceptance_deferred_not_waived": True,
         "amethyst_specific_compatibility": False,
         "ios_specific_adaptation": False,
