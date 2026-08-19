@@ -20,6 +20,7 @@ python3 -m py_compile \
   scripts/agent/normalize_unified_trial.py \
   scripts/agent/check_unified_eval_admission.py
 bash -n scripts/agent/run_unified_eval_cycle.sh
+bash -n scripts/agent/run_metal4_main_p1_physical_correctness.sh
 bash -n scripts/agent/verify.sh
 
 ./gradlew --no-daemon compileJava test \
