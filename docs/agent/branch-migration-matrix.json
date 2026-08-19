@@ -29,7 +29,9 @@
       "current_canonical_equivalent_reviewed": true,
       "canonical_equivalent": "integration/iris-metal-next P0/P1 production E2E, framebuffer, presentation, reload, and Metal 4 contracts",
       "tests_migrated": [],
-      "tests_newly_added": [],
+      "tests_newly_added": [
+        "MetalDevicePresentationContractTest"
+      ],
       "existing_tests_reused": [
         "MetalMrtBackendIntegrationTest",
         "MetalComputeBackendIntegrationTest",
