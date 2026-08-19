@@ -1,0 +1,204 @@
+name: metal-capabilities
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - integration/iris-metal-next
+      - 'agent/**'
+  pull_request:
+    branches:
+      - integration/iris-metal-next
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metal-capabilities-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cloud-contract:
+    name: cloud program contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify cloud-first program invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p agent-evidence
+          python3 scripts/agent/verify_cloud_program.py \
+            --output agent-evidence/cloud-contract.json
+          python3 -m json.tool docs/agent/cloud-first-metal-program.json >/dev/null
+          python3 -m json.tool docs/agent/branch-migration-matrix.json >/dev/null
+          python3 -m json.tool agent-evidence/cloud-contract.json >/dev/null
+
+      - name: Preserve cloud contract evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-program-contract-${{ github.run_attempt }}
+          path: agent-evidence/
+          if-no-files-found: error
+
+  hosted-metal:
+    name: hosted macOS Metal execution
+    needs: cloud-contract
+    runs-on: macos-26
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Describe hosted Apple Silicon runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p agent-evidence
+          test "$(uname -m)" = "arm64"
+          uname -a | tee "$RUNNER_TEMP/uname.txt"
+          sw_vers | tee "$RUNNER_TEMP/sw-vers.txt"
+          system_profiler SPHardwareDataType SPDisplaysDataType > "$RUNNER_TEMP/system-profiler.txt" || true
+          python3 - <<'PY'
+          import json, os, platform, subprocess
+          def capture(*cmd):
+              try:
+                  return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT).strip()
+              except Exception as exc:
+                  return f"unavailable: {exc}"
+          data = {
+              "source_sha": os.environ.get("GITHUB_SHA", "unknown"),
+              "runner_os": os.environ.get("RUNNER_OS", "unknown"),
+              "runner_arch": os.environ.get("RUNNER_ARCH", "unknown"),
+              "machine": platform.machine(),
+              "macos": capture("sw_vers", "-productVersion"),
+              "xcode": capture("xcodebuild", "-version"),
+          }
+          with open("agent-evidence/environment.json", "w", encoding="utf-8") as handle:
+              json.dump(data, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+
+      - name: Compile and execute real Metal compute/readback probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -framework Metal \
+            .github/ci/HostedMetalCapabilityProbe.swift \
+            -o "$RUNNER_TEMP/metallum-hosted-metal-probe"
+          "$RUNNER_TEMP/metallum-hosted-metal-probe" \
+            | tee "$RUNNER_TEMP/hosted-metal-probe.log"
+          grep -Fq HOSTED_METAL_GPU_PROBE_PASS "$RUNNER_TEMP/hosted-metal-probe.log"
+          python3 - <<'PY'
+          import json
+          data = {
+              "metal_runtime": True,
+              "offscreen_compute_readback": True,
+              "hosted_apple_silicon": True,
+              "metal4": None,
+              "residency_set": None,
+              "presentation_windowserver": False,
+              "metalfx_temporal": None,
+              "gpu_counter_sampling": False,
+              "final_physical_acceptance_required": True,
+          }
+          with open("agent-evidence/capabilities.json", "w", encoding="utf-8") as handle:
+              json.dump(data, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Verify current canonical evaluation contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew scripts/agent/verify_unified_eval.sh
+          bash scripts/agent/verify_unified_eval.sh
+          python3 scripts/agent/verify_metal4_main_hotpath.py \
+            --output agent-evidence/p1-hotpath.json
+
+      - name: Compile shipping native path and physical-only harnesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --stacktrace \
+            buildMacNative \
+            verifyProductionJarIsolation \
+            metalFrameGenerationLifecycleTest \
+            compileMetalMrtSmokeTest \
+            compileMetal4PipelineSmokeTest \
+            compileMetal4PipelinePathTest \
+            compileMetalFxOffscreenValidation \
+            compileMetalFxPerformanceValidation \
+            compileMetalFrameGenerationPresentationValidation
+
+      - name: Execute hosted Metal MRT and shipping Metal 4 fallback contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x build/metal-tests/MetalMRTSmokeTest
+          MTL_DEBUG_LAYER=0 MTL_SHADER_VALIDATION=0 \
+            build/metal-tests/MetalMRTSmokeTest \
+            | tee "$RUNNER_TEMP/metal-mrt.log"
+          ./gradlew --stacktrace metal4PipelineSmokeTest metal4PipelinePathTest
+          python3 - <<'PY'
+          import json
+          data = {
+              "raw_metal_compute_readback": "pass",
+              "native_mrt_smoke": "pass",
+              "metal4_shipping_path_contract": "pass",
+              "p1_hotpath_static_contract": "pass",
+              "physical_only_harnesses_compile": "pass",
+          }
+          with open("agent-evidence/correctness.json", "w", encoding="utf-8") as handle:
+              json.dump(data, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+
+      - name: Emit fail-closed cloud decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          data = {
+              "decision": "cloud-foundation-pass",
+              "stage": "C0-agent-metal-lab",
+              "source_sha": os.environ.get("GITHUB_SHA", "unknown"),
+              "cloud_correctness": "pass",
+              "hosted_metal_activation": "pass",
+              "physical_acceptance": "pending",
+              "default_enablement_allowed": False,
+              "next_cloud_stage_allowed_after_merge": True,
+          }
+          with open("agent-evidence/decision.json", "w", encoding="utf-8") as handle:
+              json.dump(data, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+          python3 -m json.tool agent-evidence/decision.json >/dev/null
+
+      - name: Preserve Agent Metal Lab evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-metal-lab-${{ github.run_attempt }}
+          path: |
+            agent-evidence/
+            build/agent-evidence/
+            build/reports/tests/**
+            build/test-results/**
+            ${{ runner.temp }}/hosted-metal-probe.log
+            ${{ runner.temp }}/metal-mrt.log
+          if-no-files-found: warn
