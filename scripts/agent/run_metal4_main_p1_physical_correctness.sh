@@ -61,7 +61,7 @@ path.write_text(json.dumps({
     "productionJarSha256": sys.argv[3],
     "nativeDylibSha256": sys.argv[4],
     "presentationEnvironment": "normal physical Mac windowing path; hosted offscreen override forbidden",
-    "metalApiValidation": true,
+    "metalApiValidation": True,
     "platform": platform.platform(),
     "machine": platform.machine(),
     "macOS": cmd("sw_vers"),
