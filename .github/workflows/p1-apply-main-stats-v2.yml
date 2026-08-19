@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: p1-apply-main-stats-v2
+  cancel-in-progress: true
+
 jobs:
   patch:
     if: github.actor != 'github-actions[bot]'
@@ -24,7 +28,6 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
-          import re
 
           swift_path = Path('src/main/native/MetallumNative.swift')
           swift = swift_path.read_text(encoding='utf-8')
@@ -149,14 +152,11 @@ jobs:
               values[0] = stats.0
               values[1] = stats.1
               values[2] = stats.2
-              // One allocator reset and one command-buffer begin occur per acquired slot.
               values[3] = stats.0
               values[4] = stats.4
               values[5] = stats.3
               values[6] = stats.0
-              // submit() contains exactly one grouped queue.commit call.
               values[7] = stats.1
-              // Argument tables are all created in Metal4MainQueueContext.init.
               values[8] = 0
               values[9] = 0
               values[10] = 1
@@ -183,13 +183,9 @@ jobs:
           ''',
           '''            metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
                       metal4MainRendererStatsV2 = downcall(lookup, "metallum_metal4_main_renderer_stats_v2", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
-                      metal4MetalFxStats = downcall(lookup, "metallum_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                      metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
           ''',
           'bind v2 stats symbol')
-
-          # The previous replacement intentionally uses the exact current metalfx symbol.
-          if '"metallum_metalfx_stats"' in java:
-              java = java.replace('"metallum_metalfx_stats"', '"metallum_metal4_metalfx_stats"', 1)
 
           marker = '''    public static long[] metallum_metal4_metalfx_stats() {
           '''
