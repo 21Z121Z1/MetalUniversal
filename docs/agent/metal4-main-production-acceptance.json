@@ -1,5 +1,5 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "stage": "P1-metal4-main-production",
   "base_stage": {
     "name": "P0-minecraft-metal-e2e",
@@ -108,6 +108,8 @@
     "runner_hashes_source_jar_and_native": true,
     "runner_executes_baseline_then_candidate": true,
     "runner_enables_metal_validation": true,
+    "runner_uses_normal_physical_presentation_path": true,
+    "hosted_offscreen_override_forbidden": true,
     "runner_checks_runtime_framebuffer_present_reload_and_readback_guardrails": true,
     "required_environment": "physical Apple GPU with Metal 4 and MTLResidencySet support",
     "same_exact_product_sha_required": true,
@@ -117,14 +119,43 @@
   },
   "performance_policy": {
     "correctness_before_performance": true,
-    "performance_runner": "scripts/agent/run_metal4_main_p1_physical_performance.sh",
-    "performance_command": "WORLD=<validation-world> P1_CORRECTNESS_GATE=<physical-correctness-root>/pair-decision.json bash scripts/agent/run_metal4_main_p1_physical_performance.sh",
+    "profile_runner": "scripts/agent/run_metal4_main_p1_physical_performance.sh",
+    "matrix_runner": "scripts/agent/run_metal4_main_p1_physical_matrix.sh",
+    "matrix_command": "WORLD=<validation-world> P1_CORRECTNESS_GATE=<physical-correctness-root>/pair-decision.json POTATO_SHADER_PACK=<potato-file> POTATO_SHADER_PACK_VERSION=<version> BSL_SHADER_PACK=<bsl-file> BSL_SHADER_PACK_VERSION=<version> bash scripts/agent/run_metal4_main_p1_physical_matrix.sh",
     "correctness_gate_source_sha_must_equal_current_head": true,
-    "benchmark_profile": "V1",
     "benchmark_contract": "docs/agent/benchmark-profiles.json",
-    "iris_loaded": true,
-    "iris_semantic": false,
-    "shader_pack": null,
+    "required_profiles": [
+      "V1",
+      "I0",
+      "I1"
+    ],
+    "profile_contracts": {
+      "V1": {
+        "iris_loaded": true,
+        "iris_semantic": false,
+        "shader_pack": null
+      },
+      "I0": {
+        "iris_loaded": true,
+        "iris_semantic": true,
+        "shader_pack": "Potato",
+        "shader_pack_input_must_be_explicit": true,
+        "shader_pack_version_must_be_explicit": true,
+        "shader_pack_sha256_required": true,
+        "shader_options_sha256_required": true,
+        "exact_runtime_activation_log_required": true
+      },
+      "I1": {
+        "iris_loaded": true,
+        "iris_semantic": true,
+        "shader_pack": "BSL",
+        "shader_pack_input_must_be_explicit": true,
+        "shader_pack_version_must_be_explicit": true,
+        "shader_pack_sha256_required": true,
+        "shader_options_sha256_required": true,
+        "exact_runtime_activation_log_required": true
+      }
+    },
     "metalfx_mode": "OFF",
     "frame_generation": false,
     "immutable_world_snapshot_per_trial": true,
@@ -137,8 +168,8 @@
     ],
     "ui_scale_default": 3,
     "render_distance_default": 16,
-    "mutable_options_and_iris_config_are_pinned_then_restored": true,
-    "required_identity_fields": [
+    "mutable_options_iris_config_and_staged_shader_inputs_are_restored_or_removed": true,
+    "common_identity_fields_must_match_across_profiles": [
       "candidate_sha",
       "production_jar_sha256",
       "native_dylib_sha256",
@@ -154,11 +185,19 @@
       "macos_version",
       "java_version"
     ],
+    "shader_profile_identity_fields": [
+      "shader_pack_name",
+      "shader_pack_version",
+      "shader_pack_sha256",
+      "shader_options_sha256",
+      "iris_version"
+    ],
     "trial_guardrails": [
       "drawable resolution equals 1708x960",
       "native main readback completed and passed",
       "explicit residency remains active",
       "main renderer engagement matches the lane",
+      "shader profile proves exact staged pack activation",
       "Metal API validation is disabled during timing"
     ],
     "baseline_candidate_dependencies_must_match": true,
@@ -166,12 +205,13 @@
     "warmup_seconds_min": 30,
     "sample_seconds_min": 120,
     "paired_performance_required_before_default_enablement": true,
-    "minimum_paired_blocks": 4,
+    "minimum_paired_blocks_per_profile": 4,
     "minimum_positive_block_fraction": 0.75,
-    "accepted_state_required": "accepted-candidate"
+    "accepted_state_required_per_profile": "accepted-candidate",
+    "matrix_accepted_state_required": "accepted-candidate"
   },
   "stage_transition": {
     "next_stage": "P2-iris-tbdr-render-graph-v3",
-    "allowed_only_if_all_structural_runtime_regression_and_performance_gates_pass": true
+    "allowed_only_if_all_structural_runtime_regression_correctness_and_three_profile_performance_gates_pass": true
   }
 }
