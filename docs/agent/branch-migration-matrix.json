@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "canonical_branch": "integration/iris-metal-next",
   "canonical_sha_at_creation": "31853a506b08e7666016497f8732c0dca3f347c8",
   "policy": {
@@ -10,6 +10,55 @@
     "amethyst_specific_compatibility": false,
     "ios_specific_adaptation": false
   },
+  "migration_records": [
+    {
+      "source_branch": "master",
+      "source_sha": "6a8ef77d8fe7b960bc09275533991c05d3588204",
+      "destination_branch": "agent/metal-eval-v3",
+      "destination_stage": "C0-agent-metal-lab",
+      "files_components_selected": [
+        "repository-owned HostedMetalCapabilityProbe compute/readback contract",
+        "hosted macOS Apple Silicon offscreen Metal execution pattern"
+      ],
+      "files_components_deliberately_omitted": [
+        "iPhoneOS and iOS Simulator jobs",
+        "Amethyst runtime and Agent chain",
+        "MobileGL command-packet and terrain-ICB implementation",
+        "MobileGL residency and performance implementation"
+      ],
+      "current_canonical_equivalent_reviewed": true,
+      "canonical_equivalent": "integration/iris-metal-next P0/P1 production E2E, framebuffer, presentation, reload, and Metal 4 contracts",
+      "tests_migrated": [],
+      "tests_newly_added": [],
+      "existing_tests_reused": [
+        "MetalMrtBackendIntegrationTest",
+        "MetalComputeBackendIntegrationTest",
+        "MetalRenderContractGpuIntegrationTest",
+        "IrisMetalPostChainCompilationTest",
+        "IrisMetalShadowPipelineTest",
+        "IrisMetalShadowComputeConformanceTest",
+        "IrisMetalCenterDepthSamplerTest",
+        "IrisMetalComputeConformanceTest",
+        "IrisMetalExternalLevelSamplerTest",
+        "MetalGenericVertexAttributeIntegrationTest",
+        "MetalIrisCustomTexturesIntegrationTest",
+        "MetalIrisNoiseTextureIntegrationTest"
+      ],
+      "runtime_evidence": [
+        "agent-evidence/environment.json",
+        "agent-evidence/capabilities.json",
+        "agent-evidence/correctness.json",
+        "agent-evidence/activation.json",
+        "agent-evidence/decision.json"
+      ],
+      "performance_evidence": null,
+      "known_deferred_physical_only_checks": [
+        "P1 physical Metal 4 and MTLResidencySet correctness",
+        "P1 V1/I0/I1 paired physical performance",
+        "final visible-window Apple Silicon acceptance"
+      ]
+    }
+  ],
   "branches": [
     {
       "branch": "agent/metal-eval-v3",
