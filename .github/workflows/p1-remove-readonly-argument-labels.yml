@@ -1,0 +1,46 @@
+name: P1 remove readonly argument-table labels
+
+on:
+  push:
+    branches:
+      - feature/metal4-main-production
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/metal4-main-production
+          fetch-depth: 0
+      - name: Remove invalid label writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('src/main/native/MetallumNative.swift')
+          s = p.read_text(encoding='utf-8')
+          block = '''        vertexArguments.label = "Metallum Vertex Arguments \\(index) (Metal 4)"\n        fragmentArguments.label = "Metallum Fragment Arguments \\(index) (Metal 4)"\n        computeArguments.label = "Metallum Compute Arguments \\(index) (Metal 4)"\n'''
+          if s.count(block) != 1:
+              raise SystemExit(f'expected one readonly label block, got {s.count(block)}')
+          p.write_text(s.replace(block, '', 1), encoding='utf-8')
+          PY
+          git diff --check
+          git diff -- src/main/native/MetallumNative.swift
+      - name: Commit and self-remove
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/p1-remove-readonly-argument-labels.yml
+          git add src/main/native/MetallumNative.swift
+          git diff --cached --check
+          git commit -m 'fix(metal4): keep argument-table labels descriptor-owned'
+          git push origin HEAD:feature/metal4-main-production
