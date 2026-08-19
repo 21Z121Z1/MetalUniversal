@@ -15,6 +15,17 @@ gradle.projectsEvaluated {
         throw new GradleException("sourceSets extension is unavailable")
     }
 
+    // The production resource graph also knows how to package optional iOS
+    // natives when an iPhoneOS SDK happens to be installed on a Mac. C0 is a
+    // macOS-only capability lane: keep those unrelated packaging producers out
+    // of this task graph instead of accidentally turning the hosted Mac gate
+    // into an iPhoneOS build requirement.
+    ["buildIOSNative", "buildIOSSpvc"].each { taskName ->
+        project.tasks.named(taskName).configure { task ->
+            task.enabled = false
+        }
+    }
+
     def configureHostedTest = { String name, String description, List<String> tests ->
         project.tasks.register(name, Test) { task ->
             task.group = "verification"
@@ -72,6 +83,7 @@ gradle.projectsEvaluated {
         "hostedMetalCoreIntegrationTest",
         "Runs shipping Java/FFM/Swift core Metal GPU integration tests after the hosted capability probe.",
         [
+            "com.metallum.client.metal.render.MetalDevicePresentationContractTest",
             "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
             "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
             "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
