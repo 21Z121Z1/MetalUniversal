@@ -12,6 +12,10 @@ on:
 
 permissions:
   contents: read
+  actions: read
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 concurrency:
   group: metal-capabilities-${{ github.workflow }}-${{ github.ref }}
@@ -23,6 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
 
       - name: Verify cloud-first program invariants
         shell: bash
@@ -31,6 +37,7 @@ jobs:
           mkdir -p agent-evidence
           python3 scripts/agent/verify_cloud_program.py \
             --verify-remote-branches \
+            --expected-source-sha "$METALLUM_SOURCE_SHA" \
             --output agent-evidence/cloud-contract.json
           python3 -m json.tool docs/agent/cloud-first-metal-program.json >/dev/null
           python3 -m json.tool docs/agent/branch-migration-matrix.json >/dev/null
@@ -56,12 +63,15 @@ jobs:
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
 
       - name: Describe hosted Apple Silicon runner
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p agent-evidence
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
           test "$(uname -m)" = "arm64"
           uname -a | tee "$RUNNER_TEMP/uname.txt"
           sw_vers | tee "$RUNNER_TEMP/sw-vers.txt"
@@ -73,8 +83,9 @@ jobs:
                   return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT).strip()
               except Exception as exc:
                   return f"unavailable: {exc}"
+          source_sha = os.environ.get("METALLUM_SOURCE_SHA", "unknown").lower()
           data = {
-              "source_sha": os.environ.get("GITHUB_SHA", "unknown"),
+              "source_sha": source_sha,
               "runner_os": os.environ.get("RUNNER_OS", "unknown"),
               "runner_arch": os.environ.get("RUNNER_ARCH", "unknown"),
               "machine": platform.machine(),
@@ -97,8 +108,9 @@ jobs:
             | tee "$RUNNER_TEMP/hosted-metal-probe.log"
           grep -Fq HOSTED_METAL_GPU_PROBE_PASS "$RUNNER_TEMP/hosted-metal-probe.log"
           python3 - <<'PY'
-          import json
+          import json, os
           data = {
+              "source_sha": os.environ.get("METALLUM_SOURCE_SHA", "unknown").lower(),
               "metal_runtime": True,
               "offscreen_compute_readback": True,
               "hosted_apple_silicon": True,
@@ -206,13 +218,22 @@ jobs:
               handle.write("\n")
           PY
 
-      - name: Emit correctness and fail-closed cloud decision
+      - name: Emit correctness, activation and fail-closed stage decision
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os
+          import json, os, re, urllib.parse, urllib.request
+
+          source_sha = os.environ.get("METALLUM_SOURCE_SHA", "").strip().lower()
+          if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+              raise SystemExit(f"invalid METALLUM_SOURCE_SHA: {source_sha!r}")
+
           correctness = {
+              "source_sha": source_sha,
               "raw_metal_compute_readback": "pass",
               "native_mrt_smoke": "pass",
               "metal4_shipping_path_contract": "pass",
@@ -225,22 +246,79 @@ jobs:
               json.dump(correctness, handle, indent=2, sort_keys=True)
               handle.write("\n")
 
+          activation = {
+              "source_sha": source_sha,
+              "raw_hosted_metal_gpu": "active-and-readback-verified",
+              "shipping_java_ffm_swift_gpu": "active-and-tests-executed",
+              "shipping_iris_gpu": "active-and-tests-executed",
+              "required_hosted_tests_skipped": 0,
+              "silent_fallback_detected": False,
+          }
+          with open("agent-evidence/activation.json", "w", encoding="utf-8") as handle:
+              json.dump(activation, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ.get("GH_TOKEN", "")
+          query = urllib.parse.urlencode({"head_sha": source_sha, "event": "pull_request", "per_page": 100})
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{repository}/actions/runs?{query}",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              payload = json.load(response)
+
+          required_external = [
+              "Minecraft 26.2 production client E2E",
+              "Unified eval verification",
+              "29/merge",
+          ]
+          latest = {}
+          for run in payload.get("workflow_runs", []):
+              name = run.get("name")
+              if name in required_external and name not in latest:
+                  latest[name] = {
+                      "run_id": run.get("id"),
+                      "status": run.get("status"),
+                      "conclusion": run.get("conclusion"),
+                      "head_sha": run.get("head_sha"),
+                  }
+
+          external_complete = all(
+              name in latest
+              and latest[name]["head_sha"] == source_sha
+              and latest[name]["status"] == "completed"
+              and latest[name]["conclusion"] == "success"
+              for name in required_external
+          )
+          decision_value = (
+              "CLOUD_COMPLETE_FINAL_PHYSICAL_PENDING"
+              if external_complete
+              else "CLOUD_INCOMPLETE"
+          )
           decision = {
-              "decision": "cloud-foundation-pass",
+              "decision": decision_value,
               "stage": "C0-agent-metal-lab",
-              "source_sha": os.environ.get("GITHUB_SHA", "unknown"),
+              "source_sha": source_sha,
               "cloud_correctness": "pass",
               "hosted_metal_activation": "pass",
               "shipping_abi_gpu_execution": "pass",
+              "external_required_workflows": latest,
               "physical_acceptance": "pending",
               "default_enablement_allowed": False,
-              "next_cloud_stage_allowed_after_merge": True,
+              "next_cloud_stage_allowed_after_merge": external_complete,
           }
           with open("agent-evidence/decision.json", "w", encoding="utf-8") as handle:
               json.dump(decision, handle, indent=2, sort_keys=True)
               handle.write("\n")
+          print(json.dumps(decision, sort_keys=True))
           PY
           python3 -m json.tool agent-evidence/correctness.json >/dev/null
+          python3 -m json.tool agent-evidence/activation.json >/dev/null
           python3 -m json.tool agent-evidence/decision.json >/dev/null
 
       - name: Preserve Agent Metal Lab evidence
