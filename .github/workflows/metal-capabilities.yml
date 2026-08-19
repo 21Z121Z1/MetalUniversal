@@ -153,40 +153,93 @@ jobs:
             build/metal-tests/MetalMRTSmokeTest \
             | tee "$RUNNER_TEMP/metal-mrt.log"
           ./gradlew --stacktrace metal4PipelineSmokeTest metal4PipelinePathTest
+
+      - name: Execute shipping Java to FFM to Swift GPU integration suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --stacktrace \
+            -I .github/ci/HostedMetalGradle.init.gradle \
+            hostedMetalCoreIntegrationTest \
+            hostedMetalIrisIntegrationTest
+
+      - name: Require hosted shipping integration suites to execute cleanly
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          task_names = [
+              "hostedMetalCoreIntegrationTest",
+              "hostedMetalIrisIntegrationTest",
+          ]
+          summary = {}
+          for task in task_names:
+              files = glob.glob(f"build/test-results/{task}/TEST-*.xml")
+              if not files:
+                  raise SystemExit(f"{task} produced no JUnit XML")
+              tests = skipped = failures = errors = 0
+              for path in files:
+                  root = ET.parse(path).getroot()
+                  tests += int(root.attrib.get("tests", 0))
+                  skipped += int(root.attrib.get("skipped", 0))
+                  failures += int(root.attrib.get("failures", 0))
+                  errors += int(root.attrib.get("errors", 0))
+              executed = tests - skipped
+              print(f"{task}: tests={tests} executed={executed} skipped={skipped} failures={failures} errors={errors}")
+              if tests == 0 or executed == 0 or skipped != 0 or failures != 0 or errors != 0:
+                  raise SystemExit(f"{task} did not fully execute cleanly")
+              summary[task] = {
+                  "tests": tests,
+                  "executed": executed,
+                  "skipped": skipped,
+                  "failures": failures,
+                  "errors": errors,
+              }
+
           import json
-          data = {
-              "raw_metal_compute_readback": "pass",
-              "native_mrt_smoke": "pass",
-              "metal4_shipping_path_contract": "pass",
-              "p1_hotpath_static_contract": "pass",
-              "physical_only_harnesses_compile": "pass",
-          }
-          with open("agent-evidence/correctness.json", "w", encoding="utf-8") as handle:
-              json.dump(data, handle, indent=2, sort_keys=True)
+          with open("agent-evidence/hosted-shipping-tests.json", "w", encoding="utf-8") as handle:
+              json.dump(summary, handle, indent=2, sort_keys=True)
               handle.write("\n")
           PY
 
-      - name: Emit fail-closed cloud decision
+      - name: Emit correctness and fail-closed cloud decision
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json, os
-          data = {
+          correctness = {
+              "raw_metal_compute_readback": "pass",
+              "native_mrt_smoke": "pass",
+              "metal4_shipping_path_contract": "pass",
+              "shipping_java_ffm_swift_core_gpu": "pass",
+              "shipping_iris_gpu": "pass",
+              "p1_hotpath_static_contract": "pass",
+              "physical_only_harnesses_compile": "pass",
+          }
+          with open("agent-evidence/correctness.json", "w", encoding="utf-8") as handle:
+              json.dump(correctness, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+
+          decision = {
               "decision": "cloud-foundation-pass",
               "stage": "C0-agent-metal-lab",
               "source_sha": os.environ.get("GITHUB_SHA", "unknown"),
               "cloud_correctness": "pass",
               "hosted_metal_activation": "pass",
+              "shipping_abi_gpu_execution": "pass",
               "physical_acceptance": "pending",
               "default_enablement_allowed": False,
               "next_cloud_stage_allowed_after_merge": True,
           }
           with open("agent-evidence/decision.json", "w", encoding="utf-8") as handle:
-              json.dump(data, handle, indent=2, sort_keys=True)
+              json.dump(decision, handle, indent=2, sort_keys=True)
               handle.write("\n")
           PY
+          python3 -m json.tool agent-evidence/correctness.json >/dev/null
           python3 -m json.tool agent-evidence/decision.json >/dev/null
 
       - name: Preserve Agent Metal Lab evidence
