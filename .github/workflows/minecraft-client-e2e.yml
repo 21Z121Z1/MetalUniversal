@@ -9,6 +9,7 @@ on:
   pull_request:
     branches:
       - master
+      - 'integration/**'
 
 permissions:
   contents: read
@@ -28,8 +29,6 @@ jobs:
       MTL_HUD_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
-      # Let setup-gradle persist Gradle's local build cache on master so Java,
-      # Loom transforms, Minecraft assets and other cacheable state can be reused.
       GRADLE_OPTS: '-Dorg.gradle.caching=true'
 
     steps:
@@ -74,8 +73,6 @@ jobs:
       - name: Setup Gradle dependency and build cache
         uses: gradle/actions/setup-gradle@v6
         with:
-          # Default-branch entries are visible to PR/feature-branch jobs. Keep
-          # large Gradle/Loom cache writes on master only to avoid cache churn.
           cache-read-only: ${{ github.ref != 'refs/heads/master' }}
           cache-cleanup: on-success
 
@@ -86,9 +83,6 @@ jobs:
           set -euo pipefail
           chmod +x ./gradlew
 
-          # This lane executes only on macOS. Do not spend runner time compiling
-          # iOS dylibs or cloning/building the iOS SPIRV-Cross library merely
-          # because processResources normally packages every Apple target.
           if [[ "${{ steps.mac-native-cache.outputs.cache-hit }}" == "true" ]]; then
             echo "Using cached src/main/resources/natives/macos/libmetallum.dylib"
             ./gradlew \
