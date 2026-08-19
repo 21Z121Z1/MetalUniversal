@@ -55,6 +55,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
     jvmArgs.add("-Dmetallum.metal.hud=false")
     jvmArgs.add("-Dmetallum.hotpath.telemetry=true")
+    jvmArgs.add("-Dmetallum.presentation.telemetry=true")
     // P0 validates the shipping renderer lifecycle exactly as configured by
     // default. Metal 4 main-renderer/compiler/queue activation belongs to P1;
     // forcing those pilots here would make P0 depend on P1 and, on GitHub's
