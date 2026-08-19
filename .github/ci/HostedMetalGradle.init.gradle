@@ -56,6 +56,12 @@ gradle.projectsEvaluated {
             task.environment "MTL_DEBUG_LAYER", "0"
             task.environment "MTL_SHADER_VALIDATION", "0"
             task.environment "MTL_HUD_ENABLED", "0"
+            // Hosted Apple Paravirtual currently reports no encoder-stage counter
+            // sampling support. Metal HUD encoder timing is a separate capability
+            // from HUD visibility, so disable it explicitly rather than allowing
+            // libMTLHud to request an unsupported counter sample while the real
+            // shipping Java -> FFM -> Swift Metal path is under test.
+            task.environment "MTL_HUD_ENCODER_TIMING_ENABLED", "0"
             task.environment "MTLFX_HUD_ENABLED", "0"
             task.systemProperty "metallum.metal.hud", "false"
             task.systemProperty "metallum.validation.gpuPassTiming", "false"
