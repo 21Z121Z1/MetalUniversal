@@ -12,6 +12,12 @@
   },
   "branches": [
     {
+      "branch": "agent/metal-eval-v3",
+      "role": "active-stage-branch",
+      "stages": ["C0"],
+      "disposition": "bounded-c0-only; merge-to-canonical-only-after-exact-head-gates-pass"
+    },
+    {
       "branch": "integration/iris-metal-next",
       "role": "canonical",
       "stages": ["P0", "P1-merged"],
