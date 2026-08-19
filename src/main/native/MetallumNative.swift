@@ -709,9 +709,6 @@ private final class Metal4MainQueueContext {
               let uniformBuffer = device.makeBuffer(length: 65_536, options: .storageModeShared) else {
             return nil
         }
-        vertexArguments.label = "Metallum Vertex Arguments \(index) (Metal 4)"
-        fragmentArguments.label = "Metallum Fragment Arguments \(index) (Metal 4)"
-        computeArguments.label = "Metallum Compute Arguments \(index) (Metal 4)"
             uniformBuffer.label = "Metallum Uniforms \(index) (Metal 4)"
             residencyTrackCreated(uniformBuffer)
             commandBuffer.label = "Metallum Main Buffer \(index) (Metal 4)"
