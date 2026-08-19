@@ -5,6 +5,7 @@ cd "$ROOT"
 
 python3 -m json.tool docs/agent/unified-evaluation-acceptance.json >/dev/null
 python3 -m json.tool docs/agent/benchmark-profiles.json >/dev/null
+python3 -m json.tool docs/agent/metal4-main-production-acceptance.json >/dev/null
 python3 scripts/agent/verify_benchmark_profiles.py
 python3 scripts/agent/verify_metal4_main_hotpath.py \
   --output build/agent-evidence/metal4-main-hotpath.json
