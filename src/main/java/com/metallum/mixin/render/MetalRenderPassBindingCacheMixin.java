@@ -6,6 +6,8 @@ import com.metallum.client.metal.render.MetalBindingTokenCache;
 import com.metallum.client.metal.render.MetalBindingTokenRegistry;
 import com.metallum.client.metal.render.MetalCompiledBindingPlan;
 import com.metallum.client.metal.render.MetalCompiledBindingPlanProvider;
+import com.metallum.client.metal.render.MetalIrisBindingTokenLayout;
+import com.metallum.client.metal.render.MetalIrisTokenBindingSession;
 import com.metallum.client.metal.render.MetalTokenBindingPass;
 import com.metallum.client.metal.render.MetalUploadDedupBuffer;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -44,12 +46,16 @@ import java.util.Objects;
  * from the token/compiled plan directly, so private callers never resolve that
  * name back through the pipeline resource map.</p>
  *
+ * <p>Iris raster binding cursors are stored directly on the render pass. This
+ * avoids a ThreadLocal lookup for every resource while keeping mutable cursor
+ * state isolated between independently encoded passes.</p>
+ *
  * <p>Texture and storage-image calls are not cancelled here because those
  * methods also flush deferred clears or mark potential shader writes. Their
  * redundant native setters are suppressed later by the encoder-local shadow.</p>
  */
 @Mixin(targets = "com.metallum.client.metal.render.MetalRenderPass")
-public abstract class MetalRenderPassBindingCacheMixin implements MetalTokenBindingPass {
+public abstract class MetalRenderPassBindingCacheMixin implements MetalIrisTokenBindingSession {
     @Unique
     private static final boolean metallum$TOKENIZED_BINDINGS = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.bindingTokens", "true")
@@ -106,6 +112,12 @@ public abstract class MetalRenderPassBindingCacheMixin implements MetalTokenBind
     private @Nullable MetalBindingToken metallum$directBindingToken;
     @Unique
     private @Nullable String metallum$directBindingName;
+    @Unique
+    private @Nullable MetalIrisBindingTokenLayout metallum$irisBindingLayout;
+    @Unique
+    private int metallum$irisUniformIndex;
+    @Unique
+    private int metallum$irisSamplerIndex;
 
     @Inject(method = "setPipeline", at = @At("RETURN"))
     private void metallum$installCompiledBindingPlan(
@@ -132,6 +144,65 @@ public abstract class MetalRenderPassBindingCacheMixin implements MetalTokenBind
         // installed. Drop it so the dense slot becomes the single source of
         // truth for this pipeline generation.
         this.metallum$fallbackUniformBindings.clear();
+    }
+
+    @Override
+    public void metallum$beginIrisBindings(final MetalIrisBindingTokenLayout layout) {
+        Objects.requireNonNull(layout, "layout");
+        if (this.metallum$irisBindingLayout != null) {
+            throw new IllegalStateException("Iris token binding session is already active on this render pass");
+        }
+        this.metallum$irisBindingLayout = layout;
+        this.metallum$irisUniformIndex = 0;
+        this.metallum$irisSamplerIndex = 0;
+    }
+
+    @Override
+    public MetalBindingToken metallum$nextIrisUniformOrTexel(final String compatibilityName) {
+        MetalIrisBindingTokenLayout layout = metallum$requireIrisBindingLayout();
+        if (this.metallum$irisUniformIndex < layout.metallum$uniformBindingCount()) {
+            int index = this.metallum$irisUniformIndex++;
+            metallum$verifyBindingName(
+                    layout.metallum$uniformBindingName(index), compatibilityName, "uniform", index
+            );
+            return layout.metallum$uniformBindingToken(index);
+        }
+        return metallum$nextIrisSampler(compatibilityName);
+    }
+
+    @Override
+    public MetalBindingToken metallum$nextIrisSampler(final String compatibilityName) {
+        MetalIrisBindingTokenLayout layout = metallum$requireIrisBindingLayout();
+        int index = this.metallum$irisSamplerIndex++;
+        if (index >= layout.metallum$samplerBindingCount()) {
+            throw new IllegalStateException(
+                    "Iris raster binding emitted more sampler operations than its compiled token layout"
+            );
+        }
+        metallum$verifyBindingName(
+                layout.metallum$samplerBindingName(index), compatibilityName, "sampler", index
+        );
+        return layout.metallum$samplerBindingToken(index);
+    }
+
+    @Override
+    public void metallum$finishIrisBindings() {
+        MetalIrisBindingTokenLayout layout = metallum$requireIrisBindingLayout();
+        try {
+            if (this.metallum$irisUniformIndex != layout.metallum$uniformBindingCount()
+                    || this.metallum$irisSamplerIndex != layout.metallum$samplerBindingCount()) {
+                throw new IllegalStateException(
+                        "Iris raster binding/token sequence diverged: consumed uniforms="
+                                + this.metallum$irisUniformIndex + "/" + layout.metallum$uniformBindingCount()
+                                + ", samplers=" + this.metallum$irisSamplerIndex + "/"
+                                + layout.metallum$samplerBindingCount()
+                );
+            }
+        } finally {
+            this.metallum$irisBindingLayout = null;
+            this.metallum$irisUniformIndex = 0;
+            this.metallum$irisSamplerIndex = 0;
+        }
     }
 
     @Override
@@ -281,6 +352,30 @@ public abstract class MetalRenderPassBindingCacheMixin implements MetalTokenBind
             }
         }
         this.markDescriptorDirty(name);
+    }
+
+    @Unique
+    private MetalIrisBindingTokenLayout metallum$requireIrisBindingLayout() {
+        MetalIrisBindingTokenLayout layout = this.metallum$irisBindingLayout;
+        if (layout == null) {
+            throw new IllegalStateException("Iris raster token binding session is not active");
+        }
+        return layout;
+    }
+
+    @Unique
+    private static void metallum$verifyBindingName(
+            final String expected,
+            final String actual,
+            final String kind,
+            final int index
+    ) {
+        if (expected != actual && !expected.equals(actual)) {
+            throw new IllegalStateException(
+                    "Iris " + kind + " binding order diverged at slot " + index
+                            + ": compiled='" + expected + "', runtime='" + actual + "'"
+            );
+        }
     }
 
     @Unique
