@@ -54,12 +54,14 @@ def cmd(*args):
     except Exception as exc:
         return f"unavailable: {exc}"
 path.write_text(json.dumps({
-    "schema_version": 1,
+    "schema_version": 2,
     "stage": "P1-metal4-main-production",
     "kind": "physical-correctness-pair",
     "sourceSha": sys.argv[2],
     "productionJarSha256": sys.argv[3],
     "nativeDylibSha256": sys.argv[4],
+    "presentationEnvironment": "normal physical Mac windowing path; hosted offscreen override forbidden",
+    "metalApiValidation": true,
     "platform": platform.platform(),
     "machine": platform.machine(),
     "macOS": cmd("sw_vers"),
@@ -74,11 +76,14 @@ run_lane() {
   mkdir -p "$lane_out"
   rm -rf "$E2E_ROOT/build/evidence" "$E2E_ROOT/build/run/clientGameTest"
 
-  MTL_DEBUG_LAYER=1 \
-  MTL_SHADER_VALIDATION=0 \
-  MTL_HUD_ENABLED=0 \
-  MTLFX_HUD_ENABLED=0 \
-  METALLUM_HOSTED_METAL_OFFSCREEN=true \
+  # Physical P1 evidence must exercise the ordinary Mac presentation path.
+  # METALLUM_HOSTED_METAL_OFFSCREEN is deliberately absent here; it belongs
+  # only to the GitHub hosted-paravirtual fallback lane.
+  env -u METALLUM_HOSTED_METAL_OFFSCREEN \
+    MTL_DEBUG_LAYER=1 \
+    MTL_SHADER_VALIDATION=0 \
+    MTL_HUD_ENABLED=0 \
+    MTLFX_HUD_ENABLED=0 \
     ./gradlew -p .github/ci/minecraft-e2e --no-daemon \
       "-PmetallumJar=$JAR" \
       "-Pp1Metal4Lane=$lane" \
