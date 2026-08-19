@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "stage": "P1-metal4-main-production",
   "base_stage": {
     "name": "P0-minecraft-metal-e2e",
@@ -79,7 +79,14 @@
     ],
     "only_intended_lane_difference": "metallum.opt.metal4MainRenderer",
     "baseline_value": false,
-    "candidate_value": true
+    "candidate_value": true,
+    "identity_fields_must_match": [
+      "sourceSha",
+      "productionJarSha256",
+      "nativeDylibSha256"
+    ],
+    "unrecorded_identity_is_rejected": true,
+    "pair_gate": "scripts/agent/check_metal4_main_e2e_pair.py"
   },
   "capability_policy": {
     "metal4_required": true,
@@ -95,12 +102,18 @@
     "ordinary_build_must_pass": true
   },
   "physical_mac_evidence": {
-    "baseline_command": "./gradlew -p .github/ci/minecraft-e2e -PmetallumJar=<production-jar> -Pp1Metal4Lane=baseline runProductionClientGameTest",
-    "candidate_command": "./gradlew -p .github/ci/minecraft-e2e -PmetallumJar=<production-jar> -Pp1Metal4Lane=candidate runProductionClientGameTest",
+    "correctness_runner": "scripts/agent/run_metal4_main_p1_physical_correctness.sh",
+    "correctness_command": "bash scripts/agent/run_metal4_main_p1_physical_correctness.sh",
+    "runner_builds_production_bits_once": true,
+    "runner_hashes_source_jar_and_native": true,
+    "runner_executes_baseline_then_candidate": true,
+    "runner_enables_metal_validation": true,
+    "runner_checks_runtime_framebuffer_present_reload_and_readback_guardrails": true,
     "legacy_candidate_alias": "-Pp1Metal4MainRenderer=true",
     "required_environment": "physical Apple GPU with Metal 4 and MTLResidencySet support",
     "same_exact_product_sha_required": true,
     "same_exact_production_jar_required": true,
+    "same_exact_native_dylib_required": true,
     "amethyst_or_ios_required": false
   },
   "performance_policy": {
