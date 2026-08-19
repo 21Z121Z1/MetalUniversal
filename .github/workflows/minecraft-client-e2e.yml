@@ -32,8 +32,21 @@ jobs:
       GRADLE_OPTS: '-Dorg.gradle.caching=true'
 
     steps:
-      - name: Checkout repository
+      - name: Checkout exact candidate SHA
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Record exact candidate SHA
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$sha" = "$expected"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "candidate SHA: $sha"
 
       - name: Describe free hosted Apple Silicon runner
         shell: bash
@@ -110,11 +123,11 @@ jobs:
           echo "jar=$jar" >> "$GITHUB_OUTPUT"
           unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
 
-      - name: Prove hosted Metal command execution before Minecraft
+      - name: Verify isolated client profiles
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew --build-cache --stacktrace metalMrtSmokeTest verifyIsolatedClientProfiles
+          ./gradlew --build-cache --stacktrace verifyIsolatedClientProfiles
 
       - name: Run real Minecraft 26.2 production Client GameTest
         shell: bash
@@ -195,6 +208,37 @@ jobs:
           print(json.dumps(runtime, indent=2))
           PY
 
+      - name: Verify drawable presentation lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          e2e=".github/ci/minecraft-e2e"
+          presentation="$e2e/build/evidence/presentation-evidence.json"
+          log="$e2e/build/run/clientGameTest/logs/latest.log"
+          test -s "$presentation"
+          test -s "$log"
+          cat "$presentation"
+          python3 - "$presentation" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding='utf-8') as f:
+              data = json.load(f)
+          encoded = int(data.get('presentEncodeCalls', 0))
+          submitted = int(data.get('presentCommandBuffersSubmitted', -1))
+          completed = int(data.get('presentCommandBuffersCompleted', -1))
+          failed = int(data.get('presentCommandBuffersFailed', -1))
+          if data.get('telemetryEnabled') is not True:
+              raise SystemExit(f"presentation telemetry was disabled: {data}")
+          if encoded <= 0 or submitted != encoded or completed != submitted or failed != 0:
+              raise SystemExit(f"incomplete presentation lifecycle: {data}")
+          if data.get('completeAndSuccessful') is not True:
+              raise SystemExit(f"presentation lifecycle did not pass: {data}")
+          PY
+          if grep -Fq 'nextDrawable() returned nil' "$log"; then
+            echo 'CAMetalLayer failed to provide a drawable during the measured presentation window' >&2
+            grep -F 'nextDrawable() returned nil' "$log" >&2 || true
+            exit 1
+          fi
+
       - name: Stage canonical Minecraft E2E evidence
         if: success()
         shell: bash
@@ -207,14 +251,17 @@ jobs:
           cp "$e2e/build/evidence/metal-framebuffer.png" "$stage/evidence/"
           cp "$e2e/build/evidence/metal-framebuffer-samples.json" "$stage/evidence/"
           cp "$e2e/build/evidence/runtime-evidence.json" "$stage/evidence/"
+          cp "$e2e/build/evidence/presentation-evidence.json" "$stage/evidence/"
           cp "$e2e/build/evidence/readback-control/suite.json" "$stage/evidence/readback-control/"
           cp "$e2e/build/run/clientGameTest/logs/latest.log" "$stage/logs/"
+          printf '{"schema":1,"candidateSha":"%s","workflowEventSha":"%s"}\n' \
+            "$(git rev-parse HEAD)" "${{ github.sha }}" > "$stage/evidence/environment.json"
           find "$stage" -type f -print | sort
 
       - name: Upload canonical Minecraft Metal framebuffer
         uses: actions/upload-artifact@v7
         with:
-          name: minecraft-26.2-metal-framebuffer-${{ github.sha }}
+          name: minecraft-26.2-metal-framebuffer-${{ steps.candidate.outputs.sha }}
           if-no-files-found: error
           retention-days: 1
           compression-level: 6
