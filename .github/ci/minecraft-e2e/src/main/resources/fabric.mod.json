@@ -8,7 +8,8 @@
     "fabric-client-gametest": [
       "com.metallum.e2e.MetalReadbackControlGameTest",
       "com.metallum.e2e.MetalUniversalClientGameTest",
-      "com.metallum.client.metal.render.MetalPresentationEvidenceGameTest"
+      "com.metallum.client.metal.render.MetalPresentationEvidenceGameTest",
+      "com.metallum.client.metal.render.MetalReloadEvidenceGameTest"
     ]
   },
   "depends": {
