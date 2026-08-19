@@ -27,6 +27,7 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
             throw new IllegalStateException("P1 requires metallum.hotpath.telemetry=true");
         }
         boolean candidate = lane.equals("candidate");
+        Identity identity = requestedIdentity();
 
         Path evidenceDir = Path.of(System.getProperty("metallum.ci.evidenceDir", "build/evidence"))
                 .toAbsolutePath().normalize();
@@ -101,13 +102,32 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
                         "P1 baseline recorded main-renderer allocator resets: " + result);
             }
 
-            writeEvidence(evidenceDir.resolve("metal4-main-renderer-evidence.json"), result);
+            writeEvidence(evidenceDir.resolve("metal4-main-renderer-evidence.json"), identity, result);
         }
     }
 
     private static String requestedLane() {
         String fallback = Boolean.getBoolean("metallum.ci.requireMetal4MainRenderer") ? "candidate" : "off";
         return System.getProperty("metallum.ci.p1Metal4Lane", fallback).trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static Identity requestedIdentity() {
+        return new Identity(
+                identityValue("metallum.ci.p1SourceSha", 40),
+                identityValue("metallum.ci.p1ProductionJarSha256", 64),
+                identityValue("metallum.ci.p1NativeDylibSha256", 64)
+        );
+    }
+
+    private static String identityValue(final String property, final int hexLength) {
+        String value = System.getProperty(property, "unrecorded").trim().toLowerCase(Locale.ROOT);
+        if (value.equals("unrecorded")) {
+            return value;
+        }
+        if (value.length() != hexLength || !value.matches("[0-9a-f]+")) {
+            throw new IllegalStateException("Invalid P1 identity property " + property + ": " + value);
+        }
+        return value;
     }
 
     private static DeviceState deviceState(final MetalDevice device) {
@@ -183,12 +203,17 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
         return device;
     }
 
-    private static void writeEvidence(final Path path, final Result result) {
+    private static void writeEvidence(final Path path, final Identity identity, final Result result) {
         String json = """
                 {
-                  "schema": 2,
+                  "schema": 3,
                   "status": "pass",
                   "lane": "%s",
+                  "identity": {
+                    "sourceSha": "%s",
+                    "productionJarSha256": "%s",
+                    "nativeDylibSha256": "%s"
+                  },
                   "metal4Supported": %s,
                   "residencySetEnabled": %s,
                   "mainRendererEnabled": %s,
@@ -217,6 +242,9 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
                 }
                 """.formatted(
                 result.lane(),
+                identity.sourceSha(),
+                identity.productionJarSha256(),
+                identity.nativeDylibSha256(),
                 result.metal4Supported(),
                 result.residencySetEnabled(),
                 result.mainRendererEnabled(),
@@ -250,6 +278,9 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
         if (!condition) {
             throw new IllegalStateException(message);
         }
+    }
+
+    private record Identity(String sourceSha, String productionJarSha256, String nativeDylibSha256) {
     }
 
     private record DeviceState(
