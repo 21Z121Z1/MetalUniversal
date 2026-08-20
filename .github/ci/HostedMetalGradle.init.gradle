@@ -1,3 +1,4 @@
+import org.gradle.api.tasks.Exec
 import org.gradle.api.tasks.testing.Test
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.gradle.api.tasks.testing.logging.TestLogEvent
@@ -26,11 +27,52 @@ gradle.projectsEvaluated {
         }
     }
 
+    // Execute the shipping dylib through dlopen/dlsym before the JVM enters the
+    // same shader-function -> descriptor -> PSO path. This isolates a native ABI
+    // / Objective-C lifetime failure from a Java FFM failure without introducing
+    // a second renderer or a synthetic copy of the production implementation.
+    def shippingAbiBinary = project.layout.buildDirectory.file(
+            "metal-tests/MetalShippingPipelineAbiSmokeTest"
+    ).get().asFile
+    def shippingAbiLog = project.layout.buildDirectory.file(
+            "agent-evidence/shipping-pipeline-c-abi.log"
+    ).get().asFile
+    project.tasks.register("hostedMetalShippingPipelineAbiSmoke", Exec) { task ->
+        task.group = "verification"
+        task.description = "Exercises the built libmetallum render-PSO C ABI outside the JVM."
+        task.dependsOn(project.tasks.named("buildMacNative"))
+        task.doFirst {
+            shippingAbiBinary.parentFile.mkdirs()
+            shippingAbiLog.parentFile.mkdirs()
+        }
+        task.environment "MTL_DEBUG_LAYER", "0"
+        task.environment "MTL_SHADER_VALIDATION", "0"
+        task.environment "MTL_HUD_ENABLED", "0"
+        task.environment "MTL_HUD_ENCODER_TIMING_ENABLED", "0"
+        task.environment "MTLFX_HUD_ENABLED", "0"
+        task.commandLine(
+                "bash",
+                "-c",
+                """
+                set -euo pipefail
+                xcrun swiftc -O -target arm64-apple-macosx14.0 \
+                  -framework Foundation -framework Metal \
+                  src/test/native/MetalShippingPipelineAbiSmokeTest.swift \
+                  -o '${shippingAbiBinary.absolutePath}'
+                '${shippingAbiBinary.absolutePath}' \
+                  '${project.file("src/main/resources/natives/macos/libmetallum.dylib").absolutePath}' \
+                  | tee '${shippingAbiLog.absolutePath}'
+                grep -Fq SHIPPING_PIPELINE_C_ABI_PASS '${shippingAbiLog.absolutePath}'
+                """.stripIndent()
+        )
+    }
+
     def configureHostedTest = { String name, String description, List<String> tests ->
         project.tasks.register(name, Test) { task ->
             task.group = "verification"
             task.description = description
             task.dependsOn(project.tasks.named("buildMacNative"))
+            task.dependsOn(project.tasks.named("hostedMetalShippingPipelineAbiSmoke"))
             task.testClassesDirs = sourceSets.test.output.classesDirs
             task.classpath = sourceSets.test.runtimeClasspath
             task.useJUnitPlatform()
