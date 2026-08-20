@@ -157,7 +157,7 @@ public final class MetalNativeBridge {
             SymbolLookup lookup = createSymbolLookup();
 
 
-            createSystemDefaultDevice = downcall(lookup, "metallum_create_system_default_device", FunctionDescriptor.of(ValueLayout.ADDRESS));
+            createSystemDefaultDevice = downcallWithoutCritical(lookup, "metallum_create_system_default_device", FunctionDescriptor.of(ValueLayout.ADDRESS));
             copyDeviceName = downcall(lookup, "metallum_copy_device_name", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             NSWindowBackingScaleFactor = downcall(lookup, "metallum_NSWindow_backingScaleFactor", FunctionDescriptor.of(DOUBLE, ValueLayout.ADDRESS));
             createMetalLayer = downcall(lookup, "metallum_create_metal_layer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, DOUBLE));
@@ -469,22 +469,22 @@ public final class MetalNativeBridge {
                     "metallum_create_sampler",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, INT, DOUBLE)
             );
-            MTLVertexDescriptorCreate = downcall(
+            MTLVertexDescriptorCreate = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLVertexDescriptor_create",
                     FunctionDescriptor.of(ValueLayout.ADDRESS)
             );
-            MTLVertexDescriptorSetAttribute = downcall(
+            MTLVertexDescriptorSetAttribute = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLVertexDescriptor_setAttribute",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG, LONG)
             );
-            MTLVertexDescriptorSetLayout = downcall(
+            MTLVertexDescriptorSetLayout = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLVertexDescriptor_setLayout",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG, LONG)
             );
-            MTLRenderPipelineDescriptorCreate = downcall(
+            MTLRenderPipelineDescriptorCreate = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_create",
                     FunctionDescriptor.of(ValueLayout.ADDRESS)
@@ -494,32 +494,32 @@ public final class MetalNativeBridge {
                     "metallum_create_shader_function",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
-            MTLRenderPipelineDescriptorSetCompiledFunctions = downcall(
+            MTLRenderPipelineDescriptorSetCompiledFunctions = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setCompiledFunctions",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
-            MTLRenderPipelineDescriptorSetVertexDescriptor = downcall(
+            MTLRenderPipelineDescriptorSetVertexDescriptor = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setVertexDescriptor",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
-            MTLRenderPipelineDescriptorSetAttachmentFormats = downcall(
+            MTLRenderPipelineDescriptorSetAttachmentFormats = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setAttachmentFormats",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG)
             );
-            MTLRenderPipelineDescriptorSetColorAttachmentFormat = optionalDowncall(
+            MTLRenderPipelineDescriptorSetColorAttachmentFormat = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT, LONG)
             );
-            MTLRenderPipelineDescriptorSetDepthStencilFormats = optionalDowncall(
+            MTLRenderPipelineDescriptorSetDepthStencilFormats = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG)
             );
-            MTLRenderPipelineDescriptorSetColorAttachmentBlendState = optionalDowncall(
+            MTLRenderPipelineDescriptorSetColorAttachmentBlendState = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState",
                     FunctionDescriptor.of(
@@ -536,7 +536,7 @@ public final class MetalNativeBridge {
                             LONG
                     )
             );
-            MTLRenderPipelineDescriptorSetBlendState = downcall(
+            MTLRenderPipelineDescriptorSetBlendState = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setBlendState",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT, LONG, LONG, LONG, LONG, LONG, LONG, LONG)
