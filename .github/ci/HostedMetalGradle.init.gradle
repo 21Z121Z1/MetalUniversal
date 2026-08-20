@@ -46,8 +46,10 @@ gradle.projectsEvaluated {
             task.maxParallelForks = 1
             task.forkEvery = 1
             def crashEvidenceDir = project.layout.buildDirectory.dir("agent-evidence").get().asFile
+            def hostedMslCacheDir = project.layout.buildDirectory.dir("hosted-metal-msl-cache").get().asFile
             task.doFirst {
                 crashEvidenceDir.mkdirs()
+                hostedMslCacheDir.mkdirs()
             }
             task.jvmArgs(
                     "--enable-native-access=ALL-UNNAMED",
@@ -74,8 +76,22 @@ gradle.projectsEvaluated {
             // shipping Java -> FFM -> Swift Metal path is under test.
             task.environment "MTL_HUD_ENCODER_TIMING_ENABLED", "0"
             task.environment "MTLFX_HUD_ENABLED", "0"
+            // Plain JUnit workers intentionally do not bootstrap Fabric's game
+            // directory lifecycle. Give the shipping MSL cache an explicit
+            // scratch location so shader translation remains identical while the
+            // harness avoids the invalid early FabricLoader.getGameDir() path.
+            task.environment "METALLUM_MSL_CACHE_DIR", hostedMslCacheDir.absolutePath
+            // Until this hosted compiler failure is closed, preserve the exact
+            // SPIRV-Cross fragment MSL in the job log at the first divergence.
+            // This is observability only; it does not alter compilation options.
+            task.environment "METALLUM_MRT_ABI_DEBUG", "1"
             task.systemProperty "metallum.metal.hud", "false"
             task.systemProperty "metallum.validation.gpuPassTiming", "false"
+            // The production archive path is rooted in Fabric's game directory.
+            // C0 validates shipping shader/PSO creation itself, not persistence
+            // of that presentation-runtime cache, so keep the archive disabled
+            // only inside this layerless headless harness.
+            task.systemProperty "metallum.opt.psoArchive", "false"
         }
     }
 
