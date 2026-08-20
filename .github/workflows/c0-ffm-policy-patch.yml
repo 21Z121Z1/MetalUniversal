@@ -1,0 +1,78 @@
+name: C0 FFM policy patch
+
+on:
+  push:
+    branches:
+      - agent/metal-eval-v3
+
+permissions:
+  contents: write
+
+jobs:
+  apply-construction-policy:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metal-eval-v3
+          fetch-depth: 1
+
+      - name: Apply exact Metal construction FFM policy patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java")
+          source = path.read_text(encoding="utf-8")
+          replacements = {
+              'createSystemDefaultDevice = downcall(lookup, "metallum_create_system_default_device", FunctionDescriptor.of(ValueLayout.ADDRESS));':
+                  'createSystemDefaultDevice = downcallWithoutCritical(lookup, "metallum_create_system_default_device", FunctionDescriptor.of(ValueLayout.ADDRESS));',
+              'MTLVertexDescriptorCreate = downcall(\n                    lookup,\n                    "metallum_MTLVertexDescriptor_create",':
+                  'MTLVertexDescriptorCreate = downcallWithoutCritical(\n                    lookup,\n                    "metallum_MTLVertexDescriptor_create",',
+              'MTLVertexDescriptorSetAttribute = downcall(\n                    lookup,\n                    "metallum_MTLVertexDescriptor_setAttribute",':
+                  'MTLVertexDescriptorSetAttribute = downcallWithoutCritical(\n                    lookup,\n                    "metallum_MTLVertexDescriptor_setAttribute",',
+              'MTLVertexDescriptorSetLayout = downcall(\n                    lookup,\n                    "metallum_MTLVertexDescriptor_setLayout",':
+                  'MTLVertexDescriptorSetLayout = downcallWithoutCritical(\n                    lookup,\n                    "metallum_MTLVertexDescriptor_setLayout",',
+              'MTLRenderPipelineDescriptorCreate = downcall(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_create",':
+                  'MTLRenderPipelineDescriptorCreate = downcallWithoutCritical(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_create",',
+              'MTLRenderPipelineDescriptorSetCompiledFunctions = downcall(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setCompiledFunctions",':
+                  'MTLRenderPipelineDescriptorSetCompiledFunctions = downcallWithoutCritical(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setCompiledFunctions",',
+              'MTLRenderPipelineDescriptorSetVertexDescriptor = downcall(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setVertexDescriptor",':
+                  'MTLRenderPipelineDescriptorSetVertexDescriptor = downcallWithoutCritical(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setVertexDescriptor",',
+              'MTLRenderPipelineDescriptorSetAttachmentFormats = downcall(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setAttachmentFormats",':
+                  'MTLRenderPipelineDescriptorSetAttachmentFormats = downcallWithoutCritical(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setAttachmentFormats",',
+              'MTLRenderPipelineDescriptorSetColorAttachmentFormat = optionalDowncall(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat",':
+                  'MTLRenderPipelineDescriptorSetColorAttachmentFormat = optionalDowncallWithoutCritical(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat",',
+              'MTLRenderPipelineDescriptorSetDepthStencilFormats = optionalDowncall(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats",':
+                  'MTLRenderPipelineDescriptorSetDepthStencilFormats = optionalDowncallWithoutCritical(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats",',
+              'MTLRenderPipelineDescriptorSetColorAttachmentBlendState = optionalDowncall(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState",':
+                  'MTLRenderPipelineDescriptorSetColorAttachmentBlendState = optionalDowncallWithoutCritical(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState",',
+              'MTLRenderPipelineDescriptorSetBlendState = downcall(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setBlendState",':
+                  'MTLRenderPipelineDescriptorSetBlendState = downcallWithoutCritical(\n                    lookup,\n                    "metallum_MTLRenderPipelineDescriptor_setBlendState",',
+          }
+
+          for old, new in replacements.items():
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one construction binding for {old.split('=')[0].strip()}, found {count}")
+              source = source.replace(old, new)
+
+          path.write_text(source, encoding="utf-8")
+          PY
+
+          git diff --check
+          git diff -- src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java
+
+      - name: Commit construction policy fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$(git status --porcelain -- src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java)"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java
+          git commit -m "fix: keep Metal construction FFM off critical path"
+          git push origin HEAD:agent/metal-eval-v3
