@@ -167,7 +167,7 @@ public final class MetalNativeBridge {
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setDebugLabelsEnabled = downcall(lookup, "metallum_set_debug_labels_enabled", FunctionDescriptor.ofVoid(INT));
             systemThermalState = optionalDowncall(lookup, "metallum_system_thermal_state", FunctionDescriptor.of(INT));
-            initPipelines = downcall(lookup, "metallum_init_pipelines", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+            initPipelines = downcallWithoutCritical(lookup, "metallum_init_pipelines", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             metalfxSupportsSpatial = downcall(lookup, "metallum_metalfx_supports_spatial", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metalfxSupportsTemporal = downcall(lookup, "metallum_metalfx_supports_temporal", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metalfxSupportsFrameGeneration = downcall(lookup, "metallum_metalfx_supports_frame_generation", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
@@ -541,7 +541,7 @@ public final class MetalNativeBridge {
                     "metallum_MTLRenderPipelineDescriptor_setBlendState",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT, LONG, LONG, LONG, LONG, LONG, LONG, LONG)
             );
-            MTLDeviceMakeRenderPipelineState = downcall(
+            MTLDeviceMakeRenderPipelineState = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLDevice_makeRenderPipelineState",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
@@ -624,7 +624,7 @@ public final class MetalNativeBridge {
                     "metallum_MTLComputeCommandEncoder_waitForFence",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
-            MTLDeviceMakeComputePipelineState = optionalDowncall(
+            MTLDeviceMakeComputePipelineState = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLDevice_makeComputePipelineState",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
@@ -965,6 +965,16 @@ public final class MetalNativeBridge {
 
     private static MethodHandle downcallWithoutCritical(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
         return LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor);
+    }
+
+    private static MethodHandle optionalDowncallWithoutCritical(
+            final SymbolLookup lookup,
+            final String symbol,
+            final FunctionDescriptor descriptor
+    ) {
+        return lookup.find(symbol)
+                .map(address -> LINKER.downcallHandle(address, descriptor))
+                .orElse(null);
     }
 
     public static MemorySegment metallum_create_system_default_device() {
