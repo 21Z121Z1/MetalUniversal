@@ -137,7 +137,18 @@ gradle.projectsEvaluated {
         }
     }
 
-    configureHostedTest(
+    // Keep the minimal Java/FFM PSO smoke as its own worker and force both larger
+    // suites behind it. The native C-ABI smoke above uses the same MSL and PSO
+    // shape, so a failure here after a native pass is a clean JVM/FFM divergence.
+    def hostedBridgeFfmSmoke = configureHostedTest(
+        "hostedMetalBridgeFfmSmokeTest",
+        "Runs the minimal JVM/FFM/shipping-Swift RGBA8 render-PSO smoke.",
+        [
+            "com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest"
+        ]
+    )
+
+    def hostedCore = configureHostedTest(
         "hostedMetalCoreIntegrationTest",
         "Runs shipping Java/FFM/Swift core Metal GPU integration tests after the hosted capability probe.",
         [
@@ -149,8 +160,9 @@ gradle.projectsEvaluated {
             "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
         ]
     )
+    hostedCore.configure { task -> task.dependsOn(hostedBridgeFfmSmoke) }
 
-    configureHostedTest(
+    def hostedIris = configureHostedTest(
         "hostedMetalIrisIntegrationTest",
         "Runs shipping Iris-on-Metal GPU integration tests after the hosted capability probe.",
         [
@@ -165,4 +177,5 @@ gradle.projectsEvaluated {
             "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
         ]
     )
+    hostedIris.configure { task -> task.dependsOn(hostedBridgeFfmSmoke) }
 }
