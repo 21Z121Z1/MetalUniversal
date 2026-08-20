@@ -69,73 +69,72 @@ fragment float4 abi_smoke_fs() {
 }
 """
 
-@main
-private struct MetalShippingPipelineAbiSmokeTest {
-    static func main() {
-        do {
-            guard CommandLine.arguments.count == 2 else {
-                try fail("usage: MetalShippingPipelineAbiSmokeTest /path/to/libmetallum.dylib")
-            }
-            let dylibPath = CommandLine.arguments[1]
-            guard let image = dlopen(dylibPath, RTLD_NOW | RTLD_LOCAL) else {
-                let error = dlerror().map { String(cString: $0) } ?? "unknown dlopen error"
-                try fail("dlopen failed for \(dylibPath): \(error)")
-            }
-            defer { dlclose(image) }
+private func runSmoke() throws {
+    guard CommandLine.arguments.count == 2 else {
+        try fail("usage: MetalShippingPipelineAbiSmokeTest /path/to/libmetallum.dylib")
+    }
+    let dylibPath = CommandLine.arguments[1]
+    guard let image = dlopen(dylibPath, RTLD_NOW | RTLD_LOCAL) else {
+        let error = dlerror().map { String(cString: $0) } ?? "unknown dlopen error"
+        try fail("dlopen failed for \(dylibPath): \(error)")
+    }
+    defer { dlclose(image) }
 
-            let createDevice = try loadSymbol(image, "metallum_create_system_default_device", as: CreateDeviceFn.self)
-            let createFunction = try loadSymbol(image, "metallum_create_shader_function", as: CreateShaderFunctionFn.self)
-            let createDescriptor = try loadSymbol(image, "metallum_MTLRenderPipelineDescriptor_create", as: CreatePipelineDescriptorFn.self)
-            let setFunctions = try loadSymbol(image, "metallum_MTLRenderPipelineDescriptor_setCompiledFunctions", as: SetCompiledFunctionsFn.self)
-            let setColorFormat = try loadSymbol(image, "metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat", as: SetColorAttachmentFormatFn.self)
-            let makePipeline = try loadSymbol(image, "metallum_MTLDevice_makeRenderPipelineState", as: MakeRenderPipelineStateFn.self)
-            let releaseObject = try loadSymbol(image, "metallum_release_object", as: ReleaseObjectFn.self)
+    let createDevice = try loadSymbol(image, "metallum_create_system_default_device", as: CreateDeviceFn.self)
+    let createFunction = try loadSymbol(image, "metallum_create_shader_function", as: CreateShaderFunctionFn.self)
+    let createDescriptor = try loadSymbol(image, "metallum_MTLRenderPipelineDescriptor_create", as: CreatePipelineDescriptorFn.self)
+    let setFunctions = try loadSymbol(image, "metallum_MTLRenderPipelineDescriptor_setCompiledFunctions", as: SetCompiledFunctionsFn.self)
+    let setColorFormat = try loadSymbol(image, "metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat", as: SetColorAttachmentFormatFn.self)
+    let makePipeline = try loadSymbol(image, "metallum_MTLDevice_makeRenderPipelineState", as: MakeRenderPipelineStateFn.self)
+    let releaseObject = try loadSymbol(image, "metallum_release_object", as: ReleaseObjectFn.self)
 
-            guard let device = createDevice() else {
-                try fail("shipping metallum_create_system_default_device returned nil")
-            }
-            defer { releaseObject(device) }
+    guard let device = createDevice() else {
+        try fail("shipping metallum_create_system_default_device returned nil")
+    }
+    defer { releaseObject(device) }
 
-            let vertexFunction: UnsafeMutableRawPointer? = shaderSource.withCString { source in
-                "abi_smoke_vs".withCString { entry in
-                    createFunction(device, source, entry)
-                }
-            }
-            guard let vertexFunction else {
-                try fail("shipping metallum_create_shader_function returned nil for vertex shader")
-            }
-            defer { releaseObject(vertexFunction) }
-
-            let fragmentFunction: UnsafeMutableRawPointer? = shaderSource.withCString { source in
-                "abi_smoke_fs".withCString { entry in
-                    createFunction(device, source, entry)
-                }
-            }
-            guard let fragmentFunction else {
-                try fail("shipping metallum_create_shader_function returned nil for fragment shader")
-            }
-            defer { releaseObject(fragmentFunction) }
-
-            guard let descriptor = createDescriptor() else {
-                try fail("shipping metallum_MTLRenderPipelineDescriptor_create returned nil")
-            }
-            defer { releaseObject(descriptor) }
-
-            setFunctions(descriptor, vertexFunction, fragmentFunction)
-            try check(
-                setColorFormat(descriptor, 0, MTLPixelFormat.rgba8Unorm.rawValue) != 0,
-                "shipping bridge rejected RGBA8 color attachment 0"
-            )
-
-            guard let pipeline = makePipeline(device, descriptor) else {
-                try fail("shipping metallum_MTLDevice_makeRenderPipelineState returned nil")
-            }
-            releaseObject(pipeline)
-
-            print("SHIPPING_PIPELINE_C_ABI_PASS device=shipping-dylib format=rgba8Unorm")
-        } catch {
-            fputs("SHIPPING_PIPELINE_C_ABI_FAIL: \(error)\n", stderr)
-            exit(1)
+    let vertexFunction: UnsafeMutableRawPointer? = shaderSource.withCString { source in
+        "abi_smoke_vs".withCString { entry in
+            createFunction(device, source, entry)
         }
     }
+    guard let vertexFunction else {
+        try fail("shipping metallum_create_shader_function returned nil for vertex shader")
+    }
+    defer { releaseObject(vertexFunction) }
+
+    let fragmentFunction: UnsafeMutableRawPointer? = shaderSource.withCString { source in
+        "abi_smoke_fs".withCString { entry in
+            createFunction(device, source, entry)
+        }
+    }
+    guard let fragmentFunction else {
+        try fail("shipping metallum_create_shader_function returned nil for fragment shader")
+    }
+    defer { releaseObject(fragmentFunction) }
+
+    guard let descriptor = createDescriptor() else {
+        try fail("shipping metallum_MTLRenderPipelineDescriptor_create returned nil")
+    }
+    defer { releaseObject(descriptor) }
+
+    setFunctions(descriptor, vertexFunction, fragmentFunction)
+    try check(
+        setColorFormat(descriptor, 0, MTLPixelFormat.rgba8Unorm.rawValue) != 0,
+        "shipping bridge rejected RGBA8 color attachment 0"
+    )
+
+    guard let pipeline = makePipeline(device, descriptor) else {
+        try fail("shipping metallum_MTLDevice_makeRenderPipelineState returned nil")
+    }
+    releaseObject(pipeline)
+
+    print("SHIPPING_PIPELINE_C_ABI_PASS device=shipping-dylib format=rgba8Unorm")
+}
+
+do {
+    try runSmoke()
+} catch {
+    fputs("SHIPPING_PIPELINE_C_ABI_FAIL: \(error)\n", stderr)
+    exit(1)
 }
