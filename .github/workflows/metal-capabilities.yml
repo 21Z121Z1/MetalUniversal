@@ -173,16 +173,34 @@ jobs:
           ("$RUNNER_TEMP/metallum-shipping-abi-probe" \
             src/main/resources/natives/macos/libmetallum.dylib \
             | tee build/agent-evidence/shipping-abi-threading-probe.log) || true
+          # JVM phase: identical sequence from a plain Java background thread,
+          # the same threading context as a Gradle test executor worker. A
+          # signal death here is a capability verdict.
+          (java --enable-native-access=ALL-UNNAMED \
+            .github/ci/JvmPsoThreadingProbe.java \
+            "$(pwd)/src/main/resources/natives/macos/libmetallum.dylib" \
+            | tee build/agent-evidence/jvm-pso-threading-probe.log) || true
           python3 - <<'PY'
           import json, os
-          log_path = "build/agent-evidence/shipping-abi-threading-probe.log"
-          with open(log_path, encoding="utf-8") as handle:
-              log = handle.read()
-          main_thread_ok = "SHIPPING_PIPELINE_C_ABI_PASS" in log
-          background_ok = "SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS" in log
-          if not main_thread_ok:
+
+          def read(path):
+              try:
+                  with open(path, encoding="utf-8") as handle:
+                      return handle.read()
+              except FileNotFoundError:
+                  return ""
+
+          native_log = read("build/agent-evidence/shipping-abi-threading-probe.log")
+          jvm_log = read("build/agent-evidence/jvm-pso-threading-probe.log")
+          main_ok = "SHIPPING_PIPELINE_C_ABI_PASS" in native_log
+          background_ok = "SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS" in native_log
+          jvm_ok = "JVM_PSO_BACKGROUND_THREAD_PASS" in jvm_log
+          if not main_ok:
               raise SystemExit("main-thread shipping PSO compile probe failed; environment is unusable")
-          mode = "environment-blocked" if not background_ok else "required"
+          if background_ok and jvm_ok:
+              mode = "required"
+          else:
+              mode = "environment-blocked"
           with open(os.environ.get("GITHUB_ENV", "/dev/null"), "a", encoding="utf-8") as handle:
               handle.write(f"METALLUM_JVM_PSO_SMOKE_MODE={mode}\n")
           capabilities_path = "agent-evidence/capabilities.json"
@@ -190,14 +208,16 @@ jobs:
           if os.path.exists(capabilities_path):
               with open(capabilities_path, encoding="utf-8") as handle:
                   data = json.load(handle)
-          data["pso_compile_main_thread"] = main_thread_ok
+          data["pso_compile_main_thread"] = main_ok
           data["pso_compile_background_thread"] = background_ok
+          data["jvm_background_pso_compile"] = jvm_ok
           data["jvm_pso_smoke_mode"] = mode
           with open(capabilities_path, "w", encoding="utf-8") as handle:
               json.dump(data, handle, indent=2, sort_keys=True)
               handle.write("\n")
-          print(f"capability: pso_compile_main_thread={main_thread_ok} "
-                f"pso_compile_background_thread={background_ok} jvm_pso_smoke_mode={mode}")
+          print(f"capability: pso_compile_main_thread={main_ok} "
+                f"pso_compile_background_thread={background_ok} "
+                f"jvm_background_pso_compile={jvm_ok} jvm_pso_smoke_mode={mode}")
           PY
 
       - name: Execute hosted Metal MRT and shipping Metal 4 fallback contracts

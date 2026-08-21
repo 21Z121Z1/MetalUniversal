@@ -74,7 +74,12 @@ jobs:
             src/main/resources/natives/macos/libmetallum.dylib \
             | tee "$RUNNER_TEMP/shipping-abi-threading-probe.log") || true
           grep -Fq SHIPPING_PIPELINE_C_ABI_PASS "$RUNNER_TEMP/shipping-abi-threading-probe.log"
-          if grep -Fq SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS "$RUNNER_TEMP/shipping-abi-threading-probe.log"; then
+          (java --enable-native-access=ALL-UNNAMED \
+            .github/ci/JvmPsoThreadingProbe.java \
+            "$(pwd)/src/main/resources/natives/macos/libmetallum.dylib" \
+            | tee "$RUNNER_TEMP/jvm-pso-threading-probe.log") || true
+          if grep -Fq SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS "$RUNNER_TEMP/shipping-abi-threading-probe.log" \
+            && grep -Fq JVM_PSO_BACKGROUND_THREAD_PASS "$RUNNER_TEMP/jvm-pso-threading-probe.log"; then
             echo "METALLUM_JVM_PSO_SMOKE_MODE=required" >> "$GITHUB_ENV"
           else
             echo "METALLUM_JVM_PSO_SMOKE_MODE=environment-blocked" >> "$GITHUB_ENV"
