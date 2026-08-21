@@ -103,6 +103,45 @@ public final class MTLCommandBuffer {
         return new MTLRenderCommandEncoder(encoder);
     }
 
+    /**
+     * RenderPassDescriptorV3: per-attachment load/store actions.
+     * Load actions: 0=dontCare, 1=load, 2=clear. Store actions:
+     * 0=dontCare, 1=store, 2=deferred(.unknown, must be resolved before
+     * endEncoding exactly like the V2 deferred-depth contract).
+     */
+    public MTLRenderCommandEncoder makeRenderCommandEncoderV3(
+            final MemorySegment[] colorTextures,
+            final MemorySegment depthTexture,
+            final int[] colorLoadActions,
+            final int[] colorStoreActions,
+            final float[] clearColors,
+            final int depthLoadAction,
+            final int depthStoreAction,
+            final double clearDepth,
+            final double viewportWidth,
+            final double viewportHeight,
+            final String label
+    ) {
+        MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeRenderCommandEncoderV3(
+                handle(),
+                colorTextures,
+                depthTexture,
+                colorLoadActions,
+                colorStoreActions,
+                clearColors,
+                depthLoadAction,
+                depthStoreAction,
+                clearDepth,
+                viewportWidth,
+                viewportHeight,
+                label
+        );
+        if (MetalNativeBridge.isNullHandle(encoder)) {
+            throw new IllegalStateException("Failed to create indexed MTLRenderCommandEncoder");
+        }
+        return new MTLRenderCommandEncoder(encoder);
+    }
+
     public void clearColorDepthTexturesRegion(
             final MemorySegment colorTexture,
             final float clearColorRed,

@@ -93,6 +93,7 @@ tasks.test {
 	exclude "**/IrisMetalExternalLevelSamplerTest.class"
 	exclude "**/MetalIrisShaderTranslationTest.class"
 	exclude "**/MetalIrisSodiumTerrainTest.class"
+	exclude "**/MetalRenderGraphBenchIntegrationTest.class"
 	if (hostedCi) {
 		exclude "**/IrisMetalPostChainCompilationTest.class"
 		exclude "**/IrisMetalShadowPipelineTest.class"

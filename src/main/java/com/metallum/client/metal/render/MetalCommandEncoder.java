@@ -88,6 +88,35 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     @Nullable
     private MetalGpuTexture renderDepthTexture;
     private boolean renderEncoderDeferredStore;
+
+    /**
+     * RenderPassDescriptorV3 selection. "auto" (default) uses V3 whenever the
+     * loaded dylib exposes the symbol and falls back to V2 otherwise; "v2"
+     * forces the legacy path (IrisGraphBench equivalence runs); "v3" demands
+     * the symbol and fails closed if it is missing.
+     */
+    private static volatile String renderPassAbiMode =
+            System.getProperty("metallum.renderpass.abi", "auto");
+
+    static void setRenderPassAbiModeForTests(final String mode) {
+        renderPassAbiMode = mode;
+    }
+
+    private static boolean renderPassDescriptorV3Active() {
+        switch (renderPassAbiMode) {
+            case "v2":
+                return false;
+            case "v3":
+                if (!MetalNativeBridge.renderCommandEncoderV3Available()) {
+                    throw new IllegalStateException(
+                            "metallum.renderpass.abi=v3 but the loaded native bridge has no V3 symbol");
+                }
+                return true;
+            default:
+                return MetalNativeBridge.renderCommandEncoderV3Available();
+        }
+    }
+
     private final Long2ObjectOpenHashMap<java.util.ArrayDeque<MemorySegment>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
     private static final int MAX_POOLED_DYNAMIC_BACKINGS_PER_SIZE = 8;
     private final List<SubmitCallback> currentSubmitCallbacks = new ArrayList<>();
@@ -439,26 +468,60 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 && renderDepthTexture != null
                 && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment);
         endEncoder(incomingClearsSameDepth);
-        MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoderV2(
-                colorAttachments,
-                depthAttachment,
-                viewportWidth,
-                viewportHeight,
-                clearColorEnabled,
-                clearColorValues,
-                clearDepthEnabled ? 1 : 0,
-                clearDepthValue,
-                label
-        );
+        boolean deferredDepthStore = DEFERRED_DEPTH_STORE
+                && depthTextureView != null
+                && ((MetalGpuTexture) depthTextureView.texture()).mtlDepthPixelFormat() != MTLPixelFormat.Invalid;
+        MTLRenderCommandEncoder encoder;
+        if (renderPassDescriptorV3Active()) {
+            // P2.1 equivalence mapping: actions project today's V2 semantics
+            // exactly (clear-or-load per slot, always store live slots,
+            // deferred depth store preserved). Policy upgrades come later and
+            // must pass IrisGraphBench before changing any of this.
+            int slotCount = colorTextureViews.length;
+            int[] colorLoadActions = new int[slotCount];
+            int[] colorStoreActions = new int[slotCount];
+            for (int index = 0; index < slotCount; index++) {
+                if (colorTextureViews[index] == null) {
+                    colorLoadActions[index] = 0;
+                    colorStoreActions[index] = 0;
+                } else {
+                    colorLoadActions[index] = clearColorEnabled[index] != 0 ? 2 : 1;
+                    colorStoreActions[index] = 1;
+                }
+            }
+            encoder = commandBuffer().makeRenderCommandEncoderV3(
+                    colorAttachments,
+                    depthAttachment,
+                    colorLoadActions,
+                    colorStoreActions,
+                    clearColorValues,
+                    clearDepthEnabled ? 2 : 1,
+                    deferredDepthStore ? 2 : 1,
+                    clearDepthValue,
+                    viewportWidth,
+                    viewportHeight,
+                    label
+            );
+        } else {
+            encoder = commandBuffer().makeRenderCommandEncoderV2(
+                    colorAttachments,
+                    depthAttachment,
+                    viewportWidth,
+                    viewportHeight,
+                    clearColorEnabled,
+                    clearColorValues,
+                    clearDepthEnabled ? 1 : 0,
+                    clearDepthValue,
+                    label
+            );
+        }
         waitRenderFences(encoder);
         encoderGeneration++;
         currentEncoder = encoder;
         renderColorAttachments = colorAttachments;
         renderDepthAttachment = depthAttachment;
         renderDepthTexture = depthTextureView == null ? null : (MetalGpuTexture) depthTextureView.texture();
-        renderEncoderDeferredStore = DEFERRED_DEPTH_STORE
-                && renderDepthTexture != null
-                && renderDepthTexture.mtlDepthPixelFormat() != MTLPixelFormat.Invalid;
+        renderEncoderDeferredStore = deferredDepthStore;
         recordGraphTelemetry(
                 label,
                 viewportWidth,

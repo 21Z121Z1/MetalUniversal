@@ -87,6 +87,13 @@ final class MetalRenderGraphBenchIntegrationTest {
 
     private static final Map<String, Map<String, Object>> SCENARIOS = new LinkedHashMap<>();
 
+    /**
+     * Every scenario runs under both ABI modes against the same absolute
+     * pixel oracle: identical expectations passing under V2 and V3 is the
+     * P2.1 framebuffer-equivalence proof.
+     */
+    private static final List<String> ABI_MODES = List.of("v2", "v3");
+
     private final Map<String, String> fragmentShaders = new HashMap<>();
     private final Map<String, String> vertexShaders = new HashMap<>();
     private MetalDevice device;
@@ -94,6 +101,7 @@ final class MetalRenderGraphBenchIntegrationTest {
 
     @BeforeEach
     void createDevice() {
+        MetalCommandEncoder.setRenderPassAbiModeForTests("auto");
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice), "MTLCreateSystemDefaultDevice returned null");
         ShaderSource source = (identifier, type) -> {
@@ -115,12 +123,22 @@ final class MetalRenderGraphBenchIntegrationTest {
 
     @AfterEach
     void closeDevice() {
+        MetalCommandEncoder.setRenderPassAbiModeForTests("auto");
         MetalFxManager.close();
         if (device != null) {
             device.close();
         }
         vertexShaders.clear();
         fragmentShaders.clear();
+    }
+
+    private static void withAbi(final String mode, final Runnable body) {
+        MetalCommandEncoder.setRenderPassAbiModeForTests(mode);
+        try {
+            body.run();
+        } finally {
+            MetalCommandEncoder.setRenderPassAbiModeForTests("auto");
+        }
     }
 
     @AfterAll
@@ -167,7 +185,9 @@ final class MetalRenderGraphBenchIntegrationTest {
 
     @Test
     void mrtFullSlots() {
-        withScenario("mrtFullSlots", () -> {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                withScenario("mrtFullSlots[" + abiMode + "]", () -> {
             List<MetalGpuTexture> textures = createTextures(
                     List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM),
                     "bench-mrt-full");
@@ -197,11 +217,15 @@ final class MetalRenderGraphBenchIntegrationTest {
                 closeAll(textures);
             }
         });
+            });
+        }
     }
 
     @Test
     void mrtNullMiddleSlot() {
-        withScenario("mrtNullMiddleSlot", () -> {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                withScenario("mrtNullMiddleSlot[" + abiMode + "]", () -> {
             List<MetalGpuTexture> textures = createTextures(
                     List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM),
                     "bench-mrt-null");
@@ -247,11 +271,15 @@ final class MetalRenderGraphBenchIntegrationTest {
                 closeAll(textures);
             }
         });
+            });
+        }
     }
 
     @Test
     void pingPongChain() {
-        withScenario("pingPongChain", () -> {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                withScenario("pingPongChain[" + abiMode + "]", () -> {
             List<MetalGpuTexture> textures = createTextures(
                     List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM),
                     "bench-pingpong");
@@ -275,11 +303,15 @@ final class MetalRenderGraphBenchIntegrationTest {
                 closeAll(textures);
             }
         });
+            });
+        }
     }
 
     @Test
     void partialViewportScissor() {
-        withScenario("partialViewportScissor", () -> {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                withScenario("partialViewportScissor[" + abiMode + "]", () -> {
             List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), "bench-scissor");
             MetalGpuTexture texture = textures.get(0);
             try {
@@ -315,11 +347,15 @@ final class MetalRenderGraphBenchIntegrationTest {
                 closeAll(textures);
             }
         });
+            });
+        }
     }
 
     @Test
     void blendOverPreviousContent() {
-        withScenario("blendOverPreviousContent", () -> {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                withScenario("blendOverPreviousContent[" + abiMode + "]", () -> {
             List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), "bench-blend");
             MetalGpuTexture texture = textures.get(0);
             try {
@@ -365,11 +401,15 @@ final class MetalRenderGraphBenchIntegrationTest {
                 closeAll(textures);
             }
         });
+            });
+        }
     }
 
     @Test
     void computeRawThenSample() {
-        withScenario("computeRawThenSample", () -> {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                withScenario("computeRawThenSample[" + abiMode + "]", () -> {
             List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), "bench-compute-raw");
             MetalGpuTexture target = textures.get(0);
             String glsl = """
@@ -404,11 +444,15 @@ final class MetalRenderGraphBenchIntegrationTest {
                 closeAll(textures);
             }
         });
+            });
+        }
     }
 
     @Test
     void historyTwoPassesApart() {
-        withScenario("historyTwoPassesApart", () -> {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                withScenario("historyTwoPassesApart[" + abiMode + "]", () -> {
             List<MetalGpuTexture> textures = createTextures(
                     List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM),
                     "bench-history");
@@ -428,11 +472,15 @@ final class MetalRenderGraphBenchIntegrationTest {
                 closeAll(textures);
             }
         });
+            });
+        }
     }
 
     @Test
     void deadAttachmentOverwrite() {
-        withScenario("deadAttachmentOverwrite", () -> {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                withScenario("deadAttachmentOverwrite[" + abiMode + "]", () -> {
             List<MetalGpuTexture> textures = createTextures(List.of(GpuFormat.RGBA8_UNORM), "bench-dead");
             MetalGpuTexture texture = textures.get(0);
             try {
@@ -457,6 +505,8 @@ final class MetalRenderGraphBenchIntegrationTest {
                 closeAll(textures);
             }
         });
+            });
+        }
     }
 
     // ------------------------------------------------------------------

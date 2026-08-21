@@ -170,7 +170,8 @@ gradle.projectsEvaluated {
             "com.metallum.client.metal.render.MetalDevicePresentationContractTest",
             "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
             "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
-            "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
+            "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest",
+            "com.metallum.client.metal.render.MetalRenderGraphBenchIntegrationTest"
         ]
     )
     hostedCore.configure { task -> task.dependsOn(hostedBridgeFfmSmoke) }
@@ -210,6 +211,7 @@ gradle.projectsEvaluated {
                     "**/MetalMrtBackendIntegrationTest.class",
                     "**/MetalComputeBackendIntegrationTest.class",
                     "**/MetalRenderContractGpuIntegrationTest.class",
+                    "**/MetalRenderGraphBenchIntegrationTest.class",
                     "**/IrisMetalPostChainCompilationTest.class",
                     "**/IrisMetalShadowPipelineTest.class",
                     "**/IrisMetalShadowComputeConformanceTest.class",
