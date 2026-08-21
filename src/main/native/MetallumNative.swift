@@ -4141,6 +4141,19 @@ private func buildPresentSampler(device: MTLDevice, filter: MTLSamplerMinMagFilt
     return device.makeSamplerState(descriptor: descriptor)
 }
 
+/// Builds the present samplers on first use. metallum_init_pipelines only
+/// runs for presentation-backed devices, but the texture-copy path (readback,
+/// resolve, Iris conformance transfers) needs these samplers on offscreen
+/// devices as well, so both copy entries call this before consuming them.
+private func ensurePresentSamplers(_ device: MTLDevice) {
+    if NativeState.presentLinearSampler == nil {
+        NativeState.presentLinearSampler = buildPresentSampler(device: device, filter: .linear)
+    }
+    if NativeState.presentNearestSampler == nil {
+        NativeState.presentNearestSampler = buildPresentSampler(device: device, filter: .nearest)
+    }
+}
+
 private func ensureCopyPipeline(_ device: MTLDevice, _ colorFormat: MTLPixelFormat) -> MTLRenderPipelineState? {
     let key = Int(colorFormat.rawValue)
     if let pipeline = NativeState.copyPipelines[key] {
@@ -6939,6 +6952,11 @@ private func metal3EncodeTextureCopy(
     _ fence: MTLFence?
 ) -> Int32 {
     autoreleasepool {
+        // Texture copies serve readback/resolve contracts on offscreen devices
+        // too, so they cannot rely on metallum_init_pipelines having prewarmed
+        // the present samplers: layerless devices deliberately skip that eager
+        // presentation prewarm. Build them on first use instead.
+        ensurePresentSamplers(commandBuffer.device)
         guard let pipeline = ensureCopyPipeline(commandBuffer.device, destinationTexture.pixelFormat) else {
             #if os(macOS) && canImport(MetalFX)
             logMetalFxFailureOnce("copy-pipeline", "could not create copy pipeline for output format \(destinationTexture.pixelFormat.rawValue)")
@@ -7003,6 +7021,9 @@ public func metallumEncodeTextureCopyEntry(
 ) -> Int32 {
     if #available(macOS 26.0, iOS 26.0, *),
        let lease = metal4MainLease(commandBufferPointer) {
+        // Same lazy-sampler contract as the Metal 3 copy path: offscreen
+        // devices never ran metallum_init_pipelines.
+        ensurePresentSamplers(sourceTexture.device)
         guard let pipeline = ensureCopyPipeline(sourceTexture.device, destinationTexture.pixelFormat),
               let sampler = linear != 0 ? NativeState.presentLinearSampler : NativeState.presentNearestSampler else {
             return 0
