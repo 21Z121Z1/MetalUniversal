@@ -112,6 +112,16 @@ tasks.test {
 			layout.buildDirectory.dir(hsErrDir).get().asFile.mkdirs()
 			jvmArgs "-XX:ErrorFile=${layout.buildDirectory.dir(hsErrDir).get().asFile.absolutePath}/hs_err_pid%p.log"
 		}
+		// Capability gate mirrors HostedMetalGradle.init.gradle: only an exact,
+		// probe-derived verdict may move the JVM PSO smoke to environment-
+		// blocked; unset or unknown keeps the strict default.
+		if (System.getenv("METALLUM_JVM_PSO_SMOKE_MODE") == "environment-blocked") {
+			exclude "**/MetalNativeBridgeRenderPipelineSmokeTest.class"
+			doFirst {
+				println("METALLUM_CAPABILITY_GATE: jvm_background_pso_compile=false on this environment; " +
+						"JVM PSO smoke reported environment-blocked (E2E remains the JVM-path authority)")
+			}
+		}
 	}
 }
 

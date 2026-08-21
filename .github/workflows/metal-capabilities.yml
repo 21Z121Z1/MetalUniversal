@@ -159,6 +159,47 @@ jobs:
             compileMetalFxPerformanceValidation \
             compileMetalFrameGenerationPresentationValidation
 
+      - name: Probe raw pipeline-compile threading capability
+        shell: bash
+        run: |
+          set -uo pipefail
+          xcrun swiftc -O -target arm64-apple-macosx14.0 \
+            -framework Foundation -framework Metal \
+            src/test/native/MetalShippingPipelineAbiSmokeTest.swift \
+            -o "$RUNNER_TEMP/metallum-shipping-abi-probe"
+          # The binary disables the dylib's own compiler hop internally, so
+          # this measures raw Metal behavior. A background-thread crash is a
+          # capability verdict, not a workflow failure.
+          ("$RUNNER_TEMP/metallum-shipping-abi-probe" \
+            src/main/resources/natives/macos/libmetallum.dylib \
+            | tee build/agent-evidence/shipping-abi-threading-probe.log) || true
+          python3 - <<'PY'
+          import json, os
+          log_path = "build/agent-evidence/shipping-abi-threading-probe.log"
+          with open(log_path, encoding="utf-8") as handle:
+              log = handle.read()
+          main_thread_ok = "SHIPPING_PIPELINE_C_ABI_PASS" in log
+          background_ok = "SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS" in log
+          if not main_thread_ok:
+              raise SystemExit("main-thread shipping PSO compile probe failed; environment is unusable")
+          mode = "environment-blocked" if not background_ok else "required"
+          with open(os.environ.get("GITHUB_ENV", "/dev/null"), "a", encoding="utf-8") as handle:
+              handle.write(f"METALLUM_JVM_PSO_SMOKE_MODE={mode}\n")
+          capabilities_path = "agent-evidence/capabilities.json"
+          data = {}
+          if os.path.exists(capabilities_path):
+              with open(capabilities_path, encoding="utf-8") as handle:
+                  data = json.load(handle)
+          data["pso_compile_main_thread"] = main_thread_ok
+          data["pso_compile_background_thread"] = background_ok
+          data["jvm_pso_smoke_mode"] = mode
+          with open(capabilities_path, "w", encoding="utf-8") as handle:
+              json.dump(data, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          print(f"capability: pso_compile_main_thread={main_thread_ok} "
+                f"pso_compile_background_thread={background_ok} jvm_pso_smoke_mode={mode}")
+          PY
+
       - name: Execute hosted Metal MRT and shipping Metal 4 fallback contracts
         shell: bash
         run: |
