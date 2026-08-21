@@ -65,8 +65,18 @@ jobs:
         # acceptance are local release evidence.
         run: >-
           ./gradlew buildMacNative build
+          -Pmetallum.hsErrDir=build/agent-evidence
           -x metalFrameGenerationPresentationValidation
           -x metalFxOffscreenValidation
+      - name: capture JVM crash evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jvm-crash-evidence
+          path: |
+            build/agent-evidence/
+            hs_err_pid*.log
+          if-no-files-found: ignore
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:

@@ -105,6 +105,13 @@ tasks.test {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
 		environment "MTL_DEBUG_LAYER", metalApiValidation
 		environment "MTL_SHADER_VALIDATION", metalShaderValidation
+		// Keep JVM crash evidence with the rest of the agent evidence so a
+		// hosted SIGSEGV yields a full native stack instead of a bare exit code.
+		def hsErrDir = providers.gradleProperty("metallum.hsErrDir").orNull
+		if (hsErrDir != null) {
+			layout.buildDirectory.dir(hsErrDir).get().asFile.mkdirs()
+			jvmArgs "-XX:ErrorFile=${layout.buildDirectory.dir(hsErrDir).get().asFile.absolutePath}/hs_err_pid%p.log"
+		}
 	}
 }
 
