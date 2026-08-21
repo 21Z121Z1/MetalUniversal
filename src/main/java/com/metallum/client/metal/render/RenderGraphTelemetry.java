@@ -28,6 +28,7 @@ public final class RenderGraphTelemetry {
     private static final AtomicLong COLOR_STORE_BYTES = new AtomicLong();
     private static final AtomicLong COLOR_LOAD_BYTES = new AtomicLong();
     private static final AtomicLong DEPTH_STORE_BYTES = new AtomicLong();
+    private static final AtomicLong DEPTH_STORE_KILLED_BYTES = new AtomicLong();
     private static final List<Map<String, Object>> EVENTS = new ArrayList<>();
     private static final int MAX_EVENTS = 4096;
 
@@ -41,6 +42,7 @@ public final class RenderGraphTelemetry {
         COLOR_STORE_BYTES.set(0);
         COLOR_LOAD_BYTES.set(0);
         DEPTH_STORE_BYTES.set(0);
+        DEPTH_STORE_KILLED_BYTES.set(0);
         synchronized (EVENTS) {
             EVENTS.clear();
         }
@@ -54,8 +56,8 @@ public final class RenderGraphTelemetry {
 
     /**
      * A new native render encoder began. {@code slotPixelBytes} carries the
-     * per-slot bytes-per-pixel (0 for absent slots); clear flags follow the
-     * current ABI so byte estimates reflect what today's semantics imply.
+     * per-slot bytes-per-pixel (0 for absent slots); clear flags and the
+     * depth store decision reflect what was ACTUALLY sent to the native side.
      */
     public static void onEncoderCreated(
             final String label,
@@ -63,9 +65,9 @@ public final class RenderGraphTelemetry {
             final int height,
             final int[] slotPixelBytes,
             final boolean[] slotClear,
-            final boolean depthAttached,
             final int depthPixelBytes,
-            final boolean depthClear
+            final boolean depthClear,
+            final boolean depthDeferredStore
     ) {
         ENCODERS_CREATED.incrementAndGet();
         long pixels = (long) width * height;
@@ -76,14 +78,15 @@ public final class RenderGraphTelemetry {
             if (bytes <= 0) {
                 continue;
             }
-            // V2 semantics: every live color attachment is stored every pass,
-            // and loaded unless this pass cleared it.
+            // Current admitted policies: live slots are stored every pass and
+            // loaded unless this pass cleared them. When a future policy
+            // suppresses either action this estimate must move with it.
             store += pixels * bytes;
             if (!slotClear[index]) {
                 load += pixels * bytes;
             }
         }
-        if (depthAttached && depthPixelBytes > 0 && !depthClear) {
+        if (depthPixelBytes > 0 && !depthClear && !depthDeferredStore) {
             DEPTH_STORE_BYTES.addAndGet(pixels * depthPixelBytes);
         }
         COLOR_STORE_BYTES.addAndGet(store);
@@ -96,6 +99,18 @@ public final class RenderGraphTelemetry {
                 "storeBytesEstimate", store,
                 "loadBytesEstimate", load
         ));
+    }
+
+    /** A deferred depth store was resolved to dontCare by an incoming clear. */
+    public static void onDepthStoreKilled(final long pixels, final int depthPixelBytes) {
+        if (pixels > 0 && depthPixelBytes > 0) {
+            DEPTH_STORE_KILLED_BYTES.addAndGet(pixels * depthPixelBytes);
+            record(Map.of(
+                    "event", "depth-store-killed",
+                    "pixels", pixels,
+                    "bytesPerPixel", depthPixelBytes
+            ));
+        }
     }
 
     /** An incoming pass reused the already-open encoder (fusion candidate path). */
@@ -120,6 +135,7 @@ public final class RenderGraphTelemetry {
         snapshot.put("colorStoreBytesEstimate", COLOR_STORE_BYTES.get());
         snapshot.put("colorLoadBytesEstimate", COLOR_LOAD_BYTES.get());
         snapshot.put("depthStoreBytesEstimate", DEPTH_STORE_BYTES.get());
+        snapshot.put("depthStoreKilledBytes", DEPTH_STORE_KILLED_BYTES.get());
         synchronized (EVENTS) {
             snapshot.put("events", new ArrayList<>(EVENTS));
         }

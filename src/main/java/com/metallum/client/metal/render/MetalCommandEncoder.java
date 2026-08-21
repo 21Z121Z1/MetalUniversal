@@ -243,6 +243,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     boolean deadDepth = incomingClearsSameDepth
                             || (renderDepthTexture != null && pendingDepthClears.containsKey(renderDepthTexture));
                     renderEncoder.setDepthStoreAction(!deadDepth);
+                    if (deadDepth && renderDepthTexture != null) {
+                        RenderGraphTelemetry.onDepthStoreKilled(
+                                (long) renderDepthTexture.getWidth(0) * renderDepthTexture.getHeight(0),
+                                renderDepthTexture.pixelSize()
+                        );
+                    }
                 }
                 // Signal timing is identical either way (the fence fires
                 // after the last listed stage); the split form documents the
@@ -528,16 +534,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 viewportHeight,
                 colorTextureViews,
                 clearColorEnabled,
-                depthTextureView != null,
-                clearDepthEnabled
+                clearDepthEnabled,
+                deferredDepthStore
         );
         return encoder;
     }
 
     /**
      * Structured render-graph evidence for the TBDR compiler work. Byte
-     * estimates reflect CURRENT ABI semantics at the encoder boundary; the
-     * planner must reduce them without changing any observable pixel.
+     * estimates reflect the actions ACTUALLY sent to the native side under
+     * the active ABI mode, so a future policy change is visible in
+     * rendergraph.json without touching the estimator.
      */
     private void recordGraphTelemetry(
             final String label,
@@ -545,8 +552,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int height,
             final MetalGpuTextureView[] colorTextureViews,
             final int[] clearColorEnabled,
-            final boolean depthAttached,
-            final boolean depthClear
+            final boolean depthClear,
+            final boolean deferredDepthStore
     ) {
         try {
             int[] slotBytes = new int[colorTextureViews.length];
@@ -557,10 +564,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     slotClear[index] = index < clearColorEnabled.length && clearColorEnabled[index] != 0;
                 }
             }
-            int depthBytes = depthAttached && renderDepthTexture != null
+            int depthBytes = renderDepthTexture != null
                     ? renderDepthTexture.pixelSize()
                     : 0;
-            RenderGraphTelemetry.onEncoderCreated(label, width, height, slotBytes, slotClear, depthAttached, depthBytes, depthClear);
+            RenderGraphTelemetry.onEncoderCreated(
+                    label, width, height, slotBytes, slotClear,
+                    depthBytes, depthClear, deferredDepthStore
+            );
         } catch (RuntimeException ignored) {
             // Telemetry must never break encoding; a missing estimate is
             // preferable to a failed frame.
