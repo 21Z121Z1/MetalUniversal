@@ -203,22 +203,22 @@ gradle.projectsEvaluated {
                     failOnNoMatchingTests = false
                 }
                 excludes.addAll([
-                    "com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest",
-                    "com.metallum.client.metal.render.MetalNativeBridgeCriticalPolicyTest",
-                    "com.metallum.client.metal.render.MetalDepthStencilPipelinePolicyTest",
-                    "com.metallum.client.metal.render.MetalDevicePresentationContractTest",
-                    "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
-                    "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
-                    "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest",
-                    "com.metallum.client.metal.render.IrisMetalPostChainCompilationTest",
-                    "com.metallum.client.metal.render.IrisMetalShadowPipelineTest",
-                    "com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest",
-                    "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest",
-                    "com.metallum.client.metal.render.IrisMetalComputeConformanceTest",
-                    "com.metallum.client.metal.render.IrisMetalExternalLevelSamplerTest",
-                    "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest",
-                    "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest",
-                    "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest",
+                    "**/MetalNativeBridgeRenderPipelineSmokeTest.class",
+                    "**/MetalNativeBridgeCriticalPolicyTest.class",
+                    "**/MetalDepthStencilPipelinePolicyTest.class",
+                    "**/MetalDevicePresentationContractTest.class",
+                    "**/MetalMrtBackendIntegrationTest.class",
+                    "**/MetalComputeBackendIntegrationTest.class",
+                    "**/MetalRenderContractGpuIntegrationTest.class",
+                    "**/IrisMetalPostChainCompilationTest.class",
+                    "**/IrisMetalShadowPipelineTest.class",
+                    "**/IrisMetalShadowComputeConformanceTest.class",
+                    "**/IrisMetalCenterDepthSamplerTest.class",
+                    "**/IrisMetalComputeConformanceTest.class",
+                    "**/IrisMetalExternalLevelSamplerTest.class",
+                    "**/MetalGenericVertexAttributeIntegrationTest.class",
+                    "**/MetalIrisCustomTexturesIntegrationTest.class",
+                    "**/MetalIrisNoiseTextureIntegrationTest.class",
                 ])
             }
         }
