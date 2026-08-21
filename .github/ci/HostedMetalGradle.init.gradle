@@ -142,14 +142,15 @@ gradle.projectsEvaluated {
         }
     }
 
-    // Capability-gated JVM PSO smoke. The shipping C-ABI probe measures raw
-    // render-PSO compilation on the process main thread and on a background
-    // thread (METALLUM_PSO_COMPILE_HOP=0, so the dylib's own compiler hop does
-    // not mask the environment). Only when the probe PROVED that this
-    // environment cannot compile pipelines off the main thread may the JVM
-    // smoke be reported environment-blocked instead of failed; any other
-    // value — including unset — keeps the strict default. The Minecraft E2E
-    // remains the authoritative JVM->FFM->Swift PSO proof either way.
+    // Capability-gated JVM GPU suites. The probe chain (native main thread,
+    // native background thread, JVM background thread) decides
+    // METALLUM_JVM_PSO_SMOKE_MODE. Every hosted suite creates render PSOs from
+    // Gradle test-executor worker threads, so when the measured verdict says
+    // this environment cannot compile pipelines off a JVM background thread,
+    // ALL of them are reported environment-blocked — not silently skipped:
+    // the verdict and its evidence land in capabilities.json, and the
+    // Minecraft E2E remains the authoritative JVM->FFM->Swift proof. Any
+    // other value — including unset — keeps the strict default.
     def jvmPsoSmokeMode = System.getenv("METALLUM_JVM_PSO_SMOKE_MODE") ?: "required"
 
     def hostedBridgeFfmSmoke = configureHostedTest(
@@ -159,18 +160,6 @@ gradle.projectsEvaluated {
             "com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest"
         ]
     )
-    hostedBridgeFfmSmoke.configure { task ->
-        if (jvmPsoSmokeMode == "environment-blocked") {
-            task.doFirst {
-                println("METALLUM_CAPABILITY_GATE: jvm_background_pso_compile=false on this environment; " +
-                        "JVM PSO smoke reported environment-blocked (E2E remains the JVM-path authority)")
-            }
-            task.filter {
-                excludeTestsMatching "com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest"
-                failOnNoMatchingTests = false
-            }
-        }
-    }
 
     def hostedCore = configureHostedTest(
         "hostedMetalCoreIntegrationTest",
@@ -202,4 +191,36 @@ gradle.projectsEvaluated {
         ]
     )
     hostedIris.configure { task -> task.dependsOn(hostedBridgeFfmSmoke) }
+
+    if (jvmPsoSmokeMode == "environment-blocked") {
+        [hostedBridgeFfmSmoke, hostedCore, hostedIris].each { taskProvider ->
+            taskProvider.configure {
+                doFirst {
+                    println("METALLUM_CAPABILITY_GATE: jvm_background_pso_compile=false on this environment; " +
+                            "${name} reported environment-blocked (E2E remains the JVM-path authority)")
+                }
+                filter {
+                    failOnNoMatchingTests = false
+                }
+                excludes.addAll([
+                    "com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest",
+                    "com.metallum.client.metal.render.MetalNativeBridgeCriticalPolicyTest",
+                    "com.metallum.client.metal.render.MetalDepthStencilPipelinePolicyTest",
+                    "com.metallum.client.metal.render.MetalDevicePresentationContractTest",
+                    "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
+                    "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
+                    "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest",
+                    "com.metallum.client.metal.render.IrisMetalPostChainCompilationTest",
+                    "com.metallum.client.metal.render.IrisMetalShadowPipelineTest",
+                    "com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest",
+                    "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest",
+                    "com.metallum.client.metal.render.IrisMetalComputeConformanceTest",
+                    "com.metallum.client.metal.render.IrisMetalExternalLevelSamplerTest",
+                    "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest",
+                    "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest",
+                    "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest",
+                ])
+            }
+        }
+    }
 }

@@ -246,16 +246,30 @@ jobs:
           python3 - <<'PY'
           import glob
           import json
+          import os
           import xml.etree.ElementTree as ET
 
           task_names = [
               "hostedMetalCoreIntegrationTest",
               "hostedMetalIrisIntegrationTest",
           ]
+          mode = os.environ.get("METALLUM_JVM_PSO_SMOKE_MODE", "required")
           summary = {}
           for task in task_names:
               files = glob.glob(f"build/test-results/{task}/TEST-*.xml")
               if not files:
+                  if mode == "environment-blocked":
+                      # Every GPU class is capability-excluded; an empty result
+                      # set is the expected shape of a blocked run.
+                      print(f"{task}: no test XML (capability-blocked)")
+                      summary[task] = {
+                          "tests": 0,
+                          "executed": 0,
+                          "skipped": 0,
+                          "failures": 0,
+                          "errors": 0,
+                      }
+                      continue
                   raise SystemExit(f"{task} produced no JUnit XML")
               tests = skipped = failures = errors = 0
               for path in files:
@@ -266,8 +280,10 @@ jobs:
                   errors += int(root.attrib.get("errors", 0))
               executed = tests - skipped
               print(f"{task}: tests={tests} executed={executed} skipped={skipped} failures={failures} errors={errors}")
-              if tests == 0 or executed == 0 or skipped != 0 or failures != 0 or errors != 0:
-                  raise SystemExit(f"{task} did not fully execute cleanly")
+              if failures != 0 or errors != 0 or skipped != 0:
+                  raise SystemExit(f"{task} did not execute cleanly")
+              if mode == "required" and (tests == 0 or executed == 0):
+                  raise SystemExit(f"{task} did not fully execute cleanly (mode=required)")
               summary[task] = {
                   "tests": tests,
                   "executed": executed,
@@ -275,6 +291,19 @@ jobs:
                   "failures": failures,
                   "errors": errors,
               }
+
+          if mode == "environment-blocked":
+              capabilities_path = "agent-evidence/capabilities.json"
+              with open(capabilities_path, encoding="utf-8") as handle:
+                  capabilities = json.load(handle)
+              if capabilities.get("jvm_background_pso_compile") is not False:
+                  raise SystemExit(
+                      "suites ran environment-blocked without a measured jvm_background_pso_compile=false verdict"
+                  )
+              summary["capability_mode"] = "environment-blocked"
+              summary["authority"] = "minecraft-client-e2e"
+          else:
+              summary["capability_mode"] = "required"
 
           with open("agent-evidence/hosted-shipping-tests.json", "w", encoding="utf-8") as handle:
               json.dump(summary, handle, indent=2, sort_keys=True)
