@@ -196,33 +196,22 @@ private enum NativeState {
 
     /// Runs a blocking pipeline-compilation body on the dedicated compiler
     /// thread. The whole body moves atomically, so lock ordering inside the
-    /// body is unchanged; the queue is private and never re-entered by the
-    /// body, so `sync` cannot deadlock.
-    static func onPipelineCompilerThread(_ body: () -> UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer? {
+    /// body is unchanged; the queue is private and never re-entered by any
+    /// hopped entry, so `sync` cannot deadlock.
+    static func onCompilerThread<T>(_ body: () -> T) -> T {
         if pipelineCompilerHopDebug == nil {
             pipelineCompilerHopDebug = ProcessInfo.processInfo.environment["METALLUM_PSO_HOP_DEBUG"] == "1"
         }
-        let debug = pipelineCompilerHopDebug ?? false
         if ProcessInfo.processInfo.environment["METALLUM_PSO_COMPILE_HOP"] == "0" {
-            if debug {
-                NSLog("[metallum] PSO hop disabled by env, compiling inline on thread main=%d", Thread.isMainThread)
-            }
             return autoreleasepool { body() }
         }
         if !pipelineCompilerHopLogged {
             pipelineCompilerHopLogged = true
             NSLog("[metallum] pipeline compiler hop engaged (dedicated serial compiler thread)")
         }
-        if debug {
-            NSLog("[metallum] PSO create enter caller-main=%d", Thread.isMainThread)
-        }
-        let result = pipelineCompilerQueue.sync {
+        return pipelineCompilerQueue.sync {
             autoreleasepool { body() }
         }
-        if debug {
-            NSLog("[metallum] PSO create exit result=%d", result != nil ? 1 : 0)
-        }
-        return result
     }
 
     static func register(function: MTLFunction, library: MTLLibrary) {
@@ -7189,7 +7178,7 @@ private func writeIndexedTriangleFanIndices(
 
 @_cdecl("metallum_create_system_default_device")
 public func metallum_create_system_default_device() -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
+    return NativeState.onCompilerThread {
         #if os(macOS)
         // Metal's HUD subsystem must be enabled before the device is created.
         // A mod cannot add MetalHUDEnabled to the host launcher's Info.plist,
@@ -9840,7 +9829,7 @@ public func metallum_MTLDevice_makeComputePipelineState(
     _ device: MTLDevice,
     _ function: MTLFunction
 ) -> UnsafeMutableRawPointer? {
-    return NativeState.onPipelineCompilerThread {
+    return NativeState.onCompilerThread {
         do {
             return retainedPointer(try device.makeComputePipelineState(function: function))
         } catch {
@@ -10097,7 +10086,9 @@ public func metallum_MTLVertexDescriptor_setLayout(
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_create")
 public func metallum_MTLRenderPipelineDescriptor_create() -> UnsafeMutableRawPointer? {
-    retainedPointer(MTLRenderPipelineDescriptor())
+    NativeState.onCompilerThread {
+        retainedPointer(MTLRenderPipelineDescriptor())
+    }
 }
 
 @_cdecl("metallum_create_shader_function")
@@ -10106,7 +10097,7 @@ public func metallum_create_shader_function(
     _ sourcePtr: UnsafePointer<CChar>?,
     _ entryPtr: UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
+    return NativeState.onCompilerThread {
         guard let sourcePtr, let entryPtr else {
             return nil
         }
@@ -10136,8 +10127,10 @@ public func metallum_MTLRenderPipelineDescriptor_setCompiledFunctions(
     _ vertexFunction: MTLFunction,
     _ fragmentFunction: MTLFunction
 ) {
-    desc.vertexFunction = vertexFunction
-    desc.fragmentFunction = fragmentFunction
+    NativeState.onCompilerThread {
+        desc.vertexFunction = vertexFunction
+        desc.fragmentFunction = fragmentFunction
+    }
 }
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setVertexDescriptor")
@@ -10172,16 +10165,18 @@ public func metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat(
     _ index: Int32,
     _ format: MTLPixelFormat
 ) -> Int32 {
-    guard index >= 0 && index < 8 else {
-        NSLog("[Metallum] rejected color attachment format index %d", index)
-        return 0
+    NativeState.onCompilerThread {
+        guard index >= 0 && index < 8 else {
+            NSLog("[Metallum] rejected color attachment format index %d", index)
+            return 0
+        }
+        guard let attachment = desc.colorAttachments[Int(index)] else {
+            NSLog("[Metallum] color attachment descriptor %d is unavailable", index)
+            return 0
+        }
+        attachment.pixelFormat = format
+        return 1
     }
-    guard let attachment = desc.colorAttachments[Int(index)] else {
-        NSLog("[Metallum] color attachment descriptor %d is unavailable", index)
-        return 0
-    }
-    attachment.pixelFormat = format
-    return 1
 }
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats")
@@ -10879,7 +10874,7 @@ public func metallum_MTLDevice_makeRenderPipelineState(
     _ device: MTLDevice,
     _ descriptor: MTLRenderPipelineDescriptor
 ) -> UnsafeMutableRawPointer? {
-    return NativeState.onPipelineCompilerThread {
+    return NativeState.onCompilerThread {
         createRenderPipelineState(device: device, descriptor: descriptor)
     }
 }
