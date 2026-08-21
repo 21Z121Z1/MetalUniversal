@@ -416,6 +416,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             throw new IllegalArgumentException("Invalid Metal MRT attachment arrays");
         }
 
+        RenderGraphTelemetry.onPassRequested(label);
+
         MemorySegment[] colorAttachments = new MemorySegment[colorTextureViews.length];
         for (int index = 0; index < colorTextureViews.length; index++) {
             colorAttachments[index] = colorTextureViews[index] == null
@@ -427,6 +429,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 && sameAttachmentHandles(renderColorAttachments, colorAttachments)
                 && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment);
         if (sameAttachments && !clearDepthEnabled && !hasClearColor(clearColorEnabled)) {
+            RenderGraphTelemetry.onEncoderReused(label);
             return (MTLRenderCommandEncoder) currentEncoder;
         }
 
@@ -456,7 +459,49 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         renderEncoderDeferredStore = DEFERRED_DEPTH_STORE
                 && renderDepthTexture != null
                 && renderDepthTexture.mtlDepthPixelFormat() != MTLPixelFormat.Invalid;
+        recordGraphTelemetry(
+                label,
+                viewportWidth,
+                viewportHeight,
+                colorTextureViews,
+                clearColorEnabled,
+                depthTextureView != null,
+                clearDepthEnabled
+        );
         return encoder;
+    }
+
+    /**
+     * Structured render-graph evidence for the TBDR compiler work. Byte
+     * estimates reflect CURRENT ABI semantics at the encoder boundary; the
+     * planner must reduce them without changing any observable pixel.
+     */
+    private void recordGraphTelemetry(
+            final String label,
+            final int width,
+            final int height,
+            final MetalGpuTextureView[] colorTextureViews,
+            final int[] clearColorEnabled,
+            final boolean depthAttached,
+            final boolean depthClear
+    ) {
+        try {
+            int[] slotBytes = new int[colorTextureViews.length];
+            boolean[] slotClear = new boolean[colorTextureViews.length];
+            for (int index = 0; index < colorTextureViews.length; index++) {
+                if (colorTextureViews[index] != null) {
+                    slotBytes[index] = ((MetalGpuTexture) colorTextureViews[index].texture()).pixelSize();
+                    slotClear[index] = index < clearColorEnabled.length && clearColorEnabled[index] != 0;
+                }
+            }
+            int depthBytes = depthAttached && renderDepthTexture != null
+                    ? renderDepthTexture.pixelSize()
+                    : 0;
+            RenderGraphTelemetry.onEncoderCreated(label, width, height, slotBytes, slotClear, depthAttached, depthBytes, depthClear);
+        } catch (RuntimeException ignored) {
+            // Telemetry must never break encoding; a missing estimate is
+            // preferable to a failed frame.
+        }
     }
 
     private static boolean hasClearColor(final int[] clearColorEnabled) {

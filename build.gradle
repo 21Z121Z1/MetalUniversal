@@ -709,6 +709,29 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 }
 
+tasks.register("renderGraphBench", Test) {
+	group = "verification"
+	description = "Runs the IrisGraphBench synthetic render-graph oracle and emits structured rendergraph.json evidence."
+	onlyIf {
+		hardwareMetalValidationAvailable()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalRenderGraphBenchIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	systemProperty "metallum.rendergraph.output",
+			layout.buildDirectory.file("agent-evidence/rendergraph.json").get().asFile.absolutePath
+	doFirst {
+		layout.buildDirectory.dir("agent-evidence").get().asFile.mkdirs()
+	}
+	environment "MTL_DEBUG_LAYER", metalApiValidation
+	environment "MTL_SHADER_VALIDATION", metalShaderValidation
+}
+
 tasks.register("metalComputeBackendIntegrationTest", Test) {
 	group = "verification"
 	description = "Runs the macOS backend and Iris compute/SSBO/image/mipmap GPU readback suites."
