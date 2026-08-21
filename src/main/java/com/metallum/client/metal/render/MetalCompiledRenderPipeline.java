@@ -70,10 +70,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final List<MTLPixelFormat> colorFormatsView;
     private final Map<PipelineSignature, MemorySegment> pipelineStates;
     private final MemorySegment withoutDepthPipeline;
-    // Lazy-variant support (S9C, active only with metallum.opt.asyncPrecompile):
-    // the constructor builds the two signatures the game actually starts with
-    // and the rest are built on the prewarm thread or on first demand, all
-    // under MetalDevice.COMPILE_CHAIN_LOCK.
+    // asyncPrewarm controls only proactive background creation. Every supported
+    // attachment signature is buildable on first demand regardless of this flag;
+    // the constructor intentionally compiles only the two startup signatures.
     private final boolean lazyVariants;
     private final MetalDevice device;
     private final RenderPipeline info;
@@ -226,7 +225,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
         this.fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
 
-        List<DepthStencilFormats> eagerFormats = this.lazyVariants ? eagerDepthStencilFormats() : supportedDepthStencilFormats();
+        // Compile only the signatures every session actually needs up front.
+        // Other supported signatures are created on first real demand below;
+        // this keeps unsupported or unused formats out of the Metal compiler.
+        List<DepthStencilFormats> eagerFormats = eagerDepthStencilFormats();
         Map<PipelineSignature, MemorySegment> states = new java.util.concurrent.ConcurrentHashMap<>();
         try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(
                 info, this.firstAvailableVertexBufferSlot, this.genericVertexInputs, this.genericVertexBufferSlot
@@ -386,12 +388,24 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private record DepthStencilFormats(MTLPixelFormat depthFormat, MTLPixelFormat stencilFormat) {
     }
 
+    /**
+     * Shipping macOS natives are built for arm64 Apple Silicon. Metal's packed
+     * Depth24Unorm_Stencil8 format is never supported on Apple Silicon, so it is
+     * deliberately absent here; Depth32Float_Stencil8 is the supported packed
+     * depth/stencil representation for this target.
+     */
+    static boolean isSupportedDepthStencilFormatPair(
+            final MTLPixelFormat depthFormat,
+            final MTLPixelFormat stencilFormat
+    ) {
+        return supportedDepthStencilFormats().contains(new DepthStencilFormats(depthFormat, stencilFormat));
+    }
+
     private static List<DepthStencilFormats> supportedDepthStencilFormats() {
         return List.of(
                 new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Invalid),
                 new DepthStencilFormats(MTLPixelFormat.Depth16Unorm, MTLPixelFormat.Invalid),
                 new DepthStencilFormats(MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid),
-                new DepthStencilFormats(MTLPixelFormat.Depth24Unorm_Stencil8, MTLPixelFormat.Depth24Unorm_Stencil8),
                 new DepthStencilFormats(MTLPixelFormat.Depth32Float_Stencil8, MTLPixelFormat.Depth32Float_Stencil8),
                 new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Stencil8)
         );
@@ -399,8 +413,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     /**
      * The two signatures every session starts with: depthless (UI, isValid)
-     * and the Depth32Float main framebuffer. Everything else is built lazily
-     * in lazy-variant mode.
+     * and the Depth32Float main framebuffer. Everything else is built on first
+     * real demand; async prewarm may additionally create it in the background.
      */
     private static List<DepthStencilFormats> eagerDepthStencilFormats() {
         return List.of(
@@ -508,11 +522,17 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     MemorySegment getNativePipeline(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
+        if (!isSupportedDepthStencilFormatPair(depthFormat, stencilFormat)) {
+            throw new IllegalArgumentException(
+                    "Unsupported Metal depth/stencil attachment signature: depth=" + depthFormat
+                            + ", stencil=" + stencilFormat
+            );
+        }
         MemorySegment pipeline = this.pipelineStates.get(this.signatureFor(depthFormat, stencilFormat));
-        if (pipeline == null && this.lazyVariants) {
-            // First demand beat the prewarm thread to this variant; build it
-            // now (bounded by one PSO compile, may wait out the prewarm
-            // thread's current item).
+        if (pipeline == null) {
+            // First real use builds exactly the requested supported signature.
+            // This is independent of async prewarm so normal production startup
+            // never needs to compile every possible attachment combination.
             pipeline = this.buildVariantLocked(depthFormat, stencilFormat);
         }
         if (pipeline == null || MetalNativeBridge.isNullHandle(pipeline)) {

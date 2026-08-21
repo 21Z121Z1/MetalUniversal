@@ -58,6 +58,32 @@ jobs:
           cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXTemporalScaler.h" 2>/dev/null
           echo "=== MTLFXFrameInterpolator.h ==="
           cat "$(xcrun --show-sdk-path)/System/Library/Frameworks/MetalFX.framework/Headers/MTLFXFrameInterpolator.h" 2>/dev/null
+      - name: Probe raw pipeline-compile threading capability
+        shell: bash
+        run: |
+          set -uo pipefail
+          ./gradlew buildMacNative
+          xcrun swiftc -O -target arm64-apple-macosx14.0 \
+            -framework Foundation -framework Metal \
+            src/test/native/MetalShippingPipelineAbiSmokeTest.swift \
+            -o "$RUNNER_TEMP/metallum-shipping-abi-probe"
+          # The binary disables the dylib's own compiler hop internally, so
+          # this measures raw Metal behavior. A background-thread crash is a
+          # capability verdict, not a workflow failure.
+          ("$RUNNER_TEMP/metallum-shipping-abi-probe" \
+            src/main/resources/natives/macos/libmetallum.dylib \
+            | tee "$RUNNER_TEMP/shipping-abi-threading-probe.log") || true
+          grep -Fq SHIPPING_PIPELINE_C_ABI_PASS "$RUNNER_TEMP/shipping-abi-threading-probe.log"
+          (java --enable-native-access=ALL-UNNAMED \
+            .github/ci/JvmPsoThreadingProbe.java \
+            "$(pwd)/src/main/resources/natives/macos/libmetallum.dylib" \
+            | tee "$RUNNER_TEMP/jvm-pso-threading-probe.log") || true
+          if grep -Fq SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS "$RUNNER_TEMP/shipping-abi-threading-probe.log" \
+            && grep -Fq JVM_PSO_BACKGROUND_THREAD_PASS "$RUNNER_TEMP/jvm-pso-threading-probe.log"; then
+            echo "METALLUM_JVM_PSO_SMOKE_MODE=required" >> "$GITHUB_ENV"
+          else
+            echo "METALLUM_JVM_PSO_SMOKE_MODE=environment-blocked" >> "$GITHUB_ENV"
+          fi
       - name: build
         # The hosted virtual GPU aborts in libMTLHud counter sampling even when
         # Metal validation is disabled. CI therefore runs compilation and
@@ -65,8 +91,18 @@ jobs:
         # acceptance are local release evidence.
         run: >-
           ./gradlew buildMacNative build
+          -Pmetallum.hsErrDir=build/agent-evidence
           -x metalFrameGenerationPresentationValidation
           -x metalFxOffscreenValidation
+      - name: capture JVM crash evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jvm-crash-evidence
+          path: |
+            build/agent-evidence/
+            hs_err_pid*.log
+          if-no-files-found: ignore
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:

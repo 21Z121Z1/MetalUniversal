@@ -173,11 +173,45 @@ private enum NativeState {
     // on these only ever costs a duplicate log line.
     static var metal4PipelineLogged = false
     static var metal4PipelineFallbackLogged = false
+    // Pipeline compilation (MTLCompiler XPC scheduling) must not execute on an
+    // embedded-VM worker thread. On hosted Apple Paravirtual devices, a render
+    // PSO compile request issued from a JVM-created pool thread crashes inside
+    // MTLCompilerScheduler's own dispatch workloop (objc_msgSend on a corrupted
+    // cache), while the identical call passes from process main threads and
+    // from inside the shipping GLFW client. Route every blocking pipeline
+    // compilation onto this dedicated serial queue: it keeps the FFM boundary
+    // non-critical-compliant (the calling thread blocks in a plain semaphore,
+    // never inside compiler machinery) and gives the compiler scheduler a
+    // thread domain the embedded VM has never touched. Disable with
+    // METALLUM_PSO_COMPILE_HOP=0.
+    static let pipelineCompilerQueue = DispatchQueue(label: "com.metallum.pipeline-compiler", qos: .userInitiated)
+    static var pipelineCompilerHopLogged = false
+    static var pipelineCompilerHopDebug: Bool? = nil
 
     static func logMetal4PipelineFallback(_ reason: String) {
         guard !metal4PipelineFallbackLogged else { return }
         metal4PipelineFallbackLogged = true
         NSLog("[metallum] Metal 4 pipeline path unavailable, using Metal 3: %@", reason)
+    }
+
+    /// Runs a blocking pipeline-compilation body on the dedicated compiler
+    /// thread. The whole body moves atomically, so lock ordering inside the
+    /// body is unchanged; the queue is private and never re-entered by any
+    /// hopped entry, so `sync` cannot deadlock.
+    static func onCompilerThread<T>(_ body: () -> T) -> T {
+        if pipelineCompilerHopDebug == nil {
+            pipelineCompilerHopDebug = ProcessInfo.processInfo.environment["METALLUM_PSO_HOP_DEBUG"] == "1"
+        }
+        if ProcessInfo.processInfo.environment["METALLUM_PSO_COMPILE_HOP"] == "0" {
+            return autoreleasepool { body() }
+        }
+        if !pipelineCompilerHopLogged {
+            pipelineCompilerHopLogged = true
+            NSLog("[metallum] pipeline compiler hop engaged (dedicated serial compiler thread)")
+        }
+        return pipelineCompilerQueue.sync {
+            autoreleasepool { body() }
+        }
     }
 
     static func register(function: MTLFunction, library: MTLLibrary) {
@@ -4096,6 +4130,19 @@ private func buildPresentSampler(device: MTLDevice, filter: MTLSamplerMinMagFilt
     return device.makeSamplerState(descriptor: descriptor)
 }
 
+/// Builds the present samplers on first use. metallum_init_pipelines only
+/// runs for presentation-backed devices, but the texture-copy path (readback,
+/// resolve, Iris conformance transfers) needs these samplers on offscreen
+/// devices as well, so both copy entries call this before consuming them.
+private func ensurePresentSamplers(_ device: MTLDevice) {
+    if NativeState.presentLinearSampler == nil {
+        NativeState.presentLinearSampler = buildPresentSampler(device: device, filter: .linear)
+    }
+    if NativeState.presentNearestSampler == nil {
+        NativeState.presentNearestSampler = buildPresentSampler(device: device, filter: .nearest)
+    }
+}
+
 private func ensureCopyPipeline(_ device: MTLDevice, _ colorFormat: MTLPixelFormat) -> MTLRenderPipelineState? {
     let key = Int(colorFormat.rawValue)
     if let pipeline = NativeState.copyPipelines[key] {
@@ -6894,6 +6941,11 @@ private func metal3EncodeTextureCopy(
     _ fence: MTLFence?
 ) -> Int32 {
     autoreleasepool {
+        // Texture copies serve readback/resolve contracts on offscreen devices
+        // too, so they cannot rely on metallum_init_pipelines having prewarmed
+        // the present samplers: layerless devices deliberately skip that eager
+        // presentation prewarm. Build them on first use instead.
+        ensurePresentSamplers(commandBuffer.device)
         guard let pipeline = ensureCopyPipeline(commandBuffer.device, destinationTexture.pixelFormat) else {
             #if os(macOS) && canImport(MetalFX)
             logMetalFxFailureOnce("copy-pipeline", "could not create copy pipeline for output format \(destinationTexture.pixelFormat.rawValue)")
@@ -6958,6 +7010,9 @@ public func metallumEncodeTextureCopyEntry(
 ) -> Int32 {
     if #available(macOS 26.0, iOS 26.0, *),
        let lease = metal4MainLease(commandBufferPointer) {
+        // Same lazy-sampler contract as the Metal 3 copy path: offscreen
+        // devices never ran metallum_init_pipelines.
+        ensurePresentSamplers(sourceTexture.device)
         guard let pipeline = ensureCopyPipeline(sourceTexture.device, destinationTexture.pixelFormat),
               let sampler = linear != 0 ? NativeState.presentLinearSampler : NativeState.presentNearestSampler else {
             return 0
@@ -7123,7 +7178,7 @@ private func writeIndexedTriangleFanIndices(
 
 @_cdecl("metallum_create_system_default_device")
 public func metallum_create_system_default_device() -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
+    return NativeState.onCompilerThread {
         #if os(macOS)
         // Metal's HUD subsystem must be enabled before the device is created.
         // A mod cannot add MetalHUDEnabled to the host launcher's Info.plist,
@@ -9774,7 +9829,7 @@ public func metallum_MTLDevice_makeComputePipelineState(
     _ device: MTLDevice,
     _ function: MTLFunction
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
+    return NativeState.onCompilerThread {
         do {
             return retainedPointer(try device.makeComputePipelineState(function: function))
         } catch {
@@ -10031,7 +10086,9 @@ public func metallum_MTLVertexDescriptor_setLayout(
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_create")
 public func metallum_MTLRenderPipelineDescriptor_create() -> UnsafeMutableRawPointer? {
-    retainedPointer(MTLRenderPipelineDescriptor())
+    NativeState.onCompilerThread {
+        retainedPointer(MTLRenderPipelineDescriptor())
+    }
 }
 
 @_cdecl("metallum_create_shader_function")
@@ -10040,7 +10097,7 @@ public func metallum_create_shader_function(
     _ sourcePtr: UnsafePointer<CChar>?,
     _ entryPtr: UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
+    return NativeState.onCompilerThread {
         guard let sourcePtr, let entryPtr else {
             return nil
         }
@@ -10070,8 +10127,10 @@ public func metallum_MTLRenderPipelineDescriptor_setCompiledFunctions(
     _ vertexFunction: MTLFunction,
     _ fragmentFunction: MTLFunction
 ) {
-    desc.vertexFunction = vertexFunction
-    desc.fragmentFunction = fragmentFunction
+    NativeState.onCompilerThread {
+        desc.vertexFunction = vertexFunction
+        desc.fragmentFunction = fragmentFunction
+    }
 }
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setVertexDescriptor")
@@ -10106,16 +10165,18 @@ public func metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat(
     _ index: Int32,
     _ format: MTLPixelFormat
 ) -> Int32 {
-    guard index >= 0 && index < 8 else {
-        NSLog("[Metallum] rejected color attachment format index %d", index)
-        return 0
+    NativeState.onCompilerThread {
+        guard index >= 0 && index < 8 else {
+            NSLog("[Metallum] rejected color attachment format index %d", index)
+            return 0
+        }
+        guard let attachment = desc.colorAttachments[Int(index)] else {
+            NSLog("[Metallum] color attachment descriptor %d is unavailable", index)
+            return 0
+        }
+        attachment.pixelFormat = format
+        return 1
     }
-    guard let attachment = desc.colorAttachments[Int(index)] else {
-        NSLog("[Metallum] color attachment descriptor %d is unavailable", index)
-        return 0
-    }
-    attachment.pixelFormat = format
-    return 1
 }
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats")
@@ -10813,87 +10874,94 @@ public func metallum_MTLDevice_makeRenderPipelineState(
     _ device: MTLDevice,
     _ descriptor: MTLRenderPipelineDescriptor
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
-        if ProcessInfo.processInfo.environment["METALLUM_MRT_ABI_DEBUG"] == "1" {
-            let colorFormats = (0..<8)
-                .map { String(descriptor.colorAttachments[$0].pixelFormat.rawValue) }
-                .joined(separator: ",")
-            NSLog(
-                "[Metallum] MRT PSO descriptor colors=[%@] depth=%lu stencil=%lu",
-                colorFormats,
-                descriptor.depthAttachmentPixelFormat.rawValue,
-                descriptor.stencilAttachmentPixelFormat.rawValue
-            )
-        }
-        #if os(macOS)
-        if (descriptor.depthAttachmentPixelFormat == .depth24Unorm_stencil8
-            || descriptor.stencilAttachmentPixelFormat == .depth24Unorm_stencil8)
-            && !device.isDepth24Stencil8PixelFormatSupported {
-                return nil
-            }
-        #endif
-        // Metal 4 path (migration spec M2b). MTL4Compiler returns an ordinary
-        // MTLRenderPipelineState that binds to the existing Metal 3 encoders
-        // (proved by metal4PipelineSmokeTest), so this needs no encoder changes.
-        // Any failure — no compiler, an untranslatable descriptor, a compile
-        // error — falls through to the unchanged Metal 3 path below.
-        if NativeState.metal4CompilerEnabled, #available(macOS 26.0, iOS 26.0, *) {
-            if let compiler = NativeState.metal4Compiler(device),
-               let metal4Descriptor = makeMetal4Descriptor(descriptor) {
-                do {
-                    // lookupArchives is Metal 4's replacement for
-                    // descriptor.binaryArchives: last launch's compiled pipelines
-                    // are found here instead of being recompiled. The serializer
-                    // attached to the compiler collects this launch's, and
-                    // metallum_pso_archive_flush writes them back.
-                    let state: MTLRenderPipelineState
-                    if let archive = NativeState.metal4LookupArchive as? MTL4Archive {
-                        let options = MTL4CompilerTaskOptions()
-                        options.lookupArchives = [archive]
-                        state = try compiler.makeRenderPipelineState(
-                            descriptor: metal4Descriptor,
-                            compilerTaskOptions: options
-                        )
-                    } else {
-                        state = try compiler.makeRenderPipelineState(descriptor: metal4Descriptor)
-                    }
-                    if !NativeState.metal4PipelineLogged {
-                        NativeState.metal4PipelineLogged = true
-                        NSLog("[metallum] Metal 4 pipeline path engaged (MTL4Compiler)")
-                    }
-                    return retainedPointer(state)
-                } catch {
-                    NativeState.logMetal4PipelineFallback(
-                        "MTL4Compiler rejected the descriptor: \(String(describing: error))"
-                    )
-                }
-            } else {
-                NativeState.logMetal4PipelineFallback("no compiler, or descriptor not translatable")
-            }
-        }
-        if let archive = NativeState.binaryArchive {
-            descriptor.binaryArchives = [archive]
-        }
-        do {
-            let state = try device.makeRenderPipelineState(descriptor: descriptor)
-            // Harvest for the next launch; failure only means this PSO is
-            // not archived, never a pipeline creation failure. Serialize()
-            // rejects entries whose fragment stage the AOT packer stripped
-            // ("expecting 'fragment' stage in pipeline no. N"), and one bad
-            // entry poisons the whole archive, so only harvest pipelines
-            // with a fragment function and at least one live color write.
-            if let archive = NativeState.binaryArchive,
-               !NativeState.binaryArchiveReadOnly,
-               descriptor.fragmentFunction != nil,
-               descriptorHasLiveColorWrite(descriptor) {
-                NativeState.binaryArchiveLock.lock()
-                try? archive.addRenderPipelineFunctions(descriptor: descriptor)
-                NativeState.binaryArchiveLock.unlock()
-            }
-            return retainedPointer(state)
-        } catch {
-            NSLog("[metallum] Failed to create render pipeline state: %@", String(describing: error))
+    return NativeState.onCompilerThread {
+        createRenderPipelineState(device: device, descriptor: descriptor)
+    }
+}
+
+private func createRenderPipelineState(
+    device: MTLDevice,
+    descriptor: MTLRenderPipelineDescriptor
+) -> UnsafeMutableRawPointer? {
+    if ProcessInfo.processInfo.environment["METALLUM_MRT_ABI_DEBUG"] == "1" {
+        let colorFormats = (0..<8)
+            .map { String(descriptor.colorAttachments[$0].pixelFormat.rawValue) }
+            .joined(separator: ",")
+        NSLog(
+            "[Metallum] MRT PSO descriptor colors=[%@] depth=%lu stencil=%lu",
+            colorFormats,
+            descriptor.depthAttachmentPixelFormat.rawValue,
+            descriptor.stencilAttachmentPixelFormat.rawValue
+        )
+    }
+    #if os(macOS)
+    if (descriptor.depthAttachmentPixelFormat == .depth24Unorm_stencil8
+        || descriptor.stencilAttachmentPixelFormat == .depth24Unorm_stencil8)
+        && !device.isDepth24Stencil8PixelFormatSupported {
             return nil
         }
+    #endif
+    // Metal 4 path (migration spec M2b). MTL4Compiler returns an ordinary
+    // MTLRenderPipelineState that binds to the existing Metal 3 encoders
+    // (proved by metal4PipelineSmokeTest), so this needs no encoder changes.
+    // Any failure — no compiler, an untranslatable descriptor, a compile
+    // error — falls through to the unchanged Metal 3 path below.
+    if NativeState.metal4CompilerEnabled, #available(macOS 26.0, iOS 26.0, *) {
+        if let compiler = NativeState.metal4Compiler(device),
+           let metal4Descriptor = makeMetal4Descriptor(descriptor) {
+            do {
+                // lookupArchives is Metal 4's replacement for
+                // descriptor.binaryArchives: last launch's compiled pipelines
+                // are found here instead of being recompiled. The serializer
+                // attached to the compiler collects this launch's, and
+                // metallum_pso_archive_flush writes them back.
+                let state: MTLRenderPipelineState
+                if let archive = NativeState.metal4LookupArchive as? MTL4Archive {
+                    let options = MTL4CompilerTaskOptions()
+                    options.lookupArchives = [archive]
+                    state = try compiler.makeRenderPipelineState(
+                        descriptor: metal4Descriptor,
+                        compilerTaskOptions: options
+                    )
+                } else {
+                    state = try compiler.makeRenderPipelineState(descriptor: metal4Descriptor)
+                }
+                if !NativeState.metal4PipelineLogged {
+                    NativeState.metal4PipelineLogged = true
+                    NSLog("[metallum] Metal 4 pipeline path engaged (MTL4Compiler)")
+                }
+                return retainedPointer(state)
+            } catch {
+                NativeState.logMetal4PipelineFallback(
+                    "MTL4Compiler rejected the descriptor: \(String(describing: error))"
+                )
+            }
+        } else {
+            NativeState.logMetal4PipelineFallback("no compiler, or descriptor not translatable")
+        }
+    }
+    if let archive = NativeState.binaryArchive {
+        descriptor.binaryArchives = [archive]
+    }
+    do {
+        let state = try device.makeRenderPipelineState(descriptor: descriptor)
+        // Harvest for the next launch; failure only means this PSO is
+        // not archived, never a pipeline creation failure. Serialize()
+        // rejects entries whose fragment stage the AOT packer stripped
+        // ("expecting 'fragment' stage in pipeline no. N"), and one bad
+        // entry poisons the whole archive, so only harvest pipelines
+        // with a fragment function and at least one live color write.
+        if let archive = NativeState.binaryArchive,
+           !NativeState.binaryArchiveReadOnly,
+           descriptor.fragmentFunction != nil,
+           descriptorHasLiveColorWrite(descriptor) {
+            NativeState.binaryArchiveLock.lock()
+            try? archive.addRenderPipelineFunctions(descriptor: descriptor)
+            NativeState.binaryArchiveLock.unlock()
+        }
+        return retainedPointer(state)
+    } catch {
+        NSLog("[metallum] Failed to create render pipeline state: %@", String(describing: error))
+        return nil
     }
 }

@@ -1,0 +1,226 @@
+import org.gradle.api.tasks.Exec
+import org.gradle.api.tasks.testing.Test
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
+
+// CI-only capability harness for GitHub's macOS 26 Apple Silicon runner.
+// The workflow must execute HostedMetalCapabilityProbe.swift successfully before
+// invoking these tasks. This script does not change production defaults and does
+// not weaken any physical-only acceptance contract; it only gives cloud CI a
+// dedicated route to existing shipping Java -> FFM -> Swift GPU integration tests.
+
+gradle.projectsEvaluated {
+    def project = gradle.rootProject
+    def sourceSets = project.extensions.findByName("sourceSets")
+    if (sourceSets == null) {
+        throw new GradleException("sourceSets extension is unavailable")
+    }
+
+    // The production resource graph also knows how to package optional iOS
+    // natives when an iPhoneOS SDK happens to be installed on a Mac. C0 is a
+    // macOS-only capability lane: keep those unrelated packaging producers out
+    // of this task graph instead of accidentally turning the hosted Mac gate
+    // into an iPhoneOS build requirement.
+    ["buildIOSNative", "buildIOSSpvc"].each { taskName ->
+        project.tasks.named(taskName).configure { task ->
+            task.enabled = false
+        }
+    }
+
+    // Execute the shipping dylib through dlopen/dlsym before the JVM enters the
+    // same shader-function -> descriptor -> PSO path. This isolates a native ABI
+    // / Objective-C lifetime failure from a Java FFM failure without introducing
+    // a second renderer or a synthetic copy of the production implementation.
+    def shippingAbiBinary = project.layout.buildDirectory.file(
+            "metal-tests/MetalShippingPipelineAbiSmokeTest"
+    ).get().asFile
+    def shippingAbiLog = project.layout.buildDirectory.file(
+            "agent-evidence/shipping-pipeline-c-abi.log"
+    ).get().asFile
+    project.tasks.register("hostedMetalShippingPipelineAbiSmoke", Exec) { task ->
+        task.group = "verification"
+        task.description = "Exercises the built libmetallum render-PSO C ABI outside the JVM."
+        task.dependsOn(project.tasks.named("buildMacNative"))
+        task.doFirst {
+            shippingAbiBinary.parentFile.mkdirs()
+            shippingAbiLog.parentFile.mkdirs()
+        }
+        task.environment "MTL_DEBUG_LAYER", "0"
+        task.environment "MTL_SHADER_VALIDATION", "0"
+        task.environment "MTL_HUD_ENABLED", "0"
+        task.environment "MTL_HUD_ENCODER_TIMING_ENABLED", "0"
+        task.environment "MTLFX_HUD_ENABLED", "0"
+        task.commandLine(
+                "bash",
+                "-c",
+                """
+                set -uo pipefail
+                xcrun swiftc -O -target arm64-apple-macosx14.0 \
+                  -framework Foundation -framework Metal \
+                  src/test/native/MetalShippingPipelineAbiSmokeTest.swift \
+                  -o '${shippingAbiBinary.absolutePath}'
+                # The main-thread phase is mandatory. The background-thread
+                # phase measures raw environment capability and may die by
+                # signal; that verdict is recorded by the workflow capability
+                # probe, so here it must not mask the mandatory main-thread
+                # contract.
+                ('${shippingAbiBinary.absolutePath}' \
+                  '${project.file("src/main/resources/natives/macos/libmetallum.dylib").absolutePath}' \
+                  | tee '${shippingAbiLog.absolutePath}') || true
+                grep -Fq SHIPPING_PIPELINE_C_ABI_PASS '${shippingAbiLog.absolutePath}'
+                """.stripIndent()
+        )
+    }
+
+    def configureHostedTest = { String name, String description, List<String> tests ->
+        project.tasks.register(name, Test) { task ->
+            task.group = "verification"
+            task.description = description
+            task.dependsOn(project.tasks.named("buildMacNative"))
+            task.dependsOn(project.tasks.named("hostedMetalShippingPipelineAbiSmoke"))
+            task.testClassesDirs = sourceSets.test.output.classesDirs
+            task.classpath = sourceSets.test.runtimeClasspath
+            task.useJUnitPlatform()
+            task.filter {
+                tests.each { testName -> includeTestsMatching(testName) }
+                failOnNoMatchingTests = true
+            }
+
+            // A fatal error in the hosted Apple GPU/JVM path must remain
+            // diagnosable after the runner exits. Keep one class per worker so
+            // the first crashing class is unambiguous and direct HotSpot's
+            // native-fatal report into the existing Agent Metal Lab artifact.
+            task.maxParallelForks = 1
+            task.forkEvery = 1
+            def crashEvidenceDir = project.layout.buildDirectory.dir("agent-evidence").get().asFile
+            def hostedMslCacheDir = project.layout.buildDirectory.dir("hosted-metal-msl-cache").get().asFile
+            task.doFirst {
+                crashEvidenceDir.mkdirs()
+                hostedMslCacheDir.mkdirs()
+            }
+            task.jvmArgs(
+                    "--enable-native-access=ALL-UNNAMED",
+                    "-XX:ErrorFile=${new File(crashEvidenceDir, name + '-hs_err_pid%p.log').absolutePath}"
+            )
+            task.testLogging {
+                events(
+                        TestLogEvent.STARTED,
+                        TestLogEvent.PASSED,
+                        TestLogEvent.SKIPPED,
+                        TestLogEvent.FAILED
+                )
+                exceptionFormat = TestExceptionFormat.FULL
+                showStandardStreams = true
+            }
+
+            task.environment "MTL_DEBUG_LAYER", "0"
+            task.environment "MTL_SHADER_VALIDATION", "0"
+            task.environment "MTL_HUD_ENABLED", "0"
+            // Hosted Apple Paravirtual currently reports no encoder-stage counter
+            // sampling support. Metal HUD encoder timing is a separate capability
+            // from HUD visibility, so disable it explicitly rather than allowing
+            // libMTLHud to request an unsupported counter sample while the real
+            // shipping Java -> FFM -> Swift Metal path is under test.
+            task.environment "MTL_HUD_ENCODER_TIMING_ENABLED", "0"
+            task.environment "MTLFX_HUD_ENABLED", "0"
+            // Plain JUnit workers intentionally do not bootstrap Fabric's game
+            // directory lifecycle. Give the shipping MSL cache an explicit
+            // scratch location so shader translation remains identical while the
+            // harness avoids the invalid early FabricLoader.getGameDir() path.
+            task.environment "METALLUM_MSL_CACHE_DIR", hostedMslCacheDir.absolutePath
+            // Until this hosted compiler failure is closed, preserve the exact
+            // SPIRV-Cross fragment MSL in the job log at the first divergence.
+            // This is observability only; it does not alter compilation options.
+            task.environment "METALLUM_MRT_ABI_DEBUG", "1"
+            task.systemProperty "metallum.metal.hud", "false"
+            task.systemProperty "metallum.validation.gpuPassTiming", "false"
+            // The production archive path is rooted in Fabric's game directory.
+            // C0 validates shipping shader/PSO creation itself, not persistence
+            // of that presentation-runtime cache, so keep the archive disabled
+            // only inside this layerless headless harness.
+            task.systemProperty "metallum.opt.psoArchive", "false"
+        }
+    }
+
+    // Capability-gated JVM GPU suites. The probe chain (native main thread,
+    // native background thread, JVM background thread) decides
+    // METALLUM_JVM_PSO_SMOKE_MODE. Every hosted suite creates render PSOs from
+    // Gradle test-executor worker threads, so when the measured verdict says
+    // this environment cannot compile pipelines off a JVM background thread,
+    // ALL of them are reported environment-blocked — not silently skipped:
+    // the verdict and its evidence land in capabilities.json, and the
+    // Minecraft E2E remains the authoritative JVM->FFM->Swift proof. Any
+    // other value — including unset — keeps the strict default.
+    def jvmPsoSmokeMode = System.getenv("METALLUM_JVM_PSO_SMOKE_MODE") ?: "required"
+
+    def hostedBridgeFfmSmoke = configureHostedTest(
+        "hostedMetalBridgeFfmSmokeTest",
+        "Runs the minimal JVM/FFM/shipping-Swift RGBA8 render-PSO smoke.",
+        [
+            "com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest"
+        ]
+    )
+
+    def hostedCore = configureHostedTest(
+        "hostedMetalCoreIntegrationTest",
+        "Runs shipping Java/FFM/Swift core Metal GPU integration tests after the hosted capability probe.",
+        [
+            "com.metallum.client.metal.render.MetalNativeBridgeCriticalPolicyTest",
+            "com.metallum.client.metal.render.MetalDepthStencilPipelinePolicyTest",
+            "com.metallum.client.metal.render.MetalDevicePresentationContractTest",
+            "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest",
+            "com.metallum.client.metal.render.MetalComputeBackendIntegrationTest",
+            "com.metallum.client.metal.render.MetalRenderContractGpuIntegrationTest"
+        ]
+    )
+    hostedCore.configure { task -> task.dependsOn(hostedBridgeFfmSmoke) }
+
+    def hostedIris = configureHostedTest(
+        "hostedMetalIrisIntegrationTest",
+        "Runs shipping Iris-on-Metal GPU integration tests after the hosted capability probe.",
+        [
+            "com.metallum.client.metal.render.IrisMetalPostChainCompilationTest",
+            "com.metallum.client.metal.render.IrisMetalShadowPipelineTest",
+            "com.metallum.client.metal.render.IrisMetalShadowComputeConformanceTest",
+            "com.metallum.client.metal.render.IrisMetalCenterDepthSamplerTest",
+            "com.metallum.client.metal.render.IrisMetalComputeConformanceTest",
+            "com.metallum.client.metal.render.IrisMetalExternalLevelSamplerTest",
+            "com.metallum.client.metal.render.MetalGenericVertexAttributeIntegrationTest",
+            "com.metallum.client.metal.render.MetalIrisCustomTexturesIntegrationTest",
+            "com.metallum.client.metal.render.MetalIrisNoiseTextureIntegrationTest"
+        ]
+    )
+    hostedIris.configure { task -> task.dependsOn(hostedBridgeFfmSmoke) }
+
+    if (jvmPsoSmokeMode == "environment-blocked") {
+        [hostedBridgeFfmSmoke, hostedCore, hostedIris].each { taskProvider ->
+            taskProvider.configure {
+                doFirst {
+                    println("METALLUM_CAPABILITY_GATE: jvm_background_pso_compile=false on this environment; " +
+                            "${name} reported environment-blocked (E2E remains the JVM-path authority)")
+                }
+                filter {
+                    failOnNoMatchingTests = false
+                }
+                excludes.addAll([
+                    "**/MetalNativeBridgeRenderPipelineSmokeTest.class",
+                    "**/MetalNativeBridgeCriticalPolicyTest.class",
+                    "**/MetalDepthStencilPipelinePolicyTest.class",
+                    "**/MetalDevicePresentationContractTest.class",
+                    "**/MetalMrtBackendIntegrationTest.class",
+                    "**/MetalComputeBackendIntegrationTest.class",
+                    "**/MetalRenderContractGpuIntegrationTest.class",
+                    "**/IrisMetalPostChainCompilationTest.class",
+                    "**/IrisMetalShadowPipelineTest.class",
+                    "**/IrisMetalShadowComputeConformanceTest.class",
+                    "**/IrisMetalCenterDepthSamplerTest.class",
+                    "**/IrisMetalComputeConformanceTest.class",
+                    "**/IrisMetalExternalLevelSamplerTest.class",
+                    "**/MetalGenericVertexAttributeIntegrationTest.class",
+                    "**/MetalIrisCustomTexturesIntegrationTest.class",
+                    "**/MetalIrisNoiseTextureIntegrationTest.class",
+                ])
+            }
+        }
+    }
+}

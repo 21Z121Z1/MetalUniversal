@@ -25,6 +25,14 @@ public final class MTLRenderPipelineDescriptor implements AutoCloseable {
     }
 
     public void setVertexDescriptor(final MTLVertexDescriptor vertexDescriptor) {
+        // Metal's vertexDescriptor is optional and only describes per-vertex
+        // stage-in data. Keep the native descriptor at its default nil value
+        // when the Java-side layout builder found no physical or generic
+        // vertex attributes instead of attaching an allocated-but-empty
+        // MTLVertexDescriptor.
+        if (vertexDescriptor.isEmpty()) {
+            return;
+        }
         MetalNativeBridge.metallum_MTLRenderPipelineDescriptor_setVertexDescriptor(
                 this.handle,
                 vertexDescriptor.handle()

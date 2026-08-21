@@ -163,6 +163,10 @@ final class MetalDevice implements GpuDeviceBackend {
         }
     }
 
+    static boolean hasPresentationLayer(@Nullable final MemorySegment metalLayer) {
+        return metalLayer != null && metalLayer.address() != 0L;
+    }
+
     MetalDevice(
             final ShaderSource defaultShaderSource,
             final GpuDebugOptions debugOptions,
@@ -176,6 +180,7 @@ final class MetalDevice implements GpuDeviceBackend {
         this.metalDeviceHandle = metalDeviceHandle;
         this.metalLayer = metalLayer;
         this.cocoaView = cocoaView;
+        final boolean presentationBacked = hasPresentationLayer(metalLayer);
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
         this.metal4Available = METAL4_REQUESTED
@@ -198,7 +203,15 @@ final class MetalDevice implements GpuDeviceBackend {
                 ) == 0) {
             throw new IllegalStateException("Metal 4 main renderer initialization failed");
         }
-        MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
+        // metallum_init_pipelines eagerly builds the swapchain/present PSO and
+        // associated presentation samplers. An offscreen MetalDevice has no
+        // CAMetalLayer by contract, so do not initialize presentation-only state
+        // for it. Render/compute pipelines continue to compile through their
+        // normal lazy shipping paths; production devices with a real layer keep
+        // the existing eager presentation prewarm unchanged.
+        if (presentationBacked) {
+            MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
+        }
         // Must agree with MetalCommandEncoder.DEFERRED_DEPTH_STORE before the
         // first render encoder: the native side only sets storeAction=.unknown
         // (which Java must then resolve before endEncoding) when enabled.
@@ -271,7 +284,12 @@ final class MetalDevice implements GpuDeviceBackend {
                 genericVertexAttributeDefaults()
         );
         current = this;
-        MetalFxManager.initialize(this);
+        // MetalFX owns presentation/HUD/frame-generation state. It is not part
+        // of a layerless offscreen device's resource graph and its startup path
+        // requires a real CAMetalLayer.
+        if (presentationBacked) {
+            MetalFxManager.initialize(this);
+        }
     }
 
     /** Current source chain used by lazy PSO compilation; package seam for generated Iris stages. */
