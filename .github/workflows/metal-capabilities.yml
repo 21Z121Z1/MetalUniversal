@@ -371,7 +371,15 @@ jobs:
           token = os.environ.get("GH_TOKEN", "")
 
           def load_latest_required():
-              query = urllib.parse.urlencode({"head_sha": source_sha, "event": "pull_request", "per_page": 100})
+              # Match the runs for THIS event context: pull_request events
+              # produce PR-scoped runs, pushes to canonical branches produce
+              # push-scoped runs. A hardcoded event name leaves one of the two
+              # contexts permanently unable to observe its authority runs.
+              query = urllib.parse.urlencode({
+                  "head_sha": source_sha,
+                  "event": os.environ.get("GITHUB_EVENT_NAME", "push"),
+                  "per_page": 100,
+              })
               request = urllib.request.Request(
                   f"https://api.github.com/repos/{repository}/actions/runs?{query}",
                   headers={

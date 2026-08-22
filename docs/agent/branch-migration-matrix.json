@@ -328,6 +328,18 @@
         "metal-capabilities stage decision gate"
       ],
       "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; decouples the PR merge check from branch pushes"
+    },
+    {
+      "branch": "fix/ci-canonical-push-authority-gate",
+      "role": "canonical-ci-hotfix",
+      "stages": [
+        "C0"
+      ],
+      "components": [
+        "authority workflow push triggers",
+        "stage decision event-scoped run query"
+      ],
+      "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; canonical pushes must run and observe their own authority workflows"
     }
   ]
 }
