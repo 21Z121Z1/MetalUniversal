@@ -365,6 +365,18 @@
     "evidence-honest kill accounting"
    ],
    "disposition": "subsumed-by-canonical (PR #33)"
+  },
+  {
+   "branch": "chore/p2-stage-decision",
+   "role": "canonical-stage-bookkeeping",
+   "stages": [
+    "P2"
+   ],
+   "components": [
+    "machine-readable P2 stage decision",
+    "subsumed-by-canonical dispositions for merged P2 branches"
+   ],
+   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; documentation only"
   }
  ]
 }
