@@ -1,93 +1,137 @@
 {
-  "schema_version": 1,
-  "program": "cloud-first-metal-consolidation",
-  "canonical_branch": "integration/iris-metal-next",
-  "program_branch": "agent/metal-eval-v3",
-  "platform_scope": {
-    "primary": "macOS Apple Silicon",
-    "amethyst_specific_compatibility": false,
-    "ios_specific_adaptation": false
-  },
-  "principles": {
-    "consolidation_before_invention": true,
-    "cloud_validation_before_final_physical_acceptance": true,
-    "physical_acceptance_is_deferred_not_waived": true,
-    "old_branch_wholesale_merge_forbidden": true,
-    "current_exact_sha_evidence_required": true,
-    "skipped_or_cancelled_required_gate_is_pass": false,
-    "unsupported_capability_is_pass": false
-  },
-  "stage_model": {
-    "cloud_stage_complete_requires": [
-      "implementation scope complete",
-      "focused tests pass",
-      "shipping native ABI compiles",
-      "GitHub Actions required jobs pass on exact stage SHA",
-      "hosted Metal activation/readback passes where capability exists",
-      "machine-readable evidence is emitted",
-      "no unresolved cloud-testable correctness blocker"
-    ],
-    "program_complete_requires": [
-      "all cloud stages complete",
-      "final physical Apple Silicon correctness matrix pass",
-      "final physical Apple Silicon performance matrix pass",
-      "presentation/reload/lifetime validation pass",
-      "no unresolved physical-only blocker"
-    ],
-    "allowed_statuses": [
-      "CLOUD_INCOMPLETE",
-      "CLOUD_COMPLETE_FINAL_PHYSICAL_PENDING",
-      "PHYSICAL_ACCEPTED"
-    ]
-  },
-  "p1_state": {
-    "merged_commit": "31853a506b08e7666016497f8732c0dca3f347c8",
-    "code_merged": true,
-    "physical_acceptance_contract": "docs/agent/metal4-main-production-acceptance.json",
-    "physical_acceptance_pending": true,
-    "default_enablement_allowed": false,
-    "note": "P1 physical Metal 4 + MTLResidencySet and V1/I0/I1 acceptance remains a final production gate. Cloud continuation does not weaken or replace it."
-  },
-  "cloud_sequence": [
-    "C0-agent-metal-lab",
-    "P2-iris-tbdr-render-graph-v3",
-    "P3-token-native-bulk-argument-patch",
-    "P4-terrain-gpu-scene",
-    "P5-canonical-cpu-terrain-icb",
-    "P6-gpu-visibility-and-icb-generation",
-    "P7-ttfv-predictive-streaming",
-    "P8-streaming-residency",
-    "P9-placement-sparse-backend",
-    "P10-gpu-ready-terrain-cache-metalio",
-    "P11-shader-pso-pipeline",
-    "P12-metalfx-frame-pacing",
-    "F0-final-physical-acceptance"
+ "schema_version": 1,
+ "program": "cloud-first-metal-consolidation",
+ "canonical_branch": "integration/iris-metal-next",
+ "program_branch": "agent/metal-eval-v3",
+ "platform_scope": {
+  "primary": "macOS Apple Silicon",
+  "amethyst_specific_compatibility": false,
+  "ios_specific_adaptation": false
+ },
+ "principles": {
+  "consolidation_before_invention": true,
+  "cloud_validation_before_final_physical_acceptance": true,
+  "physical_acceptance_is_deferred_not_waived": true,
+  "old_branch_wholesale_merge_forbidden": true,
+  "current_exact_sha_evidence_required": true,
+  "skipped_or_cancelled_required_gate_is_pass": false,
+  "unsupported_capability_is_pass": false
+ },
+ "stage_model": {
+  "cloud_stage_complete_requires": [
+   "implementation scope complete",
+   "focused tests pass",
+   "shipping native ABI compiles",
+   "GitHub Actions required jobs pass on exact stage SHA",
+   "hosted Metal activation/readback passes where capability exists",
+   "machine-readable evidence is emitted",
+   "no unresolved cloud-testable correctness blocker"
   ],
-  "current_stage": {
-    "name": "C0-agent-metal-lab",
-    "status": "CLOUD_INCOMPLETE",
-    "branch": "agent/metal-eval-v3",
-    "goals": [
-      "restore proven hosted macOS Metal compute/readback capability signal",
-      "create Mac-only capability-driven cloud workflow",
-      "emit structured agent evidence",
-      "record all reusable branch sources in a migration matrix",
-      "keep physical-only requirements explicit and fail-closed"
+  "program_complete_requires": [
+   "all cloud stages complete",
+   "final physical Apple Silicon correctness matrix pass",
+   "final physical Apple Silicon performance matrix pass",
+   "presentation/reload/lifetime validation pass",
+   "no unresolved physical-only blocker"
+  ],
+  "allowed_statuses": [
+   "CLOUD_INCOMPLETE",
+   "CLOUD_COMPLETE_FINAL_PHYSICAL_PENDING",
+   "PHYSICAL_ACCEPTED"
+  ]
+ },
+ "p1_state": {
+  "merged_commit": "31853a506b08e7666016497f8732c0dca3f347c8",
+  "code_merged": true,
+  "physical_acceptance_contract": "docs/agent/metal4-main-production-acceptance.json",
+  "physical_acceptance_pending": true,
+  "default_enablement_allowed": false,
+  "note": "P1 physical Metal 4 + MTLResidencySet and V1/I0/I1 acceptance remains a final production gate. Cloud continuation does not weaken or replace it."
+ },
+ "cloud_sequence": [
+  "C0-agent-metal-lab",
+  "P2-iris-tbdr-render-graph-v3",
+  "P3-token-native-bulk-argument-patch",
+  "P4-terrain-gpu-scene",
+  "P5-canonical-cpu-terrain-icb",
+  "P6-gpu-visibility-and-icb-generation",
+  "P7-ttfv-predictive-streaming",
+  "P8-streaming-residency",
+  "P9-placement-sparse-backend",
+  "P10-gpu-ready-terrain-cache-metalio",
+  "P11-shader-pso-pipeline",
+  "P12-metalfx-frame-pacing",
+  "F0-final-physical-acceptance"
+ ],
+ "current_stage": {
+  "name": "P2-iris-tbdr-render-graph-v3",
+  "status": "CLOUD_COMPLETE_FINAL_PHYSICAL_PENDING",
+  "branch": "integration/iris-metal-next",
+  "merged_sub_stages": [
+   {
+    "pr": 29,
+    "scope": [
+     "C0-agent-metal-lab"
+    ],
+    "merged_commit_sha_recorded_in_git_history": "78f189d2d5d42aefd9f6cc17434db85c84fdc44a"
+   },
+   {
+    "pr": 30,
+    "scope": [
+     "P2.0 IrisGraphBench shipping-path oracle + rendergraph.json baseline",
+     "P2.1 RenderPassDescriptorV3 ABI with per-attachment load/store actions"
     ]
-  },
-  "final_physical_acceptance": {
-    "performed_after_cloud_program": true,
-    "must_include": [
-      "P1 Metal 4 + MTLResidencySet exact-bit correctness",
-      "V1 Sodium paired performance",
-      "I0 Iris Potato paired performance",
-      "I1 Iris BSL paired performance",
-      "normal WindowServer presentation",
-      "framebuffer/readback equivalence",
-      "resource reload recovery",
-      "GPU completion and retirement",
-      "Metal API Validation",
-      "longer-run memory/frame-pacing checks for stages that introduce streaming or new resource lifetime models"
+   },
+   {
+    "pr": 31,
+    "scope": [
+     "ci: derive the PR merge gate from the triggering event"
     ]
-  }
+   },
+   {
+    "pr": 32,
+    "scope": [
+     "ci: run and observe authority workflows on canonical pushes"
+    ]
+   },
+   {
+    "pr": 33,
+    "scope": [
+     "P2.2 killed deferred depth stores",
+     "P2.3 real deferred color store suppression with evidence-honest kill accounting"
+    ]
+   },
+   {
+    "pr": 34,
+    "scope": [
+     "P2.4 consumer-liveness contracts: depth capture, readback negative control, present boundary"
+    ]
+   }
+  ],
+  "closed_by_analysis": [
+   "load-action policy below LOAD/CLEAR floor is unprovable in this architecture: draws submit after encoder begin, so full-overwrite-before-any-read cannot be proven at descriptor time; explicit CLEAR remains the only admitted DONT_CARE-load proof",
+   "native pass reduction already exists as same-attachment encoder reuse with encodersReused telemetry; deeper fusion would require merging work across RAW/WAR/WAW boundaries which repository invariants forbid"
+  ],
+  "deferred_non_blocking_follow_ups": [
+   "optional full-frame dead-attachment store suppression beyond adjacency-window proofs (never required by the stage contract)"
+  ],
+  "physical_only_items": [
+   "final Apple Silicon presentation/reload equivalence covered by F0"
+  ]
+ },
+ "final_physical_acceptance": {
+  "performed_after_cloud_program": true,
+  "must_include": [
+   "P1 Metal 4 + MTLResidencySet exact-bit correctness",
+   "V1 Sodium paired performance",
+   "I0 Iris Potato paired performance",
+   "I1 Iris BSL paired performance",
+   "normal WindowServer presentation",
+   "framebuffer/readback equivalence",
+   "resource reload recovery",
+   "GPU completion and retirement",
+   "Metal API Validation",
+   "longer-run memory/frame-pacing checks for stages that introduce streaming or new resource lifetime models"
+  ]
+ }
 }

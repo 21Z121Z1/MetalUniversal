@@ -1,347 +1,347 @@
 {
-  "schema_version": 2,
-  "canonical_branch": "integration/iris-metal-next",
-  "canonical_sha_at_creation": "31853a506b08e7666016497f8732c0dca3f347c8",
-  "policy": {
-    "wholesale_merge_from_diverged_source": false,
-    "selective_port_requires_source_sha": true,
-    "selective_port_requires_tests": true,
-    "selective_port_requires_current_canonical_equivalent_review": true,
-    "amethyst_specific_compatibility": false,
-    "ios_specific_adaptation": false
+ "schema_version": 2,
+ "canonical_branch": "integration/iris-metal-next",
+ "canonical_sha_at_creation": "31853a506b08e7666016497f8732c0dca3f347c8",
+ "policy": {
+  "wholesale_merge_from_diverged_source": false,
+  "selective_port_requires_source_sha": true,
+  "selective_port_requires_tests": true,
+  "selective_port_requires_current_canonical_equivalent_review": true,
+  "amethyst_specific_compatibility": false,
+  "ios_specific_adaptation": false
+ },
+ "migration_records": [
+  {
+   "source_branch": "master",
+   "source_sha": "6a8ef77d8fe7b960bc09275533991c05d3588204",
+   "destination_branch": "agent/metal-eval-v3",
+   "destination_stage": "C0-agent-metal-lab",
+   "files_components_selected": [
+    "repository-owned HostedMetalCapabilityProbe compute/readback contract",
+    "hosted macOS Apple Silicon offscreen Metal execution pattern"
+   ],
+   "files_components_deliberately_omitted": [
+    "iPhoneOS and iOS Simulator jobs",
+    "Amethyst runtime and Agent chain",
+    "MobileGL command-packet and terrain-ICB implementation",
+    "MobileGL residency and performance implementation"
+   ],
+   "current_canonical_equivalent_reviewed": true,
+   "canonical_equivalent": "integration/iris-metal-next P0/P1 production E2E, framebuffer, presentation, reload, and Metal 4 contracts",
+   "tests_migrated": [],
+   "tests_newly_added": [
+    "MetalDevicePresentationContractTest"
+   ],
+   "existing_tests_reused": [
+    "MetalMrtBackendIntegrationTest",
+    "MetalComputeBackendIntegrationTest",
+    "MetalRenderContractGpuIntegrationTest",
+    "IrisMetalPostChainCompilationTest",
+    "IrisMetalShadowPipelineTest",
+    "IrisMetalShadowComputeConformanceTest",
+    "IrisMetalCenterDepthSamplerTest",
+    "IrisMetalComputeConformanceTest",
+    "IrisMetalExternalLevelSamplerTest",
+    "MetalGenericVertexAttributeIntegrationTest",
+    "MetalIrisCustomTexturesIntegrationTest",
+    "MetalIrisNoiseTextureIntegrationTest"
+   ],
+   "runtime_evidence": [
+    "agent-evidence/environment.json",
+    "agent-evidence/capabilities.json",
+    "agent-evidence/correctness.json",
+    "agent-evidence/activation.json",
+    "agent-evidence/decision.json"
+   ],
+   "performance_evidence": null,
+   "known_deferred_physical_only_checks": [
+    "P1 physical Metal 4 and MTLResidencySet correctness",
+    "P1 V1/I0/I1 paired physical performance",
+    "final visible-window Apple Silicon acceptance"
+   ]
+  }
+ ],
+ "branches": [
+  {
+   "branch": "agent/metal-eval-v3",
+   "role": "active-stage-branch",
+   "stages": [
+    "C0"
+   ],
+   "disposition": "bounded-c0-only; merge-to-canonical-only-after-exact-head-gates-pass"
   },
-  "migration_records": [
-    {
-      "source_branch": "master",
-      "source_sha": "6a8ef77d8fe7b960bc09275533991c05d3588204",
-      "destination_branch": "agent/metal-eval-v3",
-      "destination_stage": "C0-agent-metal-lab",
-      "files_components_selected": [
-        "repository-owned HostedMetalCapabilityProbe compute/readback contract",
-        "hosted macOS Apple Silicon offscreen Metal execution pattern"
-      ],
-      "files_components_deliberately_omitted": [
-        "iPhoneOS and iOS Simulator jobs",
-        "Amethyst runtime and Agent chain",
-        "MobileGL command-packet and terrain-ICB implementation",
-        "MobileGL residency and performance implementation"
-      ],
-      "current_canonical_equivalent_reviewed": true,
-      "canonical_equivalent": "integration/iris-metal-next P0/P1 production E2E, framebuffer, presentation, reload, and Metal 4 contracts",
-      "tests_migrated": [],
-      "tests_newly_added": [
-        "MetalDevicePresentationContractTest"
-      ],
-      "existing_tests_reused": [
-        "MetalMrtBackendIntegrationTest",
-        "MetalComputeBackendIntegrationTest",
-        "MetalRenderContractGpuIntegrationTest",
-        "IrisMetalPostChainCompilationTest",
-        "IrisMetalShadowPipelineTest",
-        "IrisMetalShadowComputeConformanceTest",
-        "IrisMetalCenterDepthSamplerTest",
-        "IrisMetalComputeConformanceTest",
-        "IrisMetalExternalLevelSamplerTest",
-        "MetalGenericVertexAttributeIntegrationTest",
-        "MetalIrisCustomTexturesIntegrationTest",
-        "MetalIrisNoiseTextureIntegrationTest"
-      ],
-      "runtime_evidence": [
-        "agent-evidence/environment.json",
-        "agent-evidence/capabilities.json",
-        "agent-evidence/correctness.json",
-        "agent-evidence/activation.json",
-        "agent-evidence/decision.json"
-      ],
-      "performance_evidence": null,
-      "known_deferred_physical_only_checks": [
-        "P1 physical Metal 4 and MTLResidencySet correctness",
-        "P1 V1/I0/I1 paired physical performance",
-        "final visible-window Apple Silicon acceptance"
-      ]
-    }
-  ],
-  "branches": [
-    {
-      "branch": "agent/metal-eval-v3",
-      "role": "active-stage-branch",
-      "stages": [
-        "C0"
-      ],
-      "disposition": "bounded-c0-only; merge-to-canonical-only-after-exact-head-gates-pass"
-    },
-    {
-      "branch": "integration/iris-metal-next",
-      "role": "canonical",
-      "stages": [
-        "P0",
-        "P1-merged"
-      ],
-      "disposition": "continue-from-here"
-    },
-    {
-      "branch": "feature/metal4-main-production",
-      "role": "merged-p1-source",
-      "stages": [
-        "P1"
-      ],
-      "disposition": "subsumed-by-canonical",
-      "note": "PR #28 merged as 31853a506b08e7666016497f8732c0dca3f347c8; do not continue development here."
-    },
-    {
-      "branch": "feature/p2-tbdr-attachment-compiler",
-      "role": "active-stage-branch",
-      "stages": [
-        "P2"
-      ],
-      "components": [
-        "IrisGraphBench shipping-path oracle",
-        "RenderPassDescriptorV3 per-attachment actions",
-        "killed-store telemetry",
-        "framebuffer equivalence evidence"
-      ],
-      "disposition": "merge-to-canonical-only-after-exact-head-gates-pass"
-    },
-    {
-      "branch": "feature/token-native-private-bindings",
-      "role": "migration-source",
-      "stages": [
-        "P3a"
-      ],
-      "components": [
-        "MetalBindingToken private producer path",
-        "dense binding slots",
-        "pass-local token binding session",
-        "focused binding tests"
-      ],
-      "disposition": "selective-replay-after-current-canonical-review"
-    },
-    {
-      "branch": "fix/metal4-arena-lifetime",
-      "role": "migration-source",
-      "stages": [
-        "P4"
-      ],
-      "components": [
-        "TerrainMeshGeneration",
-        "generation ownership",
-        "arena lifetime safety",
-        "focused terrain-generation tests"
-      ],
-      "disposition": "selective-port"
-    },
-    {
-      "branch": "feature/iris-semantic-completion",
-      "role": "deep-migration-source",
-      "stages": [
-        "P2"
-      ],
-      "components": [
-        "IrisMetalExecutionGraph",
-        "IrisMetalRenderPassMetadata",
-        "ping-pong semantics",
-        "shadow/target semantics",
-        "runtime receipts",
-        "semantic tests"
-      ],
-      "disposition": "mine-contracts-and-tests-only-no-wholesale-merge"
-    },
-    {
-      "branch": "research/iris-semantic-contracts-alt",
-      "role": "secondary-research-source",
-      "stages": [
-        "P2"
-      ],
-      "disposition": "consult-only-when-primary-semantic-source-lacks-contract"
-    },
-    {
-      "branch": "master",
-      "role": "validated-mobilegl-migration-source",
-      "stages": [
-        "C0",
-        "P5",
-        "P8",
-        "P11"
-      ],
-      "components": [
-        "command packets",
-        "real terrain ICB",
-        "residency lifetime",
-        "hosted Metal capability CI",
-        "pipeline prewarm",
-        "FFM telemetry"
-      ],
-      "disposition": "selective-port-only-no-wholesale-merge"
-    },
-    {
-      "branch": "codex/autonomous-metal-next-20260813",
-      "role": "late-mobilegl-migration-source",
-      "stages": [
-        "C0",
-        "P5",
-        "P11"
-      ],
-      "components": [
-        "hosted performance experiment",
-        "HostedMetalStateSubmissionBenchmark",
-        "HostedMetalStatePathPairedBenchmark",
-        "performance analyzer",
-        "command packets",
-        "terrain ICB"
-      ],
-      "disposition": "selective-port"
-    },
-    {
-      "branch": "codex/bsl-metalfx-framegen-cutout-20260813",
-      "role": "advanced-metalfx-source",
-      "stages": [
-        "P12"
-      ],
-      "components": [
-        "IrisMetalCutoutCoverageRuntime",
-        "IrisMetalFxFrameHandoff",
-        "IrisMetalHandCoverageRuntime",
-        "reactive cutout path"
-      ],
-      "disposition": "defer-until-p12-selective-port"
-    },
-    {
-      "branch": "codex/p1-binding-shadow-safe",
-      "role": "contract-test-source",
-      "stages": [
-        "P3"
-      ],
-      "components": [
-        "binding state safety",
-        "state shadow contracts",
-        "attachment signature allocation tests"
-      ],
-      "disposition": "tests-and-invariants-only"
-    },
-    {
-      "branch": "codex/p1-uniform-token-ci",
-      "role": "contract-test-source",
-      "stages": [
-        "P3"
-      ],
-      "components": [
-        "uniform token lookup contract tests"
-      ],
-      "disposition": "tests-and-invariants-only"
-    },
-    {
-      "branch": "codex/autonomous-metal-next",
-      "role": "older-mobilegl-source",
-      "stages": [
-        "C0",
-        "P3",
-        "P5"
-      ],
-      "disposition": "secondary-source-mostly-subsumed-by-later-lineage"
-    },
-    {
-      "branch": "ci/minecraft-client-e2e-p0-20260819",
-      "role": "subsumed",
-      "stages": [
-        "P0"
-      ],
-      "disposition": "no-migration-needed"
-    },
-    {
-      "branch": "ci/minecraft-client-e2e-20260815",
-      "role": "historical-e2e-source",
-      "stages": [
-        "P0",
-        "C0"
-      ],
-      "disposition": "canonical-p0-e2e-takes-precedence"
-    },
-    {
-      "branch": "feature/metalfx-framegen-contracts",
-      "role": "historical-metalfx-contract-source",
-      "stages": [
-        "P12"
-      ],
-      "disposition": "consult-only-current-architecture-takes-precedence"
-    },
-    {
-      "branch": "archive/metal4-geometry-handoff-2026-07-28",
-      "role": "archive",
-      "disposition": "ignore-for-implementation"
-    },
-    {
-      "branch": "archive/metal-iris-beta-2026-08-02",
-      "role": "archive",
-      "disposition": "historical-research-only"
-    },
-    {
-      "branch": "archive/metalfx-v1-prototype-2026-08-02",
-      "role": "archive",
-      "disposition": "historical-research-only"
-    },
-    {
-      "branch": "perf/swift-performance-by-design-20260819",
-      "role": "subsumed-validation-branch",
-      "disposition": "no-unique-implementation"
-    },
-    {
-      "branch": "perf/swift-performance-by-design-final-20260819",
-      "role": "subsumed-validation-branch",
-      "disposition": "no-unique-implementation"
-    },
-    {
-      "branch": "perf/swift-performance-by-design-final-validation-20260819",
-      "role": "subsumed-validation-branch",
-      "disposition": "no-unique-implementation"
-    },
-    {
-      "branch": "perf/swift-performance-by-design-ready-20260819",
-      "role": "subsumed-validation-branch",
-      "disposition": "no-unique-implementation"
-    },
-    {
-      "branch": "feature/ios-amethyst-runtime",
-      "role": "out-of-scope-platform-lineage",
-      "components": [
-        "shared MobileGL ancestry",
-        "iOS/Amethyst runtime work"
-      ],
-      "disposition": "do-not-port-platform-specific-code"
-    },
-    {
-      "branch": "codex/amethyst-ios-runtime-262",
-      "role": "out-of-scope-platform-lineage",
-      "components": [
-        "shared MobileGL ancestry",
-        "iOS runtime",
-        "hosted perf experiments"
-      ],
-      "disposition": "do-not-port-ios-or-amethyst-specific-code; use non-platform-specific ideas only if absent from preferred sources"
-    },
-    {
-      "branch": "fix/ci-decouple-pr-merge-gate",
-      "role": "canonical-ci-hotfix",
-      "stages": [
-        "C0"
-      ],
-      "components": [
-        "metal-capabilities stage decision gate"
-      ],
-      "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; decouples the PR merge check from branch pushes"
-    },
-    {
-      "branch": "fix/ci-canonical-push-authority-gate",
-      "role": "canonical-ci-hotfix",
-      "stages": [
-        "C0"
-      ],
-      "components": [
-        "authority workflow push triggers",
-        "stage decision event-scoped run query"
-      ],
-      "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; canonical pushes must run and observe their own authority workflows"
-    },
- {
+  {
+   "branch": "integration/iris-metal-next",
+   "role": "canonical",
+   "stages": [
+    "P0",
+    "P1-merged"
+   ],
+   "disposition": "continue-from-here"
+  },
+  {
+   "branch": "feature/metal4-main-production",
+   "role": "merged-p1-source",
+   "stages": [
+    "P1"
+   ],
+   "disposition": "subsumed-by-canonical",
+   "note": "PR #28 merged as 31853a506b08e7666016497f8732c0dca3f347c8; do not continue development here."
+  },
+  {
+   "branch": "feature/p2-tbdr-attachment-compiler",
+   "role": "active-stage-branch",
+   "stages": [
+    "P2"
+   ],
+   "components": [
+    "IrisGraphBench shipping-path oracle",
+    "RenderPassDescriptorV3 per-attachment actions",
+    "killed-store telemetry",
+    "framebuffer equivalence evidence"
+   ],
+   "disposition": "subsumed-by-canonical (PR #30)"
+  },
+  {
+   "branch": "feature/token-native-private-bindings",
+   "role": "migration-source",
+   "stages": [
+    "P3a"
+   ],
+   "components": [
+    "MetalBindingToken private producer path",
+    "dense binding slots",
+    "pass-local token binding session",
+    "focused binding tests"
+   ],
+   "disposition": "selective-replay-after-current-canonical-review"
+  },
+  {
+   "branch": "fix/metal4-arena-lifetime",
+   "role": "migration-source",
+   "stages": [
+    "P4"
+   ],
+   "components": [
+    "TerrainMeshGeneration",
+    "generation ownership",
+    "arena lifetime safety",
+    "focused terrain-generation tests"
+   ],
+   "disposition": "selective-port"
+  },
+  {
+   "branch": "feature/iris-semantic-completion",
+   "role": "deep-migration-source",
+   "stages": [
+    "P2"
+   ],
+   "components": [
+    "IrisMetalExecutionGraph",
+    "IrisMetalRenderPassMetadata",
+    "ping-pong semantics",
+    "shadow/target semantics",
+    "runtime receipts",
+    "semantic tests"
+   ],
+   "disposition": "mine-contracts-and-tests-only-no-wholesale-merge"
+  },
+  {
+   "branch": "research/iris-semantic-contracts-alt",
+   "role": "secondary-research-source",
+   "stages": [
+    "P2"
+   ],
+   "disposition": "consult-only-when-primary-semantic-source-lacks-contract"
+  },
+  {
+   "branch": "master",
+   "role": "validated-mobilegl-migration-source",
+   "stages": [
+    "C0",
+    "P5",
+    "P8",
+    "P11"
+   ],
+   "components": [
+    "command packets",
+    "real terrain ICB",
+    "residency lifetime",
+    "hosted Metal capability CI",
+    "pipeline prewarm",
+    "FFM telemetry"
+   ],
+   "disposition": "selective-port-only-no-wholesale-merge"
+  },
+  {
+   "branch": "codex/autonomous-metal-next-20260813",
+   "role": "late-mobilegl-migration-source",
+   "stages": [
+    "C0",
+    "P5",
+    "P11"
+   ],
+   "components": [
+    "hosted performance experiment",
+    "HostedMetalStateSubmissionBenchmark",
+    "HostedMetalStatePathPairedBenchmark",
+    "performance analyzer",
+    "command packets",
+    "terrain ICB"
+   ],
+   "disposition": "selective-port"
+  },
+  {
+   "branch": "codex/bsl-metalfx-framegen-cutout-20260813",
+   "role": "advanced-metalfx-source",
+   "stages": [
+    "P12"
+   ],
+   "components": [
+    "IrisMetalCutoutCoverageRuntime",
+    "IrisMetalFxFrameHandoff",
+    "IrisMetalHandCoverageRuntime",
+    "reactive cutout path"
+   ],
+   "disposition": "defer-until-p12-selective-port"
+  },
+  {
+   "branch": "codex/p1-binding-shadow-safe",
+   "role": "contract-test-source",
+   "stages": [
+    "P3"
+   ],
+   "components": [
+    "binding state safety",
+    "state shadow contracts",
+    "attachment signature allocation tests"
+   ],
+   "disposition": "tests-and-invariants-only"
+  },
+  {
+   "branch": "codex/p1-uniform-token-ci",
+   "role": "contract-test-source",
+   "stages": [
+    "P3"
+   ],
+   "components": [
+    "uniform token lookup contract tests"
+   ],
+   "disposition": "tests-and-invariants-only"
+  },
+  {
+   "branch": "codex/autonomous-metal-next",
+   "role": "older-mobilegl-source",
+   "stages": [
+    "C0",
+    "P3",
+    "P5"
+   ],
+   "disposition": "secondary-source-mostly-subsumed-by-later-lineage"
+  },
+  {
+   "branch": "ci/minecraft-client-e2e-p0-20260819",
+   "role": "subsumed",
+   "stages": [
+    "P0"
+   ],
+   "disposition": "no-migration-needed"
+  },
+  {
+   "branch": "ci/minecraft-client-e2e-20260815",
+   "role": "historical-e2e-source",
+   "stages": [
+    "P0",
+    "C0"
+   ],
+   "disposition": "canonical-p0-e2e-takes-precedence"
+  },
+  {
+   "branch": "feature/metalfx-framegen-contracts",
+   "role": "historical-metalfx-contract-source",
+   "stages": [
+    "P12"
+   ],
+   "disposition": "consult-only-current-architecture-takes-precedence"
+  },
+  {
+   "branch": "archive/metal4-geometry-handoff-2026-07-28",
+   "role": "archive",
+   "disposition": "ignore-for-implementation"
+  },
+  {
+   "branch": "archive/metal-iris-beta-2026-08-02",
+   "role": "archive",
+   "disposition": "historical-research-only"
+  },
+  {
+   "branch": "archive/metalfx-v1-prototype-2026-08-02",
+   "role": "archive",
+   "disposition": "historical-research-only"
+  },
+  {
+   "branch": "perf/swift-performance-by-design-20260819",
+   "role": "subsumed-validation-branch",
+   "disposition": "no-unique-implementation"
+  },
+  {
+   "branch": "perf/swift-performance-by-design-final-20260819",
+   "role": "subsumed-validation-branch",
+   "disposition": "no-unique-implementation"
+  },
+  {
+   "branch": "perf/swift-performance-by-design-final-validation-20260819",
+   "role": "subsumed-validation-branch",
+   "disposition": "no-unique-implementation"
+  },
+  {
+   "branch": "perf/swift-performance-by-design-ready-20260819",
+   "role": "subsumed-validation-branch",
+   "disposition": "no-unique-implementation"
+  },
+  {
+   "branch": "feature/ios-amethyst-runtime",
+   "role": "out-of-scope-platform-lineage",
+   "components": [
+    "shared MobileGL ancestry",
+    "iOS/Amethyst runtime work"
+   ],
+   "disposition": "do-not-port-platform-specific-code"
+  },
+  {
+   "branch": "codex/amethyst-ios-runtime-262",
+   "role": "out-of-scope-platform-lineage",
+   "components": [
+    "shared MobileGL ancestry",
+    "iOS runtime",
+    "hosted perf experiments"
+   ],
+   "disposition": "do-not-port-ios-or-amethyst-specific-code; use non-platform-specific ideas only if absent from preferred sources"
+  },
+  {
+   "branch": "fix/ci-decouple-pr-merge-gate",
+   "role": "canonical-ci-hotfix",
+   "stages": [
+    "C0"
+   ],
+   "components": [
+    "metal-capabilities stage decision gate"
+   ],
+   "disposition": "subsumed-by-canonical (PR #31)"
+  },
+  {
+   "branch": "fix/ci-canonical-push-authority-gate",
+   "role": "canonical-ci-hotfix",
+   "stages": [
+    "C0"
+   ],
+   "components": [
+    "authority workflow push triggers",
+    "stage decision event-scoped run query"
+   ],
+   "disposition": "subsumed-by-canonical (PR #32)"
+  },
+  {
    "branch": "feature/p2-consumer-store-liveness",
    "role": "active-stage-branch",
    "stages": [
@@ -352,19 +352,31 @@
     "IrisGraphBench readback consumer negative control (no clear proof, zero kills)",
     "IrisGraphBench present-boundary consumer scenario (adjacent sample + copy capture)"
    ],
-   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; pins that capture/readback/present consumers keep deferred stores alive"
- },
- {
+   "disposition": "subsumed-by-canonical (PR #34)"
+  },
+  {
    "branch": "feature/p2-deferred-color-store-suppression",
-      "role": "active-stage-branch",
-      "stages": [
-        "P2"
-      ],
-      "components": [
-        "deferred color store suppression",
-        "evidence-honest kill accounting"
-      ],
-      "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; suppression fires only with same-texture full-clear successor proof"
-    }
-  ]
+   "role": "active-stage-branch",
+   "stages": [
+    "P2"
+   ],
+   "components": [
+    "deferred color store suppression",
+    "evidence-honest kill accounting"
+   ],
+   "disposition": "subsumed-by-canonical (PR #33)"
+  },
+  {
+   "branch": "chore/p2-stage-decision",
+   "role": "canonical-stage-bookkeeping",
+   "stages": [
+    "P2"
+   ],
+   "components": [
+    "machine-readable P2 stage decision",
+    "subsumed-by-canonical dispositions for merged P2 branches"
+   ],
+   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; documentation only"
+  }
+ ]
 }
