@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - integration/iris-metal-next
       - 'ci/minecraft-client-e2e-*'
   pull_request:
     branches:
