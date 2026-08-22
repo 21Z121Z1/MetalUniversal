@@ -357,7 +357,7 @@ jobs:
           required_external = [
               "Minecraft 26.2 production client E2E",
               "Unified eval verification",
-              "29/merge",
+              "30/merge",
           ]
 
           def load_latest_required():

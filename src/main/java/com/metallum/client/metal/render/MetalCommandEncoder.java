@@ -80,7 +80,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     @Nullable
     private MTLCommandEncoder currentEncoder;
     private MemorySegment[] renderColorAttachments = new MemorySegment[0];
+    private MetalGpuTexture[] renderColorTextures = new MetalGpuTexture[0];
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
+    private MemorySegment[] killedColorAttachments = new MemorySegment[0];
+    private MetalGpuTexture[] killedColorTextures = new MetalGpuTexture[0];
+    private long deferredColorStorePixels;
+    private int[] deferredColorStorePixelBytes = new int[0];
     // Bumped every time a fresh native encoder is installed. MetalRenderPass
     // compares generations to know its cached dirty-state no longer matches a
     // rebuilt encoder (a new MTLRenderCommandEncoder starts with no state).
@@ -88,6 +93,36 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     @Nullable
     private MetalGpuTexture renderDepthTexture;
     private boolean renderEncoderDeferredStore;
+    private boolean renderEncoderColorStoreKilled;
+
+    /**
+     * RenderPassDescriptorV3 selection. "auto" (default) uses V3 whenever the
+     * loaded dylib exposes the symbol and falls back to V2 otherwise; "v2"
+     * forces the legacy path (IrisGraphBench equivalence runs); "v3" demands
+     * the symbol and fails closed if it is missing.
+     */
+    private static volatile String renderPassAbiMode =
+            System.getProperty("metallum.renderpass.abi", "auto");
+
+    static void setRenderPassAbiModeForTests(final String mode) {
+        renderPassAbiMode = mode;
+    }
+
+    private static boolean renderPassDescriptorV3Active() {
+        switch (renderPassAbiMode) {
+            case "v2":
+                return false;
+            case "v3":
+                if (!MetalNativeBridge.renderCommandEncoderV3Available()) {
+                    throw new IllegalStateException(
+                            "metallum.renderpass.abi=v3 but the loaded native bridge has no V3 symbol");
+                }
+                return true;
+            default:
+                return MetalNativeBridge.renderCommandEncoderV3Available();
+        }
+    }
+
     private final Long2ObjectOpenHashMap<java.util.ArrayDeque<MemorySegment>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
     private static final int MAX_POOLED_DYNAMIC_BACKINGS_PER_SIZE = 8;
     private final List<SubmitCallback> currentSubmitCallbacks = new ArrayList<>();
@@ -199,10 +234,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     void endEncoder() {
-        endEncoder(false);
+        endEncoder(false, null);
     }
 
-    private void endEncoder(final boolean incomingClearsSameDepth) {
+    private void endEncoder(
+            final boolean incomingClearsSameDepth,
+            final boolean[] colorStoresKilled
+    ) {
         if (currentEncoder != null) {
             if (currentEncoder instanceof MTLRenderCommandEncoder renderEncoder) {
                 if (renderEncoderDeferredStore) {
@@ -213,7 +251,38 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     // pass breaking this encoder clears the same attachment.
                     boolean deadDepth = incomingClearsSameDepth
                             || (renderDepthTexture != null && pendingDepthClears.containsKey(renderDepthTexture));
-                    renderEncoder.setDepthStoreAction(!deadDepth);
+                    if (renderEncoderColorStoreKilled) {
+                        deadDepth = false;
+                    }
+                    renderEncoder.setDeferredDepthStore(!deadDepth);
+                    if (deadDepth && renderDepthTexture != null) {
+                        RenderGraphTelemetry.onDepthStoreKilled(
+                                (long) renderDepthTexture.getWidth(0) * renderDepthTexture.getHeight(0),
+                                renderDepthTexture.pixelSize()
+                        );
+                    }
+                }
+                if (killedColorAttachments.length != 0) {
+                    int[] killedPixelBytes = new int[killedColorAttachments.length];
+                    boolean anyKilled = false;
+                    for (int index = 0; index < killedColorAttachments.length; index++) {
+                        if (killedColorAttachments[index] != null
+                                && !MetalPipelineSupport.sameHandle(
+                                        killedColorAttachments[index], MemorySegment.NULL)
+                                && index < deferredColorStorePixelBytes.length) {
+                            killedPixelBytes[index] = deferredColorStorePixelBytes[index];
+                            if (deferredColorStorePixelBytes[index] > 0) {
+                                anyKilled = true;
+                            }
+                        }
+                    }
+                    if (anyKilled) {
+                        RenderGraphTelemetry.onColorStoresKilled(
+                                deferredColorStorePixels,
+                                killedPixelBytes,
+                                countKilled(killedColorAttachments)
+                        );
+                    }
                 }
                 // Signal timing is identical either way (the fence fires
                 // after the last listed stage); the split form documents the
@@ -232,9 +301,15 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             currentEncoder = null;
         }
         renderColorAttachments = new MemorySegment[0];
+        renderColorTextures = new MetalGpuTexture[0];
         renderDepthAttachment = MemorySegment.NULL;
+        killedColorAttachments = new MemorySegment[0];
+        killedColorTextures = new MetalGpuTexture[0];
+        deferredColorStorePixels = 0;
+        deferredColorStorePixelBytes = new int[0];
         renderDepthTexture = null;
         renderEncoderDeferredStore = false;
+        renderEncoderColorStoreKilled = false;
     }
 
     /**
@@ -416,6 +491,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             throw new IllegalArgumentException("Invalid Metal MRT attachment arrays");
         }
 
+        RenderGraphTelemetry.onPassRequested(label);
+
         MemorySegment[] colorAttachments = new MemorySegment[colorTextureViews.length];
         for (int index = 0; index < colorTextureViews.length; index++) {
             colorAttachments[index] = colorTextureViews[index] == null
@@ -427,36 +504,151 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 && sameAttachmentHandles(renderColorAttachments, colorAttachments)
                 && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment);
         if (sameAttachments && !clearDepthEnabled && !hasClearColor(clearColorEnabled)) {
+            RenderGraphTelemetry.onEncoderReused(label);
             return (MTLRenderCommandEncoder) currentEncoder;
         }
 
-        // The incoming pass clearing the same depth attachment proves the
-        // outgoing encoder's depth store is dead bandwidth.
+        // The incoming pass clearing the same attachment proves that the
+        // outgoing store is dead bandwidth. Resolve this evidence before
+        // rebuilding the encoder, then emit concrete V3 actions.
         boolean incomingClearsSameDepth = clearDepthEnabled
                 && renderDepthTexture != null
                 && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment);
-        endEncoder(incomingClearsSameDepth);
-        MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoderV2(
-                colorAttachments,
-                depthAttachment,
-                viewportWidth,
-                viewportHeight,
-                clearColorEnabled,
-                clearColorValues,
-                clearDepthEnabled ? 1 : 0,
-                clearDepthValue,
-                label
-        );
+        boolean deferredDepthStore = DEFERRED_DEPTH_STORE
+                && depthTextureView != null
+                && ((MetalGpuTexture) depthTextureView.texture()).mtlDepthPixelFormat() != MTLPixelFormat.Invalid;
+        boolean hasIncomingColorClear = hasClearColor(clearColorEnabled);
+        boolean[] colorStoreKilled = new boolean[colorAttachments.length];
+        if (renderPassDescriptorV3Active()) {
+            for (int index = 0; index < colorAttachments.length; index++) {
+                Object incomingTexture = colorTextureViews[index] == null ? null : colorTextureViews[index].texture();
+                colorStoreKilled[index] = hasIncomingColorClear
+                        && index < renderColorAttachments.length
+                        && index < renderColorTextures.length
+                        && renderColorAttachments[index] != null
+                        && !MetalPipelineSupport.sameHandle(
+                                renderColorAttachments[index], MemorySegment.NULL)
+                        && renderColorTextures[index] == incomingTexture
+                        && index < deferredColorStorePixelBytes.length
+                        && deferredColorStorePixelBytes[index] > 0;
+            }
+        }
+        endEncoder(incomingClearsSameDepth, colorStoreKilled);
+        MTLRenderCommandEncoder encoder;
+        if (renderPassDescriptorV3Active()) {
+            // P2.2 conservative policy: V3 emits concrete actions. A full-clear
+            // successor records the outgoing store as killed before replacing
+            // this encoder; no runtime store mutation is required.
+            int slotCount = colorTextureViews.length;
+            int[] colorLoadActions = new int[slotCount];
+            int[] colorStoreActions = new int[slotCount];
+            for (int index = 0; index < slotCount; index++) {
+                if (colorTextureViews[index] == null) {
+                    colorLoadActions[index] = 0;
+                    colorStoreActions[index] = 0;
+                } else {
+                    colorLoadActions[index] = clearColorEnabled[index] != 0 ? 2 : 1;
+                    colorStoreActions[index] = 1;
+                }
+            }
+            encoder = commandBuffer().makeRenderCommandEncoderV3(
+                    colorAttachments,
+                    depthAttachment,
+                    colorLoadActions,
+                    colorStoreActions,
+                    clearColorValues,
+                    clearDepthEnabled ? 2 : 1,
+                    deferredDepthStore ? 2 : 1,
+                    clearDepthValue,
+                    viewportWidth,
+                    viewportHeight,
+                    label
+            );
+        } else {
+            encoder = commandBuffer().makeRenderCommandEncoderV2(
+                    colorAttachments,
+                    depthAttachment,
+                    viewportWidth,
+                    viewportHeight,
+                    clearColorEnabled,
+                    clearColorValues,
+                    clearDepthEnabled ? 1 : 0,
+                    clearDepthValue,
+                    label
+            );
+        }
         waitRenderFences(encoder);
         encoderGeneration++;
         currentEncoder = encoder;
         renderColorAttachments = colorAttachments;
+        killedColorAttachments = colorAttachments.clone();
+        killedColorTextures = renderColorTextures.clone();
+        renderColorTextures = new MetalGpuTexture[colorTextureViews.length];
+        for (int index = 0; index < colorTextureViews.length; index++) {
+            renderColorTextures[index] = colorTextureViews[index] == null
+                    ? null
+                    : (MetalGpuTexture) colorTextureViews[index].texture();
+        }
         renderDepthAttachment = depthAttachment;
+        deferredColorStorePixels = (long) viewportWidth * viewportHeight;
+        deferredColorStorePixelBytes = new int[colorTextureViews.length];
+        for (int index = 0; index < colorTextureViews.length; index++) {
+            deferredColorStorePixelBytes[index] = colorTextureViews[index] == null
+                    ? 0
+                    : ((MetalGpuTexture) colorTextureViews[index].texture()).pixelSize();
+        }
         renderDepthTexture = depthTextureView == null ? null : (MetalGpuTexture) depthTextureView.texture();
-        renderEncoderDeferredStore = DEFERRED_DEPTH_STORE
-                && renderDepthTexture != null
-                && renderDepthTexture.mtlDepthPixelFormat() != MTLPixelFormat.Invalid;
+        renderEncoderDeferredStore = deferredDepthStore;
+        renderEncoderColorStoreKilled = false;
+        recordGraphTelemetry(
+                label,
+                viewportWidth,
+                viewportHeight,
+                colorTextureViews,
+                clearColorEnabled,
+                new boolean[colorTextureViews.length],
+                clearDepthEnabled,
+                deferredDepthStore
+        );
         return encoder;
+    }
+
+    /**
+     * Structured render-graph evidence for the TBDR compiler work. Byte
+     * estimates reflect the actions ACTUALLY sent to the native side under
+     * the active ABI mode, so a future policy change is visible in
+     * rendergraph.json without touching the estimator.
+     */
+    private void recordGraphTelemetry(
+            final String label,
+            final int width,
+            final int height,
+            final MetalGpuTextureView[] colorTextureViews,
+            final int[] clearColorEnabled,
+            final boolean[] colorStoreKilled,
+            final boolean depthClear,
+            final boolean deferredDepthStore
+    ) {
+        try {
+            int[] slotBytes = new int[colorTextureViews.length];
+            boolean[] slotClear = new boolean[colorTextureViews.length];
+            for (int index = 0; index < colorTextureViews.length; index++) {
+                if (colorTextureViews[index] != null) {
+                    slotBytes[index] = ((MetalGpuTexture) colorTextureViews[index].texture()).pixelSize();
+                    slotClear[index] = index < clearColorEnabled.length && clearColorEnabled[index] != 0;
+                }
+            }
+            int depthBytes = renderDepthTexture != null
+                    ? renderDepthTexture.pixelSize()
+                    : 0;
+            RenderGraphTelemetry.onEncoderCreated(
+                label, width, height, slotBytes, slotClear, colorStoreKilled,
+                    depthBytes, depthClear, deferredDepthStore
+            );
+        } catch (RuntimeException ignored) {
+            // Telemetry must never break encoding; a missing estimate is
+            // preferable to a failed frame.
+        }
     }
 
     private static boolean hasClearColor(final int[] clearColorEnabled) {
@@ -466,6 +658,26 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
         }
         return false;
+    }
+
+    private static int countKilled(final boolean[] flags) {
+        int killed = 0;
+        for (boolean flag : flags) {
+            if (flag) {
+                killed++;
+            }
+        }
+        return killed;
+    }
+
+    private static int countKilled(final MemorySegment[] attachments) {
+        int killed = 0;
+        for (MemorySegment attachment : attachments) {
+            if (attachment != null && !MetalPipelineSupport.sameHandle(attachment, MemorySegment.NULL)) {
+                killed++;
+            }
+        }
+        return killed;
     }
 
     private static boolean sameAttachmentHandles(final MemorySegment[] first, final MemorySegment[] second) {

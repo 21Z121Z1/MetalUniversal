@@ -446,13 +446,10 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
      * descriptor deferred the depth store decision, and must not be called on
      * encoders whose descriptor set a concrete store action.
      */
-    public void setDepthStoreAction(final boolean store) {
+    public void setDeferredDepthStore(final boolean store) {
         MemorySegment encoder = handle();
         flushState(encoder);
-        MetalNativeBridge.MTLRenderCommandEncoder_setDepthStoreAction(
-                encoder,
-                store ? 1 : 0
-        );
+        MetalNativeBridge.MTLRenderCommandEncoder_setDepthStoreAction(encoder, store ? 1 : 0);
     }
 
     public void updateFence(final MemorySegment fence, final MTLRenderStages stages) {

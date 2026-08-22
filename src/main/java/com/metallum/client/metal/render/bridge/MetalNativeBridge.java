@@ -359,6 +359,29 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS
                     )
             );
+            // RenderPassDescriptorV3 (P2): per-attachment load/store actions.
+            // Optional: an older shipping dylib without the symbol falls back
+            // to the V2 mapping at the call site.
+            MTLCommandBufferMakeRenderCommandEncoderV3 = optionalDowncall(
+                    lookup,
+                    "metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            DOUBLE,
+                            DOUBLE,
+                            DOUBLE,
+                            ValueLayout.ADDRESS
+                    )
+            );
             MTLRenderCommandEncoderSetRenderPipelineState = downcall(lookup, "metallum_MTLRenderCommandEncoder_setRenderPipelineState", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLRenderCommandEncoderSetDepthStencilState = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthStencilState", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLRenderCommandEncoderSetDepthBias = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthBias", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, FLOAT, FLOAT, FLOAT));
@@ -838,6 +861,12 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLDeviceMakeDepthStencilState;
     private static final MethodHandle MTLCommandBufferMakeRenderCommandEncoder;
     private static final MethodHandle MTLCommandBufferMakeRenderCommandEncoderV2;
+    private static final MethodHandle MTLCommandBufferMakeRenderCommandEncoderV3;
+
+    /** True when the loaded dylib exposes the RenderPassDescriptorV3 symbol. */
+    public static boolean renderCommandEncoderV3Available() {
+        return MTLCommandBufferMakeRenderCommandEncoderV3 != null;
+    }
     private static final MethodHandle MTLRenderCommandEncoderSetRenderPipelineState;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthStencilState;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthBias;
@@ -2041,6 +2070,99 @@ public final class MetalNativeBridge {
                 );
             } catch (Throwable throwable) {
                 throw bridgeFailure("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2", throwable);
+            }
+        }
+    }
+
+    /**
+     * RenderPassDescriptorV3: per-attachment load/store actions.
+     * Action encodings match the Swift side: 0=dontCare, 1=load, 2=clear for
+     * loads; 0=dontCare, 1=store, 2=deferred(.unknown) for stores. When the
+     * loaded dylib has no V3 symbol this falls back to the V2 boolean-clear
+     * mapping, which is exactly the conservative projection of the V3 actions
+     * the caller builds, so pixels cannot change across the fallback.
+     */
+    public static MemorySegment MTLCommandBuffer_makeRenderCommandEncoderV3(
+            final MemorySegment commandBuffer,
+            final MemorySegment[] colorTextures,
+            final MemorySegment depthTexture,
+            final int[] colorLoadActions,
+            final int[] colorStoreActions,
+            final float[] clearColors,
+            final int depthLoadAction,
+            final int depthStoreAction,
+            final double clearDepth,
+            final double viewportWidth,
+            final double viewportHeight,
+            final String label
+    ) {
+        if (colorTextures == null || colorLoadActions == null || colorStoreActions == null || clearColors == null
+                || colorLoadActions.length != colorTextures.length
+                || colorStoreActions.length != colorTextures.length
+                || clearColors.length != colorTextures.length * 4) {
+            throw new IllegalArgumentException("MRT texture and action arrays must have matching lengths");
+        }
+
+        if (MTLCommandBufferMakeRenderCommandEncoderV3 == null) {
+            int[] clearColorEnabled = new int[colorTextures.length];
+            for (int index = 0; index < colorTextures.length; index++) {
+                clearColorEnabled[index] = colorLoadActions[index] == 2 ? 1 : 0;
+            }
+            return MTLCommandBuffer_makeRenderCommandEncoderV2(
+                    commandBuffer,
+                    colorTextures,
+                    depthTexture,
+                    viewportWidth,
+                    viewportHeight,
+                    clearColorEnabled,
+                    clearColors,
+                    depthLoadAction == 2 ? 1 : 0,
+                    clearDepth,
+                    label
+            );
+        }
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment textureArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(ValueLayout.ADDRESS, colorTextures.length);
+            MemorySegment loadArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(INT, colorLoadActions.length);
+            MemorySegment storeArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(INT, colorStoreActions.length);
+            MemorySegment clearColorArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(FLOAT, clearColors.length);
+
+            for (int index = 0; index < colorTextures.length; index++) {
+                textureArray.setAtIndex(ValueLayout.ADDRESS, index, segment(colorTextures[index]));
+                loadArray.setAtIndex(INT, index, colorLoadActions[index]);
+                storeArray.setAtIndex(INT, index, colorStoreActions[index]);
+            }
+            for (int index = 0; index < clearColors.length; index++) {
+                clearColorArray.setAtIndex(FLOAT, index, clearColors[index]);
+            }
+
+            try {
+                return (MemorySegment) MTLCommandBufferMakeRenderCommandEncoderV3.invokeExact(
+                        segment(commandBuffer),
+                        textureArray,
+                        colorTextures.length,
+                        segment(depthTexture),
+                        loadArray,
+                        storeArray,
+                        clearColorArray,
+                        depthLoadAction,
+                        depthStoreAction,
+                        clearDepth,
+                        viewportWidth,
+                        viewportHeight,
+                        toCString(arena, label)
+                );
+            } catch (Throwable throwable) {
+                throw bridgeFailure("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3", throwable);
             }
         }
     }

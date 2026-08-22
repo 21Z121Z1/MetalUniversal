@@ -93,6 +93,7 @@ tasks.test {
 	exclude "**/IrisMetalExternalLevelSamplerTest.class"
 	exclude "**/MetalIrisShaderTranslationTest.class"
 	exclude "**/MetalIrisSodiumTerrainTest.class"
+	exclude "**/MetalRenderGraphBenchIntegrationTest.class"
 	if (hostedCi) {
 		exclude "**/IrisMetalPostChainCompilationTest.class"
 		exclude "**/IrisMetalShadowPipelineTest.class"
@@ -705,6 +706,29 @@ tasks.register("metalMrtBackendIntegrationTest", Test) {
 		includeTestsMatching "com.metallum.client.metal.render.MetalMrtBackendIntegrationTest"
 	}
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", metalApiValidation
+	environment "MTL_SHADER_VALIDATION", metalShaderValidation
+}
+
+tasks.register("renderGraphBench", Test) {
+	group = "verification"
+	description = "Runs the IrisGraphBench synthetic render-graph oracle and emits structured rendergraph.json evidence."
+	onlyIf {
+		hardwareMetalValidationAvailable()
+	}
+	dependsOn tasks.named("buildMacNative")
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	filter {
+		includeTestsMatching "com.metallum.client.metal.render.MetalRenderGraphBenchIntegrationTest"
+	}
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	systemProperty "metallum.rendergraph.output",
+			layout.buildDirectory.file("agent-evidence/rendergraph.json").get().asFile.absolutePath
+	doFirst {
+		layout.buildDirectory.dir("agent-evidence").get().asFile.mkdirs()
+	}
 	environment "MTL_DEBUG_LAYER", metalApiValidation
 	environment "MTL_SHADER_VALIDATION", metalShaderValidation
 }

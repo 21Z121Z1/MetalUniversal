@@ -83,8 +83,10 @@ private struct MetalFxScalerKey: Hashable {
 private enum NativeState {
     static var debugLabelsEnabled = false
     // When true, makeRenderCommandEncoder_v2 leaves the depth attachment with
-    // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
-    // before endEncoding. Toggled once at device init from
+        // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
+        // before endEncoding. Color stores remain concrete in V3 because Metal
+        // does not allow mutating actions known at encoder creation. Toggled once
+        // at device init from
     // metallum_set_deferred_depth_store; must match the Java flag exactly.
     static var deferredDepthStore = false
     // Split-fence mode (metallum.opt.splitFence): non-nil while the Java
@@ -8883,6 +8885,192 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
     }
 }
 
+// RenderPassDescriptorV3 ABI (P2). Per-attachment load/store actions replace
+// V2's boolean clear flags so the Iris planner's per-attachment decisions
+// become expressible: 0=dontCare, 1=load, 2=clear for loads; 0=dontCare,
+// 1=store, 2=deferred(.unknown, depth only) for stores. Unknown values map to
+// the conservative default (load/store) instead of being rejected: the Java
+// planner is fail-closed, and a stale native module must never change pixels.
+private func v3LoadAction(_ raw: Int32) -> MTLLoadAction {
+    switch raw {
+    case 0: return .dontCare
+    case 2: return .clear
+    default: return .load
+    }
+}
+
+private func v3StoreAction(_ raw: Int32) -> MTLStoreAction {
+    switch raw {
+    case 0: return .dontCare
+    case 2: return .unknown
+    default: return .store
+    }
+}
+
+@_cdecl("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3")
+public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
+    _ pointer: UnsafeMutableRawPointer,
+    _ colorTexturePointers: UnsafePointer<UnsafeMutableRawPointer?>?,
+    _ colorCount: Int32,
+    _ depthTexture: MTLTexture?,
+    _ colorLoadActions: UnsafePointer<Int32>?,
+    _ colorStoreActions: UnsafePointer<Int32>?,
+    _ clearColors: UnsafePointer<Float>?,
+    _ depthLoadActionRaw: Int32,
+    _ depthStoreActionRaw: Int32,
+    _ clearDepth: Double,
+    _ viewportWidth: Double,
+    _ viewportHeight: Double,
+    _ labelPtr: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
+        let count = Int(colorCount)
+        guard count >= 0 && count <= 8 else {
+            NSLog("[Metallum] rejected render pass with %d color slots; Metal backend supports at most 8", colorCount)
+            return nil
+        }
+        guard count == 0 || colorTexturePointers != nil else {
+            NSLog("[Metallum] render pass color slot count is non-zero but the texture array is null")
+            return nil
+        }
+        guard count == 0 || (colorLoadActions != nil && colorStoreActions != nil && clearColors != nil) else {
+            NSLog("[Metallum] render pass color slot count is non-zero but action arrays are null")
+            return nil
+        }
+        guard count > 0 || depthTexture != nil else {
+            NSLog("[Metallum] rejected render pass with no color or depth attachment")
+            return nil
+        }
+
+        let depthFormat = depthTexture?.pixelFormat ?? .invalid
+        let stencilFormat = stencilPixelFormat(for: depthFormat)
+        let label = stringFromOptionalCString(labelPtr) ?? "render"
+
+        if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
+            let renderPass = MTL4RenderPassDescriptor()
+            for index in 0..<count {
+                guard let attachment = renderPass.colorAttachments[index] else { return nil }
+                guard let texture = textureFromUnretainedPointer(colorTexturePointers?[index]) else {
+                    attachment.loadAction = .dontCare
+                    attachment.storeAction = .dontCare
+                    continue
+                }
+                attachment.texture = texture
+                attachment.loadAction = v3LoadAction(colorLoadActions![index])
+                attachment.storeAction = v3StoreAction(colorStoreActions![index])
+                if colorLoadActions![index] == 2 {
+                    let base = index * 4
+                    let colors = clearColors!
+                    attachment.clearColor = makeClearColor(
+                        red: colors[base], green: colors[base + 1],
+                        blue: colors[base + 2], alpha: colors[base + 3]
+                    )
+                }
+            }
+            if let depthTexture {
+                if depthFormat != .stencil8 {
+                    renderPass.depthAttachment.texture = depthTexture
+                    renderPass.depthAttachment.loadAction = v3LoadAction(depthLoadActionRaw)
+                    renderPass.depthAttachment.storeAction = v3StoreAction(depthStoreActionRaw)
+                    renderPass.depthAttachment.clearDepth = clearDepth
+                }
+                if stencilFormat != .invalid || depthFormat == .stencil8 {
+                    renderPass.stencilAttachment.texture = depthTexture
+                    renderPass.stencilAttachment.loadAction = .dontCare
+                    // Every pass loads stencil as .dontCare, so no pass can
+                    // ever observe a stored stencil value.
+                    renderPass.stencilAttachment.storeAction = .dontCare
+                }
+            }
+            renderPass.renderTargetWidth = Int(viewportWidth)
+            renderPass.renderTargetHeight = Int(viewportHeight)
+            guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+                return nil
+            }
+            encoder.label = label
+            encoder.barrier(
+                afterQueueStages: [.blit, .fragment, .dispatch],
+                beforeStages: [.vertex, .fragment],
+                visibilityOptions: .device
+            )
+            encoder.setViewport(MTLViewport(
+                originX: 0.0, originY: 0.0,
+                width: viewportWidth, height: viewportHeight,
+                znear: 0.0, zfar: 1.0
+            ))
+            let tables = lease.owner.argumentTables(at: lease.slotIndex)
+            return retainedPointer(Metal4MainRenderEncoderBridge(
+                encoder: encoder,
+                lease: lease,
+                vertexArguments: tables.0,
+                fragmentArguments: tables.1
+            ))
+        }
+
+        let commandBuffer = metal3CommandBuffer(pointer)
+        let renderPass = MTLRenderPassDescriptor()
+        for index in 0..<count {
+            guard let attachment = renderPass.colorAttachments[index] else {
+                NSLog("[Metallum] color attachment descriptor %d is unavailable", index)
+                return nil
+            }
+            guard let texture = textureFromUnretainedPointer(colorTexturePointers?[index]) else {
+                attachment.loadAction = .dontCare
+                attachment.storeAction = .dontCare
+                continue
+            }
+            attachment.texture = texture
+            attachment.loadAction = v3LoadAction(colorLoadActions![index])
+            attachment.storeAction = v3StoreAction(colorStoreActions![index])
+            if colorLoadActions![index] == 2 {
+                let base = index * 4
+                let colors = clearColors!
+                attachment.clearColor = makeClearColor(
+                    red: colors[base], green: colors[base + 1],
+                    blue: colors[base + 2], alpha: colors[base + 3]
+                )
+            }
+        }
+        if let depthTexture {
+            if depthFormat != .stencil8 {
+                renderPass.depthAttachment.texture = depthTexture
+                renderPass.depthAttachment.loadAction = v3LoadAction(depthLoadActionRaw)
+                renderPass.depthAttachment.storeAction = v3StoreAction(depthStoreActionRaw)
+                renderPass.depthAttachment.clearDepth = clearDepth
+            }
+            if stencilFormat != .invalid || depthFormat == .stencil8 {
+                renderPass.stencilAttachment.texture = depthTexture
+                renderPass.stencilAttachment.loadAction = .dontCare
+                renderPass.stencilAttachment.storeAction = .dontCare
+            }
+        }
+
+        let timing = gpuEncoderTimingContext(commandBuffer)
+        if let timing,
+           let indices = timing.reserve(label: label, kind: 0),
+           let attachment = renderPass.sampleBufferAttachments[0] {
+            attachment.sampleBuffer = timing.sampleBuffer
+            attachment.startOfVertexSampleIndex = indices.0
+            attachment.endOfFragmentSampleIndex = indices.1
+        }
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+            return nil
+        }
+        encoder.label = label
+        metal4BarrierRenderAfterUploadAndRender(encoder)
+        encoder.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: viewportWidth,
+            height: viewportHeight,
+            znear: 0.0,
+            zfar: 1.0
+        ))
+        return retainedPointer(encoder)
+    }
+}
+
 @_cdecl("metallum_MTLRenderCommandEncoder_setRenderPipelineState")
 public func metallum_MTLRenderCommandEncoder_setRenderPipelineState(_ pointer: UnsafeMutableRawPointer, _ pipeline: MTLRenderPipelineState) {
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
@@ -9918,9 +10106,6 @@ public func metallum_create_sampler_v3(
     }
 }
 
-/// Resolves a depth attachment that was created with storeAction=.unknown
-/// (deferred store mode). Only legal on encoders whose descriptor deferred
-/// the decision; the Java side tracks that invariant.
 @_cdecl("metallum_MTLRenderCommandEncoder_setDepthStoreAction")
 public func metallum_MTLRenderCommandEncoder_setDepthStoreAction(
     _ pointer: UnsafeMutableRawPointer,
