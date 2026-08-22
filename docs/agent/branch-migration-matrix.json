@@ -65,113 +65,203 @@
     {
       "branch": "agent/metal-eval-v3",
       "role": "active-stage-branch",
-      "stages": ["C0"],
+      "stages": [
+        "C0"
+      ],
       "disposition": "bounded-c0-only; merge-to-canonical-only-after-exact-head-gates-pass"
     },
     {
       "branch": "integration/iris-metal-next",
       "role": "canonical",
-      "stages": ["P0", "P1-merged"],
+      "stages": [
+        "P0",
+        "P1-merged"
+      ],
       "disposition": "continue-from-here"
     },
     {
       "branch": "feature/metal4-main-production",
       "role": "merged-p1-source",
-      "stages": ["P1"],
+      "stages": [
+        "P1"
+      ],
       "disposition": "subsumed-by-canonical",
       "note": "PR #28 merged as 31853a506b08e7666016497f8732c0dca3f347c8; do not continue development here."
     },
     {
       "branch": "feature/p2-tbdr-attachment-compiler",
       "role": "active-stage-branch",
-      "stages": ["P2"],
-      "components": ["IrisGraphBench shipping-path oracle", "RenderPassDescriptorV3 per-attachment actions", "killed-store telemetry", "framebuffer equivalence evidence"],
+      "stages": [
+        "P2"
+      ],
+      "components": [
+        "IrisGraphBench shipping-path oracle",
+        "RenderPassDescriptorV3 per-attachment actions",
+        "killed-store telemetry",
+        "framebuffer equivalence evidence"
+      ],
       "disposition": "merge-to-canonical-only-after-exact-head-gates-pass"
     },
     {
       "branch": "feature/token-native-private-bindings",
       "role": "migration-source",
-      "stages": ["P3a"],
-      "components": ["MetalBindingToken private producer path", "dense binding slots", "pass-local token binding session", "focused binding tests"],
+      "stages": [
+        "P3a"
+      ],
+      "components": [
+        "MetalBindingToken private producer path",
+        "dense binding slots",
+        "pass-local token binding session",
+        "focused binding tests"
+      ],
       "disposition": "selective-replay-after-current-canonical-review"
     },
     {
       "branch": "fix/metal4-arena-lifetime",
       "role": "migration-source",
-      "stages": ["P4"],
-      "components": ["TerrainMeshGeneration", "generation ownership", "arena lifetime safety", "focused terrain-generation tests"],
+      "stages": [
+        "P4"
+      ],
+      "components": [
+        "TerrainMeshGeneration",
+        "generation ownership",
+        "arena lifetime safety",
+        "focused terrain-generation tests"
+      ],
       "disposition": "selective-port"
     },
     {
       "branch": "feature/iris-semantic-completion",
       "role": "deep-migration-source",
-      "stages": ["P2"],
-      "components": ["IrisMetalExecutionGraph", "IrisMetalRenderPassMetadata", "ping-pong semantics", "shadow/target semantics", "runtime receipts", "semantic tests"],
+      "stages": [
+        "P2"
+      ],
+      "components": [
+        "IrisMetalExecutionGraph",
+        "IrisMetalRenderPassMetadata",
+        "ping-pong semantics",
+        "shadow/target semantics",
+        "runtime receipts",
+        "semantic tests"
+      ],
       "disposition": "mine-contracts-and-tests-only-no-wholesale-merge"
     },
     {
       "branch": "research/iris-semantic-contracts-alt",
       "role": "secondary-research-source",
-      "stages": ["P2"],
+      "stages": [
+        "P2"
+      ],
       "disposition": "consult-only-when-primary-semantic-source-lacks-contract"
     },
     {
       "branch": "master",
       "role": "validated-mobilegl-migration-source",
-      "stages": ["C0", "P5", "P8", "P11"],
-      "components": ["command packets", "real terrain ICB", "residency lifetime", "hosted Metal capability CI", "pipeline prewarm", "FFM telemetry"],
+      "stages": [
+        "C0",
+        "P5",
+        "P8",
+        "P11"
+      ],
+      "components": [
+        "command packets",
+        "real terrain ICB",
+        "residency lifetime",
+        "hosted Metal capability CI",
+        "pipeline prewarm",
+        "FFM telemetry"
+      ],
       "disposition": "selective-port-only-no-wholesale-merge"
     },
     {
       "branch": "codex/autonomous-metal-next-20260813",
       "role": "late-mobilegl-migration-source",
-      "stages": ["C0", "P5", "P11"],
-      "components": ["hosted performance experiment", "HostedMetalStateSubmissionBenchmark", "HostedMetalStatePathPairedBenchmark", "performance analyzer", "command packets", "terrain ICB"],
+      "stages": [
+        "C0",
+        "P5",
+        "P11"
+      ],
+      "components": [
+        "hosted performance experiment",
+        "HostedMetalStateSubmissionBenchmark",
+        "HostedMetalStatePathPairedBenchmark",
+        "performance analyzer",
+        "command packets",
+        "terrain ICB"
+      ],
       "disposition": "selective-port"
     },
     {
       "branch": "codex/bsl-metalfx-framegen-cutout-20260813",
       "role": "advanced-metalfx-source",
-      "stages": ["P12"],
-      "components": ["IrisMetalCutoutCoverageRuntime", "IrisMetalFxFrameHandoff", "IrisMetalHandCoverageRuntime", "reactive cutout path"],
+      "stages": [
+        "P12"
+      ],
+      "components": [
+        "IrisMetalCutoutCoverageRuntime",
+        "IrisMetalFxFrameHandoff",
+        "IrisMetalHandCoverageRuntime",
+        "reactive cutout path"
+      ],
       "disposition": "defer-until-p12-selective-port"
     },
     {
       "branch": "codex/p1-binding-shadow-safe",
       "role": "contract-test-source",
-      "stages": ["P3"],
-      "components": ["binding state safety", "state shadow contracts", "attachment signature allocation tests"],
+      "stages": [
+        "P3"
+      ],
+      "components": [
+        "binding state safety",
+        "state shadow contracts",
+        "attachment signature allocation tests"
+      ],
       "disposition": "tests-and-invariants-only"
     },
     {
       "branch": "codex/p1-uniform-token-ci",
       "role": "contract-test-source",
-      "stages": ["P3"],
-      "components": ["uniform token lookup contract tests"],
+      "stages": [
+        "P3"
+      ],
+      "components": [
+        "uniform token lookup contract tests"
+      ],
       "disposition": "tests-and-invariants-only"
     },
     {
       "branch": "codex/autonomous-metal-next",
       "role": "older-mobilegl-source",
-      "stages": ["C0", "P3", "P5"],
+      "stages": [
+        "C0",
+        "P3",
+        "P5"
+      ],
       "disposition": "secondary-source-mostly-subsumed-by-later-lineage"
     },
     {
       "branch": "ci/minecraft-client-e2e-p0-20260819",
       "role": "subsumed",
-      "stages": ["P0"],
+      "stages": [
+        "P0"
+      ],
       "disposition": "no-migration-needed"
     },
     {
       "branch": "ci/minecraft-client-e2e-20260815",
       "role": "historical-e2e-source",
-      "stages": ["P0", "C0"],
+      "stages": [
+        "P0",
+        "C0"
+      ],
       "disposition": "canonical-p0-e2e-takes-precedence"
     },
     {
       "branch": "feature/metalfx-framegen-contracts",
       "role": "historical-metalfx-contract-source",
-      "stages": ["P12"],
+      "stages": [
+        "P12"
+      ],
       "disposition": "consult-only-current-architecture-takes-precedence"
     },
     {
@@ -212,14 +302,32 @@
     {
       "branch": "feature/ios-amethyst-runtime",
       "role": "out-of-scope-platform-lineage",
-      "components": ["shared MobileGL ancestry", "iOS/Amethyst runtime work"],
+      "components": [
+        "shared MobileGL ancestry",
+        "iOS/Amethyst runtime work"
+      ],
       "disposition": "do-not-port-platform-specific-code"
     },
     {
       "branch": "codex/amethyst-ios-runtime-262",
       "role": "out-of-scope-platform-lineage",
-      "components": ["shared MobileGL ancestry", "iOS runtime", "hosted perf experiments"],
+      "components": [
+        "shared MobileGL ancestry",
+        "iOS runtime",
+        "hosted perf experiments"
+      ],
       "disposition": "do-not-port-ios-or-amethyst-specific-code; use non-platform-specific ideas only if absent from preferred sources"
+    },
+    {
+      "branch": "fix/ci-decouple-pr-merge-gate",
+      "role": "canonical-ci-hotfix",
+      "stages": [
+        "C0"
+      ],
+      "components": [
+        "metal-capabilities stage decision gate"
+      ],
+      "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; decouples the PR merge check from branch pushes"
     }
   ]
 }
