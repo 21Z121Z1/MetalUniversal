@@ -315,6 +315,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT_RUN_ID: ${{ github.run_id }}
+          # The PR mergeability check ("<number>/merge") only exists while a
+          # pull request is open. Inject it on pull_request events so evidence
+          # waits for the full merge gate, and leave it empty on branch pushes
+          # (integration/agent) where no such check can ever exist for the new
+          # SHA — a hardcoded number deadlocked canonical CI after its PR
+          # merged.
+          METALLUM_MERGE_CHECK: ${{ github.event_name == 'pull_request' && format('{0}/merge', github.event.number) || '' }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -323,6 +330,14 @@ jobs:
           source_sha = os.environ.get("METALLUM_SOURCE_SHA", "").strip().lower()
           if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
               raise SystemExit(f"invalid METALLUM_SOURCE_SHA: {source_sha!r}")
+
+          required_external = [
+              "Minecraft 26.2 production client E2E",
+              "Unified eval verification",
+          ]
+          merge_check = os.environ.get("METALLUM_MERGE_CHECK", "").strip()
+          if merge_check:
+              required_external.append(merge_check)
 
           correctness = {
               "source_sha": source_sha,
@@ -354,11 +369,6 @@ jobs:
 
           repository = os.environ["GITHUB_REPOSITORY"]
           token = os.environ.get("GH_TOKEN", "")
-          required_external = [
-              "Minecraft 26.2 production client E2E",
-              "Unified eval verification",
-              "30/merge",
-          ]
 
           def load_latest_required():
               query = urllib.parse.urlencode({"head_sha": source_sha, "event": "pull_request", "per_page": 100})
