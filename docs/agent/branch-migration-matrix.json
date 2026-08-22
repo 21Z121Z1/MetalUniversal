@@ -419,6 +419,18 @@
     "binding-state session contracts and registration tests"
    ],
    "disposition": "merge-to-canonical-only-after-exact-head-gates-pass"
+  },
+  {
+   "branch": "chore/p2-stage-decision",
+   "role": "canonical-stage-bookkeeping",
+   "stages": [
+    "P2"
+   ],
+   "components": [
+    "machine-readable P2 stage decision",
+    "subsumed-by-canonical dispositions for merged P2 branches"
+   ],
+   "disposition": "subsumed-by-canonical (PR #35); documentation only"
   }
  ]
 }
