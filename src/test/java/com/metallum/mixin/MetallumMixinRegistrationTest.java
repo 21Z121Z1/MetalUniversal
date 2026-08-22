@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * reads as if the behaviour exists. A listed class with no source is the reverse
  * and takes the whole config down at load time.</p>
  *
- * <p>The render/sodium packages also contain package-private helper classes used by
+ * <p>The render/sodium/iris packages also contain package-private helper classes used by
  * mixins. Those helpers are deliberately not entries in metallum.mixins.json, so
  * source discovery must identify {@code @Mixin} classes rather than treating every
  * Java source in the package as a mixin.</p>
@@ -31,7 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 final class MetallumMixinRegistrationTest {
     private static final Path CONFIG = Path.of("src/main/resources/metallum.mixins.json");
     private static final Path MIXIN_ROOT = Path.of("src/main/java/com/metallum/mixin");
-    private static final Pattern ENTRY = Pattern.compile("\"((?:render|sodium)\\.[A-Za-z0-9_]+)\"");
+    private static final List<String> MIXIN_SUBPACKAGES = List.of("render", "sodium", "iris");
+    private static final Pattern ENTRY = Pattern.compile("\"((?:render|sodium|iris)\\.[A-Za-z0-9_]+)\"");
     private static final Pattern MIXIN_ANNOTATION = Pattern.compile("@Mixin\\s*\\(");
 
     private static List<String> registeredEntries() throws IOException {
@@ -61,7 +62,7 @@ final class MetallumMixinRegistrationTest {
     @Test
     void everyMixinSourceIsRegistered() throws IOException {
         List<String> registered = registeredEntries();
-        for (String subpackage : new String[] { "render", "sodium" }) {
+        for (String subpackage : MIXIN_SUBPACKAGES) {
             Path directory = MIXIN_ROOT.resolve(subpackage);
             if (!Files.isDirectory(directory)) {
                 continue;
