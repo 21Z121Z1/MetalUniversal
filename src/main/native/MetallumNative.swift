@@ -10124,6 +10124,25 @@ public func metallum_set_deferred_depth_store(_ enabled: Int32) {
     NativeState.deferredDepthStore = enabled != 0
 }
 
+/// Resolves a color attachment store that was created as .unknown (deferred).
+/// The successor pass supplies the kill evidence while this encoder is still
+/// open, exactly like the depth contract; an unresolved .unknown at
+/// endEncoding is a Metal validation error, so the Java side must resolve
+/// every deferred slot it created.
+@_cdecl("metallum_MTLRenderCommandEncoder_setColorStoreAction")
+public func metallum_MTLRenderCommandEncoder_setColorStoreAction(
+    _ pointer: UnsafeMutableRawPointer,
+    _ index: Int32,
+    _ store: Int32
+) {
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
+        bridge.encoder.setColorStoreAction(store != 0 ? .store : .dontCare, index: Int(index))
+        return
+    }
+    let encoder = metal3RenderEncoder(pointer)
+    encoder.setColorStoreAction(store != 0 ? .store : .dontCare, index: Int(index))
+}
+
 /// Routes render pipeline creation through MTL4Compiler (migration spec M2).
 /// Java only calls this with 1 when the capability gate and
 /// metallum.opt.metal4Compiler both hold; 0 (the default) leaves every PSO on
