@@ -82,6 +82,13 @@
       "note": "PR #28 merged as 31853a506b08e7666016497f8732c0dca3f347c8; do not continue development here."
     },
     {
+      "branch": "feature/p2-tbdr-attachment-compiler",
+      "role": "active-stage-branch",
+      "stages": ["P2"],
+      "components": ["IrisGraphBench shipping-path oracle", "RenderPassDescriptorV3 per-attachment actions", "killed-store telemetry", "framebuffer equivalence evidence"],
+      "disposition": "merge-to-canonical-only-after-exact-head-gates-pass"
+    },
+    {
       "branch": "feature/token-native-private-bindings",
       "role": "migration-source",
       "stages": ["P3a"],
