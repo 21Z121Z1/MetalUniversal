@@ -341,8 +341,21 @@
       ],
       "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; canonical pushes must run and observe their own authority workflows"
     },
-    {
-      "branch": "feature/p2-deferred-color-store-suppression",
+ {
+   "branch": "feature/p2-consumer-store-liveness",
+   "role": "active-stage-branch",
+   "stages": [
+    "P2"
+   ],
+   "components": [
+    "IrisGraphBench depth-capture consumer liveness scenario",
+    "IrisGraphBench readback consumer negative control (no clear proof, zero kills)",
+    "IrisGraphBench present-boundary consumer scenario (adjacent sample + copy capture)"
+   ],
+   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; pins that capture/readback/present consumers keep deferred stores alive"
+ },
+ {
+   "branch": "feature/p2-deferred-color-store-suppression",
       "role": "active-stage-branch",
       "stages": [
         "P2"

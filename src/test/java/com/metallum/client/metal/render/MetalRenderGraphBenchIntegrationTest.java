@@ -6,7 +6,9 @@ import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.BlendFunction;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
+import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.platform.CompareOp;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.ShaderType;
@@ -54,6 +56,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 7. historyTwoPassesApart   store between two distant consumers is required
  * 8. deadAttachmentOverwrite written-never-read then fully overwritten
  * 9. killedColorStores       outgoing concrete store proven dead by full clear
+ * 10. depthDeferredStoreSurvives   deferred depth store reaches memory when
+ *                            only capture consumers follow (no clear proof)
+ * 11. colorStoreSurvives     unrelated successors never prove a store dead;
+ *                            the readback consumer must observe the content
+ * 12. presentConsumerKeepsFinalStores  adjacent sampling plus copy-capture
+ *                            consumers keep every final-framebuffer store
  *
  * When the system property metallum.rendergraph.output is set, the suite
  * writes structured per-scenario telemetry to that file for baseline/candidate
@@ -512,6 +520,130 @@ final class MetalRenderGraphBenchIntegrationTest {
     }
 
     @Test
+    void depthDeferredStoreSurvivesUnrelatedSuccessor() {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                final String scenarioName = "depthDeferredStoreSurvivesUnrelatedSuccessor[" + abiMode + "]";
+                withScenario(scenarioName, () -> {
+            List<MetalGpuTexture> textures = createTextures(
+                    List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM),
+                    "bench-depth-capture");
+            MetalGpuTexture a = textures.get(0);
+            MetalGpuTexture b = textures.get(1);
+            try (MetalGpuTexture depth = (MetalGpuTexture) device.createTexture(
+                    "bench-depth-capture-depth",
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_COPY_SRC,
+                    GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 1)) {
+                // P1 clears A to black, then draws red while writing a real
+                // z = 0.25 into the depth attachment. The store decision
+                // defers under V3 exactly like every other live slot.
+                RenderPipeline redDepthPipeline = depthWriteSolidPipeline(
+                        "depth_capture_red", new float[] {1.0F, 0.0F, 0.0F, 1.0F});
+                fullscreenDepthSolid("depth_capture_p1", a, depth, redDepthPipeline,
+                        new Vector4f(0.0F, 0.0F, 0.0F, 1.0F));
+                // P2 is the IMMEDIATE successor and touches only B: no pass
+                // ever clears A or D, so no kill proof exists. Both capture
+                // consumers must observe exactly what P1 wrote.
+                fullscreenSolid("depth_capture_p2", b, new Vector4f(0.0F, 1.0F, 0.0F, 1.0F));
+
+                assertRgba(readback(a), 255, 0, 0,
+                        "capture consumer sees P1 draw output after unrelated successor");
+                ByteBuffer depthData = readback(depth).order(ByteOrder.nativeOrder());
+                assertEquals(0.25F, depthData.getFloat(0), 0.001F,
+                        "deferred depth store must reach memory without a full-clear proof");
+            } finally {
+                closeAll(textures);
+            }
+        });
+                Map<String, Object> telemetry = SCENARIOS.get(scenarioName);
+                assertEquals(0L, ((Number) telemetry.get("depthStoreKilledBytes")).longValue(),
+                        "an unrelated successor must never kill the deferred depth store");
+            });
+        }
+    }
+
+    @Test
+    void colorStoreSurvivesWithoutClearProof() {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                final String scenarioName = "colorStoreSurvivesWithoutClearProof[" + abiMode + "]";
+                withScenario(scenarioName, () -> {
+            List<MetalGpuTexture> textures = createTextures(
+                    List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM),
+                    "bench-store-alive");
+            MetalGpuTexture a = textures.get(0);
+            MetalGpuTexture b = textures.get(1);
+            try {
+                // P1 writes A red; its V3 store decision is deferred.
+                fullscreenSolid("store_alive_p1", a, new Vector4f(1.0F, 0.0F, 0.0F, 1.0F));
+                // The only successors touch B: P2 clears+draws blue, P3
+                // LOADS B and draws green. Nothing proves A's content dead,
+                // so the readback consumer must observe it.
+                fullscreenSolid("store_alive_p2", b, new Vector4f(0.0F, 0.0F, 1.0F, 1.0F));
+                RenderPipeline greenLoadPipeline = solidPipeline("store_alive_green", 1,
+                        new float[] {0.0F, 1.0F, 0.0F, 1.0F}, null, null, null);
+                RenderPassDescriptor reloadB = RenderPassDescriptor.create(() -> "bench store alive p3");
+                reloadB.withColorAttachment(view(b), Optional.empty());
+                reloadB.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+                MetalRenderPass reloadPass = (MetalRenderPass) encoder.createRenderPass(reloadB);
+                reloadPass.setPipeline(greenLoadPipeline);
+                reloadPass.draw(3, 1, 0, 0);
+                encoder.submitRenderPass();
+
+                assertRgba(readback(a), 255, 0, 0,
+                        "deferred store resolves to memory when no successor clears the attachment");
+                assertRgba(readback(b), 0, 255, 0, "unrelated successors keep their own chain");
+            } finally {
+                closeAll(textures);
+            }
+        });
+                Map<String, Object> telemetry = SCENARIOS.get(scenarioName);
+                assertEquals(0L, ((Number) telemetry.get("colorStoreKilledBytes")).longValue(),
+                        "suppression requires the same-texture full-clear proof; none exists here");
+            });
+        }
+    }
+
+    @Test
+    void presentConsumerKeepsFinalStores() {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                final String scenarioName = "presentConsumerKeepsFinalStores[" + abiMode + "]";
+                withScenario(scenarioName, () -> {
+            List<MetalGpuTexture> textures = createTextures(
+                    List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM),
+                    "bench-present");
+            MetalGpuTexture scene = textures.get(0);
+            MetalGpuTexture composite = textures.get(1);
+            try {
+                RenderPipeline samplePipeline = samplePipeline("present_composite_sample");
+                GpuSampler nearest = nearestSampler();
+
+                // P1 renders the final scene color whose store feeds the
+                // present boundary.
+                fullscreenSolid("present_scene", scene, new Vector4f(1.0F, 0.0F, 0.0F, 1.0F));
+                // P2 models the adjacent composite/present consumer that
+                // samples the final framebuffer (composite/MetalFX path).
+                sampleInto("present_composite", samplePipeline, nearest, composite, scene);
+
+                // The present boundary copy-captures the drawable source
+                // exactly like scheduleFinalDrawableCapture does.
+                assertRgba(readback(scene), 255, 0, 0,
+                        "pre-present capture observes the final framebuffer");
+                assertRgba(readback(composite), 255, 0, 0,
+                        "adjacent composite consumer sampled the final framebuffer");
+            } finally {
+                closeAll(textures);
+            }
+        });
+                Map<String, Object> telemetry = SCENARIOS.get(scenarioName);
+                assertEquals(0L, ((Number) telemetry.get("colorStoreKilledBytes")).longValue(),
+                        "sampling and copy consumers keep every final store alive");
+            });
+        }
+    }
+
+    @Test
     void killedColorStoresPreserveFramebufferAndReduceStoreEvidence() throws Exception {
         List<MetalGpuTexture> baselineTextures = createTextures(
                 List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM), "bench-killed-baseline");
@@ -719,6 +851,60 @@ final class MetalRenderGraphBenchIntegrationTest {
                 new float[] { clear.x(), clear.y(), clear.z(), clear.w() }, null, null, null);
         RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "bench " + shaderName);
         descriptor.withColorAttachment(view(target), Optional.of(clear));
+        descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+        MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+        pass.setPipeline(pipeline);
+        pass.draw(3, 1, 0, 0);
+        encoder.submitRenderPass();
+    }
+
+    /** Solid-color fragment pipeline whose vertex stage writes a constant z = 0.25 depth. */
+    private RenderPipeline depthWriteSolidPipeline(final String name, final float[] rgba) {
+        vertexShaders.put("fullscreen_z_quarter", """
+                #version 450
+                void main() {
+                    vec2 positions[3] = vec2[](
+                        vec2(-1.0, -1.0),
+                        vec2( 3.0, -1.0),
+                        vec2(-1.0,  3.0)
+                    );
+                    gl_Position = vec4(positions[gl_VertexIndex], 0.25, 1.0);
+                }
+                """);
+        StringBuilder fragment = new StringBuilder("""
+                #version 450
+                layout(location=0) out vec4 out0;
+                void main() {
+                """);
+        appendColor(fragment, "out0", rgba);
+        fragment.append("}\n");
+        fragmentShaders.put(name, fragment.toString());
+        return RenderPipeline.builder()
+                .withLocation("metallum_test/" + name)
+                .withVertexShader("metallum_test/fullscreen_z_quarter")
+                .withFragmentShader("metallum_test/" + name)
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withCull(false)
+                .withDepthStencilState(new DepthStencilState(CompareOp.ALWAYS_PASS, true))
+                .withColorTargetState(0, new ColorTargetState(
+                        Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                .build();
+    }
+
+    /**
+     * One full-screen solid pass into {@code target} with a load (no-clear)
+     * depth attachment on {@code depth}.
+     */
+    private void fullscreenDepthSolid(
+            final String label,
+            final MetalGpuTexture target,
+            final MetalGpuTexture depth,
+            final RenderPipeline pipeline,
+            final Vector4f clearColor
+    ) {
+        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "bench " + label);
+        descriptor.withColorAttachment(view(target), Optional.of(clearColor));
+        descriptor.withDepthAttachment(view(depth), java.util.OptionalDouble.empty());
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
         MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
         pass.setPipeline(pipeline);
