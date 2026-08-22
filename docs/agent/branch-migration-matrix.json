@@ -59,6 +59,48 @@
     "P1 V1/I0/I1 paired physical performance",
     "final visible-window Apple Silicon acceptance"
    ]
+  },
+  {
+   "source_branch": "feature/token-native-private-bindings",
+   "source_sha": "de9d274a997721979f26afc783e4ec0cd1c95323",
+   "destination_branch": "feature/p3-token-native-bulk-patch",
+   "destination_stage": "P3-token-native-bulk-argument-patch",
+   "files_components_selected": [
+    "MetalBindingNameProvider duck interface",
+    "MetalIrisBindingTokenLayout immutable per-program layout",
+    "MetalIrisTokenBindingSession pass-local cursor",
+    "MetalTokenBindingPass metal-only token binding surface",
+    "Iris GLSL-program / post-chain / sampler-decl binding-token mixins",
+    "render-pass binding-cache token session mixin",
+    "sodium MetalFx mixin token integration",
+    "metallum.mixins.json registrations"
+   ],
+   "files_components_deliberately_omitted": [
+    "source-branch-era duplicate MetalRenderPassBindingCacheMixin body superseded by canonical version",
+    "no platform-specific code existed in source; nothing else omitted"
+   ],
+   "current_canonical_equivalent_reviewed": true,
+   "canonical_equivalent": "canonical MetalRenderStateShadow unchanged-binding suppression + MetalRenderStatePacket batching + metallum_render_state_packet_apply_v1 single native apply + MetalHotPathTelemetry; tokens feed the same suppressed/batched setter funnel",
+   "tests_migrated": [
+    "MetallumMixinRegistrationTest (conflict-resolved onto canonical contract, iris subpackage restored)"
+   ],
+   "tests_newly_added": [
+    "MetalPrivateBindingHookDescriptorTest",
+    "MetalRenderPassBindingCacheSessionTest"
+   ],
+   "existing_tests_reused": [
+    "MetalMrtBackendIntegrationTest",
+    "MetalRenderGraphBenchIntegrationTest",
+    "full local 387-test battery exercising packet/shadow defaults"
+   ],
+   "runtime_evidence": [
+    "build/agent-evidence/rendergraph.json",
+    "GitHub Actions exact-head gates on PR head"
+   ],
+   "performance_evidence": null,
+   "known_deferred_physical_only_checks": [
+    "P3 paired encode-time performance blocks deferred to the unified evaluation loop on shipping workloads"
+   ]
   }
  ],
  "branches": [
@@ -100,7 +142,7 @@
     "killed-store telemetry",
     "framebuffer equivalence evidence"
    ],
-   "disposition": "subsumed-by-canonical (PR #30)"
+   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass"
   },
   {
    "branch": "feature/token-native-private-bindings",
@@ -327,7 +369,7 @@
    "components": [
     "metal-capabilities stage decision gate"
    ],
-   "disposition": "subsumed-by-canonical (PR #31)"
+   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; decouples the PR merge check from branch pushes"
   },
   {
    "branch": "fix/ci-canonical-push-authority-gate",
@@ -339,7 +381,7 @@
     "authority workflow push triggers",
     "stage decision event-scoped run query"
    ],
-   "disposition": "subsumed-by-canonical (PR #32)"
+   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; canonical pushes must run and observe their own authority workflows"
   },
   {
    "branch": "feature/p2-consumer-store-liveness",
@@ -352,7 +394,7 @@
     "IrisGraphBench readback consumer negative control (no clear proof, zero kills)",
     "IrisGraphBench present-boundary consumer scenario (adjacent sample + copy capture)"
    ],
-   "disposition": "subsumed-by-canonical (PR #34)"
+   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; pins that capture/readback/present consumers keep deferred stores alive"
   },
   {
    "branch": "feature/p2-deferred-color-store-suppression",
@@ -364,19 +406,19 @@
     "deferred color store suppression",
     "evidence-honest kill accounting"
    ],
-   "disposition": "subsumed-by-canonical (PR #33)"
+   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; suppression fires only with same-texture full-clear successor proof"
   },
   {
-   "branch": "chore/p2-stage-decision",
-   "role": "canonical-stage-bookkeeping",
+   "branch": "feature/p3-token-native-bulk-patch",
+   "role": "active-stage-branch",
    "stages": [
-    "P2"
+    "P3"
    ],
    "components": [
-    "machine-readable P2 stage decision",
-    "subsumed-by-canonical dispositions for merged P2 branches"
+    "token-native private binding surfaces (selective replay of PR #26)",
+    "binding-state session contracts and registration tests"
    ],
-   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; documentation only"
+   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass"
   }
  ]
 }
