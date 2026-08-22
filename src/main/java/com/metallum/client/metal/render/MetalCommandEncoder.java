@@ -49,6 +49,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     // readback callbacks against in-flight GPU work.
     static final boolean DEFERRED_DEPTH_STORE =
             Boolean.parseBoolean(System.getProperty("metallum.opt.deferredStore", "true"));
+    /**
+     * Defers every live V3 color store decision (.unknown) so a full-clear
+     * successor can resolve it to dontCare instead of paying dead tile
+     * write-back. Suppression fires only with the same-texture full-clear
+     * proof; pixels are identical by construction.
+     */
+    static final boolean DEFERRED_COLOR_STORE =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.deferredColorStore", "true"));
     private static final boolean BLIT_BATCH =
             Boolean.parseBoolean(System.getProperty("metallum.opt.blitBatch", "true"));
     private final MetalDevice device;
@@ -93,7 +101,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     @Nullable
     private MetalGpuTexture renderDepthTexture;
     private boolean renderEncoderDeferredStore;
-    private boolean renderEncoderColorStoreKilled;
+    @Nullable
+    private boolean[] renderEncoderDeferredColorStores;
 
     /**
      * RenderPassDescriptorV3 selection. "auto" (default) uses V3 whenever the
@@ -106,6 +115,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     static void setRenderPassAbiModeForTests(final String mode) {
         renderPassAbiMode = mode;
+    }
+
+    private static boolean deferredColorStoreActive() {
+        return DEFERRED_COLOR_STORE && MetalNativeBridge.colorStoreResolutionAvailable();
     }
 
     private static boolean renderPassDescriptorV3Active() {
@@ -251,9 +264,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     // pass breaking this encoder clears the same attachment.
                     boolean deadDepth = incomingClearsSameDepth
                             || (renderDepthTexture != null && pendingDepthClears.containsKey(renderDepthTexture));
-                    if (renderEncoderColorStoreKilled) {
-                        deadDepth = false;
-                    }
                     renderEncoder.setDeferredDepthStore(!deadDepth);
                     if (deadDepth && renderDepthTexture != null) {
                         RenderGraphTelemetry.onDepthStoreKilled(
@@ -262,25 +272,34 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                         );
                     }
                 }
-                if (killedColorAttachments.length != 0) {
-                    int[] killedPixelBytes = new int[killedColorAttachments.length];
-                    boolean anyKilled = false;
-                    for (int index = 0; index < killedColorAttachments.length; index++) {
-                        if (killedColorAttachments[index] != null
-                                && !MetalPipelineSupport.sameHandle(
-                                        killedColorAttachments[index], MemorySegment.NULL)
-                                && index < deferredColorStorePixelBytes.length) {
+                if (renderEncoderDeferredColorStores != null) {
+                    // Resolve every deferred color store before endEncoding;
+                    // a full-clear same-texture successor proved the
+                    // predecessor's store dead, everything else keeps its
+                    // contents alive. Accounting counts ONLY the slots whose
+                    // evidence resolved them to dontCare.
+                    int[] killedPixelBytes = new int[renderEncoderDeferredColorStores.length];
+                    int killedSlotCount = 0;
+                    for (int index = 0; index < renderEncoderDeferredColorStores.length; index++) {
+                        if (!renderEncoderDeferredColorStores[index]) {
+                            continue;
+                        }
+                        boolean killed = colorStoresKilled != null
+                                && index < colorStoresKilled.length
+                                && colorStoresKilled[index]
+                                && index < deferredColorStorePixelBytes.length
+                                && deferredColorStorePixelBytes[index] > 0;
+                        renderEncoder.setDeferredColorStore(index, !killed);
+                        if (killed) {
                             killedPixelBytes[index] = deferredColorStorePixelBytes[index];
-                            if (deferredColorStorePixelBytes[index] > 0) {
-                                anyKilled = true;
-                            }
+                            killedSlotCount++;
                         }
                     }
-                    if (anyKilled) {
+                    if (killedSlotCount > 0) {
                         RenderGraphTelemetry.onColorStoresKilled(
                                 deferredColorStorePixels,
                                 killedPixelBytes,
-                                countKilled(killedColorAttachments)
+                                killedSlotCount
                         );
                     }
                 }
@@ -309,7 +328,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         deferredColorStorePixelBytes = new int[0];
         renderDepthTexture = null;
         renderEncoderDeferredStore = false;
-        renderEncoderColorStoreKilled = false;
+        renderEncoderDeferredColorStores = null;
     }
 
     /**
@@ -536,9 +555,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         endEncoder(incomingClearsSameDepth, colorStoreKilled);
         MTLRenderCommandEncoder encoder;
         if (renderPassDescriptorV3Active()) {
-            // P2.2 conservative policy: V3 emits concrete actions. A full-clear
-            // successor records the outgoing store as killed before replacing
-            // this encoder; no runtime store mutation is required.
+            // P2.3 admitted policy: live color slots defer their store
+            // decision (.unknown) exactly like depth. The successor supplies
+            // kill evidence while this encoder is still open; endEncoder
+            // resolves every deferred slot to store-or-dontCare before
+            // endEncoding. A full-clear successor overwrites the attachment
+            // completely, so suppressing the predecessor's store cannot
+            // change any pixel. Disable with metallum.opt.deferredColorStore
+            // or when the loaded dylib lacks the resolution symbol.
             int slotCount = colorTextureViews.length;
             int[] colorLoadActions = new int[slotCount];
             int[] colorStoreActions = new int[slotCount];
@@ -548,7 +572,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     colorStoreActions[index] = 0;
                 } else {
                     colorLoadActions[index] = clearColorEnabled[index] != 0 ? 2 : 1;
-                    colorStoreActions[index] = 1;
+                    colorStoreActions[index] = deferredColorStoreActive() ? 2 : 1;
                 }
             }
             encoder = commandBuffer().makeRenderCommandEncoderV3(
@@ -564,7 +588,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     viewportHeight,
                     label
             );
+            renderEncoderDeferredColorStores = new boolean[slotCount];
+            for (int index = 0; index < slotCount; index++) {
+                renderEncoderDeferredColorStores[index] = colorStoreActions[index] == 2;
+            }
         } else {
+            renderEncoderDeferredColorStores = null;
             encoder = commandBuffer().makeRenderCommandEncoderV2(
                     colorAttachments,
                     depthAttachment,
@@ -599,7 +628,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
         renderDepthTexture = depthTextureView == null ? null : (MetalGpuTexture) depthTextureView.texture();
         renderEncoderDeferredStore = deferredDepthStore;
-        renderEncoderColorStoreKilled = false;
         recordGraphTelemetry(
                 label,
                 viewportWidth,

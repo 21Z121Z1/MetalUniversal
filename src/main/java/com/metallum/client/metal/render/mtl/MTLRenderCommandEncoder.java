@@ -452,6 +452,18 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
         MetalNativeBridge.MTLRenderCommandEncoder_setDepthStoreAction(encoder, store ? 1 : 0);
     }
 
+    /**
+     * Resolves one color attachment's deferred (.unknown) store decision.
+     * Must be called before {@code endEncoding()} on every slot whose V3
+     * descriptor used the deferred store encoding; must not be called on
+     * slots with concrete store actions.
+     */
+    public void setDeferredColorStore(final int index, final boolean store) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        MetalNativeBridge.MTLRenderCommandEncoder_setColorStoreAction(encoder, index, store ? 1 : 0);
+    }
+
     public void updateFence(final MemorySegment fence, final MTLRenderStages stages) {
         MemorySegment encoder = handle();
         flushState(encoder);

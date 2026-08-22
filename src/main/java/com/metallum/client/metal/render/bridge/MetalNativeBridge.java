@@ -577,6 +577,13 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderUpdateFence = downcall(lookup, "MTLRenderCommandEncoder_updateFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             MTLRenderCommandEncoderWaitForFence = downcallWithoutCritical(lookup, "MTLRenderCommandEncoder_waitForFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             MTLRenderCommandEncoderSetDepthStoreAction = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthStoreAction", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT));
+            // Optional: older shipping dylibs without color store resolution
+            // keep every V3 color store concrete (no deferral, no suppression).
+            MTLRenderCommandEncoderSetColorStoreAction = optionalDowncall(
+                    lookup,
+                    "metallum_MTLRenderCommandEncoder_setColorStoreAction",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT, INT)
+            );
             setDeferredDepthStore = downcall(lookup, "metallum_set_deferred_depth_store", FunctionDescriptor.ofVoid(INT));
             metal4Supported = downcall(lookup, "metallum_metal4_supported", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metal4MainQueuePilotValidate = downcall(lookup, "metallum_metal4_main_queue_pilot_validate", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
@@ -867,6 +874,11 @@ public final class MetalNativeBridge {
     public static boolean renderCommandEncoderV3Available() {
         return MTLCommandBufferMakeRenderCommandEncoderV3 != null;
     }
+
+    /** True when the loaded dylib can resolve deferred color store decisions. */
+    public static boolean colorStoreResolutionAvailable() {
+        return MTLRenderCommandEncoderSetColorStoreAction != null;
+    }
     private static final MethodHandle MTLRenderCommandEncoderSetRenderPipelineState;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthStencilState;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthBias;
@@ -915,6 +927,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderUpdateFence;
     private static final MethodHandle MTLRenderCommandEncoderWaitForFence;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthStoreAction;
+    private static final MethodHandle MTLRenderCommandEncoderSetColorStoreAction;
     private static final MethodHandle setDeferredDepthStore;
     private static final MethodHandle metal4Supported;
     private static final MethodHandle metal4MainQueuePilotValidate;
@@ -2756,6 +2769,22 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderSetDepthStoreAction.invokeExact(segment(encoder), store);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLRenderCommandEncoder_setDepthStoreAction", throwable);
+        }
+    }
+
+    public static void MTLRenderCommandEncoder_setColorStoreAction(
+            final MemorySegment encoder,
+            final int index,
+            final int store
+    ) {
+        if (MTLRenderCommandEncoderSetColorStoreAction == null) {
+            throw bridgeFailure("metallum_MTLRenderCommandEncoder_setColorStoreAction",
+                    new IllegalStateException("loaded native bridge has no color store resolution symbol"));
+        }
+        try {
+            MTLRenderCommandEncoderSetColorStoreAction.invokeExact(segment(encoder), index, store);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderCommandEncoder_setColorStoreAction", throwable);
         }
     }
 
