@@ -340,6 +340,18 @@
         "stage decision event-scoped run query"
       ],
       "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; canonical pushes must run and observe their own authority workflows"
+    },
+    {
+      "branch": "feature/p2-deferred-color-store-suppression",
+      "role": "active-stage-branch",
+      "stages": [
+        "P2"
+      ],
+      "components": [
+        "deferred color store suppression",
+        "evidence-honest kill accounting"
+      ],
+      "disposition": "merge-to-canonical-only-after-exact-head-gates-pass; suppression fires only with same-texture full-clear successor proof"
     }
   ]
 }
