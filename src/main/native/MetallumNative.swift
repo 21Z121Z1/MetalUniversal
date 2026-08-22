@@ -83,8 +83,10 @@ private struct MetalFxScalerKey: Hashable {
 private enum NativeState {
     static var debugLabelsEnabled = false
     // When true, makeRenderCommandEncoder_v2 leaves the depth attachment with
-    // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
-    // before endEncoding. Toggled once at device init from
+        // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
+        // before endEncoding. Color stores remain concrete in V3 because Metal
+        // does not allow mutating actions known at encoder creation. Toggled once
+        // at device init from
     // metallum_set_deferred_depth_store; must match the Java flag exactly.
     static var deferredDepthStore = false
     // Split-fence mode (metallum.opt.splitFence): non-nil while the Java
@@ -10104,9 +10106,6 @@ public func metallum_create_sampler_v3(
     }
 }
 
-/// Resolves a depth attachment that was created with storeAction=.unknown
-/// (deferred store mode). Only legal on encoders whose descriptor deferred
-/// the decision; the Java side tracks that invariant.
 @_cdecl("metallum_MTLRenderCommandEncoder_setDepthStoreAction")
 public func metallum_MTLRenderCommandEncoder_setDepthStoreAction(
     _ pointer: UnsafeMutableRawPointer,

@@ -16,10 +16,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * - passes requested: how many semantic render passes the Java side asked for;
  * - native encoders created: how many MTLRenderCommandEncoders actually had
  *   to begin (encoder reuse means fusion happened);
- * - estimated attachment store/load bytes: bandwidth implied by the CURRENT
- *   ABI semantics (V2 stores every live color attachment every pass). This is
- *   the number the load/store planner must drive down without changing any
- *   observable pixel.
+ * - estimated attachment store/load bytes: bandwidth implied by the actions
+ *   actually sent to Metal. This is the number the load/store planner drives
+ *   down without changing any observable pixel.
  */
 public final class RenderGraphTelemetry {
     private static final AtomicLong PASSES_REQUESTED = new AtomicLong();
@@ -29,6 +28,7 @@ public final class RenderGraphTelemetry {
     private static final AtomicLong COLOR_LOAD_BYTES = new AtomicLong();
     private static final AtomicLong DEPTH_STORE_BYTES = new AtomicLong();
     private static final AtomicLong DEPTH_STORE_KILLED_BYTES = new AtomicLong();
+    private static final AtomicLong COLOR_STORE_KILLED_BYTES = new AtomicLong();
     private static final List<Map<String, Object>> EVENTS = new ArrayList<>();
     private static final int MAX_EVENTS = 4096;
 
@@ -43,6 +43,7 @@ public final class RenderGraphTelemetry {
         COLOR_LOAD_BYTES.set(0);
         DEPTH_STORE_BYTES.set(0);
         DEPTH_STORE_KILLED_BYTES.set(0);
+        COLOR_STORE_KILLED_BYTES.set(0);
         synchronized (EVENTS) {
             EVENTS.clear();
         }
@@ -65,6 +66,7 @@ public final class RenderGraphTelemetry {
             final int height,
             final int[] slotPixelBytes,
             final boolean[] slotClear,
+            final boolean[] slotStoreKilled,
             final int depthPixelBytes,
             final boolean depthClear,
             final boolean depthDeferredStore
@@ -78,10 +80,17 @@ public final class RenderGraphTelemetry {
             if (bytes <= 0) {
                 continue;
             }
-            // Current admitted policies: live slots are stored every pass and
-            // loaded unless this pass cleared them. When a future policy
-            // suppresses either action this estimate must move with it.
-            store += pixels * bytes;
+            if (slotStoreKilled[index]) {
+                COLOR_STORE_KILLED_BYTES.addAndGet(pixels * bytes);
+                record(Map.of(
+                        "event", "color-store-killed",
+                        "slot", index,
+                        "pixels", pixels,
+                        "bytesPerPixel", bytes
+                ));
+            } else {
+                store += pixels * bytes;
+            }
             if (!slotClear[index]) {
                 load += pixels * bytes;
             }
@@ -113,6 +122,32 @@ public final class RenderGraphTelemetry {
         }
     }
 
+    /**
+     * Reports deferred color stores resolved to {@code dontCare} before the
+     * encoder ended. {@code killedPixelBytes[index]} is zero when slot index was
+     * not part of the killed set.
+     */
+    public static void onColorStoresKilled(
+            final long pixels,
+            final int[] killedPixelBytes,
+            final int killedSlotCount
+    ) {
+        if (pixels <= 0 || killedPixelBytes == null || killedSlotCount <= 0) {
+            return;
+        }
+        for (int index = 0; index < killedPixelBytes.length; index++) {
+            if (killedPixelBytes[index] > 0) {
+                COLOR_STORE_KILLED_BYTES.addAndGet(pixels * killedPixelBytes[index]);
+                record(Map.of(
+                        "event", "color-store-killed",
+                        "slot", index,
+                        "pixels", pixels,
+                        "bytesPerPixel", killedPixelBytes[index]
+                ));
+            }
+        }
+    }
+
     /** An incoming pass reused the already-open encoder (fusion candidate path). */
     public static void onEncoderReused(final String label) {
         ENCODERS_REUSED.incrementAndGet();
@@ -136,6 +171,7 @@ public final class RenderGraphTelemetry {
         snapshot.put("colorLoadBytesEstimate", COLOR_LOAD_BYTES.get());
         snapshot.put("depthStoreBytesEstimate", DEPTH_STORE_BYTES.get());
         snapshot.put("depthStoreKilledBytes", DEPTH_STORE_KILLED_BYTES.get());
+        snapshot.put("colorStoreKilledBytes", COLOR_STORE_KILLED_BYTES.get());
         synchronized (EVENTS) {
             snapshot.put("events", new ArrayList<>(EVENTS));
         }

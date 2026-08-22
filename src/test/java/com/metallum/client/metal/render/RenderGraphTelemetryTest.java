@@ -4,6 +4,8 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import java.util.Map;
+
 final class RenderGraphTelemetryTest {
     @Test
     void deferredDepthStoreIsNotCountedUntilKilled() {
@@ -12,7 +14,7 @@ final class RenderGraphTelemetryTest {
         RenderGraphTelemetry.onEncoderCreated(
                 "deferred-depth", 64, 64,
                 new int[] {4}, new boolean[] {false},
-                4, false, true
+                new boolean[] {false}, 4, false, true
         );
         assertEquals(0L, RenderGraphTelemetry.snapshot().get("depthStoreBytesEstimate"));
 
@@ -26,10 +28,27 @@ final class RenderGraphTelemetryTest {
 
         RenderGraphTelemetry.onEncoderCreated(
                 "immediate-depth", 32, 32,
-                new int[0], new boolean[0],
+                new int[0], new boolean[0], new boolean[0],
                 4, false, false
         );
 
         assertEquals(4_096L, RenderGraphTelemetry.snapshot().get("depthStoreBytesEstimate"));
+    }
+
+    @Test
+    void killedColorStoresMoveBytesFromStoreToKilledEvidence() {
+        RenderGraphTelemetry.reset();
+
+        RenderGraphTelemetry.onEncoderCreated(
+                "deferred-color", 64, 64,
+                new int[] {4, 4}, new boolean[] {false, false},
+                new boolean[] {true, false},
+                0, false, false
+        );
+
+        Map<String, Object> snapshot = RenderGraphTelemetry.snapshot();
+        assertEquals(16_384L, snapshot.get("colorStoreBytesEstimate"));
+        assertEquals(32_768L, snapshot.get("colorLoadBytesEstimate"));
+        assertEquals(16_384L, snapshot.get("colorStoreKilledBytes"));
     }
 }
