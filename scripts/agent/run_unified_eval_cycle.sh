@@ -244,7 +244,8 @@ run_profile_task() {
   printf '%s\n' "${args[@]}" > "$trial_dir/properties.txt"
   local command=(./gradlew --no-daemon "$task" "-Pworld=$WORLD" "${args[@]}" \
     "-Dmetallum.validation.output=$trial_dir/artifacts/validation" \
-    "-Dmetallum.iris.experimental.planDump=$trial_dir/optimization-plan.json")
+    "-Dmetallum.iris.experimental.planDump=$trial_dir/optimization-plan.json" \
+    "-Dmetallum.validation.world=$WORLD")
   {
     printf '[command]'
     printf ' %q' "${command[@]}"
