@@ -597,6 +597,11 @@ public final class MetalNativeBridge {
                     "metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG)
             );
+            MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT)
+            );
             MTLRenderPipelineDescriptorSetColorAttachmentBlendState = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState",
@@ -991,6 +996,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderPipelineDescriptorSetAttachmentFormats;
     private static final MethodHandle MTLRenderPipelineDescriptorSetColorAttachmentFormat;
     private static final MethodHandle MTLRenderPipelineDescriptorSetDepthStencilFormats;
+    @Nullable
+    private static final MethodHandle MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers;
     private static final MethodHandle MTLRenderPipelineDescriptorSetColorAttachmentBlendState;
     private static final MethodHandle MTLRenderPipelineDescriptorSetBlendState;
     private static final MethodHandle MTLDeviceMakeRenderPipelineState;
@@ -2802,6 +2809,25 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats", throwable);
+        }
+    }
+
+    public static void metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
+            final MemorySegment desc,
+            final boolean enabled
+    ) {
+        if (MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers == null) {
+            return;
+        }
+        try {
+            MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers.invokeExact(
+                    segment(desc), enabled ? 1 : 0
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure(
+                    "metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers",
+                    throwable
+            );
         }
     }
 

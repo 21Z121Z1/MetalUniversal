@@ -23,4 +23,15 @@ final class MetalStableTerrainSamplerTest {
                 Identifier.fromNamespaceAndPath("iris", "terrain/custom")
         ));
     }
+
+    @Test
+    void routesIcbCapabilityOnlyToTheAuthoritativeSodiumTerrainShader() {
+        assertTrue(MetalCompiledRenderPipeline.isSodiumTerrainPipeline(SODIUM_TERRAIN));
+        assertFalse(MetalCompiledRenderPipeline.isSodiumTerrainPipeline(
+                Identifier.fromNamespaceAndPath("minecraft", "core/entity")
+        ));
+        assertFalse(MetalCompiledRenderPipeline.isSodiumTerrainPipeline(
+                Identifier.fromNamespaceAndPath("iris", "terrain/custom")
+        ));
+    }
 }

@@ -819,13 +819,25 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
 
     let vertexFunction = try createShippingFunction(device: device, entryPoint: "mtl4_path_vs")
     let fragmentFunction = try createShippingFunction(device: device, entryPoint: "mtl4_path_fs")
-    let pipeline = try createShippingPipeline(
+    let genericPipeline = try createShippingPipeline(
         device: device,
         descriptor: makeDescriptor(
             vertexFunction: vertexFunction,
             fragmentFunction: fragmentFunction,
-            label: "terrain-icb-readback"
+            label: "non-terrain-icb-disabled"
         )
+    )
+    try check(!genericPipeline.supportIndirectCommandBuffers,
+              "non-terrain pipeline inherited global supportIndirectCommandBuffers")
+    let terrainDescriptor = makeDescriptor(
+        vertexFunction: vertexFunction,
+        fragmentFunction: fragmentFunction,
+        label: "terrain-icb-readback"
+    )
+    terrainDescriptor.supportIndirectCommandBuffers = true
+    let pipeline = try createShippingPipeline(
+        device: device,
+        descriptor: terrainDescriptor
     )
     try check(pipeline.supportIndirectCommandBuffers,
               "terrain ICB pipeline did not advertise supportIndirectCommandBuffers")
