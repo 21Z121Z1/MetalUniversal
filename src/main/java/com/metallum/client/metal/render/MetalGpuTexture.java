@@ -104,6 +104,18 @@ final class MetalGpuTexture extends GpuTexture {
         return "metal-texture-" + validationResourceId;
     }
 
+    /**
+     * Registers the level-zero allocation with the existing render-contract
+     * identity path. Iris-owned creation sites call this eagerly so an
+     * allocation is visible before its first pass or readback use; the
+     * runtime gate keeps ordinary rendering on the zero-event path.
+     */
+    void registerValidationIdentity() {
+        if (RenderContractRuntime.enabled()) {
+            MetalCommandEncoder.contractResource(this, 0);
+        }
+    }
+
     void recordMaterializedClear(@Nullable final Vector4fc color, @Nullable final Double depth) {
         if (color != null) {
             this.materializedColorClear = color;
