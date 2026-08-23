@@ -56,6 +56,9 @@ import net.minecraft.world.level.saveddata.WeatherData;
 import net.minecraft.world.phys.Vec3;
 
 import java.io.IOException;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -2373,6 +2376,12 @@ public final class MetalValidationClient implements ClientModInitializer {
         RenderContractRuntime.Snapshot contract = RenderContractRuntime.snapshot();
         long[] metal4MainStats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
         long[] metal4MetalFxStats = MetalNativeBridge.metallum_metal4_metalfx_stats();
+        long[] terrainIcbStats = readTerrainIcbStats();
+        Metallum.LOGGER.info(
+                "Terrain ICB validation counters: encoded={} executed={}",
+                terrainIcbStats[0],
+                terrainIcbStats[1]
+        );
         try {
             ValidationStorageBudget storage = ValidationStorageBudget.shared(outputDirectory);
             writeStateArtifact(
@@ -2413,6 +2422,8 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "metal4SpatialScalerEncodes": %d,
                       "metal4TemporalScalerEncodes": %d,
                       "metal4FrameGenerationInputSubmissions": %d,
+                      "terrainIcbEncoded": %d,
+                      "terrainIcbExecuted": %d,
                       "renderContractEnabled": %s,
                       "renderContractStatus": "%s",
                       "renderContractReady": %s,
@@ -2451,6 +2462,8 @@ public final class MetalValidationClient implements ClientModInitializer {
                             metal4MetalFxStats[2],
                             metal4MetalFxStats[3],
                             metal4MetalFxStats[4],
+                            terrainIcbStats[0],
+                            terrainIcbStats[1],
                             contract.enabled(),
                             contract.status(),
                             "passed".equals(status)
@@ -2473,6 +2486,23 @@ public final class MetalValidationClient implements ClientModInitializer {
             );
         } catch (IOException exception) {
             throw new IllegalStateException("Could not write Minecraft validation state", exception);
+        }
+    }
+
+    private static long[] readTerrainIcbStats() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment encoded = arena.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment executed = arena.allocate(ValueLayout.JAVA_LONG);
+            int available = MetalNativeBridge.terrainIcbStats(encoded, executed);
+            if (available == 0) {
+                return new long[]{0L, 0L};
+            }
+            return new long[]{
+                    encoded.get(ValueLayout.JAVA_LONG, 0),
+                    executed.get(ValueLayout.JAVA_LONG, 0)
+            };
+        } catch (RuntimeException ignored) {
+            return new long[]{0L, 0L};
         }
     }
 
