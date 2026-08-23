@@ -21,6 +21,7 @@ jobs:
       MTL_SHADER_VALIDATION: '1'
       MTL_HUD_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
+      METALLUM_MRT_ABI_DEBUG: '1'
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
       GRADLE_OPTS: '-Dorg.gradle.caching=true'
 
@@ -49,7 +50,7 @@ jobs:
           })
           request = urllib.request.Request(
               'https://api.modrinth.com/v2/project/bsl-shaders/version?' + query,
-              headers={'User-Agent': 'MetalUniversal-BSL-shadow-regression/1.0'}
+              headers={'User-Agent': 'MetalUniversal-BSL-shadow-regression/2.0'}
           )
           with urllib.request.urlopen(request) as response:
               versions = json.load(response)
@@ -62,27 +63,22 @@ jobs:
           if not file:
               raise SystemExit('Selected BSL release has no downloadable file')
 
-          run = pathlib.Path('.github/ci/minecraft-e2e/build/run/clientGameTest')
-          packs = run / 'shaderpacks'
-          config = run / 'config'
-          packs.mkdir(parents=True, exist_ok=True)
-          config.mkdir(parents=True, exist_ok=True)
-          target = packs / 'BSL-regression.zip'
+          inputs = pathlib.Path('build/bsl-input')
+          inputs.mkdir(parents=True, exist_ok=True)
+          target = inputs / 'BSL-regression.zip'
           urllib.request.urlretrieve(file['url'], target)
           digest = hashlib.sha256(target.read_bytes()).hexdigest()
-          (config / 'iris.properties').write_text(
-              'enableShaders=true\nshaderPack=BSL-regression.zip\n', encoding='utf-8'
-          )
-          pathlib.Path('build').mkdir(exist_ok=True)
           pathlib.Path('build/bsl-version.json').write_text(json.dumps({
               'id': version.get('id'),
               'version_number': version.get('version_number'),
               'date_published': version.get('date_published'),
               'filename': file.get('filename'),
+              'staged_filename': target.name,
               'sha256': digest,
           }, indent=2) + '\n', encoding='utf-8')
           print(json.dumps(json.loads(pathlib.Path('build/bsl-version.json').read_text()), indent=2))
           PY
+          echo "BSL_PACK_FILE=$(cd build/bsl-input && pwd)/BSL-regression.zip" >> "$GITHUB_ENV"
 
       - name: Build production MetalUniversal jar
         id: build
@@ -95,18 +91,75 @@ jobs:
           test -s "$jar"
           echo "jar=$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")" >> "$GITHUB_OUTPUT"
 
-      - name: Run BSL production-client reproduction
+      - name: Install BSL after Loom prepares the production run directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > build/bsl-stage.init.gradle <<'GRADLE'
+          gradle.projectsEvaluated {
+              def root = gradle.rootProject
+              def task = root.tasks.findByName('runProductionClientGameTest')
+              if (task == null) {
+                  throw new GradleException('runProductionClientGameTest was not found')
+              }
+              task.doFirst {
+                  def input = new File(System.getenv('BSL_PACK_FILE'))
+                  if (!input.isFile()) {
+                      throw new GradleException("BSL input is missing: ${input}")
+                  }
+                  def run = new File(root.buildDir, 'run/clientGameTest')
+                  def packs = new File(run, 'shaderpacks')
+                  def config = new File(run, 'config')
+                  packs.mkdirs()
+                  config.mkdirs()
+                  def staged = new File(packs, 'BSL-regression.zip')
+                  java.nio.file.Files.copy(
+                      input.toPath(), staged.toPath(),
+                      java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                  )
+                  new File(config, 'iris.properties').setText(
+                      'enableShaders=true\nshaderPack=BSL-regression.zip\n', 'UTF-8'
+                  )
+                  println("[BSL-DIAG] staged ${staged} (${staged.length()} bytes)")
+                  println("[BSL-DIAG] iris.properties=" + new File(config, 'iris.properties').text.trim())
+              }
+          }
+          GRADLE
+          realpath build/bsl-stage.init.gradle
+
+      - name: Run real BSL production-client reproduction
         id: run
         continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
+          init_script="$(realpath build/bsl-stage.init.gradle)"
           ./gradlew \
             -p .github/ci/minecraft-e2e \
+            -I "$init_script" \
             --build-cache \
             --stacktrace \
             -PmetallumJar="${{ steps.build.outputs.jar }}" \
             runProductionClientGameTest 2>&1 | tee build/bsl-reproduction-console.log
+
+      - name: Prove BSL was actually selected
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          log='.github/ci/minecraft-e2e/build/run/clientGameTest/logs/latest.log'
+          test -s "$log"
+          test -s '.github/ci/minecraft-e2e/build/run/clientGameTest/shaderpacks/BSL-regression.zip'
+          test -s '.github/ci/minecraft-e2e/build/run/clientGameTest/config/iris.properties'
+          grep -F 'shaderPack=BSL-regression.zip' '.github/ci/minecraft-e2e/build/run/clientGameTest/config/iris.properties'
+          if grep -Fq 'Shaders are disabled because no valid shaderpack is selected' "$log"; then
+            echo 'Diagnostic is invalid: Iris rejected the staged BSL pack.' >&2
+            exit 1
+          fi
+          if ! grep -Ei 'BSL|shader ?pack|shaderpack' "$log" | tail -n 80; then
+            echo 'Diagnostic is invalid: no shader-pack activation evidence was logged.' >&2
+            exit 1
+          fi
 
       - name: Extract shadow failure evidence
         if: always()
@@ -117,12 +170,16 @@ jobs:
           mkdir -p build/bsl-diagnostic
           cp build/bsl-version.json build/bsl-diagnostic/ 2>/dev/null || true
           cp build/bsl-reproduction-console.log build/bsl-diagnostic/ 2>/dev/null || true
+          cp "$run/config/iris.properties" build/bsl-diagnostic/ 2>/dev/null || true
+          if [[ -d "$run/shaderpacks" ]]; then
+            find "$run/shaderpacks" -maxdepth 1 -type f -exec basename {} \; | sort > build/bsl-diagnostic/shaderpack-files.txt
+          fi
           if [[ -d "$run/logs" ]]; then cp -R "$run/logs" build/bsl-diagnostic/; fi
           if [[ -d "$run/crash-reports" ]]; then cp -R "$run/crash-reports" build/bsl-diagnostic/; fi
           if [[ -d '.github/ci/minecraft-e2e/build/evidence' ]]; then
             cp -R .github/ci/minecraft-e2e/build/evidence build/bsl-diagnostic/evidence
           fi
-          grep -RniE 'attachment|pipeline format|shadow|Iris Metal|MTLRenderPipeline|Validation' build/bsl-diagnostic | tail -n 400 || true
+          grep -RniE 'attachment|pipeline format|shadow|Iris Metal|shader ?pack|shaderpack|MTLRenderPipeline|Validation|MRT PSO' build/bsl-diagnostic | tail -n 600 || true
 
       - name: Upload diagnostic evidence
         if: always()
@@ -133,11 +190,11 @@ jobs:
           retention-days: 2
           path: build/bsl-diagnostic/**
 
-      - name: Require reproduction to be healthy
+      - name: Require BSL reproduction to be healthy
         if: always()
         shell: bash
         run: |
           if [[ '${{ steps.run.outcome }}' != 'success' ]]; then
-            echo 'BSL reproduction failed; diagnostic artifact contains the first failure.' >&2
+            echo 'Real BSL reproduction failed; diagnostic artifact contains the first failure.' >&2
             exit 1
           fi
