@@ -167,6 +167,21 @@ public final class MetalNativeBridge {
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setDebugLabelsEnabled = downcall(lookup, "metallum_set_debug_labels_enabled", FunctionDescriptor.ofVoid(INT));
             systemThermalState = optionalDowncall(lookup, "metallum_system_thermal_state", FunctionDescriptor.of(INT));
+            presentationLatestPresentIntervalNanos = optionalDowncall(
+                    lookup,
+                    "metallum_presentation_latest_present_interval_nanos",
+                    FunctionDescriptor.of(LONG)
+            );
+            presentationLatestDrawableWaitNanos = optionalDowncall(
+                    lookup,
+                    "metallum_presentation_latest_drawable_wait_nanos",
+                    FunctionDescriptor.of(LONG)
+            );
+            presentationFramesInFlight = optionalDowncall(
+                    lookup,
+                    "metallum_presentation_frames_in_flight",
+                    FunctionDescriptor.of(LONG)
+            );
             initPipelines = downcallWithoutCritical(lookup, "metallum_init_pipelines", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             metalfxSupportsSpatial = downcall(lookup, "metallum_metalfx_supports_spatial", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metalfxSupportsTemporal = downcall(lookup, "metallum_metalfx_supports_temporal", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
@@ -843,6 +858,12 @@ public final class MetalNativeBridge {
     private static final MethodHandle setDebugLabelsEnabled;
     @Nullable
     private static final MethodHandle systemThermalState;
+    @Nullable
+    private static final MethodHandle presentationLatestPresentIntervalNanos;
+    @Nullable
+    private static final MethodHandle presentationLatestDrawableWaitNanos;
+    @Nullable
+    private static final MethodHandle presentationFramesInFlight;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
     private static final MethodHandle MTLCommandQueueMakeCommandBuffer;
@@ -1046,6 +1067,42 @@ public final class MetalNativeBridge {
             return (int) systemThermalState.invokeExact();
         } catch (Throwable ignored) {
             return -1;
+        }
+    }
+
+    /** Latest interval between two ordinary CAMetalLayer presented callbacks, or -1. */
+    public static long metallum_presentation_latest_present_interval_nanos() {
+        if (presentationLatestPresentIntervalNanos == null) {
+            return -1L;
+        }
+        try {
+            return (long) presentationLatestPresentIntervalNanos.invokeExact();
+        } catch (Throwable ignored) {
+            return -1L;
+        }
+    }
+
+    /** Latest layer.nextDrawable() wait duration, or -1 when the native symbol is unavailable. */
+    public static long metallum_presentation_latest_drawable_wait_nanos() {
+        if (presentationLatestDrawableWaitNanos == null) {
+            return -1L;
+        }
+        try {
+            return (long) presentationLatestDrawableWaitNanos.invokeExact();
+        } catch (Throwable ignored) {
+            return -1L;
+        }
+    }
+
+    /** Number of ordinary presents scheduled but not yet resolved, or -1. */
+    public static long metallum_presentation_frames_in_flight() {
+        if (presentationFramesInFlight == null) {
+            return -1L;
+        }
+        try {
+            return (long) presentationFramesInFlight.invokeExact();
+        } catch (Throwable ignored) {
+            return -1L;
         }
     }
 

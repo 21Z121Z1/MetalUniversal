@@ -354,6 +354,126 @@ private enum NativeState {
     #endif
 }
 
+/// Thread-independent state for ordinary CAMetalLayer presentation evidence.
+///
+/// This deliberately excludes MetalFX frame-generation drawables.  The state
+/// accepts only finite, strictly increasing presented timestamps, so a zero or
+/// out-of-order WindowServer callback cannot replace the last useful interval.
+/// Pending IDs make a command-buffer failure and a later drawable callback
+/// idempotent without using a per-frame telemetry object.
+struct NativePresentationTelemetryState {
+    private var nextPresentationID: UInt64 = 1
+    private var pendingPresentationIDs: Set<UInt64> = []
+    private(set) var latestPresentIntervalNanos: Int64 = -1
+    private(set) var latestDrawableWaitNanos: Int64 = -1
+    private(set) var framesInFlight: Int64 = 0
+    private var lastPresentedTime: CFTimeInterval = 0.0
+
+    init() {
+        pendingPresentationIDs.reserveCapacity(8)
+    }
+
+    mutating func recordDrawableWait(nanos: Int64) {
+        guard nanos >= 0 else { return }
+        latestDrawableWaitNanos = nanos
+    }
+
+    mutating func schedulePresentation() -> UInt64 {
+        let identifier = nextPresentationID
+        nextPresentationID &+= 1
+        pendingPresentationIDs.insert(identifier)
+        framesInFlight += 1
+        return identifier
+    }
+
+    @discardableResult
+    mutating func resolvePresentation(_ identifier: UInt64) -> Bool {
+        guard pendingPresentationIDs.remove(identifier) != nil else { return false }
+        framesInFlight = max(0, framesInFlight - 1)
+        return true
+    }
+
+    mutating func recordPresented(
+        _ identifier: UInt64,
+        presentedTime: CFTimeInterval
+    ) {
+        guard pendingPresentationIDs.contains(identifier),
+              presentedTime.isFinite,
+              presentedTime > 0.0 else {
+            // A callback with a zero timestamp still closes the pending
+            // drawable, but it is not evidence of a display interval.
+            _ = resolvePresentation(identifier)
+            return
+        }
+        if lastPresentedTime > 0.0, presentedTime > lastPresentedTime {
+            let interval = (presentedTime - lastPresentedTime) * 1_000_000_000.0
+            if interval.isFinite,
+               interval > 0.0,
+               interval <= Double(Int64.max) {
+                latestPresentIntervalNanos = Int64(interval.rounded())
+            }
+        }
+        if presentedTime > lastPresentedTime {
+            lastPresentedTime = presentedTime
+        }
+        _ = resolvePresentation(identifier)
+    }
+}
+
+private final class NativePresentationTelemetry {
+    static let shared = NativePresentationTelemetry()
+
+    private let lock = NSLock()
+    private var state = NativePresentationTelemetryState()
+
+    func recordDrawableWait(nanos: Int64) {
+        lock.lock()
+        state.recordDrawableWait(nanos: nanos)
+        lock.unlock()
+    }
+
+    func schedulePresentation(_ drawable: CAMetalDrawable) -> UInt64 {
+        lock.lock()
+        let identifier = state.schedulePresentation()
+        lock.unlock()
+
+        drawable.addPresentedHandler { [weak self] drawable in
+            self?.recordPresented(identifier, presentedTime: drawable.presentedTime)
+        }
+        return identifier
+    }
+
+    func recordPresented(_ identifier: UInt64, presentedTime: CFTimeInterval) {
+        lock.lock()
+        state.recordPresented(identifier, presentedTime: presentedTime)
+        lock.unlock()
+    }
+
+    func resolveFailure(_ identifier: UInt64) {
+        lock.lock()
+        _ = state.resolvePresentation(identifier)
+        lock.unlock()
+    }
+
+    func latestPresentIntervalNanos() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.latestPresentIntervalNanos
+    }
+
+    func latestDrawableWaitNanos() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.latestDrawableWaitNanos
+    }
+
+    func framesInFlight() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.framesInFlight
+    }
+}
+
 private struct CompletedGpuEncoderTiming {
     let label: String
     let kind: Int32
@@ -577,12 +697,22 @@ private final class Metal4MainCommandBufferLease {
     private var startTime = 0.0
     private var endTime = 0.0
     fileprivate var presentDrawable: CAMetalDrawable?
+    fileprivate var presentationTelemetryID: UInt64?
     private var completionHandlers: [(Error?, CFTimeInterval, CFTimeInterval) -> Void] = []
     fileprivate var postCommitSignals: [(MTLSharedEvent, UInt64)] = []
 
     init(owner: Metal4MainQueueContext, slotIndex: Int) {
         self.owner = owner
         self.slotIndex = slotIndex
+    }
+
+    deinit {
+        // A Java-side close/abort can release an unsubmitted lease after the
+        // drawable was acquired.  Treat that as cancellation so the shared
+        // drawable count cannot leak when no Metal 4 feedback callback exists.
+        if let presentationTelemetryID {
+            NativePresentationTelemetry.shared.resolveFailure(presentationTelemetryID)
+        }
     }
 
     var commandBuffer: MTL4CommandBuffer { owner.commandBuffer(at: slotIndex) }
@@ -853,8 +983,18 @@ private final class Metal4MainQueueContext {
         let commandBuffer = slots[lease.slotIndex].commandBuffer
         commandBuffer.endCommandBuffer()
         lease.markSubmitted()
+        if let drawable = lease.presentDrawable,
+           lease.presentationTelemetryID == nil {
+            // Metal 4 does not arrange the drawable present until this submit
+            // path. Delay accounting until the lease is actually submitted.
+            lease.presentationTelemetryID = NativePresentationTelemetry.shared.schedulePresentation(drawable)
+        }
         let options = MTL4CommitOptions()
+        let presentationTelemetryID = lease.presentationTelemetryID
         options.addFeedbackHandler { [self, lease] feedback in
+            if let presentationTelemetryID, feedback.error != nil {
+                NativePresentationTelemetry.shared.resolveFailure(presentationTelemetryID)
+            }
             let completionHandlers = lease.markCompleted(
                 error: feedback.error,
                 gpuStartTime: feedback.gpuStartTime,
@@ -883,6 +1023,7 @@ private final class Metal4MainQueueContext {
             queue.signalDrawable(drawable)
             drawable.present()
             lease.presentDrawable = nil
+            lease.presentationTelemetryID = nil
         }
     }
 
@@ -9739,6 +9880,13 @@ public func metallum_configure_layer(_ layer: CAMetalLayer, _ width: Double, _ h
     #endif
 }
 
+private func monotonicElapsedNanos(since start: UInt64) -> Int64 {
+    let now = DispatchTime.now().uptimeNanoseconds
+    guard now >= start else { return 0 }
+    let elapsed = now - start
+    return elapsed > UInt64(Int64.max) ? Int64.max : Int64(elapsed)
+}
+
 @_cdecl("metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
 public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
     _ pointer: UnsafeMutableRawPointer,
@@ -9747,10 +9895,17 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
     _ globalFence: MTLFence?
 ) {
     return autoreleasepool {
+        let drawableWaitStart = DispatchTime.now().uptimeNanoseconds
         guard let drawable: CAMetalDrawable = layer.nextDrawable() else {
+            NativePresentationTelemetry.shared.recordDrawableWait(
+                nanos: monotonicElapsedNanos(since: drawableWaitStart)
+            )
             NSLog("[Metallum] WARNING: nextDrawable() returned nil (drawableSize=\(layer.drawableSize), frame=\(layer.frame), isOpaque=\(layer.isOpaque), device=\(layer.device != nil ? "set" : "nil"))")
             return
         }
+        NativePresentationTelemetry.shared.recordDrawableWait(
+            nanos: monotonicElapsedNanos(since: drawableWaitStart)
+        )
 
         if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
             let renderPass = MTL4RenderPassDescriptor()
@@ -9841,10 +9996,37 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         }
         encoder.endEncoding()
         commandBuffer.present(drawable)
+        // `present` is the point at which the command buffer actually owns a
+        // drawable presentation. Register the handler before commit, so an
+        // uncommitted buffer never increments the drawable in-flight count.
+        let presentationTelemetryID = NativePresentationTelemetry.shared.schedulePresentation(drawable)
+        commandBuffer.addCompletedHandler { completedCommandBuffer in
+            if completedCommandBuffer.error != nil {
+                NativePresentationTelemetry.shared.resolveFailure(presentationTelemetryID)
+            }
+        }
         #if os(iOS)
         CATransaction.flush()
         #endif
     }
+}
+
+/// Ordinary CAMetalLayer presentation telemetry.  MetalFX frame-generation
+/// presenters intentionally do not feed these getters: their presented times
+/// belong to a separate display-link timeline.
+@_cdecl("metallum_presentation_latest_present_interval_nanos")
+public func metallum_presentation_latest_present_interval_nanos() -> Int64 {
+    NativePresentationTelemetry.shared.latestPresentIntervalNanos()
+}
+
+@_cdecl("metallum_presentation_latest_drawable_wait_nanos")
+public func metallum_presentation_latest_drawable_wait_nanos() -> Int64 {
+    NativePresentationTelemetry.shared.latestDrawableWaitNanos()
+}
+
+@_cdecl("metallum_presentation_frames_in_flight")
+public func metallum_presentation_frames_in_flight() -> Int64 {
+    NativePresentationTelemetry.shared.framesInFlight()
 }
 
 @_cdecl("metallum_set_transfer_fence")
