@@ -120,6 +120,10 @@ private enum NativeState {
     // only when Metal 4 is available; all pipeline descriptors then carry the
     // explicit support bit required by the Metal 4 compiler.
     static var terrainIcbEnabled = false
+    // Focused native proof counters. They are session-local diagnostics, not a
+    // cache or a render-path decision.
+    static var terrainIcbEncodedCount: UInt64 = 0
+    static var terrainIcbExecutedCount: UInt64 = 0
     // Metal 4 frame-generation present pilot (spec M4). Read once when the
     // presenter is constructed; flipping it later has no effect, which matches how
     // the presenter is started.
@@ -7927,6 +7931,16 @@ public func metallum_set_terrain_icb_enabled(_ enabled: Int32) {
     NativeState.terrainIcbEnabled = enabled != 0
 }
 
+@_cdecl("metallum_terrain_icb_stats")
+public func metallum_terrain_icb_stats(
+    _ encoded: UnsafeMutablePointer<UInt64>?,
+    _ executed: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    encoded?.pointee = NativeState.terrainIcbEncodedCount
+    executed?.pointee = NativeState.terrainIcbExecutedCount
+    return 1
+}
+
 @_cdecl("metallum_metal4_main_queue_pilot_validate")
 public func metallum_metal4_main_queue_pilot_validate(_ device: MTLDevice) -> Int32 {
     guard #available(macOS 26.0, iOS 26.0, *), device.supportsFamily(.metal4) else {
@@ -9568,32 +9582,28 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
     }
 }
 
-/// Encodes one immutable Sodium terrain command array into an ICB and issues
-/// one execute operation. The command encoder retains resources referenced by
-/// the execution until its command buffer completes; no global ICB cache or
-/// second resource identity is introduced. A pipeline compiled without ICB
-/// support, an unsupported encoder, or malformed input returns 0 so Java can
-/// submit its existing indirect command exactly once.
-@_cdecl("metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb")
-public func metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb(
-    _ pointer: UnsafeMutableRawPointer,
+/// Creates one producer-owned terrain ICB. The Java owner retains the returned
+/// object for the lifetime of the real Sodium VKIndirectDrawBatch and routes
+/// replacement through the renderer destruction queue.
+@_cdecl("metallum_MTLDevice_createTerrainIndexedIcb")
+public func metallum_MTLDevice_createTerrainIndexedIcb(
+    _ device: MTLDevice,
     _ primitiveType: MTLPrimitiveType,
     _ indexType: MTLIndexType,
     _ indexBuffer: MTLBuffer,
     _ pipeline: MTLRenderPipelineState,
     _ packedCommands: UnsafePointer<Int32>?,
     _ drawCount: Int32
-) -> Int32 {
-    guard drawCount > 0,
+) -> UnsafeMutableRawPointer? {
+    guard NativeState.terrainIcbEnabled,
+          drawCount > 0,
           let packedCommands,
           pipeline.supportIndirectCommandBuffers,
-          #available(macOS 26.0, iOS 26.0, *),
-          let bridge = metal4RenderBridge(pointer),
-          let device = bridge.encoder.commandBuffer?.device else {
-        return 0
+          #available(macOS 26.0, iOS 26.0, *) else {
+        return nil
     }
     let commandCount = Int(drawCount)
-    guard commandCount <= Int.max / 5 else { return 0 }
+    guard commandCount <= Int.max / 5 else { return nil }
 
     let descriptor = MTLIndirectCommandBufferDescriptor()
     descriptor.commandTypes = .drawIndexed
@@ -9601,25 +9611,21 @@ public func metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb(
     descriptor.inheritBuffers = true
     descriptor.maxVertexBufferBindCount = 0
     descriptor.maxFragmentBufferBindCount = 0
-    if #available(macOS 26.0, iOS 26.0, *) {
-        descriptor.inheritDepthStencilState = true
-        descriptor.inheritDepthBias = true
-        descriptor.inheritDepthClipMode = true
-        descriptor.inheritCullMode = true
-        descriptor.inheritFrontFacingWinding = true
-        descriptor.inheritTriangleFillMode = true
-    }
+    descriptor.inheritDepthStencilState = true
+    descriptor.inheritDepthBias = true
+    descriptor.inheritDepthClipMode = true
+    descriptor.inheritCullMode = true
+    descriptor.inheritFrontFacingWinding = true
+    descriptor.inheritTriangleFillMode = true
 
     let indexBytes = indexType == .uint16 ? 2 : 4
-    // CPU-authored ICB commands require CPU-visible storage on the current
-    // Metal validation layer; the MTL4 encoder retains this renderer-owned
-    // object through GPU completion.
-    let commandBuffer = device.makeIndirectCommandBuffer(
+    guard let commandBuffer = device.makeIndirectCommandBuffer(
         descriptor: descriptor,
         maxCommandCount: commandCount,
         options: .storageModeShared
-    )
-    guard let commandBuffer else { return 0 }
+    ) else {
+        return nil
+    }
 
     for index in 0..<commandCount {
         let base = index * 5
@@ -9631,7 +9637,7 @@ public func metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb(
         guard indexCount >= 0, instanceCount >= 0,
               firstIndex >= 0, firstInstance >= 0,
               firstIndex <= Int.max / indexBytes else {
-            return 0
+            return nil
         }
         commandBuffer.indirectRenderCommandAt(index).drawIndexedPrimitives(
             primitiveType,
@@ -9645,10 +9651,33 @@ public func metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb(
         )
     }
 
+    residencyTrackCreated(commandBuffer)
+    NativeState.terrainIcbEncodedCount &+= 1
+    return retainedPointer(commandBuffer)
+}
+
+/// Executes one already encoded terrain ICB. No command records are decoded or
+/// replayed here, preserving Sodium's one native submission call count.
+@_cdecl("metallum_MTLRenderCommandEncoder_executeTerrainIcb")
+public func metallum_MTLRenderCommandEncoder_executeTerrainIcb(
+    _ pointer: UnsafeMutableRawPointer,
+    _ indirectCommandBufferPointer: UnsafeMutableRawPointer,
+    _ drawCount: Int32
+) -> Int32 {
+    guard NativeState.terrainIcbEnabled,
+          drawCount > 0,
+          #available(macOS 26.0, iOS 26.0, *),
+          let bridge = metal4RenderBridge(pointer),
+          let indirectCommandBuffer = Unmanaged<AnyObject>.fromOpaque(
+              indirectCommandBufferPointer
+          ).takeUnretainedValue() as? MTLIndirectCommandBuffer else {
+        return 0
+    }
     bridge.encoder.executeCommands(
-        buffer: commandBuffer,
-        range: 0..<commandCount
+        buffer: indirectCommandBuffer,
+        range: 0..<Int(drawCount)
     )
+    NativeState.terrainIcbExecutedCount &+= 1
     return 1
 }
 

@@ -440,8 +440,17 @@ final class MetalRenderPass implements RenderPassBackend {
         if (snapshot == null || indexBuffer == null || compiledPipeline == null) {
             return false;
         }
+        if (!(snapshot.producerIdentity() instanceof TerrainIcbProducer producer)) {
+            // Host/diagnostic snapshots without a real Sodium owner are not
+            // allowed to manufacture a process-wide ICB residency.
+            return false;
+        }
+        TerrainIcbOwner owner = producer.metallum$terrainIcbOwner();
+        if (owner == null) {
+            return false;
+        }
 
-        try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined()) {
+        try {
             MTLRenderCommandEncoder enc = renderEncoder();
             bindDrawState(enc);
             MTLPixelFormat depthFormat = depthAttachmentFormat();
@@ -452,12 +461,14 @@ final class MetalRenderPass implements RenderPassBackend {
                     hasAttachment ? depthFormat : MTLPixelFormat.Invalid,
                     hasAttachment ? stencilFormat : MTLPixelFormat.Invalid
             );
-            return enc.executeTerrainIndexedIcb(
+            return owner.execute(
+                    device,
+                    enc,
                     primitiveType,
                     indexType,
                     ((MetalGpuBuffer) indexBuffer).nativeHandle(),
                     pipelineHandle,
-                    snapshot.packIndexedCommands(arena),
+                    snapshot,
                     drawCount
             );
         } catch (RuntimeException exception) {

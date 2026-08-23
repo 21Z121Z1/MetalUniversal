@@ -214,6 +214,21 @@ public final class TerrainSceneSnapshot {
             return true;
         }
 
+        /**
+         * Exact identity of what the indexed ICB embeds. Dynamic inherited
+         * vertex/binding state and the transient uploaded command slice are
+         * deliberately outside this key; {@link #allLive()} and
+         * {@link TerrainSceneSnapshot#matches(StateView, ResourceSlice, int)}
+         * still validate the complete render state immediately before use.
+         */
+        boolean sameIcbEmbeddedState(final StateView other) {
+            return other != null
+                    && pipelineIdentity == other.pipelineIdentity
+                    && pipelineGeneration == other.pipelineGeneration
+                    && indexType == other.indexType
+                    && indexBuffer.sameBinding(other.indexBuffer);
+        }
+
         boolean allLive() {
             if (pipelineIdentity instanceof MetalCompiledRenderPipeline pipeline && !pipeline.isValid()) {
                 return false;
@@ -246,15 +261,48 @@ public final class TerrainSceneSnapshot {
         }
     }
 
+    /** Minimal immutable content retained by a producer-owned native ICB. */
+    static final class IcbContent {
+        private final Object pipelineIdentity;
+        private final long pipelineGeneration;
+        private final ResourceSlice indexBuffer;
+        private final MTLIndexType indexType;
+        private final List<Draw> draws;
+
+        private IcbContent(
+                final StateView state,
+                final List<Draw> draws
+        ) {
+            this.pipelineIdentity = state.pipelineIdentity;
+            this.pipelineGeneration = state.pipelineGeneration;
+            this.indexBuffer = state.indexBuffer;
+            this.indexType = state.indexType;
+            this.draws = List.copyOf(draws);
+        }
+
+        private boolean matches(
+                final StateView state,
+                final List<Draw> currentDraws
+        ) {
+            return pipelineIdentity == state.pipelineIdentity
+                    && pipelineGeneration == state.pipelineGeneration
+                    && indexType == state.indexType
+                    && indexBuffer.sameBinding(state.indexBuffer)
+                    && draws.equals(currentDraws);
+        }
+    }
+
     private final long sceneGeneration;
     private final StateView state;
     private final ResourceSlice commandBuffer;
     private final List<Draw> draws;
+    private final Object producerIdentity;
 
     private TerrainSceneSnapshot(
             final StateView state,
             final ResourceSlice commandBuffer,
-            final List<Draw> draws
+            final List<Draw> draws,
+            final Object producerIdentity
     ) {
         this.state = Objects.requireNonNull(state, "state");
         this.commandBuffer = Objects.requireNonNull(commandBuffer, "commandBuffer");
@@ -262,7 +310,19 @@ public final class TerrainSceneSnapshot {
         if (this.draws.isEmpty()) {
             throw new IllegalArgumentException("Terrain scene snapshot must contain draws");
         }
+        this.producerIdentity = producerIdentity;
         this.sceneGeneration = state.sceneGeneration();
+    }
+
+    static TerrainSceneSnapshot capture(
+            final MetalRenderPass pass,
+            final Object producerIdentity,
+            final GpuBufferSlice commandSlice,
+            final List<IrisMetalIndirectCommandStream.IndexedDraw> commands
+    ) {
+        return capture(producerIdentity, pass.terrainSnapshotState(), ResourceSlice.ofGpuSlice(
+                commandSlice, VkDrawIndexedIndirectCommand.SIZEOF
+        ), commands);
     }
 
     static TerrainSceneSnapshot capture(
@@ -270,12 +330,19 @@ public final class TerrainSceneSnapshot {
             final GpuBufferSlice commandSlice,
             final List<IrisMetalIndirectCommandStream.IndexedDraw> commands
     ) {
-        return capture(pass.terrainSnapshotState(), ResourceSlice.ofGpuSlice(
-                commandSlice, VkDrawIndexedIndirectCommand.SIZEOF
-        ), commands);
+        return capture(pass, null, commandSlice, commands);
     }
 
     static TerrainSceneSnapshot capture(
+            final StateView state,
+            final ResourceSlice commandBuffer,
+            final List<IrisMetalIndirectCommandStream.IndexedDraw> commands
+    ) {
+        return capture(null, state, commandBuffer, commands);
+    }
+
+    static TerrainSceneSnapshot capture(
+            final Object producerIdentity,
             final StateView state,
             final ResourceSlice commandBuffer,
             final List<IrisMetalIndirectCommandStream.IndexedDraw> commands
@@ -285,7 +352,7 @@ public final class TerrainSceneSnapshot {
         for (int ordinal = 0; ordinal < commands.size(); ordinal++) {
             draws.add(new Draw(ordinal, commands.get(ordinal)));
         }
-        return new TerrainSceneSnapshot(state, commandBuffer, draws);
+        return new TerrainSceneSnapshot(state, commandBuffer, draws, producerIdentity);
     }
 
     long sceneGeneration() {
@@ -294,6 +361,24 @@ public final class TerrainSceneSnapshot {
 
     List<Draw> draws() {
         return draws;
+    }
+
+    Object producerIdentity() {
+        return producerIdentity;
+    }
+
+    boolean sameIcbContent(final TerrainSceneSnapshot other) {
+        return other != null
+                && state.sameIcbEmbeddedState(other.state)
+                && Objects.equals(draws, other.draws);
+    }
+
+    boolean sameIcbContent(final IcbContent other) {
+        return other != null && other.matches(state, draws);
+    }
+
+    IcbContent icbContent() {
+        return new IcbContent(state, draws);
     }
 
     /** Packs the immutable command records once for the native ICB encoder. */

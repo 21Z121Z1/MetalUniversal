@@ -801,9 +801,10 @@ private func drawAndRead(
 }
 
 /// Shipping terrain seam: one immutable indexed command array is encoded into
-/// one ICB and executed by the native bridge. The direct indexed draw is the
-/// pixel oracle; both paths must produce the same readback and the native
-/// helper must report that it actually encoded the ICB.
+/// one producer-owned ICB and executed twice by the native bridge. The direct
+/// indexed draw is the pixel oracle; native counters prove the second submit
+/// reused the encoded command stream, while changed command content encodes a
+/// replacement.
 @available(macOS 26.0, *)
 private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue) throws {
     metallum_set_metal4_compiler_enabled(1)
@@ -880,26 +881,73 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
         )
     }
 
+    func icbStats() throws -> (UInt64, UInt64) {
+        var encoded: UInt64 = 0
+        var executed: UInt64 = 0
+        try check(metallum_terrain_icb_stats(&encoded, &executed) != 0,
+                  "terrain ICB stats export was unavailable")
+        return (encoded, executed)
+    }
+
+    let statsBefore = try icbStats()
+    let packedCommands: [Int32] = [3, 1, 0, 0, 0]
+    guard let resident = packedCommands.withUnsafeBufferPointer({ commands in
+        metallum_MTLDevice_createTerrainIndexedIcb(
+            device,
+            .triangle,
+            .uint16,
+            indexBuffer,
+            pipeline,
+            commands.baseAddress!,
+            1
+        )
+    }) else {
+        try fail("native terrain ICB owner could not encode a supported PSO")
+    }
+    defer { metallum_release_object(resident) }
+
     let icbPixel = try readback(label: "terrain native ICB") { encoder in
-        let packedCommands: [Int32] = [3, 1, 0, 0, 0]
-        let result = packedCommands.withUnsafeBufferPointer { commands in
-            metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb(
-                encoder,
-                .triangle,
-                .uint16,
-                indexBuffer,
-                pipeline,
-                commands.baseAddress!,
-                1
-            )
-        }
-        try check(result != 0, "native terrain ICB helper rejected a supported PSO")
+        let result = metallum_MTLRenderCommandEncoder_executeTerrainIcb(encoder, resident, 1)
+        try check(result != 0, "native terrain ICB reuse execute rejected a supported PSO")
+    }
+    let reusedPixel = try readback(label: "terrain native ICB reuse") { encoder in
+        let result = metallum_MTLRenderCommandEncoder_executeTerrainIcb(encoder, resident, 1)
+        try check(result != 0, "native terrain ICB second execute rejected a supported PSO")
     }
     try check(icbPixel == legacyPixel,
               "terrain ICB readback \(icbPixel) differed from legacy \(legacyPixel)")
+    try check(reusedPixel == legacyPixel,
+              "reused terrain ICB readback \(reusedPixel) differed from legacy \(legacyPixel)")
+    let statsAfterReuse = try icbStats()
+    try check(statsAfterReuse.0 - statsBefore.0 == 1,
+              "unchanged terrain ICB was encoded more than once")
+    try check(statsAfterReuse.1 - statsBefore.1 == 2,
+              "terrain ICB reuse did not execute twice")
+
+    let changedCommands: [Int32] = [3, 1, 0, 0, 1]
+    guard let replacement = changedCommands.withUnsafeBufferPointer({ commands in
+        metallum_MTLDevice_createTerrainIndexedIcb(
+            device,
+            .triangle,
+            .uint16,
+            indexBuffer,
+            pipeline,
+            commands.baseAddress!,
+            1
+        )
+    }) else {
+        try fail("changed terrain ICB command stream did not rebuild")
+    }
+    metallum_release_object(replacement)
+    let statsAfterChange = try icbStats()
+    try check(statsAfterChange.0 - statsBefore.0 == 2,
+              "changed terrain ICB command stream did not invalidate the encoded owner")
+    print("Terrain ICB stats: encodedDelta=\(statsAfterChange.0 - statsBefore.0), "
+          + "executedDelta=\(statsAfterChange.1 - statsBefore.1), "
+          + "replacementEncode=1")
     try check(icbPixel == [64, 128, 191, 255],
               "terrain ICB readback was unexpected: \(icbPixel)")
-    print("Terrain ICB: one native ICB execution matched the legacy indexed draw readback")
+    print("Terrain ICB: one encoded command stream executed twice with legacy readback parity")
 }
 
 private func runTerrainIcbReadbackTestIfAvailable(device: MTLDevice, queue: MTLCommandQueue) throws {

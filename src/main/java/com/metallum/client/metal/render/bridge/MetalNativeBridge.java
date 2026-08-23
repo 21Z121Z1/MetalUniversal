@@ -442,15 +442,25 @@ public final class MetalNativeBridge {
                     "metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG)
             );
-            MTLRenderCommandEncoderExecuteTerrainIndexedIcb = optionalDowncallWithoutCritical(
+            MTLDeviceCreateTerrainIndexedIcb = optionalDowncallWithoutCritical(
                     lookup,
-                    "metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb",
+                    "metallum_MTLDevice_createTerrainIndexedIcb",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT
+                    )
+            );
+            MTLRenderCommandEncoderExecuteTerrainIcb = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLRenderCommandEncoder_executeTerrainIcb",
                     FunctionDescriptor.of(
                             INT,
-                            ValueLayout.ADDRESS,
-                            LONG,
-                            LONG,
-                            ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             INT
@@ -637,6 +647,11 @@ public final class MetalNativeBridge {
             metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
             setTerrainIcbEnabled = optionalDowncall(lookup, "metallum_set_terrain_icb_enabled", FunctionDescriptor.ofVoid(INT));
+            terrainIcbStats = optionalDowncall(
+                    lookup,
+                    "metallum_terrain_icb_stats",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
             residencySetEnable = downcall(lookup, "metallum_residency_set_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
             setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
@@ -949,7 +964,9 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesTriangleFan;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesIndirect;
     @Nullable
-    private static final MethodHandle MTLRenderCommandEncoderExecuteTerrainIndexedIcb;
+    private static final MethodHandle MTLDeviceCreateTerrainIndexedIcb;
+    @Nullable
+    private static final MethodHandle MTLRenderCommandEncoderExecuteTerrainIcb;
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitivesIndirect;
     private static final MethodHandle MTLCommandBufferClearColorDepthTexturesRegion;
     private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawable;
@@ -995,6 +1012,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle setMetal4CompilerEnabled;
     @Nullable
     private static final MethodHandle setTerrainIcbEnabled;
+    @Nullable
+    private static final MethodHandle terrainIcbStats;
     private static final MethodHandle setMetalHud;
     private static final MethodHandle metalHudStatus;
     private static final MethodHandle residencySetEnable;
@@ -2497,12 +2516,9 @@ public final class MetalNativeBridge {
         }
     }
 
-    /**
-     * Attempts one native terrain ICB execution. Missing/old native symbols,
-     * unsupported PSOs, and native validation failures all fail closed with 0.
-     */
-    public static int MTLRenderCommandEncoder_executeTerrainIndexedIcb(
-            final MemorySegment encoder,
+    /** Creates one producer-owned, already encoded terrain ICB. */
+    public static MemorySegment MTLDevice_createTerrainIndexedIcb(
+            final MemorySegment device,
             final long primitiveType,
             final long indexType,
             final MemorySegment indexBuffer,
@@ -2510,12 +2526,12 @@ public final class MetalNativeBridge {
             final MemorySegment packedCommands,
             final int drawCount
     ) {
-        if (MTLRenderCommandEncoderExecuteTerrainIndexedIcb == null || drawCount <= 0) {
-            return 0;
+        if (MTLDeviceCreateTerrainIndexedIcb == null || drawCount <= 0) {
+            return MemorySegment.NULL;
         }
         try {
-            return (int) MTLRenderCommandEncoderExecuteTerrainIndexedIcb.invokeExact(
-                    segment(encoder),
+            return (MemorySegment) MTLDeviceCreateTerrainIndexedIcb.invokeExact(
+                    segment(device),
                     primitiveType,
                     indexType,
                     segment(indexBuffer),
@@ -2523,6 +2539,38 @@ public final class MetalNativeBridge {
                     segment(packedCommands),
                     drawCount
             );
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    /** Executes a producer-owned ICB without decoding or replaying its draws. */
+    public static int MTLRenderCommandEncoder_executeTerrainIcb(
+            final MemorySegment encoder,
+            final MemorySegment indirectCommandBuffer,
+            final int drawCount
+    ) {
+        if (MTLRenderCommandEncoderExecuteTerrainIcb == null || drawCount <= 0) {
+            return 0;
+        }
+        try {
+            return (int) MTLRenderCommandEncoderExecuteTerrainIcb.invokeExact(
+                    segment(encoder),
+                    segment(indirectCommandBuffer),
+                    drawCount
+            );
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    /** Native counters used by the focused Metal 4 reuse proof. */
+    public static int terrainIcbStats(final MemorySegment encoded, final MemorySegment executed) {
+        if (terrainIcbStats == null) {
+            return 0;
+        }
+        try {
+            return (int) terrainIcbStats.invokeExact(segment(encoded), segment(executed));
         } catch (Throwable ignored) {
             return 0;
         }
