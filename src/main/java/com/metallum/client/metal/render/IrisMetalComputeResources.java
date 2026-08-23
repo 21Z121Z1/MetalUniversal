@@ -315,6 +315,7 @@ final class IrisMetalComputeResources implements AutoCloseable {
                     1,
                     1
             );
+            texture.registerValidationIdentity();
             view = (MetalGpuTextureView) this.device.createTextureView(texture);
             boolean integer = format.componentType().name().startsWith("UINT")
                     || format.componentType().name().startsWith("SINT");

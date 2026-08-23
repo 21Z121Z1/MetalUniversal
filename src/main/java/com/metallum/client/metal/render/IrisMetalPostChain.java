@@ -1922,6 +1922,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                 1,
                 1
         );
+        this.colorSpaceSwap.registerValidationIdentity();
         this.colorSpaceSwapView = new MetalGpuTextureView(this.colorSpaceSwap, 0, 1);
         if (this.colorSpaceSampler == null) {
             this.colorSpaceSampler = new MetalGpuSampler(
