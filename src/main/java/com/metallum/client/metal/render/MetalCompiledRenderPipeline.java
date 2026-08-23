@@ -566,6 +566,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return this.vertexBufferCount;
     }
 
+    /** Returns the stride for the logical RenderPass slot, not the Metal ABI slot. */
+    int vertexStride(final int logicalSlot) {
+        int binding = logicalSlot;
+        VertexFormat[] formats = this.info.getVertexFormatBindings();
+        if (binding < 0 || binding >= formats.length || formats[binding] == null) {
+            return 0;
+        }
+        return formats[binding].getVertexSize();
+    }
+
     int genericVertexBufferSlot() {
         return this.genericVertexBufferSlot;
     }
