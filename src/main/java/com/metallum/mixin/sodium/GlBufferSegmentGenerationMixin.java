@@ -1,6 +1,7 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.metal.render.TerrainSceneSnapshot;
+import com.metallum.client.metal.render.TerrainCandidateRegistry;
 import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferArena;
 import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
 import org.spongepowered.asm.mixin.Mixin;
@@ -35,14 +36,14 @@ public abstract class GlBufferSegmentGenerationMixin implements GlBufferSegmentG
 
     @Inject(method = "setFree", at = @At("HEAD"), remap = false)
     private void metallum$freeGeneration(final boolean value, final CallbackInfo callbackInfo) {
-        if (TerrainSceneSnapshot.DRAW_METADATA_ENABLED && free != value) {
+        if ((TerrainSceneSnapshot.DRAW_METADATA_ENABLED || TerrainCandidateRegistry.enabled()) && free != value) {
             metallum$generation++;
         }
     }
 
     @Inject(method = "setOffset", at = @At("HEAD"), remap = false)
     private void metallum$offsetGeneration(final long value, final CallbackInfo callbackInfo) {
-        if (TerrainSceneSnapshot.DRAW_METADATA_ENABLED
+        if ((TerrainSceneSnapshot.DRAW_METADATA_ENABLED || TerrainCandidateRegistry.enabled())
                 && ((GlBufferSegment) (Object) this).getOffset() != value) {
             metallum$generation++;
         }
@@ -50,7 +51,7 @@ public abstract class GlBufferSegmentGenerationMixin implements GlBufferSegmentG
 
     @Inject(method = "setLength", at = @At("HEAD"), remap = false)
     private void metallum$lengthGeneration(final long value, final CallbackInfo callbackInfo) {
-        if (TerrainSceneSnapshot.DRAW_METADATA_ENABLED
+        if ((TerrainSceneSnapshot.DRAW_METADATA_ENABLED || TerrainCandidateRegistry.enabled())
                 && ((GlBufferSegment) (Object) this).getLength() != value) {
             metallum$generation++;
         }
