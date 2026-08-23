@@ -677,6 +677,11 @@ public final class MetalNativeBridge {
                     "metallum_terrain_icb_stats",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
+            terrainGpuIcbStats = optionalDowncall(
+                    lookup,
+                    "metallum_terrain_gpu_icb_stats",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
             residencySetEnable = downcall(lookup, "metallum_residency_set_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
             setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
@@ -1045,6 +1050,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle setTerrainGpuEncodeEnabled;
     @Nullable
     private static final MethodHandle terrainIcbStats;
+    @Nullable
+    private static final MethodHandle terrainGpuIcbStats;
     private static final MethodHandle setMetalHud;
     private static final MethodHandle metalHudStatus;
     private static final MethodHandle residencySetEnable;
@@ -2632,6 +2639,17 @@ public final class MetalNativeBridge {
         }
         try {
             return (int) terrainIcbStats.invokeExact(segment(encoded), segment(executed));
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    public static int terrainGpuIcbStats(final MemorySegment encoded, final MemorySegment dispatches) {
+        if (terrainGpuIcbStats == null) {
+            return 0;
+        }
+        try {
+            return (int) terrainGpuIcbStats.invokeExact(segment(encoded), segment(dispatches));
         } catch (Throwable ignored) {
             return 0;
         }

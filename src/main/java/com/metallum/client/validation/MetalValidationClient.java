@@ -2377,10 +2377,13 @@ public final class MetalValidationClient implements ClientModInitializer {
         long[] metal4MainStats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
         long[] metal4MetalFxStats = MetalNativeBridge.metallum_metal4_metalfx_stats();
         long[] terrainIcbStats = readTerrainIcbStats();
+        long[] terrainGpuIcbStats = readTerrainGpuIcbStats();
         Metallum.LOGGER.info(
-                "Terrain ICB validation counters: encoded={} executed={}",
+                "Terrain ICB validation counters: encoded={} executed={} gpuEncoded={} gpuDispatches={}",
                 terrainIcbStats[0],
-                terrainIcbStats[1]
+                terrainIcbStats[1],
+                terrainGpuIcbStats[0],
+                terrainGpuIcbStats[1]
         );
         try {
             ValidationStorageBudget storage = ValidationStorageBudget.shared(outputDirectory);
@@ -2424,6 +2427,8 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "metal4FrameGenerationInputSubmissions": %d,
                       "terrainIcbEncoded": %d,
                       "terrainIcbExecuted": %d,
+                      "terrainIcbGpuEncoded": %d,
+                      "terrainIcbGpuDispatches": %d,
                       "renderContractEnabled": %s,
                       "renderContractStatus": "%s",
                       "renderContractReady": %s,
@@ -2464,6 +2469,8 @@ public final class MetalValidationClient implements ClientModInitializer {
                             metal4MetalFxStats[4],
                             terrainIcbStats[0],
                             terrainIcbStats[1],
+                            terrainGpuIcbStats[0],
+                            terrainGpuIcbStats[1],
                             contract.enabled(),
                             contract.status(),
                             "passed".equals(status)
@@ -2500,6 +2507,23 @@ public final class MetalValidationClient implements ClientModInitializer {
             return new long[]{
                     encoded.get(ValueLayout.JAVA_LONG, 0),
                     executed.get(ValueLayout.JAVA_LONG, 0)
+            };
+        } catch (RuntimeException ignored) {
+            return new long[]{0L, 0L};
+        }
+    }
+
+    private static long[] readTerrainGpuIcbStats() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment encoded = arena.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment dispatches = arena.allocate(ValueLayout.JAVA_LONG);
+            int available = MetalNativeBridge.terrainGpuIcbStats(encoded, dispatches);
+            if (available == 0) {
+                return new long[]{0L, 0L};
+            }
+            return new long[]{
+                    encoded.get(ValueLayout.JAVA_LONG, 0),
+                    dispatches.get(ValueLayout.JAVA_LONG, 0)
             };
         } catch (RuntimeException ignored) {
             return new long[]{0L, 0L};

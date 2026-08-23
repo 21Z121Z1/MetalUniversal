@@ -462,6 +462,24 @@ final class MetalRenderPass implements RenderPassBackend {
                     hasAttachment ? stencilFormat : MTLPixelFormat.Invalid
             );
             MemorySegment indexHandle = ((MetalGpuBuffer) indexBuffer).nativeHandle();
+            if (TerrainSceneSnapshot.GPU_ICB_ENABLED
+                    && owner.hasReusableGpuIcb(device, primitiveType, snapshot)) {
+                // The immutable producer/content key is already live in the
+                // owner. Reuse the GPU-authored ICB in the current render
+                // encoder; only a content miss needs render->compute->render.
+                if (owner.execute(
+                        device,
+                        enc,
+                        primitiveType,
+                        indexType,
+                        indexHandle,
+                        pipelineHandle,
+                        snapshot,
+                        drawCount
+                )) {
+                    return true;
+                }
+            }
             if (!TerrainSceneSnapshot.GPU_ICB_ENABLED) {
                 return owner.execute(
                         device,

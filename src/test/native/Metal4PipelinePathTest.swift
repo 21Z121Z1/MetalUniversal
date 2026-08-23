@@ -849,6 +849,12 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
     }) else {
         try fail("could not allocate terrain ICB index buffer")
     }
+    let negativeIndexValues: [UInt16] = [1, 2, 3]
+    guard let negativeIndexBuffer = negativeIndexValues.withUnsafeBytes({ bytes in
+        device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+    }) else {
+        try fail("could not allocate negative-base terrain ICB index buffer")
+    }
 
     func readback(label: String, encode: (UnsafeMutableRawPointer) throws -> Void) throws -> [UInt8] {
         let target = try makeTarget(device: device, label: label + " target")
@@ -891,6 +897,11 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
     let legacyPixel = try readback(label: "terrain legacy indexed draw") { encoder in
         metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
             encoder, .triangle, 3, .uint16, indexBuffer, 0, 1, 0, 0
+        )
+    }
+    let legacyNegativeBasePixel = try readback(label: "terrain legacy negative-base indexed draw") { encoder in
+        metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+            encoder, .triangle, 3, .uint16, negativeIndexBuffer, 0, 1, -1, 0
         )
     }
 
@@ -992,7 +1003,11 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
         return (encoded, dispatches)
     }
 
-    func gpuReadback(label: String) throws -> [UInt8] {
+    func gpuReadback(
+        label: String,
+        gpuIndexBuffer: MTLBuffer,
+        gpuCommands: [Int32]
+    ) throws -> [UInt8] {
         let target = try makeTarget(device: device, label: label + " target")
         guard let commandBuffer = label.withCString({ labelPointer in
             metallum_MTLCommandQueue_makeCommandBuffer(queue, labelPointer)
@@ -1022,13 +1037,13 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
         metallum_MTLCommandEncoder_endEncoding(firstEncoder)
         defer { metallum_release_object(firstEncoder) }
 
-        guard let resident = packedCommands.withUnsafeBufferPointer({ commands in
+        guard let resident = gpuCommands.withUnsafeBufferPointer({ commands in
             metallum_MTLDevice_createTerrainGpuIndexedIcb(
                 firstEncoder,
                 device,
                 .triangle,
                 .uint16,
-                indexBuffer,
+                gpuIndexBuffer,
                 pipeline,
                 commands.baseAddress!,
                 1
@@ -1071,18 +1086,46 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
         return pixel
     }
 
+    func gpuPipelineCompiles() throws -> UInt64 {
+        var compiles: UInt64 = 0
+        try check(metallum_terrain_gpu_icb_pipeline_stats(&compiles) != 0,
+                  "terrain GPU ICB pipeline stats export was unavailable")
+        return compiles
+    }
+
+    let gpuPipelineCompilesBefore = try gpuPipelineCompiles()
     let gpuStatsBefore = try gpuStats()
-    let gpuPixel = try gpuReadback(label: "terrain GPU-authored ICB")
+    let gpuPixel = try gpuReadback(
+        label: "terrain GPU-authored ICB",
+        gpuIndexBuffer: indexBuffer,
+        gpuCommands: packedCommands
+    )
     let gpuStatsAfter = try gpuStats()
+    let gpuPipelineCompilesAfterFirst = try gpuPipelineCompiles()
     try check(gpuPixel == legacyPixel,
               "GPU-authored terrain ICB readback \(gpuPixel) differed from legacy \(legacyPixel)")
     try check(gpuStatsAfter.0 - gpuStatsBefore.0 == 1,
               "GPU-authored terrain ICB did not increment the authoring counter")
     try check(gpuStatsAfter.1 - gpuStatsBefore.1 == 1,
               "GPU-authored terrain ICB did not increment the compute dispatch counter")
+    try check(gpuPipelineCompilesAfterFirst - gpuPipelineCompilesBefore <= 1,
+              "GPU-authored terrain ICB compiled more than one PSO for one device/variant")
+
+    let gpuNegativeBasePixel = try gpuReadback(
+        label: "terrain GPU-authored negative-base ICB",
+        gpuIndexBuffer: negativeIndexBuffer,
+        gpuCommands: [3, 1, 0, -1, 0]
+    )
+    let gpuPipelineCompilesAfterSecond = try gpuPipelineCompiles()
+    try check(gpuNegativeBasePixel == legacyNegativeBasePixel,
+              "GPU-authored negative-base ICB readback \(gpuNegativeBasePixel) differed from legacy \(legacyNegativeBasePixel)")
+    try check(gpuPipelineCompilesAfterSecond == gpuPipelineCompilesAfterFirst,
+              "same-device/variant GPU ICB rebuilt its compute PSO on the second authoring")
     print("Terrain GPU ICB: all-visible compute authoring/readback parity, "
           + "gpuEncodedDelta=\(gpuStatsAfter.0 - gpuStatsBefore.0), "
-          + "gpuDispatchDelta=\(gpuStatsAfter.1 - gpuStatsBefore.1)")
+          + "gpuDispatchDelta=\(gpuStatsAfter.1 - gpuStatsBefore.1), "
+          + "negativeBaseVertexParity=1, "
+          + "pipelineCompileDelta=\(gpuPipelineCompilesAfterSecond - gpuPipelineCompilesBefore)")
 }
 
 private func runTerrainIcbReadbackTestIfAvailable(device: MTLDevice, queue: MTLCommandQueue) throws {
