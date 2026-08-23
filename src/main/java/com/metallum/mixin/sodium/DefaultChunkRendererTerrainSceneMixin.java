@@ -32,7 +32,7 @@ public abstract class DefaultChunkRendererTerrainSceneMixin {
             final boolean isTranslucent,
             final Operation<Void> original
     ) {
-        TerrainDrawMetadataCapture.beginFill(batch, region, storage, renderList, camera, renderPass);
+        TerrainDrawMetadataCapture.beginFill(batch, region, storage, renderPass);
         try {
             original.call(
                     batch, region, storage, renderList, camera, renderPass,

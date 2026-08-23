@@ -57,6 +57,7 @@
     "sodium.VKIndirectDrawBatchTerrainSceneMixin",
     "sodium.SectionRenderDataStorageAccessor",
     "sodium.GlBufferSegmentAccessor",
+    "sodium.GlBufferSegmentGenerationMixin",
     "sodium.SodiumPreferredGraphicsApiMixin",
     "iris.IrisBootstrapCompatMixin",
     "iris.IrisPipelineFactoryMixin",

@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
 import com.metallum.mixin.sodium.GlBufferSegmentAccessor;
+import com.metallum.mixin.sodium.GlBufferSegmentGeneration;
 
 import java.util.Objects;
 
@@ -20,7 +21,6 @@ record TerrainDrawMetadata(
         TerrainDrawMetadata.SectionIdentity section,
         TerrainDrawMetadata.ContentGeneration contentGeneration,
         TerrainDrawMetadata.Aabb worldAabb,
-        TerrainDrawMetadata.Aabb cameraAabb,
         int facingMask,
         boolean translucent,
         boolean localIndex
@@ -50,20 +50,34 @@ record TerrainDrawMetadata(
     }
 
     /** A value-plus-identity stamp for one Sodium arena range. */
-    record AllocationStamp(Object allocation, long offset, long length) {
+    record AllocationStamp(Object allocation, long offset, long length, long generation) {
+        AllocationStamp(final Object allocation, final long offset, final long length) {
+            this(allocation, offset, length, 0L);
+        }
+
         static AllocationStamp of(final GlBufferSegment allocation) {
-            return allocation == null
-                    ? new AllocationStamp(null, -1L, -1L)
-                    : new AllocationStamp(allocation, allocation.getOffset(), allocation.getLength());
+            if (allocation == null) {
+                return new AllocationStamp(null, -1L, -1L, -1L);
+            }
+            long generation = allocation instanceof GlBufferSegmentGeneration stamped
+                    ? stamped.metallum$generation()
+                    : 0L;
+            return new AllocationStamp(allocation, allocation.getOffset(), allocation.getLength(), generation);
         }
 
         boolean live() {
             if (allocation == null) {
                 return false;
             }
-            if (allocation instanceof GlBufferSegment segment
-                    && segment instanceof GlBufferSegmentAccessor accessor) {
-                return !accessor.metallum$isFree();
+            if (allocation instanceof GlBufferSegment segment) {
+                if (!(segment instanceof GlBufferSegmentAccessor accessor)
+                        || accessor.metallum$isFree()
+                        || !(segment instanceof GlBufferSegmentGeneration stamped)) {
+                    return false;
+                }
+                return stamped.metallum$generation() == generation
+                        && segment.getOffset() == offset
+                        && segment.getLength() == length;
             }
             // Host contract fixtures use opaque allocation identities.
             return true;
@@ -96,6 +110,5 @@ record TerrainDrawMetadata(
         Objects.requireNonNull(section, "section");
         Objects.requireNonNull(contentGeneration, "contentGeneration");
         Objects.requireNonNull(worldAabb, "worldAabb");
-        Objects.requireNonNull(cameraAabb, "cameraAabb");
     }
 }
