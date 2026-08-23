@@ -39,6 +39,22 @@ private struct PipelineVariantKey: Hashable {
     let writeColor: Bool
 }
 
+private struct TerrainGpuComputePipelineKey: Hashable {
+    let deviceAddress: UInt
+    let primitiveType: UInt
+    let indexType: UInt
+}
+
+private final class TerrainGpuComputePipeline {
+    let state: MTLComputePipelineState
+    let function: MTLFunction
+
+    init(state: MTLComputePipelineState, function: MTLFunction) {
+        self.state = state
+        self.function = function
+    }
+}
+
 private struct SamplerKey: Hashable {
     let deviceAddress: UInt
     let addressModeU: UInt
@@ -131,6 +147,12 @@ private enum NativeState {
     static var terrainIcbGpuEncodedCount: UInt64 = 0
     static var terrainIcbGpuDispatchCount: UInt64 = 0
     static var terrainGpuEncodeLogged = false
+    // Device/variant-scoped compute PSOs are reusable pipeline state, not
+    // terrain ICB or scene state. The lock also serializes first-use compile
+    // so concurrent Sodium batches cannot compile the same kernel twice.
+    static let terrainGpuPipelineLock = NSLock()
+    static var terrainGpuPipelines: [TerrainGpuComputePipelineKey: TerrainGpuComputePipeline] = [:]
+    static var terrainGpuPipelineCompileCount: UInt64 = 0
     // Metal 4 frame-generation present pilot (spec M4). Read once when the
     // presenter is constructed; flipping it later has no effect, which matches how
     // the presenter is started.
@@ -7963,6 +7985,16 @@ public func metallum_terrain_gpu_icb_stats(
     return 1
 }
 
+@_cdecl("metallum_terrain_gpu_icb_pipeline_stats")
+public func metallum_terrain_gpu_icb_pipeline_stats(
+    _ compiles: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    NativeState.terrainGpuPipelineLock.lock()
+    compiles?.pointee = NativeState.terrainGpuPipelineCompileCount
+    NativeState.terrainGpuPipelineLock.unlock()
+    return 1
+}
+
 @_cdecl("metallum_metal4_main_queue_pilot_validate")
 public func metallum_metal4_main_queue_pilot_validate(_ device: MTLDevice) -> Int32 {
     guard #available(macOS 26.0, iOS 26.0, *), device.supportsFamily(.metal4) else {
@@ -9687,10 +9719,50 @@ private func terrainGpuIcbMslSource(
       render_command command(container->commandBuffer, drawIndex);
       command.draw_indexed_primitives(primitive_type::\(primitive),
           uint(record.indexCount), indices + uint(record.firstIndex),
-          uint(record.instanceCount), uint(record.baseVertex),
+          uint(record.instanceCount), as_type<uint>(record.baseVertex),
           uint(record.firstInstance));
     }
     """
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private func terrainGpuComputePipeline(
+    device: MTLDevice,
+    primitiveType: MTLPrimitiveType,
+    indexType: MTLIndexType,
+    source: String
+) -> TerrainGpuComputePipeline? {
+    let key = TerrainGpuComputePipelineKey(
+        deviceAddress: objectAddress(device),
+        primitiveType: primitiveType.rawValue,
+        indexType: indexType.rawValue
+    )
+    NativeState.terrainGpuPipelineLock.lock()
+    defer { NativeState.terrainGpuPipelineLock.unlock() }
+    if let cached = NativeState.terrainGpuPipelines[key] {
+        return cached
+    }
+    let pipeline: TerrainGpuComputePipeline? = NativeState.onCompilerThread {
+        do {
+            let library = try device.makeLibrary(source: source, options: nil)
+            guard let function = library.makeFunction(name: "metallum_terrain_gpu_encode") else {
+                return nil
+            }
+            return TerrainGpuComputePipeline(
+                state: try device.makeComputePipelineState(function: function),
+                function: function
+            )
+        } catch {
+            NSLog("[metallum] terrain GPU ICB compute pipeline failed: %@", String(describing: error))
+            return nil
+        }
+    }
+    guard let pipeline else {
+        return nil
+    }
+    NativeState.terrainGpuPipelines[key] = pipeline
+    NativeState.terrainGpuPipelineCompileCount &+= 1
+    return pipeline
 }
 
 /// Creates one producer-owned terrain ICB. The Java owner retains the returned
@@ -9865,22 +9937,12 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
         return nil
     }
 
-    let library: MTLLibrary
-    do {
-        library = try device.makeLibrary(source: source, options: nil)
-    } catch {
-        NSLog("[metallum] terrain GPU ICB MSL compile failed: %@", String(describing: error))
-        return nil
-    }
-    guard let function = library.makeFunction(name: "metallum_terrain_gpu_encode") else {
-        NSLog("[metallum] terrain GPU ICB MSL entry point missing")
-        return nil
-    }
-    let computePipeline: MTLComputePipelineState
-    do {
-        computePipeline = try device.makeComputePipelineState(function: function)
-    } catch {
-        NSLog("[metallum] terrain GPU ICB compute pipeline failed: %@", String(describing: error))
+    guard let computePipeline = terrainGpuComputePipeline(
+        device: device,
+        primitiveType: primitiveType,
+        indexType: indexType,
+        source: source
+    ) else {
         return nil
     }
     guard let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
@@ -9896,7 +9958,7 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
         computeEncoder.endEncoding()
         return nil
     }
-    let argumentEncoder = function.makeArgumentEncoder(bufferIndex: 1)
+    let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
     guard let argumentBuffer = device.makeBuffer(
               length: argumentEncoder.encodedLength,
               options: .storageModeShared
@@ -9910,7 +9972,7 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
     arguments.setAddress(argumentBuffer.gpuAddress, index: 1)
     arguments.setAddress(indexBuffer.gpuAddress, index: 2)
     computeEncoder.setArgumentTable(arguments)
-    computeEncoder.setComputePipelineState(computePipeline)
+    computeEncoder.setComputePipelineState(computePipeline.state)
     computeEncoder.resetCommands(
         buffer: commandBuffer,
         range: 0..<commandCount
@@ -9918,7 +9980,7 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
     computeEncoder.dispatchThreads(
         threadsPerGrid: MTLSize(width: commandCount, height: 1, depth: 1),
         threadsPerThreadgroup: MTLSize(
-            width: max(1, min(computePipeline.threadExecutionWidth, 64)),
+            width: max(1, min(computePipeline.state.threadExecutionWidth, 64)),
             height: 1,
             depth: 1
         )

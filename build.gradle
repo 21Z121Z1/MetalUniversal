@@ -1105,6 +1105,8 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				renderContractMinecraftDiagnoseRequested ? "minecraft-diagnose-current"
 						: renderContractMinecraftValidationRequested ? "minecraft-current" : "disabled"
 		systemProperty "metallum.validation.sourceCommit", renderContractSourceCommit
+		systemProperty "metallum.opt.terrainGpuEncode",
+				System.getProperty("metallum.opt.terrainGpuEncode", "false")
 		// Normal Minecraft runs retain the complete logical pass graph and
 		// producer counts, but not every binding snapshot. A diagnostic rerun can
 		// opt into full producer evidence with -Dmetallum.renderContract.captureProducers=true.
@@ -1420,7 +1422,10 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			if (runState.renderBackend != "Metal") {
 				problems << "validation ran on ${runState.renderBackend ?: 'unknown'} instead of Metal"
 			}
-			if (System.getProperty("metallum.opt.terrainIcb", "false").toBoolean()) {
+			def terrainIcbRequested = System.getProperty("metallum.opt.terrainIcb", "false").toBoolean()
+			def terrainGpuEncodeRequested = System.getProperty(
+					"metallum.opt.terrainGpuEncode", "false").toBoolean()
+			if (terrainIcbRequested || terrainGpuEncodeRequested) {
 				if (!(runState.terrainIcbEncoded instanceof Number)
 						|| runState.terrainIcbEncoded <= 0) {
 					problems << "terrain ICB encoded no native command buffers"
@@ -1428,6 +1433,16 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				if (!(runState.terrainIcbExecuted instanceof Number)
 						|| runState.terrainIcbExecuted < runState.terrainIcbEncoded) {
 					problems << "terrain ICB executed ${runState.terrainIcbExecuted} of ${runState.terrainIcbEncoded} encoded command buffers"
+				}
+			}
+			if (terrainGpuEncodeRequested) {
+				if (!(runState.terrainIcbGpuEncoded instanceof Number)
+						|| runState.terrainIcbGpuEncoded <= 0) {
+					problems << "terrain GPU ICB authored no GPU command buffers"
+				}
+				if (!(runState.terrainIcbGpuDispatches instanceof Number)
+						|| runState.terrainIcbGpuDispatches < runState.terrainIcbGpuEncoded) {
+					problems << "terrain GPU ICB dispatches ${runState.terrainIcbGpuDispatches} of ${runState.terrainIcbGpuEncoded} GPU-authored command buffers"
 				}
 			}
 			def explicitMetal4Master = System.getProperty("metallum.opt.metal4")

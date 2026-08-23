@@ -24,6 +24,20 @@ public final class TerrainIcbOwner implements AutoCloseable {
     private boolean gpuAuthored;
     private boolean closed;
 
+    boolean hasReusableGpuIcb(
+            final MetalDevice currentDevice,
+            final MTLPrimitiveType currentPrimitiveType,
+            final TerrainSceneSnapshot snapshot
+    ) {
+        return !closed
+                && currentDevice == device
+                && gpuAuthored
+                && primitiveType == currentPrimitiveType
+                && snapshot != null
+                && snapshot.sameIcbContent(content)
+                && !MetalNativeBridge.isNullHandle(indirectCommandBuffer);
+    }
+
     /**
      * Encodes the immutable producer records on the Metal 4 compute path. The
      * render encoder is ended by the owning pass before this call and reopened
