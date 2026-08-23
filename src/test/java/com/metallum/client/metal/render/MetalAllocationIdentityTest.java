@@ -6,8 +6,10 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -62,6 +64,16 @@ final class MetalAllocationIdentityTest {
             recorder.close();
             deleteRecursively(output);
         }
+    }
+
+    @Test
+    void renderPassWithoutContractTokenDoesNotObserveBuffer() {
+        AtomicBoolean observed = new AtomicBoolean();
+        MetalRenderPass.observeContractBuffer(-1L, () -> observed.set(true));
+        assertFalse(observed.get());
+
+        MetalRenderPass.observeContractBuffer(1L, () -> observed.set(true));
+        assertTrue(observed.get());
     }
 
     private static void deleteRecursively(final Path root) throws Exception {
