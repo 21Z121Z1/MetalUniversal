@@ -10769,6 +10769,14 @@ public func metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats(
     }
 }
 
+@_cdecl("metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers")
+public func metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
+    _ desc: MTLRenderPipelineDescriptor,
+    _ enabled: Int32
+) {
+    desc.supportIndirectCommandBuffers = enabled != 0
+}
+
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState")
 public func metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState(
     _ desc: MTLRenderPipelineDescriptor,
@@ -11312,9 +11320,7 @@ private func makeMetal4Descriptor(_ src: MTLRenderPipelineDescriptor) -> MTL4Ren
     dst.alphaToOneState = src.isAlphaToOneEnabled ? .enabled : .disabled
     dst.isRasterizationEnabled = src.isRasterizationEnabled
     dst.maxVertexAmplificationCount = src.maxVertexAmplificationCount
-    if NativeState.terrainIcbEnabled {
-        dst.supportIndirectCommandBuffers = .enabled
-    }
+    dst.supportIndirectCommandBuffers = src.supportIndirectCommandBuffers ? .enabled : .disabled
     for index in 0..<8 {
         guard let s = src.colorAttachments[index], let d = dst.colorAttachments[index] else { continue }
         d.pixelFormat = s.pixelFormat
@@ -11459,9 +11465,6 @@ private func createRenderPipelineState(
     device: MTLDevice,
     descriptor: MTLRenderPipelineDescriptor
 ) -> UnsafeMutableRawPointer? {
-    if NativeState.terrainIcbEnabled {
-        descriptor.supportIndirectCommandBuffers = true
-    }
     if ProcessInfo.processInfo.environment["METALLUM_MRT_ABI_DEBUG"] == "1" {
         let colorFormats = (0..<8)
             .map { String(descriptor.colorAttachments[$0].pixelFormat.rawValue) }

@@ -470,6 +470,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             }
 
             pipelineDesc.setDepthStencilFormats(depthFormat, stencilFormat);
+            if (TerrainSceneSnapshot.ICB_ENABLED
+                    && isSodiumTerrainPipeline(info.getVertexShader())) {
+                pipelineDesc.setSupportIndirectCommandBuffers(true);
+            }
 
             return MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
                     device.metalDeviceHandle(),
@@ -503,6 +507,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     static boolean isSodiumTerrainBlockSampler(final String bindingName, final Identifier vertexShader) {
         return "u_BlockTex".equals(bindingName) && SODIUM_TERRAIN_VERTEX_SHADER.equals(vertexShader);
+    }
+
+    static boolean isSodiumTerrainPipeline(final Identifier vertexShader) {
+        return SODIUM_TERRAIN_VERTEX_SHADER.equals(vertexShader);
     }
 
     int firstAvailableVertexBufferSlot() {
