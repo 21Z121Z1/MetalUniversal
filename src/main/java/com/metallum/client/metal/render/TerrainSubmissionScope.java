@@ -35,6 +35,7 @@ public final class TerrainSubmissionScope implements AutoCloseable {
     /** Called only by the Sodium VK indirect producer mixin. */
     public static void capture(
             final RenderPass pass,
+            final Object producerIdentity,
             final long commandAddress,
             final int drawCount,
             final GpuBufferSlice commandSlice
@@ -53,7 +54,9 @@ public final class TerrainSubmissionScope implements AutoCloseable {
             return;
         }
         try {
-            scope.snapshot = TerrainSceneSnapshot.capture(metalPass, commandSlice, commands);
+            scope.snapshot = TerrainSceneSnapshot.capture(
+                    metalPass, producerIdentity, commandSlice, commands
+            );
         } catch (RuntimeException ignored) {
             // A missing/retired binding is a normal fail-closed condition.  Do
             // not suppress Sodium's original indirect submission.

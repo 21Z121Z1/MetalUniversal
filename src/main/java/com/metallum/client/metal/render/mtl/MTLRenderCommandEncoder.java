@@ -394,28 +394,16 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
         );
     }
 
-    /**
-     * Encodes one immutable terrain ICB execution. Native returns false for
-     * unsupported Metal/PSO capability or any encode precondition failure so
-     * the caller can issue its existing indirect fallback exactly once.
-     */
-    public boolean executeTerrainIndexedIcb(
-            final MTLPrimitiveType primitiveType,
-            final MTLIndexType indexType,
-            final MemorySegment indexBuffer,
-            final MemorySegment pipeline,
-            final MemorySegment packedCommands,
+    /** Executes an already encoded producer-owned terrain ICB once. */
+    public boolean executeTerrainIcb(
+            final MemorySegment indirectCommandBuffer,
             final int drawCount
     ) {
         MemorySegment encoder = handle();
         flushState(encoder);
-        return MetalNativeBridge.MTLRenderCommandEncoder_executeTerrainIndexedIcb(
+        return MetalNativeBridge.MTLRenderCommandEncoder_executeTerrainIcb(
                 encoder,
-                primitiveType.value,
-                indexType.value,
-                indexBuffer,
-                pipeline,
-                packedCommands,
+                indirectCommandBuffer,
                 drawCount
         ) != 0;
     }

@@ -108,6 +108,84 @@ final class TerrainSceneSnapshotTest {
     }
 
     @Test
+    void icbContentReuseRequiresExactCommandValues() {
+        Object pipeline = new Object();
+        Object indexBuffer = new Object();
+        MetalAllocationIdentity indexIdentity = new MetalAllocationIdentity(601L, 1L);
+        TerrainSceneSnapshot.ResourceSlice indexSlice = TerrainSceneSnapshot.ResourceSlice.of(
+                indexBuffer, indexIdentity, 0L, 512L, 0, false
+        );
+        TerrainSceneSnapshot.ResourceSlice vertexSlice = TerrainSceneSnapshot.ResourceSlice.of(
+                new Object(), new MetalAllocationIdentity(602L, 1L), 0L, 128L, 32, false
+        );
+        TerrainSceneSnapshot.StateView state = new TerrainSceneSnapshot.StateView(
+                pipeline, 4L, 5L, 6L, indexSlice, MTLIndexType.UInt32, slots(vertexSlice)
+        );
+        List<IrisMetalIndirectCommandStream.IndexedDraw> commands = List.of(
+                new IrisMetalIndirectCommandStream.IndexedDraw(12, 1, 0, 0, 0)
+        );
+        TerrainSceneSnapshot first = TerrainSceneSnapshot.capture(state, commandBuffer(), commands);
+        TerrainSceneSnapshot same = TerrainSceneSnapshot.capture(state, commandBuffer(), commands);
+        TerrainSceneSnapshot changed = TerrainSceneSnapshot.capture(
+                state,
+                commandBuffer(),
+                List.of(new IrisMetalIndirectCommandStream.IndexedDraw(12, 1, 0, 0, 1))
+        );
+
+        assertTrue(first.sameIcbContent(same));
+        assertFalse(first.sameIcbContent(changed));
+
+        TerrainSceneSnapshot.StateView dynamicState = new TerrainSceneSnapshot.StateView(
+                pipeline,
+                4L,
+                99L,
+                100L,
+                indexSlice,
+                MTLIndexType.UInt32,
+                slots(TerrainSceneSnapshot.ResourceSlice.of(
+                        new Object(), new MetalAllocationIdentity(603L, 1L),
+                        32L, 256L, 32, false
+                ))
+        );
+        TerrainSceneSnapshot dynamic = TerrainSceneSnapshot.capture(
+                dynamicState, commandBuffer(), commands
+        );
+        TerrainSceneSnapshot.IcbContent key = first.icbContent();
+        assertTrue(first.sameIcbContent(key));
+        assertTrue(dynamic.sameIcbContent(key),
+                "minimal ICB key must ignore transient snapshot state");
+        assertTrue(first.sameIcbContent(dynamic),
+                "inherited dynamic vertex/binding/source state must not rebuild the ICB");
+
+        TerrainSceneSnapshot.StateView changedIndexGeneration = new TerrainSceneSnapshot.StateView(
+                pipeline,
+                4L,
+                5L,
+                6L,
+                TerrainSceneSnapshot.ResourceSlice.of(
+                        indexBuffer, new MetalAllocationIdentity(601L, 2L), 0L, 512L, 0, false
+                ),
+                MTLIndexType.UInt32,
+                slots(vertexSlice)
+        );
+        TerrainSceneSnapshot.StateView changedPipelineGeneration = new TerrainSceneSnapshot.StateView(
+                pipeline, 5L, 5L, 6L, indexSlice, MTLIndexType.UInt32, slots(vertexSlice)
+        );
+        TerrainSceneSnapshot.StateView changedIndexType = new TerrainSceneSnapshot.StateView(
+                pipeline, 4L, 5L, 6L, indexSlice, MTLIndexType.UInt16, slots(vertexSlice)
+        );
+        assertFalse(first.sameIcbContent(TerrainSceneSnapshot.capture(
+                        changedIndexGeneration, commandBuffer(), commands
+                )), "index allocation generation must rebuild the ICB");
+        assertFalse(first.sameIcbContent(TerrainSceneSnapshot.capture(
+                        changedPipelineGeneration, commandBuffer(), commands
+                )), "pipeline generation must rebuild the ICB");
+        assertFalse(first.sameIcbContent(TerrainSceneSnapshot.capture(
+                        changedIndexType, commandBuffer(), commands
+                )), "index type must rebuild the ICB");
+    }
+
+    @Test
     void defaultFeatureIsOff() {
         assertFalse(TerrainSceneSnapshot.ENABLED,
                 "focused host tests must not silently enable the experimental path");
