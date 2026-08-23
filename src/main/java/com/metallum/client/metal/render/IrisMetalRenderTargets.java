@@ -308,6 +308,12 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         return height;
     }
 
+    /** O(1) authoritative stamp for the current live color allocation set. */
+    long allocationStamp() {
+        ensureOpen();
+        return colorTargets.mainTexture(0).allocationId();
+    }
+
     void captureNoTranslucentsDepth(final MetalCommandEncoder encoder) {
         ensureOpen();
         encoder.copyTextureToTexture(mainDepth, noTranslucentsDepth, 0, 0, 0, 0, 0, width, height);
@@ -429,10 +435,12 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         if (newWidth == width && newHeight == height) {
             return;
         }
+        long oldStamp = allocationStamp();
         colorTargets.resize(newWidth, newHeight);
         releaseDepthTextures();
         createDepthTextures(newWidth, newHeight);
         this.fullClearRequired = true;
+        IrisMetalOptimizationBootstrap.onTargetsReallocated(this, oldStamp);
     }
 
     private void releaseDepthTextures() {

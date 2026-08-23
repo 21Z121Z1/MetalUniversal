@@ -181,6 +181,15 @@ final class IrisMetalExperimentalOptimizer {
         ACTIVE.set(null);
     }
 
+    static void publishAttachmentLifetimeReceipt(
+            final IrisMetalOptimizationPlan plan,
+            final IrisMetalOptimizationPlan.AttachmentLifetimeReceipt receipt
+    ) {
+        Objects.requireNonNull(plan, "plan");
+        Objects.requireNonNull(receipt, "receipt");
+        ACTIVE.compareAndSet(plan, IrisMetalOptimizationPlan.withAttachmentLifetimeReceipt(plan, receipt));
+    }
+
     private static void validateArgumentLayout(final ProgramDescriptor program) {
         Set<String> names = new LinkedHashSet<>();
         Map<IrisMetalOptimizationPlan.ArgumentSlot.Kind, Set<Integer>> indices = new LinkedHashMap<>();
@@ -302,6 +311,7 @@ final class IrisMetalExperimentalOptimizer {
         out.append("  \"depthtex2Required\": ").append(plan.resourceLiveness().depthtex2Required()).append(",\n");
         out.append("  \"argumentLayouts\": ").append(plan.argumentLayouts().size()).append(",\n");
         out.append("  \"indirectBatches\": ").append(plan.indirectBatches().size()).append(",\n");
+        appendAttachmentLifetimeReceipt(out, plan.attachmentLifetimeReceipt());
         out.append("  \"passes\": [\n");
         for (int index = 0; index < plan.passReceipt().size(); index++) {
             appendPlanPass(out, plan.passReceipt().get(index), index + 1 < plan.passReceipt().size());
@@ -309,6 +319,89 @@ final class IrisMetalExperimentalOptimizer {
         out.append("  ]\n");
         out.append("}\n");
         return out.toString();
+    }
+
+    private static void appendAttachmentLifetimeReceipt(
+            final StringBuilder out,
+            final IrisMetalOptimizationPlan.AttachmentLifetimeReceipt receipt
+    ) {
+        out.append("  \"attachmentLifetimeReceipt\": ");
+        if (receipt == null) {
+            out.append("null,\n");
+            return;
+        }
+        out.append("{\n");
+        out.append("    \"chainGeneration\": ").append(receipt.chainGeneration()).append(",\n");
+        out.append("    \"targetEpoch\": ").append(receipt.targetEpoch()).append(",\n");
+        out.append("    \"targetSignature\": ").append(jsonString(receipt.targetSignature())).append(",\n");
+        out.append("    \"status\": ").append(jsonString(receipt.status())).append(",\n");
+        out.append("    \"unresolvedConsumers\": ").append(jsonStringArray(receipt.unresolvedConsumers())).append(",\n");
+        out.append("    \"attachments\": [\n");
+        for (int index = 0; index < receipt.attachments().size(); index++) {
+            IrisMetalOptimizationPlan.ResolvedAttachment attachment = receipt.attachments().get(index);
+            out.append("      {");
+            out.append("\"planPassKey\":").append(jsonString(attachment.planPassKey())).append(",");
+            out.append("\"semanticPassId\":").append(jsonString(attachment.semanticPassId())).append(",");
+            out.append("\"slot\":").append(attachment.slot()).append(",");
+            out.append("\"logicalResource\":").append(jsonString(attachment.logicalResource())).append(",");
+            out.append("\"allocationId\":").append(attachment.allocationId()).append(",");
+            out.append("\"allocationGeneration\":").append(attachment.allocationGeneration()).append(",");
+            out.append("\"mipLevel\":").append(attachment.mipLevel()).append(",");
+            out.append("\"physicalSide\":").append(jsonString(attachment.physicalSide())).append(",");
+            out.append("\"load\":").append(jsonString(attachment.load().name())).append(",");
+            out.append("\"store\":").append(jsonString(attachment.store().name())).append(",");
+            out.append("\"passIndex\":").append(attachment.passIndex()).append(",");
+            out.append("\"resolution\":").append(jsonString(attachment.resolution().name())).append(",");
+            out.append("\"classification\":").append(jsonString(attachment.classification().name())).append(",");
+            out.append("\"allocationKey\":").append(jsonString(attachment.allocationKey())).append(",");
+            out.append("\"lifetime\":");
+            appendLifetime(out, attachment.lifetime());
+            out.append("}");
+            if (index + 1 < receipt.attachments().size()) out.append(',');
+            out.append('\n');
+        }
+        out.append("    ],\n");
+        out.append("    \"lifetimes\": [\n");
+        for (int index = 0; index < receipt.lifetimes().size(); index++) {
+            appendLifetimeObject(out, receipt.lifetimes().get(index), "      ");
+            if (index + 1 < receipt.lifetimes().size()) out.append(',');
+            out.append('\n');
+        }
+        out.append("    ]\n");
+        out.append("  },\n");
+    }
+
+    private static void appendLifetime(final StringBuilder out,
+                                       final IrisMetalOptimizationPlan.AttachmentLifetime lifetime) {
+        if (lifetime == null) {
+            out.append("null");
+            return;
+        }
+        out.append('{');
+        out.append("\"allocationKey\":").append(jsonString(lifetime.allocationKey())).append(',');
+        out.append("\"allocationId\":").append(lifetime.allocationId()).append(',');
+        out.append("\"allocationGeneration\":").append(lifetime.allocationGeneration()).append(',');
+        out.append("\"mipLevel\":").append(lifetime.mipLevel()).append(',');
+        out.append("\"firstUse\":").append(lifetime.firstUse()).append(',');
+        out.append("\"lastWrite\":").append(lifetime.lastWrite()).append(',');
+        out.append("\"nextUse\":").append(lifetime.nextUse()).append(',');
+        out.append("\"nextUseAccess\":").append(jsonString(lifetime.nextUseAccess()));
+        out.append('}');
+    }
+
+    private static void appendLifetimeObject(
+            final StringBuilder out,
+            final IrisMetalOptimizationPlan.AttachmentLifetime lifetime,
+            final String indent
+    ) {
+        out.append(indent);
+        appendLifetime(out, lifetime);
+    }
+
+    private static String jsonStringArray(final List<String> values) {
+        List<String> escaped = new ArrayList<>();
+        values.stream().sorted().forEach(value -> escaped.add(jsonString(value)));
+        return "[" + String.join(",", escaped) + "]";
     }
 
     private static void appendPlanPass(

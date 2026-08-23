@@ -29,12 +29,111 @@ final class IrisMetalOptimizationPlan {
     enum LoadAction { DONT_CARE, LOAD, CLEAR }
     enum StoreAction { DONT_CARE, STORE }
 
-    /**
-     * The receipt deliberately stops before physical-resource binding. A
-     * ResourceIdentity is created only by the render-contract recorder after
-     * an actual backend allocation exists.
-     */
+    /** Creation-time plan binding remains physical-identity free. */
     enum BindingStatus { UNBOUND_DIAGNOSTIC_ONLY }
+
+    private static String requireName(final String value, final String field) {
+        Objects.requireNonNull(value, field);
+        if (value.isBlank()) {
+            throw new IllegalArgumentException(field + " must not be blank");
+        }
+        return value;
+    }
+
+    enum AttachmentResolution { RESOLVED_RASTER, UNRESOLVED_CONSERVATIVE }
+
+    enum LifetimeClassification { CONSERVATIVE_PERSISTENT }
+
+    /** Immutable liveness for one concrete allocation/subresource. */
+    record AttachmentLifetime(
+            String allocationKey,
+            long allocationId,
+            long allocationGeneration,
+            int mipLevel,
+            int firstUse,
+            int lastWrite,
+            int nextUse,
+            String nextUseAccess
+    ) {
+        AttachmentLifetime {
+            requireName(allocationKey, "allocationKey");
+            if (allocationId <= 0L || allocationGeneration <= 0L) {
+                throw new IllegalArgumentException("Attachment allocation identity must be positive");
+            }
+            if (mipLevel < 0 || firstUse < 0 || lastWrite < -1 || nextUse < -1) {
+                throw new IllegalArgumentException("Invalid attachment lifetime range");
+            }
+            requireName(nextUseAccess, "nextUseAccess");
+        }
+    }
+
+    /** One raster candidate bound to the physical side used by its pass. */
+    record ResolvedAttachment(
+            String planPassKey,
+            String semanticPassId,
+            int slot,
+            String logicalResource,
+            long allocationId,
+            long allocationGeneration,
+            int mipLevel,
+            String physicalSide,
+            LoadAction load,
+            StoreAction store,
+            int passIndex,
+            AttachmentResolution resolution,
+            LifetimeClassification classification,
+            String allocationKey,
+            AttachmentLifetime lifetime
+    ) {
+        ResolvedAttachment {
+            requireName(planPassKey, "planPassKey");
+            requireName(semanticPassId, "semanticPassId");
+            requireName(logicalResource, "logicalResource");
+            requireName(physicalSide, "physicalSide");
+            requireName(allocationKey, "allocationKey");
+            if (slot < 0 || passIndex < 0 || mipLevel < 0) {
+                throw new IllegalArgumentException("Invalid attachment receipt position");
+            }
+            Objects.requireNonNull(load, "load");
+            Objects.requireNonNull(store, "store");
+            Objects.requireNonNull(resolution, "resolution");
+            Objects.requireNonNull(classification, "classification");
+            if (resolution == AttachmentResolution.RESOLVED_RASTER) {
+                if (allocationId <= 0L || allocationGeneration <= 0L) {
+                    throw new IllegalArgumentException("Resolved attachment identity must be positive");
+                }
+                Objects.requireNonNull(lifetime, "lifetime");
+            } else if (lifetime != null || allocationId != 0L || allocationGeneration != 0L) {
+                throw new IllegalArgumentException("Unresolved attachment must not carry a physical identity");
+            }
+        }
+    }
+
+    /** Generation-scoped, diagnostic-only physical attachment compiler output. */
+    record AttachmentLifetimeReceipt(
+            int chainGeneration,
+            long targetEpoch,
+            String targetSignature,
+            String status,
+            List<ResolvedAttachment> attachments,
+            List<AttachmentLifetime> lifetimes,
+            List<String> unresolvedConsumers
+    ) {
+        AttachmentLifetimeReceipt {
+            if (chainGeneration < 0) {
+                throw new IllegalArgumentException("Chain generation must be non-negative");
+            }
+            if (targetEpoch < 0L) {
+                throw new IllegalArgumentException("Target epoch must be non-negative");
+            }
+            requireName(targetSignature, "targetSignature");
+            requireName(status, "status");
+            attachments = List.copyOf(attachments);
+            lifetimes = List.copyOf(lifetimes);
+            Objects.requireNonNull(unresolvedConsumers, "unresolvedConsumers");
+            unresolvedConsumers = unresolvedConsumers.stream().sorted().toList();
+        }
+    }
 
     record AttachmentPolicy(String resource, LoadAction load, StoreAction store) {
         AttachmentPolicy {
@@ -172,6 +271,7 @@ final class IrisMetalOptimizationPlan {
     private final ResourceLiveness resourceLiveness;
     private final Map<String, ArgumentLayout> argumentLayouts;
     private final List<IndirectBatch> indirectBatches;
+    private final AttachmentLifetimeReceipt attachmentLifetimeReceipt;
 
     private IrisMetalOptimizationPlan(
             final int chainGeneration,
@@ -182,7 +282,8 @@ final class IrisMetalOptimizationPlan {
             final Map<Integer, List<AttachmentPolicy>> attachmentPolicies,
             final ResourceLiveness resourceLiveness,
             final Map<String, ArgumentLayout> argumentLayouts,
-            final List<IndirectBatch> indirectBatches
+            final List<IndirectBatch> indirectBatches,
+            final AttachmentLifetimeReceipt attachmentLifetimeReceipt
     ) {
         if (chainGeneration < 0) {
             throw new IllegalArgumentException("Chain generation must be non-negative");
@@ -198,6 +299,7 @@ final class IrisMetalOptimizationPlan {
         this.resourceLiveness = resourceLiveness;
         this.argumentLayouts = Map.copyOf(argumentLayouts);
         this.indirectBatches = List.copyOf(indirectBatches);
+        this.attachmentLifetimeReceipt = attachmentLifetimeReceipt;
     }
 
     static Builder builder(final int chainGeneration, final IrisMetalHazardGraph hazards) {
@@ -217,6 +319,30 @@ final class IrisMetalOptimizationPlan {
     ResourceLiveness resourceLiveness() { return resourceLiveness; }
     Map<String, ArgumentLayout> argumentLayouts() { return argumentLayouts; }
     List<IndirectBatch> indirectBatches() { return indirectBatches; }
+    AttachmentLifetimeReceipt attachmentLifetimeReceipt() { return attachmentLifetimeReceipt; }
+
+    static IrisMetalOptimizationPlan withAttachmentLifetimeReceipt(
+            final IrisMetalOptimizationPlan source,
+            final AttachmentLifetimeReceipt receipt
+    ) {
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(receipt, "receipt");
+        if (source.chainGeneration != receipt.chainGeneration()) {
+            throw new IllegalArgumentException("Attachment receipt generation does not match plan");
+        }
+        return new IrisMetalOptimizationPlan(
+                source.chainGeneration,
+                source.hazards,
+                source.passReceipt,
+                source.renderMergeGroups,
+                source.computeMergeGroups,
+                source.attachmentPolicies,
+                source.resourceLiveness,
+                source.argumentLayouts,
+                source.indirectBatches,
+                receipt
+        );
+    }
 
     static final class Builder {
         private final int chainGeneration;
@@ -345,7 +471,8 @@ final class IrisMetalOptimizationPlan {
                     attachmentPolicies,
                     liveness,
                     argumentLayouts,
-                    indirectBatches
+                    indirectBatches,
+                    null
             );
         }
     }
