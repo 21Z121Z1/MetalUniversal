@@ -227,9 +227,9 @@ final class IrisMetalRenderTargets implements AutoCloseable {
                 "iris-depthtex1", DEPTH_USAGE, GpuFormat.D32_FLOAT, newWidth, newHeight, 1, 1);
         this.noHandDepth = (MetalGpuTexture) device.createTexture(
                 "iris-depthtex2", DEPTH_USAGE, GpuFormat.D32_FLOAT, newWidth, newHeight, 1, 1);
-        this.mainDepth.registerValidationIdentity();
-        this.noTranslucentsDepth.registerValidationIdentity();
-        this.noHandDepth.registerValidationIdentity();
+        this.mainDepth.registerAllocationIdentity();
+        this.noTranslucentsDepth.registerAllocationIdentity();
+        this.noHandDepth.registerAllocationIdentity();
         this.mainDepthView = new MetalGpuTextureView(this.mainDepth, 0, 1);
         this.noTranslucentsDepthView = new MetalGpuTextureView(this.noTranslucentsDepth, 0, 1);
         this.noHandDepthView = new MetalGpuTextureView(this.noHandDepth, 0, 1);

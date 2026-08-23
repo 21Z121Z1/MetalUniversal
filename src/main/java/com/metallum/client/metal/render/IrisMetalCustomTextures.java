@@ -398,7 +398,7 @@ final class IrisMetalCustomTextures implements AutoCloseable {
                     1,
                     1
             );
-            texture.registerValidationIdentity();
+            texture.registerAllocationIdentity();
             view = (MetalGpuTextureView) this.device.createTextureView(texture);
             boolean clamp = png.getFilteringData().shouldClamp();
             boolean blur = png.getFilteringData().shouldBlur();
@@ -464,7 +464,7 @@ final class IrisMetalCustomTextures implements AutoCloseable {
                     1,
                     extent.dimension()
             );
-            texture.registerValidationIdentity();
+            texture.registerAllocationIdentity();
             view = (MetalGpuTextureView) this.device.createTextureView(texture);
             boolean clamp = raw.getFilteringData().shouldClamp();
             boolean blur = raw.getFilteringData().shouldBlur();

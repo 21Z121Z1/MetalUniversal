@@ -432,7 +432,7 @@ final class MetalDevice implements GpuDeviceBackend {
         if (size <= 0L) {
             throw new IllegalArgumentException("Metal buffer size must be > 0 (got " + size + ")");
         }
-        return new MetalGpuBuffer(this, usage, size);
+        return new MetalGpuBuffer(this, label, usage, size);
     }
 
     @Override

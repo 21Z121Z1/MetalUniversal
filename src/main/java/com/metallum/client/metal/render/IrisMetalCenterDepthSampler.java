@@ -149,8 +149,8 @@ final class IrisMetalCenterDepthSampler implements AutoCloseable {
                 1,
                 1
         );
-        this.currentTexture.registerValidationIdentity();
-        this.historyTexture.registerValidationIdentity();
+        this.currentTexture.registerAllocationIdentity();
+        this.historyTexture.registerAllocationIdentity();
         this.currentView = (MetalGpuTextureView) device.createTextureView(this.currentTexture);
         this.historyView = (MetalGpuTextureView) device.createTextureView(this.historyTexture);
         this.sampler = new MetalGpuSampler(

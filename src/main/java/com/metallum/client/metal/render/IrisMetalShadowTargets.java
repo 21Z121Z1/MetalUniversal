@@ -223,8 +223,8 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         this.shadowDepthNoTranslucents = (MetalGpuTexture) device.createTexture(
                 "iris-shadowtex1", DEPTH_USAGE, GpuFormat.D32_FLOAT, newResolution, newResolution, 1,
                 mipLevels(newResolution, depthMipmapped[1]));
-        this.shadowDepth.registerValidationIdentity();
-        this.shadowDepthNoTranslucents.registerValidationIdentity();
+        this.shadowDepth.registerAllocationIdentity();
+        this.shadowDepthNoTranslucents.registerAllocationIdentity();
         this.shadowDepthView = new MetalGpuTextureView(shadowDepth, 0, shadowDepth.getMipLevels());
         this.shadowDepthNoTranslucentsView = new MetalGpuTextureView(
                 shadowDepthNoTranslucents, 0, shadowDepthNoTranslucents.getMipLevels());

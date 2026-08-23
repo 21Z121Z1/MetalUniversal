@@ -929,10 +929,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     static ResourceIdentity contractResource(final MetalGpuTexture texture, final int mipLevel) {
-        return RenderContractRuntime.identifyResource(
+        MetalAllocationIdentity allocation = texture.allocationIdentity();
+        return RenderContractRuntime.identifyAllocation(
                 texture.getLabel(),
-                texture.validationResourceId(),
-                texture.validationDebugId(),
+                allocation.allocationId(),
+                allocation.generation(),
+                texture.allocationDebugId(),
                 texture.getFormat().toString(),
                 texture.getWidth(mipLevel),
                 texture.getHeight(mipLevel),
@@ -940,6 +942,23 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 mipLevel,
                 1,
                 texture.usage()
+        );
+    }
+
+    static ResourceIdentity contractResource(final MetalGpuBuffer buffer) {
+        MetalAllocationIdentity allocation = buffer.allocationIdentity();
+        return RenderContractRuntime.identifyAllocation(
+                buffer.logicalLabel(),
+                allocation.allocationId(),
+                allocation.generation(),
+                buffer.allocationDebugId(),
+                "BUFFER",
+                Math.toIntExact(Math.min(buffer.allocationSize(), Integer.MAX_VALUE)),
+                1,
+                1,
+                0,
+                1,
+                buffer.usage()
         );
     }
 
@@ -975,8 +994,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         CapturePoint point = new CapturePoint(frameId, "metallum/present", CapturePointKind.FINAL_DRAWABLE, -1);
         RenderContractRuntime.ReadbackRequest request = new RenderContractRuntime.ReadbackRequest(
                 "final-drawable",
-                source.validationResourceId(),
-                source.validationDebugId(),
+                source.allocationId(),
+                source.allocationDebugId(),
                 source.getFormat().toString(),
                 source.pixelSize(),
                 width,
@@ -1001,8 +1020,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 RenderContractRuntime.recordReadback(
                         point,
                         "final-drawable",
-                        source.validationResourceId(),
-                        source.validationDebugId(),
+                        source.allocationId(),
+                        source.allocationDebugId(),
                         source.getFormat().toString(),
                         source.pixelSize(),
                         width,
