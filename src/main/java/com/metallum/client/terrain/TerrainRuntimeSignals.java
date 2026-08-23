@@ -2,6 +2,7 @@ package com.metallum.client.terrain;
 
 import com.metallum.client.metal.render.MetalGpuTimingRecorder;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import net.minecraft.client.Minecraft;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryUsage;
@@ -17,6 +18,12 @@ public final class TerrainRuntimeSignals {
         long cpuNanos = controller.latestCpuFrameNanos();
         long gpuNanos = MetalGpuTimingRecorder.latestGpuNanos();
         long frameNanos = cpuNanos > 0L ? cpuNanos : TerrainSchedulingController.TARGET_FRAME_NANOS;
+        PresentationPacingSnapshot pacing = PresentationPacingSnapshot.capture(
+                controller.nextFrameIndex(),
+                refreshRateHz(),
+                cpuNanos,
+                gpuNanos
+        );
         return new TerrainSchedulingController.FrameInputs(
                 frameNanos,
                 cpuNanos,
@@ -25,8 +32,23 @@ public final class TerrainRuntimeSignals {
                 0,
                 0,
                 thermalState(),
-                memoryPressure()
+                memoryPressure(),
+                pacing
         );
+    }
+
+    /** Returns the current Java-visible display refresh, or -1 when unavailable. */
+    public static int refreshRateHz() {
+        try {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft == null || minecraft.getWindow() == null) {
+                return PresentationPacingSnapshot.UNAVAILABLE_REFRESH_RATE_HZ;
+            }
+            int refreshRate = minecraft.getWindow().getRefreshRate();
+            return refreshRate > 0 ? refreshRate : PresentationPacingSnapshot.UNAVAILABLE_REFRESH_RATE_HZ;
+        } catch (Throwable ignored) {
+            return PresentationPacingSnapshot.UNAVAILABLE_REFRESH_RATE_HZ;
+        }
     }
 
     public static int thermalState() {

@@ -14,6 +14,8 @@ import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;
 import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
 import com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.terrain.PresentationPacingEvidenceAdapter;
+import com.metallum.client.terrain.TerrainSchedulingController;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.validation.storage.ValidationStorageBudget;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -770,6 +772,12 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.add("gpuNativeEncoders", summarizeGpuEncoders(gpuEncoderSamples));
             addNativeEncoderCounts(report, gpuEncoderSamples, keep);
             addPerformanceCounters(report, IrisMetalPerformanceCounters.snapshot());
+            report.add(
+                    "presentationPacing",
+                    PresentationPacingEvidenceAdapter.toJson(
+                            TerrainSchedulingController.runtime().lastSnapshot().presentationPacing()
+                    )
+            );
             JsonObject unavailable = new JsonObject();
             unavailable.addProperty(
                     "attachmentStoreLoadBytes",
