@@ -6,6 +6,7 @@ cd "$ROOT"
 
 WORLD="${WORLD:-}"
 CANDIDATE_PROFILE="${CANDIDATE_PROFILE:-all-safe-lanes}"
+BASELINE_PROFILE="${BASELINE_PROFILE:-baseline}"
 BLOCKS="${BLOCKS:-4}"
 MODE="${MODE:-full}"
 CORRECTNESS_GATE="${METALLUM_CORRECTNESS_GATE:-}"
@@ -73,6 +74,9 @@ profile_args() {
   local depth_liveness=false
   local argument_tables=false
   local terrain_adaptive=false
+  local binding_tokens=true
+  local compiled_binding_plan=true
+  local hotpath_telemetry=false
   case "$profile" in
     baseline) ;;
     depth-liveness) depth_liveness=true ;;
@@ -80,6 +84,17 @@ profile_args() {
     pass-fusion) pass_fusion=true ;;
     argument-tables) argument_tables=true ;;
     terrain-adaptive) terrain_adaptive=true ;;
+    binding-tokens)
+      hotpath_telemetry=true
+      ;;
+    name-based-bindings)
+      # Baseline arm for the P3 token-binding experiment: identical
+      # instrumentation cost (hotpath telemetry on) with the token surfaces
+      # disabled so producers fall back to per-name lookup.
+      hotpath_telemetry=true
+      binding_tokens=false
+      compiled_binding_plan=false
+      ;;
     all-safe-lanes)
       pass_fusion=true
       compute_grouping=true
@@ -115,12 +130,16 @@ profile_args() {
     "-Dmetallum.iris.argumentTables=$argument_tables" \
     "-Dmetallum.iris.experimental.argumentTables=$argument_tables" \
     "-Dmetallum.opt.terrainAdaptiveScheduling=$terrain_adaptive" \
-    "-Dmetallum.opt.terrainSchedulingTelemetry=$terrain_adaptive"
+    "-Dmetallum.opt.terrainSchedulingTelemetry=$terrain_adaptive" \
+    "-Dmetallum.hotpath.telemetry=$hotpath_telemetry" \
+    "-Dmetallum.opt.bindingTokens=$binding_tokens" \
+    "-Dmetallum.opt.compiledBindingPlan=$compiled_binding_plan"
 }
 
 write_manifest() {
   python3 - "$OUT" "$WORLD" "$CANDIDATE_PROFILE" "$BLOCKS" "$MODE" \
-    "$WARMUP_SECONDS" "$SAMPLE_SECONDS" "$ADMISSION_WARMUP_SECONDS" "$ADMISSION_SAMPLE_SECONDS" <<'PY'
+    "$WARMUP_SECONDS" "$SAMPLE_SECONDS" "$ADMISSION_WARMUP_SECONDS" "$ADMISSION_SAMPLE_SECONDS" \
+    "$BASELINE_PROFILE" <<'PY'
 import hashlib, json, os, pathlib, platform, subprocess, sys
 out = pathlib.Path(sys.argv[1])
 
@@ -147,6 +166,7 @@ manifest = {
   "schema_version": 2,
   "world": sys.argv[2],
   "candidate_profile": sys.argv[3],
+  "baseline_profile": sys.argv[10],
   "paired_blocks": int(sys.argv[4]),
   "mode": sys.argv[5],
   "performance_protocol": {
@@ -224,7 +244,8 @@ run_profile_task() {
   printf '%s\n' "${args[@]}" > "$trial_dir/properties.txt"
   local command=(./gradlew --no-daemon "$task" "-Pworld=$WORLD" "${args[@]}" \
     "-Dmetallum.validation.output=$trial_dir/artifacts/validation" \
-    "-Dmetallum.iris.experimental.planDump=$trial_dir/optimization-plan.json")
+    "-Dmetallum.iris.experimental.planDump=$trial_dir/optimization-plan.json" \
+    "-Dmetallum.validation.world=$WORLD")
   {
     printf '[command]'
     printf ' %q' "${command[@]}"
@@ -284,7 +305,7 @@ else
   run_logged static bash scripts/agent/verify.sh static || gate_status=fail
   run_logged gpu bash scripts/agent/verify.sh gpu || gate_status=fail
   run_logged synthetic ./gradlew --no-daemon renderContractSyntheticValidation || gate_status=fail
-  run_profile_task baseline renderContractMinecraftValidation "$OUT/correctness/baseline" 0 0 false || gate_status=fail
+  run_profile_task "$BASELINE_PROFILE" renderContractMinecraftValidation "$OUT/correctness/baseline" 0 0 false || gate_status=fail
   run_profile_task "$CANDIDATE_PROFILE" renderContractMinecraftValidation "$OUT/correctness/candidate" 0 0 false || gate_status=fail
   if [[ "$MODE" == "diagnostic" ]]; then
     run_profile_task "$CANDIDATE_PROFILE" renderContractMinecraftDiagnose "$OUT/correctness/diagnostic" 0 0 false || gate_status=fail
@@ -346,7 +367,7 @@ if [[ "$admission_passed" == "true" && ( "$MODE" == "full" || "$MODE" == "perfor
     if (( block % 2 == 1 )); then order=(baseline candidate); else order=(candidate baseline); fi
     printf '%s\n' "${order[@]}" > "$block_dir/order.txt"
     for label in "${order[@]}"; do
-      profile=baseline
+      profile="$BASELINE_PROFILE"
       [[ "$label" == "candidate" ]] && profile="$CANDIDATE_PROFILE"
       run_profile_task "$profile" minecraftNativeRenderEfficiencyValidation \
         "$block_dir/$label" "$WARMUP_SECONDS" "$SAMPLE_SECONDS" true || true

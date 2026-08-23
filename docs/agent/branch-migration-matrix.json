@@ -431,6 +431,19 @@
     "subsumed-by-canonical dispositions for merged P2 branches"
    ],
    "disposition": "subsumed-by-canonical (PR #35); documentation only"
+  },
+  {
+   "branch": "feature/p3b-token-paired-performance",
+   "role": "active-stage-branch",
+   "stages": [
+    "P3"
+   ],
+   "components": [
+    "binding-path paired experiment lanes (BASELINE_PROFILE + binding-tokens/name-based-bindings)",
+    "bindingPathRuntime activation evidence in the authoritative report",
+    "admission rule rejecting dormant token surfaces"
+   ],
+   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass"
   }
  ]
 }

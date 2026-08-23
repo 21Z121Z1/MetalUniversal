@@ -11,6 +11,8 @@ import com.metallum.client.metal.render.IrisMetalRenderFusionRuntime;
 import com.metallum.client.metal.render.IrisMetalComputeGroupingRuntime;
 import com.metallum.client.metal.render.IrisMetalDepthAllocationRuntime;
 import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;
+import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
+import com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.validation.storage.ValidationStorageBudget;
@@ -944,6 +946,33 @@ public final class MetalValidationClient implements ClientModInitializer {
             argumentReport.addProperty("bindingMutations", argumentStats.updates());
             argumentReport.addProperty("encodedSnapshots", argumentStats.encodedSnapshots());
             report.add("argumentBindingRuntime", argumentReport);
+            // P3 token-native binding path: activation evidence from the
+            // encoder funnel the tokens feed (state-shadow suppression +
+            // state-packet batching). Counters are zero unless
+            // -Dmetallum.hotpath.telemetry=true, which paired profiles set
+            // symmetrically on both arms.
+            MetalHotPathTelemetry.Snapshot hotPath = MetalHotPathTelemetry.snapshot();
+            JsonObject bindingPathReport = new JsonObject();
+            bindingPathReport.addProperty(
+                    "tokenizedBindings",
+                    !"false".equalsIgnoreCase(System.getProperty("metallum.opt.bindingTokens", "true"))
+            );
+            bindingPathReport.addProperty(
+                    "compiledBindingPlan",
+                    !"false".equalsIgnoreCase(System.getProperty("metallum.opt.compiledBindingPlan", "true"))
+            );
+            bindingPathReport.addProperty("renderForwardedCalls", hotPath.renderForwardedCalls());
+            bindingPathReport.addProperty("renderSuppressedCalls", hotPath.renderSuppressedCalls());
+            bindingPathReport.addProperty("renderOffsetOnlyCalls", hotPath.renderOffsetOnlyCalls());
+            bindingPathReport.addProperty("computeForwardedCalls", hotPath.computeForwardedCalls());
+            bindingPathReport.addProperty("computeSuppressedCalls", hotPath.computeSuppressedCalls());
+            MetalRenderStatePacketTelemetry.Snapshot packet = MetalRenderStatePacketTelemetry.snapshot();
+            bindingPathReport.addProperty("packetCalls", packet.packetCalls());
+            bindingPathReport.addProperty("packetEntries", packet.packetEntries());
+            bindingPathReport.addProperty("legacyReplays", packet.legacyReplays());
+            bindingPathReport.addProperty("singleEntryBypasses", packet.singleEntryBypasses());
+            bindingPathReport.addProperty("capacityFlushes", packet.capacityFlushes());
+            report.add("bindingPathRuntime", bindingPathReport);
     }
 
     private static JsonArray summarizeCpuPasses(final List<MetalGpuTimingRecorder.CpuPassSample> samples) {

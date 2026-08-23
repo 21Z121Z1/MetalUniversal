@@ -157,6 +157,7 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             "computeGroupingRuntime": report.get("computeGroupingRuntime"),
             "depthLivenessRuntime": report.get("depthLivenessRuntime"),
             "argumentBindingRuntime": report.get("argumentBindingRuntime"),
+            "bindingPathRuntime": report.get("bindingPathRuntime"),
             "irisPerformanceCounters": report.get("irisPerformanceCounters"),
         },
         "source_summary": {
@@ -183,6 +184,7 @@ def self_test() -> None:
             "cpuRenderEncodeFrameMilliseconds": {"samples": 300, "p50Milliseconds": 24.0},
             "nativeEncoderCountsPerMeasuredFrame": {"measuredFrames": 300, "renderPerFrame": 6.0, "blitPerFrame": 2.0},
             "renderFusionRuntime": {"admissions": 1},
+            "bindingPathRuntime": {"renderForwardedCalls": 30, "renderSuppressedCalls": 12, "packetCalls": 9},
         }
         first = trial / "artifacts" / "validation" / "native-fullscreen-baseline.json"
         second = trial / "artifacts" / "copy" / "native-fullscreen-baseline.json"

@@ -48,6 +48,7 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
     compute = obj(admission.get("computeGroupingRuntime"))
     depth = obj(admission.get("depthLivenessRuntime"))
     argument = obj(admission.get("argumentBindingRuntime"))
+    binding_path = obj(admission.get("bindingPathRuntime"))
 
     lanes = {
         "pass-fusion": {
@@ -69,6 +70,20 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
             "admitted": argument.get("enabled") is True and positive(argument.get("encodedSnapshots")),
             "evidence": argument,
             "requirement": "argumentBindingRuntime.enabled == true and encodedSnapshots > 0",
+        },
+        "binding-tokens": {
+            "admitted": (
+                binding_path.get("tokenizedBindings") is True
+                and positive(binding_path.get("renderForwardedCalls"))
+                and positive(binding_path.get("renderSuppressedCalls"))
+                and positive(binding_path.get("packetCalls"))
+                and positive(binding_path.get("packetEntries"))
+            ),
+            "evidence": binding_path,
+            "requirement": (
+                "bindingPathRuntime.tokenizedBindings == true and renderForwardedCalls > 0 "
+                "and renderSuppressedCalls > 0 and packetCalls > 0 and packetEntries >= packetCalls"
+            ),
         },
     }
 
