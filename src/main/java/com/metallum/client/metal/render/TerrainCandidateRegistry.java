@@ -76,6 +76,29 @@ public final class TerrainCandidateRegistry {
         }
     }
 
+    static boolean statePresentForContractTest() {
+        synchronized (TerrainCandidateRegistry.class) {
+            return state != null;
+        }
+    }
+
+    static boolean opaqueIdentityPresentForContractTest() {
+        synchronized (TerrainCandidateRegistry.class) {
+            return opaqueSharedIndex != null;
+        }
+    }
+
+    static void installOpaqueIdentityForContractTest(
+            final TerrainCandidateSnapshot.AllocationIdentity identity
+    ) {
+        if (!ENABLED) {
+            return;
+        }
+        synchronized (TerrainCandidateRegistry.class) {
+            opaqueSharedIndex = identity;
+        }
+    }
+
     /** Sodium's opaque pass uses this renderer-owned shared index buffer. */
     public static void onOpaqueSharedIndexBuffer(final GpuBuffer buffer) {
         if (!ENABLED) {
