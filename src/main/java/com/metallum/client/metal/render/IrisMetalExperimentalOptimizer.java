@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.validation.contract.PassType;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +28,8 @@ final class IrisMetalExperimentalOptimizer {
     record PassDescriptor(
             String name,
             Kind kind,
+            String stage,
+            int ordinal,
             List<IrisMetalHazardGraph.ResourceUse> uses,
             boolean explicitBarrierAfter,
             List<IrisMetalOptimizationPlan.AttachmentPolicy> attachments,
@@ -34,12 +37,46 @@ final class IrisMetalExperimentalOptimizer {
     ) {
         enum Kind { RENDER, COMPUTE, COPY, PRESENT }
 
+        PassDescriptor(
+                final String name,
+                final Kind kind,
+                final List<IrisMetalHazardGraph.ResourceUse> uses,
+                final boolean explicitBarrierAfter,
+                final List<IrisMetalOptimizationPlan.AttachmentPolicy> attachments,
+                final String attachmentCompatibilityKey
+        ) {
+            this(name, kind, "unknown", 0, uses, explicitBarrierAfter, attachments, attachmentCompatibilityKey);
+        }
+
         PassDescriptor {
             Objects.requireNonNull(name, "name");
             Objects.requireNonNull(kind, "kind");
+            stage = stage == null || stage.isBlank() ? "unknown" : stage;
+            if (ordinal < 0) throw new IllegalArgumentException("Pass ordinal must be non-negative");
             uses = List.copyOf(uses);
             attachments = List.copyOf(attachments);
             attachmentCompatibilityKey = attachmentCompatibilityKey == null ? "" : attachmentCompatibilityKey;
+        }
+
+        PassType planType() {
+            return switch (kind) {
+                case RENDER -> PassType.RENDER;
+                case COMPUTE -> PassType.COMPUTE;
+                case COPY -> PassType.COPY;
+                case PRESENT -> PassType.PRESENT;
+            };
+        }
+
+        IrisMetalOptimizationPlan.PlanPass receipt() {
+            return IrisMetalOptimizationPlan.passReceipt(
+                    stage,
+                    planType(),
+                    ordinal,
+                    name,
+                    uses,
+                    attachments,
+                    attachmentCompatibilityKey
+            );
         }
     }
 
@@ -70,6 +107,7 @@ final class IrisMetalExperimentalOptimizer {
     }
 
     static IrisMetalOptimizationPlan build(
+            final int chainGeneration,
             final List<PassDescriptor> passes,
             final List<ProgramDescriptor> programs,
             final List<DrawDescriptor> draws,
@@ -88,7 +126,7 @@ final class IrisMetalExperimentalOptimizer {
         }
 
         IrisMetalHazardGraph graph = hazards.build();
-        IrisMetalOptimizationPlan.Builder plan = IrisMetalOptimizationPlan.builder(graph);
+        IrisMetalOptimizationPlan.Builder plan = IrisMetalOptimizationPlan.builder(chainGeneration, graph);
         for (String resource : persistentResources) {
             plan.markPersistent(resource);
         }
@@ -105,6 +143,7 @@ final class IrisMetalExperimentalOptimizer {
 
         for (int index = 0; index < passes.size(); index++) {
             PassDescriptor pass = passes.get(index);
+            plan.passReceipt(pass.receipt());
             if (!pass.attachments().isEmpty()) {
                 plan.attachmentPolicy(index, pass.attachments());
             }
@@ -122,6 +161,16 @@ final class IrisMetalExperimentalOptimizer {
         ACTIVE.set(result);
         maybeDump(result);
         return result;
+    }
+
+    static IrisMetalOptimizationPlan build(
+            final List<PassDescriptor> passes,
+            final List<ProgramDescriptor> programs,
+            final List<DrawDescriptor> draws,
+            final Set<String> persistentResources,
+            final Set<String> knownResources
+    ) {
+        return build(0, passes, programs, draws, persistentResources, knownResources);
     }
 
     static IrisMetalOptimizationPlan active() {
@@ -237,6 +286,13 @@ final class IrisMetalExperimentalOptimizer {
         appendFlag(out, "finalColorFusion", IrisMetalOptimizationPlan.ENABLE_FINAL_COLOR_FUSION, true);
         appendFlag(out, "argumentTables", IrisMetalOptimizationPlan.ENABLE_ARGUMENT_TABLES, true);
         appendFlag(out, "icb", IrisMetalOptimizationPlan.ENABLE_ICB, true);
+        out.append("  \"chainGeneration\": ").append(plan.chainGeneration()).append(",\n");
+        out.append("  \"receiptStatus\": \"DIAGNOSTIC_ONLY\",\n");
+        out.append("  \"diagnosticOnly\": true,\n");
+        out.append("  \"bindingStatus\": \"")
+                .append(IrisMetalOptimizationPlan.BindingStatus.UNBOUND_DIAGNOSTIC_ONLY.name())
+                .append("\",\n");
+        out.append("  \"physicalIdentityBinding\": \"UNBOUND\",\n");
         out.append("  \"nodes\": ").append(plan.hazards().nodes().size()).append(",\n");
         out.append("  \"edges\": ").append(plan.hazards().edges().size()).append(",\n");
         out.append("  \"renderMergeGroups\": ").append(plan.renderMergeGroups().size()).append(",\n");
@@ -245,9 +301,60 @@ final class IrisMetalExperimentalOptimizer {
         out.append("  \"depthtex1Required\": ").append(plan.resourceLiveness().depthtex1Required()).append(",\n");
         out.append("  \"depthtex2Required\": ").append(plan.resourceLiveness().depthtex2Required()).append(",\n");
         out.append("  \"argumentLayouts\": ").append(plan.argumentLayouts().size()).append(",\n");
-        out.append("  \"indirectBatches\": ").append(plan.indirectBatches().size()).append("\n");
+        out.append("  \"indirectBatches\": ").append(plan.indirectBatches().size()).append(",\n");
+        out.append("  \"passes\": [\n");
+        for (int index = 0; index < plan.passReceipt().size(); index++) {
+            appendPlanPass(out, plan.passReceipt().get(index), index + 1 < plan.passReceipt().size());
+        }
+        out.append("  ]\n");
         out.append("}\n");
         return out.toString();
+    }
+
+    private static void appendPlanPass(
+            final StringBuilder out,
+            final IrisMetalOptimizationPlan.PlanPass pass,
+            final boolean comma
+    ) {
+        out.append("    {\n");
+        out.append("      \"planPassKey\": ").append(jsonString(pass.planPassKey())).append(",\n");
+        out.append("      \"semanticPassId\": ").append(jsonString(pass.semanticPassId())).append(",\n");
+        out.append("      \"passType\": ").append(jsonString(pass.type().name())).append(",\n");
+        out.append("      \"stage\": ").append(jsonString(pass.stage())).append(",\n");
+        out.append("      \"ordinal\": ").append(pass.ordinal()).append(",\n");
+        out.append("      \"logicalUses\": [");
+        for (int index = 0; index < pass.logicalUses().size(); index++) {
+            IrisMetalHazardGraph.ResourceUse use = pass.logicalUses().get(index);
+            if (index > 0) out.append(",");
+            out.append("{\"resource\":")
+                    .append(jsonString(use.resource()))
+                    .append(",\"access\":")
+                    .append(jsonString(use.access().name()))
+                    .append("}");
+        }
+        out.append("],\n");
+        out.append("      \"attachmentCandidates\": [");
+        for (int index = 0; index < pass.attachmentCandidates().size(); index++) {
+            IrisMetalOptimizationPlan.AttachmentPolicy policy = pass.attachmentCandidates().get(index);
+            if (index > 0) out.append(",");
+            out.append("{\"resource\":")
+                    .append(jsonString(policy.resource()))
+                    .append(",\"load\":")
+                    .append(jsonString(policy.load().name()))
+                    .append(",\"store\":")
+                    .append(jsonString(policy.store().name()))
+                    .append("}");
+        }
+        out.append("],\n");
+        out.append("      \"attachmentCompatibilityKey\": ")
+                .append(jsonString(pass.attachmentCompatibilityKey()))
+                .append(",\n");
+        out.append("      \"bindingStatus\": ")
+                .append(jsonString(pass.bindingStatus().name()))
+                .append("\n");
+        out.append("    }");
+        if (comma) out.append(",");
+        out.append("\n");
     }
 
     private static void appendFlag(
@@ -263,9 +370,24 @@ final class IrisMetalExperimentalOptimizer {
 
     private static String jsonArray(final Set<String> values) {
         List<String> escaped = new ArrayList<>();
-        for (String value : values) {
-            escaped.add("\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"");
-        }
+        values.stream().sorted().forEach(value -> escaped.add(jsonString(value)));
         return "[" + String.join(",", escaped) + "]";
+    }
+
+    private static String jsonString(final String value) {
+        StringBuilder escaped = new StringBuilder(value.length() + 2);
+        escaped.append('"');
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            switch (character) {
+                case '\\' -> escaped.append("\\\\");
+                case '"' -> escaped.append("\\\"");
+                case '\n' -> escaped.append("\\n");
+                case '\r' -> escaped.append("\\r");
+                case '\t' -> escaped.append("\\t");
+                default -> escaped.append(character);
+            }
+        }
+        return escaped.append('"').toString();
     }
 }
