@@ -17,12 +17,18 @@ public final class TerrainRuntimeSignals {
     ) {
         long cpuNanos = controller.latestCpuFrameNanos();
         long gpuNanos = MetalGpuTimingRecorder.latestGpuNanos();
+        long presentIntervalNanos = MetalNativeBridge.metallum_presentation_latest_present_interval_nanos();
+        long drawableWaitNanos = MetalNativeBridge.metallum_presentation_latest_drawable_wait_nanos();
+        long framesInFlight = MetalNativeBridge.metallum_presentation_frames_in_flight();
         long frameNanos = cpuNanos > 0L ? cpuNanos : TerrainSchedulingController.TARGET_FRAME_NANOS;
         PresentationPacingSnapshot pacing = controller.pacingSnapshot(
                 controller.nextFrameIndex(),
                 refreshRateHz(),
                 cpuNanos,
-                gpuNanos
+                gpuNanos,
+                presentIntervalNanos,
+                drawableWaitNanos,
+                framesInFlight
         );
         return new TerrainSchedulingController.FrameInputs(
                 frameNanos,

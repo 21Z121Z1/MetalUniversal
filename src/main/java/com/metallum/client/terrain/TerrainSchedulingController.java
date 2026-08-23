@@ -147,6 +147,26 @@ public final class TerrainSchedulingController {
             final long cpuFrameTimeNanos,
             final long gpuFrameTimeNanos
     ) {
+        return pacingSnapshot(
+                sampleFrame,
+                refreshRateHz,
+                cpuFrameTimeNanos,
+                gpuFrameTimeNanos,
+                PresentationPacingSnapshot.UNAVAILABLE_VALUE,
+                PresentationPacingSnapshot.UNAVAILABLE_VALUE,
+                PresentationPacingSnapshot.UNAVAILABLE_VALUE
+        );
+    }
+
+    synchronized PresentationPacingSnapshot pacingSnapshot(
+            final long sampleFrame,
+            final int refreshRateHz,
+            final long cpuFrameTimeNanos,
+            final long gpuFrameTimeNanos,
+            final long measuredPresentIntervalNanos,
+            final long drawableWaitNanos,
+            final long framesInFlightCount
+    ) {
         int normalizedRefreshRate = refreshRateHz > 0 ? Math.min(refreshRateHz, 1000) : -1;
         if (pacingSnapshotFrame == Long.MIN_VALUE
                 || normalizedRefreshRate != pacingSnapshot.refreshRateHz()
@@ -155,7 +175,10 @@ public final class TerrainSchedulingController {
                     sampleFrame,
                     normalizedRefreshRate,
                     cpuFrameTimeNanos,
-                    gpuFrameTimeNanos
+                    gpuFrameTimeNanos,
+                    measuredPresentIntervalNanos,
+                    drawableWaitNanos,
+                    framesInFlightCount
             );
             pacingSnapshotFrame = sampleFrame;
         }

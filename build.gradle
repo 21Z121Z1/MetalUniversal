@@ -290,6 +290,7 @@ def metal4PipelineSmokeBinary = file("${buildDir}/metal-tests/Metal4PipelineSmok
 def metal4PipelinePathBinary = file("${buildDir}/metal-tests/Metal4PipelinePathTest")
 def metalHudRuntimeTestBinary = file("${buildDir}/metal-tests/MetalHudRuntimeTest")
 def metalFrameGenerationLifecycleTestBinary = file("${buildDir}/metal-tests/MetalFrameGenerationLifecycleTest")
+def nativePresentationTelemetryStateTestBinary = file("${buildDir}/metal-tests/NativePresentationTelemetryStateTest")
 def metalFrameGenerationPresentationValidationBinary = file("${buildDir}/metal-tests/MetalFrameGenerationPresentationValidation")
 def metalFxOffscreenValidationBinary = file("${buildDir}/metal-tests/MetalFXOffscreenValidation")
 def metalFxOffscreenValidationOutput = file("${buildDir}/metal-validation/offscreen-current")
@@ -471,6 +472,44 @@ tasks.register("metalFrameGenerationLifecycleTest", Exec) {
 	}
 	dependsOn "compileMetalFrameGenerationLifecycleTest"
 	commandLine metalFrameGenerationLifecycleTestBinary.absolutePath
+}
+
+tasks.register("compileNativePresentationTelemetryStateTest", Exec) {
+	group = "verification"
+	description = "Compiles the ordinary CAMetalLayer presentation telemetry state fixture."
+	onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX() }
+	workingDir project.projectDir
+	inputs.files(
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/NativePresentationTelemetryStateTest.swift"
+	)
+	outputs.file(nativePresentationTelemetryStateTestBinary)
+	doFirst { nativePresentationTelemetryStateTestBinary.parentFile.mkdirs() }
+	commandLine "swiftc",
+		"-O",
+		"-whole-module-optimization",
+		"-module-name", "metallum_native",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "AppKit",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-framework", "QuartzCore",
+		"-o", nativePresentationTelemetryStateTestBinary.absolutePath,
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/NativePresentationTelemetryStateTest.swift"
+}
+
+tasks.register("nativePresentationTelemetryStateTest", Exec) {
+	group = "verification"
+	description = "Checks ordinary Metal 3/Metal 4 presentation telemetry lifecycle accounting."
+	onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX() }
+	dependsOn "compileNativePresentationTelemetryStateTest"
+	commandLine nativePresentationTelemetryStateTestBinary.absolutePath
 }
 
 tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
