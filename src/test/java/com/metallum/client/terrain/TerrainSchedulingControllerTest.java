@@ -112,7 +112,7 @@ final class TerrainSchedulingControllerTest {
     }
 
     @Test
-    void pacingSnapshotIsCarriedAsEvidenceWithoutChangingBudgetInputs() {
+    void pacingSnapshotDrivesRefreshTargetBudgets() {
         TerrainSchedulingController controller = new TerrainSchedulingController(true, 0);
         PresentationPacingSnapshot pacing = PresentationPacingSnapshot.capture(
                 1L, 120, 20_000_000L, 4_000_000L

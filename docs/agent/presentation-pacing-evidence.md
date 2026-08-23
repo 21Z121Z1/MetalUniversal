@@ -19,13 +19,15 @@ The current Java boundary has these sources:
 - `gpuFrameTimeNanos` is the latest completed Metal command-buffer service
   time from `MetalGpuTimingRecorder`.
 
-The native presenter does not currently export a presented timestamp, drawable
-wait duration, or dynamic in-flight count through the Java bridge.  Therefore
-`measuredPresentIntervalNanos`, `drawableWaitNanos`, and `framesInFlight` are
-serialized as JSON `null` with `available=false` and a precise provenance and
-fallback reason.  A missing display refresh source uses the legacy
-`16,666,667 ns` value only as `conservative-60hz-fallback`; it is never marked
-as measured display timing.
+Ordinary `CAMetalLayer` presentation telemetry is exported through the Java
+bridge when native samples are available: `measuredPresentIntervalNanos`,
+`drawableWaitNanos`, and `framesInFlight` retain explicit provenance.  Before
+a sample exists, or on an unsupported path, those fields remain JSON `null`
+with `available=false` and a precise fallback reason.  This evidence covers
+the ordinary CAMetalLayer render/present timeline and intentionally excludes
+the separate MetalFX generated-frame timeline.  A missing display refresh
+source uses the legacy `16,666,667 ns` value only as
+`conservative-60hz-fallback`; it is never marked as measured display timing.
 
 When `metallum.opt.terrainAdaptiveScheduling=true` and warmup has completed,
 `TerrainSchedulingController` uses `targetPresentInterval` as the single
