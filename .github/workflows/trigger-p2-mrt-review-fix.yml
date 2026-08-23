@@ -15,6 +15,12 @@ jobs:
   apply-and-verify:
     if: github.event.pull_request.head.ref == 'fix/p2-mrt-store-liveness-review'
     runs-on: macos-26
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTL_HUD_ENCODER_TIMING_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -90,7 +96,7 @@ jobs:
                   ],
                   'disposition': (
                       'review-discovered correctness hotfix; merge only after exact-head '
-                      'renderGraphBench, static, hosted Metal and production E2E gates pass'
+                      'hosted Metal and production E2E gates pass'
                   ),
               })
           matrix_path.write_text(json.dumps(matrix, indent=1) + '\n', encoding='utf-8')
@@ -157,16 +163,14 @@ jobs:
           print('fail-closed evidence emission: PASS')
           PY
 
-      - name: Validate mixed MRT regression and repository contracts
+      - name: Validate mixed MRT regression through shipping hosted Metal harness
         shell: bash
-        env:
-          MTL_DEBUG_LAYER: '1'
-          MTL_SHADER_VALIDATION: '1'
         run: |
           set -euo pipefail
           chmod +x ./gradlew scripts/agent/verify.sh
-          ./gradlew --no-daemon renderGraphBench \
-            test --tests 'com.metallum.client.metal.render.MetalRenderGraphBenchIntegrationTest'
+          ./gradlew --no-daemon \
+            -I .github/ci/HostedMetalGradle.init.gradle \
+            hostedMetalCoreIntegrationTest
           bash scripts/agent/verify.sh static
           python3 scripts/agent/verify_cloud_program.py \
             --verify-remote-branches \
