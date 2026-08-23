@@ -34,6 +34,7 @@ public final class TerrainSchedulingTelemetry implements AutoCloseable {
             "turn_detected",
             "target_present_interval_nanos",
             "target_present_interval_measured",
+            "target_present_interval_derived",
             "target_present_interval_provenance",
             "target_present_interval_fallback_reason",
             "measured_present_interval_nanos",

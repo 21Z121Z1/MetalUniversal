@@ -91,7 +91,7 @@ public record PresentationPacingSnapshot(
         boolean refreshAvailable = refreshRateHz > 0;
         int normalizedRefreshRate = refreshAvailable ? Math.min(refreshRateHz, 1000) : UNAVAILABLE_REFRESH_RATE_HZ;
         Value target = refreshAvailable
-                ? Value.measuredNanos(
+                ? Value.derivedNanos(
                         Math.max(1L, Math.round(1_000_000_000.0 / normalizedRefreshRate)),
                         REFRESH_RATE_PROVENANCE
                 )
@@ -132,9 +132,21 @@ public record PresentationPacingSnapshot(
             String unit,
             boolean available,
             boolean measured,
+            boolean derived,
             String provenance,
             String fallbackReason
     ) {
+        public Value(
+                final long value,
+                final String unit,
+                final boolean available,
+                final boolean measured,
+                final String provenance,
+                final String fallbackReason
+        ) {
+            this(value, unit, available, measured, available && !measured, provenance, fallbackReason);
+        }
+
         public Value {
             unit = requireText(unit, "unit");
             provenance = requireText(provenance, "provenance");
@@ -144,9 +156,14 @@ public record PresentationPacingSnapshot(
             if (!available) {
                 value = UNAVAILABLE_VALUE;
                 measured = false;
+                derived = false;
                 if (fallbackReason == null || fallbackReason.isBlank()) {
                     throw new IllegalArgumentException("unavailable pacing values require a fallback reason");
                 }
+            } else if (measured && derived) {
+                throw new IllegalArgumentException("a pacing value cannot be both measured and derived");
+            } else if (!measured && !derived) {
+                throw new IllegalArgumentException("available pacing values must be measured or derived");
             } else if (measured && (fallbackReason != null && !fallbackReason.isBlank())) {
                 throw new IllegalArgumentException("measured pacing values cannot have a fallback reason");
             } else if (fallbackReason != null && fallbackReason.isBlank()) {
@@ -155,7 +172,11 @@ public record PresentationPacingSnapshot(
         }
 
         public static Value measuredNanos(final long value, final String provenance) {
-            return new Value(value, NANOS_UNIT, true, true, provenance, null);
+            return new Value(value, NANOS_UNIT, true, true, false, provenance, null);
+        }
+
+        public static Value derivedNanos(final long value, final String provenance) {
+            return new Value(value, NANOS_UNIT, true, false, true, provenance, null);
         }
 
         public static Value fallbackNanos(
@@ -163,24 +184,24 @@ public record PresentationPacingSnapshot(
                 final String provenance,
                 final String reason
         ) {
-            return new Value(value, NANOS_UNIT, true, false, provenance, reason);
+            return new Value(value, NANOS_UNIT, true, false, true, provenance, reason);
         }
 
         public static Value unavailableNanos(final String provenance, final String reason) {
-            return new Value(UNAVAILABLE_VALUE, NANOS_UNIT, false, false, provenance, reason);
+            return new Value(UNAVAILABLE_VALUE, NANOS_UNIT, false, false, false, provenance, reason);
         }
 
         public static Value measuredCount(final long value, final String provenance) {
-            return new Value(value, COUNT_UNIT, true, true, provenance, null);
+            return new Value(value, COUNT_UNIT, true, true, false, provenance, null);
         }
 
         public static Value unavailableCount(final String provenance, final String reason) {
-            return new Value(UNAVAILABLE_VALUE, COUNT_UNIT, false, false, provenance, reason);
+            return new Value(UNAVAILABLE_VALUE, COUNT_UNIT, false, false, false, provenance, reason);
         }
     }
 
     private static Value measuredNanosOrUnavailable(final long value, final String provenance) {
-        return value > 0L
+        return value >= 0L
                 ? Value.measuredNanos(value, provenance)
                 : Value.unavailableNanos(provenance, unavailableReason(provenance));
     }

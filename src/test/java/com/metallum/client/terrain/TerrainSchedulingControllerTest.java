@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class TerrainSchedulingControllerTest {
@@ -136,6 +137,22 @@ final class TerrainSchedulingControllerTest {
     }
 
     @Test
+    void pacingEvidenceSnapshotIsCachedBetweenBoundedSamples() {
+        TerrainSchedulingController controller = new TerrainSchedulingController(true, 0);
+        PresentationPacingSnapshot first = controller.pacingSnapshot(1L, 60, 1L, 2L);
+        PresentationPacingSnapshot second = controller.pacingSnapshot(2L, 60, 3L, 4L);
+        assertSame(first, second);
+
+        PresentationPacingSnapshot refreshed = controller.pacingSnapshot(
+                1L + TerrainSchedulingController.PACING_SNAPSHOT_CADENCE_FRAMES,
+                60,
+                5L,
+                6L
+        );
+        assertNotEquals(first, refreshed);
+    }
+
+    @Test
     void disabledControllerIsANoOp() {
         TerrainSchedulingController controller = new TerrainSchedulingController(false, 0);
         runFrame(controller, 1L, 0.0, 0.0, 1.0, input(10_000_000L, 128, 30_000_000L, 3, 1.0));
@@ -157,8 +174,8 @@ final class TerrainSchedulingControllerTest {
         var lines = Files.readAllLines(output);
         assertEquals(TerrainSchedulingTelemetry.CSV_HEADER, lines.get(0));
         assertEquals(2, lines.size());
-        assertEquals(33, TerrainSchedulingTelemetry.CSV_HEADER.split(",").length);
-        assertTrue(lines.get(1).contains(",16666667,false,conservative-60hz-fallback,"));
+        assertEquals(34, TerrainSchedulingTelemetry.CSV_HEADER.split(",").length);
+        assertTrue(lines.get(1).contains(",16666667,false,true,conservative-60hz-fallback,"));
     }
 
     @Test
