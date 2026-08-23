@@ -30,6 +30,13 @@ public class MetalGpuBuffer extends GpuBuffer {
     private final boolean dynamic;
     private final long resourceOptions;
     private final long allocationSize;
+    /**
+     * The identity is present only while this backing is live.  Keeping the
+     * value after close would let a stale Sodium arena segment look valid in a
+     * later contract/resource lookup even though its native handle has already
+     * been retired.
+     */
+    @Nullable
     private MetalAllocationIdentity allocationIdentity;
     @Nullable
     private MemorySegment nativeHandle;
@@ -132,11 +139,11 @@ public class MetalGpuBuffer extends GpuBuffer {
     }
 
     MetalAllocationIdentity allocationIdentity() {
-        return allocationIdentity;
+        return liveAllocationIdentity();
     }
 
     long allocationId() {
-        return allocationIdentity.allocationId();
+        return liveAllocationIdentity().allocationId();
     }
 
     String allocationDebugId() {
@@ -184,10 +191,11 @@ public class MetalGpuBuffer extends GpuBuffer {
     }
 
     void swapBacking(final MemorySegment handle, final ByteBuffer storage) {
+        MetalAllocationIdentity previous = liveAllocationIdentity();
         if (RenderContractRuntime.observing()) {
             RenderContractRuntime.invalidateResourceAllocations(
-                    this.allocationId(),
-                    this.allocationDebugId()
+                    previous.allocationId(),
+                    "metal-buffer-" + previous.allocationId()
             );
         }
         this.allocationIdentity = MetalAllocationIdentity.allocate(this.logicalLabel);
@@ -198,7 +206,9 @@ public class MetalGpuBuffer extends GpuBuffer {
 
     @Override
     public boolean isClosed() {
-        return this.closed || this.nativeHandle == null;
+        return this.closed
+                || this.nativeHandle == null
+                || this.nativeHandle.address() == 0L;
     }
 
     @Override
@@ -206,13 +216,15 @@ public class MetalGpuBuffer extends GpuBuffer {
         if (this.closed) {
             return;
         }
+        MetalAllocationIdentity retired = liveAllocationIdentity();
         this.closed = true;
+        this.allocationIdentity = null;
         this.storage = null;
         if (this.nativeHandle != null) {
             if (RenderContractRuntime.observing()) {
                 RenderContractRuntime.invalidateResourceAllocations(
-                        this.allocationId(),
-                        this.allocationDebugId()
+                        retired.allocationId(),
+                        "metal-buffer-" + retired.allocationId()
                 );
             }
             MemorySegment handle = this.nativeHandle;
@@ -260,14 +272,15 @@ public class MetalGpuBuffer extends GpuBuffer {
     }
 
     private void observeAllocationIdentity() {
-        if (!RenderContractRuntime.observing() || this.nativeHandle == null) {
+        if (!RenderContractRuntime.observing() || this.nativeHandle == null || this.allocationIdentity == null) {
             return;
         }
+        MetalAllocationIdentity live = this.allocationIdentity;
         RenderContractRuntime.identifyAllocation(
                 this.logicalLabel,
-                this.allocationId(),
-                this.allocationIdentity.generation(),
-                this.allocationDebugId(),
+                live.allocationId(),
+                live.generation(),
+                "metal-buffer-" + live.allocationId(),
                 "BUFFER",
                 Math.toIntExact(Math.min(this.allocationSize, Integer.MAX_VALUE)),
                 1,
@@ -276,6 +289,19 @@ public class MetalGpuBuffer extends GpuBuffer {
                 1,
                 this.usage()
         );
+    }
+
+    private MetalAllocationIdentity liveAllocationIdentity() {
+        MetalAllocationIdentity identity = this.allocationIdentity;
+        if (this.closed
+                || this.nativeHandle == null
+                || this.nativeHandle.address() == 0L
+                || identity == null) {
+            throw new IllegalStateException(
+                    "Metal buffer allocation identity is retired or unavailable: " + this.logicalLabel
+            );
+        }
+        return identity;
     }
 
     private static String normalizeLabel(final String label) {
