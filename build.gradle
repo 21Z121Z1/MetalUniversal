@@ -27,6 +27,7 @@ dependencies {
 	// -Dmetallum.iris.semantic=true until its runtime acceptance gates pass.
 	implementation "maven.modrinth:iris:${project.iris_version}"
 	testImplementation "org.junit.jupiter:junit-jupiter:5.12.2"
+	testImplementation "com.networknt:json-schema-validator:1.5.6"
 	testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.12.2"
 }
 

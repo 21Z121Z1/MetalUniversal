@@ -44,6 +44,7 @@ public final class PresentationPacingEvidenceAdapter {
         addNullableNumber(root, name, value.value(), value.available());
         root.addProperty(name + "Available", value.available());
         root.addProperty(name + "Measured", value.measured());
+        root.addProperty(name + "Derived", value.derived());
         root.addProperty(name + "Unit", value.unit());
         root.addProperty(name + "Provenance", value.provenance());
         addNullableString(root, name + "FallbackReason", value.fallbackReason());

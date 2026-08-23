@@ -1,8 +1,19 @@
 package com.metallum.client.terrain;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.networknt.schema.JsonSchema;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion;
+import com.networknt.schema.ValidationMessage;
 import org.junit.jupiter.api.Test;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -22,6 +33,7 @@ final class PresentationPacingEvidenceAdapterTest {
         assertTrue(json.get("refreshRateHz").isJsonNull());
         assertEquals(16_666_667L, json.get("targetPresentIntervalNanos").getAsLong());
         assertFalse(json.get("targetPresentIntervalNanosMeasured").getAsBoolean());
+        assertTrue(json.get("targetPresentIntervalNanosDerived").getAsBoolean());
         assertEquals("conservative-60hz-fallback",
                 json.get("targetPresentIntervalNanosProvenance").getAsString());
         assertEquals("display-refresh-source-unavailable",
@@ -45,8 +57,31 @@ final class PresentationPacingEvidenceAdapterTest {
         JsonObject json = PresentationPacingEvidenceAdapter.toJson(snapshot);
         assertEquals(11_111_111L, json.get("measuredPresentIntervalNanos").getAsLong());
         assertTrue(json.get("measuredPresentIntervalNanosMeasured").getAsBoolean());
+        assertFalse(json.get("measuredPresentIntervalNanosDerived").getAsBoolean());
         assertTrue(json.get("drawableWaitNanosMeasured").getAsBoolean());
         assertEquals(3L, json.get("framesInFlight").getAsLong());
         assertEquals("count", json.get("framesInFlightUnit").getAsString());
+    }
+
+    @Test
+    void adapterOutputValidatesAgainstDraft202012Schema() throws Exception {
+        Path schemaPath = Path.of("docs/agent/presentation-pacing-evidence.schema.json");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode schemaNode = mapper.readTree(Files.readString(schemaPath));
+        JsonSchema schema = JsonSchemaFactory
+                .getInstance(SpecVersion.VersionFlag.V202012)
+                .getSchema(schemaNode);
+        JsonNode instance = mapper.readTree(PresentationPacingEvidenceAdapter.toJsonString(
+                PresentationPacingSnapshot.capture(9L, -1, 4_000_000L, -1L)
+        ));
+
+        Set<ValidationMessage> errors = schema.validate(instance);
+        assertTrue(errors.isEmpty(), () -> "schema errors: " + errors);
+
+        ObjectNode invalid = (ObjectNode) instance.deepCopy();
+        invalid.put("targetPresentIntervalNanosAvailable", false);
+        invalid.put("targetPresentIntervalNanos", 16_666_667L);
+        assertFalse(schema.validate(invalid).isEmpty(),
+                "schema must reject an unavailable metric with a numeric value");
     }
 }

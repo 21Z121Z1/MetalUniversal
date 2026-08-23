@@ -11,36 +11,42 @@
     "targetPresentIntervalNanos",
     "targetPresentIntervalNanosAvailable",
     "targetPresentIntervalNanosMeasured",
+    "targetPresentIntervalNanosDerived",
     "targetPresentIntervalNanosUnit",
     "targetPresentIntervalNanosProvenance",
     "targetPresentIntervalNanosFallbackReason",
     "measuredPresentIntervalNanos",
     "measuredPresentIntervalNanosAvailable",
     "measuredPresentIntervalNanosMeasured",
+    "measuredPresentIntervalNanosDerived",
     "measuredPresentIntervalNanosUnit",
     "measuredPresentIntervalNanosProvenance",
     "measuredPresentIntervalNanosFallbackReason",
     "cpuFrameTimeNanos",
     "cpuFrameTimeNanosAvailable",
     "cpuFrameTimeNanosMeasured",
+    "cpuFrameTimeNanosDerived",
     "cpuFrameTimeNanosUnit",
     "cpuFrameTimeNanosProvenance",
     "cpuFrameTimeNanosFallbackReason",
     "gpuFrameTimeNanos",
     "gpuFrameTimeNanosAvailable",
     "gpuFrameTimeNanosMeasured",
+    "gpuFrameTimeNanosDerived",
     "gpuFrameTimeNanosUnit",
     "gpuFrameTimeNanosProvenance",
     "gpuFrameTimeNanosFallbackReason",
     "drawableWaitNanos",
     "drawableWaitNanosAvailable",
     "drawableWaitNanosMeasured",
+    "drawableWaitNanosDerived",
     "drawableWaitNanosUnit",
     "drawableWaitNanosProvenance",
     "drawableWaitNanosFallbackReason",
     "framesInFlight",
     "framesInFlightAvailable",
     "framesInFlightMeasured",
+    "framesInFlightDerived",
     "framesInFlightUnit",
     "framesInFlightProvenance",
     "framesInFlightFallbackReason",
@@ -54,42 +60,164 @@
     "targetPresentIntervalNanos": {"$ref": "#/$defs/nanos"},
     "targetPresentIntervalNanosAvailable": {"$ref": "#/$defs/available"},
     "targetPresentIntervalNanosMeasured": {"$ref": "#/$defs/measured"},
+    "targetPresentIntervalNanosDerived": {"$ref": "#/$defs/derived"},
     "targetPresentIntervalNanosUnit": {"$ref": "#/$defs/nanosUnit"},
     "targetPresentIntervalNanosProvenance": {"$ref": "#/$defs/metricProvenance"},
     "targetPresentIntervalNanosFallbackReason": {"$ref": "#/$defs/metricFallback"},
     "measuredPresentIntervalNanos": {"$ref": "#/$defs/nanos"},
     "measuredPresentIntervalNanosAvailable": {"$ref": "#/$defs/available"},
     "measuredPresentIntervalNanosMeasured": {"$ref": "#/$defs/measured"},
+    "measuredPresentIntervalNanosDerived": {"$ref": "#/$defs/derived"},
     "measuredPresentIntervalNanosUnit": {"$ref": "#/$defs/nanosUnit"},
     "measuredPresentIntervalNanosProvenance": {"$ref": "#/$defs/metricProvenance"},
     "measuredPresentIntervalNanosFallbackReason": {"$ref": "#/$defs/metricFallback"},
     "cpuFrameTimeNanos": {"$ref": "#/$defs/nanos"},
     "cpuFrameTimeNanosAvailable": {"$ref": "#/$defs/available"},
     "cpuFrameTimeNanosMeasured": {"$ref": "#/$defs/measured"},
+    "cpuFrameTimeNanosDerived": {"$ref": "#/$defs/derived"},
     "cpuFrameTimeNanosUnit": {"$ref": "#/$defs/nanosUnit"},
     "cpuFrameTimeNanosProvenance": {"$ref": "#/$defs/metricProvenance"},
     "cpuFrameTimeNanosFallbackReason": {"$ref": "#/$defs/metricFallback"},
     "gpuFrameTimeNanos": {"$ref": "#/$defs/nanos"},
     "gpuFrameTimeNanosAvailable": {"$ref": "#/$defs/available"},
     "gpuFrameTimeNanosMeasured": {"$ref": "#/$defs/measured"},
+    "gpuFrameTimeNanosDerived": {"$ref": "#/$defs/derived"},
     "gpuFrameTimeNanosUnit": {"$ref": "#/$defs/nanosUnit"},
     "gpuFrameTimeNanosProvenance": {"$ref": "#/$defs/metricProvenance"},
     "gpuFrameTimeNanosFallbackReason": {"$ref": "#/$defs/metricFallback"},
     "drawableWaitNanos": {"$ref": "#/$defs/nanos"},
     "drawableWaitNanosAvailable": {"$ref": "#/$defs/available"},
     "drawableWaitNanosMeasured": {"$ref": "#/$defs/measured"},
+    "drawableWaitNanosDerived": {"$ref": "#/$defs/derived"},
     "drawableWaitNanosUnit": {"$ref": "#/$defs/nanosUnit"},
     "drawableWaitNanosProvenance": {"$ref": "#/$defs/metricProvenance"},
     "drawableWaitNanosFallbackReason": {"$ref": "#/$defs/metricFallback"},
     "framesInFlight": {"$ref": "#/$defs/count"},
     "framesInFlightAvailable": {"$ref": "#/$defs/available"},
     "framesInFlightMeasured": {"$ref": "#/$defs/measured"},
+    "framesInFlightDerived": {"$ref": "#/$defs/derived"},
     "framesInFlightUnit": {"$ref": "#/$defs/countUnit"},
     "framesInFlightProvenance": {"$ref": "#/$defs/metricProvenance"},
     "framesInFlightFallbackReason": {"$ref": "#/$defs/metricFallback"},
     "provenance": {"type": "string", "minLength": 1},
     "fallbackReason": {"type": ["string", "null"]}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"targetPresentIntervalNanosAvailable": {"const": false}}, "required": ["targetPresentIntervalNanosAvailable"]},
+      "then": {"properties": {"targetPresentIntervalNanos": {"type": "null"}, "targetPresentIntervalNanosMeasured": {"const": false}, "targetPresentIntervalNanosDerived": {"const": false}, "targetPresentIntervalNanosFallbackReason": {"type": "string", "minLength": 1}}}
+    },
+    {
+      "if": {"properties": {"targetPresentIntervalNanosMeasured": {"const": true}}, "required": ["targetPresentIntervalNanosMeasured"]},
+      "then": {"properties": {"targetPresentIntervalNanosAvailable": {"const": true}, "targetPresentIntervalNanos": {"type": "integer", "minimum": 0}, "targetPresentIntervalNanosDerived": {"const": false}, "targetPresentIntervalNanosFallbackReason": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"targetPresentIntervalNanosDerived": {"const": true}}, "required": ["targetPresentIntervalNanosDerived"]},
+      "then": {"properties": {"targetPresentIntervalNanosAvailable": {"const": true}, "targetPresentIntervalNanos": {"type": "integer", "minimum": 0}, "targetPresentIntervalNanosMeasured": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"targetPresentIntervalNanosAvailable": {"const": true}}, "required": ["targetPresentIntervalNanosAvailable"]},
+      "then": {"anyOf": [
+        {"properties": {"targetPresentIntervalNanosMeasured": {"const": true}}, "required": ["targetPresentIntervalNanosMeasured"]},
+        {"properties": {"targetPresentIntervalNanosDerived": {"const": true}}, "required": ["targetPresentIntervalNanosDerived"]}
+      ]}
+    },
+    {
+      "if": {"properties": {"measuredPresentIntervalNanosAvailable": {"const": false}}, "required": ["measuredPresentIntervalNanosAvailable"]},
+      "then": {"properties": {"measuredPresentIntervalNanos": {"type": "null"}, "measuredPresentIntervalNanosMeasured": {"const": false}, "measuredPresentIntervalNanosDerived": {"const": false}, "measuredPresentIntervalNanosFallbackReason": {"type": "string", "minLength": 1}}}
+    },
+    {
+      "if": {"properties": {"measuredPresentIntervalNanosMeasured": {"const": true}}, "required": ["measuredPresentIntervalNanosMeasured"]},
+      "then": {"properties": {"measuredPresentIntervalNanosAvailable": {"const": true}, "measuredPresentIntervalNanos": {"type": "integer", "minimum": 0}, "measuredPresentIntervalNanosDerived": {"const": false}, "measuredPresentIntervalNanosFallbackReason": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"measuredPresentIntervalNanosDerived": {"const": true}}, "required": ["measuredPresentIntervalNanosDerived"]},
+      "then": {"properties": {"measuredPresentIntervalNanosAvailable": {"const": true}, "measuredPresentIntervalNanos": {"type": "integer", "minimum": 0}, "measuredPresentIntervalNanosMeasured": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"measuredPresentIntervalNanosAvailable": {"const": true}}, "required": ["measuredPresentIntervalNanosAvailable"]},
+      "then": {"anyOf": [
+        {"properties": {"measuredPresentIntervalNanosMeasured": {"const": true}}, "required": ["measuredPresentIntervalNanosMeasured"]},
+        {"properties": {"measuredPresentIntervalNanosDerived": {"const": true}}, "required": ["measuredPresentIntervalNanosDerived"]}
+      ]}
+    },
+    {
+      "if": {"properties": {"cpuFrameTimeNanosAvailable": {"const": false}}, "required": ["cpuFrameTimeNanosAvailable"]},
+      "then": {"properties": {"cpuFrameTimeNanos": {"type": "null"}, "cpuFrameTimeNanosMeasured": {"const": false}, "cpuFrameTimeNanosDerived": {"const": false}, "cpuFrameTimeNanosFallbackReason": {"type": "string", "minLength": 1}}}
+    },
+    {
+      "if": {"properties": {"cpuFrameTimeNanosMeasured": {"const": true}}, "required": ["cpuFrameTimeNanosMeasured"]},
+      "then": {"properties": {"cpuFrameTimeNanosAvailable": {"const": true}, "cpuFrameTimeNanos": {"type": "integer", "minimum": 0}, "cpuFrameTimeNanosDerived": {"const": false}, "cpuFrameTimeNanosFallbackReason": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"cpuFrameTimeNanosDerived": {"const": true}}, "required": ["cpuFrameTimeNanosDerived"]},
+      "then": {"properties": {"cpuFrameTimeNanosAvailable": {"const": true}, "cpuFrameTimeNanos": {"type": "integer", "minimum": 0}, "cpuFrameTimeNanosMeasured": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"cpuFrameTimeNanosAvailable": {"const": true}}, "required": ["cpuFrameTimeNanosAvailable"]},
+      "then": {"anyOf": [
+        {"properties": {"cpuFrameTimeNanosMeasured": {"const": true}}, "required": ["cpuFrameTimeNanosMeasured"]},
+        {"properties": {"cpuFrameTimeNanosDerived": {"const": true}}, "required": ["cpuFrameTimeNanosDerived"]}
+      ]}
+    },
+    {
+      "if": {"properties": {"gpuFrameTimeNanosAvailable": {"const": false}}, "required": ["gpuFrameTimeNanosAvailable"]},
+      "then": {"properties": {"gpuFrameTimeNanos": {"type": "null"}, "gpuFrameTimeNanosMeasured": {"const": false}, "gpuFrameTimeNanosDerived": {"const": false}, "gpuFrameTimeNanosFallbackReason": {"type": "string", "minLength": 1}}}
+    },
+    {
+      "if": {"properties": {"gpuFrameTimeNanosMeasured": {"const": true}}, "required": ["gpuFrameTimeNanosMeasured"]},
+      "then": {"properties": {"gpuFrameTimeNanosAvailable": {"const": true}, "gpuFrameTimeNanos": {"type": "integer", "minimum": 0}, "gpuFrameTimeNanosDerived": {"const": false}, "gpuFrameTimeNanosFallbackReason": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"gpuFrameTimeNanosDerived": {"const": true}}, "required": ["gpuFrameTimeNanosDerived"]},
+      "then": {"properties": {"gpuFrameTimeNanosAvailable": {"const": true}, "gpuFrameTimeNanos": {"type": "integer", "minimum": 0}, "gpuFrameTimeNanosMeasured": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"gpuFrameTimeNanosAvailable": {"const": true}}, "required": ["gpuFrameTimeNanosAvailable"]},
+      "then": {"anyOf": [
+        {"properties": {"gpuFrameTimeNanosMeasured": {"const": true}}, "required": ["gpuFrameTimeNanosMeasured"]},
+        {"properties": {"gpuFrameTimeNanosDerived": {"const": true}}, "required": ["gpuFrameTimeNanosDerived"]}
+      ]}
+    },
+    {
+      "if": {"properties": {"drawableWaitNanosAvailable": {"const": false}}, "required": ["drawableWaitNanosAvailable"]},
+      "then": {"properties": {"drawableWaitNanos": {"type": "null"}, "drawableWaitNanosMeasured": {"const": false}, "drawableWaitNanosDerived": {"const": false}, "drawableWaitNanosFallbackReason": {"type": "string", "minLength": 1}}}
+    },
+    {
+      "if": {"properties": {"drawableWaitNanosMeasured": {"const": true}}, "required": ["drawableWaitNanosMeasured"]},
+      "then": {"properties": {"drawableWaitNanosAvailable": {"const": true}, "drawableWaitNanos": {"type": "integer", "minimum": 0}, "drawableWaitNanosDerived": {"const": false}, "drawableWaitNanosFallbackReason": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"drawableWaitNanosDerived": {"const": true}}, "required": ["drawableWaitNanosDerived"]},
+      "then": {"properties": {"drawableWaitNanosAvailable": {"const": true}, "drawableWaitNanos": {"type": "integer", "minimum": 0}, "drawableWaitNanosMeasured": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"drawableWaitNanosAvailable": {"const": true}}, "required": ["drawableWaitNanosAvailable"]},
+      "then": {"anyOf": [
+        {"properties": {"drawableWaitNanosMeasured": {"const": true}}, "required": ["drawableWaitNanosMeasured"]},
+        {"properties": {"drawableWaitNanosDerived": {"const": true}}, "required": ["drawableWaitNanosDerived"]}
+      ]}
+    },
+    {
+      "if": {"properties": {"framesInFlightAvailable": {"const": false}}, "required": ["framesInFlightAvailable"]},
+      "then": {"properties": {"framesInFlight": {"type": "null"}, "framesInFlightMeasured": {"const": false}, "framesInFlightDerived": {"const": false}, "framesInFlightFallbackReason": {"type": "string", "minLength": 1}}}
+    },
+    {
+      "if": {"properties": {"framesInFlightMeasured": {"const": true}}, "required": ["framesInFlightMeasured"]},
+      "then": {"properties": {"framesInFlightAvailable": {"const": true}, "framesInFlight": {"type": "integer", "minimum": 0}, "framesInFlightDerived": {"const": false}, "framesInFlightFallbackReason": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"framesInFlightDerived": {"const": true}}, "required": ["framesInFlightDerived"]},
+      "then": {"properties": {"framesInFlightAvailable": {"const": true}, "framesInFlight": {"type": "integer", "minimum": 0}, "framesInFlightMeasured": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"framesInFlightAvailable": {"const": true}}, "required": ["framesInFlightAvailable"]},
+      "then": {"anyOf": [
+        {"properties": {"framesInFlightMeasured": {"const": true}}, "required": ["framesInFlightMeasured"]},
+        {"properties": {"framesInFlightDerived": {"const": true}}, "required": ["framesInFlightDerived"]}
+      ]}
+    }
+  ],
   "$defs": {
     "nanos": {
       "type": ["integer", "null"],
@@ -101,10 +229,11 @@
     },
     "available": {"type": "boolean"},
     "measured": {"type": "boolean"},
+    "derived": {"type": "boolean"},
     "unit": {"type": "string", "enum": ["nanoseconds", "count"]},
     "nanosUnit": {"type": "string", "const": "nanoseconds"},
     "countUnit": {"type": "string", "const": "count"},
     "metricProvenance": {"type": "string", "minLength": 1},
-    "metricFallback": {"type": ["string", "null"]}
+    "metricFallback": {"type": ["string", "null"], "minLength": 1}
   }
 }

@@ -18,7 +18,7 @@ public final class TerrainRuntimeSignals {
         long cpuNanos = controller.latestCpuFrameNanos();
         long gpuNanos = MetalGpuTimingRecorder.latestGpuNanos();
         long frameNanos = cpuNanos > 0L ? cpuNanos : TerrainSchedulingController.TARGET_FRAME_NANOS;
-        PresentationPacingSnapshot pacing = PresentationPacingSnapshot.capture(
+        PresentationPacingSnapshot pacing = controller.pacingSnapshot(
                 controller.nextFrameIndex(),
                 refreshRateHz(),
                 cpuNanos,

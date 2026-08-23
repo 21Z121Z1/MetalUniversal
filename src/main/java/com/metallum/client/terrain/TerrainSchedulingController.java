@@ -16,6 +16,8 @@ public final class TerrainSchedulingController {
     public static final String CSV_PROPERTY = "metallum.opt.terrainSchedulingCsv";
     public static final String TELEMETRY_PROPERTY = "metallum.opt.terrainSchedulingTelemetry";
     public static final long TARGET_FRAME_NANOS = 16_666_667L;
+    /** Pacing evidence is sampled at this bounded cadence while observation is active. */
+    public static final int PACING_SNAPSHOT_CADENCE_FRAMES = 8;
 
     private static final int DEFAULT_WARMUP_FRAMES = 30;
     private static final int FORWARD_BOOST_FRAMES = 12;
@@ -58,6 +60,8 @@ public final class TerrainSchedulingController {
     private FrameInputs inputs = FrameInputs.neutral();
     private FrameDecision decision = FrameDecision.defaults();
     private FrameSnapshot lastSnapshot = FrameSnapshot.empty();
+    private PresentationPacingSnapshot pacingSnapshot = PresentationPacingSnapshot.neutral();
+    private long pacingSnapshotFrame = Long.MIN_VALUE;
     private int pressureLevel;
     private int pressureRiseSamples;
     private int pressureRecoverySamples;
@@ -130,6 +134,32 @@ public final class TerrainSchedulingController {
     /** Returns the index that the next observed frame will receive. */
     public synchronized long nextFrameIndex() {
         return frameIndex + 1L;
+    }
+
+    /**
+     * Returns a cached immutable pacing sample.  CPU/GPU timing remains
+     * available through the existing primitive frame inputs; the evidence
+     * object is deliberately refreshed only at a bounded telemetry cadence.
+     */
+    synchronized PresentationPacingSnapshot pacingSnapshot(
+            final long sampleFrame,
+            final int refreshRateHz,
+            final long cpuFrameTimeNanos,
+            final long gpuFrameTimeNanos
+    ) {
+        int normalizedRefreshRate = refreshRateHz > 0 ? Math.min(refreshRateHz, 1000) : -1;
+        if (pacingSnapshotFrame == Long.MIN_VALUE
+                || normalizedRefreshRate != pacingSnapshot.refreshRateHz()
+                || sampleFrame - pacingSnapshotFrame >= PACING_SNAPSHOT_CADENCE_FRAMES) {
+            pacingSnapshot = PresentationPacingSnapshot.capture(
+                    sampleFrame,
+                    normalizedRefreshRate,
+                    cpuFrameTimeNanos,
+                    gpuFrameTimeNanos
+            );
+            pacingSnapshotFrame = sampleFrame;
+        }
+        return pacingSnapshot;
     }
 
     public synchronized void beginFrame(
@@ -592,6 +622,7 @@ public final class TerrainSchedulingController {
                     Boolean.toString(turnDetected),
                     Long.toString(presentationPacing.targetPresentInterval().value()),
                     Boolean.toString(presentationPacing.targetPresentInterval().measured()),
+                    Boolean.toString(presentationPacing.targetPresentInterval().derived()),
                     csvValue(presentationPacing.targetPresentInterval().provenance()),
                     csvValue(presentationPacing.targetPresentInterval().fallbackReason()),
                     Long.toString(presentationPacing.measuredPresentInterval().value()),
