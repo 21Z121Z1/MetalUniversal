@@ -1721,6 +1721,43 @@ private func runShippingMetal4SpatialTest(device: MTLDevice, queue: MTLCommandQu
     try shippingMetal4SpatialTest(device: device, queue: queue)
 }
 
+/// Exercises the production V3 raw-action parser directly.  The helper is
+/// compiled in the same module as MetallumNative.swift and is then consumed by
+/// both the MTL4 and MTL3 V3 descriptor branches below.
+private func runSharedV3ActionMappingTest() throws {
+    let clearValues: [Float] = [0.125, 0.25, 0.5, 1.0, 0.75, 0.5, 0.25, 0.0]
+    try clearValues.withUnsafeBufferPointer { values in
+        guard let baseAddress = values.baseAddress else {
+            try fail("could not allocate V3 action test clear values")
+        }
+        let cleared = v3ColorAttachmentActions(
+            loadRaw: 2,
+            storeRaw: 2,
+            clearColors: baseAddress,
+            index: 1
+        )
+        try check(cleared.loadAction == .clear, "V3 clear action parser returned \(cleared.loadAction)")
+        try check(cleared.storeAction == .unknown, "V3 deferred store parser returned \(cleared.storeAction)")
+        guard let clearColor = cleared.clearColor else {
+            try fail("V3 clear action parser dropped the slot clear color")
+        }
+        try check(clearColor.red == 0.75 && clearColor.green == 0.5
+                    && clearColor.blue == 0.25 && clearColor.alpha == 0.0,
+                  "V3 clear color parser returned \(clearColor)")
+
+        let loaded = v3ColorAttachmentActions(
+            loadRaw: 99,
+            storeRaw: 99,
+            clearColors: baseAddress,
+            index: 0
+        )
+        try check(loaded.loadAction == .load, "unknown V3 load action did not fail closed to load")
+        try check(loaded.storeAction == .store, "unknown V3 store action did not fail closed to store")
+        try check(loaded.clearColor == nil, "non-clear V3 load action unexpectedly supplied a clear color")
+    }
+    print("Shared V3 action mapping: identical raw attachment semantics parsed before MTL3/MTL4 dispatch")
+}
+
 private func runPathTest() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
         try fail("MTLCreateSystemDefaultDevice returned nil")
@@ -1738,6 +1775,8 @@ private func runPathTest() throws {
     try check(reported == expected,
               "metallum_metal4_supported returned \(reported) but supportsFamily(.metal4) is \(expected)")
     print("Metal 4 path test: metallum_metal4_supported=\(reported) on \(device.name)")
+
+    try runSharedV3ActionMappingTest()
 
     guard reported else {
         print("Metal 4 path test skipped: this host has no Metal 4 support, nothing to compare against")

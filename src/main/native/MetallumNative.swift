@@ -9048,6 +9048,41 @@ private func v3StoreAction(_ raw: Int32) -> MTLStoreAction {
     }
 }
 
+/// Backend-neutral V3 color-slot semantics.  This is a value type, so parsing
+/// one raw ABI slot does not allocate a Java object or a Swift collection.
+/// Both Metal 3 and Metal 4 descriptor branches consume the same result; only
+/// the final descriptor/encoder type differs after this boundary.
+struct V3ColorAttachmentActions {
+    let loadAction: MTLLoadAction
+    let storeAction: MTLStoreAction
+    let clearColor: MTLClearColor?
+}
+
+func v3ColorAttachmentActions(
+    loadRaw: Int32,
+    storeRaw: Int32,
+    clearColors: UnsafePointer<Float>,
+    index: Int
+) -> V3ColorAttachmentActions {
+    let clearColor: MTLClearColor?
+    if loadRaw == 2 {
+        let base = index * 4
+        clearColor = makeClearColor(
+            red: clearColors[base],
+            green: clearColors[base + 1],
+            blue: clearColors[base + 2],
+            alpha: clearColors[base + 3]
+        )
+    } else {
+        clearColor = nil
+    }
+    return V3ColorAttachmentActions(
+        loadAction: v3LoadAction(loadRaw),
+        storeAction: v3StoreAction(storeRaw),
+        clearColor: clearColor
+    )
+}
+
 @_cdecl("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3")
 public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
     _ pointer: UnsafeMutableRawPointer,
@@ -9097,15 +9132,16 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
                     continue
                 }
                 attachment.texture = texture
-                attachment.loadAction = v3LoadAction(colorLoadActions![index])
-                attachment.storeAction = v3StoreAction(colorStoreActions![index])
-                if colorLoadActions![index] == 2 {
-                    let base = index * 4
-                    let colors = clearColors!
-                    attachment.clearColor = makeClearColor(
-                        red: colors[base], green: colors[base + 1],
-                        blue: colors[base + 2], alpha: colors[base + 3]
-                    )
+                let actions = v3ColorAttachmentActions(
+                    loadRaw: colorLoadActions![index],
+                    storeRaw: colorStoreActions![index],
+                    clearColors: clearColors!,
+                    index: index
+                )
+                attachment.loadAction = actions.loadAction
+                attachment.storeAction = actions.storeAction
+                if let clearColor = actions.clearColor {
+                    attachment.clearColor = clearColor
                 }
             }
             if let depthTexture {
@@ -9161,15 +9197,16 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
                 continue
             }
             attachment.texture = texture
-            attachment.loadAction = v3LoadAction(colorLoadActions![index])
-            attachment.storeAction = v3StoreAction(colorStoreActions![index])
-            if colorLoadActions![index] == 2 {
-                let base = index * 4
-                let colors = clearColors!
-                attachment.clearColor = makeClearColor(
-                    red: colors[base], green: colors[base + 1],
-                    blue: colors[base + 2], alpha: colors[base + 3]
-                )
+            let actions = v3ColorAttachmentActions(
+                loadRaw: colorLoadActions![index],
+                storeRaw: colorStoreActions![index],
+                clearColors: clearColors!,
+                index: index
+            )
+            attachment.loadAction = actions.loadAction
+            attachment.storeAction = actions.storeAction
+            if let clearColor = actions.clearColor {
+                attachment.clearColor = clearColor
             }
         }
         if let depthTexture {
