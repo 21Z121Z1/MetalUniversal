@@ -1,0 +1,140 @@
+name: BSL shadow crash diagnostic
+
+on:
+  push:
+    branches:
+      - fix/bsl-shadow-attachment-format
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '1'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      GRADLE_OPTS: '-Dorg.gradle.caching=true'
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Download exact current BSL release for Minecraft 26.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, pathlib, urllib.parse, urllib.request
+
+          query = urllib.parse.urlencode({
+              'game_versions': json.dumps(['26.2']),
+              'loaders': json.dumps(['iris']),
+          })
+          request = urllib.request.Request(
+              'https://api.modrinth.com/v2/project/bsl-shaders/version?' + query,
+              headers={'User-Agent': 'MetalUniversal-BSL-shadow-regression/1.0'}
+          )
+          with urllib.request.urlopen(request) as response:
+              versions = json.load(response)
+          if not versions:
+              raise SystemExit('No BSL release found for Minecraft 26.2 + Iris')
+          versions.sort(key=lambda x: x.get('date_published', ''), reverse=True)
+          version = versions[0]
+          files = version.get('files') or []
+          file = next((f for f in files if f.get('primary')), files[0] if files else None)
+          if not file:
+              raise SystemExit('Selected BSL release has no downloadable file')
+
+          run = pathlib.Path('.github/ci/minecraft-e2e/build/run/clientGameTest')
+          packs = run / 'shaderpacks'
+          config = run / 'config'
+          packs.mkdir(parents=True, exist_ok=True)
+          config.mkdir(parents=True, exist_ok=True)
+          target = packs / 'BSL-regression.zip'
+          urllib.request.urlretrieve(file['url'], target)
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          (config / 'iris.properties').write_text(
+              'enableShaders=true\nshaderPack=BSL-regression.zip\n', encoding='utf-8'
+          )
+          pathlib.Path('build').mkdir(exist_ok=True)
+          pathlib.Path('build/bsl-version.json').write_text(json.dumps({
+              'id': version.get('id'),
+              'version_number': version.get('version_number'),
+              'date_published': version.get('date_published'),
+              'filename': file.get('filename'),
+              'sha256': digest,
+          }, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(json.loads(pathlib.Path('build/bsl-version.json').read_text()), indent=2))
+          PY
+
+      - name: Build production MetalUniversal jar
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --build-cache --stacktrace -x buildIOSNative -x buildIOSSpvc jar
+          jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' -print | head -n 1)"
+          test -s "$jar"
+          echo "jar=$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")" >> "$GITHUB_OUTPUT"
+
+      - name: Run BSL production-client reproduction
+        id: run
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew \
+            -p .github/ci/minecraft-e2e \
+            --build-cache \
+            --stacktrace \
+            -PmetallumJar="${{ steps.build.outputs.jar }}" \
+            runProductionClientGameTest 2>&1 | tee build/bsl-reproduction-console.log
+
+      - name: Extract shadow failure evidence
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          run='.github/ci/minecraft-e2e/build/run/clientGameTest'
+          mkdir -p build/bsl-diagnostic
+          cp build/bsl-version.json build/bsl-diagnostic/ 2>/dev/null || true
+          cp build/bsl-reproduction-console.log build/bsl-diagnostic/ 2>/dev/null || true
+          if [[ -d "$run/logs" ]]; then cp -R "$run/logs" build/bsl-diagnostic/; fi
+          if [[ -d "$run/crash-reports" ]]; then cp -R "$run/crash-reports" build/bsl-diagnostic/; fi
+          if [[ -d '.github/ci/minecraft-e2e/build/evidence' ]]; then
+            cp -R .github/ci/minecraft-e2e/build/evidence build/bsl-diagnostic/evidence
+          fi
+          grep -RniE 'attachment|pipeline format|shadow|Iris Metal|MTLRenderPipeline|Validation' build/bsl-diagnostic | tail -n 400 || true
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bsl-shadow-diagnostic-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 2
+          path: build/bsl-diagnostic/**
+
+      - name: Require reproduction to be healthy
+        if: always()
+        shell: bash
+        run: |
+          if [[ '${{ steps.run.outcome }}' != 'success' ]]; then
+            echo 'BSL reproduction failed; diagnostic artifact contains the first failure.' >&2
+            exit 1
+          fi
