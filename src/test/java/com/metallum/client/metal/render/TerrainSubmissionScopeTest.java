@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 final class TerrainSubmissionScopeTest {
     @Test
     void authorizedAndStaleTransactionsAreOneShotWhenFeatureIsEnabled() {
-        Assumptions.assumeTrue(TerrainSceneSnapshot.ENABLED);
+        Assumptions.assumeTrue(TerrainSceneSnapshot.captureEnabled());
         Object pipeline = new Object();
         TerrainSceneSnapshot.StateView state = state(pipeline, 11L);
         TerrainSceneSnapshot.StateView stale = state(pipeline, 12L);

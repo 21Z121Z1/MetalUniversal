@@ -34,7 +34,7 @@ public abstract class VKIndirectDrawBatchTerrainSceneMixin {
             final int drawCount,
             final Operation<Void> original
     ) {
-        if (TerrainSceneSnapshot.ENABLED) {
+        if (TerrainSceneSnapshot.captureEnabled()) {
             TerrainSubmissionScope.capture(pass, this.pCommands, drawCount, commandSlice);
         }
         original.call(pass, commandSlice, drawCount);

@@ -800,6 +800,116 @@ private func drawAndRead(
     return values
 }
 
+/// Shipping terrain seam: one immutable indexed command array is encoded into
+/// one ICB and executed by the native bridge. The direct indexed draw is the
+/// pixel oracle; both paths must produce the same readback and the native
+/// helper must report that it actually encoded the ICB.
+@available(macOS 26.0, *)
+private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    metallum_set_metal4_compiler_enabled(1)
+    metallum_set_terrain_icb_enabled(1)
+    try check(metallum_residency_set_enable(device, queue) != 0,
+              "the global residency set could not be enabled for terrain ICB validation")
+    try check(metallum_metal4_main_renderer_enable(device, nil) != 0,
+              "the Metal 4 main renderer could not be enabled for terrain ICB validation")
+    defer {
+        metallum_set_terrain_icb_enabled(0)
+    }
+
+    let vertexFunction = try createShippingFunction(device: device, entryPoint: "mtl4_path_vs")
+    let fragmentFunction = try createShippingFunction(device: device, entryPoint: "mtl4_path_fs")
+    let pipeline = try createShippingPipeline(
+        device: device,
+        descriptor: makeDescriptor(
+            vertexFunction: vertexFunction,
+            fragmentFunction: fragmentFunction,
+            label: "terrain-icb-readback"
+        )
+    )
+    try check(pipeline.supportIndirectCommandBuffers,
+              "terrain ICB pipeline did not advertise supportIndirectCommandBuffers")
+
+    let indexValues: [UInt16] = [0, 1, 2]
+    guard let indexBuffer = indexValues.withUnsafeBytes({ bytes in
+        device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+    }) else {
+        try fail("could not allocate terrain ICB index buffer")
+    }
+
+    func readback(label: String, encode: (UnsafeMutableRawPointer) throws -> Void) throws -> [UInt8] {
+        let target = try makeTarget(device: device, label: label + " target")
+        guard let commandBuffer = label.withCString({ labelPointer in
+            metallum_MTLCommandQueue_makeCommandBuffer(queue, labelPointer)
+        }) else {
+            try fail("could not allocate \(label) command buffer")
+        }
+        defer { metallum_release_object(commandBuffer) }
+        guard let encoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            commandBuffer,
+            target,
+            nil,
+            8,
+            8,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+            1
+        ) else {
+            try fail("could not create \(label) render encoder")
+        }
+        defer { metallum_release_object(encoder) }
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(encoder, pipeline)
+        try encode(encoder)
+        metallum_MTLCommandEncoder_endEncoding(encoder)
+        metallum_MTLCommandBuffer_commit(commandBuffer)
+        try check(metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
+                  "\(label) did not complete")
+        try check(metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
+                  "\(label) completed with an error")
+        var pixel = [UInt8](repeating: 0, count: 4)
+        target.getBytes(&pixel, bytesPerRow: 4, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
+        return pixel
+    }
+
+    let legacyPixel = try readback(label: "terrain legacy indexed draw") { encoder in
+        metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+            encoder, .triangle, 3, .uint16, indexBuffer, 0, 1, 0, 0
+        )
+    }
+
+    let icbPixel = try readback(label: "terrain native ICB") { encoder in
+        let packedCommands: [Int32] = [3, 1, 0, 0, 0]
+        let result = packedCommands.withUnsafeBufferPointer { commands in
+            metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb(
+                encoder,
+                .triangle,
+                .uint16,
+                indexBuffer,
+                pipeline,
+                commands.baseAddress!,
+                1
+            )
+        }
+        try check(result != 0, "native terrain ICB helper rejected a supported PSO")
+    }
+    try check(icbPixel == legacyPixel,
+              "terrain ICB readback \(icbPixel) differed from legacy \(legacyPixel)")
+    try check(icbPixel == [64, 128, 191, 255],
+              "terrain ICB readback was unexpected: \(icbPixel)")
+    print("Terrain ICB: one native ICB execution matched the legacy indexed draw readback")
+}
+
+private func runTerrainIcbReadbackTestIfAvailable(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 26.0, *) else {
+        print("Terrain ICB test skipped: needs macOS 26")
+        return
+    }
+    try runTerrainIcbReadbackTest(device: device, queue: queue)
+}
+
 /// Exercises metallum_residency_set_enable plus the creation, submit and release
 /// hooks, all through the shipping exports (migration spec M3).
 @available(macOS 15.0, iOS 18.0, *)
@@ -1823,6 +1933,10 @@ private func runPathTest() throws {
     )
     try check(metal4Pixel == metal3Pixel,
               "Metal 4 pipeline rendered \(metal4Pixel), Metal 3 rendered \(metal3Pixel)")
+
+    // Terrain execution milestone: the shipping native bridge must create and
+    // execute one ICB when the PSO advertises the explicit Metal 4 capability.
+    try runTerrainIcbReadbackTestIfAvailable(device: device, queue: queue)
 
     // (3) switch on, but the library was never registered: the Metal 4
     // translation must decline and the Metal 3 path must still deliver a

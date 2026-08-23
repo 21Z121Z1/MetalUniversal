@@ -27,7 +27,7 @@ public abstract class DefaultChunkRendererTerrainSceneMixin {
             final DrawContext drawContext,
             final Operation<Void> original
     ) {
-        if (!TerrainSceneSnapshot.ENABLED) {
+        if (!TerrainSceneSnapshot.captureEnabled()) {
             original.call(batch, drawContext);
             return;
         }

@@ -83,18 +83,18 @@ final class MetalDevice implements GpuDeviceBackend {
     private boolean stableTerrainSamplerLogged;
     /**
      * Master kill switch for every Metal 4 path (migration spec M1, appendix C).
+     * The terrain ICB opt-in is self-contained: it requests the Metal 4
+     * capability check, while unsupported hardware still leaves this false.
      * Metal 4 code is a parallel branch: the Metal 3 path stays byte-for-byte
-     * intact and is what runs whenever this is false, whenever the device or SDK
-     * lacks Metal 4, or whenever a sub-switch is off.
+     * intact whenever this is false or the device/SDK lacks Metal 4.
      */
     private static final boolean METAL4_REQUESTED =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "false"));
-    /**
-     * Routes render pipeline creation through MTL4Compiler (spec M2). Depends on
-     * the master switch; on its own it does nothing.
-     */
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "false"))
+                    || TerrainSceneSnapshot.ICB_ENABLED;
+    /** Routes render pipeline creation through MTL4Compiler (spec M2). */
     private static final boolean METAL4_COMPILER =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"));
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"))
+                    || TerrainSceneSnapshot.ICB_ENABLED;
     /**
      * Runs the frame-generation present thread on a Metal 4 queue (spec M4).
      * Depends on the compiler switch, because the MTL4 frame interpolator is built
@@ -104,8 +104,10 @@ final class MetalDevice implements GpuDeviceBackend {
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Present", "false"));
     private static final boolean METAL4_MAIN_QUEUE_PILOT =
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainQueuePilot", "false"));
+    /** The terrain ICB requires the real MTL4 encoder/residency path. */
     private static final boolean METAL4_MAIN_RENDERER =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainRenderer", "false"));
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainRenderer", "false"))
+                    || TerrainSceneSnapshot.ICB_ENABLED;
     /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
     private final boolean metal4Available;
     private final boolean metal4MainRenderer;
@@ -226,6 +228,12 @@ final class MetalDevice implements GpuDeviceBackend {
         // compiler even when its independent pilot switch is absent.
         boolean metal4Compiler = this.metal4Available && (METAL4_COMPILER || metal4MainRenderer);
         MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4Compiler ? 1 : 0);
+        // Terrain ICB requires both the Metal 4 capability and an active
+        // MTL4Compiler PSO path. Snapshot capture remains enabled when the
+        // opt-in is requested, but native execution will fail closed otherwise.
+        MetalNativeBridge.metallum_set_terrain_icb_enabled(
+                TerrainSceneSnapshot.ICB_ENABLED && metal4Compiler ? 1 : 0
+        );
         // Depends on the compiler switch: the MTL4 frame interpolator factory
         // takes an MTL4Compiler, so the present pilot cannot run without it.
         boolean metal4Present = metal4Compiler && (METAL4_PRESENT || metal4MainRenderer);

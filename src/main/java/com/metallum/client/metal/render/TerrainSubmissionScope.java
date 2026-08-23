@@ -39,7 +39,7 @@ public final class TerrainSubmissionScope implements AutoCloseable {
             final int drawCount,
             final GpuBufferSlice commandSlice
     ) {
-        if (!TerrainSceneSnapshot.ENABLED) {
+        if (!TerrainSceneSnapshot.captureEnabled()) {
             return;
         }
         TerrainSubmissionScope scope = CURRENT.get();
@@ -70,7 +70,7 @@ public final class TerrainSubmissionScope implements AutoCloseable {
             final GpuBufferSlice commandSlice,
             final int drawCount
     ) {
-        if (!TerrainSceneSnapshot.ENABLED) {
+        if (!TerrainSceneSnapshot.captureEnabled()) {
             return false;
         }
         MetalRenderPass metalPass = metalPass(pass);
@@ -85,7 +85,7 @@ public final class TerrainSubmissionScope implements AutoCloseable {
             final GpuBufferSlice commandSlice,
             final int drawCount
     ) {
-        if (!TerrainSceneSnapshot.ENABLED) {
+        if (!TerrainSceneSnapshot.captureEnabled()) {
             return false;
         }
         TerrainSubmissionScope scope = CURRENT.get();
@@ -93,13 +93,13 @@ public final class TerrainSubmissionScope implements AutoCloseable {
             return false;
         }
         try {
-            return consume(
+            return consumeSnapshot(
                     metalPass.terrainSnapshotState(),
                     TerrainSceneSnapshot.ResourceSlice.ofGpuSlice(
                             commandSlice, VkDrawIndexedIndirectCommand.SIZEOF
                     ),
                     drawCount
-            );
+            ) != null;
         } catch (RuntimeException ignored) {
             return false;
         }
@@ -110,19 +110,32 @@ public final class TerrainSubmissionScope implements AutoCloseable {
             final TerrainSceneSnapshot.ResourceSlice commandBuffer,
             final int drawCount
     ) {
-        if (!TerrainSceneSnapshot.ENABLED) {
+        if (!TerrainSceneSnapshot.captureEnabled()) {
             return false;
+        }
+        return consumeSnapshot(state, commandBuffer, drawCount) != null;
+    }
+
+    static TerrainSceneSnapshot consumeSnapshot(
+            final TerrainSceneSnapshot.StateView state,
+            final TerrainSceneSnapshot.ResourceSlice commandBuffer,
+            final int drawCount
+    ) {
+        if (!TerrainSceneSnapshot.captureEnabled()) {
+            return null;
         }
         TerrainSubmissionScope scope = CURRENT.get();
         if (scope == null) {
-            return false;
+            return null;
         }
         TerrainSceneSnapshot candidate = scope.snapshot;
         scope.snapshot = null;
         try {
-            return candidate != null && candidate.matches(state, commandBuffer, drawCount);
+            return candidate != null && candidate.matches(state, commandBuffer, drawCount)
+                    ? candidate
+                    : null;
         } catch (RuntimeException ignored) {
-            return false;
+            return null;
         }
     }
 

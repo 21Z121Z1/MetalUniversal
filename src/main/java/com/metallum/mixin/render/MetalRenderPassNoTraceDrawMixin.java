@@ -89,6 +89,13 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
     @Invoker("terrainSnapshotAuthorized")
     protected abstract boolean metallum$terrainSnapshotAuthorized(GpuBufferSlice commands, int drawCount);
 
+    @Invoker("terrainSnapshotSubmitted")
+    protected abstract boolean metallum$terrainSnapshotSubmitted(
+            MTLPrimitiveType primitiveType,
+            GpuBufferSlice commands,
+            int drawCount
+    );
+
     @Invoker("submitIndexedIndirect")
     protected abstract void metallum$submitIndexedIndirect(
             MTLPrimitiveType primitiveType,
@@ -267,13 +274,19 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
             ci.cancel();
             return;
         }
-        if (com.metallum.client.metal.render.TerrainSceneSnapshot.ENABLED
-                && this.metallum$terrainSnapshotAuthorized(commands, drawCount)) {
-            // The authorized snapshot preserves the same single native
-            // indirect submission; it never expands the command list.
-            this.metallum$submitIndexedIndirect(primitiveType, commands, drawCount);
-            ci.cancel();
-            return;
+        if (com.metallum.client.metal.render.TerrainSceneSnapshot.captureEnabled()) {
+            if (com.metallum.client.metal.render.TerrainSceneSnapshot.ICB_ENABLED) {
+                if (this.metallum$terrainSnapshotSubmitted(primitiveType, commands, drawCount)) {
+                    ci.cancel();
+                    return;
+                }
+            } else if (this.metallum$terrainSnapshotAuthorized(commands, drawCount)) {
+                // The diagnostic snapshot path preserves the same single
+                // native indirect submission; it never expands the command list.
+                this.metallum$submitIndexedIndirect(primitiveType, commands, drawCount);
+                ci.cancel();
+                return;
+            }
         }
         MTLRenderCommandEncoder encoder = this.metallum$invokeRenderEncoder();
         this.metallum$invokeBindDrawState(encoder);
