@@ -127,6 +127,11 @@ public final class TerrainSchedulingController {
         return lastCpuFrameNanos;
     }
 
+    /** Returns the index that the next observed frame will receive. */
+    public synchronized long nextFrameIndex() {
+        return frameIndex + 1L;
+    }
+
     public synchronized void beginFrame(
             final long nowNanos,
             final double cameraX,
@@ -262,6 +267,7 @@ public final class TerrainSchedulingController {
                 frameIndex,
                 decision,
                 inputs,
+                inputs.presentationPacing(),
                 terrainNanos,
                 buildSubmitNanos,
                 uploadNanos,
@@ -447,8 +453,32 @@ public final class TerrainSchedulingController {
             int busyThreads,
             int totalThreads,
             int thermalState,
-            double memoryPressure
+            double memoryPressure,
+            PresentationPacingSnapshot presentationPacing
     ) {
+        public FrameInputs(
+                final long frameDurationNanos,
+                final long cpuFrameNanos,
+                final long gpuFrameNanos,
+                final int backlogJobs,
+                final int busyThreads,
+                final int totalThreads,
+                final int thermalState,
+                final double memoryPressure
+        ) {
+            this(
+                    frameDurationNanos,
+                    cpuFrameNanos,
+                    gpuFrameNanos,
+                    backlogJobs,
+                    busyThreads,
+                    totalThreads,
+                    thermalState,
+                    memoryPressure,
+                    PresentationPacingSnapshot.neutral()
+            );
+        }
+
         public FrameInputs {
             frameDurationNanos = Math.max(0L, frameDurationNanos);
             cpuFrameNanos = Math.max(0L, cpuFrameNanos);
@@ -460,10 +490,23 @@ public final class TerrainSchedulingController {
             memoryPressure = Double.isFinite(memoryPressure)
                     ? Math.max(0.0, Math.min(1.0, memoryPressure))
                     : 0.0;
+            presentationPacing = presentationPacing == null
+                    ? PresentationPacingSnapshot.neutral()
+                    : presentationPacing;
         }
 
         public static FrameInputs neutral() {
-            return new FrameInputs(TARGET_FRAME_NANOS, 0L, -1L, 0, 0, 0, -1, 0.0);
+            return new FrameInputs(
+                    TARGET_FRAME_NANOS,
+                    0L,
+                    -1L,
+                    0,
+                    0,
+                    0,
+                    -1,
+                    0.0,
+                    PresentationPacingSnapshot.neutral()
+            );
         }
 
         private FrameInputs withQueue(final int backlog, final int busy, final int total) {
@@ -475,7 +518,8 @@ public final class TerrainSchedulingController {
                     busy,
                     total,
                     thermalState,
-                    memoryPressure
+                    memoryPressure,
+                    presentationPacing
             );
         }
     }
@@ -502,6 +546,7 @@ public final class TerrainSchedulingController {
             long frameIndex,
             FrameDecision decision,
             FrameInputs inputs,
+            PresentationPacingSnapshot presentationPacing,
             long terrainNanos,
             long buildSubmitNanos,
             long uploadNanos,
@@ -510,7 +555,18 @@ public final class TerrainSchedulingController {
             boolean turnDetected
     ) {
         private static FrameSnapshot empty() {
-            return new FrameSnapshot(0L, FrameDecision.defaults(), FrameInputs.neutral(), 0L, 0L, 0L, 0, 0, false);
+            return new FrameSnapshot(
+                    0L,
+                    FrameDecision.defaults(),
+                    FrameInputs.neutral(),
+                    PresentationPacingSnapshot.neutral(),
+                    0L,
+                    0L,
+                    0L,
+                    0,
+                    0,
+                    false
+            );
         }
 
         String toCsv() {
@@ -533,8 +589,29 @@ public final class TerrainSchedulingController {
                     Integer.toString(submittedTasks),
                     Integer.toString(uploadResults),
                     Boolean.toString(decision.forwardBoost()),
-                    Boolean.toString(turnDetected)
+                    Boolean.toString(turnDetected),
+                    Long.toString(presentationPacing.targetPresentInterval().value()),
+                    Boolean.toString(presentationPacing.targetPresentInterval().measured()),
+                    csvValue(presentationPacing.targetPresentInterval().provenance()),
+                    csvValue(presentationPacing.targetPresentInterval().fallbackReason()),
+                    Long.toString(presentationPacing.measuredPresentInterval().value()),
+                    Boolean.toString(presentationPacing.measuredPresentInterval().available()),
+                    csvValue(presentationPacing.measuredPresentInterval().provenance()),
+                    csvValue(presentationPacing.measuredPresentInterval().fallbackReason()),
+                    Long.toString(presentationPacing.drawableWait().value()),
+                    Boolean.toString(presentationPacing.drawableWait().available()),
+                    Long.toString(presentationPacing.framesInFlight().value()),
+                    Boolean.toString(presentationPacing.framesInFlight().available()),
+                    csvValue(presentationPacing.provenance()),
+                    csvValue(presentationPacing.fallbackReason())
             );
+        }
+
+        private static String csvValue(final String value) {
+            if (value == null) {
+                return "";
+            }
+            return value.replace(',', ';').replace('\n', ' ').replace('\r', ' ');
         }
     }
 

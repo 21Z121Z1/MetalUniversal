@@ -4,6 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 python3 -m json.tool docs/agent/unified-evaluation-acceptance.json >/dev/null
+python3 -m json.tool docs/agent/presentation-pacing-evidence.schema.json >/dev/null
 python3 -m json.tool docs/agent/benchmark-profiles.json >/dev/null
 python3 -m json.tool docs/agent/metal4-main-production-acceptance.json >/dev/null
 python3 scripts/agent/verify_benchmark_profiles.py
@@ -38,6 +39,8 @@ bash -n scripts/agent/verify.sh
   -x buildIOSSpvc \
   --tests com.metallum.client.terrain.TerrainSchedulingControllerTest \
   --tests com.metallum.client.terrain.TerrainNativeSignalTest \
+  --tests com.metallum.client.terrain.PresentationPacingSnapshotTest \
+  --tests com.metallum.client.terrain.PresentationPacingEvidenceAdapterTest \
   --tests com.metallum.mixin.MetallumMixinRegistrationTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest

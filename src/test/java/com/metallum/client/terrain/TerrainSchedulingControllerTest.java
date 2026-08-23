@@ -111,6 +111,31 @@ final class TerrainSchedulingControllerTest {
     }
 
     @Test
+    void pacingSnapshotIsCarriedAsEvidenceWithoutChangingBudgetInputs() {
+        TerrainSchedulingController controller = new TerrainSchedulingController(true, 0);
+        PresentationPacingSnapshot pacing = PresentationPacingSnapshot.capture(
+                1L, 120, 20_000_000L, 4_000_000L
+        );
+        TerrainSchedulingController.FrameInputs inputs = new TerrainSchedulingController.FrameInputs(
+                20_000_000L,
+                20_000_000L,
+                4_000_000L,
+                0,
+                1,
+                4,
+                -1,
+                0.0,
+                pacing
+        );
+
+        runFrame(controller, 1L, 0.0, 0.0, 1.0, inputs);
+
+        assertEquals(pacing, controller.lastSnapshot().presentationPacing());
+        assertEquals(2_000_000L, controller.decision().buildBudgetNanos());
+        assertEquals(2_000_000L, controller.decision().uploadBudgetNanos());
+    }
+
+    @Test
     void disabledControllerIsANoOp() {
         TerrainSchedulingController controller = new TerrainSchedulingController(false, 0);
         runFrame(controller, 1L, 0.0, 0.0, 1.0, input(10_000_000L, 128, 30_000_000L, 3, 1.0));
@@ -132,7 +157,8 @@ final class TerrainSchedulingControllerTest {
         var lines = Files.readAllLines(output);
         assertEquals(TerrainSchedulingTelemetry.CSV_HEADER, lines.get(0));
         assertEquals(2, lines.size());
-        assertEquals(19, TerrainSchedulingTelemetry.CSV_HEADER.split(",").length);
+        assertEquals(33, TerrainSchedulingTelemetry.CSV_HEADER.split(",").length);
+        assertTrue(lines.get(1).contains(",16666667,false,conservative-60hz-fallback,"));
     }
 
     @Test
