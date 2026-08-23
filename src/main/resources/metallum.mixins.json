@@ -48,6 +48,7 @@
     "sodium.RenderRegionManagerTerrainSchedulingMixin",
     "sodium.RenderSectionManagerTerrainSchedulingMixin",
     "sodium.SodiumWorldRendererTerrainSchedulingMixin",
+    "sodium.GlBufferArenaMetalLifetimeMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
     "sodium.ShaderChunkRendererMetalFxMixin",

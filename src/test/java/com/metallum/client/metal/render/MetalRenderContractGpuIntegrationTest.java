@@ -39,6 +39,7 @@ import java.util.stream.StreamSupport;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Real Metal texture capture through the production render-contract boundary. */
@@ -357,6 +358,11 @@ final class MetalRenderContractGpuIntegrationTest {
         } finally {
             buffer.close();
         }
+        assertTrue(buffer.isClosed());
+        assertThrows(IllegalStateException.class, buffer::allocationId);
+        assertThrows(IllegalStateException.class, buffer::allocationIdentity);
+        // A second close must not enqueue another native retirement.
+        buffer.close();
         JsonObject closed = manifest();
         assertEquals(2L, lifecycleCount(closed, "INVALIDATE", "identity-buffer"));
     }
