@@ -9,6 +9,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 final class TerrainCandidateRegistryContractTest {
@@ -142,8 +143,18 @@ final class TerrainCandidateRegistryContractTest {
         }
 
         TerrainCandidateRegistry.captureFrame(1.0, 2.0, 3.0, new Matrix4f().identity());
+        TerrainCandidateRegistry.installOpaqueIdentityForContractTest(
+                new TerrainCandidateSnapshot.AllocationIdentity(
+                        new Object(), 0L, 16L, 1L,
+                        new MetalAllocationIdentity(9001L, 1L)
+                )
+        );
+        assertTrue(TerrainCandidateRegistry.statePresentForContractTest());
+        assertTrue(TerrainCandidateRegistry.opaqueIdentityPresentForContractTest());
         assertEquals(0, TerrainCandidateRegistry.latestSnapshot().candidates().size());
         TerrainCandidateRegistry.reset();
+        assertFalse(TerrainCandidateRegistry.statePresentForContractTest());
+        assertFalse(TerrainCandidateRegistry.opaqueIdentityPresentForContractTest());
         assertNull(TerrainCandidateRegistry.latestSnapshot());
     }
 
