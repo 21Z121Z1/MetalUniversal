@@ -188,16 +188,17 @@ jobs:
           print('fail-closed evidence emission: PASS')
           PY
 
-      - name: Validate logic, compilation and static repository contracts
+      - name: Validate logic, native compilation and cloud program contract
         shell: bash
         run: |
           set -euo pipefail
-          chmod +x ./gradlew scripts/agent/verify.sh
+          chmod +x ./gradlew
           ./gradlew --no-daemon \
             buildMacNative \
             test --tests 'com.metallum.client.metal.render.MetalCommandEncoderStoreLivenessPolicyTest' \
-            compileTestJava
-          bash scripts/agent/verify.sh static
+            compileTestJava \
+            assemble \
+            verifyProductionJarIsolation
           python3 scripts/agent/verify_cloud_program.py \
             --verify-remote-branches \
             --expected-source-sha "$(git rev-parse HEAD)" \
