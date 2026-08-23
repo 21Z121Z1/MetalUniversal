@@ -1,0 +1,251 @@
+name: one-shot P2 MRT review fix
+
+on:
+  push:
+    branches:
+      - fix/p2-mrt-store-liveness-review
+
+permissions:
+  contents: write
+
+jobs:
+  apply-review-fix:
+    if: github.event.head_commit.message == 'ci: stage reviewed P2 MRT correctness fix'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/p2-mrt-store-liveness-review
+          fetch-depth: 0
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      - name: Apply reviewed source, regression and governance fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('.')
+
+          # 1) P2 correctness: deferred color-store kill evidence is per MRT slot.
+          path = root / 'src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java'
+          text = path.read_text(encoding='utf-8')
+
+          old = '''        boolean hasIncomingColorClear = hasClearColor(clearColorEnabled);\n        boolean[] colorStoreKilled = new boolean[colorAttachments.length];\n        if (renderPassDescriptorV3Active()) {\n            for (int index = 0; index < colorAttachments.length; index++) {\n                Object incomingTexture = colorTextureViews[index] == null ? null : colorTextureViews[index].texture();\n                colorStoreKilled[index] = hasIncomingColorClear\n'''
+          new = '''        boolean[] colorStoreKilled = new boolean[colorAttachments.length];\n        if (renderPassDescriptorV3Active()) {\n            for (int index = 0; index < colorAttachments.length; index++) {\n                Object incomingTexture = colorTextureViews[index] == null ? null : colorTextureViews[index].texture();\n                // Store liveness is attachment-local. A CLEAR on another MRT slot\n                // cannot prove this slot dead: if this slot LOADs, it still depends\n                // on the predecessor store. This mirrors Metal's per-attachment\n                // load/store contract and keeps dontCare fail-closed.\n                colorStoreKilled[index] = clearColorEnabled[index] != 0\n'''
+          if old not in text:
+              raise SystemExit('expected mixed-MRT store-liveness source block not found')
+          text = text.replace(old, new, 1)
+
+          # Remove stale arrays left over from the pre-P2.3 accounting design.
+          for stale in (
+              '    private MemorySegment[] killedColorAttachments = new MemorySegment[0];\n',
+              '    private MetalGpuTexture[] killedColorTextures = new MetalGpuTexture[0];\n',
+              '        killedColorAttachments = new MemorySegment[0];\n',
+              '        killedColorTextures = new MetalGpuTexture[0];\n',
+              '        killedColorAttachments = colorAttachments.clone();\n',
+              '        killedColorTextures = renderColorTextures.clone();\n',
+          ):
+              if stale not in text:
+                  raise SystemExit(f'expected stale P2 field/assignment not found: {stale!r}')
+              text = text.replace(stale, '', 1)
+          path.write_text(text, encoding='utf-8')
+
+          # 2) IrisGraphBench regression: mixed MRT clear/load must preserve loaded sibling.
+          path = root / 'src/test/java/com/metallum/client/metal/render/MetalRenderGraphBenchIntegrationTest.java'
+          text = path.read_text(encoding='utf-8')
+          old_doc = ''' * 9. killedColorStores       outgoing concrete store proven dead by full clear\n * 10. depthDeferredStoreSurvives   deferred depth store reaches memory when\n *                            only capture consumers follow (no clear proof)\n * 11. colorStoreSurvives     unrelated successors never prove a store dead;\n *                            the readback consumer must observe the content\n * 12. presentConsumerKeepsFinalStores  adjacent sampling plus copy-capture\n *                            consumers keep every final-framebuffer store\n'''
+          new_doc = ''' * 9. killedColorStores       outgoing concrete store proven dead by full clear\n * 10. mixedMrtClearLoad      one slot CLEAR must not kill a sibling slot whose\n *                            successor action is LOAD\n * 11. depthDeferredStoreSurvives   deferred depth store reaches memory when\n *                            only capture consumers follow (no clear proof)\n * 12. colorStoreSurvives     unrelated successors never prove a store dead;\n *                            the readback consumer must observe the content\n * 13. presentConsumerKeepsFinalStores  adjacent sampling plus copy-capture\n *                            consumers keep every final-framebuffer store\n'''
+          if old_doc not in text:
+              raise SystemExit('IrisGraphBench scenario documentation block not found')
+          text = text.replace(old_doc, new_doc, 1)
+
+          marker = '''    // ------------------------------------------------------------------\n    // Harness\n    // ------------------------------------------------------------------\n'''
+          if marker not in text:
+              raise SystemExit('IrisGraphBench harness marker not found')
+          if 'mixedMrtClearDoesNotKillLoadedSiblingStore' in text:
+              raise SystemExit('mixed MRT regression already exists unexpectedly')
+
+          test_method = r'''    @Test
+    void mixedMrtClearDoesNotKillLoadedSiblingStore() {
+        for (final String abiMode : ABI_MODES) {
+            withAbi(abiMode, () -> {
+                final String scenarioName = "mixedMrtClearLoad[" + abiMode + "]";
+                withScenario(scenarioName, () -> {
+                    List<MetalGpuTexture> textures = createTextures(
+                            List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM),
+                            "bench-mixed-mrt-clear-load");
+                    MetalGpuTexture cleared = textures.get(0);
+                    MetalGpuTexture loaded = textures.get(1);
+                    try {
+                        RenderPipeline seedPipeline = solidPipeline(
+                                "mixed_mrt_seed",
+                                2,
+                                new float[] {1.0F, 0.0F, 0.0F, 1.0F},
+                                new float[] {0.0F, 1.0F, 0.0F, 1.0F},
+                                null,
+                                null
+                        );
+                        RenderPassDescriptor seed = RenderPassDescriptor.create(() -> "bench mixed mrt seed");
+                        seed.withColorAttachment(view(cleared), Optional.of(new Vector4f(0.0F)));
+                        seed.withColorAttachment(view(loaded), Optional.of(new Vector4f(0.0F)));
+                        seed.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+                        MetalRenderPass seedPass = (MetalRenderPass) encoder.createRenderPass(seed);
+                        seedPass.setPipeline(seedPipeline);
+                        seedPass.draw(3, 1, 0, 0);
+                        encoder.submitRenderPass();
+
+                        // The immediate successor clears slot 0 but LOADs slot 1.
+                        // Only slot 0 proves the predecessor store dead. Slot 1
+                        // must retain P1's green contents exactly.
+                        RenderPassDescriptor mixed = RenderPassDescriptor.create(() -> "bench mixed mrt clear/load");
+                        mixed.withColorAttachment(
+                                view(cleared),
+                                Optional.of(new Vector4f(0.0F, 0.0F, 1.0F, 1.0F))
+                        );
+                        mixed.withColorAttachment(view(loaded), Optional.empty());
+                        mixed.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+                        encoder.createRenderPass(mixed);
+                        encoder.submitRenderPass();
+                        encoder.submit();
+                        device.waitForSubmittedGpuWork();
+
+                        assertRgba(readback(cleared), 0, 0, 255,
+                                "slot 0 clear is applied independently");
+                        assertRgba(readback(loaded), 0, 255, 0,
+                                "slot 1 LOAD preserves the predecessor store despite sibling CLEAR");
+                    } finally {
+                        closeAll(textures);
+                    }
+                });
+
+                Map<String, Object> telemetry = SCENARIOS.get(scenarioName);
+                long killed = ((Number) telemetry.get("colorStoreKilledBytes")).longValue();
+                if ("v3".equals(abiMode)) {
+                    assertEquals((long) WIDTH * HEIGHT * Integer.BYTES, killed,
+                            "V3 may kill only the cleared slot's predecessor store");
+                } else {
+                    assertEquals(0L, killed,
+                            "V2 uses concrete stores and reports no deferred-store kills");
+                }
+            });
+        }
+    }
+
+'''
+          text = text.replace(marker, test_method + marker, 1)
+          path.write_text(text, encoding='utf-8')
+
+          # 3) Keep the branch inventory SSOT honest for live branches and the merged P3b lane.
+          path = root / 'docs/agent/branch-migration-matrix.json'
+          text = path.read_text(encoding='utf-8')
+          old_p3b = '''  {\n   "branch": "feature/p3b-token-paired-performance",\n   "role": "active-stage-branch",\n   "stages": [\n    "P3"\n   ],\n   "components": [\n    "binding-path paired experiment lanes (BASELINE_PROFILE + binding-tokens/name-based-bindings)",\n    "bindingPathRuntime activation evidence in the authoritative report",\n    "admission rule rejecting dormant token surfaces"\n   ],\n   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass"\n  }\n'''
+          new_p3b = '''  {\n   "branch": "feature/p3b-token-paired-performance",\n   "role": "subsumed-by-canonical",\n   "stages": [\n    "P3"\n   ],\n   "components": [\n    "binding-path paired experiment lanes (BASELINE_PROFILE + binding-tokens/name-based-bindings)",\n    "bindingPathRuntime activation evidence in the authoritative report",\n    "admission rule rejecting dormant token surfaces"\n   ],\n   "disposition": "subsumed-by-canonical (PR #37); paired harness and activation evidence now live on integration/iris-metal-next"\n  }\n'''
+          if old_p3b not in text:
+              raise SystemExit('P3b migration-matrix entry not found')
+          text = text.replace(old_p3b, new_p3b, 1)
+
+          suffix = '''  }\n ]\n}\n'''
+          if not text.endswith(suffix):
+              raise SystemExit('unexpected migration-matrix suffix')
+          additions = '''  },\n  {\n   "branch": "fix/bsl-shadow-attachment-format",\n   "role": "active-regression-fix",\n   "stages": [\n    "P1",\n    "P3"\n   ],\n   "components": [\n    "exact-SHA BSL shadow attachment-format reproduction lane",\n    "planned authoritative shadow attachment/pipeline format mapping"\n   ],\n   "disposition": "active PR #38; diagnostic first, renderer fix and exact shader-pack gates required before merge"\n  },\n  {\n   "branch": "fix/p2-mrt-store-liveness-review",\n   "role": "active-correctness-hotfix",\n   "stages": [\n    "P2",\n    "C0"\n   ],\n   "components": [\n    "per-attachment deferred color-store kill proof for mixed MRT clear/load successors",\n    "IrisGraphBench mixed MRT regression oracle",\n    "fail-closed cloud-program evidence emission and branch-state bookkeeping"\n   ],\n   "disposition": "review-discovered correctness hotfix; merge only after exact-head renderGraphBench, static, hosted Metal and production E2E gates pass"\n  }\n ]\n}\n'''
+          text = text[:-len(suffix)] + additions
+          path.write_text(text, encoding='utf-8')
+
+          # 4) Fail-closed verifier must still emit machine-readable evidence on failure.
+          path = root / 'scripts/agent/verify_cloud_program.py'
+          text = path.read_text(encoding='utf-8')
+          constants = '''PRESENTATION_TEST = ROOT / "src/test/java/com/metallum/client/metal/render/MetalDevicePresentationContractTest.java"\n\n\n'''
+          replacement = '''PRESENTATION_TEST = ROOT / "src/test/java/com/metallum/client/metal/render/MetalDevicePresentationContractTest.java"\n\nFAILURE_OUTPUT = None\nFAILURE_SOURCE_SHA = None\n\n\n'''
+          if constants not in text:
+              raise SystemExit('verify_cloud_program constants anchor not found')
+          text = text.replace(constants, replacement, 1)
+
+          old_fail = '''def fail(message: str) -> None:\n    raise SystemExit(f"Cloud Metal program invariant failed: {message}")\n'''
+          new_fail = '''def fail(message: str) -> None:\n    if FAILURE_OUTPUT is not None:\n        FAILURE_OUTPUT.parent.mkdir(parents=True, exist_ok=True)\n        evidence = {\n            "decision": "cloud-program-contract-fail",\n            "source_sha": FAILURE_SOURCE_SHA,\n            "failure_reason": message,\n        }\n        FAILURE_OUTPUT.write_text(\n            json.dumps(evidence, indent=2, sort_keys=True) + "\\n",\n            encoding="utf-8",\n        )\n    raise SystemExit(f"Cloud Metal program invariant failed: {message}")\n'''
+          if old_fail not in text:
+              raise SystemExit('verify_cloud_program fail() anchor not found')
+          text = text.replace(old_fail, new_fail, 1)
+
+          parser_anchor = '''    args = parser.parse_args()\n\n    program = load(PROGRAM)\n'''
+          parser_replacement = '''    args = parser.parse_args()\n\n    global FAILURE_OUTPUT, FAILURE_SOURCE_SHA\n    FAILURE_OUTPUT = args.output\n\n    program = load(PROGRAM)\n'''
+          if parser_anchor not in text:
+              raise SystemExit('verify_cloud_program parser anchor not found')
+          text = text.replace(parser_anchor, parser_replacement, 1)
+
+          sha_anchor = '''    checked_out_sha = run_git("rev-parse", "HEAD").lower()\n    require(re.fullmatch(r"[0-9a-f]{40}", checked_out_sha) is not None,\n'''
+          sha_replacement = '''    checked_out_sha = run_git("rev-parse", "HEAD").lower()\n    FAILURE_SOURCE_SHA = checked_out_sha\n    require(re.fullmatch(r"[0-9a-f]{40}", checked_out_sha) is not None,\n'''
+          if sha_anchor not in text:
+              raise SystemExit('verify_cloud_program SHA anchor not found')
+          text = text.replace(sha_anchor, sha_replacement, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Verify fail-closed evidence survives an intentional inventory failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp docs/agent/branch-migration-matrix.json "$RUNNER_TEMP/branch-migration-matrix.good.json"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('docs/agent/branch-migration-matrix.json')
+          data = json.loads(path.read_text(encoding='utf-8'))
+          data['branches'] = [
+              entry for entry in data['branches']
+              if entry.get('branch') != 'fix/p2-mrt-store-liveness-review'
+          ]
+          path.write_text(json.dumps(data, indent=1) + '\n', encoding='utf-8')
+          PY
+          set +e
+          python3 scripts/agent/verify_cloud_program.py \
+            --verify-remote-branches \
+            --output "$RUNNER_TEMP/cloud-contract-failure.json"
+          status=$?
+          set -e
+          mv "$RUNNER_TEMP/branch-migration-matrix.good.json" docs/agent/branch-migration-matrix.json
+          test "$status" -ne 0
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = json.loads(Path(os.environ['RUNNER_TEMP'], 'cloud-contract-failure.json').read_text())
+          assert data['decision'] == 'cloud-program-contract-fail', data
+          assert 'fix/p2-mrt-store-liveness-review' in data['failure_reason'], data
+          print('fail-closed evidence emission: PASS')
+          PY
+
+      - name: Run focused render-graph regression and static gates
+        shell: bash
+        env:
+          MTL_DEBUG_LAYER: '1'
+          MTL_SHADER_VALIDATION: '1'
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew scripts/agent/verify.sh
+          ./gradlew --no-daemon renderGraphBench \
+            test --tests 'com.metallum.client.metal.render.MetalRenderGraphBenchIntegrationTest'
+          bash scripts/agent/verify.sh static
+          python3 scripts/agent/verify_cloud_program.py \
+            --verify-remote-branches \
+            --expected-source-sha "$(git rev-parse HEAD)" \
+            --output "$RUNNER_TEMP/cloud-contract-pass.json"
+          python3 -m json.tool "$RUNNER_TEMP/cloud-contract-pass.json" >/dev/null
+
+      - name: Commit validated fix and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/one-shot-p2-mrt-review-fix.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix(rendergraph): make MRT store suppression attachment-local'
+          git push origin HEAD:fix/p2-mrt-store-liveness-review
