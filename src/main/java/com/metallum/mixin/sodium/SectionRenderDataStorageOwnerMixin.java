@@ -20,6 +20,15 @@ public abstract class SectionRenderDataStorageOwnerMixin implements SectionRende
     private int metallum$regionZ;
 
     @Unique
+    private int metallum$baseChunkX;
+
+    @Unique
+    private int metallum$baseChunkY;
+
+    @Unique
+    private int metallum$baseChunkZ;
+
+    @Unique
     private boolean metallum$translucent;
 
     @Override
@@ -27,11 +36,17 @@ public abstract class SectionRenderDataStorageOwnerMixin implements SectionRende
             final int regionX,
             final int regionY,
             final int regionZ,
+            final int baseChunkX,
+            final int baseChunkY,
+            final int baseChunkZ,
             final boolean translucent
     ) {
         metallum$regionX = regionX;
         metallum$regionY = regionY;
         metallum$regionZ = regionZ;
+        metallum$baseChunkX = baseChunkX;
+        metallum$baseChunkY = baseChunkY;
+        metallum$baseChunkZ = baseChunkZ;
         metallum$translucent = translucent;
         metallum$hasOwner = true;
     }
@@ -54,6 +69,21 @@ public abstract class SectionRenderDataStorageOwnerMixin implements SectionRende
     @Override
     public int metallum$regionZ() {
         return metallum$regionZ;
+    }
+
+    @Override
+    public int metallum$baseChunkX() {
+        return metallum$baseChunkX;
+    }
+
+    @Override
+    public int metallum$baseChunkY() {
+        return metallum$baseChunkY;
+    }
+
+    @Override
+    public int metallum$baseChunkZ() {
+        return metallum$baseChunkZ;
     }
 
     @Override

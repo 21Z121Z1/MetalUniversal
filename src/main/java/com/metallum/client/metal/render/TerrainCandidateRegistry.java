@@ -64,18 +64,39 @@ public final class TerrainCandidateRegistry {
         return ENABLED ? latest : null;
     }
 
+    /** Clears all world-owned state when Sodium changes or unloads its level. */
+    public static void reset() {
+        if (!ENABLED) {
+            return;
+        }
+        synchronized (TerrainCandidateRegistry.class) {
+            state = null;
+            latest = null;
+            opaqueSharedIndex = null;
+        }
+    }
+
     /** Sodium's opaque pass uses this renderer-owned shared index buffer. */
     public static void onOpaqueSharedIndexBuffer(final GpuBuffer buffer) {
         if (!ENABLED) {
             return;
         }
         synchronized (TerrainCandidateRegistry.class) {
-            if (buffer == null || buffer.isClosed() || buffer.size() <= 0L) {
+            if (!(buffer instanceof MetalGpuBuffer metalBuffer)
+                    || metalBuffer.isClosed() || metalBuffer.size() <= 0L) {
                 opaqueSharedIndex = null;
             } else {
-                opaqueSharedIndex = new TerrainCandidateSnapshot.AllocationIdentity(
-                        buffer, 0L, buffer.size(), 0L
-                );
+                try {
+                    MetalAllocationIdentity backing = metalBuffer.allocationIdentity();
+                    opaqueSharedIndex = new TerrainCandidateSnapshot.AllocationIdentity(
+                            metalBuffer, 0L, metalBuffer.size(), backing.generation(), backing
+                    );
+                } catch (RuntimeException exception) {
+                    opaqueSharedIndex = null;
+                }
+            }
+            if (state != null) {
+                state.refreshAll();
             }
         }
     }
@@ -171,13 +192,7 @@ public final class TerrainCandidateRegistry {
             final SectionRenderDataStorage storage,
             final int localIndex
     ) {
-        SectionKey key = new SectionKey(
-                owner.metallum$regionX(), owner.metallum$regionY(), owner.metallum$regionZ(),
-                localIndex,
-                owner.metallum$regionX() * 16 + LocalSectionIndex.unpackX(localIndex),
-                owner.metallum$regionY() * 16 + LocalSectionIndex.unpackY(localIndex),
-                owner.metallum$regionZ() * 16 + LocalSectionIndex.unpackZ(localIndex)
-        );
+        SectionKey key = keyOf(owner, localIndex);
         MutableSection section = machine.section(key);
         if (section == null || !section.ready) {
             return;
@@ -230,7 +245,7 @@ public final class TerrainCandidateRegistry {
         TerrainCandidateSnapshot.AllocationIdentity vertexIdentity = allocation(vertex);
         TerrainCandidateSnapshot.AllocationIdentity indexIdentity = allocation(index);
         if (indexIdentity == null && !localIndexMode && !owner.metallum$isTranslucent()) {
-            indexIdentity = opaqueSharedIndex;
+            indexIdentity = liveOpaqueSharedIndex();
         }
         if (vertexIdentity == null || indexIdentity == null) {
             return null;
@@ -269,7 +284,31 @@ public final class TerrainCandidateRegistry {
         if (offset < 0L || length <= 0L || stamp < 0L) {
             return null;
         }
-        return new TerrainCandidateSnapshot.AllocationIdentity(segment, offset, length, stamp);
+        return new TerrainCandidateSnapshot.AllocationIdentity(segment, offset, length, stamp, null);
+    }
+
+    private static TerrainCandidateSnapshot.AllocationIdentity liveOpaqueSharedIndex() {
+        TerrainCandidateSnapshot.AllocationIdentity identity = opaqueSharedIndex;
+        if (identity == null || !(identity.allocation() instanceof MetalGpuBuffer metalBuffer)
+                || identity.backingIdentity() == null) {
+            return null;
+        }
+        try {
+            if (metalBuffer.isClosed() || metalBuffer.size() != identity.length()) {
+                opaqueSharedIndex = null;
+                return null;
+            }
+            MetalAllocationIdentity live = metalBuffer.allocationIdentity();
+            if (!live.equals(identity.backingIdentity())
+                    || live.generation() != identity.generation()) {
+                opaqueSharedIndex = null;
+                return null;
+            }
+            return identity;
+        } catch (RuntimeException exception) {
+            opaqueSharedIndex = null;
+            return null;
+        }
     }
 
     record SectionKey(
@@ -281,6 +320,19 @@ public final class TerrainCandidateRegistry {
             int sectionY,
             int sectionZ
     ) {
+    }
+
+    static SectionKey keyOf(
+            final SectionRenderDataStorageOwner owner,
+            final int localIndex
+    ) {
+        return new SectionKey(
+                owner.metallum$regionX(), owner.metallum$regionY(), owner.metallum$regionZ(),
+                localIndex,
+                owner.metallum$baseChunkX() + LocalSectionIndex.unpackX(localIndex),
+                owner.metallum$baseChunkY() + LocalSectionIndex.unpackY(localIndex),
+                owner.metallum$baseChunkZ() + LocalSectionIndex.unpackZ(localIndex)
+        );
     }
 
     /**
@@ -324,13 +376,9 @@ public final class TerrainCandidateRegistry {
                     : TerrainCandidateSnapshot.TerrainPass.OPAQUE
                     : candidate.pass();
             if (candidate == null) {
-                if (storage instanceof SectionRenderDataStorageOwner) {
-                    section.meshes.remove(pass);
-                } else {
-                    section.meshes.values().removeIf(mesh -> mesh.storage == storage);
-                }
+                section.meshes.put(pass, new MeshState(key, pass, null, storage));
             } else {
-                section.meshes.put(pass, new MeshState(candidate, storage));
+                section.meshes.put(pass, new MeshState(key, pass, candidate, storage));
             }
         }
 
@@ -353,7 +401,7 @@ public final class TerrainCandidateRegistry {
                         && storage instanceof SectionRenderDataStorageOwner owner
                         && owner.metallum$hasOwner()) {
                     TerrainCandidateRegistry.onStorageMutation(
-                            storage, mesh.candidate.section().localIndex()
+                            storage, mesh.key.localIndex()
                     );
                 }
             }
@@ -408,10 +456,19 @@ public final class TerrainCandidateRegistry {
     }
 
     private static final class MeshState {
+        private final SectionKey key;
+        private final TerrainCandidateSnapshot.TerrainPass pass;
         private final TerrainCandidateSnapshot.Candidate candidate;
         private final Object storage;
 
-        private MeshState(final TerrainCandidateSnapshot.Candidate candidate, final Object storage) {
+        private MeshState(
+                final SectionKey key,
+                final TerrainCandidateSnapshot.TerrainPass pass,
+                final TerrainCandidateSnapshot.Candidate candidate,
+                final Object storage
+        ) {
+            this.key = key;
+            this.pass = pass;
             this.candidate = candidate;
             this.storage = storage;
         }

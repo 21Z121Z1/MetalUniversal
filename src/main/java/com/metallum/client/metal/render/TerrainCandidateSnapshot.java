@@ -77,13 +77,34 @@ public final class TerrainCandidateSnapshot {
     /**
      * Allocation identity copied from Sodium's live arena segment.  The
      * allocation object is retained as the producer-owned identity; offset,
-     * length and the per-segment generation reject allocator ABA reuse.
+     * length and the per-segment generation reject allocator ABA reuse.  The
+     * optional Metal backing identity is required for renderer-owned shared
+     * index buffers, whose backing can be swapped without changing the Java
+     * object.
      */
-    public record AllocationIdentity(Object allocation, long offset, long length, long generation) {
+    public record AllocationIdentity(
+            Object allocation,
+            long offset,
+            long length,
+            long generation,
+            MetalAllocationIdentity backingIdentity
+    ) {
+        public AllocationIdentity(
+                final Object allocation,
+                final long offset,
+                final long length,
+                final long generation
+        ) {
+            this(allocation, offset, length, generation, null);
+        }
+
         public AllocationIdentity {
             Objects.requireNonNull(allocation, "allocation");
             if (offset < 0L || length <= 0L || generation < 0L) {
                 throw new IllegalArgumentException("Invalid terrain allocation identity");
+            }
+            if (backingIdentity != null && generation != backingIdentity.generation()) {
+                throw new IllegalArgumentException("Allocation generation must match its Metal backing identity");
             }
         }
     }
