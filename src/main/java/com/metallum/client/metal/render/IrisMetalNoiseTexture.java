@@ -68,6 +68,7 @@ final class IrisMetalNoiseTexture implements AutoCloseable {
                     1,
                     1
             );
+            this.texture.registerValidationIdentity();
             this.view = (MetalGpuTextureView) device.createTextureView(this.texture);
             AddressMode addressMode = clamp ? AddressMode.CLAMP_TO_EDGE : AddressMode.REPEAT;
             FilterMode filterMode = blur ? FilterMode.LINEAR : FilterMode.NEAREST;

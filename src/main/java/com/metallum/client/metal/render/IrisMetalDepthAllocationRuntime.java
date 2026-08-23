@@ -130,6 +130,9 @@ public final class IrisMetalDepthAllocationRuntime {
                     width,
                     height
             );
+            if (replacementTexture instanceof MetalGpuTexture metalTexture) {
+                metalTexture.registerValidationIdentity();
+            }
             Object replacementView = createView(replacementTexture);
             texture.set(targets, replacementTexture);
             textureView.set(targets, replacementView);
