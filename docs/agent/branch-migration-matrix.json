@@ -434,7 +434,7 @@
   },
   {
    "branch": "feature/p3b-token-paired-performance",
-   "role": "active-stage-branch",
+   "role": "subsumed-by-canonical",
    "stages": [
     "P3"
    ],
@@ -443,7 +443,34 @@
     "bindingPathRuntime activation evidence in the authoritative report",
     "admission rule rejecting dormant token surfaces"
    ],
-   "disposition": "merge-to-canonical-only-after-exact-head-gates-pass"
+   "disposition": "subsumed-by-canonical (PR #37); paired harness and activation evidence now live on integration/iris-metal-next"
+  },
+  {
+   "branch": "fix/bsl-shadow-attachment-format",
+   "role": "active-regression-fix",
+   "stages": [
+    "P1",
+    "P3"
+   ],
+   "components": [
+    "exact-SHA BSL shadow attachment-format reproduction lane",
+    "planned authoritative shadow attachment/pipeline format mapping"
+   ],
+   "disposition": "active PR #38; diagnostic first, renderer fix and exact shader-pack gates required before merge"
+  },
+  {
+   "branch": "fix/p2-mrt-store-liveness-review",
+   "role": "active-correctness-hotfix",
+   "stages": [
+    "P2",
+    "C0"
+   ],
+   "components": [
+    "per-attachment deferred color-store kill proof for mixed MRT clear/load successors",
+    "IrisGraphBench mixed MRT regression oracle",
+    "fail-closed cloud-program evidence emission and branch-state bookkeeping"
+   ],
+   "disposition": "review-discovered correctness hotfix; merge only after exact-head hosted/physical Metal and production E2E gates pass"
   }
  ]
 }

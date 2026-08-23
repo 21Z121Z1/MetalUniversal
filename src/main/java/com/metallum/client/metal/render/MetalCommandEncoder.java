@@ -90,8 +90,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MemorySegment[] renderColorAttachments = new MemorySegment[0];
     private MetalGpuTexture[] renderColorTextures = new MetalGpuTexture[0];
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
-    private MemorySegment[] killedColorAttachments = new MemorySegment[0];
-    private MetalGpuTexture[] killedColorTextures = new MetalGpuTexture[0];
     private long deferredColorStorePixels;
     private int[] deferredColorStorePixelBytes = new int[0];
     // Bumped every time a fresh native encoder is installed. MetalRenderPass
@@ -322,8 +320,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         renderColorAttachments = new MemorySegment[0];
         renderColorTextures = new MetalGpuTexture[0];
         renderDepthAttachment = MemorySegment.NULL;
-        killedColorAttachments = new MemorySegment[0];
-        killedColorTextures = new MetalGpuTexture[0];
         deferredColorStorePixels = 0;
         deferredColorStorePixelBytes = new int[0];
         renderDepthTexture = null;
@@ -536,18 +532,24 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         boolean deferredDepthStore = DEFERRED_DEPTH_STORE
                 && depthTextureView != null
                 && ((MetalGpuTexture) depthTextureView.texture()).mtlDepthPixelFormat() != MTLPixelFormat.Invalid;
-        boolean hasIncomingColorClear = hasClearColor(clearColorEnabled);
         boolean[] colorStoreKilled = new boolean[colorAttachments.length];
         if (renderPassDescriptorV3Active()) {
             for (int index = 0; index < colorAttachments.length; index++) {
                 Object incomingTexture = colorTextureViews[index] == null ? null : colorTextureViews[index].texture();
-                colorStoreKilled[index] = hasIncomingColorClear
-                        && index < renderColorAttachments.length
+                // Store liveness is attachment-local. A CLEAR on another MRT slot
+                // cannot prove this slot dead: if this slot LOADs, it still depends
+                // on the predecessor store. This mirrors Metal's per-attachment
+                // load/store contract and keeps dontCare fail-closed.
+                boolean samePhysicalAttachment = index < renderColorAttachments.length
                         && index < renderColorTextures.length
                         && renderColorAttachments[index] != null
                         && !MetalPipelineSupport.sameHandle(
                                 renderColorAttachments[index], MemorySegment.NULL)
-                        && renderColorTextures[index] == incomingTexture
+                        && renderColorTextures[index] == incomingTexture;
+                colorStoreKilled[index] = canKillPriorColorStore(
+                                clearColorEnabled[index] != 0,
+                                samePhysicalAttachment
+                        )
                         && index < deferredColorStorePixelBytes.length
                         && deferredColorStorePixelBytes[index] > 0;
             }
@@ -610,8 +612,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         encoderGeneration++;
         currentEncoder = encoder;
         renderColorAttachments = colorAttachments;
-        killedColorAttachments = colorAttachments.clone();
-        killedColorTextures = renderColorTextures.clone();
         renderColorTextures = new MetalGpuTexture[colorTextureViews.length];
         for (int index = 0; index < colorTextureViews.length; index++) {
             renderColorTextures[index] = colorTextureViews[index] == null
@@ -686,6 +686,18 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns whether the immediate successor proves one specific MRT slot's
+     * predecessor contents dead. Metal load/store actions are attachment-local:
+     * a clear on a sibling slot is never evidence for this slot.
+     */
+    static boolean canKillPriorColorStore(
+            final boolean successorClearsThisSlot,
+            final boolean samePhysicalAttachment
+    ) {
+        return successorClearsThisSlot && samePhysicalAttachment;
     }
 
     private static int countKilled(final boolean[] flags) {

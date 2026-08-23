@@ -14,8 +14,22 @@ PROBE = ROOT / ".github/ci/HostedMetalCapabilityProbe.swift"
 HOSTED_GRADLE = ROOT / ".github/ci/HostedMetalGradle.init.gradle"
 PRESENTATION_TEST = ROOT / "src/test/java/com/metallum/client/metal/render/MetalDevicePresentationContractTest.java"
 
+FAILURE_OUTPUT = None
+FAILURE_SOURCE_SHA = None
+
 
 def fail(message: str) -> None:
+    if FAILURE_OUTPUT is not None:
+        FAILURE_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+        evidence = {
+            "decision": "cloud-program-contract-fail",
+            "source_sha": FAILURE_SOURCE_SHA,
+            "failure_reason": message,
+        }
+        FAILURE_OUTPUT.write_text(
+            json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     raise SystemExit(f"Cloud Metal program invariant failed: {message}")
 
 
@@ -147,11 +161,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    global FAILURE_OUTPUT, FAILURE_SOURCE_SHA
+    FAILURE_OUTPUT = args.output
+
     program = load(PROGRAM)
     matrix = load(MATRIX)
     p1 = load(P1)
 
     checked_out_sha = run_git("rev-parse", "HEAD").lower()
+    FAILURE_SOURCE_SHA = checked_out_sha
     require(re.fullmatch(r"[0-9a-f]{40}", checked_out_sha) is not None,
             f"checkout HEAD is not a full Git SHA: {checked_out_sha!r}")
     if args.expected_source_sha:

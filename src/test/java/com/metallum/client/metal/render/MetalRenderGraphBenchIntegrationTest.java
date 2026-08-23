@@ -56,11 +56,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 7. historyTwoPassesApart   store between two distant consumers is required
  * 8. deadAttachmentOverwrite written-never-read then fully overwritten
  * 9. killedColorStores       outgoing concrete store proven dead by full clear
- * 10. depthDeferredStoreSurvives   deferred depth store reaches memory when
+ * 10. mixedMrtClearLoad      one slot CLEAR must not kill a sibling slot whose
+ *                            successor action is LOAD
+ * 11. depthDeferredStoreSurvives   deferred depth store reaches memory when
  *                            only capture consumers follow (no clear proof)
- * 11. colorStoreSurvives     unrelated successors never prove a store dead;
+ * 12. colorStoreSurvives     unrelated successors never prove a store dead;
  *                            the readback consumer must observe the content
- * 12. presentConsumerKeepsFinalStores  adjacent sampling plus copy-capture
+ * 13. presentConsumerKeepsFinalStores  adjacent sampling plus copy-capture
  *                            consumers keep every final-framebuffer store
  *
  * When the system property metallum.rendergraph.output is set, the suite
@@ -677,6 +679,72 @@ final class MetalRenderGraphBenchIntegrationTest {
             }
         } finally {
             closeAll(baselineTextures);
+        }
+    }
+
+    @Test
+    void mixedMrtClearDoesNotKillLoadedSiblingStore() {
+        for (final String abiMode : ABI_MODES) {
+  withAbi(abiMode, () -> {
+      final String scenarioName = "mixedMrtClearLoad[" + abiMode + "]";
+      withScenario(scenarioName, () -> {
+          List<MetalGpuTexture> textures = createTextures(
+                  List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM),
+                  "bench-mixed-mrt-clear-load");
+          MetalGpuTexture cleared = textures.get(0);
+          MetalGpuTexture loaded = textures.get(1);
+          try {
+              RenderPipeline seedPipeline = solidPipeline(
+                      "mixed_mrt_seed",
+                      2,
+                      new float[] {1.0F, 0.0F, 0.0F, 1.0F},
+                      new float[] {0.0F, 1.0F, 0.0F, 1.0F},
+                      null,
+                      null
+              );
+              RenderPassDescriptor seed = RenderPassDescriptor.create(() -> "bench mixed mrt seed");
+              seed.withColorAttachment(view(cleared), Optional.of(new Vector4f(0.0F)));
+              seed.withColorAttachment(view(loaded), Optional.of(new Vector4f(0.0F)));
+              seed.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+              MetalRenderPass seedPass = (MetalRenderPass) encoder.createRenderPass(seed);
+              seedPass.setPipeline(seedPipeline);
+              seedPass.draw(3, 1, 0, 0);
+              encoder.submitRenderPass();
+
+              // The immediate successor clears slot 0 but LOADs slot 1.
+              // Only slot 0 proves the predecessor store dead. Slot 1
+              // must retain P1's green contents exactly.
+              RenderPassDescriptor mixed = RenderPassDescriptor.create(() -> "bench mixed mrt clear/load");
+              mixed.withColorAttachment(
+                      view(cleared),
+                      Optional.of(new Vector4f(0.0F, 0.0F, 1.0F, 1.0F))
+              );
+              mixed.withColorAttachment(view(loaded), Optional.empty());
+              mixed.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
+              encoder.createRenderPass(mixed);
+              encoder.submitRenderPass();
+              encoder.submit();
+              device.waitForSubmittedGpuWork();
+
+              assertRgba(readback(cleared), 0, 0, 255,
+                      "slot 0 clear is applied independently");
+              assertRgba(readback(loaded), 0, 255, 0,
+                      "slot 1 LOAD preserves the predecessor store despite sibling CLEAR");
+          } finally {
+              closeAll(textures);
+          }
+      });
+
+      Map<String, Object> telemetry = SCENARIOS.get(scenarioName);
+      long killed = ((Number) telemetry.get("colorStoreKilledBytes")).longValue();
+      if ("v3".equals(abiMode)) {
+          assertEquals((long) WIDTH * HEIGHT * Integer.BYTES, killed,
+                  "V3 may kill only the cleared slot's predecessor store");
+      } else {
+          assertEquals(0L, killed,
+                  "V2 uses concrete stores and reports no deferred-store kills");
+      }
+  });
         }
     }
 
