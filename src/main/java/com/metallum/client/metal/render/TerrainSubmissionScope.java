@@ -40,7 +40,22 @@ public final class TerrainSubmissionScope implements AutoCloseable {
             final int drawCount,
             final GpuBufferSlice commandSlice
     ) {
+        capture(pass, producerIdentity, commandAddress, drawCount, commandSlice, null);
+    }
+
+    /** Called only by Sodium's VK indirect producer mixin. */
+    public static void capture(
+            final RenderPass pass,
+            final Object producerIdentity,
+            final long commandAddress,
+            final int drawCount,
+            final GpuBufferSlice commandSlice,
+            final TerrainDrawMetadataStore metadataStore
+    ) {
         if (!TerrainSceneSnapshot.captureEnabled()) {
+            return;
+        }
+        if (TerrainSceneSnapshot.DRAW_METADATA_ENABLED && metadataStore == null) {
             return;
         }
         TerrainSubmissionScope scope = CURRENT.get();
@@ -54,8 +69,11 @@ public final class TerrainSubmissionScope implements AutoCloseable {
             return;
         }
         try {
+            List<TerrainDrawMetadata> metadata = metadataStore == null
+                    ? null
+                    : metadataStore.freeze(commands);
             scope.snapshot = TerrainSceneSnapshot.capture(
-                    metalPass, producerIdentity, commandSlice, commands
+                    metalPass, producerIdentity, commandSlice, commands, metadata
             );
         } catch (RuntimeException ignored) {
             // A missing/retired binding is a normal fail-closed condition.  Do

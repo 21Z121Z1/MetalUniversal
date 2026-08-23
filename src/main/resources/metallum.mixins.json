@@ -55,6 +55,8 @@
     "sodium.DefaultChunkRendererMetalFxMixin",
     "sodium.DefaultChunkRendererTerrainSceneMixin",
     "sodium.VKIndirectDrawBatchTerrainSceneMixin",
+    "sodium.SectionRenderDataStorageAccessor",
+    "sodium.GlBufferSegmentAccessor",
     "sodium.SodiumPreferredGraphicsApiMixin",
     "iris.IrisBootstrapCompatMixin",
     "iris.IrisPipelineFactoryMixin",

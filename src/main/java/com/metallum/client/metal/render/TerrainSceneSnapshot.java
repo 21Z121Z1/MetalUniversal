@@ -47,8 +47,16 @@ public final class TerrainSceneSnapshot {
             System.getProperty("metallum.opt.terrainGpuEncode", "false")
     );
 
+    /**
+     * Producer-side Sodium draw metadata.  This is deliberately independent
+     * from both ICB switches and is off unless explicitly requested.
+     */
+    public static final boolean DRAW_METADATA_ENABLED = Boolean.parseBoolean(
+            System.getProperty("metallum.opt.terrainDrawMetadata", "false")
+    );
+
     public static boolean captureEnabled() {
-        return ENABLED || ICB_ENABLED || GPU_ICB_ENABLED;
+        return ENABLED || ICB_ENABLED || GPU_ICB_ENABLED || DRAW_METADATA_ENABLED;
     }
 
     static final int MAX_VERTEX_BUFFERS = RenderPass.MAX_VERTEX_BUFFERS;
@@ -263,12 +271,27 @@ public final class TerrainSceneSnapshot {
         }
     }
 
-    record Draw(int ordinal, IrisMetalIndirectCommandStream.IndexedDraw arguments) {
+    record Draw(
+            int ordinal,
+            IrisMetalIndirectCommandStream.IndexedDraw arguments,
+            TerrainDrawMetadata metadata
+    ) {
+        Draw(
+                final int ordinal,
+                final IrisMetalIndirectCommandStream.IndexedDraw arguments
+        ) {
+            this(ordinal, arguments, null);
+        }
+
         Draw {
             if (ordinal < 0) {
                 throw new IllegalArgumentException("Terrain draw ordinal must be non-negative");
             }
             Objects.requireNonNull(arguments, "arguments");
+            if (metadata != null && (metadata.ordinal() != ordinal
+                    || !metadata.arguments().equals(arguments))) {
+                throw new IllegalArgumentException("Terrain draw metadata is not bound to its ordinal");
+            }
         }
     }
 
@@ -299,7 +322,17 @@ public final class TerrainSceneSnapshot {
                     && pipelineGeneration == state.pipelineGeneration
                     && indexType == state.indexType
                     && indexBuffer.sameBinding(state.indexBuffer)
-                    && draws.equals(currentDraws);
+                    && draws.equals(currentDraws)
+                    && metadataLive();
+        }
+
+        private boolean metadataLive() {
+            for (Draw draw : draws) {
+                if (draw.metadata() != null && !draw.metadata().contentGeneration().live()) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 
@@ -331,9 +364,19 @@ public final class TerrainSceneSnapshot {
             final GpuBufferSlice commandSlice,
             final List<IrisMetalIndirectCommandStream.IndexedDraw> commands
     ) {
+        return capture(pass, producerIdentity, commandSlice, commands, null);
+    }
+
+    static TerrainSceneSnapshot capture(
+            final MetalRenderPass pass,
+            final Object producerIdentity,
+            final GpuBufferSlice commandSlice,
+            final List<IrisMetalIndirectCommandStream.IndexedDraw> commands,
+            final List<TerrainDrawMetadata> metadata
+    ) {
         return capture(producerIdentity, pass.terrainSnapshotState(), ResourceSlice.ofGpuSlice(
                 commandSlice, VkDrawIndexedIndirectCommand.SIZEOF
-        ), commands);
+        ), commands, metadata);
     }
 
     static TerrainSceneSnapshot capture(
@@ -349,7 +392,16 @@ public final class TerrainSceneSnapshot {
             final ResourceSlice commandBuffer,
             final List<IrisMetalIndirectCommandStream.IndexedDraw> commands
     ) {
-        return capture(null, state, commandBuffer, commands);
+        return capture(null, state, commandBuffer, commands, null);
+    }
+
+    static TerrainSceneSnapshot capture(
+            final StateView state,
+            final ResourceSlice commandBuffer,
+            final List<IrisMetalIndirectCommandStream.IndexedDraw> commands,
+            final List<TerrainDrawMetadata> metadata
+    ) {
+        return capture(null, state, commandBuffer, commands, metadata);
     }
 
     static TerrainSceneSnapshot capture(
@@ -358,10 +410,27 @@ public final class TerrainSceneSnapshot {
             final ResourceSlice commandBuffer,
             final List<IrisMetalIndirectCommandStream.IndexedDraw> commands
     ) {
+        return capture(producerIdentity, state, commandBuffer, commands, null);
+    }
+
+    static TerrainSceneSnapshot capture(
+            final Object producerIdentity,
+            final StateView state,
+            final ResourceSlice commandBuffer,
+            final List<IrisMetalIndirectCommandStream.IndexedDraw> commands,
+            final List<TerrainDrawMetadata> metadata
+    ) {
         Objects.requireNonNull(commands, "commands");
+        if (DRAW_METADATA_ENABLED && metadata == null) {
+            throw new IllegalArgumentException("Terrain draw metadata is required when enabled");
+        }
+        if (metadata != null && metadata.size() != commands.size()) {
+            throw new IllegalArgumentException("Terrain draw metadata count does not match indexed draws");
+        }
         List<Draw> draws = new ArrayList<>(commands.size());
         for (int ordinal = 0; ordinal < commands.size(); ordinal++) {
-            draws.add(new Draw(ordinal, commands.get(ordinal)));
+            TerrainDrawMetadata drawMetadata = metadata == null ? null : metadata.get(ordinal);
+            draws.add(new Draw(ordinal, commands.get(ordinal), drawMetadata));
         }
         return new TerrainSceneSnapshot(state, commandBuffer, draws, producerIdentity);
     }
@@ -381,15 +450,26 @@ public final class TerrainSceneSnapshot {
     boolean sameIcbContent(final TerrainSceneSnapshot other) {
         return other != null
                 && state.sameIcbEmbeddedState(other.state)
-                && Objects.equals(draws, other.draws);
+                && Objects.equals(draws, other.draws)
+                && metadataLive()
+                && other.metadataLive();
     }
 
     boolean sameIcbContent(final IcbContent other) {
-        return other != null && other.matches(state, draws);
+        return other != null && other.matches(state, draws) && metadataLive();
     }
 
     IcbContent icbContent() {
         return new IcbContent(state, draws);
+    }
+
+    private boolean metadataLive() {
+        for (Draw draw : draws) {
+            if (draw.metadata() != null && !draw.metadata().contentGeneration().live()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Packs the immutable command records once for the native ICB encoder. */
@@ -425,6 +505,7 @@ public final class TerrainSceneSnapshot {
                 && current.allLive()
                 && commandBuffer.live()
                 && currentCommandBuffer.live()
-                && sceneGeneration == current.sceneGeneration();
+                && sceneGeneration == current.sceneGeneration()
+                && metadataLive();
     }
 }
