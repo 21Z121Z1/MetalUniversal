@@ -27,12 +27,19 @@ fallback reason.  A missing display refresh source uses the legacy
 `16,666,667 ns` value only as `conservative-60hz-fallback`; it is never marked
 as measured display timing.
 
-This slice does not read the pacing snapshot in any scheduling decision and
-does not alter rendering.  Snapshot objects are refreshed at most once every
+When `metallum.opt.terrainAdaptiveScheduling=true` and warmup has completed,
+`TerrainSchedulingController` uses `targetPresentInterval` as the single
+frame-budget and CPU/GPU pressure-threshold target.  It never uses the
+observed CPU frame duration or measured-present field to expand that target.
+An unavailable or malformed target falls back to `16,666,667 ns`, and each
+`FrameDecision` plus the optional terrain CSV records the target and source
+(`display-derived`, `conservative-fallback`, or `unavailable-fallback`).
+The default-disabled and warmup paths keep Sodium's original budget arguments.
+This policy wiring does not alter rendering or claim physical VRR/ProMotion
+performance. Snapshot objects are refreshed at most once every
 `TerrainSchedulingController.PACING_SNAPSHOT_CADENCE_FRAMES` observed frames
 (or immediately when refresh rate changes), so active observation does not
 allocate a snapshot and six value objects every frame.  The snapshot is available through
-`TerrainSchedulingController.FrameInputs.presentationPacing()` for a later,
-separately reviewed scheduler change.  Snapshot creation occurs only when the
-existing opt-in terrain observation path is active; the default disabled path
-remains a predictable no-op.
+`TerrainSchedulingController.FrameInputs.presentationPacing()`. Snapshot
+creation occurs only when the existing opt-in terrain observation path is
+active; the default disabled path remains a predictable no-op.

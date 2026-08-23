@@ -18,6 +18,12 @@ public final class TerrainSchedulingController {
     public static final long TARGET_FRAME_NANOS = 16_666_667L;
     /** Pacing evidence is sampled at this bounded cadence while observation is active. */
     public static final int PACING_SNAPSHOT_CADENCE_FRAMES = 8;
+    private static final long MIN_TARGET_FRAME_NANOS = 4_166_667L; // 240 Hz
+    private static final long MAX_TARGET_FRAME_NANOS = 33_333_333L; // 30 Hz
+    private static final String TARGET_SOURCE_DISPLAY_DERIVED = "display-derived";
+    private static final String TARGET_SOURCE_CONSERVATIVE_FALLBACK = "conservative-fallback";
+    private static final String TARGET_SOURCE_UNAVAILABLE_FALLBACK = "unavailable-fallback";
+    private static final String TARGET_SOURCE_SODIUM_DEFAULT = "sodium-default";
 
     private static final int DEFAULT_WARMUP_FRAMES = 30;
     private static final int FORWARD_BOOST_FRAMES = 12;
@@ -392,18 +398,30 @@ public final class TerrainSchedulingController {
 
     private FrameDecision computeDecision() {
         boolean adaptive = enabled && frameIndex > warmupFrames;
+        BudgetTarget budgetTarget = budgetTarget();
         if (!adaptive) {
-            return new FrameDecision(frameIndex, false, 0L, 0L, pressureLevel, false, turnDetected);
+            return new FrameDecision(
+                    frameIndex,
+                    false,
+                    0L,
+                    0L,
+                    pressureLevel,
+                    false,
+                    turnDetected,
+                    budgetTarget.frameNanos(),
+                    budgetTarget.source()
+            );
         }
         if (adaptiveFrameCounted != frameIndex) {
             adaptiveFrames++;
             adaptiveFrameCounted = frameIndex;
         }
-        long frameNanos = inputs.frameDurationNanos() > 0L
-                ? inputs.frameDurationNanos()
-                : TARGET_FRAME_NANOS;
+        long frameNanos = budgetTarget.frameNanos();
         long buildBudget = clampNanos(Math.round(frameNanos * 0.10), 1_500_000L, 8_000_000L);
-        long uploadBudget = clampNanos(Math.round(frameNanos * 0.08), 2_000_000L, 8_000_000L);
+        // The old 2 ms floor made 120 Hz upload authority identical to 60 Hz.
+        // Keep the existing ratio and upper bound while allowing the display
+        // target to remain authoritative at higher refresh rates.
+        long uploadBudget = clampNanos(Math.round(frameNanos * 0.08), 1_000_000L, 8_000_000L);
         double multiplier = switch (pressureLevel) {
             case 2 -> 0.50;
             case 1 -> 0.75;
@@ -418,26 +436,58 @@ public final class TerrainSchedulingController {
                 uploadBudget,
                 pressureLevel,
                 forwardBoostFrames > 0,
-                turnDetected
+                turnDetected,
+                budgetTarget.frameNanos(),
+                budgetTarget.source()
         );
     }
 
     private int rawPressure(final FrameInputs value) {
+        long targetFrameNanos = budgetTarget(value).frameNanos();
         int pressure = 0;
         if (value.backlogJobs() >= BACKLOG_SEVERE
-                || above(value.cpuFrameNanos(), TARGET_FRAME_NANOS, 1.60)
-                || above(value.gpuFrameNanos(), TARGET_FRAME_NANOS, 1.60)
+                || above(value.cpuFrameNanos(), targetFrameNanos, 1.60)
+                || above(value.gpuFrameNanos(), targetFrameNanos, 1.60)
                 || value.thermalState() >= 3
                 || value.memoryPressure() >= 0.92) {
             pressure = 2;
         } else if (value.backlogJobs() >= BACKLOG_CONSTRAINED
-                || above(value.cpuFrameNanos(), TARGET_FRAME_NANOS, 1.20)
-                || above(value.gpuFrameNanos(), TARGET_FRAME_NANOS, 1.20)
+                || above(value.cpuFrameNanos(), targetFrameNanos, 1.20)
+                || above(value.gpuFrameNanos(), targetFrameNanos, 1.20)
                 || value.thermalState() >= 2
                 || value.memoryPressure() >= 0.80) {
             pressure = 1;
         }
         return pressure;
+    }
+
+    private BudgetTarget budgetTarget() {
+        return budgetTarget(inputs);
+    }
+
+    private BudgetTarget budgetTarget(final FrameInputs value) {
+        if (!(enabled && frameIndex > warmupFrames)) {
+            return new BudgetTarget(TARGET_FRAME_NANOS, TARGET_SOURCE_SODIUM_DEFAULT);
+        }
+        PresentationPacingSnapshot pacing = value.presentationPacing();
+        PresentationPacingSnapshot.Value target = pacing == null
+                ? null
+                : pacing.targetPresentInterval();
+        if (target == null
+                || !target.available()
+                || target.measured()
+                || target.value() <= 0L
+                || !PresentationPacingSnapshot.NANOS_UNIT.equals(target.unit())) {
+            return new BudgetTarget(TARGET_FRAME_NANOS, TARGET_SOURCE_UNAVAILABLE_FALLBACK);
+        }
+        String source = target.fallbackReason() == null
+                && PresentationPacingSnapshot.REFRESH_RATE_PROVENANCE.equals(target.provenance())
+                ? TARGET_SOURCE_DISPLAY_DERIVED
+                : TARGET_SOURCE_CONSERVATIVE_FALLBACK;
+        return new BudgetTarget(
+                clampNanos(target.value(), MIN_TARGET_FRAME_NANOS, MAX_TARGET_FRAME_NANOS),
+                source
+        );
     }
 
     private void updatePressure(final int rawPressure) {
@@ -584,15 +634,61 @@ public final class TerrainSchedulingController {
             long uploadBudgetNanos,
             int pressureLevel,
             boolean forwardBoost,
-            boolean turnDetected
+            boolean turnDetected,
+            long budgetTargetFrameNanos,
+            String budgetTargetSource
     ) {
+        public FrameDecision(
+                final long frameIndex,
+                final boolean adaptive,
+                final long buildBudgetNanos,
+                final long uploadBudgetNanos,
+                final int pressureLevel,
+                final boolean forwardBoost,
+                final boolean turnDetected
+        ) {
+            this(
+                    frameIndex,
+                    adaptive,
+                    buildBudgetNanos,
+                    uploadBudgetNanos,
+                    pressureLevel,
+                    forwardBoost,
+                    turnDetected,
+                    TARGET_FRAME_NANOS,
+                    TARGET_SOURCE_SODIUM_DEFAULT
+            );
+        }
+
+        public FrameDecision {
+            if (budgetTargetFrameNanos <= 0L) {
+                throw new IllegalArgumentException("budgetTargetFrameNanos must be positive");
+            }
+            if (budgetTargetSource == null || budgetTargetSource.isBlank()) {
+                throw new IllegalArgumentException("budgetTargetSource must not be blank");
+            }
+        }
+
         private static FrameDecision defaults() {
-            return new FrameDecision(0L, false, 0L, 0L, 0, false, false);
+            return new FrameDecision(
+                    0L,
+                    false,
+                    0L,
+                    0L,
+                    0,
+                    false,
+                    false,
+                    TARGET_FRAME_NANOS,
+                    TARGET_SOURCE_SODIUM_DEFAULT
+            );
         }
 
         public boolean usesSodiumDefaults() {
             return !adaptive;
         }
+    }
+
+    private record BudgetTarget(long frameNanos, String source) {
     }
 
     public record FrameSnapshot(
@@ -629,6 +725,8 @@ public final class TerrainSchedulingController {
                     Integer.toString(decision.pressureLevel()),
                     Long.toString(decision.buildBudgetNanos()),
                     Long.toString(decision.uploadBudgetNanos()),
+                    Long.toString(decision.budgetTargetFrameNanos()),
+                    csvValue(decision.budgetTargetSource()),
                     Integer.toString(inputs.backlogJobs()),
                     Integer.toString(inputs.busyThreads()),
                     Integer.toString(inputs.totalThreads()),

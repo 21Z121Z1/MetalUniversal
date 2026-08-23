@@ -18,6 +18,8 @@ public final class TerrainSchedulingTelemetry implements AutoCloseable {
             "pressure_level",
             "build_budget_nanos",
             "upload_budget_nanos",
+            "budget_target_frame_nanos",
+            "budget_target_source",
             "backlog_jobs",
             "busy_threads",
             "total_threads",
