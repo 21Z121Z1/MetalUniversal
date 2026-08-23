@@ -1,0 +1,155 @@
+package com.metallum.client.metal.render;
+
+import org.joml.Matrix4f;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+
+final class TerrainCandidateRegistryContractTest {
+    @Test
+    void emptyAndUnuploadedSectionsAreExcludedUntilMeshUpload() {
+        TerrainCandidateRegistry.StateMachine machine = new TerrainCandidateRegistry.StateMachine();
+        TerrainCandidateRegistry.SectionKey key = key(4, 8, -2, 17);
+        machine.onSectionAdded(key);
+        machine.onBuilt(key);
+
+        assertEquals(0, snapshot(machine).candidates().size());
+
+        machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.OPAQUE, 1L), new Object());
+        assertEquals(1, snapshot(machine).candidates().size());
+
+        machine.onNotReady(key);
+        assertEquals(0, snapshot(machine).candidates().size());
+    }
+
+    @Test
+    void replacementPublishesTheNewPerAllocationGeneration() {
+        TerrainCandidateRegistry.StateMachine machine = new TerrainCandidateRegistry.StateMachine();
+        TerrainCandidateRegistry.SectionKey key = key(0, 0, 0, 3);
+        machine.onSectionAdded(key);
+        machine.onBuilt(key);
+        machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.OPAQUE, 1L), new Object());
+        assertEquals(1L, snapshot(machine).candidates().get(0).vertexAllocation().generation());
+
+        machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.OPAQUE, 2L), new Object());
+        assertEquals(2L, snapshot(machine).candidates().get(0).vertexAllocation().generation());
+    }
+
+    @Test
+    void freeAndRemoveInvalidateCandidates() {
+        TerrainCandidateRegistry.StateMachine machine = new TerrainCandidateRegistry.StateMachine();
+        TerrainCandidateRegistry.SectionKey key = key(2, 3, 4, 5);
+        machine.onSectionAdded(key);
+        machine.onBuilt(key);
+        Object storage = new Object();
+        machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.TRANSLUCENT, 1L), storage);
+        assertEquals(1, snapshot(machine).candidates().size());
+
+        machine.onMesh(key, null, storage);
+        assertEquals(0, snapshot(machine).candidates().size());
+
+        machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.TRANSLUCENT, 3L), storage);
+        machine.onSectionRemoved(key);
+        assertEquals(0, snapshot(machine).candidates().size());
+    }
+
+    @Test
+    void passIdentityIsPreservedForOpaqueAndTranslucentMeshes() {
+        TerrainCandidateRegistry.StateMachine machine = new TerrainCandidateRegistry.StateMachine();
+        TerrainCandidateRegistry.SectionKey key = key(1, 2, 3, 9);
+        machine.onSectionAdded(key);
+        machine.onBuilt(key);
+        machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.OPAQUE, 1L), new Object());
+        machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.TRANSLUCENT, 4L), new Object());
+
+        assertEquals(
+                List.of(TerrainCandidateSnapshot.TerrainPass.OPAQUE,
+                        TerrainCandidateSnapshot.TerrainPass.TRANSLUCENT),
+                snapshot(machine).candidates().stream().map(TerrainCandidateSnapshot.Candidate::pass).toList()
+        );
+    }
+
+    @Test
+    void cameraAndMatrixAreDeepCopiedAndFeatureOffIsZeroOp() {
+        Matrix4f source = new Matrix4f().identity().m30(12.0F);
+        TerrainCandidateSnapshot.VisibilityTransform transform =
+                TerrainCandidateSnapshot.VisibilityTransform.copyOf(source);
+        source.m30(99.0F);
+        assertEquals(12.0F, transform.m30());
+        assertEquals(12.0F, transform.toMatrix().m30());
+        TerrainCandidateRegistry.StateMachine machine = new TerrainCandidateRegistry.StateMachine();
+        TerrainCandidateRegistry.SectionKey key = key(0, 0, 0, 1);
+        machine.onSectionAdded(key);
+        machine.onBuilt(key);
+        machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.OPAQUE, 1L), new Object());
+        assertEquals(10.0, snapshot(machine).camera().x());
+        assertEquals(99.0, machine.snapshot(
+                new TerrainCandidateSnapshot.CameraPosition(99.0, 20.0, 30.0),
+                transform
+        ).camera().x());
+        if (!TerrainCandidateRegistry.enabled()) {
+            assertFalse(TerrainCandidateRegistry.enabled());
+            assertNull(TerrainCandidateRegistry.latestSnapshot());
+        }
+    }
+
+    private static TerrainCandidateSnapshot snapshot(final TerrainCandidateRegistry.StateMachine machine) {
+        return machine.snapshot(
+                new TerrainCandidateSnapshot.CameraPosition(10.0, 20.0, 30.0),
+                new TerrainCandidateSnapshot.VisibilityTransform(
+                        1, 0, 0, 0,
+                        0, 1, 0, 0,
+                        0, 0, 1, 0,
+                        0, 0, 0, 1
+                )
+        );
+    }
+
+    private static TerrainCandidateRegistry.SectionKey key(
+            final int regionX,
+            final int regionY,
+            final int regionZ,
+            final int localIndex
+    ) {
+        return new TerrainCandidateRegistry.SectionKey(
+                regionX, regionY, regionZ, localIndex,
+                regionX * 16 + 1, regionY * 16 + 2, regionZ * 16 + 3
+        );
+    }
+
+    private static TerrainCandidateSnapshot.Candidate candidate(
+            final TerrainCandidateRegistry.SectionKey key,
+            final TerrainCandidateSnapshot.TerrainPass pass,
+            final long generation
+    ) {
+        TerrainCandidateSnapshot.AllocationIdentity vertex =
+                new TerrainCandidateSnapshot.AllocationIdentity(
+                        new Object(), generation * 16L, 16L, generation
+                );
+        TerrainCandidateSnapshot.AllocationIdentity index =
+                new TerrainCandidateSnapshot.AllocationIdentity(
+                        new Object(), generation * 32L, 32L, generation
+                );
+        TerrainCandidateSnapshot.SectionIdentity section = new TerrainCandidateSnapshot.SectionIdentity(
+                key.regionX(), key.regionY(), key.regionZ(), key.localIndex(),
+                key.sectionX(), key.sectionY(), key.sectionZ()
+        );
+        return new TerrainCandidateSnapshot.Candidate(
+                section,
+                new TerrainCandidateSnapshot.Aabb(
+                        key.sectionX() * 16.0, key.sectionY() * 16.0, key.sectionZ() * 16.0,
+                        key.sectionX() * 16.0 + 16.0,
+                        key.sectionY() * 16.0 + 16.0,
+                        key.sectionZ() * 16.0 + 16.0
+                ),
+                pass,
+                pass == TerrainCandidateSnapshot.TerrainPass.TRANSLUCENT,
+                vertex,
+                index
+        );
+    }
+}
