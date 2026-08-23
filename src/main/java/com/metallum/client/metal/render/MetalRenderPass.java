@@ -193,7 +193,7 @@ final class MetalRenderPass implements RenderPassBackend {
         if (binding < 0 || !(slice.buffer() instanceof MetalGpuBuffer)) {
             throw new IllegalArgumentException("Invalid Metal storage buffer binding " + binding);
         }
-        ((MetalGpuBuffer) slice.buffer()).registerAllocationIdentity();
+        observeContractBuffer((MetalGpuBuffer) slice.buffer());
         storageBuffers.put(binding, slice);
         if (compiledPipeline != null) {
             for (MetalCompiledRenderPipeline.ResourceBinding resource : compiledPipeline.resources()) {
@@ -221,7 +221,7 @@ final class MetalRenderPass implements RenderPassBackend {
     @Override
     public void setUniform(final @NonNull String name, final @NonNull GpuBufferSlice value) {
         if (value.buffer() instanceof MetalGpuBuffer buffer) {
-            buffer.registerAllocationIdentity();
+            observeContractBuffer(buffer);
         }
         uniforms.put(name, value);
         markDescriptorDirty(name);
@@ -463,7 +463,7 @@ final class MetalRenderPass implements RenderPassBackend {
 
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
-        ((MetalGpuBuffer) commands.buffer()).registerAllocationIdentity();
+        observeContractBuffer((MetalGpuBuffer) commands.buffer());
 
         enc.drawPrimitivesIndirect(
                 primitiveType,
@@ -574,6 +574,16 @@ final class MetalRenderPass implements RenderPassBackend {
         );
     }
 
+    private void observeContractBuffer(final MetalGpuBuffer buffer) {
+        observeContractBuffer(contractPassToken, buffer::registerAllocationIdentity);
+    }
+
+    static void observeContractBuffer(final long contractPassToken, final Runnable observer) {
+        if (contractPassToken >= 0L) {
+            observer.run();
+        }
+    }
+
     private MTLRenderCommandEncoder renderEncoder() {
         if (nativeEncoder != null && commandEncoder.isCurrentEncoder(nativeEncoder)) {
             MetalGpuTimingRecorder.recordRenderEncoderLookup(true);
@@ -645,7 +655,7 @@ final class MetalRenderPass implements RenderPassBackend {
             }
 
             MetalGpuBuffer nativeVertexBuffer = (MetalGpuBuffer) vertexBuffer.buffer();
-            nativeVertexBuffer.registerAllocationIdentity();
+            observeContractBuffer(nativeVertexBuffer);
             int metalSlot = firstSlot + slot;
             enc.setBuffer(nativeVertexBuffer.nativeHandle(), vertexBuffer.offset(), metalSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
         }
@@ -693,7 +703,7 @@ final class MetalRenderPass implements RenderPassBackend {
             final MTLIndexType indexType,
             final int baseInstance
     ) {
-        nativeIndexBuffer.registerAllocationIdentity();
+        observeContractBuffer(nativeIndexBuffer);
         MTLPrimitiveType primitiveType = primitiveTopology();
 
         long indexOffsetBytes = (long) firstIndex * indexType.bytes;
@@ -903,7 +913,7 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         MetalGpuBuffer uniformBuffer = (MetalGpuBuffer) uniformSlice.buffer();
-        uniformBuffer.registerAllocationIdentity();
+        observeContractBuffer(uniformBuffer);
         enc.setBuffer(uniformBuffer.nativeHandle(), uniformSlice.offset(), binding.bindingIndex(), binding.stageMask());
     }
 
@@ -922,7 +932,7 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         MetalGpuBuffer texelBuffer = (MetalGpuBuffer) texelSlice.buffer();
-        texelBuffer.registerAllocationIdentity();
+        observeContractBuffer(texelBuffer);
         long pixelFormat = MTLPixelFormat.from(texelFormat).value;
         int pixelSize = texelFormat.blockSize();
         long texelByteLength = texelSlice.length();
