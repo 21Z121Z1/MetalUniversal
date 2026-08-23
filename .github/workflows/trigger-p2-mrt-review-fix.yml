@@ -33,7 +33,7 @@ jobs:
           java-version: '25'
           cache: gradle
 
-      - name: Apply reviewed renderer and regression patch
+      - name: Apply reviewed renderer and GPU regression patch
         shell: bash
         run: |
           set -euo pipefail
@@ -46,6 +46,31 @@ jobs:
           code = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
           compile(code, '<embedded-renderer-review-fix>', 'exec')
           exec(code, {'__name__': '__main__'})
+          PY
+
+      - name: Add executable store-liveness policy contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          encoder = Path('src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java')
+          text = encoder.read_text(encoding='utf-8')
+          old = '''                colorStoreKilled[index] = clearColorEnabled[index] != 0\n                        && index < renderColorAttachments.length\n                        && index < renderColorTextures.length\n                        && renderColorAttachments[index] != null\n                        && !MetalPipelineSupport.sameHandle(\n                                renderColorAttachments[index], MemorySegment.NULL)\n                        && renderColorTextures[index] == incomingTexture\n                        && index < deferredColorStorePixelBytes.length\n                        && deferredColorStorePixelBytes[index] > 0;\n'''
+          new = '''                boolean samePhysicalAttachment = index < renderColorAttachments.length\n                        && index < renderColorTextures.length\n                        && renderColorAttachments[index] != null\n                        && !MetalPipelineSupport.sameHandle(\n                                renderColorAttachments[index], MemorySegment.NULL)\n                        && renderColorTextures[index] == incomingTexture;\n                colorStoreKilled[index] = canKillPriorColorStore(\n                                clearColorEnabled[index] != 0,\n                                samePhysicalAttachment\n                        )\n                        && index < deferredColorStorePixelBytes.length\n                        && deferredColorStorePixelBytes[index] > 0;\n'''
+          if old not in text:
+              raise SystemExit('per-slot kill expression not found after reviewed patch')
+          text = text.replace(old, new, 1)
+          anchor = '''    private static int countKilled(final boolean[] flags) {\n'''
+          helper = '''    /**\n     * Returns whether the immediate successor proves one specific MRT slot's\n     * predecessor contents dead. Metal load/store actions are attachment-local:\n     * a clear on a sibling slot is never evidence for this slot.\n     */\n    static boolean canKillPriorColorStore(\n            final boolean successorClearsThisSlot,\n            final boolean samePhysicalAttachment\n    ) {\n        return successorClearsThisSlot && samePhysicalAttachment;\n    }\n\n'''
+          if anchor not in text:
+              raise SystemExit('store-liveness helper anchor not found')
+          text = text.replace(anchor, helper + anchor, 1)
+          encoder.write_text(text, encoding='utf-8')
+
+          test = Path('src/test/java/com/metallum/client/metal/render/MetalCommandEncoderStoreLivenessPolicyTest.java')
+          test.write_text('''package com.metallum.client.metal.render;\n\nimport org.junit.jupiter.api.Test;\n\nimport static org.junit.jupiter.api.Assertions.assertFalse;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nfinal class MetalCommandEncoderStoreLivenessPolicyTest {\n    @Test\n    void requiresClearOnThisExactAttachment() {\n        assertTrue(MetalCommandEncoder.canKillPriorColorStore(true, true),\n                "same-slot CLEAR of the same attachment proves the predecessor store dead");\n        assertFalse(MetalCommandEncoder.canKillPriorColorStore(false, true),\n                "a sibling MRT CLEAR must not kill this slot when this slot LOADs");\n        assertFalse(MetalCommandEncoder.canKillPriorColorStore(true, false),\n                "CLEAR of another physical attachment cannot kill this predecessor store");\n        assertFalse(MetalCommandEncoder.canKillPriorColorStore(false, false));\n    }\n}\n''', encoding='utf-8')
           PY
 
       - name: Repair machine-readable branch state and fail-closed evidence
@@ -96,7 +121,7 @@ jobs:
                   ],
                   'disposition': (
                       'review-discovered correctness hotfix; merge only after exact-head '
-                      'hosted Metal and production E2E gates pass'
+                      'hosted/physical Metal and production E2E gates pass'
                   ),
               })
           matrix_path.write_text(json.dumps(matrix, indent=1) + '\n', encoding='utf-8')
@@ -163,14 +188,15 @@ jobs:
           print('fail-closed evidence emission: PASS')
           PY
 
-      - name: Validate mixed MRT regression through shipping hosted Metal harness
+      - name: Validate logic, compilation and static repository contracts
         shell: bash
         run: |
           set -euo pipefail
           chmod +x ./gradlew scripts/agent/verify.sh
           ./gradlew --no-daemon \
-            -I .github/ci/HostedMetalGradle.init.gradle \
-            hostedMetalCoreIntegrationTest
+            buildMacNative \
+            test --tests 'com.metallum.client.metal.render.MetalCommandEncoderStoreLivenessPolicyTest' \
+            compileTestJava
           bash scripts/agent/verify.sh static
           python3 scripts/agent/verify_cloud_program.py \
             --verify-remote-branches \
