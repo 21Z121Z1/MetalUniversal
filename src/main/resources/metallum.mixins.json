@@ -53,6 +53,8 @@
     "sodium.DrawContextMixin",
     "sodium.ShaderChunkRendererMetalFxMixin",
     "sodium.DefaultChunkRendererMetalFxMixin",
+    "sodium.DefaultChunkRendererTerrainSceneMixin",
+    "sodium.VKIndirectDrawBatchTerrainSceneMixin",
     "sodium.SodiumPreferredGraphicsApiMixin",
     "iris.IrisBootstrapCompatMixin",
     "iris.IrisPipelineFactoryMixin",

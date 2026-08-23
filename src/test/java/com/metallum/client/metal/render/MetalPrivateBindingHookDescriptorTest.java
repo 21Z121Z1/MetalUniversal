@@ -7,6 +7,7 @@ import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.FieldNode;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -14,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Pins the bytecode call sites consumed by the P1c token-native redirectors.
@@ -37,6 +39,14 @@ final class MetalPrivateBindingHookDescriptorTest {
                     + "Lcom/mojang/blaze3d/textures/GpuSampler;)V";
     private static final String BIND_STORAGE_IMAGE =
             "(Ljava/lang/String;Lcom/mojang/blaze3d/textures/GpuTextureView;)V";
+    private static final String MULTI_DRAW_BATCH =
+            "net/caffeinemc/mods/sodium/client/gpu/device/batch/MultiDrawBatch";
+    private static final String DRAW_CONTEXT =
+            "(Lnet/caffeinemc/mods/sodium/client/gpu/device/context/DrawContext;)V";
+    private static final String VK_INDIRECT_BATCH =
+            "net/caffeinemc/mods/sodium/client/gpu/device/batch/VKIndirectDrawBatch";
+    private static final String DRAW_INDEXED_INDIRECT =
+            "(Lcom/mojang/blaze3d/buffers/GpuBufferSlice;I)V";
 
     @Test
     void sodiumTerrainStillHasTheFourFixedBindingCallSites() {
@@ -58,6 +68,39 @@ final class MetalPrivateBindingHookDescriptorTest {
         assertEquals(List.of("u_LightTex", "u_BlockTex"),
                 invocationStringKeys(render, RENDER_PASS, "bindTexture", BIND_TEXTURE),
                 "the two texture ordinals no longer map to u_LightTex then u_BlockTex");
+    }
+
+    @Test
+    void sodiumTerrainProducerStillHasOneBatchDrawBoundary() {
+        ClassNode sodium = load("net/caffeinemc/mods/sodium/client/render/chunk/DefaultChunkRenderer");
+        MethodNode render = sodium.methods.stream()
+                .filter(method -> method.name.equals("render"))
+                .filter(method -> (method.access & (Opcodes.ACC_BRIDGE | Opcodes.ACC_SYNTHETIC)) == 0)
+                .findFirst()
+                .orElseThrow();
+
+        assertEquals(1, invocationCount(render, MULTI_DRAW_BATCH, "draw", DRAW_CONTEXT),
+                "terrain snapshot scope must wrap Sodium's single producer batch call");
+    }
+
+    @Test
+    void sodiumIndirectProducerStillOwnsTheSingleUploadedCommandCall() {
+        ClassNode indirect = load(VK_INDIRECT_BATCH);
+        MethodNode draw = indirect.methods.stream()
+                .filter(method -> method.name.equals("draw"))
+                .filter(method -> method.desc.contains("DrawContext"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(1, invocationCount(draw, RENDER_PASS, "drawIndexedIndirect", DRAW_INDEXED_INDIRECT),
+                "VKIndirectDrawBatch.draw must keep one RenderPass indirect submission");
+        FieldNode commands = indirect.fields.stream()
+                .filter(field -> field.name.equals("pCommands"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("J", commands.desc);
+        assertTrue((commands.access & Opcodes.ACC_PRIVATE) != 0);
+        assertTrue((commands.access & Opcodes.ACC_FINAL) != 0);
+
     }
 
     @Test

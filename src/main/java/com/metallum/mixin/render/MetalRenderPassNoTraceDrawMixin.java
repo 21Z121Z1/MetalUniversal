@@ -86,6 +86,16 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
             int baseInstance
     );
 
+    @Invoker("terrainSnapshotAuthorized")
+    protected abstract boolean metallum$terrainSnapshotAuthorized(GpuBufferSlice commands, int drawCount);
+
+    @Invoker("submitIndexedIndirect")
+    protected abstract void metallum$submitIndexedIndirect(
+            MTLPrimitiveType primitiveType,
+            GpuBufferSlice commands,
+            int drawCount
+    );
+
     @Inject(method = "drawIndexed(IIIII)V", at = @At("HEAD"), cancellable = true)
     private void metallum$drawIndexedWithoutTraceObjects(
             final int indexCount,
@@ -254,6 +264,14 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
                     commands.length(),
                     drawCount
             );
+            ci.cancel();
+            return;
+        }
+        if (com.metallum.client.metal.render.TerrainSceneSnapshot.ENABLED
+                && this.metallum$terrainSnapshotAuthorized(commands, drawCount)) {
+            // The authorized snapshot preserves the same single native
+            // indirect submission; it never expands the command list.
+            this.metallum$submitIndexedIndirect(primitiveType, commands, drawCount);
             ci.cancel();
             return;
         }
