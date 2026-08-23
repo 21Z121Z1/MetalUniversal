@@ -4,6 +4,7 @@ import com.metallum.client.metal.render.TerrainSceneSnapshot;
 import com.metallum.client.metal.render.TerrainSubmissionScope;
 import com.metallum.client.metal.render.TerrainIcbOwner;
 import com.metallum.client.metal.render.TerrainIcbProducer;
+import com.metallum.client.metal.render.TerrainDrawMetadataStore;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -19,13 +20,27 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /** Copies the packed command records at Sodium's real indirect producer. */
 @Mixin(VKIndirectDrawBatch.class)
-public abstract class VKIndirectDrawBatchTerrainSceneMixin implements TerrainIcbProducer {
+public abstract class VKIndirectDrawBatchTerrainSceneMixin
+        implements TerrainIcbProducer, TerrainDrawMetadataBatch {
     @Shadow
     @Final
     private long pCommands;
 
     @Unique
     private TerrainIcbOwner metallum$terrainIcbOwner;
+
+    @Unique
+    private TerrainDrawMetadataStore metallum$terrainDrawMetadata;
+
+    @Override
+    public TerrainDrawMetadataStore metallum$terrainDrawMetadata() {
+        return this.metallum$terrainDrawMetadata;
+    }
+
+    @Override
+    public void metallum$setTerrainDrawMetadata(final TerrainDrawMetadataStore store) {
+        this.metallum$terrainDrawMetadata = store;
+    }
 
     @Override
     public TerrainIcbOwner metallum$terrainIcbOwner() {
@@ -42,6 +57,7 @@ public abstract class VKIndirectDrawBatchTerrainSceneMixin implements TerrainIcb
             this.metallum$terrainIcbOwner.close();
             this.metallum$terrainIcbOwner = null;
         }
+        this.metallum$terrainDrawMetadata = null;
     }
 
     @Inject(method = "delete", at = @At("HEAD"))
@@ -66,7 +82,8 @@ public abstract class VKIndirectDrawBatchTerrainSceneMixin implements TerrainIcb
     ) {
         if (TerrainSceneSnapshot.captureEnabled()) {
             TerrainSubmissionScope.capture(
-                    pass, this, this.pCommands, drawCount, commandSlice
+                    pass, this, this.pCommands, drawCount, commandSlice,
+                    this.metallum$terrainDrawMetadata
             );
         }
         original.call(pass, commandSlice, drawCount);
