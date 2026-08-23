@@ -15,6 +15,7 @@ public final class MTLCommandBuffer {
     private boolean presentEncodeCalled;
     private boolean presentSubmitted;
     private boolean presentCompletionRecorded;
+    private long nativePresentationTelemetryId;
 
     MTLCommandBuffer(final MemorySegment handle) {
         this(handle, false);
@@ -180,7 +181,9 @@ public final class MTLCommandBuffer {
     ) {
         MetalPresentationTelemetry.recordEncodeCall();
         presentEncodeCalled = true;
-        MetalNativeBridge.MTLCommandBuffer_encodePresentTextureToDrawable(handle(), layer, sourceTexture, globalFence);
+        nativePresentationTelemetryId = MetalNativeBridge.MTLCommandBuffer_encodePresentTextureToDrawable(
+                handle(), layer, sourceTexture, globalFence
+        );
     }
 
     public void commit() {
@@ -261,6 +264,10 @@ public final class MTLCommandBuffer {
                 && MetalNativeBridge.MTLCommandBuffer_isCompleted(handle()) == 1) {
             recordMetal4Completion();
         }
+        if (presentEncodeCalled && !presentSubmitted && nativePresentationTelemetryId > 0L) {
+            MetalNativeBridge.metallum_presentation_cancel(nativePresentationTelemetryId);
+            nativePresentationTelemetryId = 0L;
+        }
         MetalNativeBridge.metallum_release_object(handle);
         handle = MemorySegment.NULL;
     }
@@ -286,6 +293,9 @@ public final class MTLCommandBuffer {
     private void recordPresentSubmitted() {
         if (presentEncodeCalled && !presentSubmitted) {
             presentSubmitted = true;
+            // After commit the native presented/completion handlers own this
+            // id; Java must not cancel it when the wrapper is later closed.
+            nativePresentationTelemetryId = 0L;
             MetalPresentationTelemetry.recordSubmitted();
         }
     }
