@@ -89,6 +89,81 @@ public final class IrisMetalOptimizationBootstrap {
         IrisMetalExperimentalOptimizer.clear();
     }
 
+    /** Returns whether a receipt was bound to the allocation set being reallocated. */
+    static boolean receiptBelongsToTargets(
+            final IrisMetalOptimizationPlan.AttachmentLifetimeReceipt receipt,
+            final long oldStamp
+    ) {
+        return receipt != null && receipt.targetEpoch() == oldStamp;
+    }
+
+    /** Immediately retires the active physical receipt after target reallocation. */
+    static void onTargetsReallocated(final IrisMetalRenderTargets targets, final long oldStamp) {
+        if (targets == null) {
+            return;
+        }
+        IrisMetalOptimizationPlan plan = IrisMetalExperimentalOptimizer.active();
+        IrisMetalOptimizationPlan.AttachmentLifetimeReceipt receipt =
+                plan == null ? null : plan.attachmentLifetimeReceipt();
+        if (!receiptBelongsToTargets(receipt, oldStamp)) {
+            return;
+        }
+        long newStamp = targets.allocationStamp();
+        String signature = IrisMetalAttachmentLifetimeCompiler.targetSignature(targets);
+        IrisMetalExperimentalOptimizer.publishAttachmentLifetimeReceipt(
+                plan,
+                IrisMetalAttachmentLifetimeCompiler.staleReceipt(
+                        receipt, newStamp, signature
+                )
+        );
+    }
+
+    /**
+     * Binds the immutable logical receipt to live target allocations. This is
+     * intentionally called only after target creation/resize; creation-time
+     * planning remains physical-identity free.
+     */
+    static void onPostChainTargetsReady(
+            final IrisMetalPostChain chain,
+            final IrisMetalRenderTargets targets
+    ) {
+        if (chain == null || targets == null) {
+            return;
+        }
+        IrisMetalOptimizationPlan plan = IrisMetalExperimentalOptimizer.active();
+        if (plan == null) {
+            return;
+        }
+        if (plan.chainGeneration() != chain.generation()) {
+            IrisMetalExperimentalOptimizer.clear();
+            return;
+        }
+        long targetEpoch = targets.allocationStamp();
+        IrisMetalOptimizationPlan.AttachmentLifetimeReceipt existing = plan.attachmentLifetimeReceipt();
+        if (existing != null
+                && existing.targetEpoch() == targetEpoch
+                && !"STALE_UNRESOLVED".equals(existing.status())) {
+            return;
+        }
+        String signature = IrisMetalAttachmentLifetimeCompiler.targetSignature(targets);
+        try {
+            IrisMetalOptimizationPlan.AttachmentLifetimeReceipt receipt =
+                    IrisMetalAttachmentLifetimeCompiler.compile(plan, chain, targets);
+            IrisMetalExperimentalOptimizer.publishAttachmentLifetimeReceipt(plan, receipt);
+        } catch (RuntimeException failure) {
+            IrisMetalExperimentalOptimizer.publishAttachmentLifetimeReceipt(
+                    plan,
+                    IrisMetalAttachmentLifetimeCompiler.unresolvedReceipt(
+                            plan.chainGeneration(), targetEpoch, signature, "compiler-failure"
+                    )
+            );
+            Metallum.LOGGER.warn(
+                    "[metallum-iris] attachment lifetime receipt failed closed; execution remains conservative",
+                    failure
+            );
+        }
+    }
+
     public static boolean depthtex1Required() {
         IrisMetalOptimizationPlan plan = IrisMetalExperimentalOptimizer.active();
         return plan == null || plan.resourceLiveness().depthtex1Required();
