@@ -43,11 +43,11 @@ struct NativePresentationTelemetryStateTest {
               "out-of-order presented timestamp does not overwrite the latest interval")
         check(state.framesInFlight == 0, "out-of-order callback still resolves the drawable")
 
-let encodeThenCloseID = state.schedulePresentation()
-check(state.framesInFlight == 1, "encode reserves one pending drawable")
-check(state.resolvePresentation(encodeThenCloseID), "close without commit cancels the pending drawable")
-check(!state.resolvePresentation(encodeThenCloseID), "close cancellation is idempotent with a later callback")
-check(state.framesInFlight == 0, "failed/cancelled drawable cannot make count negative")
+        let encodeThenCloseID = state.schedulePresentation()
+        check(state.framesInFlight == 1, "encode reserves one pending drawable")
+        check(state.resolvePresentation(encodeThenCloseID), "close without commit cancels the pending drawable")
+        check(!state.resolvePresentation(encodeThenCloseID), "close cancellation is idempotent with a later callback")
+        check(state.framesInFlight == 0, "failed/cancelled drawable cannot make count negative")
 
         print("NativePresentationTelemetryStateTest: PASS")
     }
