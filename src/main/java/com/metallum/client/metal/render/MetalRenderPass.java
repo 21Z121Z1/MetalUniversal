@@ -193,6 +193,7 @@ final class MetalRenderPass implements RenderPassBackend {
         if (binding < 0 || !(slice.buffer() instanceof MetalGpuBuffer)) {
             throw new IllegalArgumentException("Invalid Metal storage buffer binding " + binding);
         }
+        ((MetalGpuBuffer) slice.buffer()).registerAllocationIdentity();
         storageBuffers.put(binding, slice);
         if (compiledPipeline != null) {
             for (MetalCompiledRenderPipeline.ResourceBinding resource : compiledPipeline.resources()) {
@@ -219,6 +220,9 @@ final class MetalRenderPass implements RenderPassBackend {
 
     @Override
     public void setUniform(final @NonNull String name, final @NonNull GpuBufferSlice value) {
+        if (value.buffer() instanceof MetalGpuBuffer buffer) {
+            buffer.registerAllocationIdentity();
+        }
         uniforms.put(name, value);
         markDescriptorDirty(name);
         if ("DynamicTransforms".equals(name) || "Projection".equals(name)) {
@@ -459,6 +463,7 @@ final class MetalRenderPass implements RenderPassBackend {
 
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
+        ((MetalGpuBuffer) commands.buffer()).registerAllocationIdentity();
 
         enc.drawPrimitivesIndirect(
                 primitiveType,
@@ -551,12 +556,12 @@ final class MetalRenderPass implements RenderPassBackend {
         Map<String, String> boundResources = new java.util.LinkedHashMap<>();
         for (Map.Entry<String, TextureViewAndSampler> entry : samplers.entrySet()) {
             if (entry.getValue().textureView().texture() instanceof MetalGpuTexture texture) {
-                boundResources.put(entry.getKey(), texture.getLabel() + "@" + texture.validationResourceId());
+                boundResources.put(entry.getKey(), texture.getLabel() + "@" + texture.allocationId());
             }
         }
         for (Map.Entry<String, GpuTextureView> entry : storageImages.entrySet()) {
             if (entry.getValue().texture() instanceof MetalGpuTexture texture) {
-                boundResources.put(entry.getKey(), texture.getLabel() + "@" + texture.validationResourceId());
+                boundResources.put(entry.getKey(), texture.getLabel() + "@" + texture.allocationId());
             }
         }
         RenderContractRuntime.recordProducer(
@@ -640,6 +645,7 @@ final class MetalRenderPass implements RenderPassBackend {
             }
 
             MetalGpuBuffer nativeVertexBuffer = (MetalGpuBuffer) vertexBuffer.buffer();
+            nativeVertexBuffer.registerAllocationIdentity();
             int metalSlot = firstSlot + slot;
             enc.setBuffer(nativeVertexBuffer.nativeHandle(), vertexBuffer.offset(), metalSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
         }
@@ -687,6 +693,7 @@ final class MetalRenderPass implements RenderPassBackend {
             final MTLIndexType indexType,
             final int baseInstance
     ) {
+        nativeIndexBuffer.registerAllocationIdentity();
         MTLPrimitiveType primitiveType = primitiveTopology();
 
         long indexOffsetBytes = (long) firstIndex * indexType.bytes;
@@ -896,6 +903,7 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         MetalGpuBuffer uniformBuffer = (MetalGpuBuffer) uniformSlice.buffer();
+        uniformBuffer.registerAllocationIdentity();
         enc.setBuffer(uniformBuffer.nativeHandle(), uniformSlice.offset(), binding.bindingIndex(), binding.stageMask());
     }
 
@@ -914,6 +922,7 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         MetalGpuBuffer texelBuffer = (MetalGpuBuffer) texelSlice.buffer();
+        texelBuffer.registerAllocationIdentity();
         long pixelFormat = MTLPixelFormat.from(texelFormat).value;
         int pixelSize = texelFormat.blockSize();
         long texelByteLength = texelSlice.length();

@@ -38,6 +38,7 @@ import java.util.stream.StreamSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Real Metal texture capture through the production render-contract boundary. */
@@ -290,12 +291,18 @@ final class MetalRenderContractGpuIntegrationTest {
         MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
                 "eager-disabled", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1
         );
+        MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
+                () -> "eager-disabled-buffer", GpuBuffer.USAGE_MAP_WRITE, 16L
+        );
         try {
             texture.registerValidationIdentity();
+            buffer.registerAllocationIdentity();
             assertTrue(RenderContractRuntime.enabled(), "the recorder must remain live for this disabled-switch test");
+            assertNotEquals(texture.allocationId(), buffer.allocationId());
             assertEquals(0L, lifecycleCount(manifest(), "ALLOCATE", "eager-disabled"));
         } finally {
             texture.close();
+            buffer.close();
         }
     }
 
@@ -324,6 +331,34 @@ final class MetalRenderContractGpuIntegrationTest {
         JsonObject closed = manifest();
         assertEquals(1L, lifecycleCount(closed, "INVALIDATE", "eager-mip-test", 0));
         assertEquals(1L, lifecycleCount(closed, "INVALIDATE", "eager-mip-test", 1));
+    }
+
+    @Test
+    void authoritativeBufferBackingSwapRetiresAndReallocatesGeneration() throws Exception {
+        int dynamicUsage = GpuBuffer.USAGE_UNIFORM
+                | GpuBuffer.USAGE_COPY_DST
+                | GpuBuffer.USAGE_MAP_WRITE;
+        MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
+                () -> "identity-buffer", dynamicUsage, 16L
+        );
+        buffer.registerAllocationIdentity();
+        try {
+            JsonObject initial = manifest();
+            assertEquals(1L, lifecycleCount(initial, "ALLOCATE", "identity-buffer"));
+            assertEquals(0L, lifecycleCount(initial, "INVALIDATE", "identity-buffer"));
+
+            ByteBuffer update = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+            update.putLong(0x0102030405060708L).putLong(0x1112131415161718L).flip();
+            encoder.writeToBuffer(buffer.slice(), update);
+
+            JsonObject swapped = manifest();
+            assertEquals(2L, lifecycleCount(swapped, "ALLOCATE", "identity-buffer"));
+            assertEquals(1L, lifecycleCount(swapped, "INVALIDATE", "identity-buffer"));
+        } finally {
+            buffer.close();
+        }
+        JsonObject closed = manifest();
+        assertEquals(2L, lifecycleCount(closed, "INVALIDATE", "identity-buffer"));
     }
 
     private JsonObject manifest() throws Exception {
