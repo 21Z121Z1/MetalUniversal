@@ -1,0 +1,73 @@
+name: trigger reviewed P2 MRT fix
+
+on:
+  pull_request:
+    branches:
+      - integration/iris-metal-next
+    paths:
+      - '.github/workflows/trigger-p2-mrt-review-fix.yml'
+      - '.github/workflows/one-shot-p2-mrt-review-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: github.event.pull_request.head.ref == 'fix/p2-mrt-store-liveness-review'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/p2-mrt-store-liveness-review
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      - name: Apply reviewed patch embedded in staging workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          src = Path('.github/workflows/one-shot-p2-mrt-review-fix.yml').read_text(encoding='utf-8')
+          start = src.index("          python3 - <<'PY'\n") + len("          python3 - <<'PY'\n")
+          end = src.index("          PY\n", start)
+          lines = src[start:end].splitlines()
+          code = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+          compile(code, '<embedded-review-fix>', 'exec')
+          exec(code, {'__name__': '__main__'})
+          PY
+
+      - name: Validate mixed MRT regression and repository contracts
+        shell: bash
+        env:
+          MTL_DEBUG_LAYER: '1'
+          MTL_SHADER_VALIDATION: '1'
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew scripts/agent/verify.sh
+          ./gradlew --no-daemon renderGraphBench \
+            test --tests 'com.metallum.client.metal.render.MetalRenderGraphBenchIntegrationTest'
+          bash scripts/agent/verify.sh static
+          python3 scripts/agent/verify_cloud_program.py \
+            --verify-remote-branches \
+            --expected-source-sha "$(git rev-parse HEAD)" \
+            --output "$RUNNER_TEMP/cloud-contract.json"
+          python3 -m json.tool "$RUNNER_TEMP/cloud-contract.json" >/dev/null
+
+      - name: Commit only the validated production changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/one-shot-p2-mrt-review-fix.yml
+          rm .github/workflows/trigger-p2-mrt-review-fix.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix(rendergraph): make MRT store suppression attachment-local'
+          git push origin HEAD:fix/p2-mrt-store-liveness-review
