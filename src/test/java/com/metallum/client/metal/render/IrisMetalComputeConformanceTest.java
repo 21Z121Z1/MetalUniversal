@@ -1,7 +1,10 @@
 package com.metallum.client.metal.render;
 
 import com.google.common.collect.ImmutableList;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -25,9 +28,11 @@ import java.lang.foreign.MemorySegment;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.BitSet;
 import java.util.Map;
+import java.util.stream.StreamSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -108,6 +113,60 @@ final class IrisMetalComputeConformanceTest {
         } finally {
             MetalFxManager.close();
             RenderSystem.shutdownRenderer();
+        }
+    }
+
+    @Test
+    void eagerCustomImageResourcesHaveGenerationLifecycle() throws Exception {
+        String previousEnabled = System.getProperty("metallum.renderContract.enabled");
+        Path output = Files.createTempDirectory("iris-eager-resource-contract-");
+        System.setProperty("metallum.renderContract.enabled", "true");
+        RenderContractRuntime.start(output, "iris-eager-resource-lifecycle");
+        Iris.testing = true;
+        ShaderPack pack = new ShaderPack(fixturePath(), environmentDefines(), false);
+
+        MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
+        assertFalse(MetalNativeBridge.isNullHandle(nativeDevice));
+        ShaderSource fallback = (identifier, type) -> null;
+        MetalDevice device = new MetalDevice(
+                fallback,
+                new GpuDebugOptions(2, true, true, true),
+                nativeDevice,
+                MemorySegment.NULL,
+                "Iris eager resource lifecycle device",
+                MemorySegment.NULL
+        );
+        try {
+            try (IrisMetalComputeResources computeResources = new IrisMetalComputeResources(
+                    device, pack, WIDTH, HEIGHT
+            )) {
+                JsonObject initial = manifest(output);
+                assertEquals(1L, lifecycleCount(
+                        initial, "ALLOCATE", "metallum:iris_image/contractImage"
+                ));
+
+                computeResources.resize(RESIZED_WIDTH, RESIZED_HEIGHT);
+                JsonObject resized = manifest(output);
+                assertEquals(2L, lifecycleCount(
+                        resized, "ALLOCATE", "metallum:iris_image/contractImage"
+                ));
+                assertEquals(1L, lifecycleCount(
+                        resized, "INVALIDATE", "metallum:iris_image/contractImage"
+                ));
+            }
+            JsonObject closed = manifest(output);
+            assertEquals(2L, lifecycleCount(
+                    closed, "INVALIDATE", "metallum:iris_image/contractImage"
+            ));
+        } finally {
+            RenderContractRuntime.close();
+            device.close();
+            if (previousEnabled == null) {
+                System.clearProperty("metallum.renderContract.enabled");
+            } else {
+                System.setProperty("metallum.renderContract.enabled", previousEnabled);
+            }
+            deleteRecursively(output);
         }
     }
 
@@ -370,6 +429,39 @@ final class IrisMetalComputeConformanceTest {
         var resource = IrisMetalComputeConformanceTest.class.getResource("/iris-conformance-compute/shaders");
         assertNotNull(resource, "missing Iris compute conformance fixture");
         return Path.of(resource.toURI());
+    }
+
+    private static JsonObject manifest(final Path output) throws Exception {
+        RenderContractRuntime.flushManifest();
+        return JsonParser.parseString(
+                Files.readString(output.resolve("render-contract/pass-manifest.json"))
+        ).getAsJsonObject();
+    }
+
+    private static long lifecycleCount(
+            final JsonObject manifest,
+            final String action,
+            final String semanticName
+    ) {
+        return StreamSupport.stream(manifest.getAsJsonArray("resourceLifecycle").spliterator(), false)
+                .map(element -> element.getAsJsonObject())
+                .filter(event -> action.equals(event.get("action").getAsString()))
+                .map(event -> event.getAsJsonObject("resource"))
+                .filter(resource -> semanticName.equals(resource.get("semanticName").getAsString()))
+                .count();
+    }
+
+    private static void deleteRecursively(final Path root) throws Exception {
+        if (root == null || !Files.exists(root)) return;
+        try (var paths = Files.walk(root)) {
+            paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (java.io.IOException exception) {
+                    throw new java.io.UncheckedIOException(exception);
+                }
+            });
+        }
     }
 
     private static ImmutableList<StringPair> environmentDefines() {

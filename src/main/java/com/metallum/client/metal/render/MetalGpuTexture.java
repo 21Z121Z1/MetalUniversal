@@ -108,10 +108,12 @@ final class MetalGpuTexture extends GpuTexture {
      * Registers the level-zero allocation with the existing render-contract
      * identity path. Iris-owned creation sites call this eagerly so an
      * allocation is visible before its first pass or readback use; the
-     * runtime gate keeps ordinary rendering on the zero-event path.
+     * runtime and contract-switch gates keep ordinary rendering on the
+     * zero-event path, including a switch disabled while a recorder remains live.
      */
     void registerValidationIdentity() {
-        if (RenderContractRuntime.enabled()) {
+        if (RenderContractRuntime.enabled()
+                && Boolean.parseBoolean(System.getProperty("metallum.renderContract.enabled", "false"))) {
             MetalCommandEncoder.contractResource(this, 0);
         }
     }

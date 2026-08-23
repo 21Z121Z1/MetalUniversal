@@ -30,6 +30,7 @@ final class IrisMetalWhitePixel implements AutoCloseable {
                 1,
                 1
         );
+        ((MetalGpuTexture) this.texture).registerValidationIdentity();
         this.view = device.createTextureView(this.texture);
         this.sampler = new MetalGpuSampler(
                 device,
