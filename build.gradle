@@ -1420,6 +1420,16 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			if (runState.renderBackend != "Metal") {
 				problems << "validation ran on ${runState.renderBackend ?: 'unknown'} instead of Metal"
 			}
+			if (System.getProperty("metallum.opt.terrainIcb", "false").toBoolean()) {
+				if (!(runState.terrainIcbEncoded instanceof Number)
+						|| runState.terrainIcbEncoded <= 0) {
+					problems << "terrain ICB encoded no native command buffers"
+				}
+				if (!(runState.terrainIcbExecuted instanceof Number)
+						|| runState.terrainIcbExecuted < runState.terrainIcbEncoded) {
+					problems << "terrain ICB executed ${runState.terrainIcbExecuted} of ${runState.terrainIcbEncoded} encoded command buffers"
+				}
+			}
 			def explicitMetal4Master = System.getProperty("metallum.opt.metal4")
 			def explicitMetal4Main = System.getProperty("metallum.opt.metal4MainRenderer")
 			def metal4MainRequested = explicitMetal4Main?.toBoolean() == true
