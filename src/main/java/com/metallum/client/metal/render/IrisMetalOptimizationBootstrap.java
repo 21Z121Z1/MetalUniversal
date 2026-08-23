@@ -7,9 +7,10 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Collection;
-import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -25,7 +26,9 @@ public final class IrisMetalOptimizationBootstrap {
             List<IrisMetalExperimentalOptimizer.ProgramDescriptor> programs = new ArrayList<>();
             Set<String> persistent = new LinkedHashSet<>();
             Set<String> known = new LinkedHashSet<>();
+            Map<String, Integer> ordinals = new LinkedHashMap<>();
 
+            int chainGeneration = intField(chain, "generation");
             int targetCount = intField(chain, "targetCount");
             for (int index = 0; index < targetCount; index++) known.add("colortex" + index);
             known.add("depthtex0");
@@ -36,7 +39,7 @@ public final class IrisMetalOptimizationBootstrap {
             if (stages instanceof Map<?, ?> map) {
                 for (Object stagePasses : map.values()) {
                     if (!(stagePasses instanceof Collection<?> collection)) continue;
-                    for (Object planned : collection) addRasterPass(planned, passes, programs);
+                    for (Object planned : collection) addRasterPass(planned, passes, programs, ordinals);
                 }
             }
 
@@ -47,16 +50,18 @@ public final class IrisMetalOptimizationBootstrap {
                     for (Object group : collection) {
                         Object computes = invoke(group, "computes");
                         if (computes instanceof Collection<?> computeCollection) {
-                            for (Object compute : computeCollection) addComputePass(compute, passes, programs);
+                            for (Object compute : computeCollection) {
+                                addComputePass(compute, passes, programs, ordinals);
+                            }
                         }
                     }
                 }
             }
-            addComputeCollection(field(chain, "setupComputes"), passes, programs);
-            addComputeCollection(field(chain, "finalComputes"), passes, programs);
+            addComputeCollection(field(chain, "setupComputes"), passes, programs, ordinals);
+            addComputeCollection(field(chain, "finalComputes"), passes, programs, ordinals);
 
             Object finalPass = field(chain, "finalPass");
-            if (finalPass != null) addFinalPass(finalPass, passes, programs);
+            if (finalPass != null) addFinalPass(finalPass, passes, programs, ordinals);
 
             Object histories = field(chain, "finalHistoryTargets");
             if (histories instanceof Collection<?> collection) {
@@ -66,7 +71,14 @@ public final class IrisMetalOptimizationBootstrap {
             }
             persistent.add("colortex0");
 
-            IrisMetalExperimentalOptimizer.build(passes, programs, List.of(), persistent, known);
+            IrisMetalExperimentalOptimizer.build(
+                    chainGeneration,
+                    passes,
+                    programs,
+                    List.of(),
+                    persistent,
+                    known
+            );
         } catch (ReflectiveOperationException | RuntimeException failure) {
             IrisMetalExperimentalOptimizer.clear();
             Metallum.LOGGER.warn("[metallum-iris] advanced optimization plan construction failed; conservative path retained", failure);
@@ -95,11 +107,14 @@ public final class IrisMetalOptimizationBootstrap {
     private static void addRasterPass(
             final Object planned,
             final List<IrisMetalExperimentalOptimizer.PassDescriptor> passes,
-            final List<IrisMetalExperimentalOptimizer.ProgramDescriptor> programs
+            final List<IrisMetalExperimentalOptimizer.ProgramDescriptor> programs,
+            final Map<String, Integer> ordinals
     ) throws ReflectiveOperationException {
         Object info = field(planned, "info");
         Object program = field(planned, "program");
         String name = String.valueOf(invoke(info, "name"));
+        String stage = String.valueOf(invoke(info, "stage"));
+        int ordinal = nextOrdinal(ordinals, stage, IrisMetalExperimentalOptimizer.PassDescriptor.Kind.RENDER);
         int[] drawBuffers = (int[]) invoke(info, "drawBuffers");
         BitSet readsFromAlt = (BitSet) invoke(info, "readsFromAlt");
         Set<String> samplers = stringSet(invoke(info, "declaredSamplers"));
@@ -125,6 +140,8 @@ public final class IrisMetalOptimizationBootstrap {
         passes.add(new IrisMetalExperimentalOptimizer.PassDescriptor(
                 name,
                 IrisMetalExperimentalOptimizer.PassDescriptor.Kind.RENDER,
+                stage,
+                ordinal,
                 uses,
                 false,
                 attachments,
@@ -136,11 +153,14 @@ public final class IrisMetalOptimizationBootstrap {
     private static void addFinalPass(
             final Object finalPass,
             final List<IrisMetalExperimentalOptimizer.PassDescriptor> passes,
-            final List<IrisMetalExperimentalOptimizer.ProgramDescriptor> programs
+            final List<IrisMetalExperimentalOptimizer.ProgramDescriptor> programs,
+            final Map<String, Integer> ordinals
     ) throws ReflectiveOperationException {
         Object info = invoke(finalPass, "info");
         Object program = field(finalPass, "program");
         String name = String.valueOf(invoke(info, "name"));
+        String stage = String.valueOf(invoke(info, "stage"));
+        int ordinal = nextOrdinal(ordinals, stage, IrisMetalExperimentalOptimizer.PassDescriptor.Kind.RENDER);
         Set<String> samplers = stringSet(invoke(info, "declaredSamplers"));
         List<IrisMetalHazardGraph.ResourceUse> uses = new ArrayList<>();
         for (String sampler : samplers) addSamplerUse(uses, sampler);
@@ -148,6 +168,8 @@ public final class IrisMetalOptimizationBootstrap {
         passes.add(new IrisMetalExperimentalOptimizer.PassDescriptor(
                 name,
                 IrisMetalExperimentalOptimizer.PassDescriptor.Kind.RENDER,
+                stage,
+                ordinal,
                 uses,
                 false,
                 List.of(new IrisMetalOptimizationPlan.AttachmentPolicy(
@@ -163,20 +185,24 @@ public final class IrisMetalOptimizationBootstrap {
     private static void addComputeCollection(
             final Object value,
             final List<IrisMetalExperimentalOptimizer.PassDescriptor> passes,
-            final List<IrisMetalExperimentalOptimizer.ProgramDescriptor> programs
+            final List<IrisMetalExperimentalOptimizer.ProgramDescriptor> programs,
+            final Map<String, Integer> ordinals
     ) throws ReflectiveOperationException {
         if (!(value instanceof Collection<?> collection)) return;
-        for (Object compute : collection) addComputePass(compute, passes, programs);
+        for (Object compute : collection) addComputePass(compute, passes, programs, ordinals);
     }
 
     private static void addComputePass(
             final Object compute,
             final List<IrisMetalExperimentalOptimizer.PassDescriptor> passes,
-            final List<IrisMetalExperimentalOptimizer.ProgramDescriptor> programs
+            final List<IrisMetalExperimentalOptimizer.ProgramDescriptor> programs,
+            final Map<String, Integer> ordinals
     ) throws ReflectiveOperationException {
         Object info = field(compute, "info");
         Object reflection = field(compute, "reflection");
         String name = String.valueOf(invoke(info, "name"));
+        String stage = String.valueOf(invoke(info, "stage"));
+        int ordinal = nextOrdinal(ordinals, stage, IrisMetalExperimentalOptimizer.PassDescriptor.Kind.COMPUTE);
         List<IrisMetalHazardGraph.ResourceUse> uses = new ArrayList<>();
         List<IrisMetalOptimizationPlan.ArgumentSlot> slots = new ArrayList<>();
         Object resources = invoke(reflection, "resources");
@@ -202,6 +228,8 @@ public final class IrisMetalOptimizationBootstrap {
         passes.add(new IrisMetalExperimentalOptimizer.PassDescriptor(
                 name,
                 IrisMetalExperimentalOptimizer.PassDescriptor.Kind.COMPUTE,
+                stage,
+                ordinal,
                 uses,
                 true,
                 List.of(),
@@ -258,11 +286,24 @@ public final class IrisMetalOptimizationBootstrap {
     }
 
     private static Set<String> stringSet(final Object value) {
-        Set<String> result = new LinkedHashSet<>();
+        List<String> values = new ArrayList<>();
         if (value instanceof Collection<?> collection) {
-            for (Object item : collection) result.add(String.valueOf(item));
+            for (Object item : collection) values.add(String.valueOf(item));
         }
-        return result;
+        values.sort(String::compareTo);
+        return new LinkedHashSet<>(values);
+    }
+
+    private static int nextOrdinal(
+            final Map<String, Integer> ordinals,
+            final String stage,
+            final IrisMetalExperimentalOptimizer.PassDescriptor.Kind kind
+    ) {
+        String normalizedStage = stage == null ? "unknown" : stage.trim().toLowerCase(Locale.ROOT);
+        String key = normalizedStage + '\u0000' + kind.name();
+        int ordinal = ordinals.getOrDefault(key, 0);
+        ordinals.put(key, ordinal + 1);
+        return ordinal;
     }
 
     private static Object field(final Object target, final String name) throws ReflectiveOperationException {
