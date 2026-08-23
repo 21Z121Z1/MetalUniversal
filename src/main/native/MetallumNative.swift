@@ -120,10 +120,17 @@ private enum NativeState {
     // only when Metal 4 is available; all pipeline descriptors then carry the
     // explicit support bit required by the Metal 4 compiler.
     static var terrainIcbEnabled = false
+    // Strictly opt-in all-visible GPU ICB authoring. This is a producer-scoped
+    // encoding seam, not visibility culling; unsupported compute/ICB paths
+    // return nil so Java retries CPU ICB authoring before indirect draw.
+    static var terrainGpuEncodeEnabled = false
     // Focused native proof counters. They are session-local diagnostics, not a
     // cache or a render-path decision.
     static var terrainIcbEncodedCount: UInt64 = 0
     static var terrainIcbExecutedCount: UInt64 = 0
+    static var terrainIcbGpuEncodedCount: UInt64 = 0
+    static var terrainIcbGpuDispatchCount: UInt64 = 0
+    static var terrainGpuEncodeLogged = false
     // Metal 4 frame-generation present pilot (spec M4). Read once when the
     // presenter is constructed; flipping it later has no effect, which matches how
     // the presenter is started.
@@ -7931,6 +7938,11 @@ public func metallum_set_terrain_icb_enabled(_ enabled: Int32) {
     NativeState.terrainIcbEnabled = enabled != 0
 }
 
+@_cdecl("metallum_set_terrain_gpu_encode_enabled")
+public func metallum_set_terrain_gpu_encode_enabled(_ enabled: Int32) {
+    NativeState.terrainGpuEncodeEnabled = enabled != 0
+}
+
 @_cdecl("metallum_terrain_icb_stats")
 public func metallum_terrain_icb_stats(
     _ encoded: UnsafeMutablePointer<UInt64>?,
@@ -7938,6 +7950,16 @@ public func metallum_terrain_icb_stats(
 ) -> Int32 {
     encoded?.pointee = NativeState.terrainIcbEncodedCount
     executed?.pointee = NativeState.terrainIcbExecutedCount
+    return 1
+}
+
+@_cdecl("metallum_terrain_gpu_icb_stats")
+public func metallum_terrain_gpu_icb_stats(
+    _ encoded: UnsafeMutablePointer<UInt64>?,
+    _ dispatches: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    encoded?.pointee = NativeState.terrainIcbGpuEncodedCount
+    dispatches?.pointee = NativeState.terrainIcbGpuDispatchCount
     return 1
 }
 
@@ -9582,6 +9604,95 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
     }
 }
 
+@available(macOS 26.0, iOS 26.0, *)
+private final class TerrainGpuIcbOwner {
+    let commandBuffer: MTLIndirectCommandBuffer
+    // Keep the immutable producer records alive until the command buffer
+    // completes. MTL4 argument tables bind addresses/resource IDs, not ARC
+    // ownership, so this retention is part of the producer-owned handle.
+    let packedCommands: MTLBuffer
+    let argumentBuffer: MTLBuffer
+    let indexBuffer: MTLBuffer
+    let pipeline: MTLRenderPipelineState
+
+    init(
+        commandBuffer: MTLIndirectCommandBuffer,
+        packedCommands: MTLBuffer,
+        argumentBuffer: MTLBuffer,
+        indexBuffer: MTLBuffer,
+        pipeline: MTLRenderPipelineState
+    ) {
+        self.commandBuffer = commandBuffer
+        self.packedCommands = packedCommands
+        self.argumentBuffer = argumentBuffer
+        self.indexBuffer = indexBuffer
+        self.pipeline = pipeline
+        residencyTrackCreated(commandBuffer)
+        residencyTrackCreated(packedCommands)
+        residencyTrackCreated(argumentBuffer)
+    }
+
+    deinit {
+        residencyTrackReleased(rawPointer(commandBuffer))
+        residencyTrackReleased(rawPointer(packedCommands))
+        residencyTrackReleased(rawPointer(argumentBuffer))
+    }
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private func rawPointer(_ object: AnyObject) -> UnsafeMutableRawPointer {
+    UnsafeMutableRawPointer(Unmanaged.passUnretained(object).toOpaque())
+}
+
+private func terrainGpuIcbMslSource(
+    primitiveType: MTLPrimitiveType,
+    indexType: MTLIndexType
+) -> String? {
+    let primitive: String
+    switch primitiveType {
+    case .point: primitive = "point"
+    case .line: primitive = "line"
+    case .lineStrip: primitive = "line_strip"
+    case .triangle: primitive = "triangle"
+    case .triangleStrip: primitive = "triangle_strip"
+    default: return nil
+    }
+    let indexPointer = indexType == .uint16 ? "ushort" : "uint"
+    return """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct TerrainDrawRecord {
+      int indexCount;
+      int instanceCount;
+      int firstIndex;
+      int baseVertex;
+      int firstInstance;
+    };
+
+    struct TerrainIcbContainer {
+      command_buffer commandBuffer [[id(0)]];
+    };
+
+    kernel void metallum_terrain_gpu_encode(
+      device const TerrainDrawRecord *records [[buffer(0)]],
+      device TerrainIcbContainer *container [[buffer(1)]],
+      device \(indexPointer) *indices [[buffer(2)]],
+      uint drawIndex [[thread_position_in_grid]]) {
+      TerrainDrawRecord record = records[drawIndex];
+      if (record.indexCount < 0 || record.instanceCount < 0
+          || record.firstIndex < 0 || record.firstInstance < 0) {
+        return;
+      }
+      render_command command(container->commandBuffer, drawIndex);
+      command.draw_indexed_primitives(primitive_type::\(primitive),
+          uint(record.indexCount), indices + uint(record.firstIndex),
+          uint(record.instanceCount), uint(record.baseVertex),
+          uint(record.firstInstance));
+    }
+    """
+}
+
 /// Creates one producer-owned terrain ICB. The Java owner retains the returned
 /// object for the lifetime of the real Sodium VKIndirectDrawBatch and routes
 /// replacement through the renderer destruction queue.
@@ -9656,6 +9767,186 @@ public func metallum_MTLDevice_createTerrainIndexedIcb(
     return retainedPointer(commandBuffer)
 }
 
+/// Creates the same indexed draw records through a Metal 4 GPU compute
+/// encoder. The first implementation is intentionally all-visible: one
+/// dispatched thread consumes one immutable producer record, leaving a clean
+/// command-authoring seam for a later visibility predicate/compaction phase.
+@_cdecl("metallum_MTLDevice_createTerrainGpuIndexedIcb")
+public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
+    _ pointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ primitiveType: MTLPrimitiveType,
+    _ indexType: MTLIndexType,
+    _ indexBuffer: MTLBuffer,
+    _ pipeline: MTLRenderPipelineState,
+    _ packedCommands: UnsafePointer<Int32>?,
+    _ drawCount: Int32
+) -> UnsafeMutableRawPointer? {
+    guard NativeState.terrainIcbEnabled, NativeState.terrainGpuEncodeEnabled else {
+        NSLog("[metallum] terrain GPU ICB authoring disabled")
+        return nil
+    }
+    guard drawCount > 0, let packedCommands else {
+        NSLog("[metallum] terrain GPU ICB authoring rejected empty records")
+        return nil
+    }
+    guard pipeline.supportIndirectCommandBuffers else {
+        NSLog("[metallum] terrain GPU ICB authoring rejected a PSO without ICB support")
+        return nil
+    }
+    guard #available(macOS 26.0, iOS 26.0, *) else {
+        NSLog("[metallum] terrain GPU ICB authoring unavailable before Metal 4")
+        return nil
+    }
+    guard device.supportsFamily(.metal4) else {
+        NSLog("[metallum] terrain GPU ICB authoring rejected non-Metal-4 device")
+        return nil
+    }
+    guard let bridge = metal4RenderBridge(pointer) else {
+        NSLog("[metallum] terrain GPU ICB authoring received a non-Metal-4 render bridge")
+        return nil
+    }
+    guard let source = terrainGpuIcbMslSource(
+        primitiveType: primitiveType,
+        indexType: indexType
+    ) else {
+        NSLog("[metallum] terrain GPU ICB authoring rejected unsupported primitive/index type")
+        return nil
+    }
+    let commandCount = Int(drawCount)
+    guard commandCount <= Int.max / 5,
+          commandCount <= Int.max / (5 * MemoryLayout<Int32>.stride) else {
+        return nil
+    }
+
+    // Validate record domains without replaying a draw on the CPU. The GPU
+    // kernel remains the sole author of ICB commands; invalid producer data
+    // fails closed before any partially authored ICB can be published.
+    let indexBytes = indexType == .uint16 ? 2 : 4
+    for index in 0..<commandCount {
+        let base = index * 5
+        let indexCount = Int(packedCommands[base])
+        let instanceCount = Int(packedCommands[base + 1])
+        let firstIndex = Int(packedCommands[base + 2])
+        let firstInstance = Int(packedCommands[base + 4])
+        guard indexCount >= 0, instanceCount >= 0,
+              firstIndex >= 0, firstInstance >= 0,
+              firstIndex <= Int.max / indexBytes else {
+            return nil
+        }
+    }
+
+    let recordBytes = commandCount * 5 * MemoryLayout<Int32>.stride
+    guard let packedBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCommands),
+        length: recordBytes,
+        options: .storageModeShared
+    ) else {
+        return nil
+    }
+
+    let descriptor = MTLIndirectCommandBufferDescriptor()
+    descriptor.commandTypes = .drawIndexed
+    descriptor.inheritPipelineState = true
+    descriptor.inheritBuffers = true
+    descriptor.maxVertexBufferBindCount = 0
+    descriptor.maxFragmentBufferBindCount = 0
+    descriptor.inheritDepthStencilState = true
+    descriptor.inheritDepthBias = true
+    descriptor.inheritDepthClipMode = true
+    descriptor.inheritCullMode = true
+    descriptor.inheritFrontFacingWinding = true
+    descriptor.inheritTriangleFillMode = true
+    guard let commandBuffer = device.makeIndirectCommandBuffer(
+        descriptor: descriptor,
+        maxCommandCount: commandCount,
+        options: .storageModeShared
+    ) else {
+        return nil
+    }
+
+    let library: MTLLibrary
+    do {
+        library = try device.makeLibrary(source: source, options: nil)
+    } catch {
+        NSLog("[metallum] terrain GPU ICB MSL compile failed: %@", String(describing: error))
+        return nil
+    }
+    guard let function = library.makeFunction(name: "metallum_terrain_gpu_encode") else {
+        NSLog("[metallum] terrain GPU ICB MSL entry point missing")
+        return nil
+    }
+    let computePipeline: MTLComputePipelineState
+    do {
+        computePipeline = try device.makeComputePipelineState(function: function)
+    } catch {
+        NSLog("[metallum] terrain GPU ICB compute pipeline failed: %@", String(describing: error))
+        return nil
+    }
+    guard let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+        NSLog("[metallum] terrain GPU ICB could not create MTL4 compute encoder")
+        return nil
+    }
+
+    let argumentDescriptor = MTL4ArgumentTableDescriptor()
+    argumentDescriptor.maxBufferBindCount = 3
+    argumentDescriptor.initializeBindings = true
+    argumentDescriptor.supportAttributeStrides = false
+    guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    let argumentEncoder = function.makeArgumentEncoder(bufferIndex: 1)
+    guard let argumentBuffer = device.makeBuffer(
+              length: argumentEncoder.encodedLength,
+              options: .storageModeShared
+          ) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    argumentEncoder.setArgumentBuffer(argumentBuffer, offset: 0)
+    argumentEncoder.setIndirectCommandBuffer(commandBuffer, index: 0)
+    arguments.setAddress(packedBuffer.gpuAddress, index: 0)
+    arguments.setAddress(argumentBuffer.gpuAddress, index: 1)
+    arguments.setAddress(indexBuffer.gpuAddress, index: 2)
+    computeEncoder.setArgumentTable(arguments)
+    computeEncoder.setComputePipelineState(computePipeline)
+    computeEncoder.resetCommands(
+        buffer: commandBuffer,
+        range: 0..<commandCount
+    )
+    computeEncoder.dispatchThreads(
+        threadsPerGrid: MTLSize(width: commandCount, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(
+            width: max(1, min(computePipeline.threadExecutionWidth, 64)),
+            height: 1,
+            depth: 1
+        )
+    )
+    computeEncoder.barrier(
+        afterStages: .dispatch,
+        beforeQueueStages: [.vertex, .fragment],
+        visibilityOptions: .device
+    )
+    computeEncoder.endEncoding()
+
+    let owner = TerrainGpuIcbOwner(
+        commandBuffer: commandBuffer,
+        packedCommands: packedBuffer,
+        argumentBuffer: argumentBuffer,
+        indexBuffer: indexBuffer,
+        pipeline: pipeline
+    )
+    NativeState.terrainIcbEncodedCount &+= 1
+    NativeState.terrainIcbGpuEncodedCount &+= 1
+    NativeState.terrainIcbGpuDispatchCount &+= 1
+    if !NativeState.terrainGpuEncodeLogged {
+        NativeState.terrainGpuEncodeLogged = true
+        NSLog("[metallum] terrain GPU ICB authoring active: all-visible records only; visibility culling not enabled")
+    }
+    return retainedPointer(owner)
+}
+
 /// Executes one already encoded terrain ICB. No command records are decoded or
 /// replayed here, preserving Sodium's one native submission call count.
 @_cdecl("metallum_MTLRenderCommandEncoder_executeTerrainIcb")
@@ -9667,10 +9958,16 @@ public func metallum_MTLRenderCommandEncoder_executeTerrainIcb(
     guard NativeState.terrainIcbEnabled,
           drawCount > 0,
           #available(macOS 26.0, iOS 26.0, *),
-          let bridge = metal4RenderBridge(pointer),
-          let indirectCommandBuffer = Unmanaged<AnyObject>.fromOpaque(
-              indirectCommandBufferPointer
-          ).takeUnretainedValue() as? MTLIndirectCommandBuffer else {
+          let bridge = metal4RenderBridge(pointer) else {
+        return 0
+    }
+    let indirectCommandBuffer: MTLIndirectCommandBuffer
+    let object = Unmanaged<AnyObject>.fromOpaque(indirectCommandBufferPointer).takeUnretainedValue()
+    if let owner = object as? TerrainGpuIcbOwner {
+        indirectCommandBuffer = owner.commandBuffer
+    } else if let raw = object as? MTLIndirectCommandBuffer {
+        indirectCommandBuffer = raw
+    } else {
         return 0
     }
     bridge.encoder.executeCommands(

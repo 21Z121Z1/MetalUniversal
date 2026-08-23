@@ -191,11 +191,15 @@ final class TerrainSceneSnapshotTest {
                 "focused host tests must not silently enable the experimental path");
         assertFalse(TerrainSceneSnapshot.ICB_ENABLED,
                 "focused host tests must not silently enable native terrain ICB");
+        assertFalse(TerrainSceneSnapshot.GPU_ICB_ENABLED,
+                "focused host tests must not silently enable GPU terrain ICB authoring");
     }
 
     @Test
     void terrainIcbOptInRoutesAllRequiredMetal4Switches() throws ReflectiveOperationException {
-        Assumptions.assumeTrue(TerrainSceneSnapshot.ICB_ENABLED);
+        Assumptions.assumeTrue(
+                TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED
+        );
         assertTrue(staticBoolean("METAL4_REQUESTED"));
         assertTrue(staticBoolean("METAL4_COMPILER"));
         assertTrue(staticBoolean("METAL4_MAIN_RENDERER"));

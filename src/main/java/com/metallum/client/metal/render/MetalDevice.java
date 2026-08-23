@@ -89,12 +89,14 @@ final class MetalDevice implements GpuDeviceBackend {
      * intact whenever this is false or the device/SDK lacks Metal 4.
      */
     private static final boolean METAL4_REQUESTED =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "false"))
-                    || TerrainSceneSnapshot.ICB_ENABLED;
+                    Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "false"))
+                    || TerrainSceneSnapshot.ICB_ENABLED
+                    || TerrainSceneSnapshot.GPU_ICB_ENABLED;
     /** Routes render pipeline creation through MTL4Compiler (spec M2). */
     private static final boolean METAL4_COMPILER =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"))
-                    || TerrainSceneSnapshot.ICB_ENABLED;
+                    Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"))
+                    || TerrainSceneSnapshot.ICB_ENABLED
+                    || TerrainSceneSnapshot.GPU_ICB_ENABLED;
     /**
      * Runs the frame-generation present thread on a Metal 4 queue (spec M4).
      * Depends on the compiler switch, because the MTL4 frame interpolator is built
@@ -106,8 +108,9 @@ final class MetalDevice implements GpuDeviceBackend {
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainQueuePilot", "false"));
     /** The terrain ICB requires the real MTL4 encoder/residency path. */
     private static final boolean METAL4_MAIN_RENDERER =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainRenderer", "false"))
-                    || TerrainSceneSnapshot.ICB_ENABLED;
+                    Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainRenderer", "false"))
+                    || TerrainSceneSnapshot.ICB_ENABLED
+                    || TerrainSceneSnapshot.GPU_ICB_ENABLED;
     /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
     private final boolean metal4Available;
     private final boolean metal4MainRenderer;
@@ -232,7 +235,11 @@ final class MetalDevice implements GpuDeviceBackend {
         // MTL4Compiler PSO path. Snapshot capture remains enabled when the
         // opt-in is requested, but native execution will fail closed otherwise.
         MetalNativeBridge.metallum_set_terrain_icb_enabled(
-                TerrainSceneSnapshot.ICB_ENABLED && metal4Compiler ? 1 : 0
+                (TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED)
+                        && metal4Compiler ? 1 : 0
+        );
+        MetalNativeBridge.metallum_set_terrain_gpu_encode_enabled(
+                TerrainSceneSnapshot.GPU_ICB_ENABLED && metal4Compiler ? 1 : 0
         );
         // Depends on the compiler switch: the MTL4 frame interpolator factory
         // takes an MTL4Compiler, so the present pilot cannot run without it.

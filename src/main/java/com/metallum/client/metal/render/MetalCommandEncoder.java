@@ -247,13 +247,23 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     void endEncoder() {
-        endEncoder(false, null);
+        endEncoder(false, null, false);
     }
 
-    private void endEncoder(
+    /**
+     * Ends the current render encoder but keeps its native Metal 4 bridge alive
+     * long enough for a compute encoder to be opened on the same command buffer.
+     */
+    MemorySegment endEncoderForTerrainGpuAuthoring() {
+        return endEncoder(false, null, true);
+    }
+
+    private MemorySegment endEncoder(
             final boolean incomingClearsSameDepth,
-            final boolean[] colorStoresKilled
+            final boolean[] colorStoresKilled,
+            final boolean retainNativeHandle
     ) {
+        MemorySegment retainedHandle = MemorySegment.NULL;
         if (currentEncoder != null) {
             if (currentEncoder instanceof MTLRenderCommandEncoder renderEncoder) {
                 if (renderEncoderDeferredStore) {
@@ -316,7 +326,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 // Render fence in both modes; see computeCommandEncoder().
                 computeEncoder.updateFence(fence);
             }
-            currentEncoder.endEncoding();
+            if (retainNativeHandle) {
+                retainedHandle = currentEncoder.endEncodingRetainingHandle();
+            } else {
+                currentEncoder.endEncoding();
+            }
             currentEncoder = null;
         }
         renderColorAttachments = new MemorySegment[0];
@@ -329,6 +343,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         renderDepthTexture = null;
         renderEncoderDeferredStore = false;
         renderEncoderDeferredColorStores = null;
+        return retainedHandle;
     }
 
     /**
@@ -552,7 +567,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                         && deferredColorStorePixelBytes[index] > 0;
             }
         }
-        endEncoder(incomingClearsSameDepth, colorStoreKilled);
+        endEncoder(incomingClearsSameDepth, colorStoreKilled, false);
         MTLRenderCommandEncoder encoder;
         if (renderPassDescriptorV3Active()) {
             // P2.3 admitted policy: live color slots defer their store

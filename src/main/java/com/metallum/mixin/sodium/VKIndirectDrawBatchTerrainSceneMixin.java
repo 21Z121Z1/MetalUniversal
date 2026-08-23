@@ -29,7 +29,8 @@ public abstract class VKIndirectDrawBatchTerrainSceneMixin implements TerrainIcb
 
     @Override
     public TerrainIcbOwner metallum$terrainIcbOwner() {
-        if (this.metallum$terrainIcbOwner == null && TerrainSceneSnapshot.ICB_ENABLED) {
+        if (this.metallum$terrainIcbOwner == null
+                && (TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED)) {
             this.metallum$terrainIcbOwner = new TerrainIcbOwner();
         }
         return this.metallum$terrainIcbOwner;
