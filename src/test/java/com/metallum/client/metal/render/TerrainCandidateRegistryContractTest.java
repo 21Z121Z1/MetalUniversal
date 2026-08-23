@@ -1,5 +1,7 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.mixin.sodium.SectionRenderDataStorageOwner;
+import net.caffeinemc.mods.sodium.client.render.chunk.LocalSectionIndex;
 import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
 
@@ -40,12 +42,46 @@ final class TerrainCandidateRegistryContractTest {
     }
 
     @Test
+    void regionBasesUseSodiumsAsymmetricDimensionsForNegativeCoordinates() {
+        int regionX = -3;
+        int regionY = -2;
+        int regionZ = 5;
+        int localIndex = LocalSectionIndex.pack(7, 3, 1);
+        FakeOwner owner = new FakeOwner(
+                regionX, regionY, regionZ,
+                regionX * 8, regionY * 4, regionZ * 8,
+                false
+        );
+
+        TerrainCandidateRegistry.SectionKey key = TerrainCandidateRegistry.keyOf(owner, localIndex);
+
+        assertEquals(regionX * 8 + 7, key.sectionX());
+        assertEquals(regionY * 4 + 3, key.sectionY());
+        assertEquals(regionZ * 8 + 1, key.sectionZ());
+    }
+
+    @Test
+    void storagePlaceholderSurvivesUntilOpaqueSharedIndexBecomesAvailable() {
+        TerrainCandidateRegistry.StateMachine machine = new TerrainCandidateRegistry.StateMachine();
+        TerrainCandidateRegistry.SectionKey key = key(0, 0, 0, 3);
+        FakeOwner storage = new FakeOwner(0, 0, 0, 0, 0, 0, false);
+        machine.onSectionAdded(key);
+        machine.onBuilt(key);
+
+        machine.onMesh(key, null, storage);
+        assertEquals(0, snapshot(machine).candidates().size());
+
+        machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.OPAQUE, 7L), storage);
+        assertEquals(1, snapshot(machine).candidates().size());
+    }
+
+    @Test
     void freeAndRemoveInvalidateCandidates() {
         TerrainCandidateRegistry.StateMachine machine = new TerrainCandidateRegistry.StateMachine();
         TerrainCandidateRegistry.SectionKey key = key(2, 3, 4, 5);
         machine.onSectionAdded(key);
         machine.onBuilt(key);
-        Object storage = new Object();
+        FakeOwner storage = new FakeOwner(2, 3, 4, 16, 12, 32, true);
         machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.TRANSLUCENT, 1L), storage);
         assertEquals(1, snapshot(machine).candidates().size());
 
@@ -95,6 +131,20 @@ final class TerrainCandidateRegistryContractTest {
             assertFalse(TerrainCandidateRegistry.enabled());
             assertNull(TerrainCandidateRegistry.latestSnapshot());
         }
+    }
+
+    @Test
+    void resetClearsWorldSnapshotStateWhenEnabled() {
+        if (!TerrainCandidateRegistry.enabled()) {
+            TerrainCandidateRegistry.reset();
+            assertNull(TerrainCandidateRegistry.latestSnapshot());
+            return;
+        }
+
+        TerrainCandidateRegistry.captureFrame(1.0, 2.0, 3.0, new Matrix4f().identity());
+        assertEquals(0, TerrainCandidateRegistry.latestSnapshot().candidates().size());
+        TerrainCandidateRegistry.reset();
+        assertNull(TerrainCandidateRegistry.latestSnapshot());
     }
 
     private static TerrainCandidateSnapshot snapshot(final TerrainCandidateRegistry.StateMachine machine) {
@@ -151,5 +201,86 @@ final class TerrainCandidateRegistryContractTest {
                 vertex,
                 index
         );
+    }
+
+    private static final class FakeOwner implements SectionRenderDataStorageOwner {
+        private final int regionX;
+        private final int regionY;
+        private final int regionZ;
+        private final int baseChunkX;
+        private final int baseChunkY;
+        private final int baseChunkZ;
+        private final boolean translucent;
+
+        private FakeOwner(
+                final int regionX,
+                final int regionY,
+                final int regionZ,
+                final int baseChunkX,
+                final int baseChunkY,
+                final int baseChunkZ,
+                final boolean translucent
+        ) {
+            this.regionX = regionX;
+            this.regionY = regionY;
+            this.regionZ = regionZ;
+            this.baseChunkX = baseChunkX;
+            this.baseChunkY = baseChunkY;
+            this.baseChunkZ = baseChunkZ;
+            this.translucent = translucent;
+        }
+
+        @Override
+        public void metallum$setOwner(
+                final int regionX,
+                final int regionY,
+                final int regionZ,
+                final int baseChunkX,
+                final int baseChunkY,
+                final int baseChunkZ,
+                final boolean translucent
+        ) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean metallum$hasOwner() {
+            return true;
+        }
+
+        @Override
+        public int metallum$regionX() {
+            return regionX;
+        }
+
+        @Override
+        public int metallum$regionY() {
+            return regionY;
+        }
+
+        @Override
+        public int metallum$regionZ() {
+            return regionZ;
+        }
+
+        @Override
+        public int metallum$baseChunkX() {
+            return baseChunkX;
+        }
+
+        @Override
+        public int metallum$baseChunkY() {
+            return baseChunkY;
+        }
+
+        @Override
+        public int metallum$baseChunkZ() {
+            return baseChunkZ;
+        }
+
+        @Override
+        public boolean metallum$isTranslucent() {
+            return translucent;
+        }
     }
 }

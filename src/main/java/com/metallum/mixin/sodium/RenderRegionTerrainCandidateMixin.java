@@ -26,7 +26,9 @@ public abstract class RenderRegionTerrainCandidateMixin {
         if (storage instanceof SectionRenderDataStorageOwner owner) {
             RenderRegion region = (RenderRegion) (Object) this;
             owner.metallum$setOwner(
-                    region.getX(), region.getY(), region.getZ(), renderPass.isTranslucent()
+                    region.getX(), region.getY(), region.getZ(),
+                    region.getChunkX(), region.getChunkY(), region.getChunkZ(),
+                    renderPass.isTranslucent()
             );
         }
     }

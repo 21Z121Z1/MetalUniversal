@@ -14,6 +14,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /** Captures value-only camera/matrix state before Sodium's cull preparation. */
 @Mixin(SodiumWorldRenderer.class)
 public abstract class SodiumWorldRendererTerrainCandidateMixin {
+    @Inject(method = "setLevel", at = @At("HEAD"), remap = false)
+    private void metallum$resetCandidateWorld(
+            final net.minecraft.client.multiplayer.ClientLevel level,
+            final CallbackInfo ci
+    ) {
+        TerrainCandidateRegistry.reset();
+    }
+
     @Inject(method = "setupTerrain", at = @At("HEAD"), remap = false)
     private void metallum$candidateFrame(
             final Camera camera,
