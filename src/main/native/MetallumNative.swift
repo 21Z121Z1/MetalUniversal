@@ -9887,13 +9887,12 @@ private func monotonicElapsedNanos(since start: UInt64) -> Int64 {
     return elapsed > UInt64(Int64.max) ? Int64.max : Int64(elapsed)
 }
 
-@_cdecl("metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
-public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
+private func encodePresentTextureToDrawable(
     _ pointer: UnsafeMutableRawPointer,
     _ layer: CAMetalLayer,
     _ sourceTexture: MTLTexture,
     _ globalFence: MTLFence?
-) {
+) -> Int64 {
     return autoreleasepool {
         let drawableWaitStart = DispatchTime.now().uptimeNanoseconds
         guard let drawable: CAMetalDrawable = layer.nextDrawable() else {
@@ -9901,7 +9900,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                 nanos: monotonicElapsedNanos(since: drawableWaitStart)
             )
             NSLog("[Metallum] WARNING: nextDrawable() returned nil (drawableSize=\(layer.drawableSize), frame=\(layer.frame), isOpaque=\(layer.isOpaque), device=\(layer.device != nil ? "set" : "nil"))")
-            return
+            return 0
         }
         NativePresentationTelemetry.shared.recordDrawableWait(
             nanos: monotonicElapsedNanos(since: drawableWaitStart)
@@ -9915,7 +9914,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             renderPass.renderTargetWidth = drawable.texture.width
             renderPass.renderTargetHeight = drawable.texture.height
             guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
-                return
+                return 0
             }
             encoder.barrier(
                 afterQueueStages: [.fragment, .dispatch, .blit],
@@ -9937,14 +9936,14 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                     ? NativeState.presentLinearSampler
                     : NativeState.presentNearestSampler else {
                 encoder.endEncoding()
-                return
+                return 0
             }
             tables.1.setSamplerState(sampler.gpuResourceID, index: 0)
             encoder.setArgumentTable(tables.1, stages: MTLRenderStages.fragment)
             encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
             encoder.endEncoding()
             lease.presentDrawable = drawable
-            return
+            return 0
         }
 
         let commandBuffer = metal3CommandBuffer(pointer)
@@ -9955,7 +9954,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         renderPass.colorAttachments[0].storeAction = .store
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
-            return
+            return 0
         }
 
         metal4BarrierRenderAfterRender(encoder)
@@ -9995,20 +9994,43 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             encoder.updateFence(globalFence, after: .fragment)
         }
         encoder.endEncoding()
-        commandBuffer.present(drawable)
-        // `present` is the point at which the command buffer actually owns a
-        // drawable presentation. Register the handler before commit, so an
-        // uncommitted buffer never increments the drawable in-flight count.
+        // Register before present so a fast callback cannot beat handler
+        // installation. The Java owner receives the id and cancels it if the
+        // command buffer is closed without a later commit.
         let presentationTelemetryID = NativePresentationTelemetry.shared.schedulePresentation(drawable)
         commandBuffer.addCompletedHandler { completedCommandBuffer in
             if completedCommandBuffer.error != nil {
                 NativePresentationTelemetry.shared.resolveFailure(presentationTelemetryID)
             }
         }
+        commandBuffer.present(drawable)
         #if os(iOS)
         CATransaction.flush()
         #endif
+        return Int64(presentationTelemetryID)
     }
+}
+
+/// Legacy void ABI retained for older Java/native pairs. New Java code uses
+/// the v2 export below so an uncommitted Metal 3 buffer can cancel its id.
+@_cdecl("metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
+public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
+    _ pointer: UnsafeMutableRawPointer,
+    _ layer: CAMetalLayer,
+    _ sourceTexture: MTLTexture,
+    _ globalFence: MTLFence?
+) {
+    _ = encodePresentTextureToDrawable(pointer, layer, sourceTexture, globalFence)
+}
+
+@_cdecl("metallum_MTLCommandBuffer_encodePresentTextureToDrawable_v2")
+public func metallum_MTLCommandBuffer_encodePresentTextureToDrawableV2(
+    _ pointer: UnsafeMutableRawPointer,
+    _ layer: CAMetalLayer,
+    _ sourceTexture: MTLTexture,
+    _ globalFence: MTLFence?
+) -> Int64 {
+    encodePresentTextureToDrawable(pointer, layer, sourceTexture, globalFence)
 }
 
 /// Ordinary CAMetalLayer presentation telemetry.  MetalFX frame-generation
@@ -10027,6 +10049,12 @@ public func metallum_presentation_latest_drawable_wait_nanos() -> Int64 {
 @_cdecl("metallum_presentation_frames_in_flight")
 public func metallum_presentation_frames_in_flight() -> Int64 {
     NativePresentationTelemetry.shared.framesInFlight()
+}
+
+@_cdecl("metallum_presentation_cancel")
+public func metallum_presentation_cancel(_ identifier: Int64) {
+    guard identifier > 0 else { return }
+    NativePresentationTelemetry.shared.resolveFailure(UInt64(identifier))
 }
 
 @_cdecl("metallum_set_transfer_fence")

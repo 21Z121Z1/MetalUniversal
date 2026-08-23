@@ -476,6 +476,22 @@ public final class MetalNativeBridge {
                     "metallum_MTLCommandBuffer_encodePresentTextureToDrawable",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
+            MTLCommandBufferEncodePresentTextureToDrawableV2 = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLCommandBuffer_encodePresentTextureToDrawable_v2",
+                    FunctionDescriptor.of(
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS
+                    )
+            );
+            presentationCancel = optionalDowncall(
+                    lookup,
+                    "metallum_presentation_cancel",
+                    FunctionDescriptor.ofVoid(LONG)
+            );
             createBuffer = downcall(lookup, "metallum_create_buffer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
             createTexture2d = downcall(
                     lookup,
@@ -920,6 +936,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitivesIndirect;
     private static final MethodHandle MTLCommandBufferClearColorDepthTexturesRegion;
     private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawable;
+    @Nullable
+    private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawableV2;
+    @Nullable
+    private static final MethodHandle presentationCancel;
     private static final MethodHandle createBuffer;
     private static final MethodHandle createTexture2d;
     private static final MethodHandle createTexture;
@@ -2775,11 +2795,31 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static void MTLCommandBuffer_encodePresentTextureToDrawable(final MemorySegment commandBuffer, final MemorySegment layer, final MemorySegment sourceTexture, final MemorySegment globalFence) {
+    public static long MTLCommandBuffer_encodePresentTextureToDrawable(final MemorySegment commandBuffer, final MemorySegment layer, final MemorySegment sourceTexture, final MemorySegment globalFence) {
         try {
-            MTLCommandBufferEncodePresentTextureToDrawable.invokeExact(segment(commandBuffer), segment(layer), segment(sourceTexture), segment(globalFence));
+            if (MTLCommandBufferEncodePresentTextureToDrawableV2 != null) {
+                return (long) MTLCommandBufferEncodePresentTextureToDrawableV2.invokeExact(
+                        segment(commandBuffer), segment(layer), segment(sourceTexture), segment(globalFence)
+                );
+            }
+            MTLCommandBufferEncodePresentTextureToDrawable.invokeExact(
+                    segment(commandBuffer), segment(layer), segment(sourceTexture), segment(globalFence)
+            );
+            return 0L;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_encodePresentTextureToDrawable", throwable);
+        }
+    }
+
+    public static void metallum_presentation_cancel(final long identifier) {
+        if (identifier <= 0L || presentationCancel == null) {
+            return;
+        }
+        try {
+            presentationCancel.invokeExact(identifier);
+        } catch (Throwable ignored) {
+            // Cancellation is best-effort for an optional ABI; native
+            // presented/completion callbacks remain authoritative after commit.
         }
     }
 
