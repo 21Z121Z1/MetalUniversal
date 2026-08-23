@@ -442,6 +442,20 @@ public final class MetalNativeBridge {
                     "metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG)
             );
+            MTLRenderCommandEncoderExecuteTerrainIndexedIcb = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT
+                    )
+            );
             MTLRenderCommandEncoderDrawPrimitivesIndirect = downcall(
                     lookup,
                     "metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect",
@@ -622,6 +636,7 @@ public final class MetalNativeBridge {
             metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
+            setTerrainIcbEnabled = optionalDowncall(lookup, "metallum_set_terrain_icb_enabled", FunctionDescriptor.ofVoid(INT));
             residencySetEnable = downcall(lookup, "metallum_residency_set_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
             setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
@@ -933,6 +948,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderMultiDrawIndexed;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesTriangleFan;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesIndirect;
+    @Nullable
+    private static final MethodHandle MTLRenderCommandEncoderExecuteTerrainIndexedIcb;
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitivesIndirect;
     private static final MethodHandle MTLCommandBufferClearColorDepthTexturesRegion;
     private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawable;
@@ -976,6 +993,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle metal4MainRendererStats;
     private static final MethodHandle metal4MetalFxStats;
     private static final MethodHandle setMetal4CompilerEnabled;
+    @Nullable
+    private static final MethodHandle setTerrainIcbEnabled;
     private static final MethodHandle setMetalHud;
     private static final MethodHandle metalHudStatus;
     private static final MethodHandle residencySetEnable;
@@ -2478,6 +2497,37 @@ public final class MetalNativeBridge {
         }
     }
 
+    /**
+     * Attempts one native terrain ICB execution. Missing/old native symbols,
+     * unsupported PSOs, and native validation failures all fail closed with 0.
+     */
+    public static int MTLRenderCommandEncoder_executeTerrainIndexedIcb(
+            final MemorySegment encoder,
+            final long primitiveType,
+            final long indexType,
+            final MemorySegment indexBuffer,
+            final MemorySegment pipeline,
+            final MemorySegment packedCommands,
+            final int drawCount
+    ) {
+        if (MTLRenderCommandEncoderExecuteTerrainIndexedIcb == null || drawCount <= 0) {
+            return 0;
+        }
+        try {
+            return (int) MTLRenderCommandEncoderExecuteTerrainIndexedIcb.invokeExact(
+                    segment(encoder),
+                    primitiveType,
+                    indexType,
+                    segment(indexBuffer),
+                    segment(pipeline),
+                    segment(packedCommands),
+                    drawCount
+            );
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
     public static void MTLRenderCommandEncoder_drawPrimitivesIndirect(
             final MemorySegment encoder,
             final long primitiveType,
@@ -3065,6 +3115,17 @@ public final class MetalNativeBridge {
             setMetal4CompilerEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_metal4_compiler_enabled", throwable);
+        }
+    }
+
+    public static void metallum_set_terrain_icb_enabled(final int enabled) {
+        if (setTerrainIcbEnabled == null) {
+            return;
+        }
+        try {
+            setTerrainIcbEnabled.invokeExact(enabled);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_terrain_icb_enabled", throwable);
         }
     }
 

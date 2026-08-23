@@ -5,6 +5,8 @@ import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.metallum.client.metal.render.mtl.MTLIndexType;
 import org.lwjgl.vulkan.VkDrawIndexedIndirectCommand;
 
+import java.lang.foreign.Arena;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -24,6 +26,19 @@ public final class TerrainSceneSnapshot {
     public static final boolean ENABLED = Boolean.parseBoolean(
             System.getProperty("metallum.opt.terrainSceneSnapshot", "false")
     );
+
+    /**
+     * Feature-gated Metal 4 ICB submission. Enabling it also enables the
+     * producer-owned snapshot boundary; the diagnostic snapshot switch above
+     * remains independently useful when ICB execution is not requested.
+     */
+    public static final boolean ICB_ENABLED = Boolean.parseBoolean(
+            System.getProperty("metallum.opt.terrainIcb", "false")
+    );
+
+    public static boolean captureEnabled() {
+        return ENABLED || ICB_ENABLED;
+    }
 
     static final int MAX_VERTEX_BUFFERS = RenderPass.MAX_VERTEX_BUFFERS;
 
@@ -279,6 +294,27 @@ public final class TerrainSceneSnapshot {
 
     List<Draw> draws() {
         return draws;
+    }
+
+    /** Packs the immutable command records once for the native ICB encoder. */
+    java.lang.foreign.MemorySegment packIndexedCommands(final Arena arena) {
+        Objects.requireNonNull(arena, "arena");
+        java.lang.foreign.MemorySegment packed = arena.allocate(
+                (long) draws.size() * Integer.BYTES * 5L,
+                Integer.BYTES
+        );
+        java.nio.IntBuffer values = packed.asByteBuffer()
+                .order(ByteOrder.nativeOrder())
+                .asIntBuffer();
+        for (Draw draw : draws) {
+            IrisMetalIndirectCommandStream.IndexedDraw command = draw.arguments();
+            values.put(command.indexCount());
+            values.put(command.instanceCount());
+            values.put(command.firstIndex());
+            values.put(command.baseVertex());
+            values.put(command.firstInstance());
+        }
+        return packed;
     }
 
     boolean matches(

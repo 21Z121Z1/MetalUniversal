@@ -162,7 +162,7 @@ final class MetalRenderPass implements RenderPassBackend {
             this.compiledPipeline = compiled;
             vertexBuffersDirty = true;
             pipelineDirty = true;
-            if (TerrainSceneSnapshot.ENABLED) {
+            if (TerrainSceneSnapshot.captureEnabled()) {
                 terrainPipelineGeneration++;
             }
             terrainBindingChanged();
@@ -319,7 +319,7 @@ final class MetalRenderPass implements RenderPassBackend {
     }
 
     private void terrainBindingChanged() {
-        if (TerrainSceneSnapshot.ENABLED) {
+        if (TerrainSceneSnapshot.captureEnabled()) {
             terrainBindingGeneration++;
         }
     }
@@ -350,7 +350,7 @@ final class MetalRenderPass implements RenderPassBackend {
         TerrainSceneSnapshot.StateView candidate = new TerrainSceneSnapshot.StateView(
                 compiledPipeline,
                 Math.max(1L, Math.max(terrainPipelineGeneration, irisGeneration)),
-                terrainBindingGeneration,
+                Math.max(1L, terrainBindingGeneration),
                 terrainSceneGeneration,
                 indexState,
                 indexType,
@@ -361,7 +361,7 @@ final class MetalRenderPass implements RenderPassBackend {
             candidate = new TerrainSceneSnapshot.StateView(
                     compiledPipeline,
                     Math.max(1L, Math.max(terrainPipelineGeneration, irisGeneration)),
-                    terrainBindingGeneration,
+                    Math.max(1L, terrainBindingGeneration),
                     terrainSceneGeneration,
                     indexState,
                     indexType,
@@ -406,6 +406,60 @@ final class MetalRenderPass implements RenderPassBackend {
     boolean terrainSnapshotAuthorized(final GpuBufferSlice commands, final int drawCount) {
         try {
             return TerrainSubmissionScope.consume(this, commands, drawCount);
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    /**
+     * Consumes the producer snapshot and submits one native ICB execution.
+     * Returning false is deliberately non-terminal: the caller owns the one
+     * legacy indirect fallback, so an unsupported PSO, stale resource, missing
+     * native symbol, or native encode failure cannot drop or duplicate a draw.
+     */
+    boolean terrainSnapshotSubmitted(
+            final MTLPrimitiveType primitiveType,
+            final GpuBufferSlice commands,
+            final int drawCount
+    ) {
+        if (!TerrainSceneSnapshot.ICB_ENABLED) {
+            return false;
+        }
+        final TerrainSceneSnapshot snapshot;
+        try {
+            snapshot = TerrainSubmissionScope.consumeSnapshot(
+                    terrainSnapshotState(),
+                    TerrainSceneSnapshot.ResourceSlice.ofGpuSlice(
+                            commands, VkDrawIndexedIndirectCommand.SIZEOF
+                    ),
+                    drawCount
+            );
+        } catch (RuntimeException exception) {
+            return false;
+        }
+        if (snapshot == null || indexBuffer == null || compiledPipeline == null) {
+            return false;
+        }
+
+        try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined()) {
+            MTLRenderCommandEncoder enc = renderEncoder();
+            bindDrawState(enc);
+            MTLPixelFormat depthFormat = depthAttachmentFormat();
+            MTLPixelFormat stencilFormat = stencilAttachmentFormat();
+            boolean hasAttachment = depthFormat != MTLPixelFormat.Invalid
+                    || stencilFormat != MTLPixelFormat.Invalid;
+            MemorySegment pipelineHandle = compiledPipeline.getNativePipeline(
+                    hasAttachment ? depthFormat : MTLPixelFormat.Invalid,
+                    hasAttachment ? stencilFormat : MTLPixelFormat.Invalid
+            );
+            return enc.executeTerrainIndexedIcb(
+                    primitiveType,
+                    indexType,
+                    ((MetalGpuBuffer) indexBuffer).nativeHandle(),
+                    pipelineHandle,
+                    snapshot.packIndexedCommands(arena),
+                    drawCount
+            );
         } catch (RuntimeException exception) {
             return false;
         }
@@ -504,10 +558,17 @@ final class MetalRenderPass implements RenderPassBackend {
         // producer copied its compact command records.  Both the authorized
         // and fail-closed paths intentionally issue this one existing native
         // indirect call; no Java per-draw replay is introduced.
-        if (TerrainSceneSnapshot.ENABLED && terrainSnapshotAuthorized(commands, drawCount)) {
-            submitIndexedIndirect(primitiveType, commands, drawCount);
-            recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
-            return;
+        if (TerrainSceneSnapshot.captureEnabled()) {
+            if (TerrainSceneSnapshot.ICB_ENABLED) {
+                if (terrainSnapshotSubmitted(primitiveType, commands, drawCount)) {
+                    recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
+                    return;
+                }
+            } else if (terrainSnapshotAuthorized(commands, drawCount)) {
+                submitIndexedIndirect(primitiveType, commands, drawCount);
+                recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
+                return;
+            }
         }
         // Snapshot mismatch, close, resize, or an unscoped caller reaches the
         // original ABI exactly once.

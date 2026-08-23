@@ -1,14 +1,19 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.mtl.MTLIndexType;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
+import java.lang.foreign.Arena;
+import java.lang.reflect.Field;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
 final class TerrainSceneSnapshotTest {
     @Test
@@ -71,9 +76,57 @@ final class TerrainSceneSnapshotTest {
     }
 
     @Test
+    void immutableCommandPackingPreservesMixedOrderAndSignedBaseVertex() {
+        Object pipeline = new Object();
+        TerrainSceneSnapshot snapshot = TerrainSceneSnapshot.capture(
+                state(
+                        pipeline,
+                        new MetalAllocationIdentity(501L, 1L),
+                        slots(TerrainSceneSnapshot.ResourceSlice.of(
+                                new Object(), new MetalAllocationIdentity(502L, 1L),
+                                0L, 128L, 32, false
+                        ))
+                ),
+                commandBuffer(),
+                List.of(
+                        new IrisMetalIndirectCommandStream.IndexedDraw(12, 1, 0, -4, 0),
+                        new IrisMetalIndirectCommandStream.IndexedDraw(18, 2, 12, 7, 1)
+                )
+        );
+        try (Arena arena = Arena.ofConfined()) {
+            java.nio.IntBuffer packed = snapshot.packIndexedCommands(arena)
+                    .asByteBuffer()
+                    .order(ByteOrder.nativeOrder())
+                    .asIntBuffer();
+            int[] values = new int[10];
+            packed.get(values);
+            assertArrayEquals(
+                    new int[] {12, 1, 0, -4, 0, 18, 2, 12, 7, 1},
+                    values
+            );
+        }
+    }
+
+    @Test
     void defaultFeatureIsOff() {
         assertFalse(TerrainSceneSnapshot.ENABLED,
                 "focused host tests must not silently enable the experimental path");
+        assertFalse(TerrainSceneSnapshot.ICB_ENABLED,
+                "focused host tests must not silently enable native terrain ICB");
+    }
+
+    @Test
+    void terrainIcbOptInRoutesAllRequiredMetal4Switches() throws ReflectiveOperationException {
+        Assumptions.assumeTrue(TerrainSceneSnapshot.ICB_ENABLED);
+        assertTrue(staticBoolean("METAL4_REQUESTED"));
+        assertTrue(staticBoolean("METAL4_COMPILER"));
+        assertTrue(staticBoolean("METAL4_MAIN_RENDERER"));
+    }
+
+    private static boolean staticBoolean(final String name) throws ReflectiveOperationException {
+        Field field = MetalDevice.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.getBoolean(null);
     }
 
     private static TerrainSceneSnapshot.StateView state(

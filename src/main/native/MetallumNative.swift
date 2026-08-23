@@ -116,6 +116,10 @@ private enum NativeState {
     // and metallum.opt.metal4Compiler both hold; false means every PSO takes
     // the Metal 3 path below, unchanged.
     static var metal4CompilerEnabled = false
+    // Terrain ICB is a separate opt-in. The Java capability gate sets this
+    // only when Metal 4 is available; all pipeline descriptors then carry the
+    // explicit support bit required by the Metal 4 compiler.
+    static var terrainIcbEnabled = false
     // Metal 4 frame-generation present pilot (spec M4). Read once when the
     // presenter is constructed; flipping it later has no effect, which matches how
     // the presenter is started.
@@ -7918,6 +7922,11 @@ public func metallum_metal4_supported(_ device: MTLDevice) -> Int32 {
     return 0
 }
 
+@_cdecl("metallum_set_terrain_icb_enabled")
+public func metallum_set_terrain_icb_enabled(_ enabled: Int32) {
+    NativeState.terrainIcbEnabled = enabled != 0
+}
+
 @_cdecl("metallum_metal4_main_queue_pilot_validate")
 public func metallum_metal4_main_queue_pilot_validate(_ device: MTLDevice) -> Int32 {
     guard #available(macOS 26.0, iOS 26.0, *), device.supportsFamily(.metal4) else {
@@ -9559,6 +9568,90 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
     }
 }
 
+/// Encodes one immutable Sodium terrain command array into an ICB and issues
+/// one execute operation. The command encoder retains resources referenced by
+/// the execution until its command buffer completes; no global ICB cache or
+/// second resource identity is introduced. A pipeline compiled without ICB
+/// support, an unsupported encoder, or malformed input returns 0 so Java can
+/// submit its existing indirect command exactly once.
+@_cdecl("metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb")
+public func metallum_MTLRenderCommandEncoder_executeTerrainIndexedIcb(
+    _ pointer: UnsafeMutableRawPointer,
+    _ primitiveType: MTLPrimitiveType,
+    _ indexType: MTLIndexType,
+    _ indexBuffer: MTLBuffer,
+    _ pipeline: MTLRenderPipelineState,
+    _ packedCommands: UnsafePointer<Int32>?,
+    _ drawCount: Int32
+) -> Int32 {
+    guard drawCount > 0,
+          let packedCommands,
+          pipeline.supportIndirectCommandBuffers,
+          #available(macOS 26.0, iOS 26.0, *),
+          let bridge = metal4RenderBridge(pointer),
+          let device = bridge.encoder.commandBuffer?.device else {
+        return 0
+    }
+    let commandCount = Int(drawCount)
+    guard commandCount <= Int.max / 5 else { return 0 }
+
+    let descriptor = MTLIndirectCommandBufferDescriptor()
+    descriptor.commandTypes = .drawIndexed
+    descriptor.inheritPipelineState = true
+    descriptor.inheritBuffers = true
+    descriptor.maxVertexBufferBindCount = 0
+    descriptor.maxFragmentBufferBindCount = 0
+    if #available(macOS 26.0, iOS 26.0, *) {
+        descriptor.inheritDepthStencilState = true
+        descriptor.inheritDepthBias = true
+        descriptor.inheritDepthClipMode = true
+        descriptor.inheritCullMode = true
+        descriptor.inheritFrontFacingWinding = true
+        descriptor.inheritTriangleFillMode = true
+    }
+
+    let indexBytes = indexType == .uint16 ? 2 : 4
+    // CPU-authored ICB commands require CPU-visible storage on the current
+    // Metal validation layer; the MTL4 encoder retains this renderer-owned
+    // object through GPU completion.
+    let commandBuffer = device.makeIndirectCommandBuffer(
+        descriptor: descriptor,
+        maxCommandCount: commandCount,
+        options: .storageModeShared
+    )
+    guard let commandBuffer else { return 0 }
+
+    for index in 0..<commandCount {
+        let base = index * 5
+        let indexCount = Int(packedCommands[base])
+        let instanceCount = Int(packedCommands[base + 1])
+        let firstIndex = Int(packedCommands[base + 2])
+        let baseVertex = Int(packedCommands[base + 3])
+        let firstInstance = Int(packedCommands[base + 4])
+        guard indexCount >= 0, instanceCount >= 0,
+              firstIndex >= 0, firstInstance >= 0,
+              firstIndex <= Int.max / indexBytes else {
+            return 0
+        }
+        commandBuffer.indirectRenderCommandAt(index).drawIndexedPrimitives(
+            primitiveType,
+            indexCount: indexCount,
+            indexType: indexType,
+            indexBuffer: indexBuffer,
+            indexBufferOffset: firstIndex * indexBytes,
+            instanceCount: instanceCount,
+            baseVertex: baseVertex,
+            baseInstance: firstInstance
+        )
+    }
+
+    bridge.encoder.executeCommands(
+        buffer: commandBuffer,
+        range: 0..<commandCount
+    )
+    return 1
+}
+
 @_cdecl("metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect")
 public func metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect(
     _ pointer: UnsafeMutableRawPointer,
@@ -11190,6 +11283,9 @@ private func makeMetal4Descriptor(_ src: MTLRenderPipelineDescriptor) -> MTL4Ren
     dst.alphaToOneState = src.isAlphaToOneEnabled ? .enabled : .disabled
     dst.isRasterizationEnabled = src.isRasterizationEnabled
     dst.maxVertexAmplificationCount = src.maxVertexAmplificationCount
+    if NativeState.terrainIcbEnabled {
+        dst.supportIndirectCommandBuffers = .enabled
+    }
     for index in 0..<8 {
         guard let s = src.colorAttachments[index], let d = dst.colorAttachments[index] else { continue }
         d.pixelFormat = s.pixelFormat
@@ -11334,6 +11430,9 @@ private func createRenderPipelineState(
     device: MTLDevice,
     descriptor: MTLRenderPipelineDescriptor
 ) -> UnsafeMutableRawPointer? {
+    if NativeState.terrainIcbEnabled {
+        descriptor.supportIndirectCommandBuffers = true
+    }
     if ProcessInfo.processInfo.environment["METALLUM_MRT_ABI_DEBUG"] == "1" {
         let colorFormats = (0..<8)
             .map { String(descriptor.colorAttachments[$0].pixelFormat.rawValue) }
