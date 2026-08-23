@@ -8,13 +8,10 @@ import net.caffeinemc.mods.sodium.client.gpu.device.batch.MultiDrawBatch;
 import net.caffeinemc.mods.sodium.client.render.chunk.LocalSectionIndex;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataUnsafe;
-import net.caffeinemc.mods.sodium.client.render.chunk.lists.ChunkRenderList;
 import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegion;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
-import net.caffeinemc.mods.sodium.client.render.viewport.CameraTransform;
 import net.caffeinemc.mods.sodium.client.model.quad.properties.ModelQuadFacing;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -35,15 +32,13 @@ public final class TerrainDrawMetadataCapture {
             final MultiDrawBatch batch,
             final RenderRegion region,
             final SectionRenderDataStorage storage,
-            final ChunkRenderList renderList,
-            final CameraTransform camera,
             final TerrainRenderPass renderPass
     ) {
         if (!enabled() || !(batch instanceof TerrainDrawMetadataBatch metadataBatch)) {
             return;
         }
         metadataBatch.metallum$setTerrainDrawMetadata(new TerrainDrawMetadataStore());
-        CURRENT.set(new FillContext(batch, region, storage, renderList, camera, renderPass));
+        CURRENT.set(new FillContext(batch, region, storage, renderPass));
     }
 
     public static void endFill() {
@@ -99,13 +94,10 @@ public final class TerrainDrawMetadataCapture {
         }
         fill.helper = new HelperContext(
                 fill,
-                dataPointer,
-                visibleFaces,
                 localIndex,
                 generation,
-                localIndex
-                        ? localFaceGroups()
-                        : sharedFaceGroups(dataPointer, visibleFaces)
+                visibleFaces,
+                localIndex ? List.of() : sharedFaceGroups(dataPointer, visibleFaces)
         );
     }
 
@@ -114,7 +106,10 @@ public final class TerrainDrawMetadataCapture {
         if (fill == null || fill.helper == null) {
             return;
         }
-        if (fill.helper.nextGroup != fill.helper.faceGroups.size()) {
+        boolean complete = fill.helper.localIndex
+                ? fill.helper.nextPutCall == ModelQuadFacing.COUNT
+                : fill.helper.nextGroup == fill.helper.faceGroups.size();
+        if (!complete) {
             fill.helper.store().invalidate();
         }
         fill.helper = null;
@@ -133,11 +128,28 @@ public final class TerrainDrawMetadataCapture {
             return;
         }
         HelperContext helper = fill.helper;
-        if (helper.nextGroup >= helper.faceGroups.size()) {
-            helper.store().invalidate();
-            return;
+        int facingMask;
+        if (helper.localIndex) {
+            int facing = helper.nextPutCall++;
+            if (facing >= ModelQuadFacing.COUNT) {
+                helper.store().invalidate();
+                return;
+            }
+            facingMask = TerrainDrawMetadataGrouping.localPutFacingMask(
+                    helper.localMask, facing, ModelQuadFacing.COUNT
+            );
+            // Sodium wrote this invisible put into a slot that is overwritten
+            // by the next visible face; it did not advance batch.size.
+            if (facingMask == 0) {
+                return;
+            }
+        } else {
+            if (helper.nextGroup >= helper.faceGroups.size()) {
+                helper.store().invalidate();
+                return;
+            }
+            facingMask = helper.faceGroups.get(helper.nextGroup++);
         }
-        int facingMask = helper.faceGroups.get(helper.nextGroup++);
         try {
             TerrainDrawMetadata metadata = helper.metadata(
                     ordinal,
@@ -152,47 +164,16 @@ public final class TerrainDrawMetadataCapture {
         }
     }
 
-    private static List<Integer> localFaceGroups() {
-        ArrayList<Integer> groups = new ArrayList<>(ModelQuadFacing.COUNT);
-        for (int face = 0; face < ModelQuadFacing.COUNT; face++) {
-            groups.add(1 << face);
-        }
-        return groups;
-    }
-
     /** Mirrors Sodium's shared-index run grouping, before any put occurs. */
     private static List<Integer> sharedFaceGroups(final long dataPointer, final int visibleFaces) {
-        ArrayList<Integer> groups = new ArrayList<>();
+        int[] vertexCounts = new int[ModelQuadFacing.COUNT];
+        int[] facings = new int[ModelQuadFacing.COUNT];
         long facingList = SectionRenderDataUnsafe.getFacingList(dataPointer);
-        int previousVisible = 0;
-        int pendingMask = 0;
-        for (int face = 0; face <= ModelQuadFacing.COUNT; face++) {
-            boolean visible = false;
-            long vertexCount = 0L;
-            if (face < ModelQuadFacing.COUNT) {
-                vertexCount = SectionRenderDataUnsafe.getVertexCount(dataPointer, face);
-                if (vertexCount != 0L) {
-                    long facing = (facingList >>> (face * 8)) & 255L;
-                    visible = ((visibleFaces >>> (int) facing) & 1) != 0;
-                    if (visible) {
-                        pendingMask |= 1 << face;
-                    }
-                }
-            }
-            if (!visible) {
-                if (previousVisible == 1) {
-                    if (face < ModelQuadFacing.COUNT && vertexCount == 0L) {
-                        // Sodium deliberately keeps the run open over an empty
-                        // face; retain the same state transition here.
-                        continue;
-                    }
-                    groups.add(pendingMask);
-                    pendingMask = 0;
-                }
-            }
-            previousVisible = visible ? 1 : 0;
+        for (int face = 0; face < ModelQuadFacing.COUNT; face++) {
+            vertexCounts[face] = (int) SectionRenderDataUnsafe.getVertexCount(dataPointer, face);
+            facings[face] = (int) ((facingList >>> (face * 8)) & 255L);
         }
-        return groups;
+        return TerrainDrawMetadataGrouping.sharedFacingGroups(vertexCounts, facings, visibleFaces);
     }
 
     private static SectionGeneration sectionGeneration(
@@ -234,8 +215,6 @@ public final class TerrainDrawMetadataCapture {
         private final MultiDrawBatch batch;
         private final RenderRegion region;
         private final SectionRenderDataStorage storage;
-        private final ChunkRenderList renderList;
-        private final CameraTransform camera;
         private final TerrainRenderPass renderPass;
         private SectionContext section;
         private HelperContext helper;
@@ -244,15 +223,11 @@ public final class TerrainDrawMetadataCapture {
                 final MultiDrawBatch batch,
                 final RenderRegion region,
                 final SectionRenderDataStorage storage,
-                final ChunkRenderList renderList,
-                final CameraTransform camera,
                 final TerrainRenderPass renderPass
         ) {
             this.batch = batch;
             this.region = region;
             this.storage = storage;
-            this.renderList = renderList;
-            this.camera = camera;
             this.renderPass = renderPass;
         }
     }
@@ -262,26 +237,24 @@ public final class TerrainDrawMetadataCapture {
 
     private static final class HelperContext {
         private final FillContext fill;
-        private final long dataPointer;
-        private final int visibleFaces;
         private final boolean localIndex;
         private final SectionGeneration generation;
+        private final int localMask;
         private final List<Integer> faceGroups;
         private int nextGroup;
+        private int nextPutCall;
 
         private HelperContext(
                 final FillContext fill,
-                final long dataPointer,
-                final int visibleFaces,
                 final boolean localIndex,
                 final SectionGeneration generation,
+                final int localMask,
                 final List<Integer> faceGroups
         ) {
             this.fill = fill;
-            this.dataPointer = dataPointer;
-            this.visibleFaces = visibleFaces;
             this.localIndex = localIndex;
             this.generation = generation;
+            this.localMask = localMask;
             this.faceGroups = faceGroups;
         }
 
@@ -304,14 +277,6 @@ public final class TerrainDrawMetadataCapture {
             TerrainDrawMetadata.Aabb worldAabb = new TerrainDrawMetadata.Aabb(
                     originX, originY, originZ, originX + 16.0, originY + 16.0, originZ + 16.0
             );
-            TerrainDrawMetadata.Aabb cameraAabb = new TerrainDrawMetadata.Aabb(
-                    originX - fill.camera.x,
-                    originY - fill.camera.y,
-                    originZ - fill.camera.z,
-                    originX + 16.0 - fill.camera.x,
-                    originY + 16.0 - fill.camera.y,
-                    originZ + 16.0 - fill.camera.z
-            );
             return new TerrainDrawMetadata(
                     ordinal,
                     arguments,
@@ -321,7 +286,6 @@ public final class TerrainDrawMetadataCapture {
                     ),
                     generation.content(),
                     worldAabb,
-                    cameraAabb,
                     facingMask,
                     fill.renderPass.isTranslucent(),
                     localIndex
