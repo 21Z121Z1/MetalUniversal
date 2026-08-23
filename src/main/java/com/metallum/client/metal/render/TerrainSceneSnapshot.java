@@ -36,8 +36,19 @@ public final class TerrainSceneSnapshot {
             System.getProperty("metallum.opt.terrainIcb", "false")
     );
 
+    /**
+     * Strict opt-in for the all-visible GPU ICB authoring seam.  This does not
+     * enable visibility culling: the compute kernel writes one indexed command
+     * for every immutable producer record, then the render encoder executes the
+     * resulting ICB. Unsupported Metal 4 paths fail back through the existing
+     * CPU-authored ICB and indirect draw paths.
+     */
+    public static final boolean GPU_ICB_ENABLED = Boolean.parseBoolean(
+            System.getProperty("metallum.opt.terrainGpuEncode", "false")
+    );
+
     public static boolean captureEnabled() {
-        return ENABLED || ICB_ENABLED;
+        return ENABLED || ICB_ENABLED || GPU_ICB_ENABLED;
     }
 
     static final int MAX_VERTEX_BUFFERS = RenderPass.MAX_VERTEX_BUFFERS;

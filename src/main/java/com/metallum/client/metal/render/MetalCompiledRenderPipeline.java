@@ -470,7 +470,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             }
 
             pipelineDesc.setDepthStencilFormats(depthFormat, stencilFormat);
-            if (TerrainSceneSnapshot.ICB_ENABLED
+            if ((TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED)
                     && isSodiumTerrainPipeline(info.getVertexShader())) {
                 pipelineDesc.setSupportIndirectCommandBuffers(true);
             }

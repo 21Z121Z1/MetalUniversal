@@ -275,7 +275,8 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
             return;
         }
         if (com.metallum.client.metal.render.TerrainSceneSnapshot.captureEnabled()) {
-            if (com.metallum.client.metal.render.TerrainSceneSnapshot.ICB_ENABLED) {
+            if (com.metallum.client.metal.render.TerrainSceneSnapshot.ICB_ENABLED
+                    || com.metallum.client.metal.render.TerrainSceneSnapshot.GPU_ICB_ENABLED) {
                 if (this.metallum$terrainSnapshotSubmitted(primitiveType, commands, drawCount)) {
                     ci.cancel();
                     return;

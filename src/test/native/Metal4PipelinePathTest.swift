@@ -815,6 +815,7 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
               "the Metal 4 main renderer could not be enabled for terrain ICB validation")
     defer {
         metallum_set_terrain_icb_enabled(0)
+        metallum_set_terrain_gpu_encode_enabled(0)
     }
 
     let vertexFunction = try createShippingFunction(device: device, entryPoint: "mtl4_path_vs")
@@ -960,6 +961,128 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
     try check(icbPixel == [64, 128, 191, 255],
               "terrain ICB readback was unexpected: \(icbPixel)")
     print("Terrain ICB: one encoded command stream executed twice with legacy readback parity")
+
+    // GPU authoring proof: disablement is a strict Metal 3/static contract,
+    // while the enabled path must author commands through a compute dispatch
+    // before the reopened Metal 4 render encoder executes the same ICB.
+    metallum_set_terrain_gpu_encode_enabled(0)
+    let disabledGpuIcb = packedCommands.withUnsafeBufferPointer { commands in
+        metallum_MTLDevice_createTerrainGpuIndexedIcb(
+            // The function must fail closed before dereferencing this pointer
+            // when the opt-in is disabled.
+            UnsafeMutableRawPointer(bitPattern: 1)!,
+            device,
+            .triangle,
+            .uint16,
+            indexBuffer,
+            pipeline,
+            commands.baseAddress!,
+            1
+        )
+    }
+    try check(disabledGpuIcb == nil,
+              "disabled terrain GPU authoring did not fail closed")
+
+    metallum_set_terrain_gpu_encode_enabled(1)
+    func gpuStats() throws -> (UInt64, UInt64) {
+        var encoded: UInt64 = 0
+        var dispatches: UInt64 = 0
+        try check(metallum_terrain_gpu_icb_stats(&encoded, &dispatches) != 0,
+                  "terrain GPU ICB stats export was unavailable")
+        return (encoded, dispatches)
+    }
+
+    func gpuReadback(label: String) throws -> [UInt8] {
+        let target = try makeTarget(device: device, label: label + " target")
+        guard let commandBuffer = label.withCString({ labelPointer in
+            metallum_MTLCommandQueue_makeCommandBuffer(queue, labelPointer)
+        }) else {
+            try fail("could not allocate \(label) command buffer")
+        }
+        defer { metallum_release_object(commandBuffer) }
+        guard let firstEncoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            commandBuffer,
+            target,
+            nil,
+            8,
+            8,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+            1
+        ) else {
+            try fail("could not create \(label) producer render encoder")
+        }
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(firstEncoder, pipeline)
+        // Preserve the ended bridge so the native authoring call can use its
+        // Metal 4 lease to append compute work to this command buffer.
+        metallum_MTLCommandEncoder_endEncoding(firstEncoder)
+        defer { metallum_release_object(firstEncoder) }
+
+        guard let resident = packedCommands.withUnsafeBufferPointer({ commands in
+            metallum_MTLDevice_createTerrainGpuIndexedIcb(
+                firstEncoder,
+                device,
+                .triangle,
+                .uint16,
+                indexBuffer,
+                pipeline,
+                commands.baseAddress!,
+                1
+            )
+        }) else {
+            try fail("native terrain GPU ICB authoring returned nil")
+        }
+        defer { metallum_release_object(resident) }
+
+        guard let secondEncoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            commandBuffer,
+            target,
+            nil,
+            8,
+            8,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            1
+        ) else {
+            try fail("could not create \(label) consumer render encoder")
+        }
+        defer { metallum_release_object(secondEncoder) }
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(secondEncoder, pipeline)
+        try check(metallum_MTLRenderCommandEncoder_executeTerrainIcb(
+            secondEncoder, resident, 1
+        ) != 0, "native terrain GPU-authored ICB execution rejected the command")
+        metallum_MTLCommandEncoder_endEncoding(secondEncoder)
+        metallum_MTLCommandBuffer_commit(commandBuffer)
+        try check(metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
+                  "\(label) did not complete")
+        try check(metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
+                  "\(label) completed with an error")
+        var pixel = [UInt8](repeating: 0, count: 4)
+        target.getBytes(&pixel, bytesPerRow: 4,
+                        from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
+        return pixel
+    }
+
+    let gpuStatsBefore = try gpuStats()
+    let gpuPixel = try gpuReadback(label: "terrain GPU-authored ICB")
+    let gpuStatsAfter = try gpuStats()
+    try check(gpuPixel == legacyPixel,
+              "GPU-authored terrain ICB readback \(gpuPixel) differed from legacy \(legacyPixel)")
+    try check(gpuStatsAfter.0 - gpuStatsBefore.0 == 1,
+              "GPU-authored terrain ICB did not increment the authoring counter")
+    try check(gpuStatsAfter.1 - gpuStatsBefore.1 == 1,
+              "GPU-authored terrain ICB did not increment the compute dispatch counter")
+    print("Terrain GPU ICB: all-visible compute authoring/readback parity, "
+          + "gpuEncodedDelta=\(gpuStatsAfter.0 - gpuStatsBefore.0), "
+          + "gpuDispatchDelta=\(gpuStatsAfter.1 - gpuStatsBefore.1)")
 }
 
 private func runTerrainIcbReadbackTestIfAvailable(device: MTLDevice, queue: MTLCommandQueue) throws {

@@ -21,7 +21,69 @@ public final class TerrainIcbOwner implements AutoCloseable {
     private TerrainSceneSnapshot.IcbContent content;
     private MetalDevice device;
     private MTLPrimitiveType primitiveType;
+    private boolean gpuAuthored;
     private boolean closed;
+
+    /**
+     * Encodes the immutable producer records on the Metal 4 compute path. The
+     * render encoder is ended by the owning pass before this call and reopened
+     * only after a non-null ICB is returned. A failed attempt leaves no owner
+     * state behind, allowing the caller to use the CPU-authored ICB path.
+     */
+    boolean encodeGpu(
+            final MetalDevice currentDevice,
+            final MemorySegment previousEncoder,
+            final MTLPrimitiveType currentPrimitiveType,
+            final MTLIndexType indexType,
+            final MemorySegment indexBuffer,
+            final MemorySegment pipeline,
+            final TerrainSceneSnapshot snapshot,
+            final int drawCount
+    ) {
+        if (closed || currentDevice == null || previousEncoder == null || snapshot == null
+                || drawCount <= 0 || drawCount != snapshot.draws().size()
+                || indexBuffer == null || pipeline == null
+                || MetalNativeBridge.isNullHandle(indexBuffer)
+                || MetalNativeBridge.isNullHandle(pipeline)) {
+            return false;
+        }
+        if (device != null && device != currentDevice) {
+            retire();
+            content = null;
+            gpuAuthored = false;
+        }
+        device = currentDevice;
+        if (snapshot.sameIcbContent(content) && primitiveType == currentPrimitiveType) {
+            return gpuAuthored && !MetalNativeBridge.isNullHandle(indirectCommandBuffer);
+        }
+
+        retire();
+        content = null;
+        primitiveType = currentPrimitiveType;
+        gpuAuthored = false;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment packed = snapshot.packIndexedCommands(arena);
+            indirectCommandBuffer = MetalNativeBridge.MTLDevice_createTerrainGpuIndexedIcb(
+                    previousEncoder,
+                    currentDevice.metalDeviceHandle(),
+                    currentPrimitiveType.value,
+                    indexType.value,
+                    indexBuffer,
+                    pipeline,
+                    packed,
+                    drawCount
+            );
+        } catch (RuntimeException exception) {
+            indirectCommandBuffer = MemorySegment.NULL;
+            return false;
+        }
+        if (MetalNativeBridge.isNullHandle(indirectCommandBuffer)) {
+            return false;
+        }
+        content = snapshot.icbContent();
+        gpuAuthored = true;
+        return true;
+    }
 
     boolean execute(
             final MetalDevice currentDevice,
@@ -43,6 +105,7 @@ public final class TerrainIcbOwner implements AutoCloseable {
         if (device != null && device != currentDevice) {
             retire();
             content = null;
+            gpuAuthored = false;
         }
         device = currentDevice;
 
@@ -50,6 +113,7 @@ public final class TerrainIcbOwner implements AutoCloseable {
             retire();
             content = null;
             primitiveType = currentPrimitiveType;
+            gpuAuthored = false;
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment packed = snapshot.packIndexedCommands(arena);
                 indirectCommandBuffer = MetalNativeBridge.MTLDevice_createTerrainIndexedIcb(
@@ -83,6 +147,7 @@ public final class TerrainIcbOwner implements AutoCloseable {
         retire();
         content = null;
         primitiveType = null;
+        gpuAuthored = false;
         return false;
     }
 

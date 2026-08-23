@@ -422,7 +422,7 @@ final class MetalRenderPass implements RenderPassBackend {
             final GpuBufferSlice commands,
             final int drawCount
     ) {
-        if (!TerrainSceneSnapshot.ICB_ENABLED) {
+        if (!TerrainSceneSnapshot.ICB_ENABLED && !TerrainSceneSnapshot.GPU_ICB_ENABLED) {
             return false;
         }
         final TerrainSceneSnapshot snapshot;
@@ -461,12 +461,66 @@ final class MetalRenderPass implements RenderPassBackend {
                     hasAttachment ? depthFormat : MTLPixelFormat.Invalid,
                     hasAttachment ? stencilFormat : MTLPixelFormat.Invalid
             );
+            MemorySegment indexHandle = ((MetalGpuBuffer) indexBuffer).nativeHandle();
+            if (!TerrainSceneSnapshot.GPU_ICB_ENABLED) {
+                return owner.execute(
+                        device,
+                        enc,
+                        primitiveType,
+                        indexType,
+                        indexHandle,
+                        pipelineHandle,
+                        snapshot,
+                        drawCount
+                );
+            }
+
+            // The GPU authoring kernel must run between the producer's render
+            // state and the consumer render encoder. Retain only the ended
+            // bridge: it carries the same Metal 4 queue-buffer lease, and is
+            // released immediately after the native compute transition.
+            MemorySegment retainedEncoder = commandEncoder.endEncoderForTerrainGpuAuthoring();
+            try {
+                if (owner.encodeGpu(
+                        device,
+                        retainedEncoder,
+                        primitiveType,
+                        indexType,
+                        indexHandle,
+                        pipelineHandle,
+                        snapshot,
+                        drawCount
+                )) {
+                    MTLRenderCommandEncoder reopened = renderEncoder();
+                    bindDrawState(reopened);
+                    return owner.execute(
+                            device,
+                            reopened,
+                            primitiveType,
+                            indexType,
+                            indexHandle,
+                            pipelineHandle,
+                            snapshot,
+                            drawCount
+                    );
+                }
+            } finally {
+                if (!MetalNativeBridge.isNullHandle(retainedEncoder)) {
+                    MetalNativeBridge.metallum_release_object(retainedEncoder);
+                }
+            }
+
+            // GPU authoring is fail-closed: retry the existing CPU-authored ICB
+            // on the reopened render encoder before allowing the one indirect
+            // fallback in drawIndexedIndirect to run.
+            MTLRenderCommandEncoder fallbackEncoder = renderEncoder();
+            bindDrawState(fallbackEncoder);
             return owner.execute(
                     device,
-                    enc,
+                    fallbackEncoder,
                     primitiveType,
                     indexType,
-                    ((MetalGpuBuffer) indexBuffer).nativeHandle(),
+                    indexHandle,
                     pipelineHandle,
                     snapshot,
                     drawCount
@@ -570,7 +624,7 @@ final class MetalRenderPass implements RenderPassBackend {
         // and fail-closed paths intentionally issue this one existing native
         // indirect call; no Java per-draw replay is introduced.
         if (TerrainSceneSnapshot.captureEnabled()) {
-            if (TerrainSceneSnapshot.ICB_ENABLED) {
+            if (TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED) {
                 if (terrainSnapshotSubmitted(primitiveType, commands, drawCount)) {
                     recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
                     return;

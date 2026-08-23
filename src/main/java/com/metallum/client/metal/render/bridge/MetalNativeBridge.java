@@ -456,6 +456,21 @@ public final class MetalNativeBridge {
                             INT
                     )
             );
+            MTLDeviceCreateTerrainGpuIndexedIcb = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainGpuIndexedIcb",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT
+                    )
+            );
             MTLRenderCommandEncoderExecuteTerrainIcb = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderCommandEncoder_executeTerrainIcb",
@@ -652,6 +667,11 @@ public final class MetalNativeBridge {
             metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
             setTerrainIcbEnabled = optionalDowncall(lookup, "metallum_set_terrain_icb_enabled", FunctionDescriptor.ofVoid(INT));
+            setTerrainGpuEncodeEnabled = optionalDowncall(
+                    lookup,
+                    "metallum_set_terrain_gpu_encode_enabled",
+                    FunctionDescriptor.ofVoid(INT)
+            );
             terrainIcbStats = optionalDowncall(
                     lookup,
                     "metallum_terrain_icb_stats",
@@ -971,6 +991,8 @@ public final class MetalNativeBridge {
     @Nullable
     private static final MethodHandle MTLDeviceCreateTerrainIndexedIcb;
     @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainGpuIndexedIcb;
+    @Nullable
     private static final MethodHandle MTLRenderCommandEncoderExecuteTerrainIcb;
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitivesIndirect;
     private static final MethodHandle MTLCommandBufferClearColorDepthTexturesRegion;
@@ -1019,6 +1041,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle setMetal4CompilerEnabled;
     @Nullable
     private static final MethodHandle setTerrainIcbEnabled;
+    @Nullable
+    private static final MethodHandle setTerrainGpuEncodeEnabled;
     @Nullable
     private static final MethodHandle terrainIcbStats;
     private static final MethodHandle setMetalHud;
@@ -2551,6 +2575,36 @@ public final class MetalNativeBridge {
         }
     }
 
+    /** Creates an all-visible terrain ICB by dispatching a Metal 4 compute encoder. */
+    public static MemorySegment MTLDevice_createTerrainGpuIndexedIcb(
+            final MemorySegment renderEncoder,
+            final MemorySegment device,
+            final long primitiveType,
+            final long indexType,
+            final MemorySegment indexBuffer,
+            final MemorySegment pipeline,
+            final MemorySegment packedCommands,
+            final int drawCount
+    ) {
+        if (MTLDeviceCreateTerrainGpuIndexedIcb == null || drawCount <= 0) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainGpuIndexedIcb.invokeExact(
+                    segment(renderEncoder),
+                    segment(device),
+                    primitiveType,
+                    indexType,
+                    segment(indexBuffer),
+                    segment(pipeline),
+                    segment(packedCommands),
+                    drawCount
+            );
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
+    }
+
     /** Executes a producer-owned ICB without decoding or replaying its draws. */
     public static int MTLRenderCommandEncoder_executeTerrainIcb(
             final MemorySegment encoder,
@@ -3200,6 +3254,17 @@ public final class MetalNativeBridge {
             setTerrainIcbEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_terrain_icb_enabled", throwable);
+        }
+    }
+
+    public static void metallum_set_terrain_gpu_encode_enabled(final int enabled) {
+        if (setTerrainGpuEncodeEnabled == null) {
+            return;
+        }
+        try {
+            setTerrainGpuEncodeEnabled.invokeExact(enabled);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_terrain_gpu_encode_enabled", throwable);
         }
     }
 
