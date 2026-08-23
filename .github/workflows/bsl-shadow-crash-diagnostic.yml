@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fix/bsl-shadow-attachment-format
+  pull_request:
+    branches:
+      - integration/iris-metal-next
   workflow_dispatch:
 
 permissions:
@@ -24,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-java@v5
         with:
@@ -125,7 +128,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: bsl-shadow-diagnostic-${{ github.sha }}
+          name: bsl-shadow-diagnostic-${{ github.event.pull_request.head.sha || github.sha }}
           if-no-files-found: error
           retention-days: 2
           path: build/bsl-diagnostic/**
