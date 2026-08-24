@@ -78,4 +78,36 @@ final class TerrainDrawMetadataGrouping {
         }
         return List.copyOf(groups);
     }
+
+    /**
+     * Shared-index grouping for conservative terrain candidates.  Passing
+     * Sodium's ALL bitmap reuses the exact producer grouping state machine
+     * while deliberately ignoring the CPU cull/visible-face mask: every face
+     * with non-zero mesh geometry is admitted until a later GPU decision.
+     */
+    static List<Integer> sharedGeometryGroups(
+            final int[] vertexCounts,
+            final int[] facings
+    ) {
+        List<Integer> groups = sharedFacingGroups(
+                vertexCounts,
+                facings,
+                ModelQuadFacing.ALL
+        );
+        if (!groups.isEmpty()) {
+            return groups;
+        }
+
+        // Sodium's sentinel loop carries a pending run across empty faces;
+        // when the final unassigned slot is empty, the bytecode's last-mask
+        // state does not expose that pending run at the sentinel.  The
+        // conservative candidate must not drop real geometry in that case.
+        int pendingMask = 0;
+        for (int face = 0; face < ModelQuadFacing.COUNT; face++) {
+            if (vertexCounts[face] != 0) {
+                pendingMask |= 1 << face;
+            }
+        }
+        return pendingMask == 0 ? List.of() : List.of(pendingMask);
+    }
 }
