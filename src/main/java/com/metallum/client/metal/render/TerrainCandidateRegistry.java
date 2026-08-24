@@ -10,6 +10,7 @@ import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionFlags;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.BuiltSectionInfo;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
+import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataUnsafe;
 import net.caffeinemc.mods.sodium.client.render.chunk.LocalSectionIndex;
 import org.joml.Matrix4fc;
 
@@ -248,13 +249,12 @@ public final class TerrainCandidateRegistry {
         } catch (RuntimeException exception) {
             return null;
         }
-        if (dataPointer == 0L) {
+        if (dataPointer <= 0L) {
             return null;
         }
         boolean localIndexMode;
         try {
-            localIndexMode = net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataUnsafe
-                    .isLocalIndex(dataPointer);
+            localIndexMode = SectionRenderDataUnsafe.isLocalIndex(dataPointer);
         } catch (RuntimeException exception) {
             return null;
         }
@@ -270,7 +270,27 @@ public final class TerrainCandidateRegistry {
         if (indexIdentity == null && !localIndexMode && !owner.metallum$isTranslucent()) {
             indexIdentity = liveOpaqueSharedIndex();
         }
-        if (vertexIdentity == null || indexIdentity == null) {
+        if (vertexIdentity == null || indexIdentity == null
+                || !vertexIdentity.live() || !indexIdentity.live()) {
+            return null;
+        }
+        final long baseElement;
+        final long baseVertex;
+        final long[] vertexCounts = new long[net.caffeinemc.mods.sodium.client.model.quad.properties.ModelQuadFacing.COUNT];
+        final int[] facings = new int[vertexCounts.length];
+        try {
+            baseElement = SectionRenderDataUnsafe.getBaseElement(dataPointer);
+            baseVertex = SectionRenderDataUnsafe.getBaseVertex(dataPointer);
+            long facingList = localIndexMode
+                    ? 0L
+                    : SectionRenderDataUnsafe.getFacingList(dataPointer);
+            for (int face = 0; face < vertexCounts.length; face++) {
+                vertexCounts[face] = SectionRenderDataUnsafe.getVertexCount(dataPointer, face);
+                facings[face] = localIndexMode
+                        ? face
+                        : (int) ((facingList >>> (face * 8)) & 255L);
+            }
+        } catch (RuntimeException exception) {
             return null;
         }
         int sectionX = key.sectionX();
@@ -283,6 +303,24 @@ public final class TerrainCandidateRegistry {
                 sectionX * 16.0, sectionY * 16.0, sectionZ * 16.0,
                 sectionX * 16.0 + 16.0, sectionY * 16.0 + 16.0, sectionZ * 16.0 + 16.0
         );
+        List<TerrainCandidateSnapshot.IndexedDrawRecord> draws =
+                TerrainCandidateDrawMaterializer.materialize(
+                        sectionIdentity,
+                        owner.metallum$isTranslucent()
+                                ? TerrainCandidateSnapshot.TerrainPass.TRANSLUCENT
+                                : TerrainCandidateSnapshot.TerrainPass.OPAQUE,
+                        localIndexMode,
+                        dataPointer,
+                        baseElement,
+                        baseVertex,
+                        vertexCounts,
+                        facings,
+                        vertexIdentity,
+                        indexIdentity
+                );
+        if (draws == null) {
+            return null;
+        }
         return new TerrainCandidateSnapshot.Candidate(
                 sectionIdentity,
                 aabb,
@@ -291,7 +329,8 @@ public final class TerrainCandidateRegistry {
                         : TerrainCandidateSnapshot.TerrainPass.OPAQUE,
                 localIndexMode,
                 vertexIdentity,
-                indexIdentity
+                indexIdentity,
+                draws
         );
     }
 
@@ -331,6 +370,48 @@ public final class TerrainCandidateRegistry {
         } catch (RuntimeException exception) {
             opaqueSharedIndex = null;
             return null;
+        }
+    }
+
+    /**
+     * Re-materializes one published candidate against the live Sodium storage.
+     * This is the fail-closed boundary for a future GPU consumer: pointer,
+     * allocation object, generation, backing identity, or draw arithmetic
+     * changes reject the entire candidate rather than guessing.
+     */
+    static boolean recordsLive(
+            final TerrainCandidateSnapshot.Candidate expected,
+            final SectionRenderDataStorage storage
+    ) {
+        if (!ENABLED || expected == null || storage == null
+                || !(storage instanceof SectionRenderDataStorageOwner owner)
+                || !owner.metallum$hasOwner()) {
+            return false;
+        }
+        synchronized (TerrainCandidateRegistry.class) {
+            TerrainCandidateSnapshot.SectionIdentity section = expected.section();
+            if (section.localIndex() < 0 || section.localIndex() >= 256
+                    || section.regionX() != owner.metallum$regionX()
+                    || section.regionY() != owner.metallum$regionY()
+                    || section.regionZ() != owner.metallum$regionZ()
+                    || section.sectionX() != owner.metallum$baseChunkX()
+                    + LocalSectionIndex.unpackX(section.localIndex())
+                    || section.sectionY() != owner.metallum$baseChunkY()
+                    + LocalSectionIndex.unpackY(section.localIndex())
+                    || section.sectionZ() != owner.metallum$baseChunkZ()
+                    + LocalSectionIndex.unpackZ(section.localIndex())) {
+                return false;
+            }
+            TerrainCandidateSnapshot.Candidate current = candidate(
+                    new SectionKey(
+                            section.regionX(), section.regionY(), section.regionZ(),
+                            section.localIndex(), section.sectionX(), section.sectionY(), section.sectionZ()
+                    ),
+                    owner,
+                    storage,
+                    section.localIndex()
+            );
+            return current != null && current.equals(expected) && current.recordsLive();
         }
     }
 
@@ -448,7 +529,10 @@ public final class TerrainCandidateRegistry {
                     continue;
                 }
                 for (MeshState mesh : section.meshes.values()) {
-                    if (mesh.candidate != null) {
+                    if (mesh.candidate != null
+                            && (mesh.candidate.draws().isEmpty()
+                            || !(mesh.storage instanceof SectionRenderDataStorage storage)
+                            || TerrainCandidateRegistry.recordsLive(mesh.candidate, storage))) {
                         candidates.add(mesh.candidate);
                     }
                 }
