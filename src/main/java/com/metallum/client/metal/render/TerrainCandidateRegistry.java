@@ -530,8 +530,7 @@ public final class TerrainCandidateRegistry {
                 }
                 for (MeshState mesh : section.meshes.values()) {
                     if (mesh.candidate != null
-                            && (mesh.candidate.draws().isEmpty()
-                            || !(mesh.storage instanceof SectionRenderDataStorage storage)
+                            && (!(mesh.storage instanceof SectionRenderDataStorage storage)
                             || TerrainCandidateRegistry.recordsLive(mesh.candidate, storage))) {
                         candidates.add(mesh.candidate);
                     }

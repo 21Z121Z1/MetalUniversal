@@ -6,6 +6,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -58,6 +59,42 @@ final class TerrainCandidateDrawMaterializerContractTest {
         assertEquals(new IrisMetalIndirectCommandStream.IndexedDraw(30, 1, 100, 200, 0),
                 draws.get(0).arguments());
         assertEquals((1 << 0) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6), draws.get(0).facingMask());
+    }
+
+    @Test
+    void sharedSentinelDoesNotDropGeometryBeforeTrailingEmptyFaces() {
+        List<TerrainCandidateSnapshot.IndexedDrawRecord> draws = materialize(
+                TerrainCandidateSnapshot.TerrainPass.OPAQUE,
+                false,
+                0x2100L,
+                100L,
+                200L,
+                new long[]{4, 0, 0, 0, 0, 0, 0},
+                new int[]{0, 0, 0, 0, 0, 0, 0},
+                allocation(new Object(), 200L, 128L, 2L),
+                allocation(new Object(), 100L, 128L, 2L)
+        );
+
+        assertEquals(1, draws.size());
+        assertEquals(new IrisMetalIndirectCommandStream.IndexedDraw(6, 1, 100, 200, 0),
+                draws.get(0).arguments());
+        assertEquals(1, draws.get(0).facingMask());
+    }
+
+    @Test
+    void nonQuadVertexCountsAreRejectedInsteadOfFloored() {
+        assertNull(TerrainCandidateDrawMaterializer.materialize(
+                section(),
+                TerrainCandidateSnapshot.TerrainPass.OPAQUE,
+                true,
+                0x2200L,
+                0L,
+                0L,
+                new long[]{2, 0, 0, 0, 0, 0, 0},
+                new int[]{0, 1, 2, 3, 4, 5, 6},
+                allocation(new Object(), 0L, 64L, 2L),
+                allocation(new Object(), 0L, 64L, 2L)
+        ));
     }
 
     @Test

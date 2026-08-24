@@ -47,7 +47,7 @@ final class TerrainCandidateDrawMaterializer {
         final int[] groupingCounts = new int[ModelQuadFacing.COUNT];
         for (int face = 0; face < ModelQuadFacing.COUNT; face++) {
             long vertexCount = vertexCounts[face];
-            if (!validUInt32(vertexCount)) {
+            if (!validUInt32(vertexCount) || (vertexCount & 3L) != 0L) {
                 return null;
             }
             int facing = facings[face];

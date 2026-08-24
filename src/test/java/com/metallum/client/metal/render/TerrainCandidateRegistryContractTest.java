@@ -1,7 +1,10 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.mixin.sodium.SectionRenderDataStorageOwner;
+import com.metallum.mixin.sodium.SectionRenderDataStorageAccessor;
+import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
 import net.caffeinemc.mods.sodium.client.render.chunk.LocalSectionIndex;
+import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
 import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
 
@@ -74,6 +77,22 @@ final class TerrainCandidateRegistryContractTest {
 
         machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.OPAQUE, 7L), storage);
         assertEquals(1, snapshot(machine).candidates().size());
+    }
+
+    @Test
+    void actualStorageCandidatesRequireLiveRecordsEvenWhenRecordListIsEmpty() {
+        FakeStorage storage = new FakeStorage(0, 0, 0, 0, 0, 0, false);
+        try {
+            TerrainCandidateRegistry.StateMachine machine = new TerrainCandidateRegistry.StateMachine();
+            TerrainCandidateRegistry.SectionKey key = TerrainCandidateRegistry.keyOf(storage, 3);
+            machine.onSectionAdded(key);
+            machine.onBuilt(key);
+            machine.onMesh(key, candidate(key, TerrainCandidateSnapshot.TerrainPass.OPAQUE, 1L), storage);
+
+            assertEquals(0, snapshot(machine).candidates().size());
+        } finally {
+            storage.delete();
+        }
     }
 
     @Test
@@ -292,6 +311,98 @@ final class TerrainCandidateRegistryContractTest {
         @Override
         public boolean metallum$isTranslucent() {
             return translucent;
+        }
+    }
+
+    private static final class FakeStorage extends SectionRenderDataStorage
+            implements SectionRenderDataStorageOwner, SectionRenderDataStorageAccessor {
+        private final FakeOwner owner;
+
+        private FakeStorage(
+                final int regionX,
+                final int regionY,
+                final int regionZ,
+                final int baseChunkX,
+                final int baseChunkY,
+                final int baseChunkZ,
+                final boolean translucent
+        ) {
+            super(false);
+            this.owner = new FakeOwner(
+                    regionX, regionY, regionZ,
+                    baseChunkX, baseChunkY, baseChunkZ, translucent
+            );
+        }
+
+        @Override
+        public GlBufferSegment[] metallum$getVertexAllocations() {
+            return null;
+        }
+
+        @Override
+        public GlBufferSegment[] metallum$getElementAllocations() {
+            return null;
+        }
+
+        @Override
+        public GlBufferSegment metallum$getSharedIndexAllocation() {
+            return null;
+        }
+
+        @Override
+        public void metallum$setOwner(
+                final int regionX,
+                final int regionY,
+                final int regionZ,
+                final int baseChunkX,
+                final int baseChunkY,
+                final int baseChunkZ,
+                final boolean translucent
+        ) {
+            owner.metallum$setOwner(
+                    regionX, regionY, regionZ,
+                    baseChunkX, baseChunkY, baseChunkZ, translucent
+            );
+        }
+
+        @Override
+        public boolean metallum$hasOwner() {
+            return owner.metallum$hasOwner();
+        }
+
+        @Override
+        public int metallum$regionX() {
+            return owner.metallum$regionX();
+        }
+
+        @Override
+        public int metallum$regionY() {
+            return owner.metallum$regionY();
+        }
+
+        @Override
+        public int metallum$regionZ() {
+            return owner.metallum$regionZ();
+        }
+
+        @Override
+        public int metallum$baseChunkX() {
+            return owner.metallum$baseChunkX();
+        }
+
+        @Override
+        public int metallum$baseChunkY() {
+            return owner.metallum$baseChunkY();
+        }
+
+        @Override
+        public int metallum$baseChunkZ() {
+            return owner.metallum$baseChunkZ();
+        }
+
+        @Override
+        public boolean metallum$isTranslucent() {
+            return owner.metallum$isTranslucent();
         }
     }
 }
