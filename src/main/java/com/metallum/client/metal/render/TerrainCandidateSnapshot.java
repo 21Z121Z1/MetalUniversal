@@ -8,6 +8,9 @@ import org.joml.Matrix4fc;
 
 import java.util.List;
 import java.util.Objects;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 
 /**
  * Immutable producer-side input for a future terrain visibility decision.
@@ -17,6 +20,18 @@ import java.util.Objects;
  * cull task is allowed to publish its visible lists.</p>
  */
 public final class TerrainCandidateSnapshot {
+    /** Enables the value-only GPU visibility probe; it never changes draw authority. */
+    public static final String GPU_VISIBILITY_PROBE_PROPERTY =
+            "metallum.opt.terrainGpuVisibilityProbe";
+    public static final boolean GPU_VISIBILITY_PROBE_ENABLED = Boolean.parseBoolean(
+            System.getProperty(GPU_VISIBILITY_PROBE_PROPERTY, "false")
+    );
+    /** Candidate ABI: eight float32 values (min xyz, max xyz, range, reserved). */
+    public static final int GPU_VISIBILITY_CANDIDATE_STRIDE_BYTES = 32;
+    public static final int GPU_VISIBILITY_MATRIX_BYTES = 16 * Float.BYTES;
+    /** Hard cap shared by Java and Swift so count/word arithmetic stays bounded. */
+    public static final int GPU_VISIBILITY_MAX_CANDIDATES = 1 << 20;
+
     public enum TerrainPass {
         OPAQUE,
         TRANSLUCENT
@@ -75,6 +90,14 @@ public final class TerrainCandidateSnapshot {
                 throw new IllegalArgumentException("Terrain candidate AABB must have ordered bounds");
             }
         }
+    }
+
+    /**
+     * Conservative CPU reference for the native probe contract.  The result
+     * is visible unless all eight corners are outside one complete clip plane.
+     * Non-finite values and non-positive clip w are uncertain and visible.
+     */
+    public record VisibilityDecision(boolean visible, boolean uncertain) {
     }
 
     /**
@@ -231,15 +254,33 @@ public final class TerrainCandidateSnapshot {
     private final CameraPosition camera;
     private final VisibilityTransform visibilityTransform;
     private final List<Candidate> candidates;
+    private final long epoch;
 
     TerrainCandidateSnapshot(
             final CameraPosition camera,
             final VisibilityTransform visibilityTransform,
             final List<Candidate> candidates
     ) {
+        this(0L, camera, visibilityTransform, candidates);
+    }
+
+    TerrainCandidateSnapshot(
+            final long epoch,
+            final CameraPosition camera,
+            final VisibilityTransform visibilityTransform,
+            final List<Candidate> candidates
+    ) {
+        if (epoch < 0L) {
+            throw new IllegalArgumentException("Terrain candidate snapshot epoch must be non-negative");
+        }
+        this.epoch = epoch;
         this.camera = Objects.requireNonNull(camera, "camera");
         this.visibilityTransform = Objects.requireNonNull(visibilityTransform, "visibilityTransform");
         this.candidates = List.copyOf(candidates);
+    }
+
+    public long epoch() {
+        return epoch;
     }
 
     public CameraPosition camera() {
@@ -252,5 +293,214 @@ public final class TerrainCandidateSnapshot {
 
     public List<Candidate> candidates() {
         return candidates;
+    }
+
+    /**
+     * Packs all producer candidates as camera-relative float32 values.  The
+     * subtraction intentionally occurs in double precision before narrowing;
+     * any overflow, non-finite value, or malformed range rejects the complete
+     * probe rather than allowing a partially meaningful dispatch.
+     */
+    public MemorySegment packGpuVisibilityCandidates(final Arena arena) {
+        Objects.requireNonNull(arena, "arena");
+        if (candidates.isEmpty()) {
+            return MemorySegment.NULL;
+        }
+        final long bytes = gpuVisibilityCandidateBytes(candidates.size());
+        final MemorySegment packed = arena.allocate(bytes, 16);
+        for (int index = 0; index < candidates.size(); index++) {
+            Candidate candidate = candidates.get(index);
+            Aabb aabb = candidate.worldAabb();
+            double minX = aabb.minX() - camera.x();
+            double minY = aabb.minY() - camera.y();
+            double minZ = aabb.minZ() - camera.z();
+            double maxX = aabb.maxX() - camera.x();
+            double maxY = aabb.maxY() - camera.y();
+            double maxZ = aabb.maxZ() - camera.z();
+            long offset = (long) index * GPU_VISIBILITY_CANDIDATE_STRIDE_BYTES;
+            packed.set(ValueLayout.JAVA_FLOAT, offset, conservativeMin(minX));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 4, conservativeMin(minY));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 8, conservativeMin(minZ));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 12, conservativeMax(maxX));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 16, conservativeMax(maxY));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 20, conservativeMax(maxZ));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 24,
+                    checkedRange(minX, minY, minZ, maxX, maxY, maxZ));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 28, 0.0F);
+        }
+        return packed;
+    }
+
+    static int gpuVisibilityWordCount(final int candidateCount) {
+        if (candidateCount < 0 || candidateCount > GPU_VISIBILITY_MAX_CANDIDATES) {
+            throw new IllegalArgumentException("Terrain visibility candidate count exceeds the bounded ABI");
+        }
+        return (candidateCount + 31) >>> 5;
+    }
+
+    static long gpuVisibilityCandidateBytes(final int candidateCount) {
+        if (candidateCount < 0 || candidateCount > GPU_VISIBILITY_MAX_CANDIDATES) {
+            throw new IllegalArgumentException("Terrain visibility candidate count exceeds the bounded ABI");
+        }
+        return Math.multiplyExact((long) candidateCount, GPU_VISIBILITY_CANDIDATE_STRIDE_BYTES);
+    }
+
+    /** Packs the fixed column-major clipFromCameraRelative matrix contract. */
+    public MemorySegment packGpuVisibilityMatrix(final Arena arena) {
+        Objects.requireNonNull(arena, "arena");
+        final MemorySegment packed = arena.allocate(GPU_VISIBILITY_MATRIX_BYTES, 16);
+        final float[] values = new float[]{
+                visibilityTransform.m00(), visibilityTransform.m01(),
+                visibilityTransform.m02(), visibilityTransform.m03(),
+                visibilityTransform.m10(), visibilityTransform.m11(),
+                visibilityTransform.m12(), visibilityTransform.m13(),
+                visibilityTransform.m20(), visibilityTransform.m21(),
+                visibilityTransform.m22(), visibilityTransform.m23(),
+                visibilityTransform.m30(), visibilityTransform.m31(),
+                visibilityTransform.m32(), visibilityTransform.m33()
+        };
+        for (int index = 0; index < values.length; index++) {
+            if (!Float.isFinite(values[index])) {
+                throw new IllegalArgumentException("Terrain visibility matrix contains a non-finite value");
+            }
+            packed.set(ValueLayout.JAVA_FLOAT, (long) index * Float.BYTES, values[index]);
+        }
+        return packed;
+    }
+
+    /** Pure CPU contract helper used by focused tests and native differential checks. */
+    public static VisibilityDecision referenceDecision(
+            final VisibilityTransform transform,
+            final float minX,
+            final float minY,
+            final float minZ,
+            final float maxX,
+            final float maxY,
+            final float maxZ
+    ) {
+        Objects.requireNonNull(transform, "transform");
+        if (!orderedFinite(minX, minY, minZ, maxX, maxY, maxZ)
+                || !finiteTransform(transform)) {
+            return new VisibilityDecision(true, true);
+        }
+        boolean outsideLeft = true;
+        boolean outsideRight = true;
+        boolean outsideBottom = true;
+        boolean outsideTop = true;
+        boolean outsideNear = true;
+        boolean outsideFar = true;
+        for (int xIndex = 0; xIndex < 2; xIndex++) {
+            float x = xIndex == 0 ? minX : maxX;
+            for (int yIndex = 0; yIndex < 2; yIndex++) {
+                float y = yIndex == 0 ? minY : maxY;
+                for (int zIndex = 0; zIndex < 2; zIndex++) {
+                    float z = zIndex == 0 ? minZ : maxZ;
+                    float cx = transform.m00() * x + transform.m10() * y
+                            + transform.m20() * z + transform.m30();
+                    float cy = transform.m01() * x + transform.m11() * y
+                            + transform.m21() * z + transform.m31();
+                    float cz = transform.m02() * x + transform.m12() * y
+                            + transform.m22() * z + transform.m32();
+                    float cw = transform.m03() * x + transform.m13() * y
+                            + transform.m23() * z + transform.m33();
+                    if (!Float.isFinite(cx) || !Float.isFinite(cy) || !Float.isFinite(cz)
+                            || !Float.isFinite(cw) || cw <= 0.0F) {
+                        return new VisibilityDecision(true, true);
+                    }
+                    outsideLeft &= cx < -cw;
+                    outsideRight &= cx > cw;
+                    outsideBottom &= cy < -cw;
+                    outsideTop &= cy > cw;
+                    outsideNear &= cz < -cw;
+                    outsideFar &= cz > cw;
+                }
+            }
+        }
+        return new VisibilityDecision(
+                !(outsideLeft || outsideRight || outsideBottom || outsideTop || outsideNear || outsideFar),
+                false
+        );
+    }
+
+    private static float checkedFloat(final double value) {
+        if (!Double.isFinite(value) || value > Float.MAX_VALUE || value < -Float.MAX_VALUE) {
+            throw new IllegalArgumentException("Terrain visibility camera-relative value overflowed float32");
+        }
+        float narrowed = (float) value;
+        if (!Float.isFinite(narrowed)) {
+            throw new IllegalArgumentException("Terrain visibility camera-relative value is non-finite");
+        }
+        return narrowed;
+    }
+
+    /**
+     * Narrows a minimum outward.  This matters at the clip boundary: a plain
+     * float cast can move a mathematical minimum inward by one ulp and turn a
+     * conservative AABB test into a false negative once masking is added.
+     */
+    private static float conservativeMin(final double value) {
+        float narrowed = checkedFloat(value);
+        if ((double) narrowed > value) {
+            narrowed = Math.nextDown(narrowed);
+        }
+        if (!Float.isFinite(narrowed)) {
+            throw new IllegalArgumentException("Terrain visibility minimum became non-finite");
+        }
+        return narrowed;
+    }
+
+    /** Narrows a maximum outward; see {@link #conservativeMin(double)}. */
+    private static float conservativeMax(final double value) {
+        float narrowed = checkedFloat(value);
+        if ((double) narrowed < value) {
+            narrowed = Math.nextUp(narrowed);
+        }
+        if (!Float.isFinite(narrowed)) {
+            throw new IllegalArgumentException("Terrain visibility maximum became non-finite");
+        }
+        return narrowed;
+    }
+
+    private static float checkedRange(
+            final double minX,
+            final double minY,
+            final double minZ,
+            final double maxX,
+            final double maxY,
+            final double maxZ
+    ) {
+        if (!Double.isFinite(minX) || !Double.isFinite(minY) || !Double.isFinite(minZ)
+                || !Double.isFinite(maxX) || !Double.isFinite(maxY) || !Double.isFinite(maxZ)) {
+            throw new IllegalArgumentException("Terrain visibility range is non-finite");
+        }
+        double range = Math.max(
+                Math.max(Math.abs(minX), Math.max(Math.abs(minY), Math.abs(minZ))),
+                Math.max(Math.abs(maxX), Math.max(Math.abs(maxY), Math.abs(maxZ)))
+        );
+        return conservativeMax(range);
+    }
+
+    private static boolean orderedFinite(
+            final float minX,
+            final float minY,
+            final float minZ,
+            final float maxX,
+            final float maxY,
+            final float maxZ
+    ) {
+        return Float.isFinite(minX) && Float.isFinite(minY) && Float.isFinite(minZ)
+                && Float.isFinite(maxX) && Float.isFinite(maxY) && Float.isFinite(maxZ)
+                && minX <= maxX && minY <= maxY && minZ <= maxZ;
+    }
+
+    private static boolean finiteTransform(final VisibilityTransform transform) {
+        return Float.isFinite(transform.m00()) && Float.isFinite(transform.m01())
+                && Float.isFinite(transform.m02()) && Float.isFinite(transform.m03())
+                && Float.isFinite(transform.m10()) && Float.isFinite(transform.m11())
+                && Float.isFinite(transform.m12()) && Float.isFinite(transform.m13())
+                && Float.isFinite(transform.m20()) && Float.isFinite(transform.m21())
+                && Float.isFinite(transform.m22()) && Float.isFinite(transform.m23())
+                && Float.isFinite(transform.m30()) && Float.isFinite(transform.m31())
+                && Float.isFinite(transform.m32()) && Float.isFinite(transform.m33());
     }
 }

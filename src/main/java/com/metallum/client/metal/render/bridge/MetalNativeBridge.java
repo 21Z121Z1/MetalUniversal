@@ -471,6 +471,33 @@ public final class MetalNativeBridge {
                             INT
                     )
             );
+            MTLDeviceCreateTerrainGpuVisibilityProbe = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainGpuVisibilityProbe",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            LONG
+                    )
+            );
+            TerrainVisibilityProbePoll = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_terrain_visibility_probe_poll",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT
+                    )
+            );
             MTLRenderCommandEncoderExecuteTerrainIcb = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderCommandEncoder_executeTerrainIcb",
@@ -997,6 +1024,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLDeviceCreateTerrainIndexedIcb;
     @Nullable
     private static final MethodHandle MTLDeviceCreateTerrainGpuIndexedIcb;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilityProbe;
+    @Nullable
+    private static final MethodHandle TerrainVisibilityProbePoll;
     @Nullable
     private static final MethodHandle MTLRenderCommandEncoderExecuteTerrainIcb;
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitivesIndirect;
@@ -2609,6 +2640,65 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable ignored) {
             return MemorySegment.NULL;
+        }
+    }
+
+    /** Encodes one value-only terrain visibility probe on the active MTL4 buffer. */
+    public static MemorySegment MTLDevice_createTerrainGpuVisibilityProbe(
+            final MemorySegment renderEncoder,
+            final MemorySegment device,
+            final MemorySegment packedCandidates,
+            final MemorySegment packedMatrix,
+            final int candidateCount,
+            final long epoch
+    ) {
+        if (MTLDeviceCreateTerrainGpuVisibilityProbe == null || candidateCount <= 0 || epoch < 0L) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainGpuVisibilityProbe.invokeExact(
+                    segment(renderEncoder),
+                    segment(device),
+                    segment(packedCandidates),
+                    segment(packedMatrix),
+                    candidateCount,
+                    epoch
+            );
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    public static boolean terrainVisibilityProbeAvailable() {
+        return MTLDeviceCreateTerrainGpuVisibilityProbe != null
+                && TerrainVisibilityProbePoll != null;
+    }
+
+    /** Non-blocking completion/readback poll for one terrain visibility probe. */
+    public static int terrainVisibilityProbePoll(
+            final MemorySegment probe,
+            final MemorySegment epoch,
+            final MemorySegment visible,
+            final MemorySegment uncertain,
+            final MemorySegment wordCount,
+            final MemorySegment bitset,
+            final int wordCapacity
+    ) {
+        if (TerrainVisibilityProbePoll == null || wordCapacity < 0) {
+            return 0;
+        }
+        try {
+            return (int) TerrainVisibilityProbePoll.invokeExact(
+                    segment(probe),
+                    segment(epoch),
+                    segment(visible),
+                    segment(uncertain),
+                    segment(wordCount),
+                    segment(bitset),
+                    wordCapacity
+            );
+        } catch (Throwable ignored) {
+            return -1;
         }
     }
 
