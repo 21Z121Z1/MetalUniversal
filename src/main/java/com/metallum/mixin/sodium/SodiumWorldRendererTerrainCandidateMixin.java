@@ -32,7 +32,7 @@ public abstract class SodiumWorldRendererTerrainCandidateMixin {
             final Matrix4f cullingMatrix,
             final CallbackInfo ci
     ) {
-        if (!TerrainCandidateRegistry.enabled()) {
+        if (!TerrainCandidateRegistry.enabled() || camera == null || cullingMatrix == null) {
             return;
         }
         var position = camera.position();

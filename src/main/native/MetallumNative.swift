@@ -45,6 +45,12 @@ private struct TerrainGpuComputePipelineKey: Hashable {
     let indexType: UInt
 }
 
+private struct TerrainVisibilityComputePipelineKey: Hashable {
+    let deviceAddress: UInt
+}
+
+private let terrainVisibilityMaxCandidates = 1 << 20
+
 private final class TerrainGpuComputePipeline {
     let state: MTLComputePipelineState
     let function: MTLFunction
@@ -153,6 +159,8 @@ private enum NativeState {
     static let terrainGpuPipelineLock = NSLock()
     static var terrainGpuPipelines: [TerrainGpuComputePipelineKey: TerrainGpuComputePipeline] = [:]
     static var terrainGpuPipelineCompileCount: UInt64 = 0
+    static let terrainVisibilityPipelineLock = NSLock()
+    static var terrainVisibilityPipelines: [TerrainVisibilityComputePipelineKey: TerrainGpuComputePipeline] = [:]
     // Metal 4 frame-generation present pilot (spec M4). Read once when the
     // presenter is constructed; flipping it later has no effect, which matches how
     // the presenter is started.
@@ -7995,6 +8003,34 @@ public func metallum_terrain_gpu_icb_pipeline_stats(
     return 1
 }
 
+/// Non-blocking completion/readback for a decision-only terrain visibility
+/// probe.  The caller owns the returned probe pointer and must release it
+/// after a successful or failed poll.
+@_cdecl("metallum_terrain_visibility_probe_poll")
+public func metallum_terrain_visibility_probe_poll(
+    _ pointer: UnsafeMutableRawPointer,
+    _ outEpoch: UnsafeMutablePointer<UInt64>?,
+    _ outVisible: UnsafeMutablePointer<UInt32>?,
+    _ outUncertain: UnsafeMutablePointer<UInt32>?,
+    _ outWordCount: UnsafeMutablePointer<UInt32>?,
+    _ outBitset: UnsafeMutablePointer<UInt32>?,
+    _ wordCapacity: Int32
+) -> Int32 {
+    guard #available(macOS 26.0, iOS 26.0, *),
+          let probe = Unmanaged<AnyObject>.fromOpaque(pointer)
+              .takeUnretainedValue() as? TerrainGpuVisibilityProbeOwner else {
+        return -1
+    }
+    return probe.poll(
+        outEpoch: outEpoch,
+        outVisible: outVisible,
+        outUncertain: outUncertain,
+        outWordCount: outWordCount,
+        outBitset: outBitset,
+        wordCapacity: wordCapacity
+    )
+}
+
 @_cdecl("metallum_metal4_main_queue_pilot_validate")
 public func metallum_metal4_main_queue_pilot_validate(_ device: MTLDevice) -> Int32 {
     guard #available(macOS 26.0, iOS 26.0, *), device.supportsFamily(.metal4) else {
@@ -9725,6 +9761,208 @@ private func terrainGpuIcbMslSource(
     """
 }
 
+/// Decision-only terrain visibility kernel.  It never writes an ICB or any
+/// draw command: the Java render path remains the draw authority while this
+/// probe publishes a conservative value-only bitset and counters.
+@available(macOS 26.0, iOS 26.0, *)
+private func terrainVisibilityMslSource() -> String {
+    return """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct TerrainVisibilityCandidate {
+      float minX;
+      float minY;
+      float minZ;
+      float maxX;
+      float maxY;
+      float maxZ;
+      float range;
+      float reserved;
+    };
+
+    kernel void metallum_terrain_gpu_visibility_probe(
+      device const TerrainVisibilityCandidate *candidates [[buffer(0)]],
+      device const float4x4 *clipFromCameraRelative [[buffer(1)]],
+      device atomic_uint *visibilityWords [[buffer(2)]],
+      device atomic_uint *counters [[buffer(3)]],
+      uint candidateIndex [[thread_position_in_grid]]) {
+      TerrainVisibilityCandidate candidate = candidates[candidateIndex];
+      bool uncertain = false;
+      bool visible = true;
+      if (!isfinite(candidate.minX) || !isfinite(candidate.minY)
+          || !isfinite(candidate.minZ) || !isfinite(candidate.maxX)
+          || !isfinite(candidate.maxY) || !isfinite(candidate.maxZ)
+          || !isfinite(candidate.range)
+          || candidate.minX > candidate.maxX
+          || candidate.minY > candidate.maxY
+          || candidate.minZ > candidate.maxZ
+          || candidate.range < 0.0f) {
+        uncertain = true;
+      } else {
+        float3 corners[8] = {
+          float3(candidate.minX, candidate.minY, candidate.minZ),
+          float3(candidate.maxX, candidate.minY, candidate.minZ),
+          float3(candidate.minX, candidate.maxY, candidate.minZ),
+          float3(candidate.maxX, candidate.maxY, candidate.minZ),
+          float3(candidate.minX, candidate.minY, candidate.maxZ),
+          float3(candidate.maxX, candidate.minY, candidate.maxZ),
+          float3(candidate.minX, candidate.maxY, candidate.maxZ),
+          float3(candidate.maxX, candidate.maxY, candidate.maxZ)
+        };
+        float4 clip[8];
+        for (uint corner = 0; corner < 8; ++corner) {
+          clip[corner] = (*clipFromCameraRelative) * float4(corners[corner], 1.0f);
+          if (!all(isfinite(clip[corner])) || clip[corner].w <= 0.0f) {
+            uncertain = true;
+            break;
+          }
+        }
+        if (!uncertain) {
+          bool outsideLeft = true;
+          bool outsideRight = true;
+          bool outsideBottom = true;
+          bool outsideTop = true;
+          bool outsideNear = true;
+          bool outsideFar = true;
+          for (uint corner = 0; corner < 8; ++corner) {
+            outsideLeft = outsideLeft && clip[corner].x < -clip[corner].w;
+            outsideRight = outsideRight && clip[corner].x > clip[corner].w;
+            outsideBottom = outsideBottom && clip[corner].y < -clip[corner].w;
+            outsideTop = outsideTop && clip[corner].y > clip[corner].w;
+            outsideNear = outsideNear && clip[corner].z < -clip[corner].w;
+            outsideFar = outsideFar && clip[corner].z > clip[corner].w;
+          }
+          visible = !(outsideLeft || outsideRight || outsideBottom
+                      || outsideTop || outsideNear || outsideFar);
+        }
+      }
+      if (uncertain) {
+        atomic_fetch_add_explicit(&counters[1], 1u, memory_order_relaxed);
+      }
+      if (visible || uncertain) {
+        uint word = candidateIndex >> 5;
+        uint bit = candidateIndex & 31u;
+        atomic_fetch_or_explicit(&visibilityWords[word], 1u << bit, memory_order_relaxed);
+        atomic_fetch_add_explicit(&counters[0], 1u, memory_order_relaxed);
+      }
+    }
+    """
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private func terrainVisibilityComputePipeline(
+    device: MTLDevice,
+    source: String
+) -> TerrainGpuComputePipeline? {
+    let key = TerrainVisibilityComputePipelineKey(deviceAddress: objectAddress(device))
+    NativeState.terrainVisibilityPipelineLock.lock()
+    defer { NativeState.terrainVisibilityPipelineLock.unlock() }
+    if let cached = NativeState.terrainVisibilityPipelines[key] {
+        return cached
+    }
+    let pipeline: TerrainGpuComputePipeline? = NativeState.onCompilerThread {
+        do {
+            let library = try device.makeLibrary(source: source, options: nil)
+            guard let function = library.makeFunction(name: "metallum_terrain_gpu_visibility_probe") else {
+                return nil
+            }
+            return TerrainGpuComputePipeline(
+                state: try device.makeComputePipelineState(function: function),
+                function: function
+            )
+        } catch {
+            NSLog("[metallum] terrain GPU visibility probe pipeline failed: %@", String(describing: error))
+            return nil
+        }
+    }
+    guard let pipeline else { return nil }
+    NativeState.terrainVisibilityPipelines[key] = pipeline
+    return pipeline
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private final class TerrainGpuVisibilityProbeOwner {
+    let epoch: UInt64
+    let candidateCount: Int
+    let wordCount: Int
+    let candidateBuffer: MTLBuffer
+    let matrixBuffer: MTLBuffer
+    let visibilityBuffer: MTLBuffer
+    let countersBuffer: MTLBuffer
+    private let lock = NSLock()
+    private var completed = false
+    private var succeeded = false
+
+    init(
+        epoch: UInt64,
+        candidateCount: Int,
+        wordCount: Int,
+        candidateBuffer: MTLBuffer,
+        matrixBuffer: MTLBuffer,
+        visibilityBuffer: MTLBuffer,
+        countersBuffer: MTLBuffer
+    ) {
+        self.epoch = epoch
+        self.candidateCount = candidateCount
+        self.wordCount = wordCount
+        self.candidateBuffer = candidateBuffer
+        self.matrixBuffer = matrixBuffer
+        self.visibilityBuffer = visibilityBuffer
+        self.countersBuffer = countersBuffer
+        residencyTrackCreated(candidateBuffer)
+        residencyTrackCreated(matrixBuffer)
+        residencyTrackCreated(visibilityBuffer)
+        residencyTrackCreated(countersBuffer)
+    }
+
+    deinit {
+        residencyTrackReleased(rawPointer(candidateBuffer))
+        residencyTrackReleased(rawPointer(matrixBuffer))
+        residencyTrackReleased(rawPointer(visibilityBuffer))
+        residencyTrackReleased(rawPointer(countersBuffer))
+    }
+
+    func complete(error: Error?) {
+        lock.lock()
+        completed = true
+        succeeded = error == nil
+        lock.unlock()
+    }
+
+    /// Returns 0 while the command buffer is in flight, 1 for a copied result,
+    /// and -1 for a completed command buffer that failed GPU execution.
+    func poll(
+        outEpoch: UnsafeMutablePointer<UInt64>?,
+        outVisible: UnsafeMutablePointer<UInt32>?,
+        outUncertain: UnsafeMutablePointer<UInt32>?,
+        outWordCount: UnsafeMutablePointer<UInt32>?,
+        outBitset: UnsafeMutablePointer<UInt32>?,
+        wordCapacity: Int32
+    ) -> Int32 {
+        lock.lock()
+        let isCompleted = completed
+        let isSucceeded = succeeded
+        lock.unlock()
+        guard isCompleted else { return 0 }
+        guard isSucceeded, wordCapacity >= Int32(wordCount),
+              let outEpoch, let outVisible, let outUncertain,
+              let outWordCount, let outBitset else {
+            return -1
+        }
+        let counters = countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        let words = visibilityBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        outEpoch.pointee = epoch
+        outVisible.pointee = counters[0]
+        outUncertain.pointee = counters[1]
+        outWordCount.pointee = UInt32(wordCount)
+        for index in 0..<wordCount {
+            outBitset[index] = words[index]
+        }
+        return 1
+    }
+}
+
 @available(macOS 26.0, iOS 26.0, *)
 private func terrainGpuComputePipeline(
     device: MTLDevice,
@@ -9763,6 +10001,136 @@ private func terrainGpuComputePipeline(
     NativeState.terrainGpuPipelines[key] = pipeline
     NativeState.terrainGpuPipelineCompileCount &+= 1
     return pipeline
+}
+
+/// Dispatches the value-only visibility probe into the current Metal 4 main
+/// command buffer.  The returned owner retains all shared buffers until the
+/// command-buffer completion callback has made readback safe.
+@available(macOS 26.0, iOS 26.0, *)
+@_cdecl("metallum_MTLDevice_createTerrainGpuVisibilityProbe")
+public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
+    _ pointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ packedCandidates: UnsafePointer<UInt8>?,
+    _ packedMatrix: UnsafePointer<Float>?,
+    _ candidateCount: Int32,
+    _ epoch: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard candidateCount > 0,
+          let packedCandidates,
+          let packedMatrix,
+          let bridge = metal4RenderBridge(pointer),
+          device.supportsFamily(.metal4),
+          candidateCount <= Int32(terrainVisibilityMaxCandidates) else {
+        return nil
+    }
+    let count = Int(candidateCount)
+    guard count <= Int.max / (8 * MemoryLayout<Float>.stride) else {
+        return nil
+    }
+    let candidateBytes = count * 8 * MemoryLayout<Float>.stride
+    // The Java ABI is native little-endian float32 on Apple Silicon. The
+    // typed view below is used only after count and copy-size domains are
+    // checked; all values are still validated before dispatch.
+    let candidateFloats = UnsafeRawPointer(packedCandidates).assumingMemoryBound(to: Float.self)
+    for index in 0..<count {
+        let base = index * 8
+        let minX = candidateFloats[base]
+        let minY = candidateFloats[base + 1]
+        let minZ = candidateFloats[base + 2]
+        let maxX = candidateFloats[base + 3]
+        let maxY = candidateFloats[base + 4]
+        let maxZ = candidateFloats[base + 5]
+        let range = candidateFloats[base + 6]
+        guard minX.isFinite, minY.isFinite, minZ.isFinite,
+              maxX.isFinite, maxY.isFinite, maxZ.isFinite, range.isFinite,
+              minX <= maxX, minY <= maxY, minZ <= maxZ, range >= 0.0 else {
+            return nil
+        }
+    }
+    let matrixFloats = packedMatrix
+    for index in 0..<16 {
+        guard matrixFloats[index].isFinite else { return nil }
+    }
+    guard count <= Int.max - 31 else { return nil }
+    let wordCount = (count + 31) / 32
+    guard wordCount <= Int.max / MemoryLayout<UInt32>.stride else { return nil }
+    guard let candidateBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCandidates),
+        length: candidateBytes,
+        options: .storageModeShared
+    ), let matrixBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedMatrix),
+        length: 16 * MemoryLayout<Float>.stride,
+        options: .storageModeShared
+    ), let visibilityBuffer = device.makeBuffer(
+        length: wordCount * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let countersBuffer = device.makeBuffer(
+        length: 2 * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ) else {
+        return nil
+    }
+    visibilityBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: wordCount)
+    countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: 2)
+
+    guard let pipeline = terrainVisibilityComputePipeline(
+        device: device,
+        source: terrainVisibilityMslSource()
+    ), let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+        return nil
+    }
+    let argumentDescriptor = MTL4ArgumentTableDescriptor()
+    argumentDescriptor.maxBufferBindCount = 4
+    argumentDescriptor.initializeBindings = true
+    argumentDescriptor.supportAttributeStrides = false
+    guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    arguments.setAddress(candidateBuffer.gpuAddress, index: 0)
+    arguments.setAddress(matrixBuffer.gpuAddress, index: 1)
+    arguments.setAddress(visibilityBuffer.gpuAddress, index: 2)
+    arguments.setAddress(countersBuffer.gpuAddress, index: 3)
+    computeEncoder.setArgumentTable(arguments)
+    computeEncoder.setComputePipelineState(pipeline.state)
+    computeEncoder.dispatchThreads(
+        threadsPerGrid: MTLSize(width: count, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(
+            width: max(1, min(pipeline.state.threadExecutionWidth, 64)),
+            height: 1,
+            depth: 1
+        )
+    )
+    computeEncoder.barrier(
+        afterStages: .dispatch,
+        beforeQueueStages: [.vertex, .fragment],
+        visibilityOptions: .device
+    )
+    computeEncoder.endEncoding()
+
+    let owner = TerrainGpuVisibilityProbeOwner(
+        epoch: epoch,
+        candidateCount: count,
+        wordCount: wordCount,
+        candidateBuffer: candidateBuffer,
+        matrixBuffer: matrixBuffer,
+        visibilityBuffer: visibilityBuffer,
+        countersBuffer: countersBuffer
+    )
+    // Keep the owner (and therefore every GPU-addressed buffer) alive through
+    // completion even if Java abandons the result during a world reset.
+    bridge.lease.addCompletionHandler { [owner] error, _, _ in
+        owner.complete(error: error)
+    }
+    if !NativeState.terrainGpuEncodeLogged {
+        NativeState.terrainGpuEncodeLogged = true
+        NSLog("[metallum] terrain GPU visibility probe active: decision-only bitset; draw authority unchanged")
+    }
+    return retainedPointer(owner)
 }
 
 /// Creates one producer-owned terrain ICB. The Java owner retains the returned

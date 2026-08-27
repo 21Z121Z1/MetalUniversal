@@ -28,11 +28,13 @@ public final class TerrainCandidateRegistry {
     public static final String PROPERTY = "metallum.opt.terrainCandidateSnapshot";
     public static final boolean ENABLED = Boolean.parseBoolean(
             System.getProperty(PROPERTY, "false")
-    );
+    ) || TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED;
 
     private static StateMachine state;
     private static volatile TerrainCandidateSnapshot latest;
     private static TerrainCandidateSnapshot.AllocationIdentity opaqueSharedIndex;
+    private static long epochSequence;
+    private static volatile VisibilityResult latestVisibilityResult;
 
     private TerrainCandidateRegistry() {
     }
@@ -52,12 +54,19 @@ public final class TerrainCandidateRegistry {
             return;
         }
         synchronized (TerrainCandidateRegistry.class) {
-            StateMachine machine = state();
-            machine.refreshAll();
-            latest = machine.snapshot(
-                    new TerrainCandidateSnapshot.CameraPosition(cameraX, cameraY, cameraZ),
-                    TerrainCandidateSnapshot.VisibilityTransform.copyOf(cullMatrix)
-            );
+            try {
+                StateMachine machine = state();
+                machine.refreshAll();
+                latest = machine.snapshot(
+                        nextEpoch(),
+                        new TerrainCandidateSnapshot.CameraPosition(cameraX, cameraY, cameraZ),
+                        TerrainCandidateSnapshot.VisibilityTransform.copyOf(cullMatrix)
+                );
+            } catch (RuntimeException invalidFrame) {
+                // Capture is diagnostic input only. An invalid authoritative
+                // snapshot must never interrupt Sodium's normal terrain draw.
+                latest = null;
+            }
         }
     }
 
@@ -65,15 +74,70 @@ public final class TerrainCandidateRegistry {
         return ENABLED ? latest : null;
     }
 
+    /** Latest completed probe result; it is diagnostic/decision data only. */
+    public static VisibilityResult latestVisibilityResult() {
+        return latestVisibilityResult;
+    }
+
+    static void publishVisibilityResult(final VisibilityResult result) {
+        latestVisibilityResult = result;
+    }
+
+    public record VisibilityResult(
+            long epoch,
+            int candidateCount,
+            int visibleCount,
+            int uncertainCount,
+            int[] visibilityWords,
+            boolean fallback
+    ) {
+        public VisibilityResult(
+                final long epoch,
+                final int candidateCount,
+                final int visibleCount,
+                final int uncertainCount,
+                final int[] visibilityWords
+        ) {
+            this(epoch, candidateCount, visibleCount, uncertainCount, visibilityWords, false);
+        }
+
+        public VisibilityResult {
+            if (epoch < 0L || candidateCount < 0 || visibleCount < 0 || uncertainCount < 0
+                    || visibleCount > candidateCount || uncertainCount > candidateCount
+                    || visibilityWords == null
+                    || visibilityWords.length != TerrainCandidateSnapshot.gpuVisibilityWordCount(candidateCount)) {
+                throw new IllegalArgumentException("Invalid terrain visibility result");
+            }
+            visibilityWords = visibilityWords.clone();
+        }
+
+        @Override
+        public int[] visibilityWords() {
+            return visibilityWords.clone();
+        }
+    }
+
+    private static long nextEpoch() {
+        if (epochSequence == Long.MAX_VALUE) {
+            throw new IllegalStateException("Terrain candidate snapshot epoch exhausted");
+        }
+        return ++epochSequence;
+    }
+
     /** Clears all world-owned state when Sodium changes or unloads its level. */
     public static void reset() {
         if (!ENABLED) {
             return;
         }
+        // Release only probe owners that are no longer associated with this
+        // world. Their Metal buffers remain owned by the encoded command until
+        // completion; the native owner is never reused for a new epoch.
+        TerrainGpuVisibilityProbe.reset();
         synchronized (TerrainCandidateRegistry.class) {
             state = null;
             latest = null;
             opaqueSharedIndex = null;
+            latestVisibilityResult = null;
         }
     }
 
@@ -520,6 +584,7 @@ public final class TerrainCandidateRegistry {
         }
 
         TerrainCandidateSnapshot snapshot(
+                final long epoch,
                 final TerrainCandidateSnapshot.CameraPosition camera,
                 final TerrainCandidateSnapshot.VisibilityTransform transform
         ) {
@@ -546,7 +611,14 @@ public final class TerrainCandidateRegistry {
                 if (result == 0) result = left.pass().compareTo(right.pass());
                 return result;
             });
-            return new TerrainCandidateSnapshot(camera, transform, candidates);
+            return new TerrainCandidateSnapshot(epoch, camera, transform, candidates);
+        }
+
+        TerrainCandidateSnapshot snapshot(
+                final TerrainCandidateSnapshot.CameraPosition camera,
+                final TerrainCandidateSnapshot.VisibilityTransform transform
+        ) {
+            return snapshot(0L, camera, transform);
         }
     }
 

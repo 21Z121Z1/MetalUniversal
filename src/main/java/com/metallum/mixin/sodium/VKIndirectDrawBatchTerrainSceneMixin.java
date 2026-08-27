@@ -5,6 +5,7 @@ import com.metallum.client.metal.render.TerrainSubmissionScope;
 import com.metallum.client.metal.render.TerrainIcbOwner;
 import com.metallum.client.metal.render.TerrainIcbProducer;
 import com.metallum.client.metal.render.TerrainDrawMetadataStore;
+import com.metallum.client.metal.render.TerrainGpuVisibilityProbe;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -80,12 +81,19 @@ public abstract class VKIndirectDrawBatchTerrainSceneMixin
             final int drawCount,
             final Operation<Void> original
     ) {
+        if (TerrainGpuVisibilityProbe.enabled()) {
+            TerrainGpuVisibilityProbe.beginTerrainDrawScope();
+        }
         if (TerrainSceneSnapshot.captureEnabled()) {
             TerrainSubmissionScope.capture(
                     pass, this, this.pCommands, drawCount, commandSlice,
                     this.metallum$terrainDrawMetadata
             );
         }
-        original.call(pass, commandSlice, drawCount);
+        try {
+            original.call(pass, commandSlice, drawCount);
+        } finally {
+            TerrainGpuVisibilityProbe.endTerrainDrawScope();
+        }
     }
 }

@@ -813,6 +813,7 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
               "the global residency set could not be enabled for terrain ICB validation")
     try check(metallum_metal4_main_renderer_enable(device, nil) != 0,
               "the Metal 4 main renderer could not be enabled for terrain ICB validation")
+    try runTerrainGpuVisibilityProbeReadbackTest(device: device, queue: queue)
     defer {
         metallum_set_terrain_icb_enabled(0)
         metallum_set_terrain_gpu_encode_enabled(0)
@@ -1126,6 +1127,101 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
           + "gpuDispatchDelta=\(gpuStatsAfter.1 - gpuStatsBefore.1), "
           + "negativeBaseVertexParity=1, "
           + "pipelineCompileDelta=\(gpuPipelineCompilesAfterSecond - gpuPipelineCompilesBefore)")
+}
+
+/// Exercises the value-only frustum probe on a real Metal 4 command buffer.
+/// The candidates are deliberately chosen as inside, outside and intersecting
+/// the identity clip volume; the test checks the returned bitset and counters,
+/// but does not involve Minecraft's world or make the result draw-authoritative.
+@available(macOS 26.0, *)
+private func runTerrainGpuVisibilityProbeReadbackTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    let candidates: [Float] = [
+        -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.0,
+        2.0, -0.5, -0.5, 3.0, 0.5, 0.5, 3.0, 0.0,
+        0.5, 0.5, 0.5, 1.5, 1.5, 1.5, 1.5, 0.0
+    ]
+    let matrix: [Float] = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    ]
+    let target = try makeTarget(device: device, label: "terrain visibility probe target")
+    guard let commandBuffer = "terrain visibility probe".withCString({ label in
+        metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
+    }) else {
+        try fail("could not allocate terrain visibility probe command buffer")
+    }
+    defer { metallum_release_object(commandBuffer) }
+    guard let encoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+        commandBuffer,
+        target,
+        nil,
+        8,
+        8,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1
+    ) else {
+        try fail("could not create terrain visibility probe render encoder")
+    }
+    defer { metallum_release_object(encoder) }
+    metallum_MTLCommandEncoder_endEncoding(encoder)
+
+    let probe: UnsafeMutableRawPointer? = candidates.withUnsafeBufferPointer({ candidateValues in
+        matrix.withUnsafeBufferPointer { matrixValues in
+            guard let candidateBase = candidateValues.baseAddress,
+                  let matrixBase = matrixValues.baseAddress else {
+                return nil
+            }
+            return metallum_MTLDevice_createTerrainGpuVisibilityProbe(
+                encoder,
+                device,
+                UnsafeRawPointer(candidateBase).assumingMemoryBound(to: UInt8.self),
+                matrixBase,
+                3,
+                123
+            )
+        }
+    })
+    guard let probe else {
+        try fail("native terrain visibility probe could not be encoded")
+    }
+    defer { metallum_release_object(probe) }
+
+    metallum_MTLCommandBuffer_commit(commandBuffer)
+    try check(metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
+              "terrain visibility probe command buffer did not complete")
+    try check(metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
+              "terrain visibility probe command buffer completed with an error")
+
+    var epoch: UInt64 = 0
+    var visible: UInt32 = 0
+    var uncertain: UInt32 = 0
+    var wordCount: UInt32 = 0
+    var words = [UInt32](repeating: 0, count: 1)
+    let status = words.withUnsafeMutableBufferPointer { output in
+        metallum_terrain_visibility_probe_poll(
+            probe,
+            &epoch,
+            &visible,
+            &uncertain,
+            &wordCount,
+            output.baseAddress,
+            1
+        )
+    }
+    try check(status == 1,
+              "terrain visibility probe poll returned \(status)")
+    try check(epoch == 123 && visible == 2 && uncertain == 0 && wordCount == 1,
+              "terrain visibility probe counters were epoch=\(epoch), visible=\(visible), uncertain=\(uncertain), words=\(wordCount)")
+    try check(words[0] == 0b101,
+              "terrain visibility probe bitset was 0x\(String(words[0], radix: 16)), expected 0x5")
+    print("Terrain GPU visibility probe: Metal 4 ABI/readback identity-frustum inside/outside/intersect parity")
 }
 
 private func runTerrainIcbReadbackTestIfAvailable(device: MTLDevice, queue: MTLCommandQueue) throws {

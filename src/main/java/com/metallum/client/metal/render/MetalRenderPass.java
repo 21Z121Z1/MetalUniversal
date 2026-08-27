@@ -637,6 +637,19 @@ final class MetalRenderPass implements RenderPassBackend {
             return;
         }
 
+        // Sodium's VKIndirectDrawBatch marks this lexical call as a terrain
+        // pass.  The probe ends/reopens only that compatible encoder and keeps
+        // the original indirect draw as the sole draw authority.
+        if (TerrainGpuVisibilityProbe.inTerrainDrawScope()) {
+            // drawIndexedIndirect may be the first native operation in this
+            // pass. Create the compatible render encoder before the probe asks
+            // the command encoder to retain it for the MTL4 transition.
+            renderEncoder();
+            if (TerrainGpuVisibilityProbe.beforeTerrainDraw(device, commandEncoder)) {
+                bindDrawState(renderEncoder());
+            }
+        }
+
         // The terrain snapshot is consumed only here, after the real Sodium
         // producer copied its compact command records.  Both the authorized
         // and fail-closed paths intentionally issue this one existing native
