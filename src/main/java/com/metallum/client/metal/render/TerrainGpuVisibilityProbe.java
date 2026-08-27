@@ -182,6 +182,7 @@ public final class TerrainGpuVisibilityProbe {
     public static Telemetry telemetry() {
         synchronized (LOCK) {
             return new Telemetry(
+                    ENABLED,
                     candidateCount,
                     lastVisibleCount,
                     lastUncertainCount,
@@ -425,6 +426,7 @@ public final class TerrainGpuVisibilityProbe {
     }
 
     public record Telemetry(
+            boolean enabled,
             long candidateCount,
             long visibleCount,
             long uncertainCount,

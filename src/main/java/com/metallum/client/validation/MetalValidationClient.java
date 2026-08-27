@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalGpuTimingRecorder;
 import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.TerrainGpuVisibilityProbe;
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.IrisMetalRenderFusionRuntime;
 import com.metallum.client.metal.render.IrisMetalComputeGroupingRuntime;
@@ -2378,12 +2379,26 @@ public final class MetalValidationClient implements ClientModInitializer {
         long[] metal4MetalFxStats = MetalNativeBridge.metallum_metal4_metalfx_stats();
         long[] terrainIcbStats = readTerrainIcbStats();
         long[] terrainGpuIcbStats = readTerrainGpuIcbStats();
+        TerrainGpuVisibilityProbe.Telemetry terrainGpuVisibility = TerrainGpuVisibilityProbe.telemetry();
+        String terrainGpuVisibilityJson = terrainGpuVisibilityJson(terrainGpuVisibility);
         Metallum.LOGGER.info(
                 "Terrain ICB validation counters: encoded={} executed={} gpuEncoded={} gpuDispatches={}",
                 terrainIcbStats[0],
                 terrainIcbStats[1],
                 terrainGpuIcbStats[0],
                 terrainGpuIcbStats[1]
+        );
+        Metallum.LOGGER.info(
+                "Terrain GPU visibility probe validation counters: enabled={} candidates={} attempts={} "
+                        + "dispatches={} produced={} fallbacks={} falseNegativeOracle={} lastCompletedEpoch={}",
+                terrainGpuVisibility.enabled(),
+                terrainGpuVisibility.candidateCount(),
+                terrainGpuVisibility.attemptedCount(),
+                terrainGpuVisibility.dispatchCount(),
+                terrainGpuVisibility.producedCount(),
+                terrainGpuVisibility.fallbackCount(),
+                terrainGpuVisibility.falseNegativeOracleCount(),
+                terrainGpuVisibility.lastCompletedEpoch()
         );
         try {
             ValidationStorageBudget storage = ValidationStorageBudget.shared(outputDirectory);
@@ -2429,6 +2444,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "terrainIcbExecuted": %d,
                       "terrainIcbGpuEncoded": %d,
                       "terrainIcbGpuDispatches": %d,
+                      %s
                       "renderContractEnabled": %s,
                       "renderContractStatus": "%s",
                       "renderContractReady": %s,
@@ -2471,6 +2487,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                             terrainIcbStats[1],
                             terrainGpuIcbStats[0],
                             terrainGpuIcbStats[1],
+                            terrainGpuVisibilityJson,
                             contract.enabled(),
                             contract.status(),
                             "passed".equals(status)
@@ -2494,6 +2511,34 @@ public final class MetalValidationClient implements ClientModInitializer {
         } catch (IOException exception) {
             throw new IllegalStateException("Could not write Minecraft validation state", exception);
         }
+    }
+
+    static String terrainGpuVisibilityJson(
+            final TerrainGpuVisibilityProbe.Telemetry telemetry
+    ) {
+        return String.format(
+                Locale.ROOT,
+                "                      \"terrainGpuVisibilityProbeEnabled\": %s,\n"
+                        + "                      \"terrainGpuVisibilityCandidateCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityVisibleCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityUncertainCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityAttempts\": %d,\n"
+                        + "                      \"terrainGpuVisibilityDispatches\": %d,\n"
+                        + "                      \"terrainGpuVisibilityProduced\": %d,\n"
+                        + "                      \"terrainGpuVisibilityFallbacks\": %d,\n"
+                        + "                      \"terrainGpuVisibilityFalseNegativeOracleCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityLastCompletedEpoch\": %d,",
+                telemetry.enabled(),
+                telemetry.candidateCount(),
+                telemetry.visibleCount(),
+                telemetry.uncertainCount(),
+                telemetry.attemptedCount(),
+                telemetry.dispatchCount(),
+                telemetry.producedCount(),
+                telemetry.fallbackCount(),
+                telemetry.falseNegativeOracleCount(),
+                telemetry.lastCompletedEpoch()
+        );
     }
 
     private static long[] readTerrainIcbStats() {
