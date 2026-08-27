@@ -187,6 +187,49 @@ final class TerrainGpuVisibilityProbeContractTest {
         assertEquals(0, snapshot.candidates().size());
     }
 
+    @Test
+    void completedEpochPublishesAcrossFrameAdvanceAndLateResultCannotOverwriteNewer() {
+        // Dispatching epoch N and capturing N+1 before the GPU completes N is
+        // the normal command-buffer cadence. Completion policy deliberately
+        // does not require the registry's latest snapshot to still be N: the
+        // result is value-only diagnostic data stamped with its own epoch.
+        var pendingN = pending(10L);
+        assertEquals(
+                TerrainGpuVisibilityProbe.CompletionDisposition.PUBLISH,
+                TerrainGpuVisibilityProbe.classifyCompletion(
+                        pendingN, 10L, 1, 1, 0, new int[]{1}, -1L
+                )
+        );
+
+        // Once N+1 has published, a valid but late N completion is ignored and
+        // cannot move the monotonic publication watermark backwards.
+        var pendingN1 = pending(11L);
+        assertEquals(
+                TerrainGpuVisibilityProbe.CompletionDisposition.PUBLISH,
+                TerrainGpuVisibilityProbe.classifyCompletion(
+                        pendingN1, 11L, 1, 1, 0, new int[]{1}, 10L
+                )
+        );
+        assertEquals(
+                TerrainGpuVisibilityProbe.CompletionDisposition.IGNORE,
+                TerrainGpuVisibilityProbe.classifyCompletion(
+                        pendingN, 10L, 1, 1, 0, new int[]{1}, 11L
+                )
+        );
+    }
+
+    private static TerrainGpuVisibilityProbe.Pending pending(long epoch) {
+        return new TerrainGpuVisibilityProbe.Pending(
+                MemorySegment.NULL,
+                epoch,
+                1,
+                1,
+                new int[]{1},
+                1,
+                0
+        );
+    }
+
     private static TerrainCandidateSnapshot snapshot(
             TerrainCandidateSnapshot.CameraPosition camera,
             TerrainCandidateSnapshot.VisibilityTransform transform,

@@ -241,19 +241,21 @@ public final class TerrainGpuVisibilityProbe {
                     if (falseNegative) {
                         falseNegativeOracleCount++;
                     }
-                    boolean countersMatch = Integer.toUnsignedLong(completedVisible)
-                            == pending.expectedVisibleCount()
-                            && Integer.toUnsignedLong(completedUncertain)
-                            == pending.expectedUncertainCount();
-                    boolean valid = completedEpoch == pending.epoch()
-                            && completedWordCount == pending.wordCount()
-                            && currentEpoch
-                            && !falseNegative
-                            && countersMatch;
-                    lastCompletedEpoch = Math.max(lastCompletedEpoch, completedEpoch);
-                    lastVisibleCount = Integer.toUnsignedLong(completedVisible);
-                    lastUncertainCount = Integer.toUnsignedLong(completedUncertain);
-                    if (valid && completedEpoch > lastPublishedEpoch) {
+                    CompletionDisposition disposition = classifyCompletion(
+                            pending,
+                            completedEpoch,
+                            completedWordCount,
+                            completedVisible,
+                            completedUncertain,
+                            actualWords,
+                            lastPublishedEpoch
+                    );
+                    if (completedEpoch >= lastCompletedEpoch) {
+                        lastCompletedEpoch = completedEpoch;
+                        lastVisibleCount = Integer.toUnsignedLong(completedVisible);
+                        lastUncertainCount = Integer.toUnsignedLong(completedUncertain);
+                    }
+                    if (disposition == CompletionDisposition.PUBLISH) {
                         TerrainCandidateRegistry.publishVisibilityResult(
                                 new TerrainCandidateRegistry.VisibilityResult(
                                         completedEpoch,
@@ -266,7 +268,7 @@ public final class TerrainGpuVisibilityProbe {
                         );
                         lastPublishedEpoch = completedEpoch;
                         producedCount++;
-                    } else {
+                    } else if (disposition == CompletionDisposition.FALLBACK) {
                         // A stale/malformed/mismatching result never becomes a
                         // culling decision. If it still belongs to the current
                         // snapshot, publish an explicit all-visible fallback so
@@ -300,6 +302,43 @@ public final class TerrainGpuVisibilityProbe {
                 }
             }
         }
+    }
+
+    /**
+     * Pure completion policy used by the poller and focused cross-frame tests.
+     * A validated result is diagnostic data for its own epoch even when the
+     * registry has already captured a newer frame; only publication order is
+     * monotonic, so a late older result cannot replace a newer one.
+     */
+    static CompletionDisposition classifyCompletion(
+            final Pending pending,
+            final long completedEpoch,
+            final int completedWordCount,
+            final int completedVisible,
+            final int completedUncertain,
+            final int[] actualWords,
+            final long lastPublishedEpoch
+    ) {
+        boolean countersMatch = Integer.toUnsignedLong(completedVisible)
+                == pending.expectedVisibleCount()
+                && Integer.toUnsignedLong(completedUncertain)
+                == pending.expectedUncertainCount();
+        boolean valid = completedEpoch == pending.epoch()
+                && completedWordCount == pending.wordCount()
+                && !missingExpectedBits(pending.expectedWords(), actualWords)
+                && countersMatch;
+        if (!valid) {
+            return CompletionDisposition.FALLBACK;
+        }
+        return completedEpoch > lastPublishedEpoch
+                ? CompletionDisposition.PUBLISH
+                : CompletionDisposition.IGNORE;
+    }
+
+    enum CompletionDisposition {
+        PUBLISH,
+        FALLBACK,
+        IGNORE
     }
 
     private static Oracle oracleForPackedSnapshot(
@@ -413,7 +452,7 @@ public final class TerrainGpuVisibilityProbe {
         }
     }
 
-    private record Pending(
+    record Pending(
             MemorySegment probe,
             long epoch,
             int candidateCount,
@@ -422,7 +461,7 @@ public final class TerrainGpuVisibilityProbe {
             int expectedVisibleCount,
             int expectedUncertainCount
     ) {
-        private Pending {
+        Pending {
             expectedWords = expectedWords.clone();
         }
 
