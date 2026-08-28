@@ -1129,17 +1129,12 @@ private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue
           + "pipelineCompileDelta=\(gpuPipelineCompilesAfterSecond - gpuPipelineCompilesBefore)")
 }
 
-/// Exercises the value-only frustum probe on a real Metal 4 command buffer.
-/// The candidates are deliberately chosen as inside, outside and intersecting
-/// the identity clip volume; the test checks the returned bitset and counters,
-/// but does not involve Minecraft's world or make the result draw-authoritative.
+/// Exercises visibility bitset -> prefix/compact on real Metal 4 command
+/// buffers. Each fixture uses the same native command-buffer path and checks
+/// exact tail-masked words, count and stable ascending candidate indices. The
+/// result remains value-only and does not become draw-authoritative.
 @available(macOS 26.0, *)
 private func runTerrainGpuVisibilityProbeReadbackTest(device: MTLDevice, queue: MTLCommandQueue) throws {
-    let candidates: [Float] = [
-        -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.0,
-        2.0, -0.5, -0.5, 3.0, 0.5, 0.5, 3.0, 0.0,
-        0.5, 0.5, 0.5, 1.5, 1.5, 1.5, 1.5, 0.0
-    ]
     let matrix: [Float] = [
         1.0, 0.0, 0.0, 0.0,
         0.0, 1.0, 0.0, 0.0,
@@ -1147,81 +1142,146 @@ private func runTerrainGpuVisibilityProbeReadbackTest(device: MTLDevice, queue: 
         0.0, 0.0, 0.0, 1.0
     ]
     let target = try makeTarget(device: device, label: "terrain visibility probe target")
-    guard let commandBuffer = "terrain visibility probe".withCString({ label in
-        metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
-    }) else {
-        try fail("could not allocate terrain visibility probe command buffer")
-    }
-    defer { metallum_release_object(commandBuffer) }
-    guard let encoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
-        commandBuffer,
-        target,
-        nil,
-        8,
-        8,
-        1,
-        0,
-        0,
-        0,
-        1,
-        0,
-        1
-    ) else {
-        try fail("could not create terrain visibility probe render encoder")
-    }
-    defer { metallum_release_object(encoder) }
-    metallum_MTLCommandEncoder_endEncoding(encoder)
-
-    let probe: UnsafeMutableRawPointer? = candidates.withUnsafeBufferPointer({ candidateValues in
-        matrix.withUnsafeBufferPointer { matrixValues in
-            guard let candidateBase = candidateValues.baseAddress,
-                  let matrixBase = matrixValues.baseAddress else {
-                return nil
+    func fixtureCandidates(count: Int, visibleIndices: Set<Int>) -> [Float] {
+        var values: [Float] = []
+        values.reserveCapacity(count * 8)
+        for index in 0..<count {
+            if visibleIndices.contains(index) {
+                values += [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.0]
+            } else {
+                values += [2.0, -0.5, -0.5, 3.0, 0.5, 0.5, 3.0, 0.0]
             }
-            return metallum_MTLDevice_createTerrainGpuVisibilityProbe(
-                encoder,
-                device,
-                UnsafeRawPointer(candidateBase).assumingMemoryBound(to: UInt8.self),
-                matrixBase,
-                3,
-                123
-            )
         }
-    })
-    guard let probe else {
-        try fail("native terrain visibility probe could not be encoded")
+        return values
     }
-    defer { metallum_release_object(probe) }
 
-    metallum_MTLCommandBuffer_commit(commandBuffer)
-    try check(metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
-              "terrain visibility probe command buffer did not complete")
-    try check(metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
-              "terrain visibility probe command buffer completed with an error")
+    func expectedWords(count: Int, visibleIndices: Set<Int>) -> [UInt32] {
+        var words = [UInt32](repeating: 0, count: (count + 31) / 32)
+        for index in visibleIndices {
+            words[index >> 5] |= UInt32(1) << UInt32(index & 31)
+        }
+        return words
+    }
 
-    var epoch: UInt64 = 0
-    var visible: UInt32 = 0
-    var uncertain: UInt32 = 0
-    var wordCount: UInt32 = 0
-    var words = [UInt32](repeating: 0, count: 1)
-    let status = words.withUnsafeMutableBufferPointer { output in
-        metallum_terrain_visibility_probe_poll(
-            probe,
-            &epoch,
-            &visible,
-            &uncertain,
-            &wordCount,
-            output.baseAddress,
+    func runCase(
+        label: String,
+        count: Int,
+        visibleIndices: Set<Int>,
+        epoch: UInt64
+    ) throws {
+        let candidates = fixtureCandidates(count: count, visibleIndices: visibleIndices)
+        let expected = visibleIndices.sorted()
+        let expectedBitset = expectedWords(count: count, visibleIndices: visibleIndices)
+        guard let commandBuffer = label.withCString({ name in
+            metallum_MTLCommandQueue_makeCommandBuffer(queue, name)
+        }) else {
+            try fail("could not allocate \(label) command buffer")
+        }
+        defer { metallum_release_object(commandBuffer) }
+        guard let encoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            commandBuffer,
+            target,
+            nil,
+            8,
+            8,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
             1
-        )
+        ) else {
+            try fail("could not create \(label) render encoder")
+        }
+        defer { metallum_release_object(encoder) }
+        metallum_MTLCommandEncoder_endEncoding(encoder)
+        let probe: UnsafeMutableRawPointer? = candidates.withUnsafeBufferPointer { candidateValues in
+            matrix.withUnsafeBufferPointer { matrixValues in
+                guard let candidateBase = candidateValues.baseAddress,
+                      let matrixBase = matrixValues.baseAddress else { return nil }
+                return metallum_MTLDevice_createTerrainGpuVisibilityProbe(
+                    encoder,
+                    device,
+                    UnsafeRawPointer(candidateBase).assumingMemoryBound(to: UInt8.self),
+                    matrixBase,
+                    Int32(count),
+                    epoch
+                )
+            }
+        }
+        guard let probe else {
+            try fail("native terrain visibility probe could not encode \(label)")
+        }
+        defer { metallum_release_object(probe) }
+        metallum_MTLCommandBuffer_commit(commandBuffer)
+        try check(metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
+                  "\(label) command buffer did not complete")
+        try check(metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
+                  "\(label) command buffer completed with an error")
+
+        var actualEpoch: UInt64 = 0
+        var visible: UInt32 = 0
+        var uncertain: UInt32 = 0
+        var wordCount: UInt32 = 0
+        var compactedCount: UInt32 = 0
+        var words = [UInt32](repeating: 0, count: expectedBitset.count)
+        var compacted = [UInt32](repeating: UInt32.max, count: count)
+        let wordCapacity = words.count
+        let compactedCapacity = compacted.count
+        let status = words.withUnsafeMutableBufferPointer { wordOutput in
+            compacted.withUnsafeMutableBufferPointer { compactedOutput in
+                metallum_terrain_visibility_probe_poll_v2(
+                    probe,
+                    &actualEpoch,
+                    &visible,
+                    &uncertain,
+                    &wordCount,
+                    wordOutput.baseAddress,
+                    Int32(wordCapacity),
+                    &compactedCount,
+                    compactedOutput.baseAddress,
+                    Int32(compactedCapacity)
+                )
+            }
+        }
+        try check(status == 1, "\(label) poll returned \(status)")
+        try check(actualEpoch == epoch && visible == UInt32(expected.count)
+                      && uncertain == 0 && wordCount == UInt32(expectedBitset.count),
+                  "\(label) counters were epoch=\(actualEpoch), visible=\(visible), uncertain=\(uncertain), words=\(wordCount)")
+        try check(words == expectedBitset,
+                  "\(label) bitset mismatch: \(words) expected \(expectedBitset)")
+        try check(compactedCount == UInt32(expected.count),
+                  "\(label) compacted count=\(compactedCount), expected \(expected.count)")
+        try check(Array(compacted.prefix(expected.count)) == expected.map { UInt32($0) },
+                  "\(label) compacted indices were \(compacted.prefix(expected.count)), expected \(expected)")
     }
-    try check(status == 1,
-              "terrain visibility probe poll returned \(status)")
-    try check(epoch == 123 && visible == 2 && uncertain == 0 && wordCount == 1,
-              "terrain visibility probe counters were epoch=\(epoch), visible=\(visible), uncertain=\(uncertain), words=\(wordCount)")
-    try check(words[0] == 0b101,
-              "terrain visibility probe bitset was 0x\(String(words[0], radix: 16)), expected 0x5")
-    print("Terrain GPU visibility probe: Metal 4 ABI/readback identity-frustum inside/outside/intersect parity")
+
+    // Exercise all-one, all-zero, sparse, tail-word, and every local scan
+    // boundary. The larger cases also prove the second hierarchy level.
+    let allOne = Set(0..<256)
+    let allZero = Set<Int>()
+    try runCase(label: "terrain visibility n1 all-one", count: 1, visibleIndices: [0], epoch: 101)
+    try runCase(label: "terrain visibility n31 all-zero", count: 31, visibleIndices: allZero, epoch: 131)
+    try runCase(label: "terrain visibility n32 all-one", count: 32, visibleIndices: Set(0..<32), epoch: 132)
+    try runCase(label: "terrain visibility n33 sparse-tail", count: 33, visibleIndices: [0, 31, 32], epoch: 133)
+    try runCase(label: "terrain visibility n255 all-zero", count: 255, visibleIndices: allZero, epoch: 255)
+    try runCase(label: "terrain visibility n256 all-one", count: 256, visibleIndices: allOne, epoch: 256)
+    try runCase(label: "terrain visibility n257 sparse-boundary", count: 257,
+                visibleIndices: [0, 31, 32, 255, 256], epoch: 257)
+    try runCase(label: "terrain visibility n8191 sparse-tail", count: 8191,
+                visibleIndices: [0, 255, 256, 8190], epoch: 8191)
+    try runCase(label: "terrain visibility n8192 sparse-boundary", count: 8192,
+                visibleIndices: [0, 255, 256, 7936, 8191], epoch: 8192)
+    try runCase(label: "terrain visibility n8193 sparse-group", count: 8193,
+                visibleIndices: [0, 255, 256, 8192], epoch: 8193)
+    try runCase(label: "terrain visibility n65535 sparse-tail", count: 65535,
+                visibleIndices: [0, 255, 256, 65534], epoch: 65535)
+    try runCase(label: "terrain visibility n65536 all-one", count: 65536,
+                visibleIndices: Set(0..<65536), epoch: 65536)
+    try runCase(label: "terrain visibility n65537 sparse-group-boundary", count: 65537,
+                visibleIndices: [0, 255, 256, 65535, 65536], epoch: 65537)
+    print("Terrain GPU visibility compaction: Metal 4 block-scan/readback fixtures passed (stable order, tails and boundaries)")
 }
 
 private func runTerrainIcbReadbackTestIfAvailable(device: MTLDevice, queue: MTLCommandQueue) throws {

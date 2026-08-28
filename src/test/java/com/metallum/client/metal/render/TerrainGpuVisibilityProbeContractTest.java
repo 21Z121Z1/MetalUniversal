@@ -8,7 +8,9 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.List;
+import java.util.Random;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -31,7 +33,8 @@ final class TerrainGpuVisibilityProbeContractTest {
         ));
         assertEquals(0, MetalNativeBridge.terrainVisibilityProbePoll(
                 MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL,
-                MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL, -1
+                MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL, -1,
+                MemorySegment.NULL, MemorySegment.NULL, -1
         ));
     }
 
@@ -95,6 +98,14 @@ final class TerrainGpuVisibilityProbeContractTest {
                 TerrainCandidateSnapshot.gpuVisibilityCandidateBytes(
                         TerrainCandidateSnapshot.GPU_VISIBILITY_MAX_CANDIDATES + 1
                 ));
+        assertArrayEquals(new int[0], TerrainGpuVisibilityProbe.compactIndicesForWords(
+                TerrainCandidateSnapshot.GPU_VISIBILITY_MAX_CANDIDATES,
+                new int[TerrainCandidateSnapshot.gpuVisibilityWordCount(
+                        TerrainCandidateSnapshot.GPU_VISIBILITY_MAX_CANDIDATES
+                )]
+        ));
+        assertThrows(IllegalArgumentException.class, () ->
+                TerrainGpuVisibilityProbe.compactIndicesForWords(33, new int[]{0, 2}));
     }
 
     @Test
@@ -173,6 +184,11 @@ final class TerrainGpuVisibilityProbeContractTest {
         assertThrows(IllegalArgumentException.class, () ->
                 new TerrainCandidateRegistry.VisibilityResult(7L, 33, 1, 0, new int[]{-1})
         );
+        assertThrows(IllegalArgumentException.class, () ->
+                new TerrainCandidateRegistry.VisibilityResult(
+                        7L, 33, 2, 0, new int[]{1, 1}, 2, new int[]{0, 31}, false
+                )
+        );
     }
 
     @Test
@@ -218,6 +234,71 @@ final class TerrainGpuVisibilityProbeContractTest {
         );
     }
 
+    @Test
+    void cpuCompactionOracleIsStableAcrossBlockAndTailBoundaries() {
+        int[] counts = {1, 31, 32, 33, 255, 256, 257, 8191, 8192, 8193};
+        for (int candidateCount : counts) {
+            int[] allZero = new int[TerrainCandidateSnapshot.gpuVisibilityWordCount(candidateCount)];
+            assertArrayEquals(new int[0], TerrainGpuVisibilityProbe.compactIndicesForWords(
+                    candidateCount, allZero));
+
+            int[] allOne = new int[allZero.length];
+            java.util.Arrays.fill(allOne, -1);
+            if ((candidateCount & 31) != 0) {
+                allOne[allOne.length - 1] = -1 >>> (32 - (candidateCount & 31));
+            }
+            int[] expectedAll = new int[candidateCount];
+            for (int index = 0; index < candidateCount; index++) {
+                expectedAll[index] = index;
+            }
+            assertArrayEquals(expectedAll, TerrainGpuVisibilityProbe.compactIndicesForWords(
+                    candidateCount, allOne));
+
+            int[] sparse = new int[allZero.length];
+            for (int index : new int[]{0, Math.min(31, candidateCount - 1),
+                    Math.min(32, candidateCount - 1), candidateCount - 1}) {
+                sparse[index >>> 5] |= 1 << (index & 31);
+            }
+            int[] compacted = TerrainGpuVisibilityProbe.compactIndicesForWords(candidateCount, sparse);
+            int[] expectedSparse = referenceIndices(candidateCount, sparse);
+            assertArrayEquals(expectedSparse, compacted);
+            for (int candidate : compacted) {
+                assertTrue((sparse[candidate >>> 5] & (1 << (candidate & 31))) != 0);
+            }
+        }
+
+        Random random = new Random(0x4d4554414cL);
+        for (int trial = 0; trial < 64; trial++) {
+            int candidateCount = 1 + random.nextInt(8193);
+            int[] words = new int[TerrainCandidateSnapshot.gpuVisibilityWordCount(candidateCount)];
+            for (int index = 0; index < words.length; index++) {
+                words[index] = random.nextInt();
+            }
+            if ((candidateCount & 31) != 0) {
+                words[words.length - 1] &= -1 >>> (32 - (candidateCount & 31));
+            }
+            int[] compacted = TerrainGpuVisibilityProbe.compactIndicesForWords(candidateCount, words);
+            assertArrayEquals(referenceIndices(candidateCount, words), compacted);
+            assertArrayEquals(compacted, TerrainGpuVisibilityProbe.compactIndicesForWords(
+                    candidateCount, words));
+        }
+    }
+
+    @Test
+    void compactedMismatchFailsOpenInsteadOfPublishing() {
+        TerrainGpuVisibilityProbe.Pending pending = new TerrainGpuVisibilityProbe.Pending(
+                MemorySegment.NULL, 3L, 33, 2, new int[]{1, 1}, 2, 0,
+                new int[]{0, 32}
+        );
+        assertEquals(
+                TerrainGpuVisibilityProbe.CompletionDisposition.FALLBACK,
+                TerrainGpuVisibilityProbe.classifyCompletion(
+                        pending, 3L, 2, 2, 0, new int[]{1, 1}, 2,
+                        new int[]{0, 31}, -1L
+                )
+        );
+    }
+
     private static TerrainGpuVisibilityProbe.Pending pending(long epoch) {
         return new TerrainGpuVisibilityProbe.Pending(
                 MemorySegment.NULL,
@@ -228,6 +309,23 @@ final class TerrainGpuVisibilityProbeContractTest {
                 1,
                 0
         );
+    }
+
+    private static int[] referenceIndices(final int candidateCount, final int[] words) {
+        int count = 0;
+        for (int candidate = 0; candidate < candidateCount; candidate++) {
+            if ((words[candidate >>> 5] & (1 << (candidate & 31))) != 0) {
+                count++;
+            }
+        }
+        int[] indices = new int[count];
+        int output = 0;
+        for (int candidate = 0; candidate < candidateCount; candidate++) {
+            if ((words[candidate >>> 5] & (1 << (candidate & 31))) != 0) {
+                indices[output++] = candidate;
+            }
+        }
+        return indices;
     }
 
     private static TerrainCandidateSnapshot snapshot(

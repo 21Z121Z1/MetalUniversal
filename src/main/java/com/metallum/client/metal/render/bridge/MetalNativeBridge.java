@@ -486,13 +486,16 @@ public final class MetalNativeBridge {
             );
             TerrainVisibilityProbePoll = optionalDowncallWithoutCritical(
                     lookup,
-                    "metallum_terrain_visibility_probe_poll",
+                    "metallum_terrain_visibility_probe_poll_v2",
                     FunctionDescriptor.of(
                             INT,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             INT
@@ -2682,9 +2685,12 @@ public final class MetalNativeBridge {
             final MemorySegment uncertain,
             final MemorySegment wordCount,
             final MemorySegment bitset,
-            final int wordCapacity
+            final int wordCapacity,
+            final MemorySegment compactedCount,
+            final MemorySegment compactedIndices,
+            final int compactedCapacity
     ) {
-        if (TerrainVisibilityProbePoll == null || wordCapacity < 0) {
+        if (TerrainVisibilityProbePoll == null || wordCapacity < 0 || compactedCapacity < 0) {
             return 0;
         }
         try {
@@ -2695,7 +2701,10 @@ public final class MetalNativeBridge {
                     segment(uncertain),
                     segment(wordCount),
                     segment(bitset),
-                    wordCapacity
+                    wordCapacity,
+                    segment(compactedCount),
+                    segment(compactedIndices),
+                    compactedCapacity
             );
         } catch (Throwable ignored) {
             return -1;

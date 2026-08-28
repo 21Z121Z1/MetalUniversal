@@ -12,9 +12,10 @@ import java.util.List;
 
 /**
  * Decision-only Metal visibility probe. It consumes the mesh-ready candidate
- * snapshot, publishes a bitset after GPU completion, and never participates in
- * draw submission or ICB masking. Sodium's CPU-produced draw list remains the
- * sole submission authority in this milestone.
+ * snapshot, publishes a bitset and a stable compacted candidate-index list
+ * after GPU completion, and never participates in draw submission or ICB
+ * masking. Sodium's CPU-produced draw list remains the sole submission
+ * authority in this milestone.
  */
 public final class TerrainGpuVisibilityProbe {
     public static final boolean ENABLED = TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED;
@@ -23,6 +24,8 @@ public final class TerrainGpuVisibilityProbe {
     private static final ThreadLocal<Boolean> TERRAIN_DRAW_SCOPE = new ThreadLocal<>();
     private static final List<Pending> PENDING = new ArrayList<>();
     private static final int MAX_PENDING_PROBES = 8;
+    private static final long MAX_PENDING_BYTES = 128L * 1024L * 1024L;
+    private static long pendingBytes;
     private static long lastAttemptedEpoch = -1L;
     private static long lastPublishedEpoch = -1L;
     private static long candidateCount;
@@ -33,6 +36,11 @@ public final class TerrainGpuVisibilityProbe {
     private static long producedCount;
     private static long fallbackCount;
     private static long falseNegativeOracleCount;
+    private static long compactedCount;
+    private static long compactionDispatchCount;
+    private static long compactionProducedCount;
+    private static long compactionFallbackCount;
+    private static long compactionMismatchOracleCount;
     private static long lastCompletedEpoch = -1L;
 
     private TerrainGpuVisibilityProbe() {
@@ -69,6 +77,7 @@ public final class TerrainGpuVisibilityProbe {
                 releaseQuietly(pending.probe());
             }
             PENDING.clear();
+            pendingBytes = 0L;
             lastAttemptedEpoch = -1L;
             lastPublishedEpoch = -1L;
             candidateCount = 0L;
@@ -79,6 +88,11 @@ public final class TerrainGpuVisibilityProbe {
             producedCount = 0L;
             fallbackCount = 0L;
             falseNegativeOracleCount = 0L;
+            compactedCount = 0L;
+            compactionDispatchCount = 0L;
+            compactionProducedCount = 0L;
+            compactionFallbackCount = 0L;
+            compactionMismatchOracleCount = 0L;
             lastCompletedEpoch = -1L;
         }
     }
@@ -103,6 +117,16 @@ public final class TerrainGpuVisibilityProbe {
             }
             final int count = snapshot.candidates().size();
             candidateCount = count;
+            final long allocationBytes;
+            try {
+                allocationBytes = pendingAllocationBytes(count);
+            } catch (RuntimeException overflow) {
+                lastAttemptedEpoch = snapshot.epoch();
+                attemptedCount++;
+                fallbackCount++;
+                compactionFallbackCount++;
+                return false;
+            }
 
             // These are non-mutating rejection paths. Marking the epoch avoids
             // repeating the same failed attempt for every layer draw, while a
@@ -110,10 +134,12 @@ public final class TerrainGpuVisibilityProbe {
             if (count == 0 || count > TerrainCandidateSnapshot.GPU_VISIBILITY_MAX_CANDIDATES
                     || !device.metal4Available() || !device.metal4MainRenderer()
                     || !MetalNativeBridge.terrainVisibilityProbeAvailable()
-                    || PENDING.size() >= MAX_PENDING_PROBES) {
+                    || PENDING.size() >= MAX_PENDING_PROBES
+                    || pendingBytes > MAX_PENDING_BYTES - allocationBytes) {
                 lastAttemptedEpoch = snapshot.epoch();
                 attemptedCount++;
                 fallbackCount++;
+                compactionFallbackCount++;
                 return false;
             }
 
@@ -140,6 +166,7 @@ public final class TerrainGpuVisibilityProbe {
                         oracle = oracleForPackedSnapshot(packedCandidates, packedMatrix, count);
                     } catch (RuntimeException invalidInput) {
                         fallbackCount++;
+                        compactionFallbackCount++;
                         return true;
                     }
                     MemorySegment probe = MetalNativeBridge.MTLDevice_createTerrainGpuVisibilityProbe(
@@ -152,6 +179,7 @@ public final class TerrainGpuVisibilityProbe {
                     );
                     if (MetalNativeBridge.isNullHandle(probe)) {
                         fallbackCount++;
+                        compactionFallbackCount++;
                         return true;
                     }
                     PENDING.add(new Pending(
@@ -161,13 +189,17 @@ public final class TerrainGpuVisibilityProbe {
                             TerrainCandidateSnapshot.gpuVisibilityWordCount(count),
                             oracle.expectedWords(),
                             oracle.visibleCount(),
-                            oracle.uncertainCount()
+                            oracle.uncertainCount(),
+                            oracle.compactedIndices()
                     ));
+                    pendingBytes += allocationBytes;
                     dispatchCount++;
+                    compactionDispatchCount++;
                     return true;
                 }
             } catch (RuntimeException failure) {
                 fallbackCount++;
+                compactionFallbackCount++;
                 return true;
             } finally {
                 MetalNativeBridge.metallum_release_object(retainedEncoder);
@@ -191,6 +223,11 @@ public final class TerrainGpuVisibilityProbe {
                     producedCount,
                     fallbackCount,
                     falseNegativeOracleCount,
+                    compactedCount,
+                    compactionDispatchCount,
+                    compactionProducedCount,
+                    compactionFallbackCount,
+                    compactionMismatchOracleCount,
                     lastCompletedEpoch
             );
         }
@@ -205,8 +242,12 @@ public final class TerrainGpuVisibilityProbe {
                 MemorySegment visible = arena.allocate(ValueLayout.JAVA_INT);
                 MemorySegment uncertain = arena.allocate(ValueLayout.JAVA_INT);
                 MemorySegment wordCount = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment compacted = arena.allocate(ValueLayout.JAVA_INT);
                 MemorySegment bitset = arena.allocate(
                         Math.max(1L, (long) pending.wordCount() * Integer.BYTES), 4
+                );
+                MemorySegment compactedIndices = arena.allocate(
+                        Math.max(1L, (long) pending.candidateCount() * Integer.BYTES), 4
                 );
                 int status = MetalNativeBridge.terrainVisibilityProbePoll(
                         pending.probe(),
@@ -215,7 +256,10 @@ public final class TerrainGpuVisibilityProbe {
                         uncertain,
                         wordCount,
                         bitset,
-                        pending.wordCount()
+                        pending.wordCount(),
+                        compacted,
+                        compactedIndices,
+                        pending.candidateCount()
                 );
                 if (status == 0) {
                     continue;
@@ -226,9 +270,17 @@ public final class TerrainGpuVisibilityProbe {
                     int completedWordCount = wordCount.get(ValueLayout.JAVA_INT, 0);
                     int completedVisible = visible.get(ValueLayout.JAVA_INT, 0);
                     int completedUncertain = uncertain.get(ValueLayout.JAVA_INT, 0);
+                    int completedCompacted = compacted.get(ValueLayout.JAVA_INT, 0);
                     int[] actualWords = new int[pending.wordCount()];
                     for (int index = 0; index < actualWords.length; index++) {
                         actualWords[index] = bitset.get(
+                                ValueLayout.JAVA_INT, (long) index * Integer.BYTES
+                        );
+                    }
+                    int[] actualCompacted = new int[completedCompacted < 0
+                            || completedCompacted > pending.candidateCount() ? 0 : completedCompacted];
+                    for (int index = 0; index < actualCompacted.length; index++) {
+                        actualCompacted[index] = compactedIndices.get(
                                 ValueLayout.JAVA_INT, (long) index * Integer.BYTES
                         );
                     }
@@ -242,6 +294,12 @@ public final class TerrainGpuVisibilityProbe {
                     if (falseNegative) {
                         falseNegativeOracleCount++;
                     }
+                    boolean compactionMismatch = !compactionMatches(
+                            pending.expectedCompactedIndices(), completedCompacted, actualCompacted
+                    );
+                    if (compactionMismatch) {
+                        compactionMismatchOracleCount++;
+                    }
                     CompletionDisposition disposition = classifyCompletion(
                             pending,
                             completedEpoch,
@@ -249,12 +307,15 @@ public final class TerrainGpuVisibilityProbe {
                             completedVisible,
                             completedUncertain,
                             actualWords,
+                            completedCompacted,
+                            actualCompacted,
                             lastPublishedEpoch
                     );
                     if (completedEpoch >= lastCompletedEpoch) {
                         lastCompletedEpoch = completedEpoch;
                         lastVisibleCount = Integer.toUnsignedLong(completedVisible);
                         lastUncertainCount = Integer.toUnsignedLong(completedUncertain);
+                        compactedCount = Integer.toUnsignedLong(completedCompacted);
                     }
                     if (disposition == CompletionDisposition.PUBLISH) {
                         TerrainCandidateRegistry.publishVisibilityResult(
@@ -264,11 +325,14 @@ public final class TerrainGpuVisibilityProbe {
                                         completedVisible,
                                         completedUncertain,
                                         actualWords,
+                                        completedCompacted,
+                                        actualCompacted,
                                         false
                                 )
                         );
                         lastPublishedEpoch = completedEpoch;
                         producedCount++;
+                        compactionProducedCount++;
                     } else if (disposition == CompletionDisposition.FALLBACK) {
                         // A stale/malformed/mismatching result never becomes a
                         // culling decision. If it still belongs to the current
@@ -276,6 +340,7 @@ public final class TerrainGpuVisibilityProbe {
                         // a future consumer cannot accidentally interpret an
                         // old or partial bitset as authoritative.
                         fallbackCount++;
+                        compactionFallbackCount++;
                         if (currentEpoch && completedEpoch > lastPublishedEpoch) {
                             TerrainCandidateRegistry.publishVisibilityResult(
                                     new TerrainCandidateRegistry.VisibilityResult(
@@ -284,6 +349,8 @@ public final class TerrainGpuVisibilityProbe {
                                             pending.candidateCount(),
                                             pending.candidateCount(),
                                             allVisibleWords(pending.candidateCount()),
+                                            pending.candidateCount(),
+                                            allVisibleIndices(pending.candidateCount()),
                                             true
                                     )
                             );
@@ -292,12 +359,15 @@ public final class TerrainGpuVisibilityProbe {
                     }
                 } else {
                     fallbackCount++;
+                    compactionFallbackCount++;
                 }
             } catch (RuntimeException failure) {
                 fallbackCount++;
+                compactionFallbackCount++;
                 remove = true;
             } finally {
                 if (remove) {
+                    pendingBytes = Math.max(0L, pendingBytes - pendingAllocationBytes(pending.candidateCount()));
                     releaseQuietly(pending.probe());
                     iterator.remove();
                 }
@@ -318,6 +388,8 @@ public final class TerrainGpuVisibilityProbe {
             final int completedVisible,
             final int completedUncertain,
             final int[] actualWords,
+            final int completedCompacted,
+            final int[] actualCompacted,
             final long lastPublishedEpoch
     ) {
         boolean countersMatch = Integer.toUnsignedLong(completedVisible)
@@ -327,13 +399,40 @@ public final class TerrainGpuVisibilityProbe {
         boolean valid = completedEpoch == pending.epoch()
                 && completedWordCount == pending.wordCount()
                 && !missingExpectedBits(pending.expectedWords(), actualWords)
-                && countersMatch;
+                && countersMatch
+                && compactionMatches(
+                        pending.expectedCompactedIndices(), completedCompacted, actualCompacted
+                );
         if (!valid) {
             return CompletionDisposition.FALLBACK;
         }
         return completedEpoch > lastPublishedEpoch
                 ? CompletionDisposition.PUBLISH
                 : CompletionDisposition.IGNORE;
+    }
+
+    /** Compatibility overload retained for the bitset-only contract tests. */
+    static CompletionDisposition classifyCompletion(
+            final Pending pending,
+            final long completedEpoch,
+            final int completedWordCount,
+            final int completedVisible,
+            final int completedUncertain,
+            final int[] actualWords,
+            final long lastPublishedEpoch
+    ) {
+        int[] compacted = compactIndicesForWords(pending.candidateCount(), actualWords);
+        return classifyCompletion(
+                pending,
+                completedEpoch,
+                completedWordCount,
+                completedVisible,
+                completedUncertain,
+                actualWords,
+                compacted.length,
+                compacted,
+                lastPublishedEpoch
+        );
     }
 
     enum CompletionDisposition {
@@ -391,7 +490,8 @@ public final class TerrainGpuVisibilityProbe {
                 uncertainCount++;
             }
         }
-        return new Oracle(expectedWords, visibleCount, uncertainCount);
+        int[] compactedIndices = compactIndicesForWords(count, expectedWords);
+        return new Oracle(expectedWords, visibleCount, uncertainCount, compactedIndices);
     }
 
     private static boolean missingExpectedBits(final int[] expected, final int[] actual) {
@@ -406,6 +506,72 @@ public final class TerrainGpuVisibilityProbe {
         return false;
     }
 
+    static boolean compactionMatches(
+            final int[] expected,
+            final int actualCount,
+            final int[] actual
+    ) {
+        if (expected == null || actual == null || actualCount < 0
+                || actualCount != actual.length || expected.length != actualCount) {
+            return false;
+        }
+        int previous = -1;
+        for (int index = 0; index < actual.length; index++) {
+            int candidate = actual[index];
+            if (candidate <= previous || candidate != expected[index]) {
+                return false;
+            }
+            previous = candidate;
+        }
+        return true;
+    }
+
+    /** Deterministic CPU oracle for the GPU's stable bitset-to-index scatter. */
+    static int[] compactIndicesForWords(final int candidateCount, final int[] words) {
+        if (candidateCount < 0
+                || candidateCount > TerrainCandidateSnapshot.GPU_VISIBILITY_MAX_CANDIDATES
+                || words == null
+                || words.length != TerrainCandidateSnapshot.gpuVisibilityWordCount(candidateCount)) {
+            throw new IllegalArgumentException("Invalid terrain visibility bitset");
+        }
+        if ((candidateCount & 31) != 0 && words.length > 0) {
+            int tailMask = -1 >>> (32 - (candidateCount & 31));
+            if ((words[words.length - 1] & ~tailMask) != 0) {
+                throw new IllegalArgumentException("Terrain visibility bitset has non-zero tail bits");
+            }
+        }
+        int visible = 0;
+        for (int index = 0; index < candidateCount; index++) {
+            if ((words[index >>> 5] & (1 << (index & 31))) != 0) {
+                visible++;
+            }
+        }
+        int[] compacted = new int[visible];
+        int output = 0;
+        for (int index = 0; index < candidateCount; index++) {
+            if ((words[index >>> 5] & (1 << (index & 31))) != 0) {
+                compacted[output++] = index;
+            }
+        }
+        return compacted;
+    }
+
+    private static long pendingAllocationBytes(final int candidateCount) {
+        int words = TerrainCandidateSnapshot.gpuVisibilityWordCount(candidateCount);
+        int blocks = (candidateCount + 255) >>> 8;
+        int groups = (blocks + 255) >>> 8;
+        long bytes = TerrainCandidateSnapshot.gpuVisibilityCandidateBytes(candidateCount);
+        bytes = Math.addExact(bytes, TerrainCandidateSnapshot.GPU_VISIBILITY_MATRIX_BYTES);
+        bytes = Math.addExact(bytes, Math.multiplyExact((long) words, Integer.BYTES));
+        bytes = Math.addExact(bytes, 2L * Integer.BYTES);
+        bytes = Math.addExact(bytes, Math.multiplyExact((long) candidateCount, Integer.BYTES));
+        bytes = Math.addExact(bytes, Math.multiplyExact((long) blocks, 2L * Integer.BYTES));
+        bytes = Math.addExact(bytes, Math.multiplyExact((long) groups, 2L * Integer.BYTES));
+        bytes = Math.addExact(bytes, Math.multiplyExact((long) candidateCount, Integer.BYTES));
+        bytes = Math.addExact(bytes, Integer.BYTES);
+        return Math.addExact(bytes, 3L * Integer.BYTES);
+    }
+
     private static int[] allVisibleWords(final int count) {
         int[] words = new int[TerrainCandidateSnapshot.gpuVisibilityWordCount(count)];
         Arrays.fill(words, -1);
@@ -414,6 +580,14 @@ public final class TerrainGpuVisibilityProbe {
             words[words.length - 1] = -1 >>> (32 - remainder);
         }
         return words;
+    }
+
+    private static int[] allVisibleIndices(final int count) {
+        int[] indices = new int[count];
+        for (int index = 0; index < count; index++) {
+            indices[index] = index;
+        }
+        return indices;
     }
 
     private static void releaseQuietly(final MemorySegment probe) {
@@ -435,22 +609,64 @@ public final class TerrainGpuVisibilityProbe {
             long producedCount,
             long fallbackCount,
             long falseNegativeOracleCount,
+            long compactedCount,
+            long compactionDispatchCount,
+            long compactionProducedCount,
+            long compactionFallbackCount,
+            long compactionMismatchOracleCount,
             long lastCompletedEpoch
     ) {
+        public Telemetry(
+                final boolean enabled,
+                final long candidateCount,
+                final long visibleCount,
+                final long uncertainCount,
+                final long attemptedCount,
+                final long dispatchCount,
+                final long producedCount,
+                final long fallbackCount,
+                final long falseNegativeOracleCount,
+                final long lastCompletedEpoch
+        ) {
+            this(
+                    enabled,
+                    candidateCount,
+                    visibleCount,
+                    uncertainCount,
+                    attemptedCount,
+                    dispatchCount,
+                    producedCount,
+                    fallbackCount,
+                    falseNegativeOracleCount,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    0L,
+                    lastCompletedEpoch
+            );
+        }
     }
 
     private record Oracle(
             int[] expectedWords,
             int visibleCount,
-            int uncertainCount
+            int uncertainCount,
+            int[] compactedIndices
     ) {
         private Oracle {
             expectedWords = expectedWords.clone();
+            compactedIndices = compactedIndices.clone();
         }
 
         @Override
         public int[] expectedWords() {
             return expectedWords.clone();
+        }
+
+        @Override
+        public int[] compactedIndices() {
+            return compactedIndices.clone();
         }
     }
 
@@ -461,15 +677,43 @@ public final class TerrainGpuVisibilityProbe {
             int wordCount,
             int[] expectedWords,
             int expectedVisibleCount,
-            int expectedUncertainCount
+            int expectedUncertainCount,
+            int[] expectedCompactedIndices
     ) {
         Pending {
             expectedWords = expectedWords.clone();
+            expectedCompactedIndices = expectedCompactedIndices.clone();
+        }
+
+        Pending(
+                final MemorySegment probe,
+                final long epoch,
+                final int candidateCount,
+                final int wordCount,
+                final int[] expectedWords,
+                final int expectedVisibleCount,
+                final int expectedUncertainCount
+        ) {
+            this(
+                    probe,
+                    epoch,
+                    candidateCount,
+                    wordCount,
+                    expectedWords,
+                    expectedVisibleCount,
+                    expectedUncertainCount,
+                    compactIndicesForWords(candidateCount, expectedWords)
+            );
         }
 
         @Override
         public int[] expectedWords() {
             return expectedWords.clone();
+        }
+
+        @Override
+        public int[] expectedCompactedIndices() {
+            return expectedCompactedIndices.clone();
         }
     }
 }

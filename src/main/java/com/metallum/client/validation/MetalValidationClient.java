@@ -2527,6 +2527,11 @@ public final class MetalValidationClient implements ClientModInitializer {
                         + "                      \"terrainGpuVisibilityProduced\": %d,\n"
                         + "                      \"terrainGpuVisibilityFallbacks\": %d,\n"
                         + "                      \"terrainGpuVisibilityFalseNegativeOracleCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactedCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionDispatches\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionProduced\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionFallbacks\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionMismatchOracleCount\": %d,\n"
                         + "                      \"terrainGpuVisibilityLastCompletedEpoch\": %d,",
                 telemetry.enabled(),
                 telemetry.candidateCount(),
@@ -2537,6 +2542,11 @@ public final class MetalValidationClient implements ClientModInitializer {
                 telemetry.producedCount(),
                 telemetry.fallbackCount(),
                 telemetry.falseNegativeOracleCount(),
+                telemetry.compactedCount(),
+                telemetry.compactionDispatchCount(),
+                telemetry.compactionProducedCount(),
+                telemetry.compactionFallbackCount(),
+                telemetry.compactionMismatchOracleCount(),
                 telemetry.lastCompletedEpoch()
         );
     }

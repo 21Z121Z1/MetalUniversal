@@ -23,6 +23,11 @@ final class MetalValidationClientContractTest {
             "terrainGpuVisibilityProduced",
             "terrainGpuVisibilityFallbacks",
             "terrainGpuVisibilityFalseNegativeOracleCount",
+            "terrainGpuVisibilityCompactedCount",
+            "terrainGpuVisibilityCompactionDispatches",
+            "terrainGpuVisibilityCompactionProduced",
+            "terrainGpuVisibilityCompactionFallbacks",
+            "terrainGpuVisibilityCompactionMismatchOracleCount",
             "terrainGpuVisibilityLastCompletedEpoch"
     );
 
@@ -39,6 +44,11 @@ final class MetalValidationClientContractTest {
         assertEquals(0L, telemetry.producedCount());
         assertEquals(0L, telemetry.fallbackCount());
         assertEquals(0L, telemetry.falseNegativeOracleCount());
+        assertEquals(0L, telemetry.compactedCount());
+        assertEquals(0L, telemetry.compactionDispatchCount());
+        assertEquals(0L, telemetry.compactionProducedCount());
+        assertEquals(0L, telemetry.compactionFallbackCount());
+        assertEquals(0L, telemetry.compactionMismatchOracleCount());
         assertEquals(-1L, telemetry.lastCompletedEpoch());
     }
 
@@ -73,6 +83,11 @@ final class MetalValidationClientContractTest {
         assertEquals(4L, json.get("terrainGpuVisibilityProduced").getAsLong());
         assertEquals(3L, json.get("terrainGpuVisibilityFallbacks").getAsLong());
         assertEquals(1L, json.get("terrainGpuVisibilityFalseNegativeOracleCount").getAsLong());
+        assertEquals(0L, json.get("terrainGpuVisibilityCompactedCount").getAsLong());
+        assertEquals(0L, json.get("terrainGpuVisibilityCompactionDispatches").getAsLong());
+        assertEquals(0L, json.get("terrainGpuVisibilityCompactionProduced").getAsLong());
+        assertEquals(0L, json.get("terrainGpuVisibilityCompactionFallbacks").getAsLong());
+        assertEquals(0L, json.get("terrainGpuVisibilityCompactionMismatchOracleCount").getAsLong());
         assertEquals(42L, json.get("terrainGpuVisibilityLastCompletedEpoch").getAsLong());
         assertTrue(json.get("sentinel").getAsBoolean());
     }
