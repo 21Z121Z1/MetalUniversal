@@ -89,6 +89,8 @@ public final class TerrainCandidateRegistry {
             int visibleCount,
             int uncertainCount,
             int[] visibilityWords,
+            int compactedCount,
+            int[] compactedIndices,
             boolean fallback
     ) {
         public VisibilityResult(
@@ -101,19 +103,73 @@ public final class TerrainCandidateRegistry {
             this(epoch, candidateCount, visibleCount, uncertainCount, visibilityWords, false);
         }
 
+        public VisibilityResult(
+                final long epoch,
+                final int candidateCount,
+                final int visibleCount,
+                final int uncertainCount,
+                final int[] visibilityWords,
+                final boolean fallback
+        ) {
+            this(
+                    epoch,
+                    candidateCount,
+                    visibleCount,
+                    uncertainCount,
+                    visibilityWords,
+                    TerrainGpuVisibilityProbe.compactIndicesForWords(candidateCount, visibilityWords).length,
+                    TerrainGpuVisibilityProbe.compactIndicesForWords(candidateCount, visibilityWords),
+                    fallback
+            );
+        }
+
         public VisibilityResult {
             if (epoch < 0L || candidateCount < 0 || visibleCount < 0 || uncertainCount < 0
                     || visibleCount > candidateCount || uncertainCount > candidateCount
+                    || compactedCount < 0 || compactedCount > candidateCount
                     || visibilityWords == null
-                    || visibilityWords.length != TerrainCandidateSnapshot.gpuVisibilityWordCount(candidateCount)) {
+                    || visibilityWords.length != TerrainCandidateSnapshot.gpuVisibilityWordCount(candidateCount)
+                    || compactedIndices == null
+                    || compactedIndices.length != compactedCount
+                    || compactedCount != visibleCount) {
                 throw new IllegalArgumentException("Invalid terrain visibility result");
             }
+            int bitCount = 0;
+            for (int wordIndex = 0; wordIndex < visibilityWords.length; wordIndex++) {
+                int word = visibilityWords[wordIndex];
+                if (wordIndex == visibilityWords.length - 1 && (candidateCount & 31) != 0) {
+                    int tailMask = -1 >>> (32 - (candidateCount & 31));
+                    if ((word & ~tailMask) != 0) {
+                        throw new IllegalArgumentException("Terrain visibility bitset has non-zero tail bits");
+                    }
+                }
+                bitCount += Integer.bitCount(word);
+            }
+            if (bitCount != visibleCount) {
+                throw new IllegalArgumentException("Terrain visibility count does not match bitset");
+            }
+            int previous = -1;
+            for (int index : compactedIndices) {
+                if (index <= previous || index < 0 || index >= candidateCount) {
+                    throw new IllegalArgumentException("Terrain compacted indices must be stable and in range");
+                }
+                if ((visibilityWords[index >>> 5] & (1 << (index & 31))) == 0) {
+                    throw new IllegalArgumentException("Terrain compacted index is not visible");
+                }
+                previous = index;
+            }
             visibilityWords = visibilityWords.clone();
+            compactedIndices = compactedIndices.clone();
         }
 
         @Override
         public int[] visibilityWords() {
             return visibilityWords.clone();
+        }
+
+        @Override
+        public int[] compactedIndices() {
+            return compactedIndices.clone();
         }
     }
 

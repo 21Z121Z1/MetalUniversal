@@ -61,6 +61,28 @@ private final class TerrainGpuComputePipeline {
     }
 }
 
+private final class TerrainVisibilityCompactionPipelines {
+    let visibility: MTLComputePipelineState
+    let blockScan: MTLComputePipelineState
+    let blockSumsScan: MTLComputePipelineState
+    let groupScan: MTLComputePipelineState
+    let scatter: MTLComputePipelineState
+
+    init(
+        visibility: MTLComputePipelineState,
+        blockScan: MTLComputePipelineState,
+        blockSumsScan: MTLComputePipelineState,
+        groupScan: MTLComputePipelineState,
+        scatter: MTLComputePipelineState
+    ) {
+        self.visibility = visibility
+        self.blockScan = blockScan
+        self.blockSumsScan = blockSumsScan
+        self.groupScan = groupScan
+        self.scatter = scatter
+    }
+}
+
 private struct SamplerKey: Hashable {
     let deviceAddress: UInt
     let addressModeU: UInt
@@ -160,7 +182,7 @@ private enum NativeState {
     static var terrainGpuPipelines: [TerrainGpuComputePipelineKey: TerrainGpuComputePipeline] = [:]
     static var terrainGpuPipelineCompileCount: UInt64 = 0
     static let terrainVisibilityPipelineLock = NSLock()
-    static var terrainVisibilityPipelines: [TerrainVisibilityComputePipelineKey: TerrainGpuComputePipeline] = [:]
+    static var terrainVisibilityPipelines: [TerrainVisibilityComputePipelineKey: TerrainVisibilityCompactionPipelines] = [:]
     // Metal 4 frame-generation present pilot (spec M4). Read once when the
     // presenter is constructed; flipping it later has no effect, which matches how
     // the presenter is started.
@@ -8006,15 +8028,18 @@ public func metallum_terrain_gpu_icb_pipeline_stats(
 /// Non-blocking completion/readback for a decision-only terrain visibility
 /// probe.  The caller owns the returned probe pointer and must release it
 /// after a successful or failed poll.
-@_cdecl("metallum_terrain_visibility_probe_poll")
-public func metallum_terrain_visibility_probe_poll(
+@_cdecl("metallum_terrain_visibility_probe_poll_v2")
+public func metallum_terrain_visibility_probe_poll_v2(
     _ pointer: UnsafeMutableRawPointer,
     _ outEpoch: UnsafeMutablePointer<UInt64>?,
     _ outVisible: UnsafeMutablePointer<UInt32>?,
     _ outUncertain: UnsafeMutablePointer<UInt32>?,
     _ outWordCount: UnsafeMutablePointer<UInt32>?,
     _ outBitset: UnsafeMutablePointer<UInt32>?,
-    _ wordCapacity: Int32
+    _ wordCapacity: Int32,
+    _ outCompactedCount: UnsafeMutablePointer<UInt32>?,
+    _ outCompactedIndices: UnsafeMutablePointer<UInt32>?,
+    _ compactedCapacity: Int32
 ) -> Int32 {
     guard #available(macOS 26.0, iOS 26.0, *),
           let probe = Unmanaged<AnyObject>.fromOpaque(pointer)
@@ -8027,7 +8052,10 @@ public func metallum_terrain_visibility_probe_poll(
         outUncertain: outUncertain,
         outWordCount: outWordCount,
         outBitset: outBitset,
-        wordCapacity: wordCapacity
+        wordCapacity: wordCapacity,
+        outCompactedCount: outCompactedCount,
+        outCompactedIndices: outCompactedIndices,
+        compactedCapacity: compactedCapacity
     )
 }
 
@@ -9761,9 +9789,11 @@ private func terrainGpuIcbMslSource(
     """
 }
 
-/// Decision-only terrain visibility kernel.  It never writes an ICB or any
-/// draw command: the Java render path remains the draw authority while this
-/// probe publishes a conservative value-only bitset and counters.
+/// Decision-only terrain visibility and compaction kernels. They never write
+/// an ICB or any draw command: the Java render path remains the draw authority
+/// while this probe publishes a conservative bitset and a stable candidate
+/// index list. Every prefix stage is block-local; no thread scans the whole
+/// candidate array.
 @available(macOS 26.0, iOS 26.0, *)
 private func terrainVisibilityMslSource() -> String {
     return """
@@ -9781,12 +9811,22 @@ private func terrainVisibilityMslSource() -> String {
       float reserved;
     };
 
+    struct TerrainVisibilityCompactionParams {
+      uint candidateCount;
+      uint blockCount;
+      uint groupCount;
+    };
+
     kernel void metallum_terrain_gpu_visibility_probe(
       device const TerrainVisibilityCandidate *candidates [[buffer(0)]],
       device const float4x4 *clipFromCameraRelative [[buffer(1)]],
       device atomic_uint *visibilityWords [[buffer(2)]],
       device atomic_uint *counters [[buffer(3)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
       uint candidateIndex [[thread_position_in_grid]]) {
+      if (candidateIndex >= params.candidateCount) {
+        return;
+      }
       TerrainVisibilityCandidate candidate = candidates[candidateIndex];
       bool uncertain = false;
       bool visible = true;
@@ -9847,29 +9887,152 @@ private func terrainVisibilityMslSource() -> String {
         atomic_fetch_add_explicit(&counters[0], 1u, memory_order_relaxed);
       }
     }
+
+    // One 256-thread group computes an exclusive local rank for each
+    // candidate and emits one sum. The zero-padded final group keeps all
+    // threadgroup barriers well-defined for arbitrary candidate counts.
+    kernel void metallum_terrain_visibility_block_scan(
+      device const atomic_uint *visibilityWords [[buffer(2)]],
+      device uint *prefixLocal [[buffer(4)]],
+      device uint *blockSums [[buffer(5)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint localIndex [[thread_index_in_threadgroup]],
+      uint3 candidatePosition [[thread_position_in_grid]],
+      uint3 groupPosition [[threadgroup_position_in_grid]]) {
+      threadgroup uint scan[256];
+      uint candidateIndex = candidatePosition.x;
+      uint value = 0u;
+      if (candidateIndex < params.candidateCount) {
+        uint word = atomic_load_explicit(&visibilityWords[candidateIndex >> 5], memory_order_relaxed);
+        value = (word >> (candidateIndex & 31u)) & 1u;
+      }
+      scan[localIndex] = value;
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      for (uint offset = 1u; offset < 256u; offset <<= 1u) {
+        uint add = localIndex >= offset ? scan[localIndex - offset] : 0u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        scan[localIndex] += add;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+      }
+      if (candidateIndex < params.candidateCount) {
+        prefixLocal[candidateIndex] = scan[localIndex] - value;
+      }
+      if (localIndex == 255u) {
+        blockSums[groupPosition.x] = scan[255];
+      }
+    }
+
+    // Scan block sums using the same local primitive, producing a local
+    // offset for every block and one sum for the next hierarchy level.
+    kernel void metallum_terrain_visibility_block_sums_scan(
+      device const uint *blockSums [[buffer(5)]],
+      device uint *blockOffsets [[buffer(6)]],
+      device uint *groupSums [[buffer(7)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint localIndex [[thread_index_in_threadgroup]],
+      uint3 blockPosition [[thread_position_in_grid]],
+      uint3 groupPosition [[threadgroup_position_in_grid]]) {
+      threadgroup uint scan[256];
+      uint blockIndex = blockPosition.x;
+      uint value = blockIndex < params.blockCount ? blockSums[blockIndex] : 0u;
+      scan[localIndex] = value;
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      for (uint offset = 1u; offset < 256u; offset <<= 1u) {
+        uint add = localIndex >= offset ? scan[localIndex - offset] : 0u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        scan[localIndex] += add;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+      }
+      if (blockIndex < params.blockCount) {
+        blockOffsets[blockIndex] = scan[localIndex] - value;
+      }
+      if (localIndex == 255u) {
+        groupSums[groupPosition.x] = scan[255];
+      }
+    }
+
+    // The final hierarchy level has at most sixteen entries for the bounded
+    // one-million-candidate ABI, so it remains one padded local group rather
+    // than introducing a serial full-array scan.
+    kernel void metallum_terrain_visibility_group_scan(
+      device const uint *groupSums [[buffer(7)]],
+      device uint *groupOffsets [[buffer(8)]],
+      device uint *compactedCount [[buffer(10)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint localIndex [[thread_index_in_threadgroup]]) {
+      threadgroup uint scan[256];
+      uint value = localIndex < params.groupCount ? groupSums[localIndex] : 0u;
+      scan[localIndex] = value;
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      for (uint offset = 1u; offset < 256u; offset <<= 1u) {
+        uint add = localIndex >= offset ? scan[localIndex - offset] : 0u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        scan[localIndex] += add;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+      }
+      if (localIndex < params.groupCount) {
+        groupOffsets[localIndex] = scan[localIndex] - value;
+      }
+      if (localIndex == 0u) {
+        compactedCount[0] = scan[255];
+      }
+    }
+
+    // Scatter uses the hierarchical exclusive rank. Since candidateIndex is
+    // the source position and each rank is unique, output order is exactly
+    // ascending source candidate index without an atomic allocator.
+    kernel void metallum_terrain_visibility_scatter(
+      device const atomic_uint *visibilityWords [[buffer(2)]],
+      device const uint *prefixLocal [[buffer(4)]],
+      device const uint *blockOffsets [[buffer(6)]],
+      device const uint *groupOffsets [[buffer(8)]],
+      device uint *compactedIndices [[buffer(9)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint candidateIndex [[thread_position_in_grid]]) {
+      if (candidateIndex >= params.candidateCount) {
+        return;
+      }
+      uint word = atomic_load_explicit(&visibilityWords[candidateIndex >> 5], memory_order_relaxed);
+      if (((word >> (candidateIndex & 31u)) & 1u) == 0u) {
+        return;
+      }
+      uint block = candidateIndex >> 8;
+      uint group = block >> 8;
+      uint rank = groupOffsets[group] + blockOffsets[block] + prefixLocal[candidateIndex];
+      if (rank < params.candidateCount) {
+        compactedIndices[rank] = candidateIndex;
+      }
+    }
     """
 }
 
 @available(macOS 26.0, iOS 26.0, *)
-private func terrainVisibilityComputePipeline(
+private func terrainVisibilityComputePipelines(
     device: MTLDevice,
     source: String
-) -> TerrainGpuComputePipeline? {
+) -> TerrainVisibilityCompactionPipelines? {
     let key = TerrainVisibilityComputePipelineKey(deviceAddress: objectAddress(device))
     NativeState.terrainVisibilityPipelineLock.lock()
     defer { NativeState.terrainVisibilityPipelineLock.unlock() }
     if let cached = NativeState.terrainVisibilityPipelines[key] {
         return cached
     }
-    let pipeline: TerrainGpuComputePipeline? = NativeState.onCompilerThread {
+    let pipeline: TerrainVisibilityCompactionPipelines? = NativeState.onCompilerThread {
         do {
             let library = try device.makeLibrary(source: source, options: nil)
-            guard let function = library.makeFunction(name: "metallum_terrain_gpu_visibility_probe") else {
+            guard let visibility = library.makeFunction(name: "metallum_terrain_gpu_visibility_probe"),
+                  let blockScan = library.makeFunction(name: "metallum_terrain_visibility_block_scan"),
+                  let blockSumsScan = library.makeFunction(name: "metallum_terrain_visibility_block_sums_scan"),
+                  let groupScan = library.makeFunction(name: "metallum_terrain_visibility_group_scan"),
+                  let scatter = library.makeFunction(name: "metallum_terrain_visibility_scatter") else {
                 return nil
             }
-            return TerrainGpuComputePipeline(
-                state: try device.makeComputePipelineState(function: function),
-                function: function
+            return TerrainVisibilityCompactionPipelines(
+                visibility: try device.makeComputePipelineState(function: visibility),
+                blockScan: try device.makeComputePipelineState(function: blockScan),
+                blockSumsScan: try device.makeComputePipelineState(function: blockSumsScan),
+                groupScan: try device.makeComputePipelineState(function: groupScan),
+                scatter: try device.makeComputePipelineState(function: scatter)
             )
         } catch {
             NSLog("[metallum] terrain GPU visibility probe pipeline failed: %@", String(describing: error))
@@ -9890,6 +10053,16 @@ private final class TerrainGpuVisibilityProbeOwner {
     let matrixBuffer: MTLBuffer
     let visibilityBuffer: MTLBuffer
     let countersBuffer: MTLBuffer
+    let prefixLocalBuffer: MTLBuffer
+    let blockSumsBuffer: MTLBuffer
+    let blockOffsetsBuffer: MTLBuffer
+    let groupSumsBuffer: MTLBuffer
+    let groupOffsetsBuffer: MTLBuffer
+    let compactedIndicesBuffer: MTLBuffer
+    let compactedCountBuffer: MTLBuffer
+    let paramsBuffer: MTLBuffer
+    let blockCount: Int
+    let groupCount: Int
     private let lock = NSLock()
     private var completed = false
     private var succeeded = false
@@ -9901,7 +10074,17 @@ private final class TerrainGpuVisibilityProbeOwner {
         candidateBuffer: MTLBuffer,
         matrixBuffer: MTLBuffer,
         visibilityBuffer: MTLBuffer,
-        countersBuffer: MTLBuffer
+        countersBuffer: MTLBuffer,
+        prefixLocalBuffer: MTLBuffer,
+        blockSumsBuffer: MTLBuffer,
+        blockOffsetsBuffer: MTLBuffer,
+        groupSumsBuffer: MTLBuffer,
+        groupOffsetsBuffer: MTLBuffer,
+        compactedIndicesBuffer: MTLBuffer,
+        compactedCountBuffer: MTLBuffer,
+        paramsBuffer: MTLBuffer,
+        blockCount: Int,
+        groupCount: Int
     ) {
         self.epoch = epoch
         self.candidateCount = candidateCount
@@ -9910,10 +10093,28 @@ private final class TerrainGpuVisibilityProbeOwner {
         self.matrixBuffer = matrixBuffer
         self.visibilityBuffer = visibilityBuffer
         self.countersBuffer = countersBuffer
+        self.prefixLocalBuffer = prefixLocalBuffer
+        self.blockSumsBuffer = blockSumsBuffer
+        self.blockOffsetsBuffer = blockOffsetsBuffer
+        self.groupSumsBuffer = groupSumsBuffer
+        self.groupOffsetsBuffer = groupOffsetsBuffer
+        self.compactedIndicesBuffer = compactedIndicesBuffer
+        self.compactedCountBuffer = compactedCountBuffer
+        self.paramsBuffer = paramsBuffer
+        self.blockCount = blockCount
+        self.groupCount = groupCount
         residencyTrackCreated(candidateBuffer)
         residencyTrackCreated(matrixBuffer)
         residencyTrackCreated(visibilityBuffer)
         residencyTrackCreated(countersBuffer)
+        residencyTrackCreated(prefixLocalBuffer)
+        residencyTrackCreated(blockSumsBuffer)
+        residencyTrackCreated(blockOffsetsBuffer)
+        residencyTrackCreated(groupSumsBuffer)
+        residencyTrackCreated(groupOffsetsBuffer)
+        residencyTrackCreated(compactedIndicesBuffer)
+        residencyTrackCreated(compactedCountBuffer)
+        residencyTrackCreated(paramsBuffer)
     }
 
     deinit {
@@ -9921,6 +10122,14 @@ private final class TerrainGpuVisibilityProbeOwner {
         residencyTrackReleased(rawPointer(matrixBuffer))
         residencyTrackReleased(rawPointer(visibilityBuffer))
         residencyTrackReleased(rawPointer(countersBuffer))
+        residencyTrackReleased(rawPointer(prefixLocalBuffer))
+        residencyTrackReleased(rawPointer(blockSumsBuffer))
+        residencyTrackReleased(rawPointer(blockOffsetsBuffer))
+        residencyTrackReleased(rawPointer(groupSumsBuffer))
+        residencyTrackReleased(rawPointer(groupOffsetsBuffer))
+        residencyTrackReleased(rawPointer(compactedIndicesBuffer))
+        residencyTrackReleased(rawPointer(compactedCountBuffer))
+        residencyTrackReleased(rawPointer(paramsBuffer))
     }
 
     func complete(error: Error?) {
@@ -9938,7 +10147,10 @@ private final class TerrainGpuVisibilityProbeOwner {
         outUncertain: UnsafeMutablePointer<UInt32>?,
         outWordCount: UnsafeMutablePointer<UInt32>?,
         outBitset: UnsafeMutablePointer<UInt32>?,
-        wordCapacity: Int32
+        wordCapacity: Int32,
+        outCompactedCount: UnsafeMutablePointer<UInt32>?,
+        outCompactedIndices: UnsafeMutablePointer<UInt32>?,
+        compactedCapacity: Int32
     ) -> Int32 {
         lock.lock()
         let isCompleted = completed
@@ -9946,18 +10158,63 @@ private final class TerrainGpuVisibilityProbeOwner {
         lock.unlock()
         guard isCompleted else { return 0 }
         guard isSucceeded, wordCapacity >= Int32(wordCount),
+              compactedCapacity >= 0,
               let outEpoch, let outVisible, let outUncertain,
-              let outWordCount, let outBitset else {
+              let outWordCount, let outBitset, let outCompactedCount,
+              let outCompactedIndices else {
             return -1
         }
         let counters = countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
         let words = visibilityBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        let compactedCount = compactedCountBuffer.contents().assumingMemoryBound(to: UInt32.self)[0]
+        guard compactedCount <= UInt32(candidateCount),
+              compactedCount == counters[0],
+              compactedCapacity >= Int32(compactedCount) else {
+            return -1
+        }
+        // Validate the GPU-authored representation before exposing it to the
+        // Java oracle. This is readback-time validation, not an intermediate
+        // CPU compaction: the GPU has already produced both rank and list.
+        let compacted = compactedIndicesBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        var previous: UInt32 = 0
+        for index in 0..<Int(compactedCount) {
+            let candidate = compacted[index]
+            guard candidate < UInt32(candidateCount), index == 0 || candidate > previous else {
+                return -1
+            }
+            let word = words[Int(candidate) >> 5]
+            guard (word & (1 << (candidate & 31))) != 0 else {
+                return -1
+            }
+            previous = candidate
+        }
+        if wordCount > 0 {
+            let remainder = candidateCount & 31
+            if remainder != 0 {
+                let tailMask = UInt32.max >> UInt32(32 - remainder)
+                guard (words[wordCount - 1] & ~tailMask) == 0 else { return -1 }
+            }
+        }
+        // The bitset and compact count are both GPU-authored; an exact set-bit
+        // count check catches a malformed scatter without creating a CPU list.
+        var setBitCount: UInt32 = 0
+        for index in 0..<wordCount {
+            setBitCount += UInt32(words[index].nonzeroBitCount)
+        }
+        guard setBitCount == compactedCount,
+              compactedCapacity >= Int32(compactedCount) else {
+            return -1
+        }
         outEpoch.pointee = epoch
         outVisible.pointee = counters[0]
         outUncertain.pointee = counters[1]
         outWordCount.pointee = UInt32(wordCount)
         for index in 0..<wordCount {
             outBitset[index] = words[index]
+        }
+        outCompactedCount.pointee = compactedCount
+        for index in 0..<Int(compactedCount) {
+            outCompactedIndices[index] = compacted[index]
         }
         return 1
     }
@@ -10054,7 +10311,18 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
     }
     guard count <= Int.max - 31 else { return nil }
     let wordCount = (count + 31) / 32
-    guard wordCount <= Int.max / MemoryLayout<UInt32>.stride else { return nil }
+    let blockWidth = 256
+    guard count <= Int.max - (blockWidth - 1) else { return nil }
+    let blockCount = (count + blockWidth - 1) / blockWidth
+    guard blockCount > 0,
+          blockCount <= Int32.max,
+          blockCount <= Int.max - (blockWidth - 1) else { return nil }
+    let groupCount = (blockCount + blockWidth - 1) / blockWidth
+    guard groupCount > 0, groupCount <= Int32.max,
+          wordCount <= Int.max / MemoryLayout<UInt32>.stride,
+          count <= Int.max / MemoryLayout<UInt32>.stride,
+          blockCount <= Int.max / MemoryLayout<UInt32>.stride,
+          groupCount <= Int.max / MemoryLayout<UInt32>.stride else { return nil }
     guard let candidateBuffer = device.makeBuffer(
         bytes: UnsafeRawPointer(packedCandidates),
         length: candidateBytes,
@@ -10069,6 +10337,30 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
     ), let countersBuffer = device.makeBuffer(
         length: 2 * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
+    ), let prefixLocalBuffer = device.makeBuffer(
+        length: count * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let blockSumsBuffer = device.makeBuffer(
+        length: blockCount * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let blockOffsetsBuffer = device.makeBuffer(
+        length: blockCount * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let groupSumsBuffer = device.makeBuffer(
+        length: groupCount * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let groupOffsetsBuffer = device.makeBuffer(
+        length: groupCount * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let compactedIndicesBuffer = device.makeBuffer(
+        length: count * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let compactedCountBuffer = device.makeBuffer(
+        length: MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let paramsBuffer = device.makeBuffer(
+        length: 3 * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
     ) else {
         return nil
     }
@@ -10076,15 +10368,38 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
         .initialize(repeating: 0, count: wordCount)
     countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
         .initialize(repeating: 0, count: 2)
+    prefixLocalBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: count)
+    blockSumsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: blockCount)
+    blockOffsetsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: blockCount)
+    groupSumsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: groupCount)
+    groupOffsetsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: groupCount)
+    compactedIndicesBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: count)
+    compactedCountBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: 1)
+    let params = paramsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+    params[0] = UInt32(count)
+    params[1] = UInt32(blockCount)
+    params[2] = UInt32(groupCount)
 
-    guard let pipeline = terrainVisibilityComputePipeline(
+    guard let pipeline = terrainVisibilityComputePipelines(
         device: device,
         source: terrainVisibilityMslSource()
-    ), let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+    ), pipeline.visibility.maxTotalThreadsPerThreadgroup >= blockWidth,
+          pipeline.blockScan.maxTotalThreadsPerThreadgroup >= blockWidth,
+          pipeline.blockSumsScan.maxTotalThreadsPerThreadgroup >= blockWidth,
+          pipeline.groupScan.maxTotalThreadsPerThreadgroup >= blockWidth,
+          pipeline.scatter.maxTotalThreadsPerThreadgroup >= blockWidth,
+          let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
         return nil
     }
     let argumentDescriptor = MTL4ArgumentTableDescriptor()
-    argumentDescriptor.maxBufferBindCount = 4
+    argumentDescriptor.maxBufferBindCount = 12
     argumentDescriptor.initializeBindings = true
     argumentDescriptor.supportAttributeStrides = false
     guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
@@ -10095,15 +10410,60 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
     arguments.setAddress(matrixBuffer.gpuAddress, index: 1)
     arguments.setAddress(visibilityBuffer.gpuAddress, index: 2)
     arguments.setAddress(countersBuffer.gpuAddress, index: 3)
+    arguments.setAddress(prefixLocalBuffer.gpuAddress, index: 4)
+    arguments.setAddress(blockSumsBuffer.gpuAddress, index: 5)
+    arguments.setAddress(blockOffsetsBuffer.gpuAddress, index: 6)
+    arguments.setAddress(groupSumsBuffer.gpuAddress, index: 7)
+    arguments.setAddress(groupOffsetsBuffer.gpuAddress, index: 8)
+    arguments.setAddress(compactedIndicesBuffer.gpuAddress, index: 9)
+    arguments.setAddress(compactedCountBuffer.gpuAddress, index: 10)
+    arguments.setAddress(paramsBuffer.gpuAddress, index: 11)
     computeEncoder.setArgumentTable(arguments)
-    computeEncoder.setComputePipelineState(pipeline.state)
-    computeEncoder.dispatchThreads(
-        threadsPerGrid: MTLSize(width: count, height: 1, depth: 1),
-        threadsPerThreadgroup: MTLSize(
-            width: max(1, min(pipeline.state.threadExecutionWidth, 64)),
-            height: 1,
-            depth: 1
-        )
+    let threadsPerBlock = MTLSize(width: blockWidth, height: 1, depth: 1)
+    computeEncoder.setComputePipelineState(pipeline.visibility)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
+        threadsPerThreadgroup: threadsPerBlock
+    )
+    computeEncoder.barrier(
+        afterEncoderStages: .dispatch,
+        beforeEncoderStages: .dispatch,
+        visibilityOptions: .device
+    )
+    computeEncoder.setComputePipelineState(pipeline.blockScan)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
+        threadsPerThreadgroup: threadsPerBlock
+    )
+    computeEncoder.barrier(
+        afterEncoderStages: .dispatch,
+        beforeEncoderStages: .dispatch,
+        visibilityOptions: .device
+    )
+    computeEncoder.setComputePipelineState(pipeline.blockSumsScan)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: groupCount, height: 1, depth: 1),
+        threadsPerThreadgroup: threadsPerBlock
+    )
+    computeEncoder.barrier(
+        afterEncoderStages: .dispatch,
+        beforeEncoderStages: .dispatch,
+        visibilityOptions: .device
+    )
+    computeEncoder.setComputePipelineState(pipeline.groupScan)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: 1, height: 1, depth: 1),
+        threadsPerThreadgroup: threadsPerBlock
+    )
+    computeEncoder.barrier(
+        afterEncoderStages: .dispatch,
+        beforeEncoderStages: .dispatch,
+        visibilityOptions: .device
+    )
+    computeEncoder.setComputePipelineState(pipeline.scatter)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
+        threadsPerThreadgroup: threadsPerBlock
     )
     computeEncoder.barrier(
         afterStages: .dispatch,
@@ -10119,7 +10479,17 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
         candidateBuffer: candidateBuffer,
         matrixBuffer: matrixBuffer,
         visibilityBuffer: visibilityBuffer,
-        countersBuffer: countersBuffer
+        countersBuffer: countersBuffer,
+        prefixLocalBuffer: prefixLocalBuffer,
+        blockSumsBuffer: blockSumsBuffer,
+        blockOffsetsBuffer: blockOffsetsBuffer,
+        groupSumsBuffer: groupSumsBuffer,
+        groupOffsetsBuffer: groupOffsetsBuffer,
+        compactedIndicesBuffer: compactedIndicesBuffer,
+        compactedCountBuffer: compactedCountBuffer,
+        paramsBuffer: paramsBuffer,
+        blockCount: blockCount,
+        groupCount: groupCount
     )
     // Keep the owner (and therefore every GPU-addressed buffer) alive through
     // completion even if Java abandons the result during a world reset.
@@ -10128,7 +10498,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
     }
     if !NativeState.terrainGpuEncodeLogged {
         NativeState.terrainGpuEncodeLogged = true
-        NSLog("[metallum] terrain GPU visibility probe active: decision-only bitset; draw authority unchanged")
+        NSLog("[metallum] terrain GPU visibility probe active: decision-only bitset + stable compaction; draw authority unchanged")
     }
     return retainedPointer(owner)
 }
