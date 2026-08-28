@@ -299,6 +299,22 @@ final class TerrainGpuVisibilityProbeContractTest {
         );
     }
 
+    @Test
+    void failedCompletionFallbackRequiresCurrentMatchingEpochAndNeverRewinds() {
+        TerrainGpuVisibilityProbe.Pending pending = new TerrainGpuVisibilityProbe.Pending(
+                MemorySegment.NULL, 3L, 33, 2, new int[]{1, 1}, 2, 0,
+                new int[]{0, 32}
+        );
+        assertTrue(TerrainGpuVisibilityProbe.shouldPublishCurrentEpochFallback(
+                pending, 3L, 33, 2L));
+        assertFalse(TerrainGpuVisibilityProbe.shouldPublishCurrentEpochFallback(
+                pending, 3L, 32, 2L));
+        assertFalse(TerrainGpuVisibilityProbe.shouldPublishCurrentEpochFallback(
+                pending, 2L, 33, 2L));
+        assertFalse(TerrainGpuVisibilityProbe.shouldPublishCurrentEpochFallback(
+                pending, 3L, 33, 3L));
+    }
+
     private static TerrainGpuVisibilityProbe.Pending pending(long epoch) {
         return new TerrainGpuVisibilityProbe.Pending(
                 MemorySegment.NULL,

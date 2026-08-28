@@ -1142,11 +1142,17 @@ private func runTerrainGpuVisibilityProbeReadbackTest(device: MTLDevice, queue: 
         0.0, 0.0, 0.0, 1.0
     ]
     let target = try makeTarget(device: device, label: "terrain visibility probe target")
-    func fixtureCandidates(count: Int, visibleIndices: Set<Int>) -> [Float] {
+    func fixtureCandidates(
+        count: Int,
+        visibleIndices: Set<Int>,
+        intersectingIndices: Set<Int> = []
+    ) -> [Float] {
         var values: [Float] = []
         values.reserveCapacity(count * 8)
         for index in 0..<count {
-            if visibleIndices.contains(index) {
+            if intersectingIndices.contains(index) {
+                values += [0.5, 0.5, 0.5, 1.5, 1.5, 1.5, 1.5, 0.0]
+            } else if visibleIndices.contains(index) {
                 values += [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.0]
             } else {
                 values += [2.0, -0.5, -0.5, 3.0, 0.5, 0.5, 3.0, 0.0]
@@ -1155,9 +1161,13 @@ private func runTerrainGpuVisibilityProbeReadbackTest(device: MTLDevice, queue: 
         return values
     }
 
-    func expectedWords(count: Int, visibleIndices: Set<Int>) -> [UInt32] {
+    func expectedWords(
+        count: Int,
+        visibleIndices: Set<Int>,
+        intersectingIndices: Set<Int> = []
+    ) -> [UInt32] {
         var words = [UInt32](repeating: 0, count: (count + 31) / 32)
-        for index in visibleIndices {
+        for index in visibleIndices.union(intersectingIndices) {
             words[index >> 5] |= UInt32(1) << UInt32(index & 31)
         }
         return words
@@ -1167,11 +1177,21 @@ private func runTerrainGpuVisibilityProbeReadbackTest(device: MTLDevice, queue: 
         label: String,
         count: Int,
         visibleIndices: Set<Int>,
-        epoch: UInt64
+        epoch: UInt64,
+        intersectingIndices: Set<Int> = [],
+        pollBeforeCommit: Bool = false
     ) throws {
-        let candidates = fixtureCandidates(count: count, visibleIndices: visibleIndices)
-        let expected = visibleIndices.sorted()
-        let expectedBitset = expectedWords(count: count, visibleIndices: visibleIndices)
+        let candidates = fixtureCandidates(
+            count: count,
+            visibleIndices: visibleIndices,
+            intersectingIndices: intersectingIndices
+        )
+        let expected = visibleIndices.union(intersectingIndices).sorted()
+        let expectedBitset = expectedWords(
+            count: count,
+            visibleIndices: visibleIndices,
+            intersectingIndices: intersectingIndices
+        )
         guard let commandBuffer = label.withCString({ name in
             metallum_MTLCommandQueue_makeCommandBuffer(queue, name)
         }) else {
@@ -1214,11 +1234,6 @@ private func runTerrainGpuVisibilityProbeReadbackTest(device: MTLDevice, queue: 
             try fail("native terrain visibility probe could not encode \(label)")
         }
         defer { metallum_release_object(probe) }
-        metallum_MTLCommandBuffer_commit(commandBuffer)
-        try check(metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
-                  "\(label) command buffer did not complete")
-        try check(metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
-                  "\(label) command buffer completed with an error")
 
         var actualEpoch: UInt64 = 0
         var visible: UInt32 = 0
@@ -1229,6 +1244,32 @@ private func runTerrainGpuVisibilityProbeReadbackTest(device: MTLDevice, queue: 
         var compacted = [UInt32](repeating: UInt32.max, count: count)
         let wordCapacity = words.count
         let compactedCapacity = compacted.count
+        if pollBeforeCommit {
+            let pendingStatus = words.withUnsafeMutableBufferPointer { wordOutput in
+                compacted.withUnsafeMutableBufferPointer { compactedOutput in
+                    metallum_terrain_visibility_probe_poll_v2(
+                        probe,
+                        &actualEpoch,
+                        &visible,
+                        &uncertain,
+                        &wordCount,
+                        wordOutput.baseAddress,
+                        Int32(wordCapacity),
+                        &compactedCount,
+                        compactedOutput.baseAddress,
+                        Int32(compactedCapacity)
+                    )
+                }
+            }
+            try check(pendingStatus == 0,
+                      "\(label) pre-commit poll returned \(pendingStatus), expected 0")
+        }
+        metallum_MTLCommandBuffer_commit(commandBuffer)
+        try check(metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
+                  "\(label) command buffer did not complete")
+        try check(metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
+                  "\(label) command buffer completed with an error")
+
         let status = words.withUnsafeMutableBufferPointer { wordOutput in
             compacted.withUnsafeMutableBufferPointer { compactedOutput in
                 metallum_terrain_visibility_probe_poll_v2(
@@ -1261,6 +1302,9 @@ private func runTerrainGpuVisibilityProbeReadbackTest(device: MTLDevice, queue: 
     // boundary. The larger cases also prove the second hierarchy level.
     let allOne = Set(0..<256)
     let allZero = Set<Int>()
+    try runCase(label: "terrain visibility identity-frustum inside-outside-intersect",
+                count: 3, visibleIndices: [0], epoch: 123, intersectingIndices: [2],
+                pollBeforeCommit: true)
     try runCase(label: "terrain visibility n1 all-one", count: 1, visibleIndices: [0], epoch: 101)
     try runCase(label: "terrain visibility n31 all-zero", count: 31, visibleIndices: allZero, epoch: 131)
     try runCase(label: "terrain visibility n32 all-one", count: 32, visibleIndices: Set(0..<32), epoch: 132)
