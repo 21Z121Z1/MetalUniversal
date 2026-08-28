@@ -284,10 +284,6 @@ public final class TerrainGpuVisibilityProbe {
                                 ValueLayout.JAVA_INT, (long) index * Integer.BYTES
                         );
                     }
-                    TerrainCandidateSnapshot current = TerrainCandidateRegistry.latestSnapshot();
-                    boolean currentEpoch = current != null
-                            && current.epoch() == completedEpoch
-                            && current.candidates().size() == pending.candidateCount();
                     boolean falseNegative = missingExpectedBits(
                             pending.expectedWords(), actualWords
                     );
@@ -341,29 +337,17 @@ public final class TerrainGpuVisibilityProbe {
                         // old or partial bitset as authoritative.
                         fallbackCount++;
                         compactionFallbackCount++;
-                        if (currentEpoch && completedEpoch > lastPublishedEpoch) {
-                            TerrainCandidateRegistry.publishVisibilityResult(
-                                    new TerrainCandidateRegistry.VisibilityResult(
-                                            completedEpoch,
-                                            pending.candidateCount(),
-                                            pending.candidateCount(),
-                                            pending.candidateCount(),
-                                            allVisibleWords(pending.candidateCount()),
-                                            pending.candidateCount(),
-                                            allVisibleIndices(pending.candidateCount()),
-                                            true
-                                    )
-                            );
-                            lastPublishedEpoch = completedEpoch;
-                        }
+                        publishCurrentEpochFallbackLocked(pending);
                     }
                 } else {
                     fallbackCount++;
                     compactionFallbackCount++;
+                    publishCurrentEpochFallbackLocked(pending);
                 }
             } catch (RuntimeException failure) {
                 fallbackCount++;
                 compactionFallbackCount++;
+                publishCurrentEpochFallbackLocked(pending);
                 remove = true;
             } finally {
                 if (remove) {
@@ -373,6 +357,43 @@ public final class TerrainGpuVisibilityProbe {
                 }
             }
         }
+    }
+
+    private static void publishCurrentEpochFallbackLocked(final Pending pending) {
+        TerrainCandidateSnapshot current = TerrainCandidateRegistry.latestSnapshot();
+        if (current == null || !shouldPublishCurrentEpochFallback(
+                pending,
+                current.epoch(),
+                current.candidates().size(),
+                lastPublishedEpoch
+        )) {
+            return;
+        }
+        TerrainCandidateRegistry.publishVisibilityResult(
+                new TerrainCandidateRegistry.VisibilityResult(
+                        pending.epoch(),
+                        pending.candidateCount(),
+                        pending.candidateCount(),
+                        pending.candidateCount(),
+                        allVisibleWords(pending.candidateCount()),
+                        pending.candidateCount(),
+                        allVisibleIndices(pending.candidateCount()),
+                        true
+                )
+        );
+        lastPublishedEpoch = pending.epoch();
+    }
+
+    static boolean shouldPublishCurrentEpochFallback(
+            final Pending pending,
+            final long currentEpoch,
+            final int currentCandidateCount,
+            final long lastPublishedEpoch
+    ) {
+        return pending != null
+                && currentEpoch == pending.epoch()
+                && currentCandidateCount == pending.candidateCount()
+                && pending.epoch() > lastPublishedEpoch;
     }
 
     /**

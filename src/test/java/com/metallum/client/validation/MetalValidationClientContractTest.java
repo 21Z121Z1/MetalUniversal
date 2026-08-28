@@ -64,6 +64,11 @@ final class MetalValidationClientContractTest {
                 4L,
                 3L,
                 1L,
+                27L,
+                8L,
+                6L,
+                2L,
+                1L,
                 42L
         );
         String fragment = MetalValidationClient.terrainGpuVisibilityJson(telemetry);
@@ -83,11 +88,11 @@ final class MetalValidationClientContractTest {
         assertEquals(4L, json.get("terrainGpuVisibilityProduced").getAsLong());
         assertEquals(3L, json.get("terrainGpuVisibilityFallbacks").getAsLong());
         assertEquals(1L, json.get("terrainGpuVisibilityFalseNegativeOracleCount").getAsLong());
-        assertEquals(0L, json.get("terrainGpuVisibilityCompactedCount").getAsLong());
-        assertEquals(0L, json.get("terrainGpuVisibilityCompactionDispatches").getAsLong());
-        assertEquals(0L, json.get("terrainGpuVisibilityCompactionProduced").getAsLong());
-        assertEquals(0L, json.get("terrainGpuVisibilityCompactionFallbacks").getAsLong());
-        assertEquals(0L, json.get("terrainGpuVisibilityCompactionMismatchOracleCount").getAsLong());
+        assertEquals(27L, json.get("terrainGpuVisibilityCompactedCount").getAsLong());
+        assertEquals(8L, json.get("terrainGpuVisibilityCompactionDispatches").getAsLong());
+        assertEquals(6L, json.get("terrainGpuVisibilityCompactionProduced").getAsLong());
+        assertEquals(2L, json.get("terrainGpuVisibilityCompactionFallbacks").getAsLong());
+        assertEquals(1L, json.get("terrainGpuVisibilityCompactionMismatchOracleCount").getAsLong());
         assertEquals(42L, json.get("terrainGpuVisibilityLastCompletedEpoch").getAsLong());
         assertTrue(json.get("sentinel").getAsBoolean());
     }
