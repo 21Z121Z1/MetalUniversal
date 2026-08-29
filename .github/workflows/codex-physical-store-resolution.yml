@@ -1,0 +1,108 @@
+name: codex/physical-store-resolution
+
+on:
+  push:
+    branches:
+      - codex/placement-heap-integration-staging-20260830
+    paths:
+      - .github/workflows/codex-physical-store-resolution.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/placement-heap-integration-staging-20260830
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Wire resolved physical store into attachment receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('src/main/java/com/metallum/client/metal/render/IrisMetalAttachmentLifetimeCompiler.java')
+          s = p.read_text()
+          old = '''            String allocationKey = candidate.binding().allocationKey();
+            attachments.add(new IrisMetalOptimizationPlan.ResolvedAttachment(
+                    candidate.planPassKey(),
+                    candidate.semanticPassId(),
+                    candidate.slot(),
+                    candidate.logicalResource(),
+                    candidate.binding().identity().allocationId(),
+                    candidate.binding().identity().generation(),
+                    0,
+                    candidate.physicalSide(),
+                    candidate.load(),
+                    candidate.store(),
+                    candidate.passIndex(),
+                    IrisMetalOptimizationPlan.AttachmentResolution.RESOLVED_RASTER,
+                    IrisMetalTransientAttachmentClassifier.classify(
+                            candidate.load(),
+                            candidate.store(),
+                            candidate.passIndex(),
+                            Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey),
+                            unresolvedConsumers.isEmpty()
+                    ),
+                    allocationKey,
+                    Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey)
+            ));'''
+          new = '''            String allocationKey = candidate.binding().allocationKey();
+            IrisMetalOptimizationPlan.AttachmentLifetime lifetime =
+                    Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey);
+            IrisMetalOptimizationPlan.StoreAction physicalStore =
+                    IrisMetalTransientAttachmentClassifier.resolvePhysicalStore(
+                            candidate.store(),
+                            candidate.logicalResource(),
+                            candidate.passIndex(),
+                            lifetime,
+                            plan.resourceLiveness().persistentResources(),
+                            unresolvedConsumers.isEmpty()
+                    );
+            attachments.add(new IrisMetalOptimizationPlan.ResolvedAttachment(
+                    candidate.planPassKey(),
+                    candidate.semanticPassId(),
+                    candidate.slot(),
+                    candidate.logicalResource(),
+                    candidate.binding().identity().allocationId(),
+                    candidate.binding().identity().generation(),
+                    0,
+                    candidate.physicalSide(),
+                    candidate.load(),
+                    physicalStore,
+                    candidate.passIndex(),
+                    IrisMetalOptimizationPlan.AttachmentResolution.RESOLVED_RASTER,
+                    IrisMetalTransientAttachmentClassifier.classify(
+                            candidate.load(),
+                            physicalStore,
+                            candidate.passIndex(),
+                            lifetime,
+                            unresolvedConsumers.isEmpty()
+                    ),
+                    allocationKey,
+                    lifetime
+            ));'''
+          if s.count(old) != 1:
+              raise SystemExit(f'compiler anchor count={s.count(old)}')
+          p.write_text(s.replace(old, new))
+          PY
+          ./gradlew test --tests com.metallum.client.metal.render.IrisMetalPhysicalStoreResolutionTest --tests com.metallum.client.metal.render.IrisMetalMemorylessAttachmentAllocatorTest --tests com.metallum.client.metal.render.IrisMetalAttachmentLifetimeCompilerTest
+      - name: Commit result and remove helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main/java/com/metallum/client/metal/render/IrisMetalAttachmentLifetimeCompiler.java
+          git commit -m "perf(iris): publish physical dead-store decisions"
+          git rm .github/workflows/codex-physical-store-resolution.yml
+          git commit -m "chore(ci): remove physical store helper"
+          git push origin HEAD:codex/placement-heap-integration-staging-20260830
