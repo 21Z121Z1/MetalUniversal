@@ -44,3 +44,6 @@ libs/
 
 # stray client rotated logs at repo root (runClient cwd artifacts)
 logs/
+
+# local Minecraft client/reference sources generated for agents
+.minecraft-reference/

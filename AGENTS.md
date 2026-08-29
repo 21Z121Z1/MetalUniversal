@@ -126,3 +126,13 @@ Stop for a human decision before:
 Every autonomous optimization report must include starting/ending commits, files and ownership boundaries changed, commands and exit status, correctness evidence, first divergence if any, activation proof, Metal validation status, environment limits and review readiness.
 
 Report before, after, raw change, direction-normalized improvement and paired block count for FPS, GPU frame time, CPU render/encode time, native encoder count, attachment store/load bytes, resident render resources, peak memory and stutters. Mark missing metrics `unavailable` with the exact absent structured source. Compilation alone is never rendering or performance acceptance.
+
+## Minecraft 26.2 reference source
+
+When a task depends on vanilla Minecraft implementation details, do not infer them from logs or signatures if the local reference tree is absent. Materialize it once with:
+
+```bash
+bash scripts/minecraft-reference.sh
+```
+
+The stable source root is `.minecraft-reference/26.2/sources/` for the current project version. It is generated locally from Mojang's client JAR, is intentionally git-ignored, and must never be committed or uploaded as an artifact. See `docs/agent/minecraft-reference.md` for provenance and override details.
