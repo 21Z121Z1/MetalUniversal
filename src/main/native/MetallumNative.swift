@@ -10079,6 +10079,10 @@ private func terrainVisibilityComputePipelines(
 
 @available(macOS 26.0, iOS 26.0, *)
 private final class TerrainGpuVisibilityProbeOwner {
+    // Value-only lease identity avoids retaining the lease/context and
+    // forming a command-buffer completion cycle. The visible ICB must be
+    // authored from the exact lease that produced this in-flight bitset.
+    let leaseIdentity: ObjectIdentifier
     let epoch: UInt64
     let candidateCount: Int
     let wordCount: Int
@@ -10101,6 +10105,7 @@ private final class TerrainGpuVisibilityProbeOwner {
     private var succeeded = false
 
     init(
+        leaseIdentity: ObjectIdentifier,
         epoch: UInt64,
         candidateCount: Int,
         wordCount: Int,
@@ -10119,6 +10124,7 @@ private final class TerrainGpuVisibilityProbeOwner {
         blockCount: Int,
         groupCount: Int
     ) {
+        self.leaseIdentity = leaseIdentity
         self.epoch = epoch
         self.candidateCount = candidateCount
         self.wordCount = wordCount
@@ -10514,6 +10520,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
     computeEncoder.endEncoding()
 
     let owner = TerrainGpuVisibilityProbeOwner(
+        leaseIdentity: ObjectIdentifier(bridge.lease),
         epoch: epoch,
         candidateCount: count,
         wordCount: wordCount,
@@ -10821,6 +10828,7 @@ public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
     }
     let retained = Unmanaged<AnyObject>.fromOpaque(visibilityProbePointer).takeUnretainedValue()
     guard let visibilityOwner = retained as? TerrainGpuVisibilityProbeOwner,
+          visibilityOwner.leaseIdentity == ObjectIdentifier(bridge.lease),
           visibilityOwner.epoch == expectedEpoch,
           visibilityOwner.candidateCount > 0 else {
         return nil
