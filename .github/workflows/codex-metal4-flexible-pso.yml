@@ -1,0 +1,41 @@
+name: codex/metal4-flexible-pso
+
+on:
+  push:
+    branches:
+      - codex/metal4-flexible-pso-staging-20260829
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  focused:
+    runs-on: macos-26
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Apply product patch
+        run: python3 .github/ci/patch_metal4_flexible_pso.py
+      - name: Compile Java and contract
+        run: ./gradlew --no-daemon compileJava compileTestJava test --tests com.metallum.client.metal.render.Metal4FlexiblePipelineContractTest
+      - name: Compile native bridges
+        run: ./gradlew --no-daemon buildMacNative buildIOSNative
+      - name: Commit product patch for extraction
+        if: success()
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            src/main/native/MetallumNative.swift \
+            src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java \
+            src/main/java/com/metallum/client/metal/render/MetalDevice.java
+          if ! git diff --cached --quiet; then
+            git commit -m 'perf(metal4): specialize flexible color pipeline state'
+            git push origin HEAD:codex/metal4-flexible-pso-staging-20260829
+          fi
