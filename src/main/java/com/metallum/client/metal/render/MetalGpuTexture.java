@@ -13,6 +13,8 @@ import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.util.Objects;
+
 @Environment(EnvType.CLIENT)
 final class MetalGpuTexture extends GpuTexture {
     static final int USAGE_SHADER_WRITE = 1 << 5;
@@ -26,6 +28,7 @@ final class MetalGpuTexture extends GpuTexture {
     private final MetalDevice device;
     private final MetalAllocationIdentity allocationIdentity;
     private final MTLPixelFormat mtlPixelFormat;
+    private final MTLStorageMode storageMode;
     private boolean closed;
     @Nullable
     private Vector4fc materializedColorClear;
@@ -63,10 +66,13 @@ final class MetalGpuTexture extends GpuTexture {
             final int mipLevels,
             final MetalTextureDimension dimension
     ) {
-        this(device, usage, label, format, width, height, depthOrLayers, mipLevels, dimension, null);
+        this(
+                device, usage, label, format, width, height, depthOrLayers, mipLevels,
+                dimension, MTLStorageMode.Private, null
+        );
     }
 
-    /** Adopts one retained native texture while keeping renderer-owned identity/lifetime. */
+    /** Adopts one retained private-storage native texture while keeping renderer-owned identity/lifetime. */
     MetalGpuTexture(
             final MetalDevice device,
             @GpuTexture.Usage final int usage,
@@ -80,7 +86,7 @@ final class MetalGpuTexture extends GpuTexture {
     ) {
         this(
                 device, usage, label, format, width, height, depthOrLayers, mipLevels,
-                MetalTextureDimension.TWO_D, adoptedNativeHandle
+                MetalTextureDimension.TWO_D, MTLStorageMode.Private, adoptedNativeHandle
         );
     }
 
@@ -94,12 +100,25 @@ final class MetalGpuTexture extends GpuTexture {
             final int depthOrLayers,
             final int mipLevels,
             final MetalTextureDimension dimension,
+            final MTLStorageMode storageMode,
             @Nullable final MemorySegment adoptedNativeHandle
     ) {
         super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
         this.allocationIdentity = MetalAllocationIdentity.allocate(label);
         this.mtlPixelFormat = MTLPixelFormat.from(format);
+        this.storageMode = Objects.requireNonNull(storageMode, "storageMode");
+        if (storageMode == MTLStorageMode.Memoryless
+                && !memorylessCompatible(usage, dimension, depthOrLayers, mipLevels)) {
+            throw new IllegalArgumentException(
+                    "Memoryless Metal textures must be single-layer 2D render-only attachments"
+            );
+        }
+        if (adoptedNativeHandle != null
+                && !MetalNativeBridge.isNullHandle(adoptedNativeHandle)
+                && storageMode != MTLStorageMode.Private) {
+            throw new IllegalArgumentException("Adopted placement-heap textures must use private storage");
+        }
 
         if (adoptedNativeHandle != null && !MetalNativeBridge.isNullHandle(adoptedNativeHandle)) {
             this.nativeHandle = adoptedNativeHandle;
@@ -113,17 +132,53 @@ final class MetalGpuTexture extends GpuTexture {
                     mipLevels,
                     dimension.nativeValue,
                     (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
-                    toMtlTextureUsage(usage),
-                    MTLStorageMode.Private,
+                    toMtlTextureUsage(usage, storageMode),
+                    storageMode,
                     label
             );
         }
         if (MetalNativeBridge.isNullHandle(this.nativeHandle)) {
             throw new IllegalStateException(
                     "Failed to create Metal " + dimension + " texture " + label + " ("
-                            + width + 'x' + height + 'x' + depthOrLayers + ", " + format + ')'
+                            + width + 'x' + height + 'x' + depthOrLayers + ", " + format + ", "
+                            + storageMode + ')'
             );
         }
+    }
+
+    static MetalGpuTexture createMemorylessRenderTarget(
+            final MetalDevice device,
+            @GpuTexture.Usage final int usage,
+            final String label,
+            final GpuFormat format,
+            final int width,
+            final int height
+    ) {
+        return new MetalGpuTexture(
+                device,
+                usage,
+                label,
+                format,
+                width,
+                height,
+                1,
+                1,
+                MetalTextureDimension.TWO_D,
+                MTLStorageMode.Memoryless,
+                null
+        );
+    }
+
+    static boolean memorylessCompatible(
+            @GpuTexture.Usage final int usage,
+            final MetalTextureDimension dimension,
+            final int depthOrLayers,
+            final int mipLevels
+    ) {
+        return usage == GpuTexture.USAGE_RENDER_ATTACHMENT
+                && dimension == MetalTextureDimension.TWO_D
+                && depthOrLayers == 1
+                && mipLevels == 1;
     }
 
     int pixelSize() {
@@ -225,6 +280,10 @@ final class MetalGpuTexture extends GpuTexture {
         return this.mtlPixelFormat;
     }
 
+    MTLStorageMode storageMode() {
+        return this.storageMode;
+    }
+
     MTLPixelFormat mtlDepthPixelFormat() {
         return this.mtlPixelFormat == MTLPixelFormat.Stencil8 ? MTLPixelFormat.Invalid : this.mtlPixelFormat;
     }
@@ -253,7 +312,13 @@ final class MetalGpuTexture extends GpuTexture {
         return this.closed;
     }
 
-    private long toMtlTextureUsage(@GpuTexture.Usage final int usage) {
+    private long toMtlTextureUsage(
+            @GpuTexture.Usage final int usage,
+            final MTLStorageMode storageMode
+    ) {
+        if (storageMode == MTLStorageMode.Memoryless) {
+            return MTLTextureUsage.RenderTarget.value;
+        }
         return nativeUsageFor(this.mtlPixelFormat, usage);
     }
 
