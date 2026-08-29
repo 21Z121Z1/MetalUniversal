@@ -20,7 +20,9 @@ jobs:
           distribution: temurin
           java-version: '25'
       - name: Apply bitset-only visibility optimization
-        run: python3 .github/ci/patch_terrain_visible_bitset_only.py
+        run: |
+          python3 .github/ci/normalize_bitset_patch_anchor.py
+          python3 .github/ci/patch_terrain_visible_bitset_only.py
       - name: Focused Java/native validation
         run: |
           ./gradlew --no-daemon compileJava compileTestJava test --tests com.metallum.client.metal.render.Metal4TerrainVisibleIcbContractTest buildMacNative --rerun-tasks --console=plain
