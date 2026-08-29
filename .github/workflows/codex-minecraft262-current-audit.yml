@@ -1,0 +1,161 @@
+name: codex/minecraft262-current-audit
+
+on:
+  push:
+    branches:
+      - codex/placement-heap-integration-staging-20260830
+    paths:
+      - .github/workflows/codex-minecraft262-current-audit.yml
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Cache Minecraft reference inputs
+        uses: actions/cache@v4
+        with:
+          path: .minecraft-reference/.cache
+          key: minecraft-reference-26.2-vineflower-1.12.0
+      - name: Build Minecraft 26.2 reference tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
+          test -f "$SRC/net/minecraft/client/Minecraft.java"
+          COUNT="$(find "$SRC" -type f -name '*.java' | wc -l | tr -d ' ')"
+          echo "java_files=$COUNT"
+          test "$COUNT" -ge 7000
+      - name: Audit rendering, frame-graph and resource contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          python3 - "$SRC" > build/minecraft262-modernization-audit.txt <<'PY'
+          from __future__ import annotations
+          import pathlib, re, sys
+
+          root = pathlib.Path(sys.argv[1])
+          files = sorted(root.rglob('*.java'))
+          cache = {p: p.read_text(encoding='utf-8', errors='replace') for p in files}
+          print(f'root={root}')
+          print(f'java_file_count={len(files)}')
+
+          needles = [
+              'createCommandEncoder', 'createRenderPass', 'createComputePass',
+              'createRenderPipeline', 'writeToBuffer', 'writeToTexture',
+              'copyTextureToTexture', 'mapBuffer', 'present(', 'submit',
+              'FrameGraphBuilder', 'FramePass', 'readsAndWrites', 'reads(',
+              'GpuBuffer', 'GpuTexture', 'GpuTextureView', 'GpuBufferSlice',
+              'RenderTarget', 'MainTarget', 'RenderPass', 'close()',
+          ]
+          print('\n=== GLOBAL COUNTS ===')
+          for needle in needles:
+              hits = [(text.count(needle), p) for p,text in cache.items() if needle in text]
+              hits.sort(key=lambda item: (-item[0], str(item[1])))
+              print(f'[{needle}] total={sum(n for n,_ in hits)} files={len(hits)}')
+              for n,p in hits[:15]:
+                  print(f'  {n:4d} {p.relative_to(root)}')
+
+          priority_suffixes = (
+              'net/minecraft/client/Minecraft.java',
+              'net/minecraft/client/renderer/GameRenderer.java',
+              'net/minecraft/client/renderer/LevelRenderer.java',
+              'com/mojang/blaze3d/systems/RenderSystem.java',
+              'com/mojang/blaze3d/pipeline/RenderTarget.java',
+              'com/mojang/blaze3d/pipeline/MainTarget.java',
+              'com/mojang/blaze3d/systems/CommandEncoder.java',
+              'com/mojang/blaze3d/systems/GpuDevice.java',
+              'com/mojang/blaze3d/textures/GpuTexture.java',
+              'com/mojang/blaze3d/textures/GpuTextureView.java',
+              'com/mojang/blaze3d/pipeline/RenderPipeline.java',
+              'com/mojang/blaze3d/systems/RenderPass.java',
+              'net/minecraft/client/renderer/FrameGraphBuilder.java',
+              'net/minecraft/client/renderer/FramePass.java',
+          )
+          priority = []
+          for p in files:
+              rel = p.relative_to(root).as_posix()
+              if any(rel.endswith(suffix) for suffix in priority_suffixes):
+                  priority.append(p)
+          print('\n=== PRIORITY FILES ===')
+          for p in priority:
+              print(p.relative_to(root))
+
+          pattern = re.compile(
+              r'createCommandEncoder|createRenderPass|createComputePass|writeToBuffer|writeToTexture|'
+              r'copyTextureToTexture|mapBuffer|present\(|submit|close\(|FrameGraph|addPass|readsAndWrites|'
+              r'\.reads\(|createTexture|createBuffer|RenderTarget|MainTarget|GpuBufferSlice'
+          )
+          print('\n=== PRIORITY CONTEXT ===')
+          emitted = 0
+          for p in priority:
+              lines = cache[p].splitlines()
+              hit_lines = [i for i,line in enumerate(lines) if pattern.search(line)]
+              if not hit_lines:
+                  continue
+              print(f'\n--- {p.relative_to(root)} ---')
+              covered = set()
+              for i in hit_lines:
+                  lo, hi = max(0, i-5), min(len(lines), i+10)
+                  if any(j in covered for j in range(lo, hi)):
+                      continue
+                  covered.update(range(lo, hi))
+                  for j in range(lo, hi):
+                      print(f'{j+1:5d}: {lines[j]}')
+                  print('...')
+                  emitted += 1
+                  if emitted >= 220:
+                      break
+              if emitted >= 220:
+                  break
+
+          print('\n=== COMMAND ENCODER CREATION SITES ===')
+          for p,text in cache.items():
+              for i,line in enumerate(text.splitlines()):
+                  if 'createCommandEncoder' in line:
+                      print(f'{p.relative_to(root)}:{i+1}: {line.strip()}')
+
+          print('\n=== TRY/CLOSE RESOURCE LIFETIMES ===')
+          emitted = 0
+          for p,text in cache.items():
+              if not any(k in text for k in ('RenderPass','GpuBuffer','GpuTexture','CommandEncoder')):
+                  continue
+              lines = text.splitlines()
+              for i,line in enumerate(lines):
+                  if 'try (' in line or '.close()' in line or 'close();' in line:
+                      print(f'{p.relative_to(root)}:{i+1}: {line.strip()}')
+                      emitted += 1
+                      if emitted >= 500:
+                          break
+              if emitted >= 500:
+                  break
+
+          print('\n=== FRAME GRAPH DECLARATION/EXECUTION SITES ===')
+          emitted = 0
+          for p,text in cache.items():
+              if 'FrameGraph' not in text and 'FramePass' not in text:
+                  continue
+              for i,line in enumerate(text.splitlines()):
+                  if any(k in line for k in ('FrameGraph','FramePass','addPass','readsAndWrites','reads(', 'executes')):
+                      print(f'{p.relative_to(root)}:{i+1}: {line.strip()}')
+                      emitted += 1
+                      if emitted >= 600:
+                          break
+              if emitted >= 600:
+                  break
+          PY
+          sed -n '1,2200p' build/minecraft262-modernization-audit.txt
+      - name: Upload audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft262-modernization-audit
+          path: build/minecraft262-modernization-audit.txt
+          if-no-files-found: error
