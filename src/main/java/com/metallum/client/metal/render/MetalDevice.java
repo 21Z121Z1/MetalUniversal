@@ -168,6 +168,15 @@ final class MetalDevice implements GpuDeviceBackend {
     private volatile int pipelineCacheGeneration;
     @Nullable
     private final ExecutorService prewarmExecutor;
+    @Nullable
+    private final ExecutorService prewarmLookupExecutor;
+    private static final int PREWARM_LOOKUP_WORKERS = Math.max(
+            1,
+            Math.min(4, Integer.getInteger(
+                    "metallum.opt.prewarmLookupWorkers",
+                    Math.max(1, Runtime.getRuntime().availableProcessors() / 2)
+            ))
+    );
 
     /** Vanilla marker result for a precompile that was queued, not run. */
     private record PendingCompiledPipeline() implements CompiledRenderPipeline {
@@ -319,11 +328,18 @@ final class MetalDevice implements GpuDeviceBackend {
         }
         this.prewarmExecutor = ASYNC_PRECOMPILE && RENDER_PIPELINE_IDENTITY_EQUALS
                 ? Executors.newSingleThreadExecutor(runnable -> {
-                    Thread thread = new Thread(runnable, "metallum-pso-prewarm");
+                    Thread thread = new Thread(runnable, "metallum-pso-prewarm-compile");
                     thread.setDaemon(true);
                     return thread;
                 })
                 : null;
+        this.prewarmLookupExecutor = this.prewarmExecutor == null
+                ? null
+                : Executors.newFixedThreadPool(PREWARM_LOOKUP_WORKERS, runnable -> {
+                    Thread thread = new Thread(runnable, "metallum-pso-artifact-lookup");
+                    thread.setDaemon(true);
+                    return thread;
+                });
         this.commandEncoder = new MetalCommandEncoder(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
         this.genericVertexAttributeBuffer = (MetalGpuBuffer) this.createBuffer(
@@ -530,17 +546,38 @@ final class MetalDevice implements GpuDeviceBackend {
         if (existing != null) {
             return existing;
         }
-        if (this.prewarmExecutor != null) {
+        if (this.prewarmExecutor != null && this.prewarmLookupExecutor != null) {
             int generation = this.pipelineCacheGeneration;
-            this.prewarmExecutor.execute(() -> {
-                try {
-                    this.compileInBackground(pipeline, effectiveSource, generation);
-                } catch (Throwable t) {
-                    // First real use on the render thread recompiles and
-                    // surfaces the error with vanilla's own handling.
-                    Metallum.LOGGER.warn("[metallum] background precompile failed for {}", pipeline.getLocation(), t);
-                }
-            });
+            try {
+                this.prewarmLookupExecutor.execute(() -> {
+                    try {
+                        MetalCrossShaderCompiler.CacheLookup lookup =
+                                MetalCrossShaderCompiler.tryLoadCacheLookup(pipeline, effectiveSource);
+                        if (generation != this.pipelineCacheGeneration
+                                || this.compiledPipelines.containsKey(pipeline)) {
+                            return;
+                        }
+                        this.submitPrewarmTask(() -> {
+                            try {
+                                this.compileInBackground(pipeline, effectiveSource, generation, lookup);
+                            } catch (Throwable t) {
+                                // First real use on the render thread recompiles and
+                                // surfaces the error with vanilla's own handling.
+                                Metallum.LOGGER.warn(
+                                        "[metallum] background precompile failed for {}",
+                                        pipeline.getLocation(), t
+                                );
+                            }
+                        });
+                    } catch (Throwable t) {
+                        Metallum.LOGGER.warn(
+                                "[metallum] background MSL artifact lookup failed for {}",
+                                pipeline.getLocation(), t
+                        );
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            }
             return PENDING_PRECOMPILE;
         }
         synchronized (COMPILE_CHAIN_LOCK) {
@@ -557,8 +594,20 @@ final class MetalDevice implements GpuDeviceBackend {
     private MetalCompiledRenderPipeline compileWithIrisOverride(
             final RenderPipeline pipeline, final ShaderSource source
     ) {
+        return compileWithIrisOverride(pipeline, source, null);
+    }
+
+    private MetalCompiledRenderPipeline compileWithIrisOverride(
+            final RenderPipeline pipeline,
+            final ShaderSource source,
+            final MetalCrossShaderCompiler.@Nullable CacheLookup preloadedLookup
+    ) {
+        // Iris remains the first and only override authority. A generic MSL
+        // artifact may be looked up speculatively, but can never win this race.
         MetalCompiledRenderPipeline override = IrisMetalPipelineOverrides.tryCompile(this, pipeline, source);
-        return override != null ? override : MetalCrossShaderCompiler.compile(this, pipeline, source);
+        return override != null
+                ? override
+                : MetalCrossShaderCompiler.compile(this, pipeline, source, preloadedLookup);
     }
 
     /** True when the background prewarm thread exists (async precompile on). */
@@ -584,7 +633,12 @@ final class MetalDevice implements GpuDeviceBackend {
         }
     }
 
-    private void compileInBackground(final RenderPipeline pipeline, final ShaderSource source, final int generation) {
+    private void compileInBackground(
+            final RenderPipeline pipeline,
+            final ShaderSource source,
+            final int generation,
+            final MetalCrossShaderCompiler.CacheLookup lookup
+    ) {
         if (this.compiledPipelines.containsKey(pipeline)) {
             return;
         }
@@ -595,7 +649,9 @@ final class MetalDevice implements GpuDeviceBackend {
             if (generation != this.pipelineCacheGeneration) {
                 return;
             }
-            this.compiledPipelines.computeIfAbsent(pipeline, p -> compileWithIrisOverride(p, source));
+            this.compiledPipelines.computeIfAbsent(
+                    pipeline, p -> compileWithIrisOverride(p, source, lookup)
+            );
         }
     }
 
@@ -640,10 +696,19 @@ final class MetalDevice implements GpuDeviceBackend {
         this.waitForSubmittedGpuWork();
         this.genericVertexAttributeBuffer.close();
         this.commandEncoder.close();
+        if (this.prewarmLookupExecutor != null) {
+            this.prewarmLookupExecutor.shutdownNow();
+            try {
+                if (!this.prewarmLookupExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    Metallum.LOGGER.warn("[metallum] PSO artifact lookup workers still busy at shutdown");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         if (this.prewarmExecutor != null) {
-            // Stop background compiles before tearing down the caches they
-            // populate; a straggler past the 5s bail-out still serializes
-            // against clearPipelineCache via COMPILE_CHAIN_LOCK.
+            // Stop background compiles after lookup producers. A straggler past
+            // the 5s bail-out still serializes with cache teardown via the lock.
             this.prewarmExecutor.shutdownNow();
             try {
                 if (!this.prewarmExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
