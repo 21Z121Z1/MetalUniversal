@@ -1,0 +1,38 @@
+name: Codex terrain visible bitset only
+
+on:
+  push:
+    branches:
+      - codex/terrain-visible-bitset-only-staging-20260829
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Apply bitset-only visibility optimization
+        run: python3 .github/ci/patch_terrain_visible_bitset_only.py
+      - name: Focused Java/native validation
+        run: |
+          ./gradlew --no-daemon compileJava compileTestJava test --tests com.metallum.client.metal.render.Metal4TerrainVisibleIcbContractTest buildMacNative --rerun-tasks --console=plain
+      - name: Commit validated production changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/main/native/MetallumNative.swift \
+                  src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java \
+                  src/main/java/com/metallum/client/metal/render/MetalDevice.java \
+                  src/main/java/com/metallum/client/metal/render/TerrainGpuVisibilityProbe.java \
+                  src/test/java/com/metallum/client/metal/render/Metal4TerrainVisibleIcbContractTest.java
+          git diff --cached --check
+          git commit -m "perf(metal4): skip unused terrain visibility compaction"
+          git push origin HEAD:codex/terrain-visible-bitset-only-staging-20260829
