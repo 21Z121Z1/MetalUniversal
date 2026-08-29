@@ -422,7 +422,9 @@ final class MetalRenderPass implements RenderPassBackend {
             final GpuBufferSlice commands,
             final int drawCount
     ) {
-        if (!TerrainSceneSnapshot.ICB_ENABLED && !TerrainSceneSnapshot.GPU_ICB_ENABLED) {
+        if (!TerrainSceneSnapshot.ICB_ENABLED
+                && !TerrainSceneSnapshot.GPU_ICB_ENABLED
+                && !TerrainSceneSnapshot.VISIBLE_GPU_ICB_ENABLED) {
             return false;
         }
         final TerrainSceneSnapshot snapshot;
@@ -717,7 +719,9 @@ final class MetalRenderPass implements RenderPassBackend {
         // and fail-closed paths intentionally issue this one existing native
         // indirect call; no Java per-draw replay is introduced.
         if (TerrainSceneSnapshot.captureEnabled()) {
-            if (TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED) {
+            if (TerrainSceneSnapshot.ICB_ENABLED
+                    || TerrainSceneSnapshot.GPU_ICB_ENABLED
+                    || TerrainSceneSnapshot.VISIBLE_GPU_ICB_ENABLED) {
                 if (terrainSnapshotSubmitted(primitiveType, commands, drawCount)) {
                     recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
                     return;
