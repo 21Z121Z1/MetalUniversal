@@ -1,0 +1,35 @@
+name: codex/flexible-pso-replay
+
+on:
+  push:
+    branches:
+      - codex/placement-heap-integration-staging-20260830
+    paths:
+      - .github/workflows/codex-flexible-pso-replay.yml
+
+permissions:
+  contents: write
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/placement-heap-integration-staging-20260830
+      - name: Replay validated flexible PSO implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git cherry-pick -x b6309fe808dcb3b07e8280132f2e71473a8e1479
+      - name: Remove one-shot workflow and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/codex-flexible-pso-replay.yml
+          git commit -m "chore(ci): remove flexible PSO replay helper"
+          git push origin HEAD:codex/placement-heap-integration-staging-20260830
