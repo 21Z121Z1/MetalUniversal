@@ -894,8 +894,9 @@ final class IrisMetalPostChain implements AutoCloseable {
                     );
                 }
                 if (rasterIndex == index) {
+                    int renderOrdinal = rasterCursor;
                     PlannedPass pass = raster.get(rasterCursor++);
-                    executePass(device, targets, resources, pass);
+                    executePass(device, targets, resources, pass, renderOrdinal);
                     colors.restore(pass.info.stateAfter());
                     executed.add(pass.info.name());
                 }
@@ -1452,23 +1453,35 @@ final class IrisMetalPostChain implements AutoCloseable {
             final MetalDevice device,
             final IrisMetalRenderTargets targets,
             final ResourceProvider resources,
-            final PlannedPass pass
+            final PlannedPass pass,
+            final int renderOrdinal
     ) {
         IrisMetalPingPongTargets colors = targets.colorTargets();
         colors.restore(pass.info.readsFromAlt());
         generateMipmaps(device.commandEncoder(), targets, pass.mipmappedBuffers);
         RenderPass.RenderArea area = renderArea(pass.viewport, targets.width(), targets.height());
-        try (IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor = targets.createWriteDescriptor(
-                "Iris " + pass.info.stage().name().toLowerCase(Locale.ROOT) + ": " + pass.info.name(),
-                pass.info.drawBuffers(),
-                null,
-                false,
-                null,
-                null
-        )) {
+        try (IrisMetalMemorylessPassAttachments memoryless =
+                     IrisMetalMemorylessPassAttachments.tryCreate(
+                             device, this.generation, targets, pass.info, renderOrdinal
+                     );
+             IrisMetalRenderTargets.RenderPassDescriptorWithViews descriptor = targets.createWriteDescriptor(
+                     "Iris " + pass.info.stage().name().toLowerCase(Locale.ROOT) + ": " + pass.info.name(),
+                     pass.info.drawBuffers(),
+                     null,
+                     false,
+                     null,
+                     null,
+                     memoryless == null ? null : memoryless.views()
+             )) {
             descriptor.descriptor().withRenderArea(area);
             MetalCommandEncoder encoder = device.commandEncoder();
-            MetalRenderPass renderPass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
+            MetalRenderPass renderPass = memoryless == null
+                    ? (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor())
+                    : encoder.createRenderPass(
+                            descriptor.descriptor(),
+                            memoryless.loadActions(),
+                            memoryless.storeActions()
+                    );
             try {
                 renderFullscreen(
                         renderPass,

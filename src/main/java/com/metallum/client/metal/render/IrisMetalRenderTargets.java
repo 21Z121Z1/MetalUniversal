@@ -353,6 +353,20 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             @Nullable final Double clearDepth,
             final int @Nullable [] readTargets
     ) {
+        return createWriteDescriptor(
+                label, drawBuffers, clearColors, withDepth, clearDepth, readTargets, null
+        );
+    }
+
+    RenderPassDescriptorWithViews createWriteDescriptor(
+            final String label,
+            final int[] drawBuffers,
+            @Nullable final Vector4fc[] clearColors,
+            final boolean withDepth,
+            @Nullable final Double clearDepth,
+            final int @Nullable [] readTargets,
+            final MetalGpuTextureView @Nullable [] colorOverrides
+    ) {
         ensureOpen();
         if (drawBuffers.length == 0) {
             throw new IllegalArgumentException("A pass must write at least one draw buffer");
@@ -360,13 +374,24 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         if (clearColors != null && clearColors.length != drawBuffers.length) {
             throw new IllegalArgumentException("Clear color array must match draw buffer count");
         }
+        if (colorOverrides != null && colorOverrides.length != drawBuffers.length) {
+            throw new IllegalArgumentException("Color override array must match draw buffer count");
+        }
         if (readTargets != null) {
             colorTargets.checkNoFeedbackLoop(drawBuffers, readTargets);
         }
         RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> label);
         MetalGpuTextureView[] ownedViews = new MetalGpuTextureView[drawBuffers.length + (withDepth ? 1 : 0)];
         for (int slot = 0; slot < drawBuffers.length; slot++) {
-            MetalGpuTextureView view = colorTargets.writeView(drawBuffers[slot]);
+            MetalGpuTextureView view = colorOverrides != null && colorOverrides[slot] != null
+                    ? colorOverrides[slot]
+                    : colorTargets.writeView(drawBuffers[slot]);
+            if (view.getWidth(0) != width || view.getHeight(0) != height
+                    || view.texture().getFormat() != colorTargets.format(drawBuffers[slot])) {
+                throw new IllegalArgumentException(
+                        "Color override does not match Iris target " + drawBuffers[slot]
+                );
+            }
             descriptor.withColorAttachment(
                     view,
                     clearColors == null || clearColors[slot] == null
