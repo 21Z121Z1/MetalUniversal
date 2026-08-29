@@ -20,6 +20,7 @@ public final class IrisMetalOptimizationBootstrap {
     }
 
     public static void onPostChainCreated(final Object chain) {
+        IrisMetalHeapAliasRuntime.clear();
         if (chain == null) return;
         try {
             List<IrisMetalExperimentalOptimizer.PassDescriptor> passes = new ArrayList<>();
@@ -87,6 +88,7 @@ public final class IrisMetalOptimizationBootstrap {
 
     public static void onPostChainClosed() {
         IrisMetalExperimentalOptimizer.clear();
+        IrisMetalHeapAliasRuntime.clear();
     }
 
     /** Returns whether a receipt was bound to the allocation set being reallocated. */
@@ -136,6 +138,7 @@ public final class IrisMetalOptimizationBootstrap {
         }
         if (plan.chainGeneration() != chain.generation()) {
             IrisMetalExperimentalOptimizer.clear();
+            IrisMetalHeapAliasRuntime.clear();
             return;
         }
         long targetEpoch = targets.allocationStamp();
@@ -150,6 +153,9 @@ public final class IrisMetalOptimizationBootstrap {
             IrisMetalOptimizationPlan.AttachmentLifetimeReceipt receipt =
                     IrisMetalAttachmentLifetimeCompiler.compile(plan, chain, targets);
             IrisMetalExperimentalOptimizer.publishAttachmentLifetimeReceipt(plan, receipt);
+            // Keep only stable logical/physical-side identities. Native allocation
+            // identities are deliberately generation-local and never published.
+            IrisMetalHeapAliasRuntime.publish(receipt);
         } catch (RuntimeException failure) {
             IrisMetalExperimentalOptimizer.publishAttachmentLifetimeReceipt(
                     plan,
@@ -157,6 +163,7 @@ public final class IrisMetalOptimizationBootstrap {
                             plan.chainGeneration(), targetEpoch, signature, "compiler-failure"
                     )
             );
+            IrisMetalHeapAliasRuntime.clear();
             Metallum.LOGGER.warn(
                     "[metallum-iris] attachment lifetime receipt failed closed; execution remains conservative",
                     failure
