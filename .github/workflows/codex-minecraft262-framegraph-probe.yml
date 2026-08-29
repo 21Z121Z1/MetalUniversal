@@ -1,0 +1,53 @@
+name: codex/minecraft262-framegraph-probe
+
+on:
+  push:
+    branches:
+      - codex/placement-heap-integration-staging-20260830
+    paths:
+      - .github/workflows/codex-minecraft262-framegraph-probe.yml
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/cache@v4
+        with:
+          path: .minecraft-reference/.cache
+          key: minecraft-reference-26.2-vineflower-1.12.0
+      - name: Inspect Minecraft 26.2 frame-graph allocator contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
+          OUT=build/minecraft262-framegraph-probe.txt
+          mkdir -p build
+          : > "$OUT"
+          for rel in \
+            com/mojang/blaze3d/framegraph/FrameGraphBuilder.java \
+            com/mojang/blaze3d/framegraph/FramePass.java \
+            com/mojang/blaze3d/resource/GraphicsResourceAllocator.java \
+            com/mojang/blaze3d/resource/CrossFrameResourcePool.java \
+            com/mojang/blaze3d/resource/ResourceDescriptor.java \
+            com/mojang/blaze3d/resource/RenderTargetDescriptor.java
+          do
+            echo "===== $rel =====" >> "$OUT"
+            if test -f "$SRC/$rel"; then
+              nl -ba "$SRC/$rel" >> "$OUT"
+            else
+              echo MISSING >> "$OUT"
+            fi
+          done
+          sed -n '1,1800p' "$OUT"
+      - name: Upload probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft262-framegraph-probe
+          path: build/minecraft262-framegraph-probe.txt
+          if-no-files-found: error
