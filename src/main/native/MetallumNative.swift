@@ -247,9 +247,19 @@ private enum NativeState {
     // frame-generation present thread and the async precompile thread all able to
     // create and destroy resources, so the lock is not optional.
     static var residencySetStorage: AnyObject?
+    // The explicit set is process-local, but the Metal device is not. Keep its
+    // identity beside the erased set so a second device cannot silently reuse
+    // the first device's allocations (or its pipeline states).
+    static var residencyDeviceStorage: AnyObject?
     static let residencyLock = NSLock()
     static var residencyDirty = false
     static var residencyRequested = false
+    // MTLResidencySet de-duplicates allocations, but keeping the ownership
+    // ledger here makes add/remove symmetry explicit and prevents a borrowed
+    // owner (or a cache teardown) from removing an allocation twice.
+    static var residencyTrackedAllocations: Set<ObjectIdentifier> = []
+    static var residencyCreatedCount: UInt64 = 0
+    static var residencyReleasedCount: UInt64 = 0
     // One-shot logging so a run can tell "the Metal 4 pipeline path worked" from
     // "every pipeline silently fell back to Metal 3" — the two are otherwise
     // indistinguishable, since falling back is by design never an error. Racing
@@ -1371,12 +1381,20 @@ final class Metal4PresentPath {
     private let slots: [FrameSlot]
     private let argumentTable: MTL4ArgumentTable
     private let residencySet: MTLResidencySet
+    // These PSOs are borrowed from MetalFrameGenerationPresenter. They execute
+    // on this private MTL4 queue, so they must be published to this queue's set
+    // rather than the process-wide main-queue set.
+    private var residentPipelines: [MTLRenderPipelineState]
     private let slotLock = NSLock()
     /// Only the display-link callback records commands, so at most one slot is
     /// recording. Completion feedback can release submitted slots concurrently.
     private var recordingSlotIndex: Int?
 
-    init?(device: MTLDevice, layer: CAMetalLayer) {
+    init?(
+        device: MTLDevice,
+        layer: CAMetalLayer,
+        pipelines: [MTLRenderPipelineState] = []
+    ) {
         let queueDescriptor = MTL4CommandQueueDescriptor()
         // MTL4CommandQueue.label is get-only, unlike MTLCommandQueue's: the label
         // has to come from the descriptor.
@@ -1412,17 +1430,33 @@ final class Metal4PresentPath {
         self.slots = slots
         self.argumentTable = argumentTable
         self.residencySet = residencySet
+        self.residentPipelines = pipelines
         queue.addResidencySet(residencySet)
         // Read-only and drawable-tracking: never add anything to it by hand.
         queue.addResidencySet(layer.residencySet)
+        // The present path owns a separate MTL4 queue and therefore cannot use
+        // NativeState's main-queue residency set. Publish its PSOs into this
+        // queue-local set before the first frame can bind one.
+        adopt(textures: [])
     }
 
     /// Republishes the presenter's texture set after every rebuild. Metal 4 has no
     /// automatic residency, so a texture missing here is read as unmapped memory.
     /// Memoryless textures are excluded: they have no backing allocation.
-    func adopt(textures: [MTLTexture]) {
+    func adopt(
+        textures: [MTLTexture],
+        pipelines: [MTLRenderPipelineState]? = nil
+    ) {
+        if let pipelines {
+            residentPipelines = pipelines
+        }
         residencySet.removeAllAllocations()
-        residencySet.addAllocations(textures.filter { $0.storageMode != .memoryless })
+        for texture in textures where texture.storageMode != .memoryless {
+            residencySet.addAllocation(texture)
+        }
+        for pipeline in residentPipelines {
+            residencySet.addAllocation(pipeline)
+        }
         residencySet.commit()
         residencySet.requestResidency()
     }
@@ -1895,7 +1929,16 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         // render thread's own submissions and the readyEvent signalling side stay
         // on Metal 3 regardless.
         if NativeState.metal4PresentEnabled, device.supportsFamily(.metal4) {
-            if let path = Metal4PresentPath(device: device, layer: layer),
+            if let path = Metal4PresentPath(
+                   device: device,
+                   layer: layer,
+                   pipelines: [
+                       copyPipeline,
+                       fusedPresentPipeline,
+                       motionResamplePipeline,
+                       depthResamplePipeline
+                   ]
+               ),
                let interpolator = Self.makeMetal4FrameInterpolator(
                    device: device,
                    sceneColor: sceneColor,
@@ -2331,6 +2374,20 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
         self.copyPipeline = newCopyPipeline
         self.fusedPresentPipeline = newFusedPresentPipeline
+        metal4Path?.adopt(
+            textures: textureSet.scene
+                + textureSet.nativeScene
+                + textureSet.uiOverlay
+                + textureSet.depth
+                + textureSet.motion
+                + textureSet.interpolation,
+            pipelines: [
+                newCopyPipeline,
+                newFusedPresentPipeline,
+                motionResamplePipeline,
+                depthResamplePipeline
+            ]
+        )
         self.copyFormat = layer.pixelFormat
         self.nextBufferIndex = 0
         self.lastPresentedIndex = nil
@@ -4395,6 +4452,9 @@ private func ensureCopyPipeline(_ device: MTLDevice, _ colorFormat: MTLPixelForm
         return nil
     }
     NativeState.copyPipelines[key] = pipeline
+    // This cache is consumed by both the ordinary MTLCommandQueue and the
+    // Metal 4 main queue. The latter has no implicit PSO residency.
+    residencyTrackCreated(pipeline)
     return pipeline
 }
 
@@ -4406,6 +4466,9 @@ private func ensureClearColorDepthPipeline(_ device: MTLDevice, _ colorFormat: M
     let pipeline = buildClearPipeline(device: device, colorFormat: colorFormat, depthFormat: depthFormat, writeColor: writeColor)
     if let pipeline {
         NativeState.clearPipelines[key] = pipeline
+        // Clear PSOs are used by the main render queue's MTL4 encoder and are
+        // intentionally retained for the process lifetime.
+        residencyTrackCreated(pipeline)
     }
     return pipeline
 }
@@ -4500,6 +4563,7 @@ private func ensureTransparencyMaskPipeline(_ device: MTLDevice) -> MTLComputePi
         }
         function.label = "Transparency Mask"
         let pipeline = try device.makeComputePipelineState(function: function)
+        residencyTrackCreated(pipeline)
         NativeState.transparencyMaskPipeline = pipeline
         return pipeline
     } catch {
@@ -4585,6 +4649,7 @@ private func ensureCutoutReactivePipeline(_ device: MTLDevice) -> MTLComputePipe
         }
         function.label = "CUTOUT Reactive Dilation"
         let pipeline = try device.makeComputePipelineState(function: function)
+        residencyTrackCreated(pipeline)
         NativeState.cutoutReactivePipeline = pipeline
         return pipeline
     } catch {
@@ -4660,6 +4725,7 @@ private func ensureHandOverlayPipeline(_ device: MTLDevice) -> MTLComputePipelin
         }
         function.label = "Hand Overlay Motion"
         let pipeline = try device.makeComputePipelineState(function: function)
+        residencyTrackCreated(pipeline)
         NativeState.handOverlayPipeline = pipeline
         return pipeline
     } catch {
@@ -4822,6 +4888,7 @@ private func ensureMotionPipeline(_ device: MTLDevice) -> MTLComputePipelineStat
         }
         function.label = "Motion Reconstruction"
         let pipeline = try device.makeComputePipelineState(function: function)
+        residencyTrackCreated(pipeline)
         NativeState.motionPipeline = pipeline
         return pipeline
     } catch {
@@ -5386,6 +5453,10 @@ private func ensureMotionV2Pipelines(_ device: MTLDevice) -> (
         let merge = try device.makeComputePipelineState(function: mergeFunction)
         let fused = try device.makeComputePipelineState(function: fusedFunction)
         let clear = try device.makeComputePipelineState(function: clearFunction)
+        residencyTrackCreated(camera)
+        residencyTrackCreated(merge)
+        residencyTrackCreated(fused)
+        residencyTrackCreated(clear)
         NativeState.motionV2Pipeline = camera
         NativeState.motionMergePipeline = merge
         NativeState.motionFusedPipeline = fused
@@ -5428,7 +5499,14 @@ private func metalFxScalerKey(
 @_cdecl("metallum_init_pipelines")
 public func metallum_init_pipelines(_ device: MTLDevice) {
     autoreleasepool {
+        if let previous = NativeState.presentPipeline {
+            // Reinitialization replaces the state used by the main queue. Drop
+            // its old allocation before publishing the new one so repeated
+            // device/resource setup cannot leak residency entries.
+            residencyTrackReleased(previous)
+        }
         NativeState.presentPipeline = buildPresentPipeline(device: device, colorFormat: .bgra8Unorm)
+        residencyTrackCreated(NativeState.presentPipeline)
         NativeState.presentLinearSampler = buildPresentSampler(device: device, filter: .linear)
         NativeState.presentNearestSampler = buildPresentSampler(device: device, filter: .nearest)
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .depth32Float)
@@ -7309,6 +7387,14 @@ public func metallum_metalfx_shutdown() {
     NativeState.frameGenerationPresenter = nil
     }
     metallum_metalfx_release_scalers()
+    residencyTrackReleased(NativeState.motionPipeline)
+    residencyTrackReleased(NativeState.motionV2Pipeline)
+    residencyTrackReleased(NativeState.motionMergePipeline)
+    residencyTrackReleased(NativeState.motionFusedPipeline)
+    residencyTrackReleased(NativeState.motionClearPipeline)
+    residencyTrackReleased(NativeState.transparencyMaskPipeline)
+    residencyTrackReleased(NativeState.cutoutReactivePipeline)
+    residencyTrackReleased(NativeState.handOverlayPipeline)
     NativeState.motionPipeline = nil
     NativeState.motionV2Pipeline = nil
     NativeState.motionMergePipeline = nil
@@ -7318,6 +7404,9 @@ public func metallum_metalfx_shutdown() {
     NativeState.cutoutReactivePipeline = nil
     NativeState.frameGenerationLogged = false
     #endif
+    for pipeline in NativeState.copyPipelines.values {
+        residencyTrackReleased(pipeline)
+    }
     NativeState.copyPipelines.removeAll()
     #if os(macOS)
     MetalFxNativeHudMetrics.resetMetalFx()
@@ -10289,12 +10378,22 @@ private func terrainVisibilityComputePipelines(
                   let scatter = library.makeFunction(name: "metallum_terrain_visibility_scatter") else {
                 return nil
             }
+            let visibilityState = try device.makeComputePipelineState(function: visibility)
+            let blockScanState = try device.makeComputePipelineState(function: blockScan)
+            let blockSumsScanState = try device.makeComputePipelineState(function: blockSumsScan)
+            let groupScanState = try device.makeComputePipelineState(function: groupScan)
+            let scatterState = try device.makeComputePipelineState(function: scatter)
+            residencyTrackCreated(visibilityState)
+            residencyTrackCreated(blockScanState)
+            residencyTrackCreated(blockSumsScanState)
+            residencyTrackCreated(groupScanState)
+            residencyTrackCreated(scatterState)
             return TerrainVisibilityCompactionPipelines(
-                visibility: try device.makeComputePipelineState(function: visibility),
-                blockScan: try device.makeComputePipelineState(function: blockScan),
-                blockSumsScan: try device.makeComputePipelineState(function: blockSumsScan),
-                groupScan: try device.makeComputePipelineState(function: groupScan),
-                scatter: try device.makeComputePipelineState(function: scatter)
+                visibility: visibilityState,
+                blockScan: blockScanState,
+                blockSumsScan: blockSumsScanState,
+                groupScan: groupScanState,
+                scatter: scatterState
             )
         } catch {
             NSLog("[metallum] terrain GPU visibility probe pipeline failed: %@", String(describing: error))
@@ -10323,7 +10422,9 @@ private func terrainVisibilityOnlyPipeline(
             guard let visibility = library.makeFunction(name: "metallum_terrain_gpu_visibility_probe") else {
                 return nil
             }
-            return try device.makeComputePipelineState(function: visibility)
+            let pipeline = try device.makeComputePipelineState(function: visibility)
+            residencyTrackCreated(pipeline)
+            return pipeline
         } catch {
             return nil
         }
@@ -10351,7 +10452,9 @@ private func terrainVisibilityScenePipeline(
             guard let visibility = library.makeFunction(name: "metallum_terrain_gpu_visibility_scene") else {
                 return nil
             }
-            return try device.makeComputePipelineState(function: visibility)
+            let pipeline = try device.makeComputePipelineState(function: visibility)
+            residencyTrackCreated(pipeline)
+            return pipeline
         } catch {
             NSLog("[metallum] persistent terrain visibility pipeline failed: %@", String(describing: error))
             return nil
@@ -10778,10 +10881,9 @@ private func terrainGpuComputePipeline(
             guard let function = library.makeFunction(name: functionName) else {
                 return nil
             }
-            return TerrainGpuComputePipeline(
-                state: try device.makeComputePipelineState(function: function),
-                function: function
-            )
+            let state = try device.makeComputePipelineState(function: function)
+            residencyTrackCreated(state)
+            return TerrainGpuComputePipeline(state: state, function: function)
         } catch {
             NSLog("[metallum] terrain GPU ICB compute pipeline failed: %@", String(describing: error))
             return nil
@@ -12520,7 +12622,9 @@ public func metallum_MTLDevice_makeComputePipelineState(
 ) -> UnsafeMutableRawPointer? {
     return NativeState.onCompilerThread {
         do {
-            return retainedPointer(try device.makeComputePipelineState(function: function))
+            let state = try device.makeComputePipelineState(function: function)
+            residencyTrackCreated(state)
+            return retainedPointer(state)
         } catch {
             NSLog("[metallum] Failed to create compute pipeline state: %@", String(describing: error))
             return nil
@@ -13284,29 +13388,64 @@ final class Metal4BumpAllocatorRing {
 
 // MARK: - Residency set (migration spec M3)
 
-/// Adds a freshly created resource to the residency set, if one is active.
-/// Memoryless textures are excluded: they have no backing allocation, so adding
-/// them is invalid.
+/// Adds a freshly created allocation to the residency set, if one is active.
+/// `MTLRenderPipelineState` and `MTLComputePipelineState` conform to
+/// `MTLAllocation` but not `MTLResource`; using the latter here silently leaves
+/// Metal 4 pipeline state unmapped. Memoryless textures remain excluded because
+/// they have no backing allocation.
 @available(macOS 15.0, iOS 18.0, *)
-private func residencyAdd(_ resource: MTLResource) {
+private func residencyAdd(_ allocation: any MTLAllocation) {
     NativeState.residencyLock.lock()
     defer { NativeState.residencyLock.unlock() }
     guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
-    if let texture = resource as? MTLTexture, texture.storageMode == .memoryless {
+    if let texture = allocation as? MTLTexture, texture.storageMode == .memoryless {
         return
     }
-    set.addAllocation(resource)
+    let identity = ObjectIdentifier(allocation as AnyObject)
+    guard NativeState.residencyTrackedAllocations.insert(identity).inserted else {
+        return
+    }
+    // A resource can be proven to belong to a device; an unknown allocation is
+    // still passed through because MTLAllocation intentionally exposes no
+    // device property. All allocations created by this module are one of the
+    // three known types below.
+    if let resource = allocation as? MTLResource,
+       let residencyDevice = NativeState.residencyDeviceStorage,
+       objectAddress(resource.device) != objectAddress(residencyDevice) {
+        NativeState.residencyTrackedAllocations.remove(identity)
+        return
+    }
+    if let renderPipeline = allocation as? MTLRenderPipelineState,
+       let residencyDevice = NativeState.residencyDeviceStorage,
+       objectAddress(renderPipeline.device) != objectAddress(residencyDevice) {
+        NativeState.residencyTrackedAllocations.remove(identity)
+        return
+    }
+    if let computePipeline = allocation as? MTLComputePipelineState,
+       let residencyDevice = NativeState.residencyDeviceStorage,
+       objectAddress(computePipeline.device) != objectAddress(residencyDevice) {
+        NativeState.residencyTrackedAllocations.remove(identity)
+        return
+    }
+    set.addAllocation(allocation)
+    NativeState.residencyCreatedCount &+= 1
     NativeState.residencyDirty = true
 }
 
-/// Drops a resource from the residency set. Called from the release path, which
-/// the Java destruction queue already defers past the frames still in flight.
+/// Drops an allocation from the residency set. Called from the raw release
+/// path, which the Java destruction queue already defers past frames still in
+/// flight, and from explicit cache teardown for privately retained PSOs.
 @available(macOS 15.0, iOS 18.0, *)
-private func residencyRemove(_ resource: MTLResource) {
+private func residencyRemove(_ allocation: any MTLAllocation) {
     NativeState.residencyLock.lock()
     defer { NativeState.residencyLock.unlock() }
     guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
-    set.removeAllocation(resource)
+    let identity = ObjectIdentifier(allocation as AnyObject)
+    guard NativeState.residencyTrackedAllocations.remove(identity) != nil else {
+        return
+    }
+    set.removeAllocation(allocation)
+    NativeState.residencyReleasedCount &+= 1
     NativeState.residencyDirty = true
 }
 
@@ -13327,11 +13466,20 @@ private func residencyCommitIfDirty() {
     }
 }
 
-/// Version-erased entry points so the call sites stay free of #available noise.
-private func residencyTrackCreated(_ resource: MTLResource?) {
-    guard let resource, NativeState.residencySetStorage != nil else { return }
-    if #available(macOS 15.0, iOS 18.0, *) {
-        residencyAdd(resource)
+/// Version-erased entry points so call sites stay free of #available noise.
+private func residencyTrackCreated(_ object: AnyObject?) {
+    guard let object, NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *), let allocation = object as? any MTLAllocation {
+        residencyAdd(allocation)
+    }
+}
+
+/// Object form used when a private cache releases a strong PSO reference
+/// without going through the Java raw-pointer ABI.
+private func residencyTrackReleased(_ object: AnyObject?) {
+    guard let object, NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *), let allocation = object as? any MTLAllocation {
+        residencyRemove(allocation)
     }
 }
 
@@ -13342,10 +13490,8 @@ private func residencyTrackCreated(_ resource: MTLResource?) {
 private func residencyTrackReleased(_ pointer: UnsafeMutableRawPointer) {
     guard NativeState.residencySetStorage != nil else { return }
     if #available(macOS 15.0, iOS 18.0, *) {
-        guard let resource = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLResource else {
-            return
-        }
-        residencyRemove(resource)
+        let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+        residencyTrackReleased(object)
     }
 }
 
@@ -13365,7 +13511,18 @@ public func metallum_residency_set_enable(_ device: MTLDevice, _ queue: MTLComma
         guard #available(macOS 15.0, iOS 18.0, *) else { return 0 }
         NativeState.residencyLock.lock()
         defer { NativeState.residencyLock.unlock() }
-        if NativeState.residencySetStorage != nil { return 1 }
+        if NativeState.residencySetStorage != nil {
+            // A process may expose more than one MTLDevice (for example an
+            // offscreen validation device and the presentation device). A
+            // residency set is device-scoped; never report success while
+            // attaching a second device to the first device's set.
+            if let activeDevice = NativeState.residencyDeviceStorage,
+               objectAddress(activeDevice) != objectAddress(device) {
+                NSLog("[metallum] residency set already belongs to another Metal device")
+                return 0
+            }
+            return 1
+        }
         let descriptor = MTLResidencySetDescriptor()
         descriptor.label = "metallum-residency"
         descriptor.initialCapacity = 1024
@@ -13374,8 +13531,12 @@ public func metallum_residency_set_enable(_ device: MTLDevice, _ queue: MTLComma
             return 0
         }
         NativeState.residencySetStorage = set
+        NativeState.residencyDeviceStorage = device
         NativeState.residencyDirty = false
         NativeState.residencyRequested = false
+        NativeState.residencyTrackedAllocations.removeAll()
+        NativeState.residencyCreatedCount = 0
+        NativeState.residencyReleasedCount = 0
         queue.addResidencySet(set)
         NSLog("[metallum] residency set attached to the main command queue")
         return 1
@@ -13399,6 +13560,26 @@ public func metallum_residency_set_stats(
         guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return 0 }
         outAllocations?.pointee = UInt32(set.allAllocations.count)
         outBytes?.pointee = UInt64(set.allocatedSize)
+        return 1
+    }
+}
+
+/// Returns successful allocation add/remove counts for the active explicit
+/// set. These counters are intentionally separate from `allAllocations`: the
+/// latter is a live snapshot, while this pair proves that every test-created
+/// pipeline state was removed symmetrically after its raw owner was released.
+@_cdecl("metallum_residency_set_lifetime_stats")
+public func metallum_residency_set_lifetime_stats(
+    _ outCreated: UnsafeMutablePointer<UInt64>?,
+    _ outReleased: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    return autoreleasepool {
+        guard #available(macOS 15.0, iOS 18.0, *) else { return 0 }
+        NativeState.residencyLock.lock()
+        defer { NativeState.residencyLock.unlock() }
+        guard NativeState.residencySetStorage is MTLResidencySet else { return 0 }
+        outCreated?.pointee = NativeState.residencyCreatedCount
+        outReleased?.pointee = NativeState.residencyReleasedCount
         return 1
     }
 }
@@ -13644,6 +13825,7 @@ private func createRenderPipelineState(
                     NativeState.metal4PipelineLogged = true
                     NSLog("[metallum] Metal 4 pipeline path engaged (MTL4Compiler)")
                 }
+                residencyTrackCreated(state)
                 return retainedPointer(state)
             } catch {
                 NativeState.logMetal4PipelineFallback(
@@ -13673,6 +13855,7 @@ private func createRenderPipelineState(
             try? archive.addRenderPipelineFunctions(descriptor: descriptor)
             NativeState.binaryArchiveLock.unlock()
         }
+        residencyTrackCreated(state)
         return retainedPointer(state)
     } catch {
         NSLog("[metallum] Failed to create render pipeline state: %@", String(describing: error))

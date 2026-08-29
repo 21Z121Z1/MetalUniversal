@@ -60,6 +60,17 @@ fragment float4 mtl4_path_fs() {
 }
 """
 
+private let residencyComputeShaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void residency_compute_probe(uint id [[thread_position_in_grid]]) {
+    // The body is intentionally empty: the fixture proves allocation
+    // admission and lifetime through the shipping compute-PSO ABI, not a
+    // separate dispatch or shader-output contract.
+}
+"""
+
 // Distinct source and entry-point names for the fall-through case. Reusing
 // `shaderSource` here does not work: Metal hands back the same MTLFunction
 // object for an identical library source, so the weak-keyed side table still
@@ -740,6 +751,36 @@ private func createShippingPipeline(
         try fail("metallum_MTLDevice_makeRenderPipelineState did not return an MTLRenderPipelineState")
     }
     return state
+}
+
+/// Retains the returned ABI handle separately from the typed, unretained view.
+/// The residency fixture must exercise metallum_release_object itself; using
+/// takeRetainedValue here would bypass that release hook and only test ARC.
+private func createShippingPipelineHandle(
+    device: MTLDevice,
+    descriptor: MTLRenderPipelineDescriptor
+) throws -> (UnsafeMutableRawPointer, MTLRenderPipelineState) {
+    guard let pointer = metallum_MTLDevice_makeRenderPipelineState(device, descriptor) else {
+        let label = descriptor.label ?? "<unlabelled>"
+        try fail("metallum_MTLDevice_makeRenderPipelineState returned nil for " + label)
+    }
+    guard let state = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLRenderPipelineState else {
+        try fail("metallum_MTLDevice_makeRenderPipelineState did not return an MTLRenderPipelineState")
+    }
+    return (pointer, state)
+}
+
+private func createShippingComputePipelineHandle(
+    device: MTLDevice,
+    function: MTLFunction
+) throws -> (UnsafeMutableRawPointer, MTLComputePipelineState) {
+    guard let pointer = metallum_MTLDevice_makeComputePipelineState(device, function) else {
+        try fail("metallum_MTLDevice_makeComputePipelineState returned nil")
+    }
+    guard let state = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLComputePipelineState else {
+        try fail("metallum_MTLDevice_makeComputePipelineState did not return an MTLComputePipelineState")
+    }
+    return (pointer, state)
 }
 
 private func makeTarget(device: MTLDevice, label: String) throws -> MTLTexture {
@@ -1588,7 +1629,62 @@ private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
         commandBuffer.waitUntilCompleted()
     }
 
+    func lifetimeStats(_ label: String) throws -> (created: UInt64, released: UInt64) {
+        var created: UInt64 = 0
+        var released: UInt64 = 0
+        try check(metallum_residency_set_lifetime_stats(&created, &released) != 0,
+                  "metallum_residency_set_lifetime_stats reported no active set at \(label)")
+        return (created, released)
+    }
+
     let baseline = try residencyCount("baseline")
+    let lifetimeBefore = try lifetimeStats("baseline")
+
+    // The first state is created through the registered-function MTL4 compiler
+    // path. The second uses an unregistered library while the switch is still
+    // on, proving the ordinary MTL3 fallback is also tracked. The compute state
+    // exercises the separate public compute-PSO ABI; unlike resources, both PSO
+    // protocols conform to MTLAllocation without conforming to MTLResource.
+    let renderVertex = try createShippingFunction(device: device, entryPoint: "mtl4_path_vs")
+    let renderFragment = try createShippingFunction(device: device, entryPoint: "mtl4_path_fs")
+    metallum_set_metal4_compiler_enabled(1)
+    defer { metallum_set_metal4_compiler_enabled(0) }
+    let (metal4RenderPointer, metal4RenderState) = try createShippingPipelineHandle(
+        device: device,
+        descriptor: makeDescriptor(
+            vertexFunction: renderVertex,
+            fragmentFunction: renderFragment,
+            label: "residency-metal4-render-pso"
+        )
+    )
+    let fallbackLibrary = try device.makeLibrary(source: unregisteredShaderSource, options: nil)
+    guard let fallbackVertex = fallbackLibrary.makeFunction(name: "mtl4_unregistered_vs"),
+          let fallbackFragment = fallbackLibrary.makeFunction(name: "mtl4_unregistered_fs") else {
+        try fail("could not resolve the residency fallback MSL entry points")
+    }
+    let (metal3RenderPointer, metal3RenderState) = try createShippingPipelineHandle(
+        device: device,
+        descriptor: makeDescriptor(
+            vertexFunction: fallbackVertex,
+            fragmentFunction: fallbackFragment,
+            label: "residency-metal3-fallback-render-pso"
+        )
+    )
+    let computeFunction = try createShippingFunction(
+        device: device,
+        entryPoint: "residency_compute_probe",
+        source: residencyComputeShaderSource
+    )
+    let (computePointer, computeState) = try createShippingComputePipelineHandle(
+        device: device,
+        function: computeFunction
+    )
+    // Keep typed views alive until the matching ABI releases below. The Metal
+    // SDK statically declares all three concrete states as MTLAllocation; the
+    // live residency count below proves the shipping bridge admitted them.
+    _ = metal4RenderState
+    _ = metal3RenderState
+    _ = computeState
 
     guard let bufferPointer = metallum_create_buffer(device, 4096, []) else {
         try fail("metallum_create_buffer returned nil")
@@ -1608,23 +1704,36 @@ private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
 
     try flushResidency("residency additions")
     let afterCreate = try residencyCount("after create")
-    // Three resources created, but the memoryless one must not be tracked.
-    try check(afterCreate == baseline + 2,
-              "expected \(baseline + 2) tracked allocations after creating a buffer, a texture and a "
-              + "memoryless texture, got \(afterCreate)")
+    // Three resources were created, but the memoryless one must be excluded;
+    // the two render and one compute PSO are all real MTLAllocation entries.
+    try check(afterCreate == baseline + 5,
+              "expected \(baseline + 5) tracked allocations after creating two render PSOs, one compute "
+              + "PSO, a buffer, a texture and a memoryless texture, got \(afterCreate)")
+    let lifetimeAfterCreate = try lifetimeStats("after create")
+    try check(lifetimeAfterCreate.created == lifetimeBefore.created + 5,
+              "expected five allocation additions (two render PSOs, one compute PSO and two resources), "
+              + "got \(lifetimeAfterCreate.created - lifetimeBefore.created)")
 
     metallum_release_object(bufferPointer)
     try flushResidency("residency removal")
     let afterRelease = try residencyCount("after release")
-    try check(afterRelease == baseline + 1,
-              "releasing the buffer should leave \(baseline + 1) tracked allocations, got \(afterRelease)")
+    try check(afterRelease == baseline + 4,
+              "releasing the buffer should leave \(baseline + 4) tracked allocations, got \(afterRelease)")
 
     metallum_release_object(texturePointer)
     metallum_release_object(memorylessPointer)
+    metallum_release_object(metal4RenderPointer)
+    metallum_release_object(metal3RenderPointer)
+    metallum_release_object(computePointer)
     try flushResidency("residency drain")
     let afterDrain = try residencyCount("after drain")
     try check(afterDrain == baseline,
               "releasing everything should return to \(baseline) tracked allocations, got \(afterDrain)")
+    let lifetimeAfterDrain = try lifetimeStats("after drain")
+    try check(lifetimeAfterDrain.released == lifetimeBefore.released + 5,
+              "expected five allocation removals after releasing the PSOs and resources, got "
+              + "\(lifetimeAfterDrain.released - lifetimeBefore.released)")
+    print("Residency allocation fixture: Metal 4 render PSO, Metal 3 fallback render PSO and compute PSO were accepted as MTLAllocation; memoryless texture excluded; created/released delta=5/5")
 }
 
 private func runResidencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
@@ -1718,7 +1827,7 @@ private func presentPathTest(device: MTLDevice) throws {
 
     // Both textures must be resident: Metal 4 does no automatic residency, so a
     // missing adopt() is exactly the bug this checks for.
-    path.adopt(textures: [source, destination])
+    path.adopt(textures: [source, destination], pipelines: [copyPipeline])
 
     guard let commandBuffer = path.beginFrame() else {
         try fail("no Metal 4 frame slot was available for the initial copy")
@@ -1830,7 +1939,7 @@ private func presentPathTest(device: MTLDevice) throws {
         print("Metal 4 present path: sustained in-flight test skipped because the detached layer vended no drawable")
         return
     }
-    saturationPath.adopt(textures: [source, destination])
+    saturationPath.adopt(textures: [source, destination], pipelines: [copyPipeline])
     var saturationErrors: [Error] = []
     let saturationErrorLock = NSLock()
     let saturationCompletions = DispatchGroup()
