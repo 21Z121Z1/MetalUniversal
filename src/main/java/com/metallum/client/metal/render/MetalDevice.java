@@ -88,6 +88,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private static final boolean VISIBLE_GPU_ICB_METAL4 =
             TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED
                     && MetalNativeBridge.terrainVisibilityProbeAvailable()
+                    && MetalNativeBridge.terrainVisibilityProbeStatusAvailable()
                     && MetalNativeBridge.terrainVisibleGpuIcbAvailable();
     private static final boolean GPU_VISIBILITY_PROBE_METAL4 =
             EXPLICIT_GPU_VISIBILITY_PROBE_METAL4 || VISIBLE_GPU_ICB_METAL4;

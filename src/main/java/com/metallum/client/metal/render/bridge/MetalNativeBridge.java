@@ -519,6 +519,11 @@ public final class MetalNativeBridge {
                             INT
                     )
             );
+            TerrainVisibilityProbeStatus = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_terrain_visibility_probe_status",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
+            );
             MTLRenderCommandEncoderExecuteTerrainIcb = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderCommandEncoder_executeTerrainIcb",
@@ -1051,6 +1056,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilityProbe;
     @Nullable
     private static final MethodHandle TerrainVisibilityProbePoll;
+    @Nullable
+    private static final MethodHandle TerrainVisibilityProbeStatus;
     @Nullable
     private static final MethodHandle MTLRenderCommandEncoderExecuteTerrainIcb;
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitivesIndirect;
@@ -2737,6 +2744,23 @@ public final class MetalNativeBridge {
     public static boolean terrainVisibilityProbeAvailable() {
         return MTLDeviceCreateTerrainGpuVisibilityProbe != null
                 && TerrainVisibilityProbePoll != null;
+    }
+
+    /** True when visible-only terrain completion can avoid GPU-result readback. */
+    public static boolean terrainVisibilityProbeStatusAvailable() {
+        return TerrainVisibilityProbeStatus != null;
+    }
+
+    /** Non-blocking completion-only query; returns 0 in-flight, 1 success, -1 failure. */
+    public static int terrainVisibilityProbeStatus(final MemorySegment probe) {
+        if (TerrainVisibilityProbeStatus == null || isNullHandle(probe)) {
+            return -1;
+        }
+        try {
+            return (int) TerrainVisibilityProbeStatus.invokeExact(segment(probe));
+        } catch (Throwable ignored) {
+            return -1;
+        }
     }
 
     /** Non-blocking completion/readback poll for one terrain visibility probe. */
