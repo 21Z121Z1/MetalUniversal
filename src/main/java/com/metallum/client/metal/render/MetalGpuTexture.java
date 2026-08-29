@@ -63,24 +63,61 @@ final class MetalGpuTexture extends GpuTexture {
             final int mipLevels,
             final MetalTextureDimension dimension
     ) {
+        this(device, usage, label, format, width, height, depthOrLayers, mipLevels, dimension, null);
+    }
+
+    /** Adopts one retained native texture while keeping renderer-owned identity/lifetime. */
+    MetalGpuTexture(
+            final MetalDevice device,
+            @GpuTexture.Usage final int usage,
+            final String label,
+            final GpuFormat format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevels,
+            final MemorySegment adoptedNativeHandle
+    ) {
+        this(
+                device, usage, label, format, width, height, depthOrLayers, mipLevels,
+                MetalTextureDimension.TWO_D, adoptedNativeHandle
+        );
+    }
+
+    private MetalGpuTexture(
+            final MetalDevice device,
+            @GpuTexture.Usage final int usage,
+            final String label,
+            final GpuFormat format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevels,
+            final MetalTextureDimension dimension,
+            @Nullable final MemorySegment adoptedNativeHandle
+    ) {
         super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
         this.allocationIdentity = MetalAllocationIdentity.allocate(label);
         this.mtlPixelFormat = MTLPixelFormat.from(format);
 
-        this.nativeHandle = MetalNativeBridge.metallum_create_texture(
-                device.metalDeviceHandle(),
-                this.mtlPixelFormat,
-                width,
-                height,
-                depthOrLayers,
-                mipLevels,
-                dimension.nativeValue,
-                (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
-                toMtlTextureUsage(usage),
-                MTLStorageMode.Private,
-                label
-        );
+        if (adoptedNativeHandle != null && !MetalNativeBridge.isNullHandle(adoptedNativeHandle)) {
+            this.nativeHandle = adoptedNativeHandle;
+        } else {
+            this.nativeHandle = MetalNativeBridge.metallum_create_texture(
+                    device.metalDeviceHandle(),
+                    this.mtlPixelFormat,
+                    width,
+                    height,
+                    depthOrLayers,
+                    mipLevels,
+                    dimension.nativeValue,
+                    (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
+                    toMtlTextureUsage(usage),
+                    MTLStorageMode.Private,
+                    label
+            );
+        }
         if (MetalNativeBridge.isNullHandle(this.nativeHandle)) {
             throw new IllegalStateException(
                     "Failed to create Metal " + dimension + " texture " + label + " ("
@@ -217,23 +254,24 @@ final class MetalGpuTexture extends GpuTexture {
     }
 
     private long toMtlTextureUsage(@GpuTexture.Usage final int usage) {
+        return nativeUsageFor(this.mtlPixelFormat, usage);
+    }
+
+    static long nativeUsageFor(
+            final MTLPixelFormat pixelFormat, @GpuTexture.Usage final int usage
+    ) {
         long result = 0L;
-        if ((usage & GpuTexture.USAGE_TEXTURE_BINDING) != 0 || (usage & GpuTexture.USAGE_COPY_DST) != 0 || (usage & GpuTexture.USAGE_COPY_SRC) != 0) {
+        if ((usage & GpuTexture.USAGE_TEXTURE_BINDING) != 0
+                || (usage & GpuTexture.USAGE_COPY_DST) != 0
+                || (usage & GpuTexture.USAGE_COPY_SRC) != 0) {
             result |= MTLTextureUsage.ShaderRead.value;
         }
         if ((usage & GpuTexture.USAGE_RENDER_ATTACHMENT) != 0) {
             result |= MTLTextureUsage.RenderTarget.value;
             result |= MTLTextureUsage.ShaderRead.value;
-            // Legacy path (kill switch only): blanket ShaderWrite on color
-            // attachments because MetalFX outputs used to rely on it. The
-            // minimal-usage path instead requires MetalFX output targets to
-            // carry USAGE_SHADER_WRITE explicitly (MetalDevice
-            // withExtraTextureUsage scope around their creation). Depth
-            // attachments must not receive ShaderWrite, because Metal does
-            // not permit storage writes to every depth format.
             if (!MINIMAL_USAGE
-                    && !this.mtlPixelFormat.hasStencil() && this.mtlPixelFormat != MTLPixelFormat.Depth16Unorm
-                    && this.mtlPixelFormat != MTLPixelFormat.Depth32Float) {
+                    && !pixelFormat.hasStencil() && pixelFormat != MTLPixelFormat.Depth16Unorm
+                    && pixelFormat != MTLPixelFormat.Depth32Float) {
                 result |= MTLTextureUsage.ShaderWrite.value;
             }
         }

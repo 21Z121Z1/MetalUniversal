@@ -50,6 +50,7 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
     private final BitSet alphaOneSampleTargets;
     private final BitSet mipmapsOnMain;
     private final BitSet mipmapsOnAlt;
+    private IrisMetalPlacementHeap.Allocation placementAllocation;
     private int width;
     private int height;
     private boolean closed;
@@ -134,6 +135,10 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         this.altViews = new MetalGpuTextureView[formats.length];
         this.mainSampleViews = new MetalGpuTextureView[formats.length];
         this.altSampleViews = new MetalGpuTextureView[formats.length];
+        this.placementAllocation = IrisMetalPlacementHeap.tryCreate(
+                device, labelPrefix, formats, newWidth, newHeight,
+                mipmappedTargets, storageImageTargets
+        );
         for (int index = 0; index < formats.length; index++) {
             int mipLevels = this.mipmappedTargets.get(index)
                     ? fullMipLevelCount(newWidth, newHeight)
@@ -141,9 +146,11 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
             int usage = TEXTURE_USAGE | (this.storageImageTargets.get(index)
                     ? MetalGpuTexture.USAGE_SHADER_WRITE
                     : 0);
-            main[index] = (MetalGpuTexture) device.createTexture(
+            MetalGpuTexture heapMain = placementAllocation == null ? null : placementAllocation.main(index);
+            MetalGpuTexture heapAlt = placementAllocation == null ? null : placementAllocation.alt(index);
+            main[index] = heapMain != null ? heapMain : (MetalGpuTexture) device.createTexture(
                     labelPrefix + index + "-main", usage, formats[index], newWidth, newHeight, 1, mipLevels);
-            alt[index] = (MetalGpuTexture) device.createTexture(
+            alt[index] = heapAlt != null ? heapAlt : (MetalGpuTexture) device.createTexture(
                     labelPrefix + index + "-alt", usage, formats[index], newWidth, newHeight, 1, mipLevels);
             main[index].registerAllocationIdentity();
             alt[index].registerAllocationIdentity();
@@ -365,6 +372,10 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
                 alt[index].close();
                 alt[index] = null;
             }
+        }
+        if (placementAllocation != null) {
+            placementAllocation.retireOwner(device);
+            placementAllocation = null;
         }
     }
 
