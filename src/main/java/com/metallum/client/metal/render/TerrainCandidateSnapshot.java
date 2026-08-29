@@ -35,6 +35,10 @@ public final class TerrainCandidateSnapshot {
     /** Candidate ABI: eight float32 values (min xyz, max xyz, range, reserved). */
     public static final int GPU_VISIBILITY_CANDIDATE_STRIDE_BYTES = 32;
     public static final int GPU_VISIBILITY_MATRIX_BYTES = 16 * Float.BYTES;
+    /** Persistent scene record: int4 section origin + two float4 bounds blocks. */
+    public static final int GPU_VISIBILITY_SCENE_CANDIDATE_STRIDE_BYTES = 48;
+    /** Per-frame scene state: float4x4 matrix + int4 camera block + float4 fraction. */
+    public static final int GPU_VISIBILITY_SCENE_FRAME_BYTES = 96;
     /** Hard cap shared by Java and Swift so count/word arithmetic stays bounded. */
     public static final int GPU_VISIBILITY_MAX_CANDIDATES = 1 << 20;
 
@@ -261,13 +265,15 @@ public final class TerrainCandidateSnapshot {
     private final VisibilityTransform visibilityTransform;
     private final List<Candidate> candidates;
     private final long epoch;
+    /** Changes only when the authoritative mesh/candidate scene changes. */
+    private final long sceneGeneration;
 
     TerrainCandidateSnapshot(
             final CameraPosition camera,
             final VisibilityTransform visibilityTransform,
             final List<Candidate> candidates
     ) {
-        this(0L, camera, visibilityTransform, candidates);
+        this(0L, 0L, camera, visibilityTransform, candidates);
     }
 
     TerrainCandidateSnapshot(
@@ -276,10 +282,24 @@ public final class TerrainCandidateSnapshot {
             final VisibilityTransform visibilityTransform,
             final List<Candidate> candidates
     ) {
+        this(epoch, 0L, camera, visibilityTransform, candidates);
+    }
+
+    TerrainCandidateSnapshot(
+            final long epoch,
+            final long sceneGeneration,
+            final CameraPosition camera,
+            final VisibilityTransform visibilityTransform,
+            final List<Candidate> candidates
+    ) {
         if (epoch < 0L) {
             throw new IllegalArgumentException("Terrain candidate snapshot epoch must be non-negative");
         }
+        if (sceneGeneration < 0L) {
+            throw new IllegalArgumentException("Terrain scene generation must be non-negative");
+        }
         this.epoch = epoch;
+        this.sceneGeneration = sceneGeneration;
         this.camera = Objects.requireNonNull(camera, "camera");
         this.visibilityTransform = Objects.requireNonNull(visibilityTransform, "visibilityTransform");
         this.candidates = List.copyOf(candidates);
@@ -287,6 +307,10 @@ public final class TerrainCandidateSnapshot {
 
     public long epoch() {
         return epoch;
+    }
+
+    public long sceneGeneration() {
+        return sceneGeneration;
     }
 
     public CameraPosition camera() {
@@ -335,6 +359,112 @@ public final class TerrainCandidateSnapshot {
             packed.set(ValueLayout.JAVA_FLOAT, offset + 28, 0.0F);
         }
         return packed;
+    }
+
+    /**
+     * Packs camera-independent terrain bounds for a native generation-owned GPU scene.
+     * Integer section-block origins preserve large-world precision; only local bounds
+     * are narrowed to float32. The camera is deliberately absent from this buffer.
+     */
+    public MemorySegment packGpuVisibilitySceneCandidates(final Arena arena) {
+        Objects.requireNonNull(arena, "arena");
+        if (candidates.isEmpty()) {
+            return MemorySegment.NULL;
+        }
+        final long bytes = Math.multiplyExact(
+                (long) candidates.size(), GPU_VISIBILITY_SCENE_CANDIDATE_STRIDE_BYTES
+        );
+        final MemorySegment packed = arena.allocate(bytes, 16);
+        for (int index = 0; index < candidates.size(); index++) {
+            Candidate candidate = candidates.get(index);
+            SectionIdentity section = candidate.section();
+            int blockX = sectionBlock(section.sectionX());
+            int blockY = sectionBlock(section.sectionY());
+            int blockZ = sectionBlock(section.sectionZ());
+            Aabb aabb = candidate.worldAabb();
+            double minX = aabb.minX() - blockX;
+            double minY = aabb.minY() - blockY;
+            double minZ = aabb.minZ() - blockZ;
+            double maxX = aabb.maxX() - blockX;
+            double maxY = aabb.maxY() - blockY;
+            double maxZ = aabb.maxZ() - blockZ;
+            long offset = (long) index * GPU_VISIBILITY_SCENE_CANDIDATE_STRIDE_BYTES;
+            packed.set(ValueLayout.JAVA_INT, offset, blockX);
+            packed.set(ValueLayout.JAVA_INT, offset + 4, blockY);
+            packed.set(ValueLayout.JAVA_INT, offset + 8, blockZ);
+            packed.set(ValueLayout.JAVA_INT, offset + 12, 0);
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 16, conservativeMin(minX));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 20, conservativeMin(minY));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 24, conservativeMin(minZ));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 28, conservativeMax(maxX));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 32, conservativeMax(maxY));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 36, conservativeMax(maxZ));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 40,
+                    checkedRange(minX, minY, minZ, maxX, maxY, maxZ));
+            packed.set(ValueLayout.JAVA_FLOAT, offset + 44, 0.0F);
+        }
+        return packed;
+    }
+
+    /**
+     * Packs the only visibility state that changes with camera motion. Camera
+     * position is split into exact integer block coordinates plus a sub-block
+     * fraction, so the GPU subtracts large world coordinates in integer space
+     * before converting the small relative distance to float32.
+     */
+    public MemorySegment packGpuVisibilitySceneFrame(final Arena arena) {
+        Objects.requireNonNull(arena, "arena");
+        final MemorySegment packed = arena.allocate(GPU_VISIBILITY_SCENE_FRAME_BYTES, 16);
+        final float[] matrix = new float[]{
+                visibilityTransform.m00(), visibilityTransform.m01(),
+                visibilityTransform.m02(), visibilityTransform.m03(),
+                visibilityTransform.m10(), visibilityTransform.m11(),
+                visibilityTransform.m12(), visibilityTransform.m13(),
+                visibilityTransform.m20(), visibilityTransform.m21(),
+                visibilityTransform.m22(), visibilityTransform.m23(),
+                visibilityTransform.m30(), visibilityTransform.m31(),
+                visibilityTransform.m32(), visibilityTransform.m33()
+        };
+        for (int index = 0; index < matrix.length; index++) {
+            if (!Float.isFinite(matrix[index])) {
+                throw new IllegalArgumentException("Terrain visibility matrix contains a non-finite value");
+            }
+            packed.set(ValueLayout.JAVA_FLOAT, (long) index * Float.BYTES, matrix[index]);
+        }
+        int cameraBlockX = cameraBlock(camera.x());
+        int cameraBlockY = cameraBlock(camera.y());
+        int cameraBlockZ = cameraBlock(camera.z());
+        packed.set(ValueLayout.JAVA_INT, 64, cameraBlockX);
+        packed.set(ValueLayout.JAVA_INT, 68, cameraBlockY);
+        packed.set(ValueLayout.JAVA_INT, 72, cameraBlockZ);
+        packed.set(ValueLayout.JAVA_INT, 76, 0);
+        packed.set(ValueLayout.JAVA_FLOAT, 80, checkedFloat(camera.x() - cameraBlockX));
+        packed.set(ValueLayout.JAVA_FLOAT, 84, checkedFloat(camera.y() - cameraBlockY));
+        packed.set(ValueLayout.JAVA_FLOAT, 88, checkedFloat(camera.z() - cameraBlockZ));
+        packed.set(ValueLayout.JAVA_FLOAT, 92, 0.0F);
+        return packed;
+    }
+
+    static long gpuVisibilitySceneCandidateBytes(final int candidateCount) {
+        if (candidateCount < 0 || candidateCount > GPU_VISIBILITY_MAX_CANDIDATES) {
+            throw new IllegalArgumentException("Terrain visibility candidate count exceeds the bounded ABI");
+        }
+        return Math.multiplyExact((long) candidateCount, GPU_VISIBILITY_SCENE_CANDIDATE_STRIDE_BYTES);
+    }
+
+    private static int sectionBlock(final int sectionCoordinate) {
+        return Math.toIntExact(Math.multiplyExact((long) sectionCoordinate, 16L));
+    }
+
+    private static int cameraBlock(final double coordinate) {
+        if (!Double.isFinite(coordinate)) {
+            throw new IllegalArgumentException("Terrain visibility camera coordinate is non-finite");
+        }
+        double floored = Math.floor(coordinate);
+        if (floored < Integer.MIN_VALUE || floored > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Terrain visibility camera block is outside int32");
+        }
+        return (int) floored;
     }
 
     static int gpuVisibilityWordCount(final int candidateCount) {
