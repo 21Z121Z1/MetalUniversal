@@ -1,0 +1,43 @@
+name: codex/pipeline-modernization-replay
+
+on:
+  push:
+    branches:
+      - codex/placement-heap-integration-staging-20260830
+    paths:
+      - .github/workflows/codex-pipeline-modernization-replay.yml
+
+permissions:
+  contents: write
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/placement-heap-integration-staging-20260830
+      - name: Replay pipeline and argument-runtime commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for sha in \
+            14157dd0ea5eb72cb1c162f0c2df8cbbe5eab790 \
+            52cc32fd8860e1a8ccff10a36a208f3c92d1feee \
+            28886aa601d4138a614e2ecbf5868b2dd9f17162 \
+            bb445ff69fb78a89bb765626d43a225e3c88cfbe
+          do
+            echo "REPLAY $sha"
+            git cherry-pick -x "$sha"
+          done
+      - name: Remove one-shot workflow and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/codex-pipeline-modernization-replay.yml
+          git commit -m "chore(ci): remove pipeline replay helper"
+          git push origin HEAD:codex/placement-heap-integration-staging-20260830
