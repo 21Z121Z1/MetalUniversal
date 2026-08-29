@@ -20,7 +20,9 @@ jobs:
           distribution: temurin
           java-version: '25'
       - name: Apply product patch
-        run: python3 .github/ci/patch_metal4_flexible_pso.py
+        run: |
+          python3 .github/ci/patch_metal4_flexible_pso.py
+          python3 .github/ci/fix_metal4_flexible_pso_optionals.py
       - name: Compile Java and contract
         run: ./gradlew --no-daemon compileJava compileTestJava test --tests com.metallum.client.metal.render.Metal4FlexiblePipelineContractTest
       - name: Compile native bridges
