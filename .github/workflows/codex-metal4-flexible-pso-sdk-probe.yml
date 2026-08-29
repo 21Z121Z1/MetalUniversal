@@ -1,0 +1,61 @@
+name: codex/metal4-flexible-pso-sdk-probe
+
+on:
+  push:
+    branches:
+      - codex/metal4-flexible-pso-sdk-probe-20260829
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect Metal 4 specialization API
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDK="$(xcrun --sdk macosx --show-sdk-path)"
+          METAL="$SDK/System/Library/Frameworks/Metal.framework/Headers"
+          echo "SDK=$SDK"
+          grep -RniE 'unspecialized|specializ' "$METAL" | head -n 500 || true
+          echo '=== MTL4Compiler.h ==='
+          grep -n -A12 -B12 -E 'RenderPipeline|specializ|unspecialized' "$METAL/MTL4Compiler.h" | head -n 800 || true
+          echo '=== MTLRenderPipeline.h ==='
+          grep -n -A16 -B16 -E 'specializ|Unspecialized|unspecialized' "$METAL/MTLRenderPipeline.h" | head -n 800 || true
+          echo '=== MTL4RenderPipeline.h ==='
+          if [ -f "$METAL/MTL4RenderPipeline.h" ]; then
+            grep -n -A16 -B16 -E 'specializ|Unspecialized|unspecialized' "$METAL/MTL4RenderPipeline.h" | head -n 800 || true
+          fi
+      - name: Typecheck Swift specialization surface
+        shell: bash
+        run: |
+          cat > /tmp/flexible.swift <<'SWIFT'
+          import Metal
+
+          @available(macOS 26.0, *)
+          func probe(
+              _ compiler: MTL4Compiler,
+              _ descriptor: MTL4RenderPipelineDescriptor,
+              _ base: MTLRenderPipelineState
+          ) throws -> MTLRenderPipelineState {
+              let specialization = base.makeRenderPipelineDescriptorForSpecialization()
+              guard let render = specialization as? MTL4RenderPipelineDescriptor else {
+                  throw NSError(domain: "probe", code: 1)
+              }
+              _ = descriptor
+              return try compiler.makeRenderPipelineState(
+                  descriptor: render,
+                  unspecializedPipelineState: base
+              )
+          }
+          SWIFT
+          xcrun swiftc -typecheck -target arm64-apple-macos26.0 /tmp/flexible.swift 2>&1 | tee /tmp/typecheck.log
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal4-flexible-pso-sdk-probe
+          path: |
+            /tmp/typecheck.log
