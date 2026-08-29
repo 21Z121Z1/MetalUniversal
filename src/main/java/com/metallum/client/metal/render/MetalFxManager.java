@@ -148,6 +148,8 @@ public final class MetalFxManager {
     private final boolean handOverlayPipelineAvailable;
     private int phaseCount;
     private int phase;
+    private long historyFrameId;
+    private long historyEpoch = 1L;
     private boolean historyReset = true;
     private boolean previousMatrixValid;
     private final Matrix4f previousViewProjection = new Matrix4f();
@@ -1331,6 +1333,7 @@ public final class MetalFxManager {
         }
         warnedInvalidFrame = false;
         this.sceneFrame = true;
+        this.historyFrameId = Math.incrementExact(this.historyFrameId);
         long sceneFrameStartNanos = System.nanoTime();
         this.sceneFrameDeltaSeconds = lastSceneFrameStartNanos > 0
                 ? (float) ((sceneFrameStartNanos - lastSceneFrameStartNanos) / 1_000_000_000.0)
@@ -1650,8 +1653,17 @@ public final class MetalFxManager {
         if (historyTransactionEncoded) {
             Matrix4f submittedViewProjection = new Matrix4f(this.currentViewProjection);
             int submittedNextPhase = (phase + 1) % phaseCount;
+            MetalFxHistoryStamp submittedHistory = new MetalFxHistoryStamp(
+                    this.historyFrameId, this.historyEpoch
+            );
             encoder.onCurrentSubmit(
                     () -> {
+                        // submit callbacks may be delayed until presentation. A
+                        // resize/scene cut/reset in between revokes this frame's
+                        // authority to publish temporal history.
+                        if (!submittedHistory.canCommit(this.historyFrameId, this.historyEpoch)) {
+                            return;
+                        }
                         this.historyReset = false;
                         this.previousViewProjection.set(submittedViewProjection);
                         this.previousMatrixValid = true;
@@ -1659,6 +1671,12 @@ public final class MetalFxManager {
                         this.phase = submittedNextPhase;
                     },
                     () -> {
+                        // A failure in the active epoch poisons all dependent
+                        // successors. A failure from an already-reset epoch is
+                        // stale and must not discard the new frame's staging.
+                        if (!submittedHistory.canReject(this.historyEpoch)) {
+                            return;
+                        }
                         this.motionStateStore.discardFrame();
                         resetHistoryInternal("Metal command buffer failed after temporal encode");
                     }
@@ -3539,6 +3557,7 @@ public final class MetalFxManager {
     }
 
     private void resetHistoryInternal(final String reason) {
+        this.historyEpoch = Math.incrementExact(this.historyEpoch);
         historyReset = true;
         previousMatrixValid = false;
         previousCameraProjectionValid = false;
