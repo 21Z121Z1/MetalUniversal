@@ -28,7 +28,8 @@ public final class TerrainCandidateRegistry {
     public static final String PROPERTY = "metallum.opt.terrainCandidateSnapshot";
     public static final boolean ENABLED = Boolean.parseBoolean(
             System.getProperty(PROPERTY, "false")
-    ) || TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED;
+    ) || TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED
+            || TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED;
 
     private static StateMachine state;
     private static volatile TerrainCandidateSnapshot latest;

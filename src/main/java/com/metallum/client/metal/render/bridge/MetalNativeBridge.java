@@ -471,6 +471,24 @@ public final class MetalNativeBridge {
                             INT
                     )
             );
+            MTLDeviceCreateTerrainVisibleGpuIndexedIcb = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            ValueLayout.ADDRESS,
+                            LONG
+                    )
+            );
             MTLDeviceCreateTerrainGpuVisibilityProbe = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLDevice_createTerrainGpuVisibilityProbe",
@@ -1027,6 +1045,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLDeviceCreateTerrainIndexedIcb;
     @Nullable
     private static final MethodHandle MTLDeviceCreateTerrainGpuIndexedIcb;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainVisibleGpuIndexedIcb;
     @Nullable
     private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilityProbe;
     @Nullable
@@ -2647,6 +2667,48 @@ public final class MetalNativeBridge {
     }
 
     /** Encodes one value-only terrain visibility probe on the active MTL4 buffer. */
+    public static boolean terrainVisibleGpuIcbAvailable() {
+        return MTLDeviceCreateTerrainVisibleGpuIndexedIcb != null;
+    }
+
+    /** Creates a source-ordinal terrain ICB whose slots are masked by an in-flight GPU visibility bitset. */
+    public static MemorySegment MTLDevice_createTerrainVisibleGpuIndexedIcb(
+            final MemorySegment renderEncoder,
+            final MemorySegment device,
+            final long primitiveType,
+            final long indexType,
+            final MemorySegment indexBuffer,
+            final MemorySegment pipeline,
+            final MemorySegment packedCommands,
+            final MemorySegment candidateBySourceOrdinal,
+            final int drawCount,
+            final MemorySegment visibilityProbeOwner,
+            final long expectedEpoch
+    ) {
+        if (MTLDeviceCreateTerrainVisibleGpuIndexedIcb == null
+                || drawCount <= 0 || expectedEpoch < 0L
+                || isNullHandle(visibilityProbeOwner)) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainVisibleGpuIndexedIcb.invokeExact(
+                    segment(renderEncoder),
+                    segment(device),
+                    primitiveType,
+                    indexType,
+                    segment(indexBuffer),
+                    segment(pipeline),
+                    segment(packedCommands),
+                    segment(candidateBySourceOrdinal),
+                    drawCount,
+                    segment(visibilityProbeOwner),
+                    expectedEpoch
+            );
+        } catch (Throwable throwable) {
+            return MemorySegment.NULL;
+        }
+    }
+
     public static MemorySegment MTLDevice_createTerrainGpuVisibilityProbe(
             final MemorySegment renderEncoder,
             final MemorySegment device,

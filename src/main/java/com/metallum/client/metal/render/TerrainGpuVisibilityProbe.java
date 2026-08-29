@@ -18,7 +18,10 @@ import java.util.List;
  * authority in this milestone.
  */
 public final class TerrainGpuVisibilityProbe {
-    public static final boolean ENABLED = TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED;
+    public static final boolean ENABLED = TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED
+            || TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED;
+    private static final boolean ORACLE_ENABLED =
+            TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED;
 
     private static final Object LOCK = new Object();
     private static final ThreadLocal<Boolean> TERRAIN_DRAW_SCOPE = new ThreadLocal<>();
@@ -159,11 +162,13 @@ public final class TerrainGpuVisibilityProbe {
                 try (Arena arena = Arena.ofConfined()) {
                     MemorySegment packedCandidates;
                     MemorySegment packedMatrix;
-                    Oracle oracle;
+                    Oracle oracle = null;
                     try {
                         packedCandidates = snapshot.packGpuVisibilityCandidates(arena);
                         packedMatrix = snapshot.packGpuVisibilityMatrix(arena);
-                        oracle = oracleForPackedSnapshot(packedCandidates, packedMatrix, count);
+                        if (ORACLE_ENABLED) {
+                            oracle = oracleForPackedSnapshot(packedCandidates, packedMatrix, count);
+                        }
                     } catch (RuntimeException invalidInput) {
                         fallbackCount++;
                         compactionFallbackCount++;
@@ -182,7 +187,8 @@ public final class TerrainGpuVisibilityProbe {
                         compactionFallbackCount++;
                         return true;
                     }
-                    PENDING.add(new Pending(
+                    PENDING.add(oracle != null
+                            ? new Pending(
                             probe,
                             snapshot.epoch(),
                             count,
@@ -190,7 +196,12 @@ public final class TerrainGpuVisibilityProbe {
                             oracle.expectedWords(),
                             oracle.visibleCount(),
                             oracle.uncertainCount(),
-                            oracle.compactedIndices()
+                            oracle.compactedIndices(),
+                            true
+                    )
+                            : Pending.withoutOracle(
+                            probe, snapshot.epoch(), count,
+                            TerrainCandidateSnapshot.gpuVisibilityWordCount(count)
                     ));
                     pendingBytes += allocationBytes;
                     dispatchCount++;
@@ -204,6 +215,31 @@ public final class TerrainGpuVisibilityProbe {
             } finally {
                 MetalNativeBridge.metallum_release_object(retainedEncoder);
             }
+        }
+    }
+
+    /**
+     * Returns the unique in-flight native probe owner for this exact producer
+     * epoch. This never polls or copies GPU results to the CPU; the returned
+     * pointer is borrowed while PENDING owns the Java-side retain.
+     */
+    static MemorySegment ownerForEpoch(final long epoch, final int expectedCandidateCount) {
+        if (!ENABLED || epoch < 0L || expectedCandidateCount <= 0) {
+            return MemorySegment.NULL;
+        }
+        synchronized (LOCK) {
+            MemorySegment found = MemorySegment.NULL;
+            for (Pending pending : PENDING) {
+                if (pending.epoch() != epoch
+                        || pending.candidateCount() != expectedCandidateCount) {
+                    continue;
+                }
+                if (!MetalNativeBridge.isNullHandle(found)) {
+                    return MemorySegment.NULL;
+                }
+                found = pending.probe();
+            }
+            return found;
         }
     }
 
@@ -284,13 +320,13 @@ public final class TerrainGpuVisibilityProbe {
                                 ValueLayout.JAVA_INT, (long) index * Integer.BYTES
                         );
                     }
-                    boolean falseNegative = missingExpectedBits(
+                    boolean falseNegative = pending.oracleEnabled() && missingExpectedBits(
                             pending.expectedWords(), actualWords
                     );
                     if (falseNegative) {
                         falseNegativeOracleCount++;
                     }
-                    boolean compactionMismatch = !compactionMatches(
+                    boolean compactionMismatch = pending.oracleEnabled() && !compactionMatches(
                             pending.expectedCompactedIndices(), completedCompacted, actualCompacted
                     );
                     if (compactionMismatch) {
@@ -413,17 +449,25 @@ public final class TerrainGpuVisibilityProbe {
             final int[] actualCompacted,
             final long lastPublishedEpoch
     ) {
-        boolean countersMatch = Integer.toUnsignedLong(completedVisible)
-                == pending.expectedVisibleCount()
-                && Integer.toUnsignedLong(completedUncertain)
-                == pending.expectedUncertainCount();
         boolean valid = completedEpoch == pending.epoch()
                 && completedWordCount == pending.wordCount()
-                && !missingExpectedBits(pending.expectedWords(), actualWords)
-                && countersMatch
-                && compactionMatches(
-                        pending.expectedCompactedIndices(), completedCompacted, actualCompacted
-                );
+                && completedCompacted >= 0
+                && completedCompacted <= pending.candidateCount()
+                && actualCompacted != null
+                && actualCompacted.length == completedCompacted
+                && Integer.toUnsignedLong(completedVisible) <= pending.candidateCount()
+                && Integer.toUnsignedLong(completedUncertain) <= pending.candidateCount();
+        if (valid && pending.oracleEnabled()) {
+            boolean countersMatch = Integer.toUnsignedLong(completedVisible)
+                    == pending.expectedVisibleCount()
+                    && Integer.toUnsignedLong(completedUncertain)
+                    == pending.expectedUncertainCount();
+            valid = !missingExpectedBits(pending.expectedWords(), actualWords)
+                    && countersMatch
+                    && compactionMatches(
+                    pending.expectedCompactedIndices(), completedCompacted, actualCompacted
+            );
+        }
         if (!valid) {
             return CompletionDisposition.FALLBACK;
         }
@@ -699,11 +743,26 @@ public final class TerrainGpuVisibilityProbe {
             int[] expectedWords,
             int expectedVisibleCount,
             int expectedUncertainCount,
-            int[] expectedCompactedIndices
+            int[] expectedCompactedIndices,
+            boolean oracleEnabled
     ) {
         Pending {
             expectedWords = expectedWords.clone();
             expectedCompactedIndices = expectedCompactedIndices.clone();
+        }
+
+        Pending(
+                final MemorySegment probe,
+                final long epoch,
+                final int candidateCount,
+                final int wordCount,
+                final int[] expectedWords,
+                final int expectedVisibleCount,
+                final int expectedUncertainCount,
+                final int[] expectedCompactedIndices
+        ) {
+            this(probe, epoch, candidateCount, wordCount, expectedWords,
+                    expectedVisibleCount, expectedUncertainCount, expectedCompactedIndices, true);
         }
 
         Pending(
@@ -723,7 +782,20 @@ public final class TerrainGpuVisibilityProbe {
                     expectedWords,
                     expectedVisibleCount,
                     expectedUncertainCount,
-                    compactIndicesForWords(candidateCount, expectedWords)
+                    compactIndicesForWords(candidateCount, expectedWords),
+                    true
+            );
+        }
+
+        static Pending withoutOracle(
+                final MemorySegment probe,
+                final long epoch,
+                final int candidateCount,
+                final int wordCount
+        ) {
+            return new Pending(
+                    probe, epoch, candidateCount, wordCount,
+                    new int[0], -1, -1, new int[0], false
             );
         }
 

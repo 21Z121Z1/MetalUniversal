@@ -81,10 +81,16 @@ final class MetalDevice implements GpuDeviceBackend {
                     "true"
             ));
     private boolean stableTerrainSamplerLogged;
-    /** Optional probe symbols are a capability gate, never a required bridge ABI. */
-    private static final boolean GPU_VISIBILITY_PROBE_METAL4 =
+    /** Optional symbols are capability gates, never required bridge ABI. */
+    private static final boolean EXPLICIT_GPU_VISIBILITY_PROBE_METAL4 =
             TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED
                     && MetalNativeBridge.terrainVisibilityProbeAvailable();
+    private static final boolean VISIBLE_GPU_ICB_METAL4 =
+            TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED
+                    && MetalNativeBridge.terrainVisibilityProbeAvailable()
+                    && MetalNativeBridge.terrainVisibleGpuIcbAvailable();
+    private static final boolean GPU_VISIBILITY_PROBE_METAL4 =
+            EXPLICIT_GPU_VISIBILITY_PROBE_METAL4 || VISIBLE_GPU_ICB_METAL4;
     /**
      * Master kill switch for every Metal 4 path (migration spec M1, appendix C).
      * The terrain ICB opt-in is self-contained: it requests the Metal 4
@@ -125,7 +131,8 @@ final class MetalDevice implements GpuDeviceBackend {
      * initialization contract.
      */
     private static final boolean VISIBILITY_PROBE_FALLBACK_ALLOWED =
-            TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED
+            (TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED
+                    || TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED)
                     && !TerrainSceneSnapshot.ICB_ENABLED
                     && !TerrainSceneSnapshot.GPU_ICB_ENABLED
                     && !Boolean.parseBoolean(System.getProperty(
@@ -268,11 +275,14 @@ final class MetalDevice implements GpuDeviceBackend {
         // MTL4Compiler PSO path. Snapshot capture remains enabled when the
         // opt-in is requested, but native execution will fail closed otherwise.
         MetalNativeBridge.metallum_set_terrain_icb_enabled(
-                (TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED)
+                (TerrainSceneSnapshot.ICB_ENABLED
+                        || TerrainSceneSnapshot.GPU_ICB_ENABLED
+                        || VISIBLE_GPU_ICB_METAL4)
                         && metal4Compiler ? 1 : 0
         );
         MetalNativeBridge.metallum_set_terrain_gpu_encode_enabled(
-                TerrainSceneSnapshot.GPU_ICB_ENABLED && metal4Compiler ? 1 : 0
+                (TerrainSceneSnapshot.GPU_ICB_ENABLED || VISIBLE_GPU_ICB_METAL4)
+                        && metal4Compiler ? 1 : 0
         );
         // Depends on the compiler switch: the MTL4 frame interpolator factory
         // takes an MTL4Compiler, so the present pilot cannot run without it.

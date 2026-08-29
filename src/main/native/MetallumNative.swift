@@ -43,6 +43,7 @@ private struct TerrainGpuComputePipelineKey: Hashable {
     let deviceAddress: UInt
     let primitiveType: UInt
     let indexType: UInt
+    let variant: UInt8
 }
 
 private struct TerrainVisibilityComputePipelineKey: Hashable {
@@ -9710,28 +9711,36 @@ private final class TerrainGpuIcbOwner {
     let argumentBuffer: MTLBuffer
     let indexBuffer: MTLBuffer
     let pipeline: MTLRenderPipelineState
+    let candidateIndices: MTLBuffer?
+    let visibilityOwner: AnyObject?
 
     init(
         commandBuffer: MTLIndirectCommandBuffer,
         packedCommands: MTLBuffer,
         argumentBuffer: MTLBuffer,
         indexBuffer: MTLBuffer,
-        pipeline: MTLRenderPipelineState
+        pipeline: MTLRenderPipelineState,
+        candidateIndices: MTLBuffer? = nil,
+        visibilityOwner: AnyObject? = nil
     ) {
         self.commandBuffer = commandBuffer
         self.packedCommands = packedCommands
         self.argumentBuffer = argumentBuffer
         self.indexBuffer = indexBuffer
         self.pipeline = pipeline
+        self.candidateIndices = candidateIndices
+        self.visibilityOwner = visibilityOwner
         residencyTrackCreated(commandBuffer)
         residencyTrackCreated(packedCommands)
         residencyTrackCreated(argumentBuffer)
+        if let candidateIndices { residencyTrackCreated(candidateIndices) }
     }
 
     deinit {
         residencyTrackReleased(rawPointer(commandBuffer))
         residencyTrackReleased(rawPointer(packedCommands))
         residencyTrackReleased(rawPointer(argumentBuffer))
+        if let candidateIndices { residencyTrackReleased(rawPointer(candidateIndices)) }
     }
 }
 
@@ -9775,6 +9784,30 @@ private func terrainGpuIcbMslSource(
       device TerrainIcbContainer *container [[buffer(1)]],
       device \(indexPointer) *indices [[buffer(2)]],
       uint drawIndex [[thread_position_in_grid]]) {
+      TerrainDrawRecord record = records[drawIndex];
+      if (record.indexCount < 0 || record.instanceCount < 0
+          || record.firstIndex < 0 || record.firstInstance < 0) {
+        return;
+      }
+      render_command command(container->commandBuffer, drawIndex);
+      command.draw_indexed_primitives(primitive_type::\(primitive),
+          uint(record.indexCount), indices + uint(record.firstIndex),
+          uint(record.instanceCount), as_type<uint>(record.baseVertex),
+          uint(record.firstInstance));
+    }
+
+    kernel void metallum_terrain_gpu_encode_visible(
+      device const TerrainDrawRecord *records [[buffer(0)]],
+      device TerrainIcbContainer *container [[buffer(1)]],
+      device \(indexPointer) *indices [[buffer(2)]],
+      device atomic_uint *visibilityWords [[buffer(3)]],
+      device const uint *candidateBySourceOrdinal [[buffer(4)]],
+      uint drawIndex [[thread_position_in_grid]]) {
+      uint candidateIndex = candidateBySourceOrdinal[drawIndex];
+      uint word = atomic_load_explicit(&visibilityWords[candidateIndex >> 5], memory_order_relaxed);
+      if ((word & (1u << (candidateIndex & 31))) == 0u) {
+        return;
+      }
       TerrainDrawRecord record = records[drawIndex];
       if (record.indexCount < 0 || record.instanceCount < 0
           || record.firstIndex < 0 || record.firstInstance < 0) {
@@ -10225,12 +10258,15 @@ private func terrainGpuComputePipeline(
     device: MTLDevice,
     primitiveType: MTLPrimitiveType,
     indexType: MTLIndexType,
-    source: String
+    source: String,
+    functionName: String,
+    variant: UInt8
 ) -> TerrainGpuComputePipeline? {
     let key = TerrainGpuComputePipelineKey(
         deviceAddress: objectAddress(device),
         primitiveType: primitiveType.rawValue,
-        indexType: indexType.rawValue
+        indexType: indexType.rawValue,
+        variant: variant
     )
     NativeState.terrainGpuPipelineLock.lock()
     defer { NativeState.terrainGpuPipelineLock.unlock() }
@@ -10240,7 +10276,7 @@ private func terrainGpuComputePipeline(
     let pipeline: TerrainGpuComputePipeline? = NativeState.onCompilerThread {
         do {
             let library = try device.makeLibrary(source: source, options: nil)
-            guard let function = library.makeFunction(name: "metallum_terrain_gpu_encode") else {
+            guard let function = library.makeFunction(name: functionName) else {
                 return nil
             }
             return TerrainGpuComputePipeline(
@@ -10684,7 +10720,9 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
         device: device,
         primitiveType: primitiveType,
         indexType: indexType,
-        source: source
+        source: source,
+        functionName: "metallum_terrain_gpu_encode",
+        variant: 0
     ) else {
         return nil
     }
@@ -10749,6 +10787,161 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
         NativeState.terrainGpuEncodeLogged = true
         NSLog("[metallum] terrain GPU ICB authoring active: all-visible records only; visibility culling not enabled")
     }
+    return retainedPointer(owner)
+}
+
+
+/// GPU-authors a sparse source-ordinal terrain ICB directly from the visibility
+/// bitset produced earlier in the same Metal 4 command-buffer lease. Invisible
+/// source slots remain reset/no-op; the render pass executes the complete source
+/// range and never reads visibility back to the CPU.
+@_cdecl("metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb")
+public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
+    _ pointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ primitiveType: MTLPrimitiveType,
+    _ indexType: MTLIndexType,
+    _ indexBuffer: MTLBuffer,
+    _ pipeline: MTLRenderPipelineState,
+    _ packedCommands: UnsafePointer<Int32>?,
+    _ packedCandidateIndices: UnsafePointer<Int32>?,
+    _ drawCount: Int32,
+    _ visibilityProbePointer: UnsafeMutableRawPointer?,
+    _ expectedEpoch: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard NativeState.terrainIcbEnabled, NativeState.terrainGpuEncodeEnabled,
+          drawCount > 0, let packedCommands, let packedCandidateIndices,
+          let visibilityProbePointer,
+          pipeline.supportIndirectCommandBuffers,
+          #available(macOS 26.0, iOS 26.0, *),
+          device.supportsFamily(.metal4),
+          let bridge = metal4RenderBridge(pointer),
+          let source = terrainGpuIcbMslSource(primitiveType: primitiveType, indexType: indexType) else {
+        return nil
+    }
+    let retained = Unmanaged<AnyObject>.fromOpaque(visibilityProbePointer).takeUnretainedValue()
+    guard let visibilityOwner = retained as? TerrainGpuVisibilityProbeOwner,
+          visibilityOwner.epoch == expectedEpoch,
+          visibilityOwner.candidateCount > 0 else {
+        return nil
+    }
+    let commandCount = Int(drawCount)
+    guard commandCount <= Int.max / 5,
+          commandCount <= Int.max / (5 * MemoryLayout<Int32>.stride),
+          commandCount <= Int.max / MemoryLayout<Int32>.stride else {
+        return nil
+    }
+
+    let indexBytes = indexType == .uint16 ? 2 : 4
+    for index in 0..<commandCount {
+        let base = index * 5
+        let indexCount = Int(packedCommands[base])
+        let instanceCount = Int(packedCommands[base + 1])
+        let firstIndex = Int(packedCommands[base + 2])
+        let firstInstance = Int(packedCommands[base + 4])
+        let candidate = Int(packedCandidateIndices[index])
+        guard indexCount >= 0, instanceCount >= 0,
+              firstIndex >= 0, firstInstance >= 0,
+              firstIndex <= Int.max / indexBytes,
+              candidate >= 0, candidate < visibilityOwner.candidateCount else {
+            return nil
+        }
+    }
+
+    let recordBytes = commandCount * 5 * MemoryLayout<Int32>.stride
+    let mappingBytes = commandCount * MemoryLayout<Int32>.stride
+    guard let packedBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCommands), length: recordBytes, options: .storageModeShared
+    ), let mappingBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCandidateIndices), length: mappingBytes, options: .storageModeShared
+    ) else {
+        return nil
+    }
+
+    let descriptor = MTLIndirectCommandBufferDescriptor()
+    descriptor.commandTypes = .drawIndexed
+    descriptor.inheritPipelineState = true
+    descriptor.inheritBuffers = true
+    descriptor.maxVertexBufferBindCount = 0
+    descriptor.maxFragmentBufferBindCount = 0
+    descriptor.inheritDepthStencilState = true
+    descriptor.inheritDepthBias = true
+    descriptor.inheritDepthClipMode = true
+    descriptor.inheritCullMode = true
+    descriptor.inheritFrontFacingWinding = true
+    descriptor.inheritTriangleFillMode = true
+    guard let commandBuffer = device.makeIndirectCommandBuffer(
+        descriptor: descriptor, maxCommandCount: commandCount, options: .storageModeShared
+    ), let computePipeline = terrainGpuComputePipeline(
+        device: device,
+        primitiveType: primitiveType,
+        indexType: indexType,
+        source: source,
+        functionName: "metallum_terrain_gpu_encode_visible",
+        variant: 1
+    ), let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+        return nil
+    }
+
+    let argumentDescriptor = MTL4ArgumentTableDescriptor()
+    argumentDescriptor.maxBufferBindCount = 5
+    argumentDescriptor.initializeBindings = true
+    argumentDescriptor.supportAttributeStrides = false
+    guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
+    guard let argumentBuffer = device.makeBuffer(
+        length: argumentEncoder.encodedLength, options: .storageModeShared
+    ) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    argumentEncoder.setArgumentBuffer(argumentBuffer, offset: 0)
+    argumentEncoder.setIndirectCommandBuffer(commandBuffer, index: 0)
+    arguments.setAddress(packedBuffer.gpuAddress, index: 0)
+    arguments.setAddress(argumentBuffer.gpuAddress, index: 1)
+    arguments.setAddress(indexBuffer.gpuAddress, index: 2)
+    arguments.setAddress(visibilityOwner.visibilityBuffer.gpuAddress, index: 3)
+    arguments.setAddress(mappingBuffer.gpuAddress, index: 4)
+    computeEncoder.setArgumentTable(arguments)
+    computeEncoder.setComputePipelineState(computePipeline.state)
+    computeEncoder.resetCommands(buffer: commandBuffer, range: 0..<commandCount)
+    // The visibility producer is a previous compute encoder on this same queue.
+    // Pair its producer queue barrier with the precise dispatch consumer edge.
+    computeEncoder.barrier(
+        afterQueueStages: .dispatch,
+        beforeStages: .dispatch,
+        visibilityOptions: .device
+    )
+    computeEncoder.dispatchThreads(
+        threadsPerGrid: MTLSize(width: commandCount, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(
+            width: max(1, min(computePipeline.state.threadExecutionWidth, 64)),
+            height: 1,
+            depth: 1
+        )
+    )
+    computeEncoder.barrier(
+        afterStages: .dispatch,
+        beforeQueueStages: [.vertex, .fragment],
+        visibilityOptions: .device
+    )
+    computeEncoder.endEncoding()
+
+    let owner = TerrainGpuIcbOwner(
+        commandBuffer: commandBuffer,
+        packedCommands: packedBuffer,
+        argumentBuffer: argumentBuffer,
+        indexBuffer: indexBuffer,
+        pipeline: pipeline,
+        candidateIndices: mappingBuffer,
+        visibilityOwner: visibilityOwner
+    )
+    NativeState.terrainIcbEncodedCount &+= 1
+    NativeState.terrainIcbGpuEncodedCount &+= 1
+    NativeState.terrainIcbGpuDispatchCount &+= 1
     return retainedPointer(owner)
 }
 

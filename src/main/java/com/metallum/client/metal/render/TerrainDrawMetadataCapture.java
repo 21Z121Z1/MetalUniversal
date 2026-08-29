@@ -25,7 +25,7 @@ public final class TerrainDrawMetadataCapture {
     }
 
     public static boolean enabled() {
-        return TerrainSceneSnapshot.DRAW_METADATA_ENABLED;
+        return TerrainSceneSnapshot.drawMetadataRequired();
     }
 
     public static void beginFill(
