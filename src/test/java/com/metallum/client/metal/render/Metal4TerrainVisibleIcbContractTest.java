@@ -39,10 +39,28 @@ final class Metal4TerrainVisibleIcbContractTest {
     }
 
     @Test
+    void visibleOnlyCompletionAvoidsCpuVisibilityReadback() throws IOException {
+        String source = Files.readString(Path.of(
+                "src/main/java/com/metallum/client/metal/render/TerrainGpuVisibilityProbe.java"
+        ));
+        int loop = source.indexOf("for (Iterator<Pending> iterator = PENDING.iterator()");
+        int completionOnly = source.indexOf("if (!pending.oracleEnabled())", loop);
+        int status = source.indexOf("terrainVisibilityProbeStatus(pending.probe())", completionOnly);
+        int readbackArena = source.indexOf("try (Arena arena = Arena.ofConfined())", completionOnly);
+        assertTrue(loop > 0 && completionOnly > loop && status > completionOnly);
+        assertTrue(readbackArena > status);
+        String noReadback = source.substring(completionOnly, readbackArena);
+        assertTrue(!noReadback.contains("terrainVisibilityProbePoll("));
+        assertTrue(!noReadback.contains("actualWords"));
+        assertTrue(!noReadback.contains("actualCompacted"));
+    }
+
+    @Test
     void visibleFeatureRetainsNativeCapabilityGate() throws IOException {
         String source = Files.readString(Path.of("src/main/java/com/metallum/client/metal/render/MetalDevice.java"));
         assertTrue(source.contains("TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED"));
         assertTrue(source.contains("MetalNativeBridge.terrainVisibilityProbeAvailable()"));
+        assertTrue(source.contains("MetalNativeBridge.terrainVisibilityProbeStatusAvailable()"));
         assertTrue(source.contains("MetalNativeBridge.terrainVisibleGpuIcbAvailable()"));
         assertTrue(source.contains("EXPLICIT_GPU_VISIBILITY_PROBE_METAL4 || VISIBLE_GPU_ICB_METAL4"));
     }

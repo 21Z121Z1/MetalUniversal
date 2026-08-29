@@ -272,6 +272,24 @@ public final class TerrainGpuVisibilityProbe {
     private static void pollCompletedLocked() {
         for (Iterator<Pending> iterator = PENDING.iterator(); iterator.hasNext(); ) {
             Pending pending = iterator.next();
+            // The visible-ICB lane needs this owner only until native ICB
+            // authoring retains it. After GPU completion, query one status word
+            // and release the Java retain: do not allocate an Arena or copy the
+            // visibility bitset/compacted list back to the CPU.
+            if (!pending.oracleEnabled()) {
+                int status = MetalNativeBridge.terrainVisibilityProbeStatus(pending.probe());
+                if (status == 0) {
+                    continue;
+                }
+                if (status < 0) {
+                    fallbackCount++;
+                }
+                lastCompletedEpoch = Math.max(lastCompletedEpoch, pending.epoch());
+                pendingBytes = Math.max(0L, pendingBytes - pendingAllocationBytes(pending.candidateCount()));
+                releaseQuietly(pending.probe());
+                iterator.remove();
+                continue;
+            }
             boolean remove = false;
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment epoch = arena.allocate(ValueLayout.JAVA_LONG);
