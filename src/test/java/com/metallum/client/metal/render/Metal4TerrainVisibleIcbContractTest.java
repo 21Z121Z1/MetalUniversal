@@ -64,4 +64,21 @@ final class Metal4TerrainVisibleIcbContractTest {
         assertTrue(source.contains("MetalNativeBridge.terrainVisibleGpuIcbAvailable()"));
         assertTrue(source.contains("EXPLICIT_GPU_VISIBILITY_PROBE_METAL4 || VISIBLE_GPU_ICB_METAL4"));
     }
+    @Test
+    void visibleOnlyProbeSkipsStableCompactionWork() throws IOException {
+        String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+        assertTrue(nativeSource.contains("static var terrainVisibilityCompactionEnabled = true"));
+        assertTrue(nativeSource.contains("let compact = NativeState.terrainVisibilityCompactionEnabled"));
+        assertTrue(nativeSource.contains("if compact {"));
+        assertTrue(nativeSource.contains("compactionEnabled: compact"));
+
+        String deviceSource = Files.readString(Path.of("src/main/java/com/metallum/client/metal/render/MetalDevice.java"));
+        assertTrue(deviceSource.contains("metallum_set_terrain_visibility_compaction_enabled"));
+        assertTrue(deviceSource.contains("TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED"));
+
+        String probeSource = Files.readString(Path.of("src/main/java/com/metallum/client/metal/render/TerrainGpuVisibilityProbe.java"));
+        assertTrue(probeSource.contains("pendingAllocationBytes(count, ORACLE_ENABLED)"));
+        assertTrue(probeSource.contains("if (ORACLE_ENABLED) { compactionDispatchCount++; }"));
+    }
+
 }
