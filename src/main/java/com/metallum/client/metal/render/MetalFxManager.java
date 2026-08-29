@@ -3557,6 +3557,10 @@ public final class MetalFxManager {
         if (runtimeDisabled) {
             return;
         }
+        // MetalFX owns PSOs and intermediate targets that may still be referenced
+        // by the current or an in-flight command buffer. Drain the device before
+        // releasing either the cache entries or their residency allocations.
+        device.waitForSubmittedGpuWork();
         runtimeDisabled = true;
         metalFxScalerEncodeObserved = false;
         MetalEntityMotionCapture.setEnabled(false);
@@ -3648,6 +3652,11 @@ public final class MetalFxManager {
     }
 
     private void closeInternal() {
+        // Cache-owned MetalFX PSOs are removed from the global residency set by
+        // metallum_metalfx_shutdown. The device must be idle before any target,
+        // texture, or PSO owner is destroyed so the next residency commit cannot
+        // evict an allocation still referenced by submitted GPU work.
+        device.waitForSubmittedGpuWork();
         motionStateStore.reset();
         entityGenerations.clear();
         MetalEntityMotionPipeline.clear();

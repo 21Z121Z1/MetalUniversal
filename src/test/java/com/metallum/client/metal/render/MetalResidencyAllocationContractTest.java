@@ -110,4 +110,62 @@ final class MetalResidencyAllocationContractTest {
         assertTrue(source.contains("pipelines: [\n                       copyPipeline"));
         assertTrue(source.contains("pipelines: [\n                newCopyPipeline"));
     }
+
+    @Test
+    void metalFxTeardownDrainsBeforeDestroyingTargetsOrRemovingPipelines() throws IOException {
+        String source = Files.readString(Path.of("src/main/java/com/metallum/client/metal/render/MetalFxManager.java"));
+
+        int disableStart = source.indexOf("private void disableForSession");
+        int disableEnd = source.indexOf("\n    private void disableFrameGenerationInternal", disableStart);
+        assertTrue(disableStart >= 0 && disableEnd > disableStart);
+        String disableBody = source.substring(disableStart, disableEnd);
+        int disableWait = disableBody.indexOf("device.waitForSubmittedGpuWork();");
+        assertTrue(disableWait >= 0);
+        assertTrue(disableWait < disableBody.indexOf("disableFrameGenerationInternal(reason)"));
+        assertTrue(disableWait < disableBody.indexOf("uiTarget.destroyBuffers()"));
+        assertTrue(disableWait < disableBody.indexOf("closeAuxiliaryTextures()"));
+        assertTrue(disableWait < disableBody.indexOf("MetalNativeBridge.metallum_metalfx_shutdown()"));
+
+        int closeStart = source.indexOf("private void closeInternal");
+        int closeEnd = source.indexOf("\n    @Nullable", closeStart);
+        assertTrue(closeStart >= 0 && closeEnd > closeStart);
+        String closeBody = source.substring(closeStart, closeEnd);
+        int closeWait = closeBody.indexOf("device.waitForSubmittedGpuWork();");
+        assertTrue(closeWait >= 0);
+        assertTrue(closeWait < closeBody.indexOf("closeAuxiliaryTextures()"));
+        assertTrue(closeWait < closeBody.indexOf("uiTarget.destroyBuffers()"));
+        assertTrue(closeWait < closeBody.indexOf("MetalNativeBridge.metallum_metalfx_shutdown()"));
+    }
+
+    @Test
+    void pipelineInitializationIsNilGuardedAndNeverLiveReplacesThePresentPso() throws IOException {
+        String source = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+
+        int initStart = source.indexOf("@_cdecl(\"metallum_init_pipelines\")");
+        int initEnd = source.indexOf("\n@_cdecl(\"metallum_metalfx_supports_spatial\")", initStart);
+        assertTrue(initStart >= 0 && initEnd > initStart);
+        String initBody = source.substring(initStart, initEnd);
+        assertTrue(initBody.contains("if NativeState.presentPipeline == nil"));
+        assertTrue(initBody.contains("if NativeState.presentLinearSampler == nil"));
+        assertTrue(initBody.contains("if NativeState.presentNearestSampler == nil"));
+        assertFalse(initBody.contains("residencyTrackReleased(previous)"));
+        assertTrue(initBody.indexOf("NativeState.presentPipeline = buildPresentPipeline")
+                > initBody.indexOf("if NativeState.presentPipeline == nil"));
+    }
+
+    @Test
+    void sameDeviceResidencyReentryReattachesTheExistingSetToThePassedQueue() throws IOException {
+        String source = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+
+        int enableStart = source.indexOf("@_cdecl(\"metallum_residency_set_enable\")");
+        int enableEnd = source.indexOf("\n/// Reports how much the residency set", enableStart);
+        assertTrue(enableStart >= 0 && enableEnd > enableStart);
+        String enableBody = source.substring(enableStart, enableEnd);
+        int existingSetBranch = enableBody.indexOf("if NativeState.residencySetStorage != nil");
+        int reattach = enableBody.indexOf("queue.addResidencySet(set)");
+        int successReturn = enableBody.indexOf("return 1", existingSetBranch);
+        assertTrue(existingSetBranch >= 0);
+        assertTrue(reattach > existingSetBranch);
+        assertTrue(successReturn > reattach);
+    }
 }

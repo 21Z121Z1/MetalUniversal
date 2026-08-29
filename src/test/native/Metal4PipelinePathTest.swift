@@ -1637,6 +1637,42 @@ private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
         return (created, released)
     }
 
+    // Re-entry must attach the already-created set to every same-device queue;
+    // returning success without queue membership would leave that queue on
+    // automatic residency. The production Metal 4 main queue performs the same
+    // attachment directly, while this exercises the shipping helper contract.
+    guard let secondaryQueue = device.makeCommandQueue() else {
+        try fail("could not create the same-device secondary command queue")
+    }
+    try check(metallum_residency_set_enable(device, secondaryQueue) != 0,
+              "same-device residency re-entry did not attach the existing set")
+
+    // Calling the initializer twice must not remove and recreate a present PSO
+    // that a live command buffer could still reference. The first flush publishes
+    // any newly created entries; the second flush proves that re-entry adds no
+    // allocation and performs no release.
+    let initCountBefore = try residencyCount("before idempotent pipeline init")
+    let initLifetimeBefore = try lifetimeStats("before idempotent pipeline init")
+    metallum_init_pipelines(device)
+    try flushResidency("first idempotent pipeline init")
+    let initCountAfterFirst = try residencyCount("after first pipeline init")
+    let initLifetimeAfterFirst = try lifetimeStats("after first pipeline init")
+    metallum_init_pipelines(device)
+    try flushResidency("second idempotent pipeline init")
+    let initCountAfterSecond = try residencyCount("after second pipeline init")
+    let initLifetimeAfterSecond = try lifetimeStats("after second pipeline init")
+    try check(initCountAfterSecond == initCountAfterFirst,
+              "idempotent pipeline init changed live residency count from \(initCountAfterFirst) to \(initCountAfterSecond)")
+    try check(initLifetimeAfterSecond.created == initLifetimeAfterFirst.created,
+              "idempotent pipeline init created allocations on its second call")
+    try check(initLifetimeAfterSecond.released == initLifetimeAfterFirst.released,
+              "idempotent pipeline init released an allocation on its second call")
+    try check(initCountAfterFirst >= initCountBefore,
+              "first pipeline init unexpectedly reduced live residency count")
+    try check(initLifetimeAfterFirst.released == initLifetimeBefore.released,
+              "first pipeline init released a pre-existing allocation")
+    print("Residency pipeline lifecycle: same-device queue re-entry reattached the existing set; repeated init was idempotent with no live PSO removal")
+
     let baseline = try residencyCount("baseline")
     let lifetimeBefore = try lifetimeStats("baseline")
 

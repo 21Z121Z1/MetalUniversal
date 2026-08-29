@@ -5499,16 +5499,21 @@ private func metalFxScalerKey(
 @_cdecl("metallum_init_pipelines")
 public func metallum_init_pipelines(_ device: MTLDevice) {
     autoreleasepool {
-        if let previous = NativeState.presentPipeline {
-            // Reinitialization replaces the state used by the main queue. Drop
-            // its old allocation before publishing the new one so repeated
-            // device/resource setup cannot leak residency entries.
-            residencyTrackReleased(previous)
+        // Initialization is intentionally idempotent. The present PSO may be
+        // referenced by a submitted Metal 3 or Metal 4 command buffer, so a
+        // live re-init must never remove and replace it. The constructor calls
+        // this once after residency is enabled; repeated calls simply reuse the
+        // same device-owned objects.
+        if NativeState.presentPipeline == nil {
+            NativeState.presentPipeline = buildPresentPipeline(device: device, colorFormat: .bgra8Unorm)
+            residencyTrackCreated(NativeState.presentPipeline)
         }
-        NativeState.presentPipeline = buildPresentPipeline(device: device, colorFormat: .bgra8Unorm)
-        residencyTrackCreated(NativeState.presentPipeline)
-        NativeState.presentLinearSampler = buildPresentSampler(device: device, filter: .linear)
-        NativeState.presentNearestSampler = buildPresentSampler(device: device, filter: .nearest)
+        if NativeState.presentLinearSampler == nil {
+            NativeState.presentLinearSampler = buildPresentSampler(device: device, filter: .linear)
+        }
+        if NativeState.presentNearestSampler == nil {
+            NativeState.presentNearestSampler = buildPresentSampler(device: device, filter: .nearest)
+        }
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .depth32Float)
         _ = ensureClearColorDepthPipeline(device, .rgba8Unorm, .depth32Float)
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .invalid)
@@ -13520,6 +13525,14 @@ public func metallum_residency_set_enable(_ device: MTLDevice, _ queue: MTLComma
                objectAddress(activeDevice) != objectAddress(device) {
                 NSLog("[metallum] residency set already belongs to another Metal device")
                 return 0
+            }
+            // The same residency set can be associated with each queue that
+            // executes work for this device. This call is harmless when the
+            // queue was already attached, and avoids returning success for a
+            // second same-device queue that would otherwise have no explicit
+            // residency guarantee.
+            if let set = NativeState.residencySetStorage as? MTLResidencySet {
+                queue.addResidencySet(set)
             }
             return 1
         }
