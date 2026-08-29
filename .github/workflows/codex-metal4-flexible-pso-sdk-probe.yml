@@ -21,33 +21,38 @@ jobs:
           echo "SDK=$SDK"
           grep -RniE 'unspecialized|specializ' "$METAL" | head -n 500 || true
           echo '=== MTL4Compiler.h ==='
-          grep -n -A12 -B12 -E 'RenderPipeline|specializ|unspecialized' "$METAL/MTL4Compiler.h" | head -n 800 || true
+          grep -n -A16 -B16 -E 'RenderPipeline|specializ|unspecialized' "$METAL/MTL4Compiler.h" | head -n 900 || true
           echo '=== MTLRenderPipeline.h ==='
-          grep -n -A16 -B16 -E 'specializ|Unspecialized|unspecialized' "$METAL/MTLRenderPipeline.h" | head -n 800 || true
-          echo '=== MTL4RenderPipeline.h ==='
-          if [ -f "$METAL/MTL4RenderPipeline.h" ]; then
-            grep -n -A16 -B16 -E 'specializ|Unspecialized|unspecialized' "$METAL/MTL4RenderPipeline.h" | head -n 800 || true
-          fi
+          grep -n -A18 -B18 -E 'specializ|Unspecialized|unspecialized' "$METAL/MTLRenderPipeline.h" | head -n 900 || true
       - name: Typecheck Swift specialization surface
         shell: bash
         run: |
           cat > /tmp/flexible.swift <<'SWIFT'
+          import Foundation
           import Metal
 
           @available(macOS 26.0, *)
           func probe(
               _ compiler: MTL4Compiler,
-              _ descriptor: MTL4RenderPipelineDescriptor,
               _ base: MTLRenderPipelineState
           ) throws -> MTLRenderPipelineState {
               let specialization = base.makeRenderPipelineDescriptorForSpecialization()
               guard let render = specialization as? MTL4RenderPipelineDescriptor else {
                   throw NSError(domain: "probe", code: 1)
               }
-              _ = descriptor
-              return try compiler.makeRenderPipelineState(
+              if let color = render.colorAttachments[0] {
+                  color.pixelFormat = .unspecialized
+                  color.writeMask = .unspecialized
+                  color.sourceRGBBlendFactor = .unspecialized
+                  color.destinationRGBBlendFactor = .unspecialized
+                  color.rgbBlendOperation = .unspecialized
+                  color.sourceAlphaBlendFactor = .unspecialized
+                  color.destinationAlphaBlendFactor = .unspecialized
+                  color.alphaBlendOperation = .unspecialized
+              }
+              return try compiler.makeRenderPipelineStateBySpecialization(
                   descriptor: render,
-                  unspecializedPipelineState: base
+                  pipeline: base
               )
           }
           SWIFT
@@ -57,5 +62,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: metal4-flexible-pso-sdk-probe
-          path: |
-            /tmp/typecheck.log
+          path: /tmp/typecheck.log
