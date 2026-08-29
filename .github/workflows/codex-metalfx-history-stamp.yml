@@ -1,0 +1,46 @@
+name: codex/metalfx-history-stamp
+
+on:
+  push:
+    branches:
+      - codex/placement-heap-integration-staging-20260830
+    paths:
+      - .github/workflows/codex-metalfx-history-stamp.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/placement-heap-integration-staging-20260830
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Apply stamped history generation gate
+        run: |
+          set -euo pipefail
+          python3 scripts/agent/codex_metalfx_history_stamp.py
+          git diff --check
+          ./gradlew test \
+            --tests com.metallum.client.metal.render.MetalFxHistoryStampTest \
+            --tests com.metallum.client.metal.render.MetalFxStampedHistoryIntegrationContractTest \
+            --tests com.metallum.client.metal.render.MetalFxManagerFrameTransactionTest
+      - name: Commit result and remove one-shot tooling
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main/java/com/metallum/client/metal/render/MetalFxManager.java \
+                  src/test/java/com/metallum/client/metal/render/MetalFxStampedHistoryIntegrationContractTest.java
+          git commit -m "fix(metalfx): stamp temporal history submit transactions"
+          git rm .github/workflows/codex-metalfx-history-stamp.yml \
+                 scripts/agent/codex_metalfx_history_stamp.py
+          git commit -m "chore(ci): remove MetalFX history stamp tooling"
+          git push origin HEAD:codex/placement-heap-integration-staging-20260830
