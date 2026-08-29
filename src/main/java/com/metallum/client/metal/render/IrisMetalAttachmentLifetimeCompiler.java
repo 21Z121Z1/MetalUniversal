@@ -309,29 +309,40 @@ final class IrisMetalAttachmentLifetimeCompiler {
                 continue;
             }
             String allocationKey = candidate.binding().allocationKey();
-            attachments.add(new IrisMetalOptimizationPlan.ResolvedAttachment(
-                    candidate.planPassKey(),
-                    candidate.semanticPassId(),
-                    candidate.slot(),
-                    candidate.logicalResource(),
-                    candidate.binding().identity().allocationId(),
-                    candidate.binding().identity().generation(),
-                    0,
-                    candidate.physicalSide(),
-                    candidate.load(),
-                    candidate.store(),
-                    candidate.passIndex(),
-                    IrisMetalOptimizationPlan.AttachmentResolution.RESOLVED_RASTER,
-                    IrisMetalTransientAttachmentClassifier.classify(
-                            candidate.load(),
-                            candidate.store(),
-                            candidate.passIndex(),
-                            Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey),
-                            unresolvedConsumers.isEmpty()
-                    ),
-                    allocationKey,
-                    Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey)
-            ));
+  IrisMetalOptimizationPlan.AttachmentLifetime lifetime =
+          Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey);
+  IrisMetalOptimizationPlan.StoreAction physicalStore =
+          IrisMetalTransientAttachmentClassifier.resolvePhysicalStore(
+                  candidate.store(),
+                  candidate.logicalResource(),
+                  candidate.passIndex(),
+                  lifetime,
+                  plan.resourceLiveness().persistentResources(),
+                  unresolvedConsumers.isEmpty()
+          );
+  attachments.add(new IrisMetalOptimizationPlan.ResolvedAttachment(
+          candidate.planPassKey(),
+          candidate.semanticPassId(),
+          candidate.slot(),
+          candidate.logicalResource(),
+          candidate.binding().identity().allocationId(),
+          candidate.binding().identity().generation(),
+          0,
+          candidate.physicalSide(),
+          candidate.load(),
+          physicalStore,
+          candidate.passIndex(),
+          IrisMetalOptimizationPlan.AttachmentResolution.RESOLVED_RASTER,
+          IrisMetalTransientAttachmentClassifier.classify(
+                  candidate.load(),
+                  physicalStore,
+                  candidate.passIndex(),
+                  lifetime,
+                  unresolvedConsumers.isEmpty()
+          ),
+          allocationKey,
+          lifetime
+  ));
         }
         String status = unresolvedConsumers.isEmpty()
                 ? "RESOLVED_CONSERVATIVE"
