@@ -462,6 +462,68 @@ final class MetalRenderPass implements RenderPassBackend {
                     hasAttachment ? stencilFormat : MTLPixelFormat.Invalid
             );
             MemorySegment indexHandle = ((MetalGpuBuffer) indexBuffer).nativeHandle();
+
+            // The visible lane is frame/epoch state and must be attempted before
+            // an immutable all-visible ICB can be reused. The candidate snapshot
+            // is authoritative only when every source draw resolves to exactly
+            // one live candidate, and ownerForEpoch returns only the producer
+            // encoded earlier in this same terrain draw scope. Any rejection
+            // falls through to the existing all-visible GPU/CPU paths.
+            if (TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED) {
+                TerrainCandidateSnapshot candidates = TerrainCandidateRegistry.latestSnapshot();
+                TerrainVisibleDrawPlan visiblePlan = candidates == null
+                        ? null
+                        : TerrainVisibleDrawPlan.tryBuild(snapshot, candidates);
+                if (visiblePlan != null) {
+                    MemorySegment visibilityOwner = TerrainGpuVisibilityProbe.ownerForEpoch(
+                            visiblePlan.candidateEpoch(), visiblePlan.candidateCount()
+                    );
+                    if (!MetalNativeBridge.isNullHandle(visibilityOwner)) {
+                        MemorySegment retainedEncoder = commandEncoder.endEncoderForTerrainGpuAuthoring();
+                        try {
+                            if (!MetalNativeBridge.isNullHandle(retainedEncoder)
+                                    && owner.encodeVisibleGpu(
+                                    device,
+                                    retainedEncoder,
+                                    primitiveType,
+                                    indexType,
+                                    indexHandle,
+                                    pipelineHandle,
+                                    snapshot,
+                                    visiblePlan,
+                                    visibilityOwner,
+                                    drawCount
+                            )) {
+                                MTLRenderCommandEncoder reopened = renderEncoder();
+                                bindDrawState(reopened);
+                                if (owner.execute(
+                                        device,
+                                        reopened,
+                                        primitiveType,
+                                        indexType,
+                                        indexHandle,
+                                        pipelineHandle,
+                                        snapshot,
+                                        drawCount
+                                )) {
+                                    return true;
+                                }
+                            }
+                        } finally {
+                            if (!MetalNativeBridge.isNullHandle(retainedEncoder)) {
+                                MetalNativeBridge.metallum_release_object(retainedEncoder);
+                            }
+                        }
+                        // A visible attempt owns epoch-specific state. Never let
+                        // a failed execute leave that mask reusable as immutable
+                        // draw content while the conservative fallback continues.
+                        owner.invalidateVisibilityAuthored();
+                        enc = renderEncoder();
+                        bindDrawState(enc);
+                    }
+                }
+            }
+
             if (TerrainSceneSnapshot.GPU_ICB_ENABLED
                     && owner.hasReusableGpuIcb(device, primitiveType, snapshot)) {
                 // The immutable producer/content key is already live in the
