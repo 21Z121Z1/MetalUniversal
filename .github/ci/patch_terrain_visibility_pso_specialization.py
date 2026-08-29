@@ -111,10 +111,12 @@ text = once(
     '    computeEncoder.setComputePipelineState(visibilityPipeline)\n',
     'visibility PSO dispatch'
 )
+# bitset-only intentionally has a shallow indentation after the conditional;
+# anchor on the exact emitted source rather than style whitespace.
 text = once(
     text,
-    '    if compact {\n        computeEncoder.barrier(',
-    '    if let pipeline = compactionPipelines {\n        computeEncoder.barrier(',
+    '    if compact {\n    computeEncoder.barrier(',
+    '    if let pipeline = compactionPipelines {\n    computeEncoder.barrier(',
     'compaction PSO unwrap'
 )
 path.write_text(text)
