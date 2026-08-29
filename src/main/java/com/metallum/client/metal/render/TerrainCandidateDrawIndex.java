@@ -1,37 +1,38 @@
 package com.metallum.client.metal.render;
 
 import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Objects;
 
 /**
  * Pre-indexes terrain candidates for source-draw admission.
  *
  * <p>The first visible-ICB rollout joined every submitted draw by scanning the
- * complete candidate list.  That makes admission O(draws * candidates) on a
- * CPU hot path.  This index performs one O(candidates + candidateDraws) build
- * and then narrows every source draw to two hash buckets: an exact draw bucket
- * for candidates with captured draw records and a coarse wildcard bucket for
- * legacy/fixture candidates whose draw list is empty.</p>
+ * complete candidate list. That makes admission O(draws * candidates) on a CPU
+ * hot path. This index performs one O(candidates + candidateDraws) build and
+ * then narrows every source draw to two fingerprint buckets: an exact draw
+ * bucket for candidates with captured draw records and a coarse wildcard bucket
+ * for legacy/fixture candidates whose draw list is empty.</p>
  *
- * <p>Fingerprints are only accelerators.  Every hit is revalidated with actual
- * allocation object identity and all fields from the original strict join, so
- * identity-hash or 64-bit fingerprint collisions cannot admit a wrong draw.
- * Ambiguous matches fail closed.</p>
+ * <p>The tables use primitive open addressing instead of {@code HashMap<Long,
+ * ...>} so rebuilding an index does not allocate a boxed key/node per candidate
+ * or draw. A heap bucket is allocated only when two records share the same
+ * 64-bit fingerprint. Fingerprints are accelerators only: every hit is
+ * revalidated with actual allocation object identity and all fields from the
+ * original strict join, so identity-hash or fingerprint collisions cannot admit
+ * a wrong draw. Ambiguous matches fail closed.</p>
  */
 final class TerrainCandidateDrawIndex {
     private static final long HASH_SEED = 0x243f6a8885a308d3L;
 
     private final TerrainCandidateSnapshot snapshot;
-    private final Map<Long, LongBucket> exactDraws;
-    private final Map<Long, LongBucket> wildcardCandidates;
+    private final FingerprintTable exactDraws;
+    private final FingerprintTable wildcardCandidates;
     private final int indexedDrawCount;
 
     private TerrainCandidateDrawIndex(
             final TerrainCandidateSnapshot snapshot,
-            final Map<Long, LongBucket> exactDraws,
-            final Map<Long, LongBucket> wildcardCandidates,
+            final FingerprintTable exactDraws,
+            final FingerprintTable wildcardCandidates,
             final int indexedDrawCount
     ) {
         this.snapshot = snapshot;
@@ -42,25 +43,32 @@ final class TerrainCandidateDrawIndex {
 
     static TerrainCandidateDrawIndex build(final TerrainCandidateSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot");
-        Map<Long, LongBucket> exact = new HashMap<>();
-        Map<Long, LongBucket> wildcard = new HashMap<>();
-        int drawCount = 0;
+        int exactEntryCount = 0;
+        int wildcardEntryCount = 0;
+        for (TerrainCandidateSnapshot.Candidate candidate : snapshot.candidates()) {
+            if (candidate.draws().isEmpty()) {
+                wildcardEntryCount = Math.addExact(wildcardEntryCount, 1);
+            } else {
+                exactEntryCount = Math.addExact(exactEntryCount, candidate.draws().size());
+            }
+        }
 
+        FingerprintTable exact = new FingerprintTable(exactEntryCount);
+        FingerprintTable wildcard = new FingerprintTable(wildcardEntryCount);
         for (int candidateIndex = 0; candidateIndex < snapshot.candidates().size(); candidateIndex++) {
             TerrainCandidateSnapshot.Candidate candidate = snapshot.candidates().get(candidateIndex);
             if (candidate.draws().isEmpty()) {
-                add(wildcard, coarseFingerprint(candidate), Integer.toUnsignedLong(candidateIndex));
+                wildcard.add(coarseFingerprint(candidate), Integer.toUnsignedLong(candidateIndex));
                 continue;
             }
-            drawCount = Math.addExact(drawCount, candidate.draws().size());
             for (int drawOrdinal = 0; drawOrdinal < candidate.draws().size(); drawOrdinal++) {
                 TerrainCandidateSnapshot.IndexedDrawRecord draw = candidate.draws().get(drawOrdinal);
                 long reference = (Integer.toUnsignedLong(candidateIndex) << 32)
                         | Integer.toUnsignedLong(drawOrdinal);
-                add(exact, exactFingerprint(candidate, draw), reference);
+                exact.add(exactFingerprint(candidate, draw), reference);
             }
         }
-        return new TerrainCandidateDrawIndex(snapshot, exact, wildcard, drawCount);
+        return new TerrainCandidateDrawIndex(snapshot, exact, wildcard, exactEntryCount);
     }
 
     /**
@@ -77,31 +85,27 @@ final class TerrainCandidateDrawIndex {
         }
 
         int found = -1;
-        LongBucket exact = exactDraws.get(exactFingerprint(metadata));
-        if (exact != null) {
-            for (int i = 0; i < exact.size; i++) {
-                long reference = exact.values[i];
-                int candidateIndex = (int) (reference >>> 32);
-                int drawOrdinal = (int) reference;
-                TerrainCandidateSnapshot.Candidate candidate = snapshot.candidates().get(candidateIndex);
-                if (!sameCandidateCore(candidate, metadata)
-                        || drawOrdinal < 0 || drawOrdinal >= candidate.draws().size()
-                        || !sameDraw(candidate.draws().get(drawOrdinal), metadata)) {
-                    continue;
+        int exactSlot = exactDraws.find(exactFingerprint(metadata));
+        if (exactSlot >= 0) {
+            LongBucket collisions = exactDraws.collisions(exactSlot);
+            if (collisions == null) {
+                found = matchExact(metadata, exactDraws.firstValue(exactSlot), found);
+            } else {
+                for (int i = 0; i < collisions.size; i++) {
+                    found = matchExact(metadata, collisions.values[i], found);
                 }
-                found = mergeUnique(found, candidateIndex);
             }
         }
 
-        LongBucket wildcard = wildcardCandidates.get(coarseFingerprint(metadata));
-        if (wildcard != null) {
-            for (int i = 0; i < wildcard.size; i++) {
-                int candidateIndex = (int) wildcard.values[i];
-                TerrainCandidateSnapshot.Candidate candidate = snapshot.candidates().get(candidateIndex);
-                if (!candidate.draws().isEmpty() || !sameCandidateCore(candidate, metadata)) {
-                    continue;
+        int wildcardSlot = wildcardCandidates.find(coarseFingerprint(metadata));
+        if (wildcardSlot >= 0) {
+            LongBucket collisions = wildcardCandidates.collisions(wildcardSlot);
+            if (collisions == null) {
+                found = matchWildcard(metadata, wildcardCandidates.firstValue(wildcardSlot), found);
+            } else {
+                for (int i = 0; i < collisions.size; i++) {
+                    found = matchWildcard(metadata, collisions.values[i], found);
                 }
-                found = mergeUnique(found, candidateIndex);
             }
         }
 
@@ -119,15 +123,38 @@ final class TerrainCandidateDrawIndex {
         return indexedDrawCount;
     }
 
+    private int matchExact(final TerrainDrawMetadata metadata, final long reference, final int found) {
+        int candidateIndex = (int) (reference >>> 32);
+        int drawOrdinal = (int) reference;
+        if (candidateIndex < 0 || candidateIndex >= snapshot.candidates().size()) {
+            return found;
+        }
+        TerrainCandidateSnapshot.Candidate candidate = snapshot.candidates().get(candidateIndex);
+        if (!sameCandidateCore(candidate, metadata)
+                || drawOrdinal < 0 || drawOrdinal >= candidate.draws().size()
+                || !sameDraw(candidate.draws().get(drawOrdinal), metadata)) {
+            return found;
+        }
+        return mergeUnique(found, candidateIndex);
+    }
+
+    private int matchWildcard(final TerrainDrawMetadata metadata, final long reference, final int found) {
+        int candidateIndex = (int) reference;
+        if (candidateIndex < 0 || candidateIndex >= snapshot.candidates().size()) {
+            return found;
+        }
+        TerrainCandidateSnapshot.Candidate candidate = snapshot.candidates().get(candidateIndex);
+        if (!candidate.draws().isEmpty() || !sameCandidateCore(candidate, metadata)) {
+            return found;
+        }
+        return mergeUnique(found, candidateIndex);
+    }
+
     private static int mergeUnique(final int found, final int candidateIndex) {
         if (found < 0 || found == candidateIndex) {
             return candidateIndex;
         }
         throw new IllegalArgumentException("Terrain draw metadata maps to ambiguous candidates");
-    }
-
-    private static void add(final Map<Long, LongBucket> buckets, final long fingerprint, final long value) {
-        buckets.computeIfAbsent(fingerprint, ignored -> new LongBucket()).add(value);
     }
 
     private static boolean sameCandidateCore(
@@ -304,6 +331,91 @@ final class TerrainCandidateDrawIndex {
         value ^= input + 0x9e3779b97f4a7c15L + (value << 6) + (value >>> 2);
         value *= 0xbf58476d1ce4e5b9L;
         return value ^ (value >>> 29);
+    }
+
+    private static int tableCapacity(final int expectedEntries) {
+        if (expectedEntries <= 0) {
+            return 0;
+        }
+        long minimum = Math.max(2L, ((long) expectedEntries * 4L + 2L) / 3L);
+        if (minimum > (1L << 30)) {
+            throw new IllegalArgumentException("Terrain candidate draw index is too large");
+        }
+        int capacity = 1;
+        while (capacity < minimum) {
+            capacity <<= 1;
+        }
+        return capacity;
+    }
+
+    private static int tableSlot(final long fingerprint, final int mask) {
+        long value = fingerprint;
+        value ^= value >>> 33;
+        value *= 0xff51afd7ed558ccdL;
+        value ^= value >>> 33;
+        return (int) value & mask;
+    }
+
+    private static final class FingerprintTable {
+        private final long[] fingerprints;
+        private final long[] firstValues;
+        private final boolean[] occupied;
+        private final LongBucket[] collisions;
+        private final int mask;
+
+        private FingerprintTable(final int expectedEntries) {
+            int capacity = tableCapacity(expectedEntries);
+            fingerprints = new long[capacity];
+            firstValues = new long[capacity];
+            occupied = new boolean[capacity];
+            collisions = new LongBucket[capacity];
+            mask = capacity == 0 ? 0 : capacity - 1;
+        }
+
+        private void add(final long fingerprint, final long value) {
+            if (fingerprints.length == 0) {
+                throw new IllegalStateException("Terrain candidate index capacity was under-counted");
+            }
+            int slot = tableSlot(fingerprint, mask);
+            while (occupied[slot] && fingerprints[slot] != fingerprint) {
+                slot = (slot + 1) & mask;
+            }
+            if (!occupied[slot]) {
+                occupied[slot] = true;
+                fingerprints[slot] = fingerprint;
+                firstValues[slot] = value;
+                return;
+            }
+            LongBucket bucket = collisions[slot];
+            if (bucket == null) {
+                bucket = new LongBucket();
+                bucket.add(firstValues[slot]);
+                collisions[slot] = bucket;
+            }
+            bucket.add(value);
+        }
+
+        private int find(final long fingerprint) {
+            if (fingerprints.length == 0) {
+                return -1;
+            }
+            int slot = tableSlot(fingerprint, mask);
+            while (occupied[slot]) {
+                if (fingerprints[slot] == fingerprint) {
+                    return slot;
+                }
+                slot = (slot + 1) & mask;
+            }
+            return -1;
+        }
+
+        private long firstValue(final int slot) {
+            return firstValues[slot];
+        }
+
+        private LongBucket collisions(final int slot) {
+            return collisions[slot];
+        }
     }
 
     private static final class LongBucket {
