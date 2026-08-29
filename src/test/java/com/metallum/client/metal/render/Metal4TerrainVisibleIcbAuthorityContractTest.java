@@ -40,4 +40,18 @@ final class Metal4TerrainVisibleIcbAuthorityContractTest {
         assertTrue(allVisible > invalidate, "visible failure must continue into all-visible GPU authoring");
         assertTrue(finalFallback > allVisible, "existing CPU ICB/indirect fallback must remain reachable");
     }
+
+
+    @Test
+    void visibleIcbPropertyAloneRequestsSubmission() throws Exception {
+        String renderPass = Files.readString(Path.of(
+                "src/main/java/com/metallum/client/metal/render/MetalRenderPass.java"
+        ));
+        assertTrue(renderPass.contains(
+                "&& !TerrainSceneSnapshot.VISIBLE_GPU_ICB_ENABLED)"
+        ));
+        assertTrue(renderPass.contains(
+                "|| TerrainSceneSnapshot.VISIBLE_GPU_ICB_ENABLED)"
+        ));
+    }
 }
