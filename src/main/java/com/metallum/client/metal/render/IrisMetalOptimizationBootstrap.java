@@ -20,6 +20,7 @@ public final class IrisMetalOptimizationBootstrap {
     }
 
     public static void onPostChainCreated(final Object chain) {
+        IrisMetalHeapAliasRuntime.clear();
         if (chain == null) return;
         try {
             List<IrisMetalExperimentalOptimizer.PassDescriptor> passes = new ArrayList<>();
@@ -87,6 +88,7 @@ public final class IrisMetalOptimizationBootstrap {
 
     public static void onPostChainClosed() {
         IrisMetalExperimentalOptimizer.clear();
+        IrisMetalHeapAliasRuntime.clear();
     }
 
     /** Returns whether a receipt was bound to the allocation set being reallocated. */
@@ -150,6 +152,12 @@ public final class IrisMetalOptimizationBootstrap {
             IrisMetalOptimizationPlan.AttachmentLifetimeReceipt receipt =
                     IrisMetalAttachmentLifetimeCompiler.compile(plan, chain, targets);
             IrisMetalExperimentalOptimizer.publishAttachmentLifetimeReceipt(plan, receipt);
+            // The receipt describes the allocation set that already exists.
+            // Publish only its stable semantic/physical recipe so a later
+            // resize in this same chain generation may choose heap-backed
+            // placement without carrying native allocation identities across
+            // generations.
+            IrisMetalHeapAliasRuntime.publish(receipt);
         } catch (RuntimeException failure) {
             IrisMetalExperimentalOptimizer.publishAttachmentLifetimeReceipt(
                     plan,
@@ -157,6 +165,7 @@ public final class IrisMetalOptimizationBootstrap {
                             plan.chainGeneration(), targetEpoch, signature, "compiler-failure"
                     )
             );
+            IrisMetalHeapAliasRuntime.clear();
             Metallum.LOGGER.warn(
                     "[metallum-iris] attachment lifetime receipt failed closed; execution remains conservative",
                     failure
