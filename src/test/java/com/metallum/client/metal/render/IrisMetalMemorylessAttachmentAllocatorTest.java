@@ -14,6 +14,7 @@ final class IrisMetalMemorylessAttachmentAllocatorTest {
             final int nextUse
     ) {
         int pass = 3;
+        int lastUse = nextUse >= 0 ? nextUse : pass;
         var lifetime = new IrisMetalOptimizationPlan.AttachmentLifetime(
                 "allocation/17/generation/2/mip/0",
                 17L,
@@ -21,6 +22,7 @@ final class IrisMetalMemorylessAttachmentAllocatorTest {
                 0,
                 pass,
                 pass,
+                lastUse,
                 nextUse,
                 nextUse < 0 ? "NONE" : "SAMPLED_READ"
         );
