@@ -42,7 +42,7 @@ final class IrisMetalOptimizationPlan {
 
     enum AttachmentResolution { RESOLVED_RASTER, UNRESOLVED_CONSERVATIVE }
 
-    enum LifetimeClassification { CONSERVATIVE_PERSISTENT }
+    enum LifetimeClassification { CONSERVATIVE_PERSISTENT, PASS_LOCAL_TRANSIENT }
 
     /** Immutable liveness for one concrete allocation/subresource. */
     record AttachmentLifetime(

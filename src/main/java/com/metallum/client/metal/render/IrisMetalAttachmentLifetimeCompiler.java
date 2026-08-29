@@ -320,7 +320,13 @@ final class IrisMetalAttachmentLifetimeCompiler {
                     candidate.store(),
                     candidate.passIndex(),
                     IrisMetalOptimizationPlan.AttachmentResolution.RESOLVED_RASTER,
-                    IrisMetalOptimizationPlan.LifetimeClassification.CONSERVATIVE_PERSISTENT,
+                    IrisMetalTransientAttachmentClassifier.classify(
+                            candidate.load(),
+                            candidate.store(),
+                            candidate.passIndex(),
+                            Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey),
+                            unresolvedConsumers.isEmpty()
+                    ),
                     allocationKey,
                     Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey)
             ));
