@@ -122,12 +122,12 @@ public final class TerrainGpuVisibilityProbe {
             candidateCount = count;
             final long allocationBytes;
             try {
-                allocationBytes = pendingAllocationBytes(count);
+                allocationBytes = pendingAllocationBytes(count, ORACLE_ENABLED);
             } catch (RuntimeException overflow) {
                 lastAttemptedEpoch = snapshot.epoch();
                 attemptedCount++;
                 fallbackCount++;
-                compactionFallbackCount++;
+                if (ORACLE_ENABLED) { compactionFallbackCount++; }
                 return false;
             }
 
@@ -142,7 +142,7 @@ public final class TerrainGpuVisibilityProbe {
                 lastAttemptedEpoch = snapshot.epoch();
                 attemptedCount++;
                 fallbackCount++;
-                compactionFallbackCount++;
+                if (ORACLE_ENABLED) { compactionFallbackCount++; }
                 return false;
             }
 
@@ -171,7 +171,7 @@ public final class TerrainGpuVisibilityProbe {
                         }
                     } catch (RuntimeException invalidInput) {
                         fallbackCount++;
-                        compactionFallbackCount++;
+                        if (ORACLE_ENABLED) { compactionFallbackCount++; }
                         return true;
                     }
                     MemorySegment probe = MetalNativeBridge.MTLDevice_createTerrainGpuVisibilityProbe(
@@ -184,7 +184,7 @@ public final class TerrainGpuVisibilityProbe {
                     );
                     if (MetalNativeBridge.isNullHandle(probe)) {
                         fallbackCount++;
-                        compactionFallbackCount++;
+                        if (ORACLE_ENABLED) { compactionFallbackCount++; }
                         return true;
                     }
                     PENDING.add(oracle != null
@@ -205,12 +205,12 @@ public final class TerrainGpuVisibilityProbe {
                     ));
                     pendingBytes += allocationBytes;
                     dispatchCount++;
-                    compactionDispatchCount++;
+                    if (ORACLE_ENABLED) { compactionDispatchCount++; }
                     return true;
                 }
             } catch (RuntimeException failure) {
                 fallbackCount++;
-                compactionFallbackCount++;
+                if (ORACLE_ENABLED) { compactionFallbackCount++; }
                 return true;
             } finally {
                 MetalNativeBridge.metallum_release_object(retainedEncoder);
@@ -285,7 +285,7 @@ public final class TerrainGpuVisibilityProbe {
                     fallbackCount++;
                 }
                 lastCompletedEpoch = Math.max(lastCompletedEpoch, pending.epoch());
-                pendingBytes = Math.max(0L, pendingBytes - pendingAllocationBytes(pending.candidateCount()));
+                pendingBytes = Math.max(0L, pendingBytes - pendingAllocationBytes(pending.candidateCount(), pending.oracleEnabled()));
                 releaseQuietly(pending.probe());
                 iterator.remove();
                 continue;
@@ -382,7 +382,7 @@ public final class TerrainGpuVisibilityProbe {
                         );
                         lastPublishedEpoch = completedEpoch;
                         producedCount++;
-                        compactionProducedCount++;
+                        if (ORACLE_ENABLED) { compactionProducedCount++; }
                     } else if (disposition == CompletionDisposition.FALLBACK) {
                         // A stale/malformed/mismatching result never becomes a
                         // culling decision. If it still belongs to the current
@@ -390,22 +390,22 @@ public final class TerrainGpuVisibilityProbe {
                         // a future consumer cannot accidentally interpret an
                         // old or partial bitset as authoritative.
                         fallbackCount++;
-                        compactionFallbackCount++;
+                        if (ORACLE_ENABLED) { compactionFallbackCount++; }
                         publishCurrentEpochFallbackLocked(pending);
                     }
                 } else {
                     fallbackCount++;
-                    compactionFallbackCount++;
+                    if (ORACLE_ENABLED) { compactionFallbackCount++; }
                     publishCurrentEpochFallbackLocked(pending);
                 }
             } catch (RuntimeException failure) {
                 fallbackCount++;
-                compactionFallbackCount++;
+                if (ORACLE_ENABLED) { compactionFallbackCount++; }
                 publishCurrentEpochFallbackLocked(pending);
                 remove = true;
             } finally {
                 if (remove) {
-                    pendingBytes = Math.max(0L, pendingBytes - pendingAllocationBytes(pending.candidateCount()));
+                    pendingBytes = Math.max(0L, pendingBytes - pendingAllocationBytes(pending.candidateCount(), pending.oracleEnabled()));
                     releaseQuietly(pending.probe());
                     iterator.remove();
                 }
@@ -640,6 +640,10 @@ public final class TerrainGpuVisibilityProbe {
     }
 
     private static long pendingAllocationBytes(final int candidateCount) {
+        return pendingAllocationBytes(candidateCount, true);
+    }
+
+    private static long pendingAllocationBytes(final int candidateCount, final boolean compact) {
         int words = TerrainCandidateSnapshot.gpuVisibilityWordCount(candidateCount);
         int blocks = (candidateCount + 255) >>> 8;
         int groups = (blocks + 255) >>> 8;
@@ -647,10 +651,16 @@ public final class TerrainGpuVisibilityProbe {
         bytes = Math.addExact(bytes, TerrainCandidateSnapshot.GPU_VISIBILITY_MATRIX_BYTES);
         bytes = Math.addExact(bytes, Math.multiplyExact((long) words, Integer.BYTES));
         bytes = Math.addExact(bytes, 2L * Integer.BYTES);
-        bytes = Math.addExact(bytes, Math.multiplyExact((long) candidateCount, Integer.BYTES));
-        bytes = Math.addExact(bytes, Math.multiplyExact((long) blocks, 2L * Integer.BYTES));
-        bytes = Math.addExact(bytes, Math.multiplyExact((long) groups, 2L * Integer.BYTES));
-        bytes = Math.addExact(bytes, Math.multiplyExact((long) candidateCount, Integer.BYTES));
+        if (compact) {
+            bytes = Math.addExact(bytes, Math.multiplyExact((long) candidateCount, Integer.BYTES));
+            bytes = Math.addExact(bytes, Math.multiplyExact((long) blocks, 2L * Integer.BYTES));
+            bytes = Math.addExact(bytes, Math.multiplyExact((long) groups, 2L * Integer.BYTES));
+            bytes = Math.addExact(bytes, Math.multiplyExact((long) candidateCount, Integer.BYTES));
+        } else {
+            // Six compaction-only scratch/output buffers remain as one-word
+            // placeholders so the stable argument-table layout stays unchanged.
+            bytes = Math.addExact(bytes, 6L * Integer.BYTES);
+        }
         bytes = Math.addExact(bytes, Integer.BYTES);
         return Math.addExact(bytes, 3L * Integer.BYTES);
     }

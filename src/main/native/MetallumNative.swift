@@ -169,6 +169,10 @@ private enum NativeState {
     // encoding seam, not visibility culling; unsupported compute/ICB paths
     // return nil so Java retries CPU ICB authoring before indirect draw.
     static var terrainGpuEncodeEnabled = false
+    // The explicit diagnostic probe needs stable prefix/scatter output. The
+    // shipping visible-ICB lane consumes only the visibility bitset and can
+    // skip every compaction dispatch and candidate-sized scratch buffer.
+    static var terrainVisibilityCompactionEnabled = true
     // Focused native proof counters. They are session-local diagnostics, not a
     // cache or a render-path decision.
     static var terrainIcbEncodedCount: UInt64 = 0
@@ -7996,6 +8000,11 @@ public func metallum_set_terrain_gpu_encode_enabled(_ enabled: Int32) {
     NativeState.terrainGpuEncodeEnabled = enabled != 0
 }
 
+@_cdecl("metallum_set_terrain_visibility_compaction_enabled")
+public func metallum_set_terrain_visibility_compaction_enabled(_ enabled: Int32) {
+    NativeState.terrainVisibilityCompactionEnabled = enabled != 0
+}
+
 @_cdecl("metallum_terrain_icb_stats")
 public func metallum_terrain_icb_stats(
     _ encoded: UnsafeMutablePointer<UInt64>?,
@@ -10098,6 +10107,7 @@ private final class TerrainGpuVisibilityProbeOwner {
     let leaseIdentity: ObjectIdentifier
     let epoch: UInt64
     let candidateCount: Int
+    let compactionEnabled: Bool
     let wordCount: Int
     let candidateBuffer: MTLBuffer
     let matrixBuffer: MTLBuffer
@@ -10121,6 +10131,7 @@ private final class TerrainGpuVisibilityProbeOwner {
         leaseIdentity: ObjectIdentifier,
         epoch: UInt64,
         candidateCount: Int,
+        compactionEnabled: Bool,
         wordCount: Int,
         candidateBuffer: MTLBuffer,
         matrixBuffer: MTLBuffer,
@@ -10140,6 +10151,7 @@ private final class TerrainGpuVisibilityProbeOwner {
         self.leaseIdentity = leaseIdentity
         self.epoch = epoch
         self.candidateCount = candidateCount
+        self.compactionEnabled = compactionEnabled
         self.wordCount = wordCount
         self.candidateBuffer = candidateBuffer
         self.matrixBuffer = matrixBuffer
@@ -10218,6 +10230,7 @@ private final class TerrainGpuVisibilityProbeOwner {
         let isSucceeded = succeeded
         lock.unlock()
         guard isCompleted else { return 0 }
+        guard compactionEnabled else { return -1 }
         guard isSucceeded, wordCapacity >= Int32(wordCount),
               compactedCapacity >= 0,
               let outEpoch, let outVisible, let outUncertain,
@@ -10375,6 +10388,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
     }
     guard count <= Int.max - 31 else { return nil }
     let wordCount = (count + 31) / 32
+    let compact = NativeState.terrainVisibilityCompactionEnabled
     let blockWidth = 256
     guard count <= Int.max - (blockWidth - 1) else { return nil }
     let blockCount = (count + blockWidth - 1) / blockWidth
@@ -10402,22 +10416,22 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
         length: 2 * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
     ), let prefixLocalBuffer = device.makeBuffer(
-        length: count * MemoryLayout<UInt32>.stride,
+        length: (compact ? count : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
     ), let blockSumsBuffer = device.makeBuffer(
-        length: blockCount * MemoryLayout<UInt32>.stride,
+        length: (compact ? blockCount : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
     ), let blockOffsetsBuffer = device.makeBuffer(
-        length: blockCount * MemoryLayout<UInt32>.stride,
+        length: (compact ? blockCount : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
     ), let groupSumsBuffer = device.makeBuffer(
-        length: groupCount * MemoryLayout<UInt32>.stride,
+        length: (compact ? groupCount : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
     ), let groupOffsetsBuffer = device.makeBuffer(
-        length: groupCount * MemoryLayout<UInt32>.stride,
+        length: (compact ? groupCount : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
     ), let compactedIndicesBuffer = device.makeBuffer(
-        length: count * MemoryLayout<UInt32>.stride,
+        length: (compact ? count : 1) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared
     ), let compactedCountBuffer = device.makeBuffer(
         length: MemoryLayout<UInt32>.stride,
@@ -10433,17 +10447,17 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
     countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
         .initialize(repeating: 0, count: 2)
     prefixLocalBuffer.contents().assumingMemoryBound(to: UInt32.self)
-        .initialize(repeating: 0, count: count)
+        .initialize(repeating: 0, count: compact ? count : 1)
     blockSumsBuffer.contents().assumingMemoryBound(to: UInt32.self)
-        .initialize(repeating: 0, count: blockCount)
+        .initialize(repeating: 0, count: compact ? blockCount : 1)
     blockOffsetsBuffer.contents().assumingMemoryBound(to: UInt32.self)
-        .initialize(repeating: 0, count: blockCount)
+        .initialize(repeating: 0, count: compact ? blockCount : 1)
     groupSumsBuffer.contents().assumingMemoryBound(to: UInt32.self)
-        .initialize(repeating: 0, count: groupCount)
+        .initialize(repeating: 0, count: compact ? groupCount : 1)
     groupOffsetsBuffer.contents().assumingMemoryBound(to: UInt32.self)
-        .initialize(repeating: 0, count: groupCount)
+        .initialize(repeating: 0, count: compact ? groupCount : 1)
     compactedIndicesBuffer.contents().assumingMemoryBound(to: UInt32.self)
-        .initialize(repeating: 0, count: count)
+        .initialize(repeating: 0, count: compact ? count : 1)
     compactedCountBuffer.contents().assumingMemoryBound(to: UInt32.self)
         .initialize(repeating: 0, count: 1)
     let params = paramsBuffer.contents().assumingMemoryBound(to: UInt32.self)
@@ -10489,12 +10503,13 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
         threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
         threadsPerThreadgroup: threadsPerBlock
     )
+    if compact {
     computeEncoder.barrier(
-        afterEncoderStages: .dispatch,
-        beforeEncoderStages: .dispatch,
-        visibilityOptions: .device
-    )
-    computeEncoder.setComputePipelineState(pipeline.blockScan)
+            afterEncoderStages: .dispatch,
+            beforeEncoderStages: .dispatch,
+            visibilityOptions: .device
+        )
+        computeEncoder.setComputePipelineState(pipeline.blockScan)
     computeEncoder.dispatchThreadgroups(
         threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
         threadsPerThreadgroup: threadsPerBlock
@@ -10529,6 +10544,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
         threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
         threadsPerThreadgroup: threadsPerBlock
     )
+    }
     // The visibility/compaction results can feed either raster stages or a
     // later GPU-authored ICB compute encoder. This is a queue dependency: the
     // producer encoder has ended before those consumers begin, so publish the
@@ -10545,6 +10561,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
         leaseIdentity: ObjectIdentifier(bridge.lease),
         epoch: epoch,
         candidateCount: count,
+        compactionEnabled: compact,
         wordCount: wordCount,
         candidateBuffer: candidateBuffer,
         matrixBuffer: matrixBuffer,
