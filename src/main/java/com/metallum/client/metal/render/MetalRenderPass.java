@@ -422,7 +422,9 @@ final class MetalRenderPass implements RenderPassBackend {
             final GpuBufferSlice commands,
             final int drawCount
     ) {
-        if (!TerrainSceneSnapshot.ICB_ENABLED && !TerrainSceneSnapshot.GPU_ICB_ENABLED) {
+        if (!TerrainSceneSnapshot.ICB_ENABLED
+                && !TerrainSceneSnapshot.GPU_ICB_ENABLED
+                && !TerrainSceneSnapshot.VISIBLE_GPU_ICB_ENABLED) {
             return false;
         }
         final TerrainSceneSnapshot snapshot;
@@ -462,6 +464,47 @@ final class MetalRenderPass implements RenderPassBackend {
                     hasAttachment ? stencilFormat : MTLPixelFormat.Invalid
             );
             MemorySegment indexHandle = ((MetalGpuBuffer) indexBuffer).nativeHandle();
+            if (TerrainSceneSnapshot.VISIBLE_GPU_ICB_ENABLED) {
+                TerrainCandidateSnapshot candidates = TerrainCandidateRegistry.latestSnapshot();
+                TerrainVisibleDrawPlan visiblePlan = candidates == null
+                        ? null : TerrainVisibleDrawPlan.tryBuild(snapshot, candidates);
+                MemorySegment visibilityOwner = visiblePlan == null
+                        ? MemorySegment.NULL
+                        : TerrainGpuVisibilityProbe.ownerForEpoch(
+                        visiblePlan.candidateEpoch(), visiblePlan.candidateCount()
+                );
+                if (visiblePlan != null
+                        && !MetalNativeBridge.isNullHandle(visibilityOwner)
+                        && MetalNativeBridge.terrainVisibleGpuIcbAvailable()) {
+                    MemorySegment retainedEncoder = commandEncoder.endEncoderForTerrainGpuAuthoring();
+                    try {
+                        if (owner.encodeVisibleGpu(
+                                device, retainedEncoder, primitiveType, indexType, indexHandle,
+                                pipelineHandle, snapshot, visiblePlan, visibilityOwner, drawCount
+                        )) {
+                            MTLRenderCommandEncoder reopened = renderEncoder();
+                            bindDrawState(reopened);
+                            if (owner.execute(
+                                    device, reopened, primitiveType, indexType, indexHandle,
+                                    pipelineHandle, snapshot, drawCount
+                            )) {
+                                return true;
+                            }
+                        }
+                    } finally {
+                        if (!MetalNativeBridge.isNullHandle(retainedEncoder)) {
+                            MetalNativeBridge.metallum_release_object(retainedEncoder);
+                        }
+                    }
+                }
+                owner.invalidateVisibilityAuthored();
+                MTLRenderCommandEncoder fallbackEncoder = renderEncoder();
+                bindDrawState(fallbackEncoder);
+                return owner.execute(
+                        device, fallbackEncoder, primitiveType, indexType, indexHandle,
+                        pipelineHandle, snapshot, drawCount
+                );
+            }
             if (TerrainSceneSnapshot.GPU_ICB_ENABLED
                     && owner.hasReusableGpuIcb(device, primitiveType, snapshot)) {
                 // The immutable producer/content key is already live in the
@@ -655,7 +698,9 @@ final class MetalRenderPass implements RenderPassBackend {
         // and fail-closed paths intentionally issue this one existing native
         // indirect call; no Java per-draw replay is introduced.
         if (TerrainSceneSnapshot.captureEnabled()) {
-            if (TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED) {
+            if (TerrainSceneSnapshot.ICB_ENABLED
+                    || TerrainSceneSnapshot.GPU_ICB_ENABLED
+                    || TerrainSceneSnapshot.VISIBLE_GPU_ICB_ENABLED) {
                 if (terrainSnapshotSubmitted(primitiveType, commands, drawCount)) {
                     recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
                     return;

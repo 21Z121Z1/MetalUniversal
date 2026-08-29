@@ -26,6 +26,12 @@ public final class TerrainCandidateSnapshot {
     public static final boolean GPU_VISIBILITY_PROBE_ENABLED = Boolean.parseBoolean(
             System.getProperty(GPU_VISIBILITY_PROBE_PROPERTY, "false")
     );
+    /** GPU visibility directly masks source-ordinal terrain ICB slots. Default off. */
+    public static final String VISIBLE_GPU_ICB_PROPERTY =
+            "metallum.opt.terrainVisibleGpuIcb";
+    public static final boolean VISIBLE_GPU_ICB_ENABLED = Boolean.parseBoolean(
+            System.getProperty(VISIBLE_GPU_ICB_PROPERTY, "false")
+    );
     /** Candidate ABI: eight float32 values (min xyz, max xyz, range, reserved). */
     public static final int GPU_VISIBILITY_CANDIDATE_STRIDE_BYTES = 32;
     public static final int GPU_VISIBILITY_MATRIX_BYTES = 16 * Float.BYTES;

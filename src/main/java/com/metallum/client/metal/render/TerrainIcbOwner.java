@@ -22,6 +22,8 @@ public final class TerrainIcbOwner implements AutoCloseable {
     private MetalDevice device;
     private MTLPrimitiveType primitiveType;
     private boolean gpuAuthored;
+    /** -1 for CPU/all-visible ICB; otherwise the visibility producer epoch. */
+    private long visibilityEpoch = -1L;
     private boolean closed;
 
     boolean hasReusableGpuIcb(
@@ -32,6 +34,7 @@ public final class TerrainIcbOwner implements AutoCloseable {
         return !closed
                 && currentDevice == device
                 && gpuAuthored
+                && visibilityEpoch < 0L
                 && primitiveType == currentPrimitiveType
                 && snapshot != null
                 && snapshot.sameIcbContent(content)
@@ -65,6 +68,7 @@ public final class TerrainIcbOwner implements AutoCloseable {
             retire();
             content = null;
             gpuAuthored = false;
+            visibilityEpoch = -1L;
         }
         device = currentDevice;
         if (snapshot.sameIcbContent(content) && primitiveType == currentPrimitiveType) {
@@ -75,6 +79,7 @@ public final class TerrainIcbOwner implements AutoCloseable {
         content = null;
         primitiveType = currentPrimitiveType;
         gpuAuthored = false;
+        visibilityEpoch = -1L;
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment packed = snapshot.packIndexedCommands(arena);
             indirectCommandBuffer = MetalNativeBridge.MTLDevice_createTerrainGpuIndexedIcb(
@@ -96,7 +101,73 @@ public final class TerrainIcbOwner implements AutoCloseable {
         }
         content = snapshot.icbContent();
         gpuAuthored = true;
+        visibilityEpoch = -1L;
         return true;
+    }
+
+    boolean encodeVisibleGpu(
+            final MetalDevice currentDevice,
+            final MemorySegment previousEncoder,
+            final MTLPrimitiveType currentPrimitiveType,
+            final MTLIndexType indexType,
+            final MemorySegment indexBuffer,
+            final MemorySegment pipeline,
+            final TerrainSceneSnapshot snapshot,
+            final TerrainVisibleDrawPlan plan,
+            final MemorySegment visibilityProbeOwner,
+            final int drawCount
+    ) {
+        if (closed || currentDevice == null || previousEncoder == null || snapshot == null
+                || plan == null || drawCount <= 0 || drawCount != snapshot.draws().size()
+                || drawCount != plan.drawCount() || indexBuffer == null || pipeline == null
+                || MetalNativeBridge.isNullHandle(indexBuffer)
+                || MetalNativeBridge.isNullHandle(pipeline)
+                || MetalNativeBridge.isNullHandle(visibilityProbeOwner)
+                || !MetalNativeBridge.terrainVisibleGpuIcbAvailable()) {
+            return false;
+        }
+        if (device != null && device != currentDevice) {
+            retire();
+            content = null;
+        }
+        device = currentDevice;
+        // Visibility is frame/epoch state, not immutable draw content. Never
+        // reuse a visibility-masked ICB solely because the command records match.
+        retire();
+        content = null;
+        primitiveType = currentPrimitiveType;
+        gpuAuthored = false;
+        visibilityEpoch = -1L;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment packed = snapshot.packIndexedCommands(arena);
+            MemorySegment mapping = plan.packCandidateIndices(arena);
+            indirectCommandBuffer = MetalNativeBridge.MTLDevice_createTerrainVisibleGpuIndexedIcb(
+                    previousEncoder, currentDevice.metalDeviceHandle(),
+                    currentPrimitiveType.value, indexType.value, indexBuffer, pipeline,
+                    packed, mapping, drawCount, visibilityProbeOwner, plan.candidateEpoch()
+            );
+        } catch (RuntimeException exception) {
+            indirectCommandBuffer = MemorySegment.NULL;
+            return false;
+        }
+        if (MetalNativeBridge.isNullHandle(indirectCommandBuffer)) {
+            return false;
+        }
+        content = snapshot.icbContent();
+        gpuAuthored = true;
+        visibilityEpoch = plan.candidateEpoch();
+        return true;
+    }
+
+    void invalidateVisibilityAuthored() {
+        if (visibilityEpoch < 0L) {
+            return;
+        }
+        retire();
+        content = null;
+        primitiveType = null;
+        gpuAuthored = false;
+        visibilityEpoch = -1L;
     }
 
     boolean execute(
@@ -120,6 +191,7 @@ public final class TerrainIcbOwner implements AutoCloseable {
             retire();
             content = null;
             gpuAuthored = false;
+            visibilityEpoch = -1L;
         }
         device = currentDevice;
 
@@ -128,6 +200,7 @@ public final class TerrainIcbOwner implements AutoCloseable {
             content = null;
             primitiveType = currentPrimitiveType;
             gpuAuthored = false;
+            visibilityEpoch = -1L;
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment packed = snapshot.packIndexedCommands(arena);
                 indirectCommandBuffer = MetalNativeBridge.MTLDevice_createTerrainIndexedIcb(
@@ -162,6 +235,7 @@ public final class TerrainIcbOwner implements AutoCloseable {
         content = null;
         primitiveType = null;
         gpuAuthored = false;
+        visibilityEpoch = -1L;
         return false;
     }
 
@@ -187,5 +261,7 @@ public final class TerrainIcbOwner implements AutoCloseable {
         retire();
         content = null;
         primitiveType = null;
+        gpuAuthored = false;
+        visibilityEpoch = -1L;
     }
 }
