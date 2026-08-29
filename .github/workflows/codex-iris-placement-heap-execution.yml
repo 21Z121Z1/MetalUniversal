@@ -1,0 +1,46 @@
+name: Codex Iris placement heap execution
+
+on:
+  push:
+    branches:
+      - codex/iris-placement-heap-execution-staging-20260829
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: codex/iris-placement-heap-execution-staging-20260829
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Apply placement heap execution patch
+        run: python3 .github/ci/patch_iris_placement_heap_execution.py
+      - name: Validate Java contract and native bridge
+        run: ./gradlew test --tests com.metallum.client.metal.render.IrisMetalPlacementHeapContractTest buildMacNative --no-daemon
+      - name: Check patch hygiene
+        run: |
+          git diff --check
+          git diff --stat
+          test -z "$(git status --short | grep -E '^.. \.github/' || true)" || {
+            echo 'temporary CI files unexpectedly modified by product patch' >&2
+            exit 1
+          }
+      - name: Commit validated product changes
+        run: |
+          git config user.name '21Z121Z1'
+          git config user.email '89170834+21Z121Z1@users.noreply.github.com'
+          git add src/main/java src/main/native src/test/java
+          if git diff --cached --quiet; then
+            echo 'no product changes to commit'
+            exit 1
+          fi
+          git commit -m 'feat(iris): allocate proven colortex aliases from placement heap'
+          git push origin HEAD:codex/iris-placement-heap-execution-staging-20260829
