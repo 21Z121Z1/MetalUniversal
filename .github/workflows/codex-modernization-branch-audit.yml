@@ -1,0 +1,49 @@
+name: codex/modernization-branch-audit
+
+on:
+  push:
+    branches:
+      - codex/placement-heap-integration-staging-20260830
+    paths:
+      - .github/workflows/codex-modernization-branch-audit.yml
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/placement-heap-integration-staging-20260830
+      - name: Find non-patch-equivalent branch commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          echo '=== CURRENT ==='
+          git log -1 --oneline
+          echo '=== UNIQUE PATCHES ==='
+          found=0
+          while IFS= read -r ref; do
+            branch="${ref#refs/remotes/origin/}"
+            case "$branch" in
+              codex/placement-heap-integration-staging-20260830|integration/iris-metal-next|master) continue ;;
+            esac
+            case "$branch" in
+              codex/*20260829|fix/*20260829|feature/*|perf/*20260819|chore/p2-*|research/iris-*) ;;
+              *) continue ;;
+            esac
+            unique="$(git cherry HEAD "$ref" | awk '$1 == "+" {print $2}')"
+            [ -n "$unique" ] || continue
+            found=$((found + 1))
+            echo
+            echo "--- $branch ---"
+            while IFS= read -r sha; do
+              [ -n "$sha" ] || continue
+              git show -s --format='%H %s' "$sha"
+            done <<< "$unique"
+          done < <(git for-each-ref --format='%(refname)' refs/remotes/origin | sort)
+          echo
+          echo "branches_with_unique_patches=$found"
