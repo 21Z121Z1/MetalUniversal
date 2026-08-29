@@ -29,9 +29,6 @@ native = once(
     "native optimize setter",
 )
 
-# Scope the insertion to the sparse-visible authoring export. There are two
-# GPU ICB producers with the same producer barrier; only this one has blank
-# reset slots and should be optimized.
 entry = native.index('@_cdecl("metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb")')
 end = native.find('\n@_cdecl(', entry + 1)
 if end < 0:
@@ -65,21 +62,11 @@ bridge = once(
     "    @Nullable\n    private static final MethodHandle setTerrainVisibleIcbOptimizeEnabled;\n",
     "bridge handle declaration",
 )
-lookup = '''            setTerrainGpuEncodeEnabled = optionalDowncall(
-                    lookup,
-                    "metallum_set_terrain_gpu_encode_enabled",
-                    FunctionDescriptor.ofVoid(INT)
-            );
-'''
+lookup = '            setTerrainGpuEncodeEnabled = optionalDowncall(lookup, "metallum_set_terrain_gpu_encode_enabled", FunctionDescriptor.ofVoid(INT));\n'
 bridge = once(
     bridge,
     lookup,
-    lookup + '''            setTerrainVisibleIcbOptimizeEnabled = optionalDowncall(
-                    lookup,
-                    "metallum_set_terrain_visible_icb_optimize_enabled",
-                    FunctionDescriptor.ofVoid(INT)
-            );
-''',
+    lookup + '            setTerrainVisibleIcbOptimizeEnabled = optionalDowncall(lookup, "metallum_set_terrain_visible_icb_optimize_enabled", FunctionDescriptor.ofVoid(INT));\n',
     "bridge optimize lookup",
 )
 wrapper = '''    public static void metallum_set_terrain_gpu_encode_enabled(final int enabled) {
