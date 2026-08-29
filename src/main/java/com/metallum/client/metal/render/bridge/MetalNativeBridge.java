@@ -489,6 +489,23 @@ public final class MetalNativeBridge {
                             LONG
                     )
             );
+            MTLDeviceCreateTerrainGpuVisibilityScene = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainGpuVisibilityScene",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, LONG
+                    )
+            );
+            MTLDeviceCreateTerrainGpuVisibilitySceneProbe = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, LONG, LONG
+                    )
+            );
             MTLDeviceCreateTerrainGpuVisibilityProbe = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLDevice_createTerrainGpuVisibilityProbe",
@@ -1052,6 +1069,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLDeviceCreateTerrainGpuIndexedIcb;
     @Nullable
     private static final MethodHandle MTLDeviceCreateTerrainVisibleGpuIndexedIcb;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilityScene;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilitySceneProbe;
     @Nullable
     private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilityProbe;
     @Nullable
@@ -2718,6 +2739,52 @@ public final class MetalNativeBridge {
         } catch (Throwable throwable) {
             return MemorySegment.NULL;
         }
+    }
+
+    public static MemorySegment MTLDevice_createTerrainGpuVisibilityScene(
+            final MemorySegment device,
+            final MemorySegment packedCandidates,
+            final int candidateCount,
+            final long sceneGeneration
+    ) {
+        if (MTLDeviceCreateTerrainGpuVisibilityScene == null || candidateCount <= 0 || sceneGeneration < 0L) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainGpuVisibilityScene.invokeExact(
+                    segment(device), segment(packedCandidates), candidateCount, sceneGeneration
+            );
+        } catch (Throwable throwable) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    public static MemorySegment MTLDevice_createTerrainGpuVisibilitySceneProbe(
+            final MemorySegment renderEncoder,
+            final MemorySegment device,
+            final MemorySegment scene,
+            final MemorySegment packedFrame,
+            final long expectedSceneGeneration,
+            final long epoch
+    ) {
+        if (MTLDeviceCreateTerrainGpuVisibilitySceneProbe == null
+                || isNullHandle(scene) || expectedSceneGeneration < 0L || epoch < 0L) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainGpuVisibilitySceneProbe.invokeExact(
+                    segment(renderEncoder), segment(device), segment(scene), segment(packedFrame),
+                    expectedSceneGeneration, epoch
+            );
+        } catch (Throwable throwable) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    public static boolean terrainPersistentVisibilitySceneAvailable() {
+        return MTLDeviceCreateTerrainGpuVisibilityScene != null
+                && MTLDeviceCreateTerrainGpuVisibilitySceneProbe != null
+                && TerrainVisibilityProbeStatus != null;
     }
 
     public static MemorySegment MTLDevice_createTerrainGpuVisibilityProbe(

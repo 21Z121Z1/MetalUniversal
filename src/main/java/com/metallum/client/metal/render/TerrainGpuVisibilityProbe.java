@@ -29,6 +29,10 @@ public final class TerrainGpuVisibilityProbe {
     private static final int MAX_PENDING_PROBES = 8;
     private static final long MAX_PENDING_BYTES = 128L * 1024L * 1024L;
     private static long pendingBytes;
+    /** Java owns one retain on the latest native generation-owned static scene. */
+    private static MemorySegment persistentSceneOwner = MemorySegment.NULL;
+    private static long persistentSceneGeneration = -1L;
+    private static int persistentSceneCandidateCount;
     private static long lastAttemptedEpoch = -1L;
     private static long lastPublishedEpoch = -1L;
     private static long candidateCount;
@@ -80,6 +84,12 @@ public final class TerrainGpuVisibilityProbe {
                 releaseQuietly(pending.probe());
             }
             PENDING.clear();
+            if (!MetalNativeBridge.isNullHandle(persistentSceneOwner)) {
+                releaseQuietly(persistentSceneOwner);
+            }
+            persistentSceneOwner = MemorySegment.NULL;
+            persistentSceneGeneration = -1L;
+            persistentSceneCandidateCount = 0;
             pendingBytes = 0L;
             lastAttemptedEpoch = -1L;
             lastPublishedEpoch = -1L;
@@ -160,28 +170,43 @@ public final class TerrainGpuVisibilityProbe {
             attemptedCount++;
             try {
                 try (Arena arena = Arena.ofConfined()) {
-                    MemorySegment packedCandidates;
-                    MemorySegment packedMatrix;
                     Oracle oracle = null;
+                    MemorySegment probe;
                     try {
-                        packedCandidates = snapshot.packGpuVisibilityCandidates(arena);
-                        packedMatrix = snapshot.packGpuVisibilityMatrix(arena);
-                        if (ORACLE_ENABLED) {
-                            oracle = oracleForPackedSnapshot(packedCandidates, packedMatrix, count);
+                        if (!ORACLE_ENABLED && MetalNativeBridge.terrainPersistentVisibilitySceneAvailable()) {
+                            if (!ensurePersistentSceneLocked(snapshot, device, arena)) {
+                                fallbackCount++;
+                                return true;
+                            }
+                            MemorySegment packedFrame = snapshot.packGpuVisibilitySceneFrame(arena);
+                            probe = MetalNativeBridge.MTLDevice_createTerrainGpuVisibilitySceneProbe(
+                                    retainedEncoder,
+                                    device.metalDeviceHandle(),
+                                    persistentSceneOwner,
+                                    packedFrame,
+                                    snapshot.sceneGeneration(),
+                                    snapshot.epoch()
+                            );
+                        } else {
+                            MemorySegment packedCandidates = snapshot.packGpuVisibilityCandidates(arena);
+                            MemorySegment packedMatrix = snapshot.packGpuVisibilityMatrix(arena);
+                            if (ORACLE_ENABLED) {
+                                oracle = oracleForPackedSnapshot(packedCandidates, packedMatrix, count);
+                            }
+                            probe = MetalNativeBridge.MTLDevice_createTerrainGpuVisibilityProbe(
+                                    retainedEncoder,
+                                    device.metalDeviceHandle(),
+                                    packedCandidates,
+                                    packedMatrix,
+                                    count,
+                                    snapshot.epoch()
+                            );
                         }
                     } catch (RuntimeException invalidInput) {
                         fallbackCount++;
                         if (ORACLE_ENABLED) { compactionFallbackCount++; }
                         return true;
                     }
-                    MemorySegment probe = MetalNativeBridge.MTLDevice_createTerrainGpuVisibilityProbe(
-                            retainedEncoder,
-                            device.metalDeviceHandle(),
-                            packedCandidates,
-                            packedMatrix,
-                            count,
-                            snapshot.epoch()
-                    );
                     if (MetalNativeBridge.isNullHandle(probe)) {
                         fallbackCount++;
                         if (ORACLE_ENABLED) { compactionFallbackCount++; }
@@ -241,6 +266,37 @@ public final class TerrainGpuVisibilityProbe {
             }
             return found;
         }
+    }
+
+    private static boolean ensurePersistentSceneLocked(
+            final TerrainCandidateSnapshot snapshot,
+            final MetalDevice device,
+            final Arena arena
+    ) {
+        int count = snapshot.candidates().size();
+        if (!MetalNativeBridge.isNullHandle(persistentSceneOwner)
+                && persistentSceneGeneration == snapshot.sceneGeneration()
+                && persistentSceneCandidateCount == count) {
+            return true;
+        }
+        MemorySegment packedScene = snapshot.packGpuVisibilitySceneCandidates(arena);
+        MemorySegment replacement = MetalNativeBridge.MTLDevice_createTerrainGpuVisibilityScene(
+                device.metalDeviceHandle(),
+                packedScene,
+                count,
+                snapshot.sceneGeneration()
+        );
+        if (MetalNativeBridge.isNullHandle(replacement)) {
+            return false;
+        }
+        MemorySegment previous = persistentSceneOwner;
+        persistentSceneOwner = replacement;
+        persistentSceneGeneration = snapshot.sceneGeneration();
+        persistentSceneCandidateCount = count;
+        if (!MetalNativeBridge.isNullHandle(previous)) {
+            releaseQuietly(previous);
+        }
+        return true;
     }
 
     static TerrainCandidateRegistry.VisibilityResult latestResult() {
