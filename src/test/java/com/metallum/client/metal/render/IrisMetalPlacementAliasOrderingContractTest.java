@@ -47,7 +47,7 @@ final class IrisMetalPlacementAliasOrderingContractTest {
         // Any compute/copy consumer makes the receipt unresolved, so a recipe
         // cannot alias resources whose non-raster lifetime is unrepresented.
         assertTrue(compiler.contains("if (pass.type() == PassType.RENDER)"));
-        assertTrue(compiler.contains("unresolvedConsumers.add(pass.planPassKey() + \"\:\" + use.resource()"));
+        assertTrue(compiler.contains("unresolvedConsumers.add(pass.planPassKey() + \":\" + use.resource()"));
         assertTrue(recipe.contains("receipt.unresolvedConsumers().isEmpty()"));
         assertTrue(recipe.contains("previous.lastUse() >= current.firstUse()"));
     }
