@@ -1,0 +1,40 @@
+name: Codex Metal allocation residency repair
+
+on:
+  push:
+    branches:
+      - fix/metal-allocation-residency-20260829
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Apply MTLAllocation residency repair
+        run: python3 .github/ci/patch_metal_allocation_residency.py
+      - name: Validate contract and native ABI
+        run: |
+          ./gradlew --no-daemon compileJava compileTestJava test \
+            --tests com.metallum.client.metal.render.MetalResidencyAllocationContractTest \
+            buildMacNative --rerun-tasks --console=plain
+      - name: Exercise Metal 4 pipeline path when hosted capability allows
+        continue-on-error: true
+        run: ./gradlew --no-daemon metal4PipelinePathTest --rerun-tasks --console=plain
+      - name: Commit validated production changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/main/native/MetallumNative.swift src/test/java/com/metallum/client/metal/render/MetalResidencyAllocationContractTest.java
+          git diff --cached --check
+          git commit -m "fix(metal4): track pipeline states as resident allocations"
+          git push origin HEAD:fix/metal-allocation-residency-20260829
