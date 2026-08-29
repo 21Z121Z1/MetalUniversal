@@ -21,7 +21,21 @@ final class Metal4TerrainVisibleIcbContractTest {
         assertTrue(visible.contains("resetCommands(buffer: commandBuffer, range: 0..<commandCount)"));
         assertTrue(visible.contains("afterQueueStages: .dispatch"));
         assertTrue(visible.contains("beforeStages: .dispatch"));
+        assertTrue(visible.contains("visibilityOwner.leaseIdentity == ObjectIdentifier(bridge.lease)"));
         assertTrue(visible.contains("visibilityOwner.epoch == expectedEpoch"));
+    }
+
+    @Test
+    void visibilityOwnerStoresValueOnlyLeaseIdentity() throws IOException {
+        String source = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+        int owner = source.indexOf("private final class TerrainGpuVisibilityProbeOwner");
+        int nativeEntry = source.indexOf("metallum_MTLDevice_createTerrainGpuVisibilityProbe", owner);
+        assertTrue(owner > 0 && nativeEntry > owner);
+        String ownerSource = source.substring(owner, nativeEntry);
+        assertTrue(ownerSource.contains("let leaseIdentity: ObjectIdentifier"));
+        assertTrue(ownerSource.contains("leaseIdentity: ObjectIdentifier"));
+        assertTrue(ownerSource.contains("self.leaseIdentity = leaseIdentity"));
+        assertTrue(!ownerSource.contains("let lease: Metal4MainCommandBufferLease"));
     }
 
     @Test
