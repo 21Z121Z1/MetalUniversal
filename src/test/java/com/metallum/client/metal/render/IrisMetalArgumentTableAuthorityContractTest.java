@@ -32,8 +32,9 @@ final class IrisMetalArgumentTableAuthorityContractTest {
         assertTrue(nativeSource.contains(
                 "encoder.setArgumentTable(fragmentArguments, stages: MTLRenderStages.fragment)"
         ));
-        assertTrue(nativeSource.contains("vertexArguments.setBuffer("));
-        assertTrue(nativeSource.contains("fragmentArguments.setBuffer("));
+        // MTL4ArgumentTable buffer bindings are GPU addresses, not MTLBuffer object setters.
+        assertTrue(nativeSource.contains("vertexArguments.setAddress("));
+        assertTrue(nativeSource.contains("fragmentArguments.setAddress("));
         assertTrue(nativeSource.contains("vertexArguments.setTexture("));
         assertTrue(nativeSource.contains("fragmentArguments.setTexture("));
     }
