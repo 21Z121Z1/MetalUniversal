@@ -234,6 +234,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 info, this.firstAvailableVertexBufferSlot, this.genericVertexInputs, this.genericVertexBufferSlot
         )) {
             for (DepthStencilFormats formats : eagerFormats) {
+                PipelineSignature signature = this.signatureFor(
+                        formats.depthFormat(), formats.stencilFormat()
+                );
+                // MTL4RenderPipelineDescriptor has no depth/stencil attachment
+                // format fields: those formats are supplied by the render pass.
+                // Once signatureFor canonicalizes Metal 4 attachment state, do
+                // not compile the same native PSO twice during eager startup.
+                if (states.containsKey(signature)) {
+                    continue;
+                }
                 MemorySegment pipeline = createPipeline(
                         device,
                         info,
@@ -245,13 +255,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         formats.stencilFormat()
                 );
                 if (!MetalNativeBridge.isNullHandle(pipeline)) {
-                    states.put(this.signatureFor(formats.depthFormat(), formats.stencilFormat()), pipeline);
+                    states.put(signature, pipeline);
                 }
             }
         }
         this.pipelineStates = states;
         this.withoutDepthPipeline = states.get(this.signatureFor(MTLPixelFormat.Invalid, MTLPixelFormat.Invalid));
-        if (this.lazyVariants) {
+        if (this.lazyVariants && !device.metal4MainRendererEnabled()) {
             for (DepthStencilFormats formats : supportedDepthStencilFormats()) {
                 if (!eagerFormats.contains(formats)) {
                     device.submitPrewarmTask(() -> {
@@ -340,6 +350,18 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     private PipelineSignature signatureFor(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
+        if (this.device.metal4MainRendererEnabled()) {
+            // Metal 4 deliberately removes depth/stencil attachment formats from
+            // the pipeline descriptor. They are render-pass state, so carrying
+            // them in the Java PSO cache key would manufacture duplicate native
+            // pipelines that compile identical Metal 4 descriptors.
+            return new PipelineSignature(
+                    this.colorFormatsView,
+                    MTLPixelFormat.Invalid,
+                    MTLPixelFormat.Invalid,
+                    1
+            );
+        }
         return new PipelineSignature(this.colorFormatsView, depthFormat, stencilFormat, 1);
     }
 
