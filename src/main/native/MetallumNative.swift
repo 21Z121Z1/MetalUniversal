@@ -10264,19 +10264,153 @@ private func terrainVisibilityScenePipeline(
 
 @available(macOS 26.0, iOS 26.0, *)
 private final class TerrainGpuVisibilitySceneOwner {
+    static let inFlightSlotCount = 3
+
+    final class FrameSlot {
+        let frameBuffer: MTLBuffer
+        let visibilityBuffer: MTLBuffer
+        let countersBuffer: MTLBuffer
+        let prefixLocalBuffer: MTLBuffer
+        let blockSumsBuffer: MTLBuffer
+        let blockOffsetsBuffer: MTLBuffer
+        let groupSumsBuffer: MTLBuffer
+        let groupOffsetsBuffer: MTLBuffer
+        let compactedIndicesBuffer: MTLBuffer
+        let compactedCountBuffer: MTLBuffer
+        let paramsBuffer: MTLBuffer
+        let arguments: MTL4ArgumentTable
+
+        init?(
+            device: MTLDevice,
+            candidateBuffer: MTLBuffer,
+            candidateCount: Int,
+            wordCount: Int,
+            blockCount: Int,
+            groupCount: Int,
+            slotIndex: Int
+        ) {
+            guard let frameBuffer = device.makeBuffer(length: 96, options: .storageModeShared),
+                  let visibilityBuffer = device.makeBuffer(
+                    length: wordCount * MemoryLayout<UInt32>.stride, options: .storageModeShared
+                  ),
+                  let countersBuffer = device.makeBuffer(
+                    length: 2 * MemoryLayout<UInt32>.stride, options: .storageModeShared
+                  ),
+                  let prefixLocalBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let blockSumsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let blockOffsetsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let groupSumsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let groupOffsetsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let compactedIndicesBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let compactedCountBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let paramsBuffer = device.makeBuffer(length: 12, options: .storageModeShared) else {
+                return nil
+            }
+            let descriptor = MTL4ArgumentTableDescriptor()
+            descriptor.maxBufferBindCount = 12
+            descriptor.initializeBindings = true
+            descriptor.supportAttributeStrides = false
+            descriptor.label = "Metallum Terrain Visibility Scene Arguments \(slotIndex)"
+            guard let arguments = try? device.makeArgumentTable(descriptor: descriptor) else {
+                return nil
+            }
+            frameBuffer.label = "Metallum Terrain Visibility Frame \(slotIndex)"
+            visibilityBuffer.label = "Metallum Terrain Visibility Bits \(slotIndex)"
+            countersBuffer.label = "Metallum Terrain Visibility Counters \(slotIndex)"
+            let params = paramsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+            params[0] = UInt32(candidateCount)
+            params[1] = UInt32(blockCount)
+            params[2] = UInt32(groupCount)
+            arguments.setAddress(candidateBuffer.gpuAddress, index: 0)
+            arguments.setAddress(frameBuffer.gpuAddress, index: 1)
+            arguments.setAddress(visibilityBuffer.gpuAddress, index: 2)
+            arguments.setAddress(countersBuffer.gpuAddress, index: 3)
+            arguments.setAddress(prefixLocalBuffer.gpuAddress, index: 4)
+            arguments.setAddress(blockSumsBuffer.gpuAddress, index: 5)
+            arguments.setAddress(blockOffsetsBuffer.gpuAddress, index: 6)
+            arguments.setAddress(groupSumsBuffer.gpuAddress, index: 7)
+            arguments.setAddress(groupOffsetsBuffer.gpuAddress, index: 8)
+            arguments.setAddress(compactedIndicesBuffer.gpuAddress, index: 9)
+            arguments.setAddress(compactedCountBuffer.gpuAddress, index: 10)
+            arguments.setAddress(paramsBuffer.gpuAddress, index: 11)
+            self.frameBuffer = frameBuffer
+            self.visibilityBuffer = visibilityBuffer
+            self.countersBuffer = countersBuffer
+            self.prefixLocalBuffer = prefixLocalBuffer
+            self.blockSumsBuffer = blockSumsBuffer
+            self.blockOffsetsBuffer = blockOffsetsBuffer
+            self.groupSumsBuffer = groupSumsBuffer
+            self.groupOffsetsBuffer = groupOffsetsBuffer
+            self.compactedIndicesBuffer = compactedIndicesBuffer
+            self.compactedCountBuffer = compactedCountBuffer
+            self.paramsBuffer = paramsBuffer
+            self.arguments = arguments
+        }
+
+        var buffers: [MTLBuffer] {
+            [frameBuffer, visibilityBuffer, countersBuffer, prefixLocalBuffer,
+             blockSumsBuffer, blockOffsetsBuffer, groupSumsBuffer, groupOffsetsBuffer,
+             compactedIndicesBuffer, compactedCountBuffer, paramsBuffer]
+        }
+    }
+
     let sceneGeneration: UInt64
     let candidateCount: Int
     let candidateBuffer: MTLBuffer
+    let wordCount: Int
+    let blockCount: Int
+    let groupCount: Int
+    private let slots: [FrameSlot]
 
-    init(sceneGeneration: UInt64, candidateCount: Int, candidateBuffer: MTLBuffer) {
+    init?(
+        device: MTLDevice,
+        sceneGeneration: UInt64,
+        candidateCount: Int,
+        candidateBuffer: MTLBuffer
+    ) {
+        guard candidateCount > 0, candidateCount <= Int.max - 31 else { return nil }
+        let wordCount = (candidateCount + 31) / 32
+        let blockWidth = 256
+        guard candidateCount <= Int.max - (blockWidth - 1) else { return nil }
+        let blockCount = (candidateCount + blockWidth - 1) / blockWidth
+        let groupCount = max(1, (blockCount + blockWidth - 1) / blockWidth)
+        var created: [FrameSlot] = []
+        created.reserveCapacity(Self.inFlightSlotCount)
+        for slotIndex in 0..<Self.inFlightSlotCount {
+            guard let slot = FrameSlot(
+                device: device,
+                candidateBuffer: candidateBuffer,
+                candidateCount: candidateCount,
+                wordCount: wordCount,
+                blockCount: blockCount,
+                groupCount: groupCount,
+                slotIndex: slotIndex
+            ) else { return nil }
+            created.append(slot)
+        }
         self.sceneGeneration = sceneGeneration
         self.candidateCount = candidateCount
         self.candidateBuffer = candidateBuffer
+        self.wordCount = wordCount
+        self.blockCount = blockCount
+        self.groupCount = groupCount
+        self.slots = created
         residencyTrackCreated(candidateBuffer)
+        for slot in created {
+            for buffer in slot.buffers { residencyTrackCreated(buffer) }
+        }
+    }
+
+    func frameSlot(at index: Int) -> FrameSlot? {
+        guard index >= 0, index < slots.count else { return nil }
+        return slots[index]
     }
 
     deinit {
         residencyTrackReleased(rawPointer(candidateBuffer))
+        for slot in slots {
+            for buffer in slot.buffers { residencyTrackReleased(rawPointer(buffer)) }
+        }
     }
 }
 
@@ -10294,6 +10428,7 @@ private final class TerrainGpuVisibilityProbeOwner {
     // A persistent scene owner keeps the shared candidate allocation live across epochs.
     let sceneOwner: AnyObject?
     let ownsCandidateBuffer: Bool
+    let ownsProbeBuffers: Bool
     let matrixBuffer: MTLBuffer
     let visibilityBuffer: MTLBuffer
     let countersBuffer: MTLBuffer
@@ -10320,6 +10455,7 @@ private final class TerrainGpuVisibilityProbeOwner {
         candidateBuffer: MTLBuffer,
         sceneOwner: AnyObject? = nil,
         ownsCandidateBuffer: Bool = true,
+        ownsProbeBuffers: Bool = true,
         matrixBuffer: MTLBuffer,
         visibilityBuffer: MTLBuffer,
         countersBuffer: MTLBuffer,
@@ -10342,6 +10478,7 @@ private final class TerrainGpuVisibilityProbeOwner {
         self.candidateBuffer = candidateBuffer
         self.sceneOwner = sceneOwner
         self.ownsCandidateBuffer = ownsCandidateBuffer
+        self.ownsProbeBuffers = ownsProbeBuffers
         self.matrixBuffer = matrixBuffer
         self.visibilityBuffer = visibilityBuffer
         self.countersBuffer = countersBuffer
@@ -10356,32 +10493,36 @@ private final class TerrainGpuVisibilityProbeOwner {
         self.blockCount = blockCount
         self.groupCount = groupCount
         if ownsCandidateBuffer { residencyTrackCreated(candidateBuffer) }
-        residencyTrackCreated(matrixBuffer)
-        residencyTrackCreated(visibilityBuffer)
-        residencyTrackCreated(countersBuffer)
-        residencyTrackCreated(prefixLocalBuffer)
-        residencyTrackCreated(blockSumsBuffer)
-        residencyTrackCreated(blockOffsetsBuffer)
-        residencyTrackCreated(groupSumsBuffer)
-        residencyTrackCreated(groupOffsetsBuffer)
-        residencyTrackCreated(compactedIndicesBuffer)
-        residencyTrackCreated(compactedCountBuffer)
-        residencyTrackCreated(paramsBuffer)
+        if ownsProbeBuffers {
+            residencyTrackCreated(matrixBuffer)
+            residencyTrackCreated(visibilityBuffer)
+            residencyTrackCreated(countersBuffer)
+            residencyTrackCreated(prefixLocalBuffer)
+            residencyTrackCreated(blockSumsBuffer)
+            residencyTrackCreated(blockOffsetsBuffer)
+            residencyTrackCreated(groupSumsBuffer)
+            residencyTrackCreated(groupOffsetsBuffer)
+            residencyTrackCreated(compactedIndicesBuffer)
+            residencyTrackCreated(compactedCountBuffer)
+            residencyTrackCreated(paramsBuffer)
+        }
     }
 
     deinit {
         if ownsCandidateBuffer { residencyTrackReleased(rawPointer(candidateBuffer)) }
-        residencyTrackReleased(rawPointer(matrixBuffer))
-        residencyTrackReleased(rawPointer(visibilityBuffer))
-        residencyTrackReleased(rawPointer(countersBuffer))
-        residencyTrackReleased(rawPointer(prefixLocalBuffer))
-        residencyTrackReleased(rawPointer(blockSumsBuffer))
-        residencyTrackReleased(rawPointer(blockOffsetsBuffer))
-        residencyTrackReleased(rawPointer(groupSumsBuffer))
-        residencyTrackReleased(rawPointer(groupOffsetsBuffer))
-        residencyTrackReleased(rawPointer(compactedIndicesBuffer))
-        residencyTrackReleased(rawPointer(compactedCountBuffer))
-        residencyTrackReleased(rawPointer(paramsBuffer))
+        if ownsProbeBuffers {
+            residencyTrackReleased(rawPointer(matrixBuffer))
+            residencyTrackReleased(rawPointer(visibilityBuffer))
+            residencyTrackReleased(rawPointer(countersBuffer))
+            residencyTrackReleased(rawPointer(prefixLocalBuffer))
+            residencyTrackReleased(rawPointer(blockSumsBuffer))
+            residencyTrackReleased(rawPointer(blockOffsetsBuffer))
+            residencyTrackReleased(rawPointer(groupSumsBuffer))
+            residencyTrackReleased(rawPointer(groupOffsetsBuffer))
+            residencyTrackReleased(rawPointer(compactedIndicesBuffer))
+            residencyTrackReleased(rawPointer(compactedCountBuffer))
+            residencyTrackReleased(rawPointer(paramsBuffer))
+        }
     }
 
     func complete(error: Error?) {
@@ -10564,11 +10705,13 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityScene(
         options: .storageModeShared
     ) else { return nil }
     buffer.label = "Metallum Persistent Terrain Visibility Scene"
-    return retainedPointer(TerrainGpuVisibilitySceneOwner(
+    guard let owner = TerrainGpuVisibilitySceneOwner(
+        device: device,
         sceneGeneration: sceneGeneration,
         candidateCount: count,
         candidateBuffer: buffer
-    ))
+    ) else { return nil }
+    return retainedPointer(owner)
 }
 
 /// Dispatches visibility against a generation-owned scene. Only the 96-byte
@@ -10599,39 +10742,16 @@ public func metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe(
         let value = Float(bitPattern: frameWords[index])
         guard value.isFinite, value >= 0.0, value <= 1.0 else { return nil }
     }
-    guard count <= Int.max - 31 else { return nil }
-    let wordCount = (count + 31) / 32
+    let wordCount = scene.wordCount
+    let blockCount = scene.blockCount
+    let groupCount = scene.groupCount
     let blockWidth = 256
-    guard count <= Int.max - (blockWidth - 1) else { return nil }
-    let blockCount = (count + blockWidth - 1) / blockWidth
-    let groupCount = max(1, (blockCount + blockWidth - 1) / blockWidth)
-    guard blockCount > 0,
-          wordCount <= Int.max / MemoryLayout<UInt32>.stride else { return nil }
-
-    guard let frameBuffer = device.makeBuffer(
-        bytes: UnsafeRawPointer(packedFrame), length: 96, options: .storageModeShared
-    ), let visibilityBuffer = device.makeBuffer(
-        length: wordCount * MemoryLayout<UInt32>.stride, options: .storageModeShared
-    ), let countersBuffer = device.makeBuffer(
-        length: 2 * MemoryLayout<UInt32>.stride, options: .storageModeShared
-    ), let prefixLocalBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-       let blockSumsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-       let blockOffsetsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-       let groupSumsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-       let groupOffsetsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-       let compactedIndicesBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-       let compactedCountBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
-       let paramsBuffer = device.makeBuffer(length: 12, options: .storageModeShared) else {
-        return nil
-    }
-    visibilityBuffer.contents().assumingMemoryBound(to: UInt32.self)
+    guard let slot = scene.frameSlot(at: bridge.lease.slotIndex) else { return nil }
+    slot.frameBuffer.contents().copyMemory(from: UnsafeRawPointer(packedFrame), byteCount: 96)
+    slot.visibilityBuffer.contents().assumingMemoryBound(to: UInt32.self)
         .initialize(repeating: 0, count: wordCount)
-    countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
+    slot.countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
         .initialize(repeating: 0, count: 2)
-    let params = paramsBuffer.contents().assumingMemoryBound(to: UInt32.self)
-    params[0] = UInt32(count)
-    params[1] = UInt32(blockCount)
-    params[2] = UInt32(groupCount)
 
     let source = terrainVisibilityMslSource()
     guard let pipeline = terrainVisibilityScenePipeline(device: device, source: source),
@@ -10639,27 +10759,7 @@ public func metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe(
           let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
         return nil
     }
-    let descriptor = MTL4ArgumentTableDescriptor()
-    descriptor.maxBufferBindCount = 12
-    descriptor.initializeBindings = true
-    descriptor.supportAttributeStrides = false
-    guard let arguments = try? device.makeArgumentTable(descriptor: descriptor) else {
-        computeEncoder.endEncoding()
-        return nil
-    }
-    arguments.setAddress(scene.candidateBuffer.gpuAddress, index: 0)
-    arguments.setAddress(frameBuffer.gpuAddress, index: 1)
-    arguments.setAddress(visibilityBuffer.gpuAddress, index: 2)
-    arguments.setAddress(countersBuffer.gpuAddress, index: 3)
-    arguments.setAddress(prefixLocalBuffer.gpuAddress, index: 4)
-    arguments.setAddress(blockSumsBuffer.gpuAddress, index: 5)
-    arguments.setAddress(blockOffsetsBuffer.gpuAddress, index: 6)
-    arguments.setAddress(groupSumsBuffer.gpuAddress, index: 7)
-    arguments.setAddress(groupOffsetsBuffer.gpuAddress, index: 8)
-    arguments.setAddress(compactedIndicesBuffer.gpuAddress, index: 9)
-    arguments.setAddress(compactedCountBuffer.gpuAddress, index: 10)
-    arguments.setAddress(paramsBuffer.gpuAddress, index: 11)
-    computeEncoder.setArgumentTable(arguments)
+    computeEncoder.setArgumentTable(slot.arguments)
     computeEncoder.setComputePipelineState(pipeline)
     computeEncoder.dispatchThreadgroups(
         threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
@@ -10681,17 +10781,18 @@ public func metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe(
         candidateBuffer: scene.candidateBuffer,
         sceneOwner: scene,
         ownsCandidateBuffer: false,
-        matrixBuffer: frameBuffer,
-        visibilityBuffer: visibilityBuffer,
-        countersBuffer: countersBuffer,
-        prefixLocalBuffer: prefixLocalBuffer,
-        blockSumsBuffer: blockSumsBuffer,
-        blockOffsetsBuffer: blockOffsetsBuffer,
-        groupSumsBuffer: groupSumsBuffer,
-        groupOffsetsBuffer: groupOffsetsBuffer,
-        compactedIndicesBuffer: compactedIndicesBuffer,
-        compactedCountBuffer: compactedCountBuffer,
-        paramsBuffer: paramsBuffer,
+        ownsProbeBuffers: false,
+        matrixBuffer: slot.frameBuffer,
+        visibilityBuffer: slot.visibilityBuffer,
+        countersBuffer: slot.countersBuffer,
+        prefixLocalBuffer: slot.prefixLocalBuffer,
+        blockSumsBuffer: slot.blockSumsBuffer,
+        blockOffsetsBuffer: slot.blockOffsetsBuffer,
+        groupSumsBuffer: slot.groupSumsBuffer,
+        groupOffsetsBuffer: slot.groupOffsetsBuffer,
+        compactedIndicesBuffer: slot.compactedIndicesBuffer,
+        compactedCountBuffer: slot.compactedCountBuffer,
+        paramsBuffer: slot.paramsBuffer,
         blockCount: blockCount,
         groupCount: groupCount
     )
