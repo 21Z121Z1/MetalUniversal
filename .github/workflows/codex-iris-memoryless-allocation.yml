@@ -1,0 +1,37 @@
+name: Codex Iris memoryless allocation seam
+
+on:
+  push:
+    branches:
+      - codex/iris-memoryless-allocation-seam-20260829
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Apply memoryless allocation seam
+        run: python3 .github/ci/patch_iris_memoryless_allocation.py
+      - name: Validate Java contracts and native build
+        run: |
+          ./gradlew --no-daemon compileJava compileTestJava test \
+            --tests com.metallum.client.metal.render.IrisMetalMemorylessAttachmentAllocatorTest \
+            --tests com.metallum.client.metal.render.IrisMetalTransientAttachmentClassifierTest \
+            buildMacNative --rerun-tasks --console=plain
+      - name: Commit validated production changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/main/java/com/metallum/client/metal/render/MetalGpuTexture.java
+          git diff --cached --check
+          git commit -m "feat(iris): add constrained memoryless texture allocation"
+          git push origin HEAD:codex/iris-memoryless-allocation-seam-20260829
