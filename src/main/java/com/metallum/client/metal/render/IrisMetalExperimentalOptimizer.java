@@ -384,6 +384,7 @@ final class IrisMetalExperimentalOptimizer {
         out.append("\"mipLevel\":").append(lifetime.mipLevel()).append(',');
         out.append("\"firstUse\":").append(lifetime.firstUse()).append(',');
         out.append("\"lastWrite\":").append(lifetime.lastWrite()).append(',');
+        out.append("\"lastUse\":").append(lifetime.lastUse()).append(',');
         out.append("\"nextUse\":").append(lifetime.nextUse()).append(',');
         out.append("\"nextUseAccess\":").append(jsonString(lifetime.nextUseAccess()));
         out.append('}');

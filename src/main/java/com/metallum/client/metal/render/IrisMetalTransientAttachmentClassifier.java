@@ -32,6 +32,7 @@ final class IrisMetalTransientAttachmentClassifier {
                 || store != IrisMetalOptimizationPlan.StoreAction.DONT_CARE
                 || lifetime.firstUse() != passIndex
                 || lifetime.lastWrite() != passIndex
+                || lifetime.lastUse() != passIndex
                 || lifetime.nextUse() != -1
                 || !"NONE".equals(lifetime.nextUseAccess())) {
             return IrisMetalOptimizationPlan.LifetimeClassification.CONSERVATIVE_PERSISTENT;

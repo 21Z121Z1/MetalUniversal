@@ -44,7 +44,11 @@ final class IrisMetalOptimizationPlan {
 
     enum LifetimeClassification { CONSERVATIVE_PERSISTENT, PASS_LOCAL_TRANSIENT }
 
-    /** Immutable liveness for one concrete allocation/subresource. */
+    /**
+     * Immutable liveness for one concrete allocation/subresource. The compiler
+     * derives {@code lastUse} from the maximum pass access, independently of
+     * the last write, so a later read cannot be mistaken for attachment death.
+     */
     record AttachmentLifetime(
             String allocationKey,
             long allocationId,
@@ -52,6 +56,7 @@ final class IrisMetalOptimizationPlan {
             int mipLevel,
             int firstUse,
             int lastWrite,
+            int lastUse,
             int nextUse,
             String nextUseAccess
     ) {
@@ -60,7 +65,8 @@ final class IrisMetalOptimizationPlan {
             if (allocationId <= 0L || allocationGeneration <= 0L) {
                 throw new IllegalArgumentException("Attachment allocation identity must be positive");
             }
-            if (mipLevel < 0 || firstUse < 0 || lastWrite < -1 || nextUse < -1) {
+            if (mipLevel < 0 || firstUse < 0 || lastWrite < -1
+                    || lastUse < firstUse || lastUse < lastWrite || nextUse < -1) {
                 throw new IllegalArgumentException("Invalid attachment lifetime range");
             }
             requireName(nextUseAccess, "nextUseAccess");

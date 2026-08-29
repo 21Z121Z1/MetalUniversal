@@ -12,6 +12,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class IrisMetalAttachmentLifetimeCompilerTest {
@@ -37,14 +38,33 @@ final class IrisMetalAttachmentLifetimeCompilerTest {
         IrisMetalOptimizationPlan.AttachmentLifetime main = lifetime(receipt, 100);
         assertEquals(0, main.firstUse());
         assertEquals(1, main.lastWrite());
+        assertEquals(2, main.lastUse());
         assertEquals(2, main.nextUse());
         assertEquals("SAMPLED_READ", main.nextUseAccess());
 
         IrisMetalOptimizationPlan.AttachmentLifetime alt = lifetime(receipt, 101);
         assertEquals(0, alt.firstUse());
         assertEquals(2, alt.lastWrite());
+        assertEquals(2, alt.lastUse());
         assertEquals(-1, alt.nextUse());
         assertNotEquals(main.allocationKey(), alt.allocationKey());
+
+        // Verify the serialized authoritative receipt carries the same
+        // compiler-derived death point for each physical ping-pong side.
+        String json = IrisMetalExperimentalOptimizer.toJson(
+                IrisMetalOptimizationPlan.withAttachmentLifetimeReceipt(plan, receipt)
+        );
+        assertEquals(2, jsonLifetime(json, 100L).get("lastUse").getAsInt());
+        assertEquals(2, jsonLifetime(json, 101L).get("lastUse").getAsInt());
+    }
+
+    @Test
+    void lifetimeRejectsDeathBeforeItsLastWrite() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new IrisMetalOptimizationPlan.AttachmentLifetime(
+                        "allocation/1/generation/1/mip/0", 1L, 1L, 0,
+                        2, 5, 4, 3, "SAMPLED_READ"
+                ));
     }
 
     @Test
@@ -144,6 +164,23 @@ final class IrisMetalAttachmentLifetimeCompilerTest {
                 .filter(value -> value.allocationId() == allocationId)
                 .findFirst()
                 .orElseThrow();
+    }
+
+    private static com.google.gson.JsonObject jsonLifetime(
+            final String json,
+            final long allocationId
+    ) {
+        var lifetimes = JsonParser.parseString(json)
+                .getAsJsonObject()
+                .getAsJsonObject("attachmentLifetimeReceipt")
+                .getAsJsonArray("lifetimes");
+        for (var element : lifetimes) {
+            var lifetime = element.getAsJsonObject();
+            if (lifetime.get("allocationId").getAsLong() == allocationId) {
+                return lifetime;
+            }
+        }
+        throw new AssertionError("Missing lifetime for allocation " + allocationId);
     }
 
     private static List<IrisMetalAttachmentLifetimeCompiler.AllocationBinding> bindings(

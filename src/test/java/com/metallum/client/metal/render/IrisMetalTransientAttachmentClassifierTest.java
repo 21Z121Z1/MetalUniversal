@@ -10,6 +10,7 @@ final class IrisMetalTransientAttachmentClassifierTest {
     private static IrisMetalOptimizationPlan.AttachmentLifetime lifetime(
             final int firstUse,
             final int lastWrite,
+            final int lastUse,
             final int nextUse,
             final String nextAccess
     ) {
@@ -20,6 +21,7 @@ final class IrisMetalTransientAttachmentClassifierTest {
                 0,
                 firstUse,
                 lastWrite,
+                lastUse,
                 nextUse,
                 nextAccess
         );
@@ -31,7 +33,7 @@ final class IrisMetalTransientAttachmentClassifierTest {
                 IrisMetalOptimizationPlan.LoadAction.CLEAR,
                 IrisMetalOptimizationPlan.StoreAction.DONT_CARE,
                 4,
-                lifetime(4, 4, -1, "NONE"),
+                lifetime(4, 4, 4, -1, "NONE"),
                 true
         );
         assertEquals(IrisMetalOptimizationPlan.LifetimeClassification.PASS_LOCAL_TRANSIENT, classification);
@@ -46,7 +48,7 @@ final class IrisMetalTransientAttachmentClassifierTest {
                         IrisMetalOptimizationPlan.LoadAction.LOAD,
                         IrisMetalOptimizationPlan.StoreAction.DONT_CARE,
                         2,
-                        lifetime(2, 2, -1, "NONE"),
+                        lifetime(2, 2, 2, -1, "NONE"),
                         true
                 )
         );
@@ -56,7 +58,7 @@ final class IrisMetalTransientAttachmentClassifierTest {
                         IrisMetalOptimizationPlan.LoadAction.DONT_CARE,
                         IrisMetalOptimizationPlan.StoreAction.STORE,
                         2,
-                        lifetime(2, 2, -1, "NONE"),
+                        lifetime(2, 2, 2, -1, "NONE"),
                         true
                 )
         );
@@ -66,10 +68,22 @@ final class IrisMetalTransientAttachmentClassifierTest {
                         IrisMetalOptimizationPlan.LoadAction.DONT_CARE,
                         IrisMetalOptimizationPlan.StoreAction.DONT_CARE,
                         2,
-                        lifetime(2, 2, 3, "SAMPLED_READ"),
+                        lifetime(2, 2, 3, 3, "SAMPLED_READ"),
                         true
                 )
         );
+    }
+
+    @Test
+    void aLaterAccessKeepsTheAttachmentPersistentEvenWithoutNextWrite() {
+        var classification = IrisMetalTransientAttachmentClassifier.classify(
+                IrisMetalOptimizationPlan.LoadAction.DONT_CARE,
+                IrisMetalOptimizationPlan.StoreAction.DONT_CARE,
+                2,
+                lifetime(2, 2, 3, -1, "NONE"),
+                true
+        );
+        assertEquals(IrisMetalOptimizationPlan.LifetimeClassification.CONSERVATIVE_PERSISTENT, classification);
     }
 
     @Test
@@ -78,7 +92,7 @@ final class IrisMetalTransientAttachmentClassifierTest {
                 IrisMetalOptimizationPlan.LoadAction.DONT_CARE,
                 IrisMetalOptimizationPlan.StoreAction.DONT_CARE,
                 1,
-                lifetime(1, 1, -1, "NONE"),
+                lifetime(1, 1, 1, -1, "NONE"),
                 false
         );
         assertEquals(IrisMetalOptimizationPlan.LifetimeClassification.CONSERVATIVE_PERSISTENT, classification);
