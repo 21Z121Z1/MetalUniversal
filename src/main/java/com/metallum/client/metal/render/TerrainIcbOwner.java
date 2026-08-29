@@ -159,6 +159,75 @@ public final class TerrainIcbOwner implements AutoCloseable {
         return true;
     }
 
+    boolean encodeFusedVisibleGpu(
+            final MetalDevice currentDevice,
+            final MemorySegment previousEncoder,
+            final MTLPrimitiveType currentPrimitiveType,
+            final MTLIndexType indexType,
+            final MemorySegment indexBuffer,
+            final MemorySegment pipeline,
+            final TerrainSceneSnapshot snapshot,
+            final TerrainCandidateSnapshot candidates,
+            final TerrainVisibleDrawPlan plan,
+            final MemorySegment persistentSceneOwner,
+            final int drawCount
+    ) {
+        if (closed || currentDevice == null || previousEncoder == null || snapshot == null
+                || candidates == null || plan == null || drawCount <= 0
+                || drawCount != snapshot.draws().size() || drawCount != plan.drawCount()
+                || plan.candidateCount() != candidates.candidates().size()
+                || plan.candidateEpoch() != candidates.epoch()
+                || indexBuffer == null || pipeline == null
+                || MetalNativeBridge.isNullHandle(indexBuffer)
+                || MetalNativeBridge.isNullHandle(pipeline)
+                || MetalNativeBridge.isNullHandle(persistentSceneOwner)
+                || !MetalNativeBridge.terrainFusedVisibleGpuIcbAvailable()) {
+            return false;
+        }
+        if (device != null && device != currentDevice) {
+            retire();
+            content = null;
+        }
+        device = currentDevice;
+        // Like the two-stage visible path, fused visibility is camera/epoch
+        // state and can never be reused through the immutable content key.
+        retire();
+        content = null;
+        primitiveType = currentPrimitiveType;
+        gpuAuthored = false;
+        visibilityEpoch = -1L;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment packed = snapshot.packIndexedCommands(arena);
+            MemorySegment mapping = plan.packCandidateIndices(arena);
+            MemorySegment frame = candidates.packGpuVisibilitySceneFrame(arena);
+            indirectCommandBuffer = MetalNativeBridge.MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
+                    previousEncoder,
+                    currentDevice.metalDeviceHandle(),
+                    currentPrimitiveType.value,
+                    indexType.value,
+                    indexBuffer,
+                    pipeline,
+                    packed,
+                    mapping,
+                    drawCount,
+                    persistentSceneOwner,
+                    frame,
+                    candidates.sceneGeneration(),
+                    plan.candidateCount()
+            );
+        } catch (RuntimeException exception) {
+            indirectCommandBuffer = MemorySegment.NULL;
+            return false;
+        }
+        if (MetalNativeBridge.isNullHandle(indirectCommandBuffer)) {
+            return false;
+        }
+        content = snapshot.icbContent();
+        gpuAuthored = true;
+        visibilityEpoch = plan.candidateEpoch();
+        return true;
+    }
+
     void invalidateVisibilityAuthored() {
         if (visibilityEpoch < 0L) {
             return;

@@ -119,7 +119,11 @@ public final class TerrainGpuVisibilityProbe {
             final MetalDevice device,
             final MetalCommandEncoder commandEncoder
     ) {
-        if (!ENABLED) {
+        // The fused shipping lane performs visibility inside ICB authoring and
+        // therefore must not create an intermediate bitset/probe encoder. Keep
+        // the explicit diagnostic oracle untouched so it can still falsify the
+        // fused decision on hardware when both switches are enabled.
+        if (!ENABLED || (TerrainCandidateSnapshot.FUSED_VISIBLE_GPU_ICB_ENABLED && !ORACLE_ENABLED)) {
             return false;
         }
         synchronized (LOCK) {
@@ -265,6 +269,34 @@ public final class TerrainGpuVisibilityProbe {
                 found = pending.probe();
             }
             return found;
+        }
+    }
+
+    /**
+     * Borrows the exact generation-owned scene for fused ICB authoring.
+     * The returned pointer remains Java-retained by this runtime; the native
+     * ICB owner takes a strong reference to the scene before this call returns.
+     */
+    static MemorySegment persistentSceneForFused(
+            final TerrainCandidateSnapshot snapshot,
+            final MetalDevice device
+    ) {
+        if (!TerrainCandidateSnapshot.FUSED_VISIBLE_GPU_ICB_ENABLED
+                || snapshot == null || device == null
+                || !MetalNativeBridge.terrainFusedVisibleGpuIcbAvailable()) {
+            return MemorySegment.NULL;
+        }
+        synchronized (LOCK) {
+            try (Arena arena = Arena.ofConfined()) {
+                if (!ensurePersistentSceneLocked(snapshot, device, arena)) {
+                    return MemorySegment.NULL;
+                }
+                return persistentSceneGeneration == snapshot.sceneGeneration()
+                        && persistentSceneCandidateCount == snapshot.candidates().size()
+                        ? persistentSceneOwner : MemorySegment.NULL;
+            } catch (RuntimeException failure) {
+                return MemorySegment.NULL;
+            }
         }
     }
 

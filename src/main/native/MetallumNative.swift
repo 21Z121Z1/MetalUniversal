@@ -9815,6 +9815,19 @@ private func terrainGpuIcbMslSource(
       command_buffer commandBuffer [[id(0)]];
     };
 
+
+    struct TerrainVisibilitySceneCandidate {
+      int4 sectionBlock;
+      float4 localMinMaxX;
+      float4 localMaxYZRange;
+    };
+
+    struct TerrainVisibilitySceneFrame {
+      float4x4 clipFromCameraRelative;
+      int4 cameraBlock;
+      float4 cameraFraction;
+    };
+
     kernel void metallum_terrain_gpu_encode(
       device const TerrainDrawRecord *records [[buffer(0)]],
       device TerrainIcbContainer *container [[buffer(1)]],
@@ -9842,6 +9855,84 @@ private func terrainGpuIcbMslSource(
       uint candidateIndex = candidateBySourceOrdinal[drawIndex];
       uint word = atomic_load_explicit(&visibilityWords[candidateIndex >> 5], memory_order_relaxed);
       if ((word & (1u << (candidateIndex & 31))) == 0u) {
+        return;
+      }
+      TerrainDrawRecord record = records[drawIndex];
+      if (record.indexCount < 0 || record.instanceCount < 0
+          || record.firstIndex < 0 || record.firstInstance < 0) {
+        return;
+      }
+      render_command command(container->commandBuffer, drawIndex);
+      command.draw_indexed_primitives(primitive_type::\(primitive),
+          uint(record.indexCount), indices + uint(record.firstIndex),
+          uint(record.instanceCount), as_type<uint>(record.baseVertex),
+          uint(record.firstInstance));
+    }
+
+    kernel void metallum_terrain_gpu_encode_fused_visible(
+      device const TerrainDrawRecord *records [[buffer(0)]],
+      device TerrainIcbContainer *container [[buffer(1)]],
+      device \(indexPointer) *indices [[buffer(2)]],
+      device const TerrainVisibilitySceneCandidate *candidates [[buffer(3)]],
+      device const TerrainVisibilitySceneFrame *frame [[buffer(4)]],
+      device const uint *candidateBySourceOrdinal [[buffer(5)]],
+      uint drawIndex [[thread_position_in_grid]]) {
+      uint candidateIndex = candidateBySourceOrdinal[drawIndex];
+      TerrainVisibilitySceneCandidate candidate = candidates[candidateIndex];
+      int3 blockDelta = candidate.sectionBlock.xyz - frame->cameraBlock.xyz;
+      float3 cameraRelativeBase = float3(blockDelta) - frame->cameraFraction.xyz;
+      float3 localMin = candidate.localMinMaxX.xyz;
+      float3 localMax = float3(candidate.localMinMaxX.w,
+                               candidate.localMaxYZRange.x,
+                               candidate.localMaxYZRange.y);
+      float3 minBounds = cameraRelativeBase + localMin;
+      float3 maxBounds = cameraRelativeBase + localMax;
+      float range = candidate.localMaxYZRange.z;
+      bool uncertain = false;
+      bool visible = true;
+      if (!all(isfinite(minBounds)) || !all(isfinite(maxBounds)) || !isfinite(range)
+          || any(minBounds > maxBounds) || range < 0.0f
+          || !all(isfinite(frame->cameraFraction))) {
+        uncertain = true;
+      } else {
+        float3 corners[8] = {
+          float3(minBounds.x, minBounds.y, minBounds.z),
+          float3(maxBounds.x, minBounds.y, minBounds.z),
+          float3(minBounds.x, maxBounds.y, minBounds.z),
+          float3(maxBounds.x, maxBounds.y, minBounds.z),
+          float3(minBounds.x, minBounds.y, maxBounds.z),
+          float3(maxBounds.x, minBounds.y, maxBounds.z),
+          float3(minBounds.x, maxBounds.y, maxBounds.z),
+          float3(maxBounds.x, maxBounds.y, maxBounds.z)
+        };
+        float4 clip[8];
+        for (uint corner = 0; corner < 8; ++corner) {
+          clip[corner] = frame->clipFromCameraRelative * float4(corners[corner], 1.0f);
+          if (!all(isfinite(clip[corner])) || clip[corner].w <= 0.0f) {
+            uncertain = true;
+            break;
+          }
+        }
+        if (!uncertain) {
+          bool outsideLeft = true;
+          bool outsideRight = true;
+          bool outsideBottom = true;
+          bool outsideTop = true;
+          bool outsideNear = true;
+          bool outsideFar = true;
+          for (uint corner = 0; corner < 8; ++corner) {
+            outsideLeft = outsideLeft && clip[corner].x < -clip[corner].w;
+            outsideRight = outsideRight && clip[corner].x > clip[corner].w;
+            outsideBottom = outsideBottom && clip[corner].y < -clip[corner].w;
+            outsideTop = outsideTop && clip[corner].y > clip[corner].w;
+            outsideNear = outsideNear && clip[corner].z < -clip[corner].w;
+            outsideFar = outsideFar && clip[corner].z > clip[corner].w;
+          }
+          visible = !(outsideLeft || outsideRight || outsideBottom
+                      || outsideTop || outsideNear || outsideFar);
+        }
+      }
+      if (!visible && !uncertain) {
         return;
       }
       TerrainDrawRecord record = records[drawIndex];
@@ -11471,6 +11562,167 @@ public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
         pipeline: pipeline,
         candidateIndices: mappingBuffer,
         visibilityOwner: visibilityOwner
+    )
+    NativeState.terrainIcbEncodedCount &+= 1
+    NativeState.terrainIcbGpuEncodedCount &+= 1
+    NativeState.terrainIcbGpuDispatchCount &+= 1
+    return retainedPointer(owner)
+}
+
+/// Fuses persistent-scene frustum testing and source-ordinal ICB authoring in
+/// one compute encoder. No intermediate visibility bitset is produced.
+@_cdecl("metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb")
+public func metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
+    _ pointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ primitiveType: MTLPrimitiveType,
+    _ indexType: MTLIndexType,
+    _ indexBuffer: MTLBuffer,
+    _ pipeline: MTLRenderPipelineState,
+    _ packedCommands: UnsafePointer<Int32>?,
+    _ packedCandidateIndices: UnsafePointer<Int32>?,
+    _ drawCount: Int32,
+    _ scenePointer: UnsafeMutableRawPointer?,
+    _ packedFrame: UnsafePointer<UInt8>?,
+    _ expectedSceneGeneration: UInt64,
+    _ expectedCandidateCount: Int32
+) -> UnsafeMutableRawPointer? {
+    guard NativeState.terrainIcbEnabled, NativeState.terrainGpuEncodeEnabled,
+          drawCount > 0, expectedCandidateCount > 0,
+          let packedCommands, let packedCandidateIndices, let scenePointer, let packedFrame,
+          pipeline.supportIndirectCommandBuffers,
+          #available(macOS 26.0, iOS 26.0, *),
+          device.supportsFamily(.metal4),
+          let bridge = metal4RenderBridge(pointer),
+          let source = terrainGpuIcbMslSource(primitiveType: primitiveType, indexType: indexType) else {
+        return nil
+    }
+    let object = Unmanaged<AnyObject>.fromOpaque(scenePointer).takeUnretainedValue()
+    guard let scene = object as? TerrainGpuVisibilitySceneOwner,
+          scene.sceneGeneration == expectedSceneGeneration,
+          scene.candidateCount == Int(expectedCandidateCount),
+          let slot = scene.frameSlot(at: bridge.lease.slotIndex) else {
+        return nil
+    }
+    let frameWords = UnsafeRawPointer(packedFrame).assumingMemoryBound(to: UInt32.self)
+    for index in 0..<16 {
+        guard Float(bitPattern: frameWords[index]).isFinite else { return nil }
+    }
+    for index in 20..<23 {
+        let value = Float(bitPattern: frameWords[index])
+        guard value.isFinite, value >= 0.0, value <= 1.0 else { return nil }
+    }
+
+    let commandCount = Int(drawCount)
+    guard commandCount <= Int.max / 5,
+          commandCount <= Int.max / (5 * MemoryLayout<Int32>.stride),
+          commandCount <= Int.max / MemoryLayout<Int32>.stride else {
+        return nil
+    }
+    let indexBytes = indexType == .uint16 ? 2 : 4
+    for index in 0..<commandCount {
+        let base = index * 5
+        let indexCount = Int(packedCommands[base])
+        let instanceCount = Int(packedCommands[base + 1])
+        let firstIndex = Int(packedCommands[base + 2])
+        let firstInstance = Int(packedCommands[base + 4])
+        let candidate = Int(packedCandidateIndices[index])
+        guard indexCount >= 0, instanceCount >= 0,
+              firstIndex >= 0, firstInstance >= 0,
+              firstIndex <= Int.max / indexBytes,
+              candidate >= 0, candidate < scene.candidateCount else {
+            return nil
+        }
+    }
+
+    slot.frameBuffer.contents().copyMemory(from: UnsafeRawPointer(packedFrame), byteCount: 96)
+    let recordBytes = commandCount * 5 * MemoryLayout<Int32>.stride
+    let mappingBytes = commandCount * MemoryLayout<Int32>.stride
+    guard let packedBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCommands), length: recordBytes, options: .storageModeShared
+    ), let mappingBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCandidateIndices), length: mappingBytes, options: .storageModeShared
+    ) else {
+        return nil
+    }
+
+    let descriptor = MTLIndirectCommandBufferDescriptor()
+    descriptor.commandTypes = .drawIndexed
+    descriptor.inheritPipelineState = true
+    descriptor.inheritBuffers = true
+    descriptor.maxVertexBufferBindCount = 0
+    descriptor.maxFragmentBufferBindCount = 0
+    descriptor.inheritDepthStencilState = true
+    descriptor.inheritDepthBias = true
+    descriptor.inheritDepthClipMode = true
+    descriptor.inheritCullMode = true
+    descriptor.inheritFrontFacingWinding = true
+    descriptor.inheritTriangleFillMode = true
+    guard let commandBuffer = device.makeIndirectCommandBuffer(
+        descriptor: descriptor, maxCommandCount: commandCount, options: .storageModeShared
+    ), let computePipeline = terrainGpuComputePipeline(
+        device: device,
+        primitiveType: primitiveType,
+        indexType: indexType,
+        source: source,
+        functionName: "metallum_terrain_gpu_encode_fused_visible",
+        variant: 2
+    ), let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+        return nil
+    }
+
+    let argumentDescriptor = MTL4ArgumentTableDescriptor()
+    argumentDescriptor.maxBufferBindCount = 6
+    argumentDescriptor.initializeBindings = true
+    argumentDescriptor.supportAttributeStrides = false
+    guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
+    guard let argumentBuffer = device.makeBuffer(
+        length: argumentEncoder.encodedLength, options: .storageModeShared
+    ) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    argumentEncoder.setArgumentBuffer(argumentBuffer, offset: 0)
+    argumentEncoder.setIndirectCommandBuffer(commandBuffer, index: 0)
+    arguments.setAddress(packedBuffer.gpuAddress, index: 0)
+    arguments.setAddress(argumentBuffer.gpuAddress, index: 1)
+    arguments.setAddress(indexBuffer.gpuAddress, index: 2)
+    arguments.setAddress(scene.candidateBuffer.gpuAddress, index: 3)
+    arguments.setAddress(slot.frameBuffer.gpuAddress, index: 4)
+    arguments.setAddress(mappingBuffer.gpuAddress, index: 5)
+    computeEncoder.setArgumentTable(arguments)
+    computeEncoder.setComputePipelineState(computePipeline.state)
+    computeEncoder.resetCommands(buffer: commandBuffer, range: 0..<commandCount)
+    computeEncoder.dispatchThreads(
+        threadsPerGrid: MTLSize(width: commandCount, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(
+            width: max(1, min(computePipeline.state.threadExecutionWidth, 64)),
+            height: 1,
+            depth: 1
+        )
+    )
+    if NativeState.terrainVisibleIcbOptimizeEnabled {
+        computeEncoder.optimizeCommands(buffer: commandBuffer, range: 0..<commandCount)
+    }
+    computeEncoder.barrier(
+        afterStages: .dispatch,
+        beforeQueueStages: [.vertex, .fragment],
+        visibilityOptions: .device
+    )
+    computeEncoder.endEncoding()
+
+    let owner = TerrainGpuIcbOwner(
+        commandBuffer: commandBuffer,
+        packedCommands: packedBuffer,
+        argumentBuffer: argumentBuffer,
+        indexBuffer: indexBuffer,
+        pipeline: pipeline,
+        candidateIndices: mappingBuffer,
+        visibilityOwner: scene
     )
     NativeState.terrainIcbEncodedCount &+= 1
     NativeState.terrainIcbGpuEncodedCount &+= 1

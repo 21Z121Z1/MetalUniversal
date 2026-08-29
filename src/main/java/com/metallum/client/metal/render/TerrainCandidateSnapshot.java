@@ -32,6 +32,11 @@ public final class TerrainCandidateSnapshot {
     public static final boolean VISIBLE_GPU_ICB_ENABLED = Boolean.parseBoolean(
             System.getProperty(VISIBLE_GPU_ICB_PROPERTY, "false")
     );
+    /** Fuses persistent-scene visibility and sparse ICB authoring into one compute pass. */
+    public static final String FUSED_VISIBLE_GPU_ICB_PROPERTY =
+            "metallum.opt.terrainFusedVisibleIcb";
+    public static final boolean FUSED_VISIBLE_GPU_ICB_ENABLED = VISIBLE_GPU_ICB_ENABLED
+            && Boolean.parseBoolean(System.getProperty(FUSED_VISIBLE_GPU_ICB_PROPERTY, "false"));
     /** Candidate ABI: eight float32 values (min xyz, max xyz, range, reserved). */
     public static final int GPU_VISIBILITY_CANDIDATE_STRIDE_BYTES = 32;
     public static final int GPU_VISIBILITY_MATRIX_BYTES = 16 * Float.BYTES;
