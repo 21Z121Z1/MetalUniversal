@@ -566,24 +566,40 @@ public final class TerrainCandidateRegistry {
      */
     static final class StateMachine {
         private final Map<SectionKey, MutableSection> sections = new HashMap<>();
+        /** Monotonic identity for the ordered mesh/candidate scene, independent of camera epochs. */
+        private long sceneGeneration = 1L;
+
+        private void bumpSceneGeneration() {
+            if (sceneGeneration == Long.MAX_VALUE) {
+                throw new IllegalStateException("Terrain scene generation exhausted");
+            }
+            sceneGeneration++;
+        }
 
         void onSectionAdded(final SectionKey key) {
-            sections.put(key, new MutableSection(key));
+            MutableSection previous = sections.put(key, new MutableSection(key));
+            if (previous == null || previous.ready || !previous.meshes.isEmpty()) {
+                bumpSceneGeneration();
+            }
         }
 
         void onBuilt(final SectionKey key) {
             MutableSection section = sections.computeIfAbsent(key, MutableSection::new);
+            boolean changed = !section.ready || !section.meshes.isEmpty();
             section.ready = true;
             // BuiltSectionInfo is published before Sodium's later mesh upload
-            // owner.  Drop the prior generation here so an old live segment
+            // owner. Drop the prior generation here so an old live segment
             // cannot masquerade as the newly built mesh.
             section.meshes.clear();
+            if (changed) bumpSceneGeneration();
         }
 
         void onNotReady(final SectionKey key) {
             MutableSection section = sections.computeIfAbsent(key, MutableSection::new);
+            boolean changed = section.ready || !section.meshes.isEmpty();
             section.ready = false;
             section.meshes.clear();
+            if (changed) bumpSceneGeneration();
         }
 
         void onMesh(
@@ -600,17 +616,22 @@ public final class TerrainCandidateRegistry {
                     ? TerrainCandidateSnapshot.TerrainPass.TRANSLUCENT
                     : TerrainCandidateSnapshot.TerrainPass.OPAQUE
                     : candidate.pass();
-            if (candidate == null) {
-                section.meshes.put(pass, new MeshState(key, pass, null, storage));
-            } else {
-                section.meshes.put(pass, new MeshState(key, pass, candidate, storage));
+            MeshState previous = section.meshes.get(pass);
+            MeshState next = new MeshState(key, pass, candidate, storage);
+            if (previous == null
+                    || previous.storage != storage
+                    || !java.util.Objects.equals(previous.candidate, candidate)) {
+                section.meshes.put(pass, next);
+                bumpSceneGeneration();
             }
         }
 
         void onStorageDeleted(final Object storage) {
+            boolean changed = false;
             for (MutableSection section : sections.values()) {
-                section.meshes.values().removeIf(mesh -> mesh.storage == storage);
+                changed |= section.meshes.values().removeIf(mesh -> mesh.storage == storage);
             }
+            if (changed) bumpSceneGeneration();
         }
 
         void refreshAll() {
@@ -633,7 +654,9 @@ public final class TerrainCandidateRegistry {
         }
 
         void onSectionRemoved(final SectionKey key) {
-            sections.remove(key);
+            if (sections.remove(key) != null) {
+                bumpSceneGeneration();
+            }
         }
 
         MutableSection section(final SectionKey key) {
@@ -668,7 +691,7 @@ public final class TerrainCandidateRegistry {
                 if (result == 0) result = left.pass().compareTo(right.pass());
                 return result;
             });
-            return new TerrainCandidateSnapshot(epoch, camera, transform, candidates);
+            return new TerrainCandidateSnapshot(epoch, sceneGeneration, camera, transform, candidates);
         }
 
         TerrainCandidateSnapshot snapshot(
