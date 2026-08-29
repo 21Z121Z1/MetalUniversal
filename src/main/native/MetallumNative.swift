@@ -188,6 +188,10 @@ private enum NativeState {
     static var terrainGpuPipelineCompileCount: UInt64 = 0
     static let terrainVisibilityPipelineLock = NSLock()
     static var terrainVisibilityPipelines: [TerrainVisibilityComputePipelineKey: TerrainVisibilityCompactionPipelines] = [:]
+    // Shipping visible-ICB only needs the frustum/bitset kernel. Keep a
+    // separate cache so first use does not compile four scan/scatter PSOs
+    // that the non-diagnostic path never dispatches.
+    static var terrainVisibilityOnlyPipelines: [TerrainVisibilityComputePipelineKey: MTLComputePipelineState] = [:]
     // Metal 4 frame-generation present pilot (spec M4). Read once when the
     // presenter is constructed; flipping it later has no effect, which matches how
     // the presenter is started.
@@ -10100,6 +10104,34 @@ private func terrainVisibilityComputePipelines(
 }
 
 @available(macOS 26.0, iOS 26.0, *)
+private func terrainVisibilityOnlyPipeline(
+    device: MTLDevice,
+    source: String
+) -> MTLComputePipelineState? {
+    let key = TerrainVisibilityComputePipelineKey(deviceAddress: objectAddress(device))
+    NativeState.terrainVisibilityPipelineLock.lock()
+    defer { NativeState.terrainVisibilityPipelineLock.unlock() }
+    if let cached = NativeState.terrainVisibilityOnlyPipelines[key] {
+        return cached
+    }
+    let pipeline: MTLComputePipelineState? = NativeState.onCompilerThread {
+        do {
+            let library = try device.makeLibrary(source: source, options: nil)
+            guard let visibility = library.makeFunction(name: "metallum_terrain_gpu_visibility_probe") else {
+                return nil
+            }
+            return try device.makeComputePipelineState(function: visibility)
+        } catch {
+            return nil
+        }
+    }
+    if let pipeline {
+        NativeState.terrainVisibilityOnlyPipelines[key] = pipeline
+    }
+    return pipeline
+}
+
+@available(macOS 26.0, iOS 26.0, *)
 private final class TerrainGpuVisibilityProbeOwner {
     // Value-only lease identity avoids retaining the lease/context and
     // forming a command-buffer completion cycle. The visible ICB must be
@@ -10465,15 +10497,33 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
     params[1] = UInt32(blockCount)
     params[2] = UInt32(groupCount)
 
-    guard let pipeline = terrainVisibilityComputePipelines(
-        device: device,
-        source: terrainVisibilityMslSource()
-    ), pipeline.visibility.maxTotalThreadsPerThreadgroup >= blockWidth,
-          pipeline.blockScan.maxTotalThreadsPerThreadgroup >= blockWidth,
-          pipeline.blockSumsScan.maxTotalThreadsPerThreadgroup >= blockWidth,
-          pipeline.groupScan.maxTotalThreadsPerThreadgroup >= blockWidth,
-          pipeline.scatter.maxTotalThreadsPerThreadgroup >= blockWidth,
-          let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+    let visibilitySource = terrainVisibilityMslSource()
+    let visibilityPipeline: MTLComputePipelineState
+    let compactionPipelines: TerrainVisibilityCompactionPipelines?
+    if compact {
+        guard let pipelines = terrainVisibilityComputePipelines(
+            device: device,
+            source: visibilitySource
+        ), pipelines.visibility.maxTotalThreadsPerThreadgroup >= blockWidth,
+              pipelines.blockScan.maxTotalThreadsPerThreadgroup >= blockWidth,
+              pipelines.blockSumsScan.maxTotalThreadsPerThreadgroup >= blockWidth,
+              pipelines.groupScan.maxTotalThreadsPerThreadgroup >= blockWidth,
+              pipelines.scatter.maxTotalThreadsPerThreadgroup >= blockWidth else {
+            return nil
+        }
+        visibilityPipeline = pipelines.visibility
+        compactionPipelines = pipelines
+    } else {
+        guard let pipeline = terrainVisibilityOnlyPipeline(
+            device: device,
+            source: visibilitySource
+        ), pipeline.maxTotalThreadsPerThreadgroup >= blockWidth else {
+            return nil
+        }
+        visibilityPipeline = pipeline
+        compactionPipelines = nil
+    }
+    guard let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
         return nil
     }
     let argumentDescriptor = MTL4ArgumentTableDescriptor()
@@ -10498,12 +10548,12 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
     arguments.setAddress(paramsBuffer.gpuAddress, index: 11)
     computeEncoder.setArgumentTable(arguments)
     let threadsPerBlock = MTLSize(width: blockWidth, height: 1, depth: 1)
-    computeEncoder.setComputePipelineState(pipeline.visibility)
+    computeEncoder.setComputePipelineState(visibilityPipeline)
     computeEncoder.dispatchThreadgroups(
         threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
         threadsPerThreadgroup: threadsPerBlock
     )
-    if compact {
+    if let pipeline = compactionPipelines {
     computeEncoder.barrier(
             afterEncoderStages: .dispatch,
             beforeEncoderStages: .dispatch,
