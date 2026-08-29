@@ -33,6 +33,17 @@ jobs:
           path.write_text(text.replace(old, new, 1))
       - name: Apply visible GPU ICB modernization
         run: python3 .github/ci/apply_terrain_visible_gpu_icb.py
+      - name: Normalize optional bridge declarations
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java")
+          text = path.read_text()
+          old = """    @Nullable\n    @Nullable\n    private static final MethodHandle MTLDeviceCreateTerrainVisibleGpuIndexedIcb;\n    private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilityProbe;\n"""
+          new = """    @Nullable\n    private static final MethodHandle MTLDeviceCreateTerrainVisibleGpuIndexedIcb;\n    @Nullable\n    private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilityProbe;\n"""
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one duplicated nullable declaration pair, found {text.count(old)}")
+          path.write_text(text.replace(old, new, 1))
       - name: Focused Java contracts
         run: >-
           ./gradlew --no-daemon test
