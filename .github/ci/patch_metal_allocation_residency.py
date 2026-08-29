@@ -35,10 +35,13 @@ text = once(
     "    set.removeAllocation(allocation)\n    NativeState.residencyDirty = true",
     "residency remove body",
 )
+# Keep the unversioned entry point erased. MTLAllocation itself is only
+# available on macOS 15 / iOS 18, so mentioning it in this function's
+# signature would raise the deployment target of every caller.
 text = once(
     text,
     "private func residencyTrackCreated(_ resource: MTLResource?) {\n    guard let resource, NativeState.residencySetStorage != nil else { return }\n    if #available(macOS 15.0, iOS 18.0, *) {\n        residencyAdd(resource)\n    }\n}",
-    "private func residencyTrackCreated(_ allocation: (any MTLAllocation)?) {\n    guard let allocation, NativeState.residencySetStorage != nil else { return }\n    if #available(macOS 15.0, iOS 18.0, *) {\n        residencyAdd(allocation)\n    }\n}",
+    "private func residencyTrackCreated(_ object: AnyObject?) {\n    guard let object, NativeState.residencySetStorage != nil else { return }\n    if #available(macOS 15.0, iOS 18.0, *), let allocation = object as? any MTLAllocation {\n        residencyAdd(allocation)\n    }\n}",
     "created allocation tracker",
 )
 text = once(
@@ -94,6 +97,8 @@ final class MetalResidencyAllocationContractTest {
 
         assertTrue(source.contains("private func residencyAdd(_ allocation: any MTLAllocation)"));
         assertTrue(source.contains("private func residencyRemove(_ allocation: any MTLAllocation)"));
+        assertTrue(source.contains("private func residencyTrackCreated(_ object: AnyObject?)"));
+        assertTrue(source.contains("object as? any MTLAllocation"));
         assertTrue(source.contains("as? any MTLAllocation"));
         assertTrue(source.contains("residencyTrackCreated(state)\n                return retainedPointer(state)"));
         assertTrue(source.contains("let state = try device.makeComputePipelineState(function: function)\n            residencyTrackCreated(state)"));
