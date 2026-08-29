@@ -477,6 +477,60 @@ final class MetalRenderPass implements RenderPassBackend {
                         ? null
                         : TerrainVisibleDrawPlan.tryBuild(snapshot, candidates);
                 if (visiblePlan != null) {
+                    // Fast shipping lane: evaluate the persistent scene and
+                    // author source-ordinal ICB slots in the same compute pass.
+                    // This removes the intermediate visibility bitset and one
+                    // render->compute->render transition. Failure is non-terminal.
+                    if (TerrainCandidateSnapshot.FUSED_VISIBLE_GPU_ICB_ENABLED) {
+                        MemorySegment sceneOwner = TerrainGpuVisibilityProbe.persistentSceneForFused(
+                                candidates, device
+                        );
+                        if (!MetalNativeBridge.isNullHandle(sceneOwner)) {
+                            MemorySegment retainedEncoder = commandEncoder.endEncoderForTerrainGpuAuthoring();
+                            try {
+                                if (!MetalNativeBridge.isNullHandle(retainedEncoder)
+                                        && owner.encodeFusedVisibleGpu(
+                                        device,
+                                        retainedEncoder,
+                                        primitiveType,
+                                        indexType,
+                                        indexHandle,
+                                        pipelineHandle,
+                                        snapshot,
+                                        candidates,
+                                        visiblePlan,
+                                        sceneOwner,
+                                        drawCount
+                                )) {
+                                    MTLRenderCommandEncoder reopened = renderEncoder();
+                                    bindDrawState(reopened);
+                                    if (owner.execute(
+                                            device,
+                                            reopened,
+                                            primitiveType,
+                                            indexType,
+                                            indexHandle,
+                                            pipelineHandle,
+                                            snapshot,
+                                            drawCount
+                                    )) {
+                                        return true;
+                                    }
+                                }
+                            } finally {
+                                if (!MetalNativeBridge.isNullHandle(retainedEncoder)) {
+                                    MetalNativeBridge.metallum_release_object(retainedEncoder);
+                                }
+                            }
+                            owner.invalidateVisibilityAuthored();
+                            enc = renderEncoder();
+                            bindDrawState(enc);
+                        }
+                    }
+
+                    // Diagnostic/two-stage lane remains available. In fused-only
+                    // shipping mode no probe owner exists, so this naturally
+                    // skips without allocating or reading an intermediate bitset.
                     MemorySegment visibilityOwner = TerrainGpuVisibilityProbe.ownerForEpoch(
                             visiblePlan.candidateEpoch(), visiblePlan.candidateCount()
                     );
