@@ -11490,7 +11490,9 @@ public func metallum_MTLDevice_makeComputePipelineState(
 ) -> UnsafeMutableRawPointer? {
     return NativeState.onCompilerThread {
         do {
-            return retainedPointer(try device.makeComputePipelineState(function: function))
+            let state = try device.makeComputePipelineState(function: function)
+            residencyTrackCreated(state)
+            return retainedPointer(state)
         } catch {
             NSLog("[metallum] Failed to create compute pipeline state: %@", String(describing: error))
             return nil
@@ -12258,25 +12260,25 @@ final class Metal4BumpAllocatorRing {
 /// Memoryless textures are excluded: they have no backing allocation, so adding
 /// them is invalid.
 @available(macOS 15.0, iOS 18.0, *)
-private func residencyAdd(_ resource: MTLResource) {
+private func residencyAdd(_ allocation: any MTLAllocation) {
     NativeState.residencyLock.lock()
     defer { NativeState.residencyLock.unlock() }
     guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
-    if let texture = resource as? MTLTexture, texture.storageMode == .memoryless {
+    if let texture = allocation as? MTLTexture, texture.storageMode == .memoryless {
         return
     }
-    set.addAllocation(resource)
+    set.addAllocation(allocation)
     NativeState.residencyDirty = true
 }
 
 /// Drops a resource from the residency set. Called from the release path, which
 /// the Java destruction queue already defers past the frames still in flight.
 @available(macOS 15.0, iOS 18.0, *)
-private func residencyRemove(_ resource: MTLResource) {
+private func residencyRemove(_ allocation: any MTLAllocation) {
     NativeState.residencyLock.lock()
     defer { NativeState.residencyLock.unlock() }
     guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
-    set.removeAllocation(resource)
+    set.removeAllocation(allocation)
     NativeState.residencyDirty = true
 }
 
@@ -12298,10 +12300,10 @@ private func residencyCommitIfDirty() {
 }
 
 /// Version-erased entry points so the call sites stay free of #available noise.
-private func residencyTrackCreated(_ resource: MTLResource?) {
-    guard let resource, NativeState.residencySetStorage != nil else { return }
-    if #available(macOS 15.0, iOS 18.0, *) {
-        residencyAdd(resource)
+private func residencyTrackCreated(_ object: AnyObject?) {
+    guard let object, NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *), let allocation = object as? any MTLAllocation {
+        residencyAdd(allocation)
     }
 }
 
@@ -12312,10 +12314,10 @@ private func residencyTrackCreated(_ resource: MTLResource?) {
 private func residencyTrackReleased(_ pointer: UnsafeMutableRawPointer) {
     guard NativeState.residencySetStorage != nil else { return }
     if #available(macOS 15.0, iOS 18.0, *) {
-        guard let resource = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLResource else {
+        guard let allocation = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? any MTLAllocation else {
             return
         }
-        residencyRemove(resource)
+        residencyRemove(allocation)
     }
 }
 
@@ -12614,6 +12616,7 @@ private func createRenderPipelineState(
                     NativeState.metal4PipelineLogged = true
                     NSLog("[metallum] Metal 4 pipeline path engaged (MTL4Compiler)")
                 }
+                residencyTrackCreated(state)
                 return retainedPointer(state)
             } catch {
                 NativeState.logMetal4PipelineFallback(
@@ -12629,6 +12632,7 @@ private func createRenderPipelineState(
     }
     do {
         let state = try device.makeRenderPipelineState(descriptor: descriptor)
+        residencyTrackCreated(state)
         // Harvest for the next launch; failure only means this PSO is
         // not archived, never a pipeline creation failure. Serialize()
         // rejects entries whose fragment stage the AOT packer stripped
