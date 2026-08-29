@@ -18,21 +18,28 @@ import java.util.WeakHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Shared Java ownership layer for Metal 3 argument buffers and Metal 4 argument
- * tables. Existing native setters remain the execution mechanism; this class
- * freezes the ABI, owns one snapshot per in-flight slot and records only actual
- * logical mutations.
+ * Optional diagnostics mirror for Iris resource-binding mutations.
  *
- * <p>The snapshots are owned by the compiled pipeline/layout generation rather
- * than by a short-lived {@code MetalRenderPass}. Minecraft creates render-pass
- * objects as command-encoding transactions, while an argument table can be
- * reused by later encoders. Each pass therefore maps to its pipeline-owned
- * state; the three in-flight slots survive pass destruction and rotate exactly
- * once after submit.</p>
+ * <p>This class is deliberately not the argument-table execution authority.
+ * The real render path already batches admitted Java state through
+ * {@code MetalRenderStatePacket}; on Metal 4 the native render bridge owns one
+ * vertex and one fragment {@code MTL4ArgumentTable}, binds each table once when
+ * the encoder is created, and patches those tables from the packet/setter
+ * stream. Keeping this Java reflection/snapshot mirror active under the
+ * performance argument-table flag would duplicate bookkeeping without replacing
+ * any native binding.</p>
+ *
+ * <p>The mirror remains available behind the explicit
+ * {@code metallum.iris.argumentSnapshotDiagnostics} switch for differential
+ * diagnostics only. When enabled, snapshots are owned by the compiled pipeline
+ * generation rather than by short-lived render passes so each in-flight ring
+ * advances exactly once per submit.</p>
  */
 public final class IrisMetalArgumentBindingRuntime {
+    private static final boolean SNAPSHOT_DIAGNOSTICS =
+            Boolean.getBoolean("metallum.iris.argumentSnapshotDiagnostics");
     private static final Object STATE_LOCK = new Object();
-    /** Weak pass aliases into the pipeline-owned state. */
+    /** Weak pass aliases into the pipeline-owned diagnostic state. */
     private static final Map<Object, State> PASSES = new WeakHashMap<>();
     /** Weak generation owners; State deliberately does not retain the pipeline key. */
     private static final Map<Object, State> PIPELINES = new WeakHashMap<>();
@@ -56,12 +63,10 @@ public final class IrisMetalArgumentBindingRuntime {
                     PIPELINES.put(pipeline, state);
                     LAYOUTS.increment();
                 }
-                // A render pass is only a transient alias. Re-attaching the same
-                // pipeline never allocates another in-flight ring.
                 PASSES.put(pass, state);
             }
         } catch (ReflectiveOperationException | RuntimeException failure) {
-            Metallum.LOGGER.warn("[metallum-iris-opt] argument layout attachment failed", failure);
+            Metallum.LOGGER.warn("[metallum-iris-opt] argument snapshot diagnostics failed", failure);
         }
     }
 
@@ -129,8 +134,6 @@ public final class IrisMetalArgumentBindingRuntime {
     public static void advanceAfterSubmit() {
         if (!enabled()) return;
         synchronized (STATE_LOCK) {
-            // Advance each pipeline-owned ring once. Iterating PASSES would rotate
-            // one ring repeatedly when multiple render passes used the same PSO.
             for (State state : new HashSet<>(PIPELINES.values())) {
                 state.ring.advanceAfterSubmit();
             }
@@ -147,9 +150,12 @@ public final class IrisMetalArgumentBindingRuntime {
         ENCODED.reset();
     }
 
+    static boolean diagnosticsEnabled() {
+        return SNAPSHOT_DIAGNOSTICS;
+    }
+
     private static boolean enabled() {
-        return IrisMetalOptimizationPlan.ENABLE_ARGUMENT_TABLES
-                || IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES;
+        return SNAPSHOT_DIAGNOSTICS;
     }
 
     private static State state(final Object pass) {
