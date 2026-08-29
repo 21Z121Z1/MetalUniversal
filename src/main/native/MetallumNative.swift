@@ -8026,6 +8026,19 @@ public func metallum_terrain_gpu_icb_pipeline_stats(
     return 1
 }
 
+/// Completion-only query for a terrain visibility owner. Visible ICB
+/// submission uses this instead of allocating CPU readback buffers after GPU
+/// completion; the explicit diagnostic probe keeps using poll_v2 below.
+@_cdecl("metallum_terrain_visibility_probe_status")
+public func metallum_terrain_visibility_probe_status(
+    _ pointer: UnsafeMutableRawPointer
+) -> Int32 {
+    guard #available(macOS 26.0, iOS 26.0, *) else { return -1 }
+    let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+    guard let owner = object as? TerrainGpuVisibilityProbeOwner else { return -1 }
+    return owner.status()
+}
+
 /// Non-blocking completion/readback for a decision-only terrain visibility
 /// probe.  The caller owns the returned probe pointer and must release it
 /// after a successful or failed poll.
@@ -10176,6 +10189,15 @@ private final class TerrainGpuVisibilityProbeOwner {
         completed = true
         succeeded = error == nil
         lock.unlock()
+    }
+
+    /// Completion-only query for the shipping visible-ICB lane. It deliberately
+    /// exposes no GPU-authored visibility bytes to the CPU.
+    func status() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard completed else { return 0 }
+        return succeeded ? 1 : -1
     }
 
     /// Returns 0 while the command buffer is in flight, 1 for a copied result,
