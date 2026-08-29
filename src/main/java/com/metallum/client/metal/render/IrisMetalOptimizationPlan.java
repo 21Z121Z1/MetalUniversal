@@ -52,6 +52,7 @@ final class IrisMetalOptimizationPlan {
             int mipLevel,
             int firstUse,
             int lastWrite,
+            int lastUse,
             int nextUse,
             String nextUseAccess
     ) {
@@ -60,10 +61,39 @@ final class IrisMetalOptimizationPlan {
             if (allocationId <= 0L || allocationGeneration <= 0L) {
                 throw new IllegalArgumentException("Attachment allocation identity must be positive");
             }
-            if (mipLevel < 0 || firstUse < 0 || lastWrite < -1 || nextUse < -1) {
+            if (mipLevel < 0 || firstUse < 0 || lastWrite < -1 || lastUse < firstUse
+                    || lastUse < lastWrite || nextUse < -1) {
                 throw new IllegalArgumentException("Invalid attachment lifetime range");
             }
             requireName(nextUseAccess, "nextUseAccess");
+        }
+
+        /**
+         * Source-compatible constructor for tests/callers that only model the
+         * former first-use/last-write/next-use receipt. Production compilation
+         * supplies the exact lastUse from the full ordered event list.
+         */
+        AttachmentLifetime(
+                String allocationKey,
+                long allocationId,
+                long allocationGeneration,
+                int mipLevel,
+                int firstUse,
+                int lastWrite,
+                int nextUse,
+                String nextUseAccess
+        ) {
+            this(
+                    allocationKey,
+                    allocationId,
+                    allocationGeneration,
+                    mipLevel,
+                    firstUse,
+                    lastWrite,
+                    Math.max(firstUse, Math.max(lastWrite, nextUse)),
+                    nextUse,
+                    nextUseAccess
+            );
         }
     }
 
