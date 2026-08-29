@@ -22,7 +22,17 @@ jobs:
           distribution: temurin
           java-version: '25'
       - name: Apply artifact-prewarm patch
-        run: python3 .github/ci/patch_pso_cache_hit_parallel_prewarm.py
+        run: |
+          python3 .github/ci/patch_pso_cache_hit_parallel_prewarm.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/main/java/com/metallum/client/metal/render/MetalCrossShaderCompiler.java')
+          s = p.read_text().replace('@Nullable MetalMslDiskCache.Entry cached', 'MetalMslDiskCache.@Nullable Entry cached')
+          p.write_text(s)
+          p = Path('src/main/java/com/metallum/client/metal/render/MetalDevice.java')
+          s = p.read_text().replace('@Nullable final MetalCrossShaderCompiler.CacheLookup preloadedLookup', 'final MetalCrossShaderCompiler.@Nullable CacheLookup preloadedLookup')
+          p.write_text(s)
+          PY
       - name: Validate prewarm contracts
         run: ./gradlew test --tests com.metallum.client.metal.render.MetalPsoArtifactPrewarmContractTest buildMacNative --no-daemon
       - name: Check patch hygiene
