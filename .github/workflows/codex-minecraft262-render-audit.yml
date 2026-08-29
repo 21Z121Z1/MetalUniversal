@@ -1,0 +1,142 @@
+name: codex/minecraft262-render-audit
+
+on:
+  push:
+    branches:
+      - codex/minecraft262-render-audit-20260829
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Cache Minecraft reference inputs
+        uses: actions/cache@v4
+        with:
+          path: .minecraft-reference/.cache
+          key: minecraft-reference-26.2-vineflower-1.12.0
+      - name: Build Minecraft 26.2 reference tree
+        shell: bash
+        run: |
+          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
+          test -f "$SRC/net/minecraft/client/Minecraft.java"
+          echo "java_files=$(find "$SRC" -type f -name '*.java' | wc -l | tr -d ' ')"
+      - name: Audit rendering and resource contracts
+        shell: bash
+        run: |
+          mkdir -p build
+          python3 - "$SRC" > build/minecraft262-render-audit.txt <<'PY'
+          from __future__ import annotations
+          import pathlib, re, sys
+
+          root = pathlib.Path(sys.argv[1])
+          files = list(root.rglob('*.java'))
+          print(f'root={root}')
+          print(f'java_file_count={len(files)}')
+
+          needles = [
+              'createCommandEncoder', 'createRenderPass', 'createComputePass',
+              'createRenderPipeline', 'RenderPipeline', 'CommandEncoder',
+              'GpuDevice', 'GpuBuffer', 'GpuTexture', 'GpuTextureView',
+              'GpuBufferSlice', 'writeToBuffer', 'writeToTexture', 'copyTextureToTexture',
+              'mapBuffer', 'RenderTarget', 'MainTarget', 'FrameGraphBuilder',
+              'FrameGraphPass', 'present', 'submit', 'finish', 'close',
+          ]
+          counts = {n: [] for n in needles}
+          text_cache = {}
+          for p in files:
+              try:
+                  text = p.read_text(encoding='utf-8', errors='replace')
+              except OSError:
+                  continue
+              text_cache[p] = text
+              for n in needles:
+                  c = text.count(n)
+                  if c:
+                      counts[n].append((c, p))
+
+          print('\n=== TOP OCCURRENCES ===')
+          for n in needles:
+              hits = sorted(counts[n], reverse=True)[:12]
+              print(f'[{n}] total={sum(c for c,_ in counts[n])} files={len(counts[n])}')
+              for c,p in hits:
+                  print(f'  {c:4d} {p.relative_to(root)}')
+
+          priority_names = {
+              'Minecraft.java', 'GameRenderer.java', 'LevelRenderer.java',
+              'RenderSystem.java', 'RenderTarget.java', 'MainTarget.java',
+              'CommandEncoder.java', 'GpuDevice.java', 'GpuBuffer.java',
+              'GpuTexture.java', 'GpuTextureView.java', 'RenderPipeline.java',
+              'RenderPass.java', 'FrameGraphBuilder.java', 'FramePass.java',
+          }
+          priority = [p for p in files if p.name in priority_names]
+          print('\n=== PRIORITY FILES ===')
+          for p in sorted(priority):
+              print(p.relative_to(root))
+
+          patterns = re.compile(
+              r'createCommandEncoder|createRenderPass|createComputePass|writeToBuffer|writeToTexture|'
+              r'copyTextureToTexture|mapBuffer|present|submit|finish|close\(|createTexture|createBuffer|'
+              r'FrameGraph|RenderTarget|MainTarget|GpuBufferSlice'
+          )
+          emitted = 0
+          print('\n=== PRIORITY CONTEXT ===')
+          for p in sorted(priority):
+              lines = text_cache.get(p, '').splitlines()
+              hit_lines = [i for i,line in enumerate(lines) if patterns.search(line)]
+              if not hit_lines:
+                  continue
+              print(f'\n--- {p.relative_to(root)} ---')
+              seen = set()
+              for i in hit_lines:
+                  lo, hi = max(0, i-4), min(len(lines), i+8)
+                  key = (lo,hi)
+                  if key in seen: continue
+                  seen.add(key)
+                  for j in range(lo,hi):
+                      print(f'{j+1:5d}: {lines[j]}')
+                  print('...')
+                  emitted += 1
+                  if emitted >= 160:
+                      break
+              if emitted >= 160:
+                  break
+
+          # Resource-lifetime-specific evidence: try-with-resources and close sites.
+          print('\n=== RESOURCE LIFETIME SITES ===')
+          lifetime = []
+          for p,text in text_cache.items():
+              if not any(k in text for k in ('GpuBuffer','GpuTexture','CommandEncoder','RenderPass')):
+                  continue
+              for i,line in enumerate(text.splitlines()):
+                  if 'try (' in line or '.close()' in line or 'close();' in line:
+                      lifetime.append((p,i,line.strip()))
+          for p,i,line in lifetime[:300]:
+              print(f'{p.relative_to(root)}:{i+1}: {line}')
+
+          # Frame graph declaration/execute sites.
+          print('\n=== FRAME GRAPH SITES ===')
+          fg = []
+          for p,text in text_cache.items():
+              if 'FrameGraph' not in text and 'FramePass' not in text:
+                  continue
+              for i,line in enumerate(text.splitlines()):
+                  if any(k in line for k in ('FrameGraph','FramePass','executes','addPass','readsAndWrites','reads(')):
+                      fg.append((p,i,line.strip()))
+          for p,i,line in fg[:400]:
+              print(f'{p.relative_to(root)}:{i+1}: {line}')
+          PY
+          sed -n '1,1800p' build/minecraft262-render-audit.txt
+      - name: Upload audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft262-render-audit
+          path: build/minecraft262-render-audit.txt
+          if-no-files-found: error
