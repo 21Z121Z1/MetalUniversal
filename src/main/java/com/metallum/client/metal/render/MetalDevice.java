@@ -92,6 +92,8 @@ final class MetalDevice implements GpuDeviceBackend {
                     && MetalNativeBridge.terrainVisibleGpuIcbAvailable();
     private static final boolean GPU_VISIBILITY_PROBE_METAL4 =
             EXPLICIT_GPU_VISIBILITY_PROBE_METAL4 || VISIBLE_GPU_ICB_METAL4;
+    private static final boolean VISIBLE_GPU_ICB_OPTIMIZE =
+            Boolean.getBoolean("metallum.opt.terrainVisibleIcbOptimize");
     /**
      * Master kill switch for every Metal 4 path (migration spec M1, appendix C).
      * The terrain ICB opt-in is self-contained: it requests the Metal 4
@@ -284,6 +286,9 @@ final class MetalDevice implements GpuDeviceBackend {
         MetalNativeBridge.metallum_set_terrain_gpu_encode_enabled(
                 (TerrainSceneSnapshot.GPU_ICB_ENABLED || VISIBLE_GPU_ICB_METAL4)
                         && metal4Compiler ? 1 : 0
+        );
+        MetalNativeBridge.metallum_set_terrain_visible_icb_optimize_enabled(
+                VISIBLE_GPU_ICB_METAL4 && VISIBLE_GPU_ICB_OPTIMIZE && metal4Compiler
         );
         MetalNativeBridge.metallum_set_terrain_visibility_compaction_enabled(
                 TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED

@@ -721,6 +721,7 @@ public final class MetalNativeBridge {
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
             setTerrainIcbEnabled = optionalDowncall(lookup, "metallum_set_terrain_icb_enabled", FunctionDescriptor.ofVoid(INT));
             setTerrainGpuEncodeEnabled = optionalDowncall(lookup, "metallum_set_terrain_gpu_encode_enabled", FunctionDescriptor.ofVoid(INT));
+            setTerrainVisibleIcbOptimizeEnabled = optionalDowncall(lookup, "metallum_set_terrain_visible_icb_optimize_enabled", FunctionDescriptor.ofVoid(INT));
             setTerrainVisibilityCompactionEnabled = optionalDowncall(
                     lookup, "metallum_set_terrain_visibility_compaction_enabled", FunctionDescriptor.ofVoid(INT)
             );
@@ -1108,6 +1109,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle setTerrainIcbEnabled;
     @Nullable
     private static final MethodHandle setTerrainGpuEncodeEnabled;
+    @Nullable
+    private static final MethodHandle setTerrainVisibleIcbOptimizeEnabled;
     @Nullable
     private static final MethodHandle setTerrainVisibilityCompactionEnabled;
     @Nullable
@@ -3469,6 +3472,17 @@ public final class MetalNativeBridge {
             setTerrainGpuEncodeEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_terrain_gpu_encode_enabled", throwable);
+        }
+    }
+
+    public static void metallum_set_terrain_visible_icb_optimize_enabled(final boolean enabled) {
+        if (setTerrainVisibleIcbOptimizeEnabled == null) {
+            return;
+        }
+        try {
+            setTerrainVisibleIcbOptimizeEnabled.invokeExact(enabled ? 1 : 0);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_terrain_visible_icb_optimize_enabled", throwable);
         }
     }
 

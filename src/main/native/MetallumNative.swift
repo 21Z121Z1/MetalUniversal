@@ -169,6 +169,9 @@ private enum NativeState {
     // encoding seam, not visibility culling; unsupported compute/ICB paths
     // return nil so Java retries CPU ICB authoring before indirect draw.
     static var terrainGpuEncodeEnabled = false
+    // Optional optimization for sparse GPU-authored visible ICBs. Keep it
+    // independently reversible until physical-GPU A/B establishes benefit.
+    static var terrainVisibleIcbOptimizeEnabled = false
     // The explicit diagnostic probe needs stable prefix/scatter output. The
     // shipping visible-ICB lane consumes only the visibility bitset and can
     // skip every compaction dispatch and candidate-sized scratch buffer.
@@ -8004,6 +8007,11 @@ public func metallum_set_terrain_gpu_encode_enabled(_ enabled: Int32) {
     NativeState.terrainGpuEncodeEnabled = enabled != 0
 }
 
+@_cdecl("metallum_set_terrain_visible_icb_optimize_enabled")
+public func metallum_set_terrain_visible_icb_optimize_enabled(_ enabled: Int32) {
+    NativeState.terrainVisibleIcbOptimizeEnabled = enabled != 0
+}
+
 @_cdecl("metallum_set_terrain_visibility_compaction_enabled")
 public func metallum_set_terrain_visibility_compaction_enabled(_ enabled: Int32) {
     NativeState.terrainVisibilityCompactionEnabled = enabled != 0
@@ -11020,6 +11028,9 @@ public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
             depth: 1
         )
     )
+    if NativeState.terrainVisibleIcbOptimizeEnabled {
+        computeEncoder.optimizeCommands(buffer: commandBuffer, range: 0..<commandCount)
+    }
     computeEncoder.barrier(
         afterStages: .dispatch,
         beforeQueueStages: [.vertex, .fragment],
