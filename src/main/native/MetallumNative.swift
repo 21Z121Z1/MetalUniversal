@@ -50,6 +50,23 @@ private struct TerrainVisibilityComputePipelineKey: Hashable {
     let deviceAddress: UInt
 }
 
+/// Common-state identity for a Metal 4 flexible render pipeline. Color attachment
+/// format/write/blend state is deliberately absent: those fields are compiled as
+/// unspecialized in the base PSO and supplied only to terminal specializations.
+private struct Metal4FlexiblePipelineBaseKey: Hashable {
+    let deviceAddress: UInt
+    let vertexFunctionAddress: UInt
+    let fragmentFunctionAddress: UInt
+    let rasterSampleCount: Int
+    let inputPrimitiveTopology: UInt
+    let alphaToCoverage: Bool
+    let alphaToOne: Bool
+    let rasterizationEnabled: Bool
+    let maxVertexAmplificationCount: Int
+    let supportIndirectCommandBuffers: Bool
+    let vertexDescriptorHash: Int
+}
+
 private let terrainVisibilityMaxCandidates = 1 << 20
 
 private final class TerrainGpuComputePipeline {
@@ -161,6 +178,14 @@ private enum NativeState {
     // and metallum.opt.metal4Compiler both hold; false means every PSO takes
     // the Metal 3 path below, unchanged.
     static var metal4CompilerEnabled = false
+    // Flexible PSO specialization is independently reversible. The base cache
+    // owns only unspecialized Metal 4 PSOs; every returned child is terminal and
+    // falls back to the existing direct Metal 4 compile path on any failure.
+    static var metal4FlexiblePsoEnabled = false
+    static let metal4FlexiblePsoLock = NSLock()
+    static var metal4FlexiblePsoBases: [Metal4FlexiblePipelineBaseKey: MTLRenderPipelineState] = [:]
+    static var metal4FlexiblePsoLogged = false
+    static var metal4FlexiblePsoFallbackLogged = false
     // Terrain ICB is a separate opt-in. The Java capability gate sets this
     // only when Metal 4 is available; all pipeline descriptors then carry the
     // explicit support bit required by the Metal 4 compiler.
@@ -12908,6 +12933,23 @@ public func metallum_set_metal4_compiler_enabled(_ enabled: Int32) {
     NativeState.metal4CompilerEnabled = enabled != 0
 }
 
+@_cdecl("metallum_set_metal4_flexible_pso_enabled")
+public func metallum_set_metal4_flexible_pso_enabled(_ enabled: Int32) {
+    NativeState.metal4FlexiblePsoEnabled = enabled != 0
+    if enabled == 0 {
+        NativeState.metal4FlexiblePsoLock.lock()
+        NativeState.metal4FlexiblePsoBases.removeAll(keepingCapacity: false)
+        NativeState.metal4FlexiblePsoLock.unlock()
+    }
+}
+
+@_cdecl("metallum_metal4_flexible_pso_reset")
+public func metallum_metal4_flexible_pso_reset() {
+    NativeState.metal4FlexiblePsoLock.lock()
+    NativeState.metal4FlexiblePsoBases.removeAll(keepingCapacity: true)
+    NativeState.metal4FlexiblePsoLock.unlock()
+}
+
 /// Routes the frame-generation present thread onto a Metal 4 queue (spec M4).
 /// Java only passes 1 when the capability gate, metallum.opt.metal4Compiler and
 /// metallum.opt.metal4Present all hold; the presenter still falls back to Metal 3
@@ -13763,7 +13805,10 @@ private func metal4ArchiveURL(forBinaryArchivePath path: String) -> URL {
 /// binaryArchives has no counterpart either; MTL4 uses
 /// MTL4CompilerTaskOptions.lookupArchives instead.
 @available(macOS 26.0, iOS 26.0, *)
-private func makeMetal4Descriptor(_ src: MTLRenderPipelineDescriptor) -> MTL4RenderPipelineDescriptor? {
+private func makeMetal4Descriptor(
+    _ src: MTLRenderPipelineDescriptor,
+    flexibleColorState: Bool = false
+) -> MTL4RenderPipelineDescriptor? {
     guard let vertexFunction = src.vertexFunction,
           let vertexLibrary = NativeState.library(for: vertexFunction) else {
         return nil
@@ -13795,19 +13840,149 @@ private func makeMetal4Descriptor(_ src: MTLRenderPipelineDescriptor) -> MTL4Ren
     dst.supportIndirectCommandBuffers = src.supportIndirectCommandBuffers ? .enabled : .disabled
     for index in 0..<8 {
         guard let s = src.colorAttachments[index], let d = dst.colorAttachments[index] else { continue }
-        d.pixelFormat = s.pixelFormat
-        d.writeMask = s.writeMask
-        d.blendingState = s.isBlendingEnabled ? .enabled : .disabled
-        if s.isBlendingEnabled {
-            d.sourceRGBBlendFactor = s.sourceRGBBlendFactor
-            d.destinationRGBBlendFactor = s.destinationRGBBlendFactor
-            d.rgbBlendOperation = s.rgbBlendOperation
-            d.sourceAlphaBlendFactor = s.sourceAlphaBlendFactor
-            d.destinationAlphaBlendFactor = s.destinationAlphaBlendFactor
-            d.alphaBlendOperation = s.alphaBlendOperation
+        if flexibleColorState {
+            d.pixelFormat = .unspecialized
+            d.writeMask = .unspecialized
+            d.blendingState = .unspecialized
+            d.sourceRGBBlendFactor = .unspecialized
+            d.destinationRGBBlendFactor = .unspecialized
+            d.rgbBlendOperation = .unspecialized
+            d.sourceAlphaBlendFactor = .unspecialized
+            d.destinationAlphaBlendFactor = .unspecialized
+            d.alphaBlendOperation = .unspecialized
+        } else {
+            d.pixelFormat = s.pixelFormat
+            d.writeMask = s.writeMask
+            d.blendingState = s.isBlendingEnabled ? .enabled : .disabled
+            if s.isBlendingEnabled {
+                d.sourceRGBBlendFactor = s.sourceRGBBlendFactor
+                d.destinationRGBBlendFactor = s.destinationRGBBlendFactor
+                d.rgbBlendOperation = s.rgbBlendOperation
+                d.sourceAlphaBlendFactor = s.sourceAlphaBlendFactor
+                d.destinationAlphaBlendFactor = s.destinationAlphaBlendFactor
+                d.alphaBlendOperation = s.alphaBlendOperation
+            }
         }
     }
     return dst
+}
+
+private func metal4VertexDescriptorHash(_ descriptor: MTLVertexDescriptor?) -> Int {
+    guard let descriptor else { return 0 }
+    var hasher = Hasher()
+    for index in 0..<31 {
+        if let attribute = descriptor.attributes[index] {
+            hasher.combine(attribute.format.rawValue)
+            hasher.combine(attribute.offset)
+            hasher.combine(attribute.bufferIndex)
+        } else {
+            hasher.combine(-1)
+        }
+        if let layout = descriptor.layouts[index] {
+            hasher.combine(layout.stride)
+            hasher.combine(layout.stepFunction.rawValue)
+            hasher.combine(layout.stepRate)
+        } else {
+            hasher.combine(-1)
+        }
+    }
+    return hasher.finalize()
+}
+
+private func metal4FlexibleBaseKey(
+    device: MTLDevice,
+    descriptor: MTLRenderPipelineDescriptor
+) -> Metal4FlexiblePipelineBaseKey? {
+    guard let vertex = descriptor.vertexFunction else { return nil }
+    return Metal4FlexiblePipelineBaseKey(
+        deviceAddress: objectAddress(device),
+        vertexFunctionAddress: objectAddress(vertex),
+        fragmentFunctionAddress: descriptor.fragmentFunction.map(objectAddress) ?? 0,
+        rasterSampleCount: descriptor.rasterSampleCount,
+        inputPrimitiveTopology: descriptor.inputPrimitiveTopology.rawValue,
+        alphaToCoverage: descriptor.isAlphaToCoverageEnabled,
+        alphaToOne: descriptor.isAlphaToOneEnabled,
+        rasterizationEnabled: descriptor.isRasterizationEnabled,
+        maxVertexAmplificationCount: descriptor.maxVertexAmplificationCount,
+        supportIndirectCommandBuffers: descriptor.supportIndirectCommandBuffers,
+        vertexDescriptorHash: metal4VertexDescriptorHash(descriptor.vertexDescriptor)
+    )
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private func applyMetal4ColorSpecialization(
+    concrete: MTL4RenderPipelineDescriptor,
+    specialization: MTL4RenderPipelineDescriptor
+) {
+    for index in 0..<8 {
+        guard let source = concrete.colorAttachments[index],
+              let target = specialization.colorAttachments[index] else { continue }
+        target.pixelFormat = source.pixelFormat
+        target.writeMask = source.writeMask
+        target.blendingState = source.blendingState
+        target.sourceRGBBlendFactor = source.sourceRGBBlendFactor
+        target.destinationRGBBlendFactor = source.destinationRGBBlendFactor
+        target.rgbBlendOperation = source.rgbBlendOperation
+        target.sourceAlphaBlendFactor = source.sourceAlphaBlendFactor
+        target.destinationAlphaBlendFactor = source.destinationAlphaBlendFactor
+        target.alphaBlendOperation = source.alphaBlendOperation
+    }
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private func makeMetal4FlexibleRenderPipelineState(
+    device: MTLDevice,
+    sourceDescriptor: MTLRenderPipelineDescriptor,
+    concreteDescriptor: MTL4RenderPipelineDescriptor,
+    compiler: MTL4Compiler
+) throws -> MTLRenderPipelineState? {
+    guard NativeState.metal4FlexiblePsoEnabled,
+          let key = metal4FlexibleBaseKey(device: device, descriptor: sourceDescriptor) else {
+        return nil
+    }
+
+    NativeState.metal4FlexiblePsoLock.lock()
+    var base = NativeState.metal4FlexiblePsoBases[key]
+    NativeState.metal4FlexiblePsoLock.unlock()
+
+    if base == nil {
+        guard let unspecialized = makeMetal4Descriptor(sourceDescriptor, flexibleColorState: true) else {
+            return nil
+        }
+        let created: MTLRenderPipelineState
+        if let archive = NativeState.metal4LookupArchive as? MTL4Archive {
+            let options = MTL4CompilerTaskOptions()
+            options.lookupArchives = [archive]
+            created = try compiler.makeRenderPipelineState(
+                descriptor: unspecialized,
+                compilerTaskOptions: options
+            )
+        } else {
+            created = try compiler.makeRenderPipelineState(descriptor: unspecialized)
+        }
+        NativeState.metal4FlexiblePsoLock.lock()
+        if let raced = NativeState.metal4FlexiblePsoBases[key] {
+            base = raced
+        } else {
+            NativeState.metal4FlexiblePsoBases[key] = created
+            base = created
+        }
+        NativeState.metal4FlexiblePsoLock.unlock()
+    }
+
+    guard let base,
+          let specialization = base.makeRenderPipelineDescriptorForSpecialization()
+              as? MTL4RenderPipelineDescriptor else {
+        return nil
+    }
+    applyMetal4ColorSpecialization(
+        concrete: concreteDescriptor,
+        specialization: specialization
+    )
+    return try compiler.makeRenderPipelineStateBySpecialization(
+        descriptor: specialization,
+        pipeline: base
+    )
 }
 
 /// Opens (or creates) the on-disk PSO binary archive. Existing file is loaded
@@ -13964,6 +14139,35 @@ private func createRenderPipelineState(
         if let compiler = NativeState.metal4Compiler(device),
            let metal4Descriptor = makeMetal4Descriptor(descriptor) {
             do {
+                // Flexible color state reuses one unspecialized shader/common-state
+                // base across terminal attachment/blend specializations. A failure
+                // is not renderer failure: fall through to this exact direct Metal 4
+                // compile path below.
+                if NativeState.metal4FlexiblePsoEnabled {
+                    do {
+                        if let specialized = try makeMetal4FlexibleRenderPipelineState(
+                            device: device,
+                            sourceDescriptor: descriptor,
+                            concreteDescriptor: metal4Descriptor,
+                            compiler: compiler
+                        ) {
+                            if !NativeState.metal4FlexiblePsoLogged {
+                                NativeState.metal4FlexiblePsoLogged = true
+                                NSLog("[metallum] Metal 4 flexible PSO specialization engaged")
+                            }
+                            return retainedPointer(specialized)
+                        }
+                    } catch {
+                        if !NativeState.metal4FlexiblePsoFallbackLogged {
+                            NativeState.metal4FlexiblePsoFallbackLogged = true
+                            NSLog(
+                                "[metallum] Metal 4 flexible PSO specialization failed; using direct compile: %@",
+                                String(describing: error)
+                            )
+                        }
+                    }
+                }
+
                 // lookupArchives is Metal 4's replacement for
                 // descriptor.binaryArchives: last launch's compiled pipelines
                 // are found here instead of being recompiled. The serializer

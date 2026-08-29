@@ -778,6 +778,12 @@ public final class MetalNativeBridge {
             metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
+            setMetal4FlexiblePsoEnabled = optionalDowncall(
+                    lookup, "metallum_set_metal4_flexible_pso_enabled", FunctionDescriptor.ofVoid(INT)
+            );
+            metal4FlexiblePsoReset = optionalDowncall(
+                    lookup, "metallum_metal4_flexible_pso_reset", FunctionDescriptor.ofVoid()
+            );
             setTerrainIcbEnabled = optionalDowncall(lookup, "metallum_set_terrain_icb_enabled", FunctionDescriptor.ofVoid(INT));
             setTerrainGpuEncodeEnabled = optionalDowncall(lookup, "metallum_set_terrain_gpu_encode_enabled", FunctionDescriptor.ofVoid(INT));
             setTerrainVisibleIcbOptimizeEnabled = optionalDowncall(lookup, "metallum_set_terrain_visible_icb_optimize_enabled", FunctionDescriptor.ofVoid(INT));
@@ -1178,6 +1184,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle metal4MainRendererStats;
     private static final MethodHandle metal4MetalFxStats;
     private static final MethodHandle setMetal4CompilerEnabled;
+    @Nullable
+    private static final MethodHandle setMetal4FlexiblePsoEnabled;
+    @Nullable
+    private static final MethodHandle metal4FlexiblePsoReset;
     @Nullable
     private static final MethodHandle setTerrainIcbEnabled;
     @Nullable
@@ -3686,6 +3696,24 @@ public final class MetalNativeBridge {
             setMetal4CompilerEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_metal4_compiler_enabled", throwable);
+        }
+    }
+
+    public static void metallum_set_metal4_flexible_pso_enabled(final boolean enabled) {
+        if (setMetal4FlexiblePsoEnabled == null) return;
+        try {
+            setMetal4FlexiblePsoEnabled.invokeExact(enabled ? 1 : 0);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_metal4_flexible_pso_enabled", throwable);
+        }
+    }
+
+    public static void metallum_metal4_flexible_pso_reset() {
+        if (metal4FlexiblePsoReset == null) return;
+        try {
+            metal4FlexiblePsoReset.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metal4_flexible_pso_reset", throwable);
         }
     }
 

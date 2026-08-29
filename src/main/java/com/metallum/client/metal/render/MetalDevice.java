@@ -112,6 +112,8 @@ final class MetalDevice implements GpuDeviceBackend {
                     || TerrainSceneSnapshot.ICB_ENABLED
                     || TerrainSceneSnapshot.GPU_ICB_ENABLED
                     || GPU_VISIBILITY_PROBE_METAL4;
+    private static final boolean METAL4_FLEXIBLE_PSO =
+            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4FlexiblePso", "false"));
     /**
      * Runs the frame-generation present thread on a Metal 4 queue (spec M4).
      * Depends on the compiler switch, because the MTL4 frame interpolator is built
@@ -283,6 +285,9 @@ final class MetalDevice implements GpuDeviceBackend {
         // compiler even when its independent pilot switch is absent.
         boolean metal4Compiler = this.metal4Available && (METAL4_COMPILER || metal4MainRenderer);
         MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4Compiler ? 1 : 0);
+        MetalNativeBridge.metallum_set_metal4_flexible_pso_enabled(
+                metal4Compiler && METAL4_FLEXIBLE_PSO
+        );
         // Terrain ICB requires both the Metal 4 capability and an active
         // MTL4Compiler PSO path. Snapshot capture remains enabled when the
         // opt-in is requested, but native execution will fail closed otherwise.
@@ -684,6 +689,10 @@ final class MetalDevice implements GpuDeviceBackend {
             this.pipelineCacheGeneration++;
             this.compiledPipelines.values().forEach(MetalCompiledRenderPipeline::close);
             this.compiledPipelines.clear();
+            // Unspecialized bases retain shader/common-state identity. Drop them
+            // before this generation releases MTLFunction handles so an address
+            // cannot be recycled into a stale base-cache key after resource reload.
+            MetalNativeBridge.metallum_metal4_flexible_pso_reset();
             this.shaderCache.values().forEach(IntermediaryShaderModule::close);
             this.shaderCache.clear();
             for (MemorySegment function : this.functionCache.values()) {
