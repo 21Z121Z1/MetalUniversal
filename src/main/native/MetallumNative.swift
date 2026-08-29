@@ -10465,9 +10465,14 @@ public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
         threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
         threadsPerThreadgroup: threadsPerBlock
     )
+    // The visibility/compaction results can feed either raster stages or a
+    // later GPU-authored ICB compute encoder. This is a queue dependency: the
+    // producer encoder has ended before those consumers begin, so publish the
+    // dispatch writes to every legal downstream stage instead of relying on a
+    // pass-local encoder barrier.
     computeEncoder.barrier(
         afterStages: .dispatch,
-        beforeQueueStages: [.vertex, .fragment],
+        beforeQueueStages: [.vertex, .fragment, .dispatch],
         visibilityOptions: .device
     )
     computeEncoder.endEncoding()
