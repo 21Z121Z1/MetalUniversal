@@ -195,6 +195,8 @@ private enum NativeState {
     // separate cache so first use does not compile four scan/scatter PSOs
     // that the non-diagnostic path never dispatches.
     static var terrainVisibilityOnlyPipelines: [TerrainVisibilityComputePipelineKey: MTLComputePipelineState] = [:]
+    // Persistent-scene visibility uses a distinct entry point but the same device-scoped cache key.
+    static var terrainVisibilityScenePipelines: [TerrainVisibilityComputePipelineKey: MTLComputePipelineState] = [:]
     // Metal 4 frame-generation present pilot (spec M4). Read once when the
     // presenter is constructed; flipping it later has no effect, which matches how
     // the presenter is started.
@@ -9878,6 +9880,19 @@ private func terrainVisibilityMslSource() -> String {
       float reserved;
     };
 
+
+    struct TerrainVisibilitySceneCandidate {
+      int4 sectionBlock;
+      float4 localMinMaxX;
+      float4 localMaxYZRange;
+    };
+
+    struct TerrainVisibilitySceneFrame {
+      float4x4 clipFromCameraRelative;
+      int4 cameraBlock;
+      float4 cameraFraction;
+    };
+
     struct TerrainVisibilityCompactionParams {
       uint candidateCount;
       uint blockCount;
@@ -9920,6 +9935,85 @@ private func terrainVisibilityMslSource() -> String {
         float4 clip[8];
         for (uint corner = 0; corner < 8; ++corner) {
           clip[corner] = (*clipFromCameraRelative) * float4(corners[corner], 1.0f);
+          if (!all(isfinite(clip[corner])) || clip[corner].w <= 0.0f) {
+            uncertain = true;
+            break;
+          }
+        }
+        if (!uncertain) {
+          bool outsideLeft = true;
+          bool outsideRight = true;
+          bool outsideBottom = true;
+          bool outsideTop = true;
+          bool outsideNear = true;
+          bool outsideFar = true;
+          for (uint corner = 0; corner < 8; ++corner) {
+            outsideLeft = outsideLeft && clip[corner].x < -clip[corner].w;
+            outsideRight = outsideRight && clip[corner].x > clip[corner].w;
+            outsideBottom = outsideBottom && clip[corner].y < -clip[corner].w;
+            outsideTop = outsideTop && clip[corner].y > clip[corner].w;
+            outsideNear = outsideNear && clip[corner].z < -clip[corner].w;
+            outsideFar = outsideFar && clip[corner].z > clip[corner].w;
+          }
+          visible = !(outsideLeft || outsideRight || outsideBottom
+                      || outsideTop || outsideNear || outsideFar);
+        }
+      }
+      if (uncertain) {
+        atomic_fetch_add_explicit(&counters[1], 1u, memory_order_relaxed);
+      }
+      if (visible || uncertain) {
+        uint word = candidateIndex >> 5;
+        uint bit = candidateIndex & 31u;
+        atomic_fetch_or_explicit(&visibilityWords[word], 1u << bit, memory_order_relaxed);
+        atomic_fetch_add_explicit(&counters[0], 1u, memory_order_relaxed);
+      }
+    }
+
+
+    // Shipping visible-ICB kernel for generation-owned static scene records.
+    // Large world coordinates remain integer until after camera subtraction;
+    // only the small camera-relative delta is converted to float32.
+    kernel void metallum_terrain_gpu_visibility_scene(
+      device const TerrainVisibilitySceneCandidate *candidates [[buffer(0)]],
+      device const TerrainVisibilitySceneFrame *frame [[buffer(1)]],
+      device atomic_uint *visibilityWords [[buffer(2)]],
+      device atomic_uint *counters [[buffer(3)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint candidateIndex [[thread_position_in_grid]]) {
+      if (candidateIndex >= params.candidateCount) {
+        return;
+      }
+      TerrainVisibilitySceneCandidate candidate = candidates[candidateIndex];
+      int3 blockDelta = candidate.sectionBlock.xyz - frame->cameraBlock.xyz;
+      float3 cameraRelativeBase = float3(blockDelta) - frame->cameraFraction.xyz;
+      float3 localMin = candidate.localMinMaxX.xyz;
+      float3 localMax = float3(candidate.localMinMaxX.w,
+                               candidate.localMaxYZRange.x,
+                               candidate.localMaxYZRange.y);
+      float3 minBounds = cameraRelativeBase + localMin;
+      float3 maxBounds = cameraRelativeBase + localMax;
+      float range = candidate.localMaxYZRange.z;
+      bool uncertain = false;
+      bool visible = true;
+      if (!all(isfinite(minBounds)) || !all(isfinite(maxBounds)) || !isfinite(range)
+          || any(minBounds > maxBounds) || range < 0.0f
+          || !all(isfinite(frame->cameraFraction))) {
+        uncertain = true;
+      } else {
+        float3 corners[8] = {
+          float3(minBounds.x, minBounds.y, minBounds.z),
+          float3(maxBounds.x, minBounds.y, minBounds.z),
+          float3(minBounds.x, maxBounds.y, minBounds.z),
+          float3(maxBounds.x, maxBounds.y, minBounds.z),
+          float3(minBounds.x, minBounds.y, maxBounds.z),
+          float3(maxBounds.x, minBounds.y, maxBounds.z),
+          float3(minBounds.x, maxBounds.y, maxBounds.z),
+          float3(maxBounds.x, maxBounds.y, maxBounds.z)
+        };
+        float4 clip[8];
+        for (uint corner = 0; corner < 8; ++corner) {
+          clip[corner] = frame->clipFromCameraRelative * float4(corners[corner], 1.0f);
           if (!all(isfinite(clip[corner])) || clip[corner].w <= 0.0f) {
             uncertain = true;
             break;
@@ -10140,6 +10234,53 @@ private func terrainVisibilityOnlyPipeline(
 }
 
 @available(macOS 26.0, iOS 26.0, *)
+private func terrainVisibilityScenePipeline(
+    device: MTLDevice,
+    source: String
+) -> MTLComputePipelineState? {
+    let key = TerrainVisibilityComputePipelineKey(deviceAddress: objectAddress(device))
+    NativeState.terrainVisibilityPipelineLock.lock()
+    defer { NativeState.terrainVisibilityPipelineLock.unlock() }
+    if let cached = NativeState.terrainVisibilityScenePipelines[key] {
+        return cached
+    }
+    let pipeline: MTLComputePipelineState? = NativeState.onCompilerThread {
+        do {
+            let library = try device.makeLibrary(source: source, options: nil)
+            guard let visibility = library.makeFunction(name: "metallum_terrain_gpu_visibility_scene") else {
+                return nil
+            }
+            return try device.makeComputePipelineState(function: visibility)
+        } catch {
+            NSLog("[metallum] persistent terrain visibility pipeline failed: %@", String(describing: error))
+            return nil
+        }
+    }
+    if let pipeline {
+        NativeState.terrainVisibilityScenePipelines[key] = pipeline
+    }
+    return pipeline
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private final class TerrainGpuVisibilitySceneOwner {
+    let sceneGeneration: UInt64
+    let candidateCount: Int
+    let candidateBuffer: MTLBuffer
+
+    init(sceneGeneration: UInt64, candidateCount: Int, candidateBuffer: MTLBuffer) {
+        self.sceneGeneration = sceneGeneration
+        self.candidateCount = candidateCount
+        self.candidateBuffer = candidateBuffer
+        residencyTrackCreated(candidateBuffer)
+    }
+
+    deinit {
+        residencyTrackReleased(rawPointer(candidateBuffer))
+    }
+}
+
+@available(macOS 26.0, iOS 26.0, *)
 private final class TerrainGpuVisibilityProbeOwner {
     // Value-only lease identity avoids retaining the lease/context and
     // forming a command-buffer completion cycle. The visible ICB must be
@@ -10150,6 +10291,9 @@ private final class TerrainGpuVisibilityProbeOwner {
     let compactionEnabled: Bool
     let wordCount: Int
     let candidateBuffer: MTLBuffer
+    // A persistent scene owner keeps the shared candidate allocation live across epochs.
+    let sceneOwner: AnyObject?
+    let ownsCandidateBuffer: Bool
     let matrixBuffer: MTLBuffer
     let visibilityBuffer: MTLBuffer
     let countersBuffer: MTLBuffer
@@ -10174,6 +10318,8 @@ private final class TerrainGpuVisibilityProbeOwner {
         compactionEnabled: Bool,
         wordCount: Int,
         candidateBuffer: MTLBuffer,
+        sceneOwner: AnyObject? = nil,
+        ownsCandidateBuffer: Bool = true,
         matrixBuffer: MTLBuffer,
         visibilityBuffer: MTLBuffer,
         countersBuffer: MTLBuffer,
@@ -10194,6 +10340,8 @@ private final class TerrainGpuVisibilityProbeOwner {
         self.compactionEnabled = compactionEnabled
         self.wordCount = wordCount
         self.candidateBuffer = candidateBuffer
+        self.sceneOwner = sceneOwner
+        self.ownsCandidateBuffer = ownsCandidateBuffer
         self.matrixBuffer = matrixBuffer
         self.visibilityBuffer = visibilityBuffer
         self.countersBuffer = countersBuffer
@@ -10207,7 +10355,7 @@ private final class TerrainGpuVisibilityProbeOwner {
         self.paramsBuffer = paramsBuffer
         self.blockCount = blockCount
         self.groupCount = groupCount
-        residencyTrackCreated(candidateBuffer)
+        if ownsCandidateBuffer { residencyTrackCreated(candidateBuffer) }
         residencyTrackCreated(matrixBuffer)
         residencyTrackCreated(visibilityBuffer)
         residencyTrackCreated(countersBuffer)
@@ -10222,7 +10370,7 @@ private final class TerrainGpuVisibilityProbeOwner {
     }
 
     deinit {
-        residencyTrackReleased(rawPointer(candidateBuffer))
+        if ownsCandidateBuffer { residencyTrackReleased(rawPointer(candidateBuffer)) }
         residencyTrackReleased(rawPointer(matrixBuffer))
         residencyTrackReleased(rawPointer(visibilityBuffer))
         residencyTrackReleased(rawPointer(countersBuffer))
@@ -10375,6 +10523,182 @@ private func terrainGpuComputePipeline(
     NativeState.terrainGpuPipelines[key] = pipeline
     NativeState.terrainGpuPipelineCompileCount &+= 1
     return pipeline
+}
+
+/// Creates one camera-independent terrain visibility scene. Java replaces this
+/// owner only when its exact mesh/candidate scene generation changes.
+@available(macOS 26.0, iOS 26.0, *)
+@_cdecl("metallum_MTLDevice_createTerrainGpuVisibilityScene")
+public func metallum_MTLDevice_createTerrainGpuVisibilityScene(
+    _ device: MTLDevice,
+    _ packedCandidates: UnsafePointer<UInt8>?,
+    _ candidateCount: Int32,
+    _ sceneGeneration: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard candidateCount > 0, let packedCandidates,
+          device.supportsFamily(.metal4),
+          candidateCount <= Int32(terrainVisibilityMaxCandidates) else {
+        return nil
+    }
+    let count = Int(candidateCount)
+    guard count <= Int.max / 48 else { return nil }
+    let words = UnsafeRawPointer(packedCandidates).assumingMemoryBound(to: UInt32.self)
+    for index in 0..<count {
+        let base = index * 12
+        let minX = Float(bitPattern: words[base + 4])
+        let minY = Float(bitPattern: words[base + 5])
+        let minZ = Float(bitPattern: words[base + 6])
+        let maxX = Float(bitPattern: words[base + 7])
+        let maxY = Float(bitPattern: words[base + 8])
+        let maxZ = Float(bitPattern: words[base + 9])
+        let range = Float(bitPattern: words[base + 10])
+        guard minX.isFinite, minY.isFinite, minZ.isFinite,
+              maxX.isFinite, maxY.isFinite, maxZ.isFinite, range.isFinite,
+              minX <= maxX, minY <= maxY, minZ <= maxZ, range >= 0 else {
+            return nil
+        }
+    }
+    guard let buffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCandidates),
+        length: count * 48,
+        options: .storageModeShared
+    ) else { return nil }
+    buffer.label = "Metallum Persistent Terrain Visibility Scene"
+    return retainedPointer(TerrainGpuVisibilitySceneOwner(
+        sceneGeneration: sceneGeneration,
+        candidateCount: count,
+        candidateBuffer: buffer
+    ))
+}
+
+/// Dispatches visibility against a generation-owned scene. Only the 96-byte
+/// frame block and per-frame bitset/counters are allocated for each camera epoch.
+@available(macOS 26.0, iOS 26.0, *)
+@_cdecl("metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe")
+public func metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe(
+    _ pointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ scenePointer: UnsafeMutableRawPointer?,
+    _ packedFrame: UnsafePointer<UInt8>?,
+    _ expectedSceneGeneration: UInt64,
+    _ epoch: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard let scenePointer, let packedFrame,
+          let bridge = metal4RenderBridge(pointer),
+          device.supportsFamily(.metal4) else { return nil }
+    let object = Unmanaged<AnyObject>.fromOpaque(scenePointer).takeUnretainedValue()
+    guard let scene = object as? TerrainGpuVisibilitySceneOwner,
+          scene.sceneGeneration == expectedSceneGeneration,
+          scene.candidateCount > 0 else { return nil }
+    let count = scene.candidateCount
+    let frameWords = UnsafeRawPointer(packedFrame).assumingMemoryBound(to: UInt32.self)
+    for index in 0..<16 {
+        guard Float(bitPattern: frameWords[index]).isFinite else { return nil }
+    }
+    for index in 20..<23 {
+        let value = Float(bitPattern: frameWords[index])
+        guard value.isFinite, value >= 0.0, value <= 1.0 else { return nil }
+    }
+    guard count <= Int.max - 31 else { return nil }
+    let wordCount = (count + 31) / 32
+    let blockWidth = 256
+    guard count <= Int.max - (blockWidth - 1) else { return nil }
+    let blockCount = (count + blockWidth - 1) / blockWidth
+    let groupCount = max(1, (blockCount + blockWidth - 1) / blockWidth)
+    guard blockCount > 0,
+          wordCount <= Int.max / MemoryLayout<UInt32>.stride else { return nil }
+
+    guard let frameBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedFrame), length: 96, options: .storageModeShared
+    ), let visibilityBuffer = device.makeBuffer(
+        length: wordCount * MemoryLayout<UInt32>.stride, options: .storageModeShared
+    ), let countersBuffer = device.makeBuffer(
+        length: 2 * MemoryLayout<UInt32>.stride, options: .storageModeShared
+    ), let prefixLocalBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+       let blockSumsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+       let blockOffsetsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+       let groupSumsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+       let groupOffsetsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+       let compactedIndicesBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+       let compactedCountBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+       let paramsBuffer = device.makeBuffer(length: 12, options: .storageModeShared) else {
+        return nil
+    }
+    visibilityBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: wordCount)
+    countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: 2)
+    let params = paramsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+    params[0] = UInt32(count)
+    params[1] = UInt32(blockCount)
+    params[2] = UInt32(groupCount)
+
+    let source = terrainVisibilityMslSource()
+    guard let pipeline = terrainVisibilityScenePipeline(device: device, source: source),
+          pipeline.maxTotalThreadsPerThreadgroup >= blockWidth,
+          let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+        return nil
+    }
+    let descriptor = MTL4ArgumentTableDescriptor()
+    descriptor.maxBufferBindCount = 12
+    descriptor.initializeBindings = true
+    descriptor.supportAttributeStrides = false
+    guard let arguments = try? device.makeArgumentTable(descriptor: descriptor) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    arguments.setAddress(scene.candidateBuffer.gpuAddress, index: 0)
+    arguments.setAddress(frameBuffer.gpuAddress, index: 1)
+    arguments.setAddress(visibilityBuffer.gpuAddress, index: 2)
+    arguments.setAddress(countersBuffer.gpuAddress, index: 3)
+    arguments.setAddress(prefixLocalBuffer.gpuAddress, index: 4)
+    arguments.setAddress(blockSumsBuffer.gpuAddress, index: 5)
+    arguments.setAddress(blockOffsetsBuffer.gpuAddress, index: 6)
+    arguments.setAddress(groupSumsBuffer.gpuAddress, index: 7)
+    arguments.setAddress(groupOffsetsBuffer.gpuAddress, index: 8)
+    arguments.setAddress(compactedIndicesBuffer.gpuAddress, index: 9)
+    arguments.setAddress(compactedCountBuffer.gpuAddress, index: 10)
+    arguments.setAddress(paramsBuffer.gpuAddress, index: 11)
+    computeEncoder.setArgumentTable(arguments)
+    computeEncoder.setComputePipelineState(pipeline)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: blockWidth, height: 1, depth: 1)
+    )
+    computeEncoder.barrier(
+        afterStages: .dispatch,
+        beforeQueueStages: [.vertex, .fragment, .dispatch],
+        visibilityOptions: .device
+    )
+    computeEncoder.endEncoding()
+
+    let owner = TerrainGpuVisibilityProbeOwner(
+        leaseIdentity: ObjectIdentifier(bridge.lease),
+        epoch: epoch,
+        candidateCount: count,
+        compactionEnabled: false,
+        wordCount: wordCount,
+        candidateBuffer: scene.candidateBuffer,
+        sceneOwner: scene,
+        ownsCandidateBuffer: false,
+        matrixBuffer: frameBuffer,
+        visibilityBuffer: visibilityBuffer,
+        countersBuffer: countersBuffer,
+        prefixLocalBuffer: prefixLocalBuffer,
+        blockSumsBuffer: blockSumsBuffer,
+        blockOffsetsBuffer: blockOffsetsBuffer,
+        groupSumsBuffer: groupSumsBuffer,
+        groupOffsetsBuffer: groupOffsetsBuffer,
+        compactedIndicesBuffer: compactedIndicesBuffer,
+        compactedCountBuffer: compactedCountBuffer,
+        paramsBuffer: paramsBuffer,
+        blockCount: blockCount,
+        groupCount: groupCount
+    )
+    bridge.lease.addCompletionHandler { [owner] error, _, _ in
+        owner.complete(error: error)
+    }
+    return retainedPointer(owner)
 }
 
 /// Dispatches the value-only visibility probe into the current Metal 4 main
