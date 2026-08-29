@@ -52,6 +52,11 @@ final class MetalRenderPass implements RenderPassBackend {
     private final RenderPass.RenderArea renderArea;
     @Nullable
     private Vector4fc[] clearColors;
+    @Nullable
+    private final int[] explicitColorLoadActions;
+    @Nullable
+    private final int[] explicitColorStoreActions;
+    private boolean explicitColorActionsConsumed;
     private boolean clearDepthEnabled;
     private final double clearDepthValue;
     private final long contractPassToken;
@@ -103,6 +108,8 @@ final class MetalRenderPass implements RenderPassBackend {
             @Nullable final GpuTextureView depthTexture,
             final RenderPass.RenderArea renderArea,
             @Nullable final Vector4fc[] clearColors,
+            @Nullable final int[] explicitColorLoadActions,
+            @Nullable final int[] explicitColorStoreActions,
             final boolean clearDepthEnabled,
             final double clearDepthValue,
             final long contractPassToken
@@ -122,6 +129,10 @@ final class MetalRenderPass implements RenderPassBackend {
         this.depthTexture = depthTexture;
         this.renderArea = renderArea;
         this.clearColors = clearColors == null ? null : clearColors.clone();
+        this.explicitColorLoadActions = explicitColorLoadActions == null
+                ? null : explicitColorLoadActions.clone();
+        this.explicitColorStoreActions = explicitColorStoreActions == null
+                ? null : explicitColorStoreActions.clone();
         this.clearDepthEnabled = clearDepthEnabled;
         this.clearDepthValue = clearDepthValue;
         this.contractPassToken = contractPassToken;
@@ -1056,6 +1067,11 @@ final class MetalRenderPass implements RenderPassBackend {
         MetalGpuTextureView depthTextureView = depthTexture == null ? null : (MetalGpuTextureView) depthTexture;
         boolean clearDepthNow = clearDepthEnabled;
         GpuTextureView extent = extentTexture();
+        if (this.explicitColorActionsConsumed) {
+            throw new IllegalStateException(
+                    "Render pass with explicit attachment actions cannot reopen its native encoder"
+            );
+        }
         MTLRenderCommandEncoder encoder = commandEncoder.renderCommandEncoder(
                 colorTextureViews,
                 depthTextureView,
@@ -1065,8 +1081,13 @@ final class MetalRenderPass implements RenderPassBackend {
                 clearColorValues,
                 clearDepthNow,
                 clearDepthValue,
-                label == null ? "unlabeled render pass" : label
+                label == null ? "unlabeled render pass" : label,
+                this.explicitColorLoadActions,
+                this.explicitColorStoreActions
         );
+        if (this.explicitColorLoadActions != null) {
+            this.explicitColorActionsConsumed = true;
+        }
         nativeEncoder = encoder;
         clearColors = null;
         clearDepthEnabled = false;

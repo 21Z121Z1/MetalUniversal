@@ -136,6 +136,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
     }
 
+    static boolean explicitColorActionsAvailable() {
+        return renderPassDescriptorV3Active();
+    }
+
     private final Long2ObjectOpenHashMap<java.util.ArrayDeque<MemorySegment>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
     private static final int MAX_POOLED_DYNAMIC_BACKINGS_PER_SIZE = 8;
     private final List<SubmitCallback> currentSubmitCallbacks = new ArrayList<>();
@@ -515,14 +519,42 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final double clearDepthValue,
             final String label
     ) {
+        return renderCommandEncoder(
+                colorTextureViews, depthTextureView, viewportWidth, viewportHeight,
+                clearColorEnabled, clearColorValues, clearDepthEnabled, clearDepthValue,
+                label, null, null
+        );
+    }
+
+    MTLRenderCommandEncoder renderCommandEncoder(
+            final MetalGpuTextureView[] colorTextureViews,
+            @Nullable final MetalGpuTextureView depthTextureView,
+            final int viewportWidth,
+            final int viewportHeight,
+            final int[] clearColorEnabled,
+            final float[] clearColorValues,
+            final boolean clearDepthEnabled,
+            final double clearDepthValue,
+            final String label,
+            final int @Nullable [] explicitColorLoadActions,
+            final int @Nullable [] explicitColorStoreActions
+    ) {
         if (colorTextureViews == null || colorTextureViews.length > Math.min(
                 com.mojang.blaze3d.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
                 device.getDeviceInfo().limits().maxColorAttachments()
         )
                 || clearColorEnabled == null || clearColorValues == null
                 || clearColorEnabled.length != colorTextureViews.length
-                || clearColorValues.length != colorTextureViews.length * 4) {
+                || clearColorValues.length != colorTextureViews.length * 4
+                || (explicitColorLoadActions == null) != (explicitColorStoreActions == null)
+                || (explicitColorLoadActions != null
+                && (explicitColorLoadActions.length != colorTextureViews.length
+                || explicitColorStoreActions.length != colorTextureViews.length))) {
             throw new IllegalArgumentException("Invalid Metal MRT attachment arrays");
+        }
+        boolean explicitColorActions = explicitColorLoadActions != null;
+        if (explicitColorActions && !renderPassDescriptorV3Active()) {
+            throw new IllegalStateException("Explicit color attachment actions require render-pass ABI V3");
         }
 
         RenderGraphTelemetry.onPassRequested(label);
@@ -537,7 +569,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         boolean sameAttachments = currentEncoder instanceof MTLRenderCommandEncoder
                 && sameAttachmentHandles(renderColorAttachments, colorAttachments)
                 && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment);
-        if (sameAttachments && !clearDepthEnabled && !hasClearColor(clearColorEnabled)) {
+        if (sameAttachments && !explicitColorActions
+                && !clearDepthEnabled && !hasClearColor(clearColorEnabled)) {
             RenderGraphTelemetry.onEncoderReused(label);
             return (MTLRenderCommandEncoder) currentEncoder;
         }
@@ -582,12 +615,24 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             int[] colorLoadActions = new int[slotCount];
             int[] colorStoreActions = new int[slotCount];
             for (int index = 0; index < slotCount; index++) {
+                int requestedLoad = explicitColorActions ? explicitColorLoadActions[index] : -1;
+                int requestedStore = explicitColorActions ? explicitColorStoreActions[index] : -1;
+                if (requestedLoad < -1 || requestedLoad > 2 || requestedStore < -1 || requestedStore > 2) {
+                    throw new IllegalArgumentException("Invalid explicit Metal attachment action at slot " + index);
+                }
                 if (colorTextureViews[index] == null) {
+                    if (requestedLoad > 0 || requestedStore > 0) {
+                        throw new IllegalArgumentException("Unused color slot cannot request load/store");
+                    }
                     colorLoadActions[index] = 0;
                     colorStoreActions[index] = 0;
                 } else {
-                    colorLoadActions[index] = clearColorEnabled[index] != 0 ? 2 : 1;
-                    colorStoreActions[index] = deferredColorStoreActive() ? 2 : 1;
+                    colorLoadActions[index] = requestedLoad >= 0
+                            ? requestedLoad
+                            : clearColorEnabled[index] != 0 ? 2 : 1;
+                    colorStoreActions[index] = requestedStore >= 0
+                            ? requestedStore
+                            : deferredColorStoreActive() ? 2 : 1;
                 }
             }
             encoder = commandBuffer().makeRenderCommandEncoderV3(
@@ -737,6 +782,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     @Override
     public @NonNull RenderPassBackend createRenderPass(final RenderPassDescriptor descriptor) {
+        return createRenderPass(descriptor, null, null);
+    }
+
+    MetalRenderPass createRenderPass(
+            final RenderPassDescriptor descriptor,
+            final int @Nullable [] explicitColorLoadActions,
+            final int @Nullable [] explicitColorStoreActions
+    ) {
         List<RenderPassDescriptor.Attachment<Optional<Vector4fc>>> colorAttachments = descriptor.colorAttachments();
         int maxColorAttachments = Math.min(
                 com.mojang.blaze3d.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
@@ -747,6 +800,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     "Metal render pass has " + colorAttachments.size()
                             + " color slots but the backend limit is " + maxColorAttachments
             );
+        }
+        if ((explicitColorLoadActions == null) != (explicitColorStoreActions == null)
+                || (explicitColorLoadActions != null
+                && (explicitColorLoadActions.length != colorAttachments.size()
+                || explicitColorStoreActions.length != colorAttachments.size()))) {
+            throw new IllegalArgumentException("Explicit attachment actions must match color slots");
         }
         RenderPassDescriptor.Attachment<OptionalDouble> depthAttachment = descriptor.depthAttachment();
         if (colorAttachments.isEmpty() && depthAttachment == null) {
@@ -860,6 +919,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 depthTexture,
                 renderArea,
                 hasColorClear ? clearColors : null,
+                explicitColorLoadActions,
+                explicitColorStoreActions,
                 depthClear.isPresent(),
                 depthClear.isPresent()
                         ? MetalIrisDepthConvention.hardwareClear(depthClear.getAsDouble())
