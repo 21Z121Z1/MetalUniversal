@@ -1,0 +1,35 @@
+name: codex/memoryless-replay
+
+on:
+  push:
+    branches:
+      - codex/placement-heap-integration-staging-20260830
+    paths:
+      - .github/workflows/codex-memoryless-replay.yml
+
+permissions:
+  contents: write
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/placement-heap-integration-staging-20260830
+      - name: Replay constrained memoryless allocation seam
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git cherry-pick -x d86eb8368dcd5a247b10d76e945cad7742497c93
+      - name: Remove one-shot workflow and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/codex-memoryless-replay.yml
+          git commit -m "chore(ci): remove memoryless replay helper"
+          git push origin HEAD:codex/placement-heap-integration-staging-20260830
