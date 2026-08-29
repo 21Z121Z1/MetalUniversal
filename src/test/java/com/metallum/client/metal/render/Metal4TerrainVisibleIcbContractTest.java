@@ -81,4 +81,14 @@ final class Metal4TerrainVisibleIcbContractTest {
         assertTrue(probeSource.contains("if (ORACLE_ENABLED) { compactionDispatchCount++; }"));
     }
 
+    @Test
+    void visibleOnlyProbeCompilesOnlyItsConsumedPso() throws IOException {
+        String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+        assertTrue(nativeSource.contains("terrainVisibilityOnlyPipelines"));
+        assertTrue(nativeSource.contains("private func terrainVisibilityOnlyPipeline("));
+        assertTrue(nativeSource.contains("visibilityPipeline = pipeline"));
+        assertTrue(nativeSource.contains("compactionPipelines = nil"));
+        assertTrue(nativeSource.contains("if let pipeline = compactionPipelines {"));
+    }
+
 }
