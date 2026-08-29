@@ -20,6 +20,17 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
+      - name: Disambiguate duplicate owner reset anchors
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("src/main/java/com/metallum/client/metal/render/TerrainIcbOwner.java")
+          text = path.read_text()
+          old = """            content = null;\n            gpuAuthored = false;\n        }\n        device = currentDevice;\n"""
+          new = """            content = null;\n            gpuAuthored = false;\n            visibilityEpoch = -1L;\n        }\n        device = currentDevice;\n"""
+          if text.count(old) != 2:
+              raise SystemExit(f"expected two device-reset anchors, found {text.count(old)}")
+          path.write_text(text.replace(old, new, 1))
       - name: Apply visible GPU ICB modernization
         run: python3 .github/ci/apply_terrain_visible_gpu_icb.py
       - name: Focused Java contracts
