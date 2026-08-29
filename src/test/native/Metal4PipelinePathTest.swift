@@ -1159,6 +1159,33 @@ private func runTerrainGpuVisibleIcbReadbackTest(
         try fail("could not allocate uint32 terrain visible ICB index buffer")
     }
 
+    // Exercise the persistent-scene retain ABI independently of fused ICB
+    // execution. The scene handle is borrowed for the typed retain call, and
+    // both the original Java-style owner and its short-lived transition retain
+    // are released exactly once below.
+    let sceneWords: [UInt32] = [
+        0, 0, 0, 0,
+        Float(-0.5).bitPattern, Float(-0.5).bitPattern, Float(-0.5).bitPattern,
+        Float(0.5).bitPattern, Float(0.5).bitPattern, Float(0.5).bitPattern,
+        Float(0.5).bitPattern, 0
+    ]
+    guard let scene = sceneWords.withUnsafeBufferPointer({ words in
+        metallum_MTLDevice_createTerrainGpuVisibilityScene(
+            device,
+            UnsafeRawPointer(words.baseAddress!).assumingMemoryBound(to: UInt8.self),
+            1,
+            9000
+        )
+    }) else {
+        try fail("could not create persistent terrain visibility scene")
+    }
+    guard let retainedScene = metallum_terrain_visibility_scene_retain(scene) else {
+        metallum_release_object(scene)
+        try fail("could not retain persistent terrain visibility scene")
+    }
+    metallum_release_object(scene)
+    metallum_release_object(retainedScene)
+
     func runCase(
         label: String,
         visibleIndices: Set<Int>,
@@ -1206,6 +1233,10 @@ private func runTerrainGpuVisibleIcbReadbackTest(
         guard let probe else {
             try fail("could not create \(label) visibility owner")
         }
+        guard let retainedProbe = metallum_terrain_visibility_probe_retain(probe) else {
+            metallum_release_object(probe)
+            try fail("could not retain \(label) visibility owner for ICB authoring")
+        }
 
         // Source order is deliberately [candidate 7, candidate 2, candidate 7].
         // Candidate indices are lookup keys only; source ordinals remain ICB slots.
@@ -1219,14 +1250,23 @@ private func runTerrainGpuVisibleIcbReadbackTest(
             candidateBySource.withUnsafeBufferPointer { mapping in
                 metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
                     producer, device, .triangle, indexType, indexBuffer, pipeline,
-                    draws.baseAddress, mapping.baseAddress, 3, probe, 9000
+                    draws.baseAddress, mapping.baseAddress, 3, retainedProbe, 9000
                 )
             }
         }
         guard let resident else {
             metallum_release_object(probe)
+            metallum_release_object(retainedProbe)
             try fail("could not create \(label) sparse visible ICB")
         }
+
+        // A GPU-authored owner is scoped to both the creating lease and the
+        // exact source command range. These rejection checks return before
+        // touching the render encoder, so they are safe on this ended bridge.
+        try check(
+            metallum_MTLRenderCommandEncoder_executeTerrainIcb(producer, resident, 2) == 0,
+            "\(label) accepted a wrong GPU-authored ICB draw count"
+        )
 
         if testCrossLease {
             guard let otherCommandBuffer = (label + " wrong lease").withCString({ name in
@@ -1236,6 +1276,7 @@ private func runTerrainGpuVisibleIcbReadbackTest(
             ) else {
                 metallum_release_object(resident)
                 metallum_release_object(probe)
+                metallum_release_object(retainedProbe)
                 try fail("could not allocate \(label) cross-lease rejection fixture")
             }
             metallum_MTLRenderCommandEncoder_setRenderPipelineState(wrongEncoder, pipeline)
@@ -1244,12 +1285,16 @@ private func runTerrainGpuVisibleIcbReadbackTest(
                 candidateBySource.withUnsafeBufferPointer { mapping in
                     metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
                         wrongEncoder, device, .triangle, indexType, indexBuffer, pipeline,
-                        draws.baseAddress, mapping.baseAddress, 3, probe, 9000
+                        draws.baseAddress, mapping.baseAddress, 3, retainedProbe, 9000
                     )
                 }
             }
             try check(rejected == nil, "\(label) accepted a different command-buffer lease")
             if let rejected { metallum_release_object(rejected) }
+            try check(
+                metallum_MTLRenderCommandEncoder_executeTerrainIcb(wrongEncoder, resident, 3) == 0,
+                "\(label) executed a GPU-authored ICB from a different command-buffer lease"
+            )
             metallum_release_object(wrongEncoder)
             metallum_release_object(otherCommandBuffer)
         }
@@ -1257,6 +1302,7 @@ private func runTerrainGpuVisibleIcbReadbackTest(
         // Drop the external probe reference before execute. The visible ICB
         // owner must retain the probe-backed visibility buffer through completion.
         metallum_release_object(probe)
+        metallum_release_object(retainedProbe)
         guard let consumer = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
             commandBuffer, target, nil, 8, 8, 0, 0, 0, 0, 1, 0, 1
         ) else {

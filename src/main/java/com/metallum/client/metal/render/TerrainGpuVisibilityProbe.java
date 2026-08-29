@@ -69,7 +69,8 @@ public final class TerrainGpuVisibilityProbe {
         }
     }
 
-    static boolean inTerrainDrawScope() {
+    /** True while Sodium is issuing the bounded terrain indirect submission. */
+    public static boolean inTerrainDrawScope() {
         return ENABLED && Boolean.TRUE.equals(TERRAIN_DRAW_SCOPE.get());
     }
 
@@ -249,8 +250,10 @@ public final class TerrainGpuVisibilityProbe {
 
     /**
      * Returns the unique in-flight native probe owner for this exact producer
-     * epoch. This never polls or copies GPU results to the CPU; the returned
-     * pointer is borrowed while PENDING owns the Java-side retain.
+     * epoch. This never polls or copies GPU results to the CPU. The lookup is
+     * synchronized with reset/release, then the typed native retain is made
+     * while {@link #LOCK} is held; the returned temporary handle is owned by
+     * the caller and must be released exactly once after native ICB authoring.
      */
     static MemorySegment ownerForEpoch(final long epoch, final int expectedCandidateCount) {
         if (!ENABLED || epoch < 0L || expectedCandidateCount <= 0) {
@@ -268,14 +271,16 @@ public final class TerrainGpuVisibilityProbe {
                 }
                 found = pending.probe();
             }
-            return found;
+            return MetalNativeBridge.terrainVisibilityProbeRetain(found);
         }
     }
 
     /**
-     * Borrows the exact generation-owned scene for fused ICB authoring.
-     * The returned pointer remains Java-retained by this runtime; the native
-     * ICB owner takes a strong reference to the scene before this call returns.
+     * Returns an owned temporary handle to the exact generation-owned scene
+     * for fused ICB authoring. The typed retain is made while {@link #LOCK} is
+     * held, so reset cannot release the scene between lookup and retain. The
+     * caller must release this temporary exactly once after native authoring;
+     * the native ICB owner takes its own strong reference before then.
      */
     static MemorySegment persistentSceneForFused(
             final TerrainCandidateSnapshot snapshot,
@@ -291,9 +296,11 @@ public final class TerrainGpuVisibilityProbe {
                 if (!ensurePersistentSceneLocked(snapshot, device, arena)) {
                     return MemorySegment.NULL;
                 }
-                return persistentSceneGeneration == snapshot.sceneGeneration()
-                        && persistentSceneCandidateCount == snapshot.candidates().size()
-                        ? persistentSceneOwner : MemorySegment.NULL;
+                if (persistentSceneGeneration != snapshot.sceneGeneration()
+                        || persistentSceneCandidateCount != snapshot.candidates().size()) {
+                    return MemorySegment.NULL;
+                }
+                return MetalNativeBridge.terrainVisibilitySceneRetain(persistentSceneOwner);
             } catch (RuntimeException failure) {
                 return MemorySegment.NULL;
             }

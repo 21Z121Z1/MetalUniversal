@@ -9740,6 +9740,12 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
 @available(macOS 26.0, iOS 26.0, *)
 private final class TerrainGpuIcbOwner {
     let commandBuffer: MTLIndirectCommandBuffer
+    // Keep the exact main-queue lease that authored this GPU ICB alive until
+    // the Java owner releases it.  The lease identity is also the execution
+    // domain: a command buffer must not execute an ICB authored by another
+    // in-flight slot.
+    let lease: Metal4MainCommandBufferLease
+    let commandCount: Int
     // Keep the immutable producer records alive until the command buffer
     // completes. MTL4 argument tables bind addresses/resource IDs, not ARC
     // ownership, so this retention is part of the producer-owned handle.
@@ -9752,6 +9758,8 @@ private final class TerrainGpuIcbOwner {
 
     init(
         commandBuffer: MTLIndirectCommandBuffer,
+        lease: Metal4MainCommandBufferLease,
+        commandCount: Int,
         packedCommands: MTLBuffer,
         argumentBuffer: MTLBuffer,
         indexBuffer: MTLBuffer,
@@ -9760,6 +9768,8 @@ private final class TerrainGpuIcbOwner {
         visibilityOwner: AnyObject? = nil
     ) {
         self.commandBuffer = commandBuffer
+        self.lease = lease
+        self.commandCount = commandCount
         self.packedCommands = packedCommands
         self.argumentBuffer = argumentBuffer
         self.indexBuffer = indexBuffer
@@ -10714,6 +10724,34 @@ private final class TerrainGpuVisibilityProbeOwner {
     }
 }
 
+/// Retains one typed visibility-probe owner for a short Java-side transition.
+/// The input is borrowed; the returned pointer carries exactly one ownership
+/// retain and must be released with metallum_release_object.
+@available(macOS 26.0, iOS 26.0, *)
+@_cdecl("metallum_terrain_visibility_probe_retain")
+public func metallum_terrain_visibility_probe_retain(
+    _ pointer: UnsafeMutableRawPointer?
+) -> UnsafeMutableRawPointer? {
+    guard let pointer else { return nil }
+    let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+    guard let owner = object as? TerrainGpuVisibilityProbeOwner else { return nil }
+    return retainedPointer(owner)
+}
+
+/// Retains one typed persistent-scene owner for a short Java-side transition.
+/// The input is borrowed; the returned pointer carries exactly one ownership
+/// retain and must be released with metallum_release_object.
+@available(macOS 26.0, iOS 26.0, *)
+@_cdecl("metallum_terrain_visibility_scene_retain")
+public func metallum_terrain_visibility_scene_retain(
+    _ pointer: UnsafeMutableRawPointer?
+) -> UnsafeMutableRawPointer? {
+    guard let pointer else { return nil }
+    let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+    guard let owner = object as? TerrainGpuVisibilitySceneOwner else { return nil }
+    return retainedPointer(owner)
+}
+
 @available(macOS 26.0, iOS 26.0, *)
 private func terrainGpuComputePipeline(
     device: MTLDevice,
@@ -11395,6 +11433,8 @@ public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
 
     let owner = TerrainGpuIcbOwner(
         commandBuffer: commandBuffer,
+        lease: bridge.lease,
+        commandCount: commandCount,
         packedCommands: packedBuffer,
         argumentBuffer: argumentBuffer,
         indexBuffer: indexBuffer,
@@ -11556,6 +11596,8 @@ public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
 
     let owner = TerrainGpuIcbOwner(
         commandBuffer: commandBuffer,
+        lease: bridge.lease,
+        commandCount: commandCount,
         packedCommands: packedBuffer,
         argumentBuffer: argumentBuffer,
         indexBuffer: indexBuffer,
@@ -11717,6 +11759,8 @@ public func metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
 
     let owner = TerrainGpuIcbOwner(
         commandBuffer: commandBuffer,
+        lease: bridge.lease,
+        commandCount: commandCount,
         packedCommands: packedBuffer,
         argumentBuffer: argumentBuffer,
         indexBuffer: indexBuffer,
@@ -11747,6 +11791,14 @@ public func metallum_MTLRenderCommandEncoder_executeTerrainIcb(
     let indirectCommandBuffer: MTLIndirectCommandBuffer
     let object = Unmanaged<AnyObject>.fromOpaque(indirectCommandBufferPointer).takeUnretainedValue()
     if let owner = object as? TerrainGpuIcbOwner {
+        // GPU-authored ICBs are scoped to the exact Metal 4 main-queue lease
+        // that produced them.  Also require the complete source range: a
+        // shorter execute would silently omit source-ordinal slots, while a
+        // longer one would address outside the encoded command buffer.
+        guard owner.lease === bridge.lease,
+              Int(drawCount) == owner.commandCount else {
+            return 0
+        }
         indirectCommandBuffer = owner.commandBuffer
     } else if let raw = object as? MTLIndirectCommandBuffer {
         indirectCommandBuffer = raw

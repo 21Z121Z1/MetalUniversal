@@ -539,6 +539,16 @@ public final class MetalNativeBridge {
                             LONG
                     )
             );
+            TerrainVisibilityProbeRetain = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_terrain_visibility_probe_retain",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            TerrainVisibilitySceneRetain = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_terrain_visibility_scene_retain",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
             TerrainVisibilityProbePoll = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_terrain_visibility_probe_poll_v2",
@@ -1097,6 +1107,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilitySceneProbe;
     @Nullable
     private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilityProbe;
+    @Nullable
+    private static final MethodHandle TerrainVisibilityProbeRetain;
+    @Nullable
+    private static final MethodHandle TerrainVisibilitySceneRetain;
     @Nullable
     private static final MethodHandle TerrainVisibilityProbePoll;
     @Nullable
@@ -2805,7 +2819,8 @@ public final class MetalNativeBridge {
 
     public static boolean terrainFusedVisibleGpuIcbAvailable() {
         return MTLDeviceCreateTerrainFusedVisibleGpuIndexedIcb != null
-                && MTLDeviceCreateTerrainGpuVisibilityScene != null;
+                && MTLDeviceCreateTerrainGpuVisibilityScene != null
+                && TerrainVisibilitySceneRetain != null;
     }
 
     /** Fuses persistent-scene frustum testing and source-ordinal ICB authoring. */
@@ -2843,7 +2858,50 @@ public final class MetalNativeBridge {
     public static boolean terrainPersistentVisibilitySceneAvailable() {
         return MTLDeviceCreateTerrainGpuVisibilityScene != null
                 && MTLDeviceCreateTerrainGpuVisibilitySceneProbe != null
+                && TerrainVisibilitySceneRetain != null
                 && TerrainVisibilityProbeStatus != null;
+    }
+
+    /** True when the typed probe-owner retain ABI is available. */
+    public static boolean terrainVisibilityProbeRetainAvailable() {
+        return TerrainVisibilityProbeRetain != null;
+    }
+
+    /** True when the typed persistent-scene retain ABI is available. */
+    public static boolean terrainVisibilitySceneRetainAvailable() {
+        return TerrainVisibilitySceneRetain != null;
+    }
+
+    /**
+     * Retains a borrowed visibility-probe owner for one short Java/native
+     * transition. The returned handle is owned by the caller and must be
+     * released exactly once with {@link #metallum_release_object(MemorySegment)}.
+     */
+    public static MemorySegment terrainVisibilityProbeRetain(final MemorySegment probe) {
+        if (TerrainVisibilityProbeRetain == null || isNullHandle(probe)) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) TerrainVisibilityProbeRetain.invokeExact(segment(probe));
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    /**
+     * Retains a borrowed persistent-scene owner for one short Java/native
+     * transition. The returned handle is owned by the caller and must be
+     * released exactly once with {@link #metallum_release_object(MemorySegment)}.
+     */
+    public static MemorySegment terrainVisibilitySceneRetain(final MemorySegment scene) {
+        if (TerrainVisibilitySceneRetain == null || isNullHandle(scene)) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) TerrainVisibilitySceneRetain.invokeExact(segment(scene));
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
     }
 
     public static MemorySegment MTLDevice_createTerrainGpuVisibilityProbe(
@@ -2873,7 +2931,8 @@ public final class MetalNativeBridge {
 
     public static boolean terrainVisibilityProbeAvailable() {
         return MTLDeviceCreateTerrainGpuVisibilityProbe != null
-                && TerrainVisibilityProbePoll != null;
+                && TerrainVisibilityProbePoll != null
+                && TerrainVisibilityProbeRetain != null;
     }
 
     /** True when visible-only terrain completion can avoid GPU-result readback. */

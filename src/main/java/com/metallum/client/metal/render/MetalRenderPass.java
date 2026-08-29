@@ -83,6 +83,18 @@ final class MetalRenderPass implements RenderPassBackend {
     private final long cpuTimingStartNanos = System.nanoTime();
     private boolean cpuTimingRecorded;
 
+    /**
+     * Prepares the live terrain encoder for the visibility producer. Kept as a
+     * render-pass method so the allocation-free no-trace mixin can invoke the
+     * same encoder transition without exposing package-private backend types.
+     */
+    void prepareTerrainDrawForVisibility() {
+        renderEncoder();
+        if (TerrainGpuVisibilityProbe.beforeTerrainDraw(device, commandEncoder)) {
+            bindDrawState(renderEncoder());
+        }
+    }
+
     MetalRenderPass(
             final MetalDevice device,
             final MetalCommandEncoder encoder,
@@ -486,10 +498,68 @@ final class MetalRenderPass implements RenderPassBackend {
                                 candidates, device
                         );
                         if (!MetalNativeBridge.isNullHandle(sceneOwner)) {
+                            try {
+                                MemorySegment retainedEncoder = commandEncoder.endEncoderForTerrainGpuAuthoring();
+                                try {
+                                    if (!MetalNativeBridge.isNullHandle(retainedEncoder)
+                                            && owner.encodeFusedVisibleGpu(
+                                            device,
+                                            retainedEncoder,
+                                            primitiveType,
+                                            indexType,
+                                            indexHandle,
+                                            pipelineHandle,
+                                            snapshot,
+                                            candidates,
+                                            visiblePlan,
+                                            sceneOwner,
+                                            drawCount
+                                    )) {
+                                        MTLRenderCommandEncoder reopened = renderEncoder();
+                                        bindDrawState(reopened);
+                                        if (owner.execute(
+                                                device,
+                                                reopened,
+                                                primitiveType,
+                                                indexType,
+                                                indexHandle,
+                                                pipelineHandle,
+                                                snapshot,
+                                                drawCount
+                                        )) {
+                                            return true;
+                                        }
+                                    }
+                                } finally {
+                                    if (!MetalNativeBridge.isNullHandle(retainedEncoder)) {
+                                        MetalNativeBridge.metallum_release_object(retainedEncoder);
+                                    }
+                                }
+                            } finally {
+                                // persistentSceneForFused returns an owned
+                                // temporary retain; the native ICB owner has
+                                // its own strong scene reference after a
+                                // successful factory call.
+                                MetalNativeBridge.metallum_release_object(sceneOwner);
+                            }
+                            owner.invalidateVisibilityAuthored();
+                            enc = renderEncoder();
+                            bindDrawState(enc);
+                        }
+                    }
+
+                    // Diagnostic/two-stage lane remains available. In fused-only
+                    // shipping mode no probe owner exists, so this naturally
+                    // skips without allocating or reading an intermediate bitset.
+                    MemorySegment visibilityOwner = TerrainGpuVisibilityProbe.ownerForEpoch(
+                            visiblePlan.candidateEpoch(), visiblePlan.candidateCount()
+                    );
+                    if (!MetalNativeBridge.isNullHandle(visibilityOwner)) {
+                        try {
                             MemorySegment retainedEncoder = commandEncoder.endEncoderForTerrainGpuAuthoring();
                             try {
                                 if (!MetalNativeBridge.isNullHandle(retainedEncoder)
-                                        && owner.encodeFusedVisibleGpu(
+                                        && owner.encodeVisibleGpu(
                                         device,
                                         retainedEncoder,
                                         primitiveType,
@@ -497,9 +567,8 @@ final class MetalRenderPass implements RenderPassBackend {
                                         indexHandle,
                                         pipelineHandle,
                                         snapshot,
-                                        candidates,
                                         visiblePlan,
-                                        sceneOwner,
+                                        visibilityOwner,
                                         drawCount
                                 )) {
                                     MTLRenderCommandEncoder reopened = renderEncoder();
@@ -522,53 +591,11 @@ final class MetalRenderPass implements RenderPassBackend {
                                     MetalNativeBridge.metallum_release_object(retainedEncoder);
                                 }
                             }
-                            owner.invalidateVisibilityAuthored();
-                            enc = renderEncoder();
-                            bindDrawState(enc);
-                        }
-                    }
-
-                    // Diagnostic/two-stage lane remains available. In fused-only
-                    // shipping mode no probe owner exists, so this naturally
-                    // skips without allocating or reading an intermediate bitset.
-                    MemorySegment visibilityOwner = TerrainGpuVisibilityProbe.ownerForEpoch(
-                            visiblePlan.candidateEpoch(), visiblePlan.candidateCount()
-                    );
-                    if (!MetalNativeBridge.isNullHandle(visibilityOwner)) {
-                        MemorySegment retainedEncoder = commandEncoder.endEncoderForTerrainGpuAuthoring();
-                        try {
-                            if (!MetalNativeBridge.isNullHandle(retainedEncoder)
-                                    && owner.encodeVisibleGpu(
-                                    device,
-                                    retainedEncoder,
-                                    primitiveType,
-                                    indexType,
-                                    indexHandle,
-                                    pipelineHandle,
-                                    snapshot,
-                                    visiblePlan,
-                                    visibilityOwner,
-                                    drawCount
-                            )) {
-                                MTLRenderCommandEncoder reopened = renderEncoder();
-                                bindDrawState(reopened);
-                                if (owner.execute(
-                                        device,
-                                        reopened,
-                                        primitiveType,
-                                        indexType,
-                                        indexHandle,
-                                        pipelineHandle,
-                                        snapshot,
-                                        drawCount
-                                )) {
-                                    return true;
-                                }
-                            }
                         } finally {
-                            if (!MetalNativeBridge.isNullHandle(retainedEncoder)) {
-                                MetalNativeBridge.metallum_release_object(retainedEncoder);
-                            }
+                            // ownerForEpoch returns an owned temporary probe
+                            // retain; the visible ICB owner retains the probe
+                            // independently once its factory succeeds.
+                            MetalNativeBridge.metallum_release_object(visibilityOwner);
                         }
                         // A visible attempt owns epoch-specific state. Never let
                         // a failed execute leave that mask reusable as immutable
