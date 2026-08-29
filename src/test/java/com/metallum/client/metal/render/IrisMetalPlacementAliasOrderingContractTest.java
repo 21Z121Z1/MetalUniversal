@@ -27,7 +27,11 @@ final class IrisMetalPlacementAliasOrderingContractTest {
         assertTrue(encoder.contains("waitRenderFences(final MTLRenderCommandEncoder encoder)"));
         assertTrue(encoder.contains("encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment)"));
         assertTrue(encoder.contains("renderEncoder.updateFence("));
-        assertTrue(encoder.contains("computeEncoder.waitForFence(fence)"));
+        int computeStart = encoder.indexOf("MTLComputeCommandEncoder computeCommandEncoder()");
+        int computeEnd = encoder.indexOf("long encoderGeneration()", computeStart);
+        assertTrue(computeStart >= 0 && computeEnd > computeStart);
+        String computeMethod = encoder.substring(computeStart, computeEnd);
+        assertTrue(computeMethod.contains("encoder.waitForFence(fence)"));
         assertTrue(encoder.contains("computeEncoder.updateFence(fence)"));
 
         // Metal 4 deliberately ignores the legacy fence calls; new render
