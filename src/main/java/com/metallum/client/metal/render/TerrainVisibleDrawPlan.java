@@ -80,8 +80,10 @@ final class TerrainVisibleDrawPlan {
             }
             TerrainCandidateSnapshot.Candidate candidate = candidates.candidates().get(candidateIndex);
             // Empty draw lists are coarse diagnostic/legacy wildcard records.
-            // They cannot prove which source draw belongs to the candidate.
-            if (candidate.draws().isEmpty() || !candidate.recordsLive()) {
+            // They cannot prove which source draw belongs to the candidate. The
+            // strict index already matched the candidate's captured allocation
+            // generation and draw record against the live source metadata.
+            if (candidate.draws().isEmpty()) {
                 throw new IllegalArgumentException("Visible terrain ICB candidate is not draw-authoritative");
             }
             mapping[sourceOrdinal] = candidateIndex;
