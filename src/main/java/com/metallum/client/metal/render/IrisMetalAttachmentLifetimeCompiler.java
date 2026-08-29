@@ -261,6 +261,7 @@ final class IrisMetalAttachmentLifetimeCompiler {
                     .sorted(Comparator.comparingInt(Event::passIndex))
                     .toList();
             int firstUse = ordered.stream().mapToInt(Event::passIndex).min().orElseThrow();
+            int lastUse = ordered.stream().mapToInt(Event::passIndex).max().orElseThrow();
             int lastWrite = ordered.stream()
                     .filter(event -> event.access().writes())
                     .mapToInt(Event::passIndex)
@@ -276,6 +277,7 @@ final class IrisMetalAttachmentLifetimeCompiler {
                             0,
                             firstUse,
                             lastWrite,
+                            lastUse,
                             next == null ? -1 : next.passIndex(),
                             next == null ? "NONE" : next.access().name()
                     );
