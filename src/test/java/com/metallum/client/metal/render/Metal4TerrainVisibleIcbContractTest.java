@@ -91,4 +91,20 @@ final class Metal4TerrainVisibleIcbContractTest {
         assertTrue(nativeSource.contains("if let pipeline = compactionPipelines {"));
     }
 
+    @Test
+    void optimizedVisibleIcbUsesTheExactResetAndExecuteRange() throws IOException {
+        String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+        int entry = nativeSource.indexOf("metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb");
+        int execute = nativeSource.indexOf("metallum_MTLRenderCommandEncoder_executeTerrainIcb", entry);
+        assertTrue(entry > 0 && execute > entry);
+        String visible = nativeSource.substring(entry, execute);
+        assertTrue(visible.contains("resetCommands(buffer: commandBuffer, range: 0..<commandCount)"));
+        assertTrue(visible.contains("optimizeCommands(buffer: commandBuffer, range: 0..<commandCount)"));
+        assertTrue(visible.indexOf("optimizeCommands") < visible.indexOf("beforeQueueStages: [.vertex, .fragment]"));
+
+        String deviceSource = Files.readString(Path.of("src/main/java/com/metallum/client/metal/render/MetalDevice.java"));
+        assertTrue(deviceSource.contains("metallum.opt.terrainVisibleIcbOptimize"));
+        assertTrue(deviceSource.contains("VISIBLE_GPU_ICB_METAL4 && VISIBLE_GPU_ICB_OPTIMIZE && metal4Compiler"));
+    }
+
 }
