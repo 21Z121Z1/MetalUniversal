@@ -20,21 +20,22 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Apply persistent scene identity patch
-        run: python3 .github/ci/patch_terrain_persistent_gpu_scene_java.py
-      - name: Validate Java scene contracts
+      - name: Apply native persistent scene ownership patch
+        run: python3 .github/ci/patch_terrain_persistent_gpu_scene_native.py
+      - name: Validate Java/native contracts
         run: |
           ./gradlew --no-daemon compileJava compileTestJava test \
             --tests com.metallum.client.metal.render.TerrainPersistentGpuSceneContractTest \
+            --tests com.metallum.client.metal.render.TerrainPersistentGpuSceneNativeContractTest \
             --tests com.metallum.client.metal.render.TerrainGpuVisibilityProbeTest \
-            --tests com.metallum.client.metal.render.TerrainCandidateRegistryTest \
-            --console=plain
-      - name: Commit validated product changes
+            buildMacNative buildIOSNative --rerun-tasks --console=plain
+      - name: Commit validated native product changes
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/main/java/com/metallum/client/metal/render/TerrainCandidateSnapshot.java \
-                  src/main/java/com/metallum/client/metal/render/TerrainCandidateRegistry.java \
-                  src/test/java/com/metallum/client/metal/render/TerrainPersistentGpuSceneContractTest.java
-          git commit -m 'feat(terrain): separate persistent scene identity from camera epochs'
+          git add src/main/java/com/metallum/client/metal/render/TerrainGpuVisibilityProbe.java \
+                  src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java \
+                  src/main/native/MetallumNative.swift \
+                  src/test/java/com/metallum/client/metal/render/TerrainPersistentGpuSceneNativeContractTest.java
+          git commit -m 'feat(metal4): retain persistent terrain visibility scene on GPU'
           git push origin HEAD:${GITHUB_REF_NAME}
