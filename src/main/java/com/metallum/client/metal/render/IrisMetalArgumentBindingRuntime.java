@@ -11,6 +11,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
@@ -21,9 +22,20 @@ import java.util.concurrent.atomic.LongAdder;
  * tables. Existing native setters remain the execution mechanism; this class
  * freezes the ABI, owns one snapshot per in-flight slot and records only actual
  * logical mutations.
+ *
+ * <p>The snapshots are owned by the compiled pipeline/layout generation rather
+ * than by a short-lived {@code MetalRenderPass}. Minecraft creates render-pass
+ * objects as command-encoding transactions, while an argument table can be
+ * reused by later encoders. Each pass therefore maps to its pipeline-owned
+ * state; the three in-flight slots survive pass destruction and rotate exactly
+ * once after submit.</p>
  */
 public final class IrisMetalArgumentBindingRuntime {
-    private static final Map<Object, State> PASSES = java.util.Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Object STATE_LOCK = new Object();
+    /** Weak pass aliases into the pipeline-owned state. */
+    private static final Map<Object, State> PASSES = new WeakHashMap<>();
+    /** Weak generation owners; State deliberately does not retain the pipeline key. */
+    private static final Map<Object, State> PIPELINES = new WeakHashMap<>();
     private static final LongAdder LAYOUTS = new LongAdder();
     private static final LongAdder UPDATES = new LongAdder();
     private static final LongAdder ENCODED = new LongAdder();
@@ -37,12 +49,16 @@ public final class IrisMetalArgumentBindingRuntime {
             Object pipeline = field(pass, "compiledPipeline");
             if (pipeline == null) return;
             IrisMetalOptimizationPlan.ArgumentLayout layout = layout(pipeline);
-            synchronized (PASSES) {
-                State previous = PASSES.get(pass);
-                if (previous == null || previous.layout.stableHash() != layout.stableHash()) {
-                    PASSES.put(pass, new State(layout));
+            synchronized (STATE_LOCK) {
+                State state = PIPELINES.get(pipeline);
+                if (state == null || state.layout.stableHash() != layout.stableHash()) {
+                    state = new State(layout);
+                    PIPELINES.put(pipeline, state);
                     LAYOUTS.increment();
                 }
+                // A render pass is only a transient alias. Re-attaching the same
+                // pipeline never allocates another in-flight ring.
+                PASSES.put(pass, state);
             }
         } catch (ReflectiveOperationException | RuntimeException failure) {
             Metallum.LOGGER.warn("[metallum-iris-opt] argument layout attachment failed", failure);
@@ -112,8 +128,12 @@ public final class IrisMetalArgumentBindingRuntime {
 
     public static void advanceAfterSubmit() {
         if (!enabled()) return;
-        synchronized (PASSES) {
-            for (State state : PASSES.values()) state.ring.advanceAfterSubmit();
+        synchronized (STATE_LOCK) {
+            // Advance each pipeline-owned ring once. Iterating PASSES would rotate
+            // one ring repeatedly when multiple render passes used the same PSO.
+            for (State state : new HashSet<>(PIPELINES.values())) {
+                state.ring.advanceAfterSubmit();
+            }
         }
     }
 
@@ -134,7 +154,7 @@ public final class IrisMetalArgumentBindingRuntime {
 
     private static State state(final Object pass) {
         if (!enabled()) return null;
-        synchronized (PASSES) {
+        synchronized (STATE_LOCK) {
             return PASSES.get(pass);
         }
     }
