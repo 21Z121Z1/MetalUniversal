@@ -31,30 +31,10 @@ jobs:
           from pathlib import Path
           p = Path('src/main/java/com/metallum/client/metal/render/IrisMetalAttachmentLifetimeCompiler.java')
           s = p.read_text()
-          old = '''            String allocationKey = candidate.binding().allocationKey();
-            attachments.add(new IrisMetalOptimizationPlan.ResolvedAttachment(
-                    candidate.planPassKey(),
-                    candidate.semanticPassId(),
-                    candidate.slot(),
-                    candidate.logicalResource(),
-                    candidate.binding().identity().allocationId(),
-                    candidate.binding().identity().generation(),
-                    0,
-                    candidate.physicalSide(),
-                    candidate.load(),
-                    candidate.store(),
-                    candidate.passIndex(),
-                    IrisMetalOptimizationPlan.AttachmentResolution.RESOLVED_RASTER,
-                    IrisMetalTransientAttachmentClassifier.classify(
-                            candidate.load(),
-                            candidate.store(),
-                            candidate.passIndex(),
-                            Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey),
-                            unresolvedConsumers.isEmpty()
-                    ),
-                    allocationKey,
-                    Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey)
-            ));'''
+          start_marker = '            String allocationKey = candidate.binding().allocationKey();\n'
+          end_marker = '                    Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey)\n            ));'
+          start = s.index(start_marker)
+          end = s.index(end_marker, start) + len(end_marker)
           new = '''            String allocationKey = candidate.binding().allocationKey();
             IrisMetalOptimizationPlan.AttachmentLifetime lifetime =
                     Objects.requireNonNull(lifetimeByKey.get(allocationKey), allocationKey);
@@ -90,10 +70,10 @@ jobs:
                     allocationKey,
                     lifetime
             ));'''
-          if s.count(old) != 1:
-              raise SystemExit(f'compiler anchor count={s.count(old)}')
-          p.write_text(s.replace(old, new))
+          p.write_text(s[:start] + new + s[end:])
           PY
+          git diff --check
+          git diff -- src/main/java/com/metallum/client/metal/render/IrisMetalAttachmentLifetimeCompiler.java
           ./gradlew test --tests com.metallum.client.metal.render.IrisMetalPhysicalStoreResolutionTest --tests com.metallum.client.metal.render.IrisMetalMemorylessAttachmentAllocatorTest --tests com.metallum.client.metal.render.IrisMetalAttachmentLifetimeCompilerTest
       - name: Commit result and remove helper
         shell: bash
