@@ -8837,6 +8837,152 @@ public func metallum_create_texture(
     }
 }
 
+
+
+private final class IrisPlacementHeapTextureSet {
+    let heap: MTLHeap
+    let textures: [MTLTexture]
+
+    init(heap: MTLHeap, textures: [MTLTexture]) {
+        self.heap = heap
+        self.textures = textures
+    }
+}
+
+private struct IrisPlacementTextureRecord {
+    let descriptor: MTLTextureDescriptor
+    let size: Int
+    let alignment: Int
+    let slot: Int
+}
+
+private func irisAlignUp(_ value: Int, _ alignment: Int) -> Int? {
+    guard value >= 0, alignment > 0 else { return nil }
+    let remainder = value % alignment
+    if remainder == 0 { return value }
+    let delta = alignment - remainder
+    guard value <= Int.max - delta else { return nil }
+    return value + delta
+}
+
+@_cdecl("metallum_iris_placement_heap_create")
+public func metallum_iris_placement_heap_create(
+    _ device: MTLDevice,
+    _ rawRecords: UnsafePointer<UInt64>?,
+    _ rawRecordCount: UInt64,
+    _ rawSlotCount: UInt64
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        guard let rawRecords,
+              rawRecordCount > 1,
+              rawRecordCount <= UInt64(Int.max),
+              rawSlotCount > 0,
+              rawSlotCount <= UInt64(Int.max) else {
+            return nil
+        }
+        let recordCount = Int(rawRecordCount)
+        let slotCount = Int(rawSlotCount)
+        var records: [IrisPlacementTextureRecord] = []
+        records.reserveCapacity(recordCount)
+        var slotSize = Array(repeating: 0, count: slotCount)
+        var slotAlignment = Array(repeating: 1, count: slotCount)
+
+        for index in 0..<recordCount {
+            let base = index * 6
+            guard let format = MTLPixelFormat(rawValue: UInt(rawRecords[base])),
+                  rawRecords[base + 1] > 0, rawRecords[base + 1] <= UInt64(Int.max),
+                  rawRecords[base + 2] > 0, rawRecords[base + 2] <= UInt64(Int.max),
+                  rawRecords[base + 3] > 0, rawRecords[base + 3] <= UInt64(Int.max),
+                  rawRecords[base + 5] < rawSlotCount else {
+                return nil
+            }
+            let descriptor = MTLTextureDescriptor()
+            descriptor.textureType = .type2D
+            descriptor.pixelFormat = format
+            descriptor.width = Int(rawRecords[base + 1])
+            descriptor.height = Int(rawRecords[base + 2])
+            descriptor.depth = 1
+            descriptor.mipmapLevelCount = Int(rawRecords[base + 3])
+            descriptor.arrayLength = 1
+            descriptor.sampleCount = 1
+            descriptor.storageMode = .private
+            descriptor.cpuCacheMode = .defaultCache
+            descriptor.hazardTrackingMode = .untracked
+            descriptor.usage = MTLTextureUsage(rawValue: UInt(rawRecords[base + 4]))
+
+            let sizeAndAlign = device.heapTextureSizeAndAlign(descriptor: descriptor)
+            guard sizeAndAlign.size > 0, sizeAndAlign.align > 0 else { return nil }
+            let slot = Int(rawRecords[base + 5])
+            slotSize[slot] = max(slotSize[slot], sizeAndAlign.size)
+            slotAlignment[slot] = max(slotAlignment[slot], sizeAndAlign.align)
+            records.append(IrisPlacementTextureRecord(
+                descriptor: descriptor,
+                size: sizeAndAlign.size,
+                alignment: sizeAndAlign.align,
+                slot: slot
+            ))
+        }
+
+        var slotOffsets = Array(repeating: 0, count: slotCount)
+        var heapSize = 0
+        for slot in 0..<slotCount where slotSize[slot] > 0 {
+            guard let aligned = irisAlignUp(heapSize, slotAlignment[slot]),
+                  aligned <= Int.max - slotSize[slot] else {
+                return nil
+            }
+            slotOffsets[slot] = aligned
+            heapSize = aligned + slotSize[slot]
+        }
+        guard heapSize > 0 else { return nil }
+
+        // max alignment is sufficient on Apple heap size/alignment values, but
+        // verify every concrete descriptor before creating the heap rather than
+        // assuming an undocumented divisibility relationship.
+        for record in records {
+            if slotOffsets[record.slot] % record.alignment != 0
+                || slotOffsets[record.slot] > heapSize - record.size {
+                return nil
+            }
+        }
+
+        let heapDescriptor = MTLHeapDescriptor()
+        heapDescriptor.type = .placement
+        heapDescriptor.storageMode = .private
+        heapDescriptor.cpuCacheMode = .defaultCache
+        heapDescriptor.hazardTrackingMode = .untracked
+        heapDescriptor.size = heapSize
+        guard let heap = device.makeHeap(descriptor: heapDescriptor) else { return nil }
+        heap.label = "Iris colortex placement heap"
+
+        var textures: [MTLTexture] = []
+        textures.reserveCapacity(recordCount)
+        for (index, record) in records.enumerated() {
+            guard let texture = heap.makeTexture(
+                descriptor: record.descriptor,
+                offset: slotOffsets[record.slot]
+            ) else {
+                return nil
+            }
+            texture.label = "Iris aliased colortex \(index)"
+            residencyTrackCreated(texture)
+            textures.append(texture)
+        }
+        return retainedPointer(IrisPlacementHeapTextureSet(heap: heap, textures: textures))
+    }
+}
+
+@_cdecl("metallum_iris_placement_heap_texture")
+public func metallum_iris_placement_heap_texture(
+    _ ownerPointer: UnsafeMutableRawPointer?, _ rawIndex: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard let ownerPointer, rawIndex <= UInt64(Int.max) else { return nil }
+    let owner = Unmanaged<IrisPlacementHeapTextureSet>.fromOpaque(ownerPointer).takeUnretainedValue()
+    let index = Int(rawIndex)
+    guard index >= 0, index < owner.textures.count else { return nil }
+    return retainedPointer(owner.textures[index])
+}
+
+
 @_cdecl("metallum_create_texture_view")
 public func metallum_create_texture_view(_ texture: MTLTexture, _ baseMipLevel: UInt64, _ mipLevelCount: UInt64) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
