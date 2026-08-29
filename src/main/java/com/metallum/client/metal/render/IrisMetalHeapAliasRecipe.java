@@ -21,10 +21,12 @@ import java.util.Objects;
  * native pointer.</p>
  *
  * <p>Each member owns a closed [firstUse,lastUse] interval. Two members may
- * share one automatic MTLHeap allocation slot only when those intervals are
- * strictly disjoint. The emitted handoff edge is the only legal point at which
- * the executor may mark the former heap resource aliasable and create the next
- * resource. Native execution still has to prove GPU ordering at that edge.</p>
+ * share one placement-heap backing range only when those intervals are
+ * strictly disjoint. All resource objects may exist eagerly; placement at the
+ * same aligned heap offset aliases their backing memory. The emitted handoff
+ * edge remains the ordering proof: native execution must ensure the former
+ * resource has no GPU use crossing that edge before the next aliased resource
+ * is accessed.</p>
  */
 final class IrisMetalHeapAliasRecipe {
     private IrisMetalHeapAliasRecipe() {
