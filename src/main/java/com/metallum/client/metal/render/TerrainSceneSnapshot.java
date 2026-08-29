@@ -48,6 +48,15 @@ public final class TerrainSceneSnapshot {
     );
 
     /**
+     * Strict opt-in for GPU visibility-masked, source-ordinal ICB authoring.
+     * Candidate capture and draw metadata become required producer inputs, but
+     * unsupported native/Metal 4 paths still fall through to the existing ICB
+     * or indirect submission.
+     */
+    public static final boolean VISIBLE_GPU_ICB_ENABLED =
+            TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED;
+
+    /**
      * Producer-side Sodium draw metadata.  This is deliberately independent
      * from both ICB switches and is off unless explicitly requested.
      */
@@ -56,7 +65,12 @@ public final class TerrainSceneSnapshot {
     );
 
     public static boolean captureEnabled() {
-        return ENABLED || ICB_ENABLED || GPU_ICB_ENABLED || DRAW_METADATA_ENABLED;
+        return ENABLED || ICB_ENABLED || GPU_ICB_ENABLED
+                || VISIBLE_GPU_ICB_ENABLED || DRAW_METADATA_ENABLED;
+    }
+
+    public static boolean drawMetadataRequired() {
+        return DRAW_METADATA_ENABLED || VISIBLE_GPU_ICB_ENABLED;
     }
 
     static final int MAX_VERTEX_BUFFERS = RenderPass.MAX_VERTEX_BUFFERS;
