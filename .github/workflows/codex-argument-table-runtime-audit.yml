@@ -1,0 +1,39 @@
+name: codex/argument-table-runtime-audit
+
+on:
+  push:
+    branches:
+      - codex/argument-table-runtime-audit-20260829
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate argument ownership and encode sites
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          {
+            echo '=== Iris argument runtime references ==='
+            grep -RniE 'IrisMetalArgumentBindingRuntime|IrisMetalArgumentSnapshot|markEncoded\(|bindSampler\(|bindBuffer\(' src/main/java || true
+            echo
+            echo '=== Render-state packet resource ops ==='
+            grep -RniE 'MetalRenderStatePacket|appendBuffer\(|appendBufferOffset\(|appendTexture\(|appendTextureAndSampler\(' src/main/java || true
+            echo
+            echo '=== Metal4 native argument table mutations ==='
+            grep -nE 'vertexArguments|fragmentArguments|setArgumentTable|setAddress\(|setTexture\(|setSamplerState\(' src/main/native/MetallumNative.swift | head -n 1200 || true
+            echo
+            echo '=== Argument runtime source ==='
+            sed -n '1,500p' src/main/java/com/metallum/client/metal/render/IrisMetalArgumentBindingRuntime.java
+            echo
+            echo '=== Snapshot source ==='
+            sed -n '1,500p' src/main/java/com/metallum/client/metal/render/IrisMetalArgumentSnapshot.java
+          } | tee build/argument-runtime-audit.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: argument-runtime-audit
+          path: build/argument-runtime-audit.txt
