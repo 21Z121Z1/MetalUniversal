@@ -720,10 +720,9 @@ public final class MetalNativeBridge {
             metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
             setTerrainIcbEnabled = optionalDowncall(lookup, "metallum_set_terrain_icb_enabled", FunctionDescriptor.ofVoid(INT));
-            setTerrainGpuEncodeEnabled = optionalDowncall(
-                    lookup,
-                    "metallum_set_terrain_gpu_encode_enabled",
-                    FunctionDescriptor.ofVoid(INT)
+            setTerrainGpuEncodeEnabled = optionalDowncall(lookup, "metallum_set_terrain_gpu_encode_enabled", FunctionDescriptor.ofVoid(INT));
+            setTerrainVisibilityCompactionEnabled = optionalDowncall(
+                    lookup, "metallum_set_terrain_visibility_compaction_enabled", FunctionDescriptor.ofVoid(INT)
             );
             terrainIcbStats = optionalDowncall(
                     lookup,
@@ -1109,6 +1108,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle setTerrainIcbEnabled;
     @Nullable
     private static final MethodHandle setTerrainGpuEncodeEnabled;
+    @Nullable
+    private static final MethodHandle setTerrainVisibilityCompactionEnabled;
     @Nullable
     private static final MethodHandle terrainIcbStats;
     @Nullable
@@ -3468,6 +3469,17 @@ public final class MetalNativeBridge {
             setTerrainGpuEncodeEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_terrain_gpu_encode_enabled", throwable);
+        }
+    }
+
+    public static void metallum_set_terrain_visibility_compaction_enabled(final boolean enabled) {
+        if (setTerrainVisibilityCompactionEnabled == null) {
+            return;
+        }
+        try {
+            setTerrainVisibilityCompactionEnabled.invokeExact(enabled ? 1 : 0);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_terrain_visibility_compaction_enabled", throwable);
         }
     }
 

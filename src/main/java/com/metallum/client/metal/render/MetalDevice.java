@@ -285,6 +285,9 @@ final class MetalDevice implements GpuDeviceBackend {
                 (TerrainSceneSnapshot.GPU_ICB_ENABLED || VISIBLE_GPU_ICB_METAL4)
                         && metal4Compiler ? 1 : 0
         );
+        MetalNativeBridge.metallum_set_terrain_visibility_compaction_enabled(
+                TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED
+        );
         // Depends on the compiler switch: the MTL4 frame interpolator factory
         // takes an MTL4Compiler, so the present pilot cannot run without it.
         boolean metal4Present = metal4Compiler && (METAL4_PRESENT || metal4MainRenderer);
