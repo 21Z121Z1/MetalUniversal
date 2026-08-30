@@ -1,6 +1,7 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.metal.render.TerrainCandidateRegistry;
+import com.metallum.client.metal.render.TerrainStorageBridge;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
 import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegion;
@@ -23,13 +24,12 @@ public abstract class RenderRegionTerrainCandidateMixin {
             return;
         }
         SectionRenderDataStorage storage = cir.getReturnValue();
-        if (storage instanceof SectionRenderDataStorageOwner owner) {
+        if (storage != null) {
             RenderRegion region = (RenderRegion) (Object) this;
-            owner.metallum$setOwner(
-                    region.getX(), region.getY(), region.getZ(),
+            TerrainStorageBridge.setOwner(
+                    storage, region.getX(), region.getY(), region.getZ(),
                     region.getChunkX(), region.getChunkY(), region.getChunkZ(),
-                    renderPass.isTranslucent()
-            );
+                    renderPass.isTranslucent());
         }
     }
 

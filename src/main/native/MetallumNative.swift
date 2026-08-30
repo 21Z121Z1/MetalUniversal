@@ -13844,6 +13844,17 @@ private func createRenderPipelineState(
                 NativeState.logMetal4PipelineFallback(
                     "MTL4Compiler rejected the descriptor: \(String(describing: error))"
                 )
+                // The Metal 4 compiler is stricter than the Metal 3 device
+                // compiler about supportIndirectCommandBuffers.  A terrain
+                // pipeline may be eligible for the optional ICB lane while
+                // its fragment stage is not legal for an MTL4 ICB descriptor
+                // (for example on the M1 Pro driver).  Clear only that
+                // Metal-4-specific descriptor bit before the established
+                // Metal 3 fallback.  The Java caller already treats a failed
+                // ICB encode/execute as non-terminal and retries the ordinary
+                // indirect draw path, so returning a regular Metal 3 PSO keeps
+                // the world renderable without claiming ICB execution.
+                descriptor.supportIndirectCommandBuffers = false
             }
         } else {
             NativeState.logMetal4PipelineFallback("no compiler, or descriptor not translatable")

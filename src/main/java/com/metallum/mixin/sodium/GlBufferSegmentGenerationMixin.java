@@ -17,7 +17,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * stamp, while the default-off path does not perform any increments.
  */
 @Mixin(GlBufferSegment.class)
-public abstract class GlBufferSegmentGenerationMixin implements GlBufferSegmentGeneration {
+public abstract class GlBufferSegmentGenerationMixin {
     @Shadow
     private boolean free;
 
@@ -57,7 +57,6 @@ public abstract class GlBufferSegmentGenerationMixin implements GlBufferSegmentG
         }
     }
 
-    @Override
     public long metallum$generation() {
         return metallum$generation;
     }

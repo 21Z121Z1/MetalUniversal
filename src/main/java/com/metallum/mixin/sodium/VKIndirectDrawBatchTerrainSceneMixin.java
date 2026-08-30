@@ -22,7 +22,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /** Copies the packed command records at Sodium's real indirect producer. */
 @Mixin(VKIndirectDrawBatch.class)
 public abstract class VKIndirectDrawBatchTerrainSceneMixin
-        implements TerrainIcbProducer, TerrainDrawMetadataBatch {
+        implements TerrainIcbProducer {
     @Shadow
     @Final
     private long pCommands;
@@ -33,12 +33,10 @@ public abstract class VKIndirectDrawBatchTerrainSceneMixin
     @Unique
     private TerrainDrawMetadataStore metallum$terrainDrawMetadata;
 
-    @Override
     public TerrainDrawMetadataStore metallum$terrainDrawMetadata() {
         return this.metallum$terrainDrawMetadata;
     }
 
-    @Override
     public void metallum$setTerrainDrawMetadata(final TerrainDrawMetadataStore store) {
         this.metallum$terrainDrawMetadata = store;
     }

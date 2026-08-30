@@ -1,7 +1,5 @@
 package com.metallum.client.metal.render;
 
-import com.metallum.mixin.sodium.GlBufferSegmentAccessor;
-import com.metallum.mixin.sodium.GlBufferSegmentGeneration;
 import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
@@ -158,15 +156,14 @@ public final class TerrainCandidateSnapshot {
          */
         boolean live() {
             if (allocation instanceof GlBufferSegment segment) {
-                if (!(segment instanceof GlBufferSegmentAccessor accessor)
-                        || accessor.metallum$isFree()
-                        || !(segment instanceof GlBufferSegmentGeneration stamped)) {
+                long liveGeneration = TerrainSegmentIdentity.generation(segment);
+                if (TerrainSegmentIdentity.isFree(segment) || liveGeneration < 0L) {
                     return false;
                 }
                 try {
                     return segment.getOffset() == offset
                             && segment.getLength() == length
-                            && stamped.metallum$generation() == generation;
+                            && liveGeneration == generation;
                 } catch (RuntimeException exception) {
                     return false;
                 }

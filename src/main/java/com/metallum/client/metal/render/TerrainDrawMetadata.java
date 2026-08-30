@@ -1,8 +1,6 @@
 package com.metallum.client.metal.render;
 
 import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
-import com.metallum.mixin.sodium.GlBufferSegmentAccessor;
-import com.metallum.mixin.sodium.GlBufferSegmentGeneration;
 
 import java.util.Objects;
 
@@ -59,9 +57,7 @@ record TerrainDrawMetadata(
             if (allocation == null) {
                 return new AllocationStamp(null, -1L, -1L, -1L);
             }
-            long generation = allocation instanceof GlBufferSegmentGeneration stamped
-                    ? stamped.metallum$generation()
-                    : 0L;
+            long generation = TerrainSegmentIdentity.generation(allocation);
             return new AllocationStamp(allocation, allocation.getOffset(), allocation.getLength(), generation);
         }
 
@@ -70,12 +66,11 @@ record TerrainDrawMetadata(
                 return false;
             }
             if (allocation instanceof GlBufferSegment segment) {
-                if (!(segment instanceof GlBufferSegmentAccessor accessor)
-                        || accessor.metallum$isFree()
-                        || !(segment instanceof GlBufferSegmentGeneration stamped)) {
+                long liveGeneration = TerrainSegmentIdentity.generation(segment);
+                if (TerrainSegmentIdentity.isFree(segment) || liveGeneration < 0L) {
                     return false;
                 }
-                return stamped.metallum$generation() == generation
+                return liveGeneration == generation
                         && segment.getOffset() == offset
                         && segment.getLength() == length;
             }

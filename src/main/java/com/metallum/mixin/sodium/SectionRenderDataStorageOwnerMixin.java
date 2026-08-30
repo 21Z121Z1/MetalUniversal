@@ -6,7 +6,7 @@ import org.spongepowered.asm.mixin.Unique;
 
 /** Stores only primitive owner coordinates; candidate keys remain coordinate based. */
 @Mixin(SectionRenderDataStorage.class)
-public abstract class SectionRenderDataStorageOwnerMixin implements SectionRenderDataStorageOwner {
+public abstract class SectionRenderDataStorageOwnerMixin {
     @Unique
     private boolean metallum$hasOwner;
 
@@ -31,7 +31,6 @@ public abstract class SectionRenderDataStorageOwnerMixin implements SectionRende
     @Unique
     private boolean metallum$translucent;
 
-    @Override
     public void metallum$setOwner(
             final int regionX,
             final int regionY,
@@ -51,42 +50,34 @@ public abstract class SectionRenderDataStorageOwnerMixin implements SectionRende
         metallum$hasOwner = true;
     }
 
-    @Override
     public boolean metallum$hasOwner() {
         return metallum$hasOwner;
     }
 
-    @Override
     public int metallum$regionX() {
         return metallum$regionX;
     }
 
-    @Override
     public int metallum$regionY() {
         return metallum$regionY;
     }
 
-    @Override
     public int metallum$regionZ() {
         return metallum$regionZ;
     }
 
-    @Override
     public int metallum$baseChunkX() {
         return metallum$baseChunkX;
     }
 
-    @Override
     public int metallum$baseChunkY() {
         return metallum$baseChunkY;
     }
 
-    @Override
     public int metallum$baseChunkZ() {
         return metallum$baseChunkZ;
     }
 
-    @Override
     public boolean metallum$isTranslucent() {
         return metallum$translucent;
     }

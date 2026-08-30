@@ -1,8 +1,6 @@
 package com.metallum.client.metal.render;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
-import com.metallum.mixin.sodium.SectionRenderDataStorageAccessor;
-import com.metallum.mixin.sodium.TerrainDrawMetadataBatch;
 import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
 import net.caffeinemc.mods.sodium.client.gpu.device.batch.MultiDrawBatch;
 import net.caffeinemc.mods.sodium.client.render.chunk.LocalSectionIndex;
@@ -34,10 +32,10 @@ public final class TerrainDrawMetadataCapture {
             final SectionRenderDataStorage storage,
             final TerrainRenderPass renderPass
     ) {
-        if (!enabled() || !(batch instanceof TerrainDrawMetadataBatch metadataBatch)) {
+        if (!enabled() || !TerrainStorageBridge.hasMetadataBatch(batch)) {
             return;
         }
-        metadataBatch.metallum$setTerrainDrawMetadata(new TerrainDrawMetadataStore());
+        TerrainStorageBridge.setMetadata(batch, new TerrainDrawMetadataStore());
         CURRENT.set(new FillContext(batch, region, storage, renderPass));
     }
 
@@ -72,7 +70,7 @@ public final class TerrainDrawMetadataCapture {
                 || fill.section.dataPointer != dataPointer) {
             return;
         }
-        TerrainDrawMetadataStore store = ((TerrainDrawMetadataBatch) batch).metallum$terrainDrawMetadata();
+        TerrainDrawMetadataStore store = TerrainStorageBridge.metadata(batch);
         if (store == null) {
             return;
         }
@@ -182,18 +180,15 @@ public final class TerrainDrawMetadataCapture {
             final long dataPointer,
             final boolean localIndexMode
     ) {
-        if (!(storage instanceof SectionRenderDataStorageAccessor accessor)) {
-            return null;
-        }
-        GlBufferSegment[] vertices = accessor.metallum$getVertexAllocations();
+        GlBufferSegment[] vertices = TerrainStorageBridge.vertexAllocations(storage);
         if (vertices == null || localIndex < 0 || localIndex >= vertices.length) {
             return null;
         }
-        GlBufferSegment[] elements = accessor.metallum$getElementAllocations();
+        GlBufferSegment[] elements = TerrainStorageBridge.elementAllocations(storage);
         GlBufferSegment vertex = vertices[localIndex];
         GlBufferSegment index = localIndexMode
                 ? elements == null || localIndex >= elements.length ? null : elements[localIndex]
-                : accessor.metallum$getSharedIndexAllocation();
+                : TerrainStorageBridge.sharedIndexAllocation(storage);
         if (vertex == null || index == null) {
             return null;
         }
@@ -259,7 +254,7 @@ public final class TerrainDrawMetadataCapture {
         }
 
         private TerrainDrawMetadataStore store() {
-            return ((TerrainDrawMetadataBatch) fill.batch).metallum$terrainDrawMetadata();
+            return TerrainStorageBridge.metadata(fill.batch);
         }
 
         private TerrainDrawMetadata metadata(
