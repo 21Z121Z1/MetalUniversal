@@ -233,6 +233,13 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         return this.flipped.get(checked) ? altViews[checked] : mainViews[checked];
     }
 
+    /** Raw view of one fixed physical side for an explicit flip snapshot. */
+    MetalGpuTextureView physicalView(final int index, final boolean alternate) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        return alternate ? altViews[checked] : mainViews[checked];
+    }
+
     /** Sampled view of the current write/history side, including logical format swizzles. */
     MetalGpuTextureView sampleWriteView(final int index) {
         ensureOpen();

@@ -743,7 +743,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                                                 + "' exceeds target count " + this.targetCount
                                 );
                             }
-                            image = this.targets.colorView(shadowTarget, pass.readsFromAlt());
+                            image = this.targets.storageView(shadowTarget, pass.readsFromAlt());
                         } else {
                             image = resources.storageImage(info, sampler.name());
                         }
@@ -925,7 +925,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                         "Shadow storage image '" + name + "' exceeds target count " + this.targetCount
                 );
             }
-            return this.targets.colorView(shadowTarget, compute.info.readsFromAlt());
+            return this.targets.storageView(shadowTarget, compute.info.readsFromAlt());
         }
         GpuTextureView view = resources.storageImage(compute.info, name);
         if (view == null) {
@@ -953,7 +953,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
         if (target < 0 || target >= this.targetCount || this.targets == null) {
             return null;
         }
-        return this.targets.colorTargets().sampleReadView(target);
+        return this.targets.colorTargets().storageReadView(target);
     }
 
     private static GpuBufferSlice requireBuffer(
