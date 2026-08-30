@@ -22,10 +22,16 @@ public abstract class TerrainSchedulingTuningMixin {
             "metallum.opt.terrainAdaptiveSchedulingBuildBudgetRatio";
     private static final String UPLOAD_RATIO_PROPERTY =
             "metallum.opt.terrainAdaptiveSchedulingUploadBudgetRatio";
+    private static final String CONSTRAINED_MULTIPLIER_PROPERTY =
+            "metallum.opt.terrainAdaptiveSchedulingConstrainedMultiplier";
+    private static final String SEVERE_MULTIPLIER_PROPERTY =
+            "metallum.opt.terrainAdaptiveSchedulingSevereMultiplier";
 
     private static final int MAX_WARMUP_FRAMES = 600;
     private static final double MIN_BUDGET_RATIO = 0.01;
     private static final double MAX_BUDGET_RATIO = 0.50;
+    private static final double MIN_PRESSURE_MULTIPLIER = 0.10;
+    private static final double MAX_PRESSURE_MULTIPLIER = 1.00;
 
     @ModifyConstant(
             method = "createRuntime",
@@ -63,6 +69,24 @@ public abstract class TerrainSchedulingTuningMixin {
         return metallum$budgetRatio(UPLOAD_RATIO_PROPERTY, original);
     }
 
+    @ModifyConstant(
+            method = "computeDecision",
+            constant = @Constant(doubleValue = 0.75),
+            require = 1
+    )
+    private double metallum$tuneConstrainedPressureMultiplier(final double original) {
+        return metallum$pressureMultiplier(CONSTRAINED_MULTIPLIER_PROPERTY, original);
+    }
+
+    @ModifyConstant(
+            method = "computeDecision",
+            constant = @Constant(doubleValue = 0.50),
+            require = 1
+    )
+    private double metallum$tuneSeverePressureMultiplier(final double original) {
+        return metallum$pressureMultiplier(SEVERE_MULTIPLIER_PROPERTY, original);
+    }
+
     private static double metallum$budgetRatio(final String property, final double original) {
         final String raw = System.getProperty(property);
         if (raw == null || raw.isBlank()) {
@@ -73,6 +97,23 @@ public abstract class TerrainSchedulingTuningMixin {
             return Double.isFinite(value)
                     && value >= MIN_BUDGET_RATIO
                     && value <= MAX_BUDGET_RATIO
+                    ? value
+                    : original;
+        } catch (NumberFormatException ignored) {
+            return original;
+        }
+    }
+
+    private static double metallum$pressureMultiplier(final String property, final double original) {
+        final String raw = System.getProperty(property);
+        if (raw == null || raw.isBlank()) {
+            return original;
+        }
+        try {
+            final double value = Double.parseDouble(raw.trim());
+            return Double.isFinite(value)
+                    && value >= MIN_PRESSURE_MULTIPLIER
+                    && value <= MAX_PRESSURE_MULTIPLIER
                     ? value
                     : original;
         } catch (NumberFormatException ignored) {
