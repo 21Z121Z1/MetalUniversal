@@ -161,9 +161,23 @@ final class MetalComputePipeline implements AutoCloseable {
                             + " (entry " + entryPoint + ")"
             );
         }
-        MemorySegment pipelineState = MetalNativeBridge.MTLDevice_makeComputePipelineState(
-                device.metalDeviceHandle(), function
-        );
+        String shaderHash = sha256(msl);
+        String compileIdentity = "compute:" + label
+                + "|shader=" + shaderHash
+                + "|entry=" + entryPoint
+                + "|local=" + localSizeX + "x" + localSizeY + "x" + localSizeZ
+                + "|metal4=" + device.metal4MainRendererEnabled();
+        MemorySegment pipelineState = MemorySegment.NULL;
+        try {
+            pipelineState = MetalNativeBridge.MTLDevice_makeComputePipelineState(
+                    device.metalDeviceHandle(), function
+            );
+        } finally {
+            MetalPipelineCompilationTelemetry.recordCompute(
+                    compileIdentity,
+                    !MetalNativeBridge.isNullHandle(pipelineState)
+            );
+        }
         if (MetalNativeBridge.isNullHandle(pipelineState)) {
             throw new IllegalStateException("Failed to create MTLComputePipelineState for " + label);
         }
@@ -174,7 +188,7 @@ final class MetalComputePipeline implements AutoCloseable {
                 localSizeX,
                 localSizeY,
                 localSizeZ,
-                sha256(msl)
+                shaderHash
         );
     }
 

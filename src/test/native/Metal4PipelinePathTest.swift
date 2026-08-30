@@ -1738,6 +1738,47 @@ private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
         try fail("metallum_create_texture_2d returned nil for the memoryless texture")
     }
 
+    // Pipeline states are MTLAllocation objects, but not MTLResource objects.
+    // Create them through the same shipping exports Minecraft uses so this
+    // test catches a residency registry that is accidentally narrowed to
+    // buffers/textures/ICBs. The compiler is disabled by the caller here, so
+    // the test exercises the common M3 fallback as well as the allocation type
+    // boundary; the M4 compiler path registers through the same tracked entry
+    // points above.
+    let residencyLibrary = try device.makeLibrary(source: shaderSource, options: nil)
+    guard let residencyVertex = residencyLibrary.makeFunction(name: "mtl4_path_vs"),
+          let residencyFragment = residencyLibrary.makeFunction(name: "mtl4_path_fs") else {
+        try fail("missing residency render pipeline functions")
+    }
+    guard let renderPipelinePointer = metallum_MTLDevice_makeRenderPipelineState(
+        device,
+        makeDescriptor(
+            vertexFunction: residencyVertex,
+            fragmentFunction: residencyFragment,
+            label: "residency-render-pipeline"
+        )
+    ) else {
+        try fail("metallum_MTLDevice_makeRenderPipelineState returned nil for residency test")
+    }
+    guard Unmanaged<AnyObject>.fromOpaque(renderPipelinePointer)
+        .takeUnretainedValue() is MTLRenderPipelineState else {
+        try fail("residency render pipeline pointer was not an MTLRenderPipelineState")
+    }
+
+    let computeLibrary = try device.makeLibrary(source: """
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void residency_test_compute() {}
+        """, options: nil)
+    guard let computeFunction = computeLibrary.makeFunction(name: "residency_test_compute"),
+          let computePipelinePointer = metallum_MTLDevice_makeComputePipelineState(device, computeFunction) else {
+        try fail("metallum_MTLDevice_makeComputePipelineState returned nil for residency test")
+    }
+    guard Unmanaged<AnyObject>.fromOpaque(computePipelinePointer)
+        .takeUnretainedValue() is MTLComputePipelineState else {
+        try fail("residency compute pipeline pointer was not an MTLComputePipelineState")
+    }
+
     try flushResidency("residency additions")
     let afterCreate = try residencyCount("after create")
     // Three resources were created, but the memoryless one must be excluded;
@@ -1757,6 +1798,8 @@ private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
               "releasing the buffer should leave \(baseline + 4) tracked allocations, got \(afterRelease)")
 
     metallum_release_object(texturePointer)
+    metallum_release_object(renderPipelinePointer)
+    metallum_release_object(computePipelinePointer)
     metallum_release_object(memorylessPointer)
     metallum_release_object(metal4RenderPointer)
     metallum_release_object(metal3RenderPointer)

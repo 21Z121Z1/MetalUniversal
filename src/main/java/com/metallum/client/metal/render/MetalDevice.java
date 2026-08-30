@@ -55,6 +55,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private final Map<StableTerrainSamplerKey, MetalGpuSampler> stableTerrainSamplers = new HashMap<>();
     private static final int MAX_POOLED_BUFFER_BUCKETS = 32;
     private static final int MAX_POOLED_BUFFERS_PER_SIZE = 16;
+    static final int MAX_MULTI_DRAW_DIRECT_INTERLEAVED_DRAWS = 16_384;
     private final Map<Long, Deque<MemorySegment>> bufferPool = new LinkedHashMap<>(16, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(final Map.Entry<Long, Deque<MemorySegment>> eldest) {
@@ -118,7 +119,10 @@ final class MetalDevice implements GpuDeviceBackend {
      * from an MTL4Compiler.
      */
     private static final boolean METAL4_PRESENT =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Present", "false"));
+            Boolean.parseBoolean(System.getProperty(
+                    "metallum.opt.metal4Present",
+                    Boolean.toString(METAL4_REQUESTED)
+            ));
     private static final boolean METAL4_MAIN_QUEUE_PILOT =
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainQueuePilot", "false"));
     /** The terrain ICB requires the real MTL4 encoder/residency path. */
@@ -144,12 +148,6 @@ final class MetalDevice implements GpuDeviceBackend {
     private final boolean metal4Available;
     private final boolean metal4MainRenderer;
     /**
-     * Explicit residency tracking (spec M3). MTLResidencySet is macOS 15 / iOS 18
-     * and needs no Metal 4, so this switch is independent of the master one: the
-     * table gets built and measured on the existing Metal 3 queue, and M7 only
-     * has to connect it.
-     */
-    /**
      * Appends the Metal 4 barrier map's consumer barriers to the existing Metal 3
      * encoders (spec M6-B). Independent of the master switch: the API is gated on
      * macOS 26, not on Metal 4 family support. Strengthens ordering only, so golden
@@ -157,8 +155,15 @@ final class MetalDevice implements GpuDeviceBackend {
      */
     private static final boolean METAL4_BARRIER =
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Barrier", "false"));
+    /**
+     * Explicit residency tracking. It is part of the default Metal 4 backend,
+     * but remains independently selectable for a Metal 3 diagnostic run.
+     */
     private static final boolean RESIDENCY_SET =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.residencySet", "false"));
+            Boolean.parseBoolean(System.getProperty(
+                    "metallum.opt.residencySet",
+                    Boolean.toString(METAL4_REQUESTED)
+            ));
     private static final boolean RENDER_PIPELINE_IDENTITY_EQUALS = renderPipelineUsesIdentityEquals();
     /**
      * Serializes the whole GLSL→SPIR-V→MSL→PSO chain across threads: the
@@ -176,6 +181,8 @@ final class MetalDevice implements GpuDeviceBackend {
      * stale ShaderSource and must abandon instead of repopulating the map.
      */
     private volatile int pipelineCacheGeneration;
+    /** Terminal state published before background compilation and GPU teardown. */
+    private volatile boolean closing;
     @Nullable
     private final ExecutorService prewarmExecutor;
 
@@ -222,7 +229,7 @@ final class MetalDevice implements GpuDeviceBackend {
         boolean metal4MainRenderer = this.metal4Available && METAL4_MAIN_RENDERER;
         // Before metallum_init_pipelines and before any texture or buffer exists:
         // resources created earlier would never enter the set.
-        if ((RESIDENCY_SET || metal4MainRenderer)
+        if (metal4.residency()
                 && !this.commandQueue.enableResidencySet(metalDeviceHandle)) {
             if (metal4MainRenderer && VISIBILITY_PROBE_FALLBACK_ALLOWED) {
                 Metallum.LOGGER.warn(
@@ -236,7 +243,7 @@ final class MetalDevice implements GpuDeviceBackend {
                 Metallum.LOGGER.warn("[metallum] residency set unavailable; residency stays automatic");
             }
         }
-        if (metal4MainRenderer
+        if (metal4.mainRenderer()
                 && MetalNativeBridge.metallum_metal4_main_renderer_enable(
                         metalDeviceHandle,
                         metalLayer
@@ -302,19 +309,23 @@ final class MetalDevice implements GpuDeviceBackend {
                 && MetalNativeBridge.metallum_metal4_main_queue_pilot_validate(metalDeviceHandle) == 0) {
             throw new IllegalStateException("Metal 4 main-queue pilot validation failed");
         }
-        MetalNativeBridge.metallum_set_metal4_barrier_enabled(METAL4_BARRIER ? 1 : 0);
+        MetalNativeBridge.metallum_set_metal4_barrier_enabled(metal4.barrier() ? 1 : 0);
         MetalNativeBridge.metallum_set_gpu_encoder_timing_enabled(
                 Boolean.getBoolean("metallum.validation.gpuPassTiming") ? 1 : 0
         );
         Metallum.LOGGER.info(
-                "[Metallum] Metal 4: requested={} available={} compiler={} present={} mainQueuePilot={} mainRenderer={} barrier={}",
-                METAL4_REQUESTED,
-                this.metal4Available,
-                metal4Compiler,
-                metal4Present,
-                metal4MainQueuePilot,
-                metal4MainRenderer,
-                METAL4_BARRIER
+                "[Metallum] Metal 4: requested={} supported={} available={} compiler={} present={} "
+                        + "mainQueuePilot={} mainRenderer={} barrier={} residency={} rejection={}",
+                metal4.requested(),
+                metal4.supported(),
+                metal4.available(),
+                metal4.compiler(),
+                metal4.present(),
+                metal4.mainQueuePilot(),
+                metal4.mainRenderer(),
+                metal4.barrier(),
+                metal4.residency(),
+                metal4.rejectionReason()
         );
         if (PSO_ARCHIVE) {
             try {
@@ -541,6 +552,9 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull CompiledRenderPipeline precompilePipeline(final @NonNull RenderPipeline pipeline, @Nullable final ShaderSource shaderSource) {
+        if (this.closing) {
+            throw new IllegalStateException("Metal device is closing");
+        }
         ShaderSource effectiveSource = shaderSource == null ? this.activeShaderSource : shaderSource;
         if (shaderSource != null) {
             this.activeShaderSource = shaderSource;
@@ -595,7 +609,7 @@ final class MetalDevice implements GpuDeviceBackend {
      * on demand instead.
      */
     void submitPrewarmTask(final Runnable task) {
-        if (this.prewarmExecutor != null) {
+        if (!this.closing && this.prewarmExecutor != null) {
             try {
                 this.prewarmExecutor.execute(task);
             } catch (java.util.concurrent.RejectedExecutionException ignored) {
@@ -604,7 +618,7 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     private void compileInBackground(final RenderPipeline pipeline, final ShaderSource source, final int generation) {
-        if (this.compiledPipelines.containsKey(pipeline)) {
+        if (this.closing || this.compiledPipelines.containsKey(pipeline)) {
             return;
         }
         synchronized (COMPILE_CHAIN_LOCK) {
@@ -653,16 +667,19 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public void close() {
+        if (this.closing) {
+            return;
+        }
+        this.closing = true;
         if (current == this) {
             current = null;
         }
-        this.waitForSubmittedGpuWork();
-        this.genericVertexAttributeBuffer.close();
-        this.commandEncoder.close();
+
+        MetalFxManager.close(this);
+
+        // Freeze and join background compilation before touching any cache,
+        // encoder, residency state or native object it can still populate.
         if (this.prewarmExecutor != null) {
-            // Stop background compiles before tearing down the caches they
-            // populate; a straggler past the 5s bail-out still serializes
-            // against clearPipelineCache via COMPILE_CHAIN_LOCK.
             this.prewarmExecutor.shutdownNow();
             try {
                 if (!this.prewarmExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -672,7 +689,14 @@ final class MetalDevice implements GpuDeviceBackend {
                 Thread.currentThread().interrupt();
             }
         }
+
+        // All retirement queued below remains legal until commandEncoder.close()
+        // performs the terminal drain. Closing the encoder earlier stranded late
+        // sampler and buffer releases in a queue that could never rotate again.
+        this.waitForSubmittedGpuWork();
+        this.genericVertexAttributeBuffer.close();
         this.clearPipelineCache();
+        this.commandEncoder.close();
         this.drainBufferPool();
         if (!MetalNativeBridge.isNullHandle(this.cocoaView)) {
             try {
@@ -680,6 +704,7 @@ final class MetalDevice implements GpuDeviceBackend {
             } catch (Throwable ignored) {
             }
         }
+        MetalNativeBridge.metallum_metal_device_shutdown(this.metalDeviceHandle);
         this.commandQueue.close();
         MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
     }
@@ -847,8 +872,20 @@ final class MetalDevice implements GpuDeviceBackend {
                 // ColorTargetState contract has the same upper bound. Keep
                 // the advertised limit aligned with both APIs so the generic
                 // CommandEncoder rejects an impossible pass before native use.
-                new DeviceLimits(1, 256, 16384, maxMemoryAllocationSize, 0, ColorTargetState.MAX_COLOR_TARGETS),
-                new DeviceFeatures(false, false, true, true, true, false, true),
+                new DeviceLimits(
+                        1,
+                        256,
+                        16384,
+                        maxMemoryAllocationSize,
+                        MAX_MULTI_DRAW_DIRECT_INTERLEAVED_DRAWS,
+                        ColorTargetState.MAX_COLOR_TARGETS
+                ),
+                // MetalRenderPass implements Mojang's interleaved indexed
+                // multi-draw contract as well as the separate-array form.
+                // Sodium checks this capability in the public RenderPass
+                // wrapper before the backend method can run, so the device
+                // declaration must match the production implementation.
+                new DeviceFeatures(false, true, true, true, true, false, true),
                 underlyingExtensions,
                 new HintsAndWorkarounds(false, false),
                 type

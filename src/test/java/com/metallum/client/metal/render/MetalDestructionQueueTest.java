@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Guards the destruction-delay contract established for the in-flight model:
@@ -14,6 +16,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * must not run before the rotation whose wait has confirmed submit N itself.
  */
 final class MetalDestructionQueueTest {
+    @Test
+    void rejectsNonPositiveDepth() {
+        assertThrows(IllegalArgumentException.class, () -> new MetalDestructionQueue(0));
+        assertThrows(IllegalArgumentException.class, () -> new MetalDestructionQueue(-1));
+    }
+
     @Test
     void actionQueuedNowRunsOnFourthRotationAtDepthFour() {
         MetalDestructionQueue queue = new MetalDestructionQueue(

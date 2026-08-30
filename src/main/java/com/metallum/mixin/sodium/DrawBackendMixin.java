@@ -12,7 +12,12 @@ public class DrawBackendMixin {
     @Inject(method = "chooseBackend", at = @At("HEAD"), cancellable = true, remap = false)
     private static void metallum$chooseMetalBackend(CallbackInfoReturnable<DrawBackend> cir) {
         if (RenderSystem.getDevice().getDeviceInfo().backendName().equals("Metal")) {
-            cir.setReturnValue(DrawBackend.VK_INDIRECT);
+            // Sodium's VK_MULTIDRAW representation is a compact, interleaved
+            // { firstIndex, indexCount, baseVertex } command array.  The Metal
+            // render pass consumes exactly that normalized form and can route
+            // qualifying terrain batches through ICB without first uploading a
+            // Vulkan-style indirect-command ring buffer.
+            cir.setReturnValue(DrawBackend.VK_MULTIDRAW);
         }
     }
 }

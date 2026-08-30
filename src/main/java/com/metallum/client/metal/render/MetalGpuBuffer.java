@@ -42,6 +42,7 @@ public class MetalGpuBuffer extends GpuBuffer {
     private MemorySegment nativeHandle;
     @Nullable
     private ByteBuffer storage;
+    private long backingGeneration = 1L;
     private boolean closed;
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size) {
@@ -229,6 +230,7 @@ public class MetalGpuBuffer extends GpuBuffer {
             }
             MemorySegment handle = this.nativeHandle;
             this.nativeHandle = null;
+            this.backingGeneration = Math.incrementExact(this.backingGeneration);
             this.device.queueBufferRelease(handle, this.allocationSize, this.resourceOptions);
         }
     }
@@ -267,7 +269,9 @@ public class MetalGpuBuffer extends GpuBuffer {
     }
 
     private static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {
-        MTLStorageMode storageMode = isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private;
+        MTLStorageMode storageMode = FORCE_SHARED_STORAGE
+                ? MTLStorageMode.Shared
+                : (isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private);
         return MTLResourceOptions.of(storageMode, MTLHazardTrackingMode.Untracked);
     }
 

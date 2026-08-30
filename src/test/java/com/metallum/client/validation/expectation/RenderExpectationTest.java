@@ -11,9 +11,12 @@ import com.metallum.client.validation.contract.ResourceIdentity;
 import com.metallum.client.validation.storage.ValidationStorageBudget;
 import org.junit.jupiter.api.Test;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -169,6 +172,40 @@ final class RenderExpectationTest {
         String results = Files.readString(output.resolve("results.json"));
         assertTrue(results.contains("\"schemaVersion\": 1"));
         assertTrue(results.contains("color0-exact"));
+    }
+
+    @Test
+    void fileCaptureNormalizesBottomLeftReadbackForVisualPng() throws Exception {
+        var output = Files.createTempDirectory("render-contract-capture-png-origin-");
+        ResourceIdentity identity = new ResourceIdentity(
+                "color0", 7L, 1L, "metal-texture-7", "RGBA8_UNORM", 1, 2, 1, 0, 1, 3
+        );
+        // Native row zero is the bottom blue texel; row one is the top red texel.
+        CapturedResource actual = resource(
+                "color0", identity, "RGBA8_UNORM", 4,
+                new byte[]{0, 0, (byte) 255, (byte) 255,
+                        (byte) 255, 0, 0, (byte) 255}
+        );
+        CapturePoint point = new CapturePoint(13L, "synthetic/origin", CapturePointKind.AFTER_PASS, -1);
+        try (FileValidationCaptureService service = new FileValidationCaptureService(output, "capture-origin")) {
+            service.requestCapture(
+                    point,
+                    List.of(AttachmentProbe.of("color0", identity, AttachmentSemantic.COLOR,
+                            CaptureFormat.fromFormat("RGBA8_UNORM", 4))),
+                    List.of()
+            );
+            service.completeCapture(point, List.of(actual), List.of());
+        }
+        Path png;
+        try (var files = Files.find(
+                output, 8,
+                (path, attributes) -> path.getFileName().toString().equals("actual.png")
+        )) {
+            png = files.findFirst().orElseThrow();
+        }
+        BufferedImage image = ImageIO.read(png.toFile());
+        assertEquals(0xffff0000, image.getRGB(0, 0));
+        assertEquals(0xff0000ff, image.getRGB(0, 1));
     }
 
     @Test

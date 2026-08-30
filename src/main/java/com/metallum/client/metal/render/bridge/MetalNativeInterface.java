@@ -95,7 +95,9 @@ public final class MetalNativeInterface {
         if (symbol.isEmpty()) {
             return Optional.empty();
         }
-        MethodHandle negotiate = Linker.nativeLinker().downcallHandle(symbol.get(), NEGOTIATION_DESCRIPTOR);
+        MethodHandle negotiate = MetalFfmCallTelemetry.instrumentDowncall(
+                Linker.nativeLinker().downcallHandle(symbol.get(), NEGOTIATION_DESCRIPTOR)
+        );
 
         int status;
         MemorySegment table;
@@ -207,7 +209,9 @@ public final class MetalNativeInterface {
             throw new IndexOutOfBoundsException("Entry " + index + " is outside the "
                     + entries.size() + " entries of " + feature + " v" + version);
         }
-        return Linker.nativeLinker().downcallHandle(entries.get(index), descriptor);
+        return MetalFfmCallTelemetry.instrumentDowncall(
+                Linker.nativeLinker().downcallHandle(entries.get(index), descriptor)
+        );
     }
 
     /** Raw entry address, for diagnostics and for asserting table structure. */

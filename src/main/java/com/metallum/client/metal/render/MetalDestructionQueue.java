@@ -21,6 +21,7 @@ final class MetalDestructionQueue {
 
     private final Slot[] slots;
     private int currentQueueIndex;
+    private boolean closed;
 
     MetalDestructionQueue(final int queueCount) {
         if (queueCount <= 0) {
