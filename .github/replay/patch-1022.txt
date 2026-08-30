@@ -1,0 +1,16 @@
+*** Begin Patch
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/scripts/experience/launch-minecraft-26.2.sh
+@@
+     metal4)
+         COMMON_FLAGS+=(
+             -Dmetallum.opt.metal4=true
+             -Dmetallum.opt.metal4Compiler=true
+             -Dmetallum.opt.metal4MainRenderer=true
+             -Dmetallum.opt.metal4Present=true
+             -Dmetallum.opt.metal4Barrier=true
+             -Dmetallum.opt.residencySet=true
+-            -Dmetallum.opt.terrainSceneSnapshot=true
+-            -Dmetallum.opt.terrainIcb=true
+         )
+         ;;
+*** End Patch
