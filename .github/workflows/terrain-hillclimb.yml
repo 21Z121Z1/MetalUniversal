@@ -1,0 +1,138 @@
+name: Apple Silicon terrain hill climb
+
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: Repeats per worker-count candidate
+        required: false
+        default: '2'
+  push:
+    branches:
+      - experiment/apple-terrain-hillclimb
+    paths:
+      - 'src/main/java/com/metallum/mixin/sodium/**'
+      - 'src/main/java/com/metallum/client/terrain/**'
+      - 'src/main/resources/metallum.mixins.json'
+      - 'scripts/terrain-hillclimb.py'
+      - '.github/ci/minecraft-e2e/**'
+      - '.github/workflows/terrain-hillclimb.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terrain-hillclimb-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terrain-hillclimb:
+    name: Sodium terrain / Apple Silicon hill climb
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      # Performance experiments must not pay validation/HUD sampling overhead.
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      GRADLE_OPTS: '-Dorg.gradle.caching=true'
+
+    steps:
+      - name: Checkout terrain experiment
+        uses: actions/checkout@v6
+
+      - name: Describe Apple Silicon runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          sw_vers
+          system_profiler SPHardwareDataType SPDisplaysDataType || true
+          test "$(uname -m)" = "arm64"
+          echo "logical CPUs: $(sysctl -n hw.logicalcpu)"
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle caches
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-cleanup: on-success
+
+      - name: Build production MetalUniversal JAR
+        id: metallum
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew scripts/terrain-hillclimb.py
+          ./gradlew \
+            --build-cache \
+            --stacktrace \
+            -x buildIOSNative \
+            -x buildIOSSpvc \
+            jar
+          jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' \
+            -print | head -n 1)"
+          test -n "$jar"
+          test -s "$jar"
+          jar="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
+          unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
+          echo "jar=$jar" >> "$GITHUB_OUTPUT"
+
+      - name: Hill-climb Sodium chunk workers
+        shell: bash
+        env:
+          REPEATS: ${{ github.event.inputs.repeats || '2' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/terrain-hillclimb.py \
+            --repo-root "$PWD" \
+            --metallum-jar "${{ steps.metallum.outputs.jar }}" \
+            --repeats "$REPEATS" \
+            --min-improvement 0.02 \
+            --tail-regression-limit 0.05 \
+            --output build/terrain-hillclimb/report.json
+
+      - name: Summarize recommendation
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          report="build/terrain-hillclimb/report.json"
+          if [[ -s "$report" ]]; then
+            cat "$report"
+            python3 - "$report" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding='utf-8'))
+          winner = data['winner']
+          search = data['search']
+          print('## Apple Silicon terrain hill climb')
+          print()
+          print(f"- Sodium default workers: {search['sodiumDefaultThreads']}")
+          print(f"- Hill-climb path: {' → '.join(map(str, search['path']))}")
+          print(f"- Winner: {winner['threads']} workers")
+          print(f"- Winner median chunkRenderTicks: {winner['medianChunkRenderTicks']}")
+          print(f"- Relative median improvement: {winner['relativeMedianImprovementVsSodiumDefault'] * 100:.2f}%")
+          print(f"- Runtime recommendation: `{winner['recommendedSystemProperty']}`")
+          PY
+          else
+            echo 'Terrain hill-climb report was not produced.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload hill-climb evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: terrain-hillclimb-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            build/terrain-hillclimb/**
+            .github/ci/minecraft-e2e/build/evidence/**
+            .github/ci/minecraft-e2e/build/run/clientGameTest/logs/latest.log
