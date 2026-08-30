@@ -1,0 +1,14 @@
+*** Begin Patch
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainCandidateRegistry.java
+@@
+             TerrainStorageBridge.Owner storageOwner = TerrainStorageBridge.owner(storage);
+             TerrainCandidateSnapshot.TerrainPass pass = candidate == null
+-                    && storageOwner != null
+-                    && storageOwner.translucent()
+-                    ? TerrainCandidateSnapshot.TerrainPass.TRANSLUCENT
+-                    : TerrainCandidateSnapshot.TerrainPass.OPAQUE
++                    ? storageOwner != null && storageOwner.translucent()
++                    ? TerrainCandidateSnapshot.TerrainPass.TRANSLUCENT
++                    : TerrainCandidateSnapshot.TerrainPass.OPAQUE
+                     : candidate.pass();
+*** End Patch
