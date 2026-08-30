@@ -6,6 +6,7 @@ on:
       - codex/real-client-replay-staging-20260830
     paths:
       - .github/workflows/codex-real-client-replay.yml
+      - .github/replay/**
 
 permissions:
   contents: write
@@ -27,7 +28,7 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/metallum-replay
           cp .github/replay/apply_rollout_patch.py .github/replay/patch-*.txt /tmp/metallum-replay/
-          git config user.name "github-actions[bot]"
+          git config user.name "github-actions[bot]]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$TARGET_BRANCH" "$BASE_SHA"
 
