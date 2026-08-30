@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       repeats:
-        description: Repeats per hill-climb candidate
+        description: Repeats per coarse hill-climb candidate
         required: false
         default: '2'
   push:
@@ -17,6 +17,8 @@ on:
       - 'src/main/resources/metallum.mixins.json'
       - 'scripts/terrain-hillclimb.py'
       - 'scripts/terrain-scheduler-hillclimb.py'
+      - 'scripts/terrain-pressure-hillclimb.py'
+      - 'scripts/terrain-scheduler-fine-hillclimb.py'
       - '.github/ci/terrain-bench/**'
       - '.github/workflows/terrain-hillclimb.yml'
 
@@ -31,9 +33,8 @@ jobs:
   terrain-hillclimb:
     name: Sodium terrain / Apple Silicon hill climb
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
-      # Performance experiments must not pay validation/HUD sampling overhead.
       MTL_DEBUG_LAYER: '0'
       MTL_SHADER_VALIDATION: '0'
       MTL_HUD_ENABLED: '0'
@@ -71,7 +72,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chmod +x ./gradlew scripts/terrain-hillclimb.py scripts/terrain-scheduler-hillclimb.py
+          chmod +x ./gradlew \
+            scripts/terrain-hillclimb.py \
+            scripts/terrain-scheduler-hillclimb.py \
+            scripts/terrain-pressure-hillclimb.py \
+            scripts/terrain-scheduler-fine-hillclimb.py
           ./gradlew \
             --build-cache \
             --stacktrace \
@@ -128,56 +133,141 @@ jobs:
             --tail-regression-limit 0.05 \
             --output build/terrain-scheduler-hillclimb/report.json
 
+      - name: Hill-climb terrain pressure policy
+        shell: bash
+        env:
+          COARSE_REPEATS: ${{ github.event.inputs.repeats || '2' }}
+        run: |
+          set -euo pipefail
+          worker_report="build/terrain-hillclimb/report.json"
+          scheduler_report="build/terrain-scheduler-hillclimb/report.json"
+          test -s "$worker_report"
+          test -s "$scheduler_report"
+          read -r threads build_ratio upload_ratio <<<"$(python3 - "$worker_report" "$scheduler_report" <<'PY'
+          import json, sys
+          worker = json.load(open(sys.argv[1], encoding='utf-8'))
+          scheduler = json.load(open(sys.argv[2], encoding='utf-8'))
+          print(int(worker['winner']['threads']),
+                float(scheduler['winner']['buildBudgetRatio']),
+                float(scheduler['winner']['uploadBudgetRatio']))
+          PY
+          )"
+          repeats="$COARSE_REPEATS"
+          if (( repeats < 3 )); then repeats=3; fi
+          echo "pressure search: workers=$threads build=$build_ratio upload=$upload_ratio repeats=$repeats"
+          python3 scripts/terrain-pressure-hillclimb.py \
+            --repo-root "$PWD" \
+            --bench-project .github/ci/terrain-bench \
+            --metallum-jar "${{ steps.metallum.outputs.jar }}" \
+            --threads "$threads" \
+            --build-ratio "$build_ratio" \
+            --upload-ratio "$upload_ratio" \
+            --repeats "$repeats" \
+            --step 0.10 \
+            --max-moves 2 \
+            --min-improvement 0.02 \
+            --tail-regression-limit 0.05 \
+            --output build/terrain-pressure-hillclimb/report.json
+
+      - name: Fine hill-climb terrain scheduler ratios
+        shell: bash
+        env:
+          COARSE_REPEATS: ${{ github.event.inputs.repeats || '2' }}
+        run: |
+          set -euo pipefail
+          worker_report="build/terrain-hillclimb/report.json"
+          scheduler_report="build/terrain-scheduler-hillclimb/report.json"
+          pressure_report="build/terrain-pressure-hillclimb/report.json"
+          test -s "$worker_report"
+          test -s "$scheduler_report"
+          test -s "$pressure_report"
+          read -r threads build_ratio upload_ratio constrained severe <<<"$(python3 - "$worker_report" "$scheduler_report" "$pressure_report" <<'PY'
+          import json, sys
+          worker = json.load(open(sys.argv[1], encoding='utf-8'))
+          scheduler = json.load(open(sys.argv[2], encoding='utf-8'))
+          pressure = json.load(open(sys.argv[3], encoding='utf-8'))
+          print(int(worker['winner']['threads']),
+                float(scheduler['winner']['buildBudgetRatio']),
+                float(scheduler['winner']['uploadBudgetRatio']),
+                float(pressure['winner']['constrainedMultiplier']),
+                float(pressure['winner']['severeMultiplier']))
+          PY
+          )"
+          repeats="$COARSE_REPEATS"
+          if (( repeats < 3 )); then repeats=3; fi
+          echo "fine ratio search: workers=$threads start=$build_ratio/$upload_ratio pressure=$constrained/$severe repeats=$repeats"
+          python3 scripts/terrain-scheduler-fine-hillclimb.py \
+            --repo-root "$PWD" \
+            --bench-project .github/ci/terrain-bench \
+            --metallum-jar "${{ steps.metallum.outputs.jar }}" \
+            --threads "$threads" \
+            --start-build-ratio "$build_ratio" \
+            --start-upload-ratio "$upload_ratio" \
+            --constrained-multiplier "$constrained" \
+            --severe-multiplier "$severe" \
+            --repeats "$repeats" \
+            --step 0.01 \
+            --max-moves 2 \
+            --min-improvement 0.015 \
+            --tail-regression-limit 0.05 \
+            --output build/terrain-scheduler-fine-hillclimb/report.json
+
       - name: Summarize recommendation
         if: always()
         shell: bash
         run: |
           set -u
-          worker_report="build/terrain-hillclimb/report.json"
-          scheduler_report="build/terrain-scheduler-hillclimb/report.json"
-          if [[ -s "$worker_report" ]]; then
-            cat "$worker_report"
-            python3 - "$worker_report" >> "$GITHUB_STEP_SUMMARY" <<'PY'
-          import json, sys
-          data = json.load(open(sys.argv[1], encoding='utf-8'))
-          winner = data['winner']
-          search = data['search']
-          print('## Apple Silicon terrain worker hill climb')
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          def load(path):
+              p = Path(path)
+              return json.loads(p.read_text(encoding='utf-8')) if p.is_file() else None
+
+          worker = load('build/terrain-hillclimb/report.json')
+          coarse = load('build/terrain-scheduler-hillclimb/report.json')
+          pressure = load('build/terrain-pressure-hillclimb/report.json')
+          fine = load('build/terrain-scheduler-fine-hillclimb/report.json')
+
+          print('## Apple Silicon terrain hill climb')
           print()
-          print(f"- Sodium default workers: {search['sodiumDefaultThreads']}")
-          print(f"- Hill-climb path: {' → '.join(map(str, search['path']))}")
-          print(f"- Winner: {winner['threads']} workers")
-          print(f"- Winner median chunkRenderTicks: {winner['medianChunkRenderTicks']}")
-          print(f"- Winner median readiness: {winner['medianChunkRenderElapsedMillis']:.3f} ms")
-          print(f"- Relative median improvement: {winner['relativeMedianImprovementVsSodiumDefault'] * 100:.2f}%")
-          print(f"- Runtime recommendation: `{winner['recommendedSystemProperty']}`")
-          print()
+          if worker:
+              w = worker['winner']
+              print(f"- Worker winner: {w['threads']} (median {w['medianChunkRenderElapsedMillis']:.3f} ms)")
+          else:
+              print('- Worker phase: no report')
+          if coarse:
+              w = coarse['winner']
+              print(f"- Coarse scheduler: build={w['buildBudgetRatio']:.4f}, upload={w['uploadBudgetRatio']:.4f}, median={w['medianChunkRenderElapsedMillis']:.3f} ms")
+              print(f"- Coarse vs scheduler-disabled control: {w['relativeMedianImprovementVsSchedulerDisabledControl'] * 100:.2f}%")
+          else:
+              print('- Coarse scheduler phase: no report')
+          if pressure:
+              w = pressure['winner']
+              probe = pressure['causalProbeNoPressureThrottle']
+              print(f"- Pressure winner: constrained={w['constrainedMultiplier']:.4f}, severe={w['severeMultiplier']:.4f}, median={w['medianChunkRenderElapsedMillis']:.3f} ms")
+              print(f"- Pressure winner vs current pressure: {w['relativeMedianImprovementVsCurrentPressure'] * 100:.2f}%")
+              print(f"- No-throttle (1,1) causal probe vs current pressure: {probe['relativeMedianImprovementVsCurrentPressure'] * 100:.2f}%")
+              print(f"- No-throttle (1,1) vs scheduler-disabled control: {probe['relativeMedianImprovementVsSchedulerDisabledControl'] * 100:.2f}%")
+          else:
+              print('- Pressure phase: no report')
+          if fine:
+              w = fine['winner']
+              print(f"- Fine scheduler: build={w['buildBudgetRatio']:.4f}, upload={w['uploadBudgetRatio']:.4f}, median={w['medianChunkRenderElapsedMillis']:.3f} ms")
+              print(f"- Fine improvement vs coarse start: {w['relativeMedianImprovementVsFineStart'] * 100:.2f}%")
+              print(f"- Fine vs scheduler-disabled control: {w['relativeMedianImprovementVsSchedulerDisabledControl'] * 100:.2f}%")
+              print(f"- Pressure-frame fraction at winner: {w['medianPressureFrameFraction'] * 100:.1f}%")
+          else:
+              print('- Fine scheduler phase: no report')
           PY
-          else
-            echo 'Terrain worker hill-climb report was not produced.' >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [[ -s "$scheduler_report" ]]; then
-            cat "$scheduler_report"
-            python3 - "$scheduler_report" >> "$GITHUB_STEP_SUMMARY" <<'PY'
-          import json, sys
-          data = json.load(open(sys.argv[1], encoding='utf-8'))
-          winner = data['winner']
-          search = data['search']
-          print('## MetalUniversal terrain scheduler hill climb')
-          print()
-          print(f"- Fixed Sodium workers: {data['fixedSodiumWorkerCount']}")
-          print(f"- Warmup during search: {search['warmupFrames']} frames")
-          print(f"- Winner build ratio: {winner['buildBudgetRatio']:.4f}")
-          print(f"- Winner upload ratio: {winner['uploadBudgetRatio']:.4f}")
-          print(f"- Winner median readiness: {winner['medianChunkRenderElapsedMillis']:.3f} ms")
-          print(f"- Adaptive frames (median): {winner['medianAdaptiveFrames']}")
-          print(f"- Improvement vs adaptive default: {winner['relativeMedianImprovementVsAdaptiveDefault'] * 100:.2f}%")
-          print(f"- Improvement vs scheduler-disabled control: {winner['relativeMedianImprovementVsSchedulerDisabledControl'] * 100:.2f}%")
-          print(f"- Search path: {search['path']}")
-          PY
-          else
-            echo 'Terrain scheduler hill-climb report was not produced.' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          for report in \
+            build/terrain-hillclimb/report.json \
+            build/terrain-scheduler-hillclimb/report.json \
+            build/terrain-pressure-hillclimb/report.json \
+            build/terrain-scheduler-fine-hillclimb/report.json; do
+            if [[ -s "$report" ]]; then cat "$report"; fi
+          done
 
       - name: Upload hill-climb evidence
         if: always()
@@ -189,5 +279,7 @@ jobs:
           path: |
             build/terrain-hillclimb/**
             build/terrain-scheduler-hillclimb/**
+            build/terrain-pressure-hillclimb/**
+            build/terrain-scheduler-fine-hillclimb/**
             .github/ci/terrain-bench/build/evidence/**
             .github/ci/terrain-bench/build/run/clientGameTest/logs/latest.log
