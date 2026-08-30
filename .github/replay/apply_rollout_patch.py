@@ -72,12 +72,12 @@ def apply_patch(text: str) -> None:
                 new_text = "\n".join(new)
                 needle = old_text + "\n"
                 replacement = new_text + ("\n" if new else "")
-                if data.count(needle) == 1:
+                if needle in data:
                     data = data.replace(needle, replacement, 1)
-                elif data.count(old_text) == 1:
+                elif old_text in data:
                     data = data.replace(old_text, new_text, 1)
                 else:
-                    raise RuntimeError(f"hunk match count={data.count(needle)} for {path}: {old_text[:160]!r}")
+                    raise RuntimeError(f"hunk not found for {path}: {old_text[:160]!r}")
             path.write_text(data)
             continue
         raise RuntimeError(f"unknown patch command: {line}")
