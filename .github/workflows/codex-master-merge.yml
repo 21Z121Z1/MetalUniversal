@@ -1,0 +1,35 @@
+name: Resolve integration merge into master
+
+on:
+  push:
+    branches:
+      - codex/master-merge-staging-20260830
+    paths:
+      - .github/workflows/codex-master-merge.yml
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/master-merge-staging-20260830
+      - name: Merge master into validated integration tree
+        env:
+          INTEGRATION_SHA: c73a66efcaf4dd3e4f1a571d96901e15e3b07552
+          MASTER_SHA: 6a8ef77d8fe7b960bc09275533991c05d3588204
+          TARGET_BRANCH: codex/master-merge-resolved-20260830
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$TARGET_BRANCH" "$INTEGRATION_SHA"
+          git merge --no-ff -X ours "$MASTER_SHA" -m "Merge master history into validated Metal integration line"
+          git diff --check "$MASTER_SHA"..HEAD
+          git log -1 --pretty=raw
+          git push --force-with-lease origin HEAD:"$TARGET_BRANCH"
