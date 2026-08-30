@@ -35,32 +35,105 @@ jobs:
           python3 .github/replay-reviewed/fix-parser.py
           python3 -m py_compile scripts/agent/replay_reviewed_codex.py
 
-      - name: inspect product state after reviewed rollout
+      - name: build reviewed product tree
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import base64, importlib.util, json, zlib
           from pathlib import Path
+
           spec = importlib.util.spec_from_file_location("reviewed_replay", "scripts/agent/replay_reviewed_codex.py")
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
           patches = json.loads(zlib.decompress(base64.b64decode(module.PAYLOAD)).decode("utf-8"))
+
+          # The last payload entry is our post-audit benchmark hardening. Apply
+          # the 39 reviewed rollout patches first, then harden the resulting
+          # final script structurally so it is independent of stale hunk context.
           for index, patch in enumerate(patches[:-1], 1):
               module.apply_patch(patch)
-              print(f"applied reviewed patch {index}/{len(patches)}")
-          path = Path("scripts/agent/run_unified_eval_cycle.sh")
-          lines = path.read_text(encoding="utf-8").splitlines()
-          for needle in ("stage_eval_shader_pack() {", "run_profile_task() {"):
-              at = next(i for i, line in enumerate(lines) if line.strip() == needle)
-              lo = max(0, at - 5)
-              hi = min(len(lines), at + 70)
-              print(f"=== {needle} @ {at + 1} ===")
-              for number in range(lo, hi):
-                  print(f"{number + 1:04d}: {lines[number]}")
+              print(f"applied reviewed rollout patch {index}/{len(patches) - 1}")
+
+          script_path = Path("scripts/agent/run_unified_eval_cycle.sh")
+          script = script_path.read_text(encoding="utf-8")
+
+          old_stage = '''  pin_equals_property "$IRIS_CONFIG" "shaderPack" "$STAGED_PACK_NAME"
+          ���  pin_equals_property "$IRIS_CONFIG" "enableShaders" "true"
+          ���}
+          ���
+          ���stage_eval_shader_pack
+          ���'''.replace('          ���', '')
+          new_stage = '''  pin_staged_shader_pack
+          ���}
+          ���
+          ���pin_staged_shader_pack() {
+          ���  [[ -z "$STAGED_PACK_NAME" ]] && return 0
+          ���  pin_equals_property "$IRIS_CONFIG" "shaderPack" "$STAGED_PACK_NAME"
+          ���  pin_equals_property "$IRIS_CONFIG" "enableShaders" "true"
+          ���}
+          ���
+          ���stage_eval_shader_pack
+          ���'''.replace('          ���', '')
+          if script.count(old_stage) != 1:
+              raise SystemExit("expected one shader-pack staging tail")
+          script = script.replace(old_stage, new_stage, 1)
+
+          marker = '''  mkdir -p "$trial_dir/artifacts"
+          ���  : > "$marker"
+          ���  while IFS= read -r arg; do args+=("$arg"); done < <(profile_args "$profile" "$warmup_seconds" "$sample_seconds")
+          ���'''.replace('          ���', '')
+          marker_hardened = '''  mkdir -p "$trial_dir/artifacts"
+          ���  : > "$marker"
+          ���  # Iris persists its runtime selection on shutdown. Re-pin immediately before
+          ���  # every client process so A/B/B/A trials cannot inherit enableShaders=false
+          ���  # or a different pack from the preceding arm.
+          ���  pin_staged_shader_pack
+          ���  while IFS= read -r arg; do args+=("$arg"); done < <(profile_args "$profile" "$warmup_seconds" "$sample_seconds")
+          ���'''.replace('          ���', '')
+          if script.count(marker) != 1:
+              raise SystemExit("expected one run-profile trial marker")
+          script = script.replace(marker, marker_hardened, 1)
+
+          proof = '''  if [[ -n "$STAGED_PACK_NAME" ]]; then
+          ���    grep -F "Using shaderpack: $STAGED_PACK_NAME" "$trial_dir/client.log" >/dev/null || {
+          ���      echo "$profile did not prove exact shader-pack activation: $STAGED_PACK_NAME" >&2
+          ���      return 2
+          ���    }
+          ���  fi
+          ���  return "$normalize_status"
+          ���'''.replace('          ���', '')
+          proof_hardened = '''  if [[ -n "$STAGED_PACK_NAME" ]]; then
+          ���    grep -F "Using shaderpack: $STAGED_PACK_NAME" "$trial_dir/client.log" >/dev/null || {
+          ���      echo "$profile did not prove exact shader-pack activation: $STAGED_PACK_NAME" >&2
+          ���      return 2
+          ���    }
+          ���  fi
+          ���  # Startup/menu pacing records legitimately use OUT_OF_LEVEL_MENU with
+          ���  # level=false. Reject only throttled records emitted while a level is live.
+          ���  if [[ "$normalize" == "true" ]] \
+          ���      && grep -Eq 'Metal frame pacing: .*throttle=(SHORT_AFK|OUT_OF_LEVEL_MENU).*level=true' \
+          ���          "$trial_dir/client.log"; then
+          ���    echo "$profile entered a throttled in-world state; performance evidence is invalid" >&2
+          ���    return 2
+          ���  fi
+          ���  return "$normalize_status"
+          ���'''.replace('          ���', '')
+          if script.count(proof) != 1:
+              raise SystemExit("expected one shader-pack proof block")
+          script = script.replace(proof, proof_hardened, 1)
+          script_path.write_text(script, encoding="utf-8")
+
+          doc_path = Path("docs/agent/unified-evaluation-loop.md")
+          doc = doc_path.read_text(encoding="utf-8")
+          old_doc = "When `METALLUM_EVAL_SHADER_PACK_PATH` is supplied, the runner stages a content-addressed copy, temporarily pins `run/config/iris.properties` to it, and requires each client log to prove that exact pack was loaded. The original Iris configuration and any newly staged archive are restored/removed when the run exits."
+          new_doc = "When `METALLUM_EVAL_SHADER_PACK_PATH` is supplied, the runner stages a content-addressed copy, re-pins `run/config/iris.properties` immediately before every client process, and requires each client log to prove that exact pack was loaded. The original Iris configuration and any newly staged archive are restored/removed when the run exits. Normalized admission/performance trials also fail closed if in-world frame-pacing evidence reports `SHORT_AFK` or `OUT_OF_LEVEL_MENU`, because those throttled samples are not comparable with an unthrottled arm."
+          if doc.count(old_doc) != 1:
+              raise SystemExit("expected one unified-eval shader-pack documentation paragraph")
+          doc_path.write_text(doc.replace(old_doc, new_doc, 1), encoding="utf-8")
           PY
+          bash -n scripts/agent/run_unified_eval_cycle.sh
           git diff --check
-          false
 
       - name: commit product diff
         shell: bash
