@@ -1,0 +1,11 @@
+*** Begin Patch
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/mixin/sodium/GlBufferSegmentGenerationMixin.java
+@@
+ @Mixin(GlBufferSegment.class)
+-public abstract class GlBufferSegmentGenerationMixin implements GlBufferSegmentGeneration {
++public abstract class GlBufferSegmentGenerationMixin {
+@@
+-    @Override
+     public long metallum$generation() {
+*** Delete File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/mixin/sodium/GlBufferSegmentGeneration.java
+*** End Patch
