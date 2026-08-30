@@ -31,9 +31,9 @@ if original in text:
 if "normalized = [line.lstrip() for line in needle]" not in text:
     raise SystemExit("failed to install indentation-compatible context lookup")
 
-# Codex's custom apply_patch accepts unprefixed lines inside an added heredoc
-# body. Patch the single parser rejection site structurally rather than
-# depending on the exact exception type/quoting used by the generated helper.
+# Codex's custom apply_patch accepts unprefixed lines and unprefixed blank
+# lines inside added heredoc bodies. Patch only those two explicit rejection
+# sites; source context/deletion matching remains unchanged.
 lines = text.splitlines()
 raw_rejections = [i for i, line in enumerate(lines) if "unsupported patch line for" in line]
 if len(raw_rejections) != 1:
@@ -41,6 +41,13 @@ if len(raw_rejections) != 1:
 index = raw_rejections[0]
 indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
 lines[index] = indent + "new.append(patch_line)"
+
+empty_rejections = [i for i, line in enumerate(lines) if "malformed empty patch line for" in line]
+if len(empty_rejections) != 1:
+    raise SystemExit(f"expected one empty-line parser branch, found {len(empty_rejections)}")
+index = empty_rejections[0]
+indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
+lines[index] = indent + 'new.append(""); continue'
 text = "\n".join(lines) + "\n"
 
 old_write = '''        lines[index:index + len(old)] = new
@@ -50,6 +57,9 @@ new_write = '''        replacement = []
         old_offset = 0
         for patch_line in hunk:
             if patch_line == "\\\\ No newline at end of file":
+                continue
+            if patch_line == "":
+                replacement.append("")
                 continue
             prefix, value = patch_line[0], patch_line[1:]
             if prefix == " ":
@@ -66,7 +76,7 @@ new_write = '''        replacement = []
 '''
 if old_write in text:
     text = text.replace(old_write, new_write, 1)
-if "replacement.append(patch_line)" not in text:
+if "replacement.append(patch_line)" not in text or 'replacement.append("")' not in text:
     raise SystemExit("failed to install raw heredoc replacement support")
 
 path.write_text(text, encoding="utf-8")
