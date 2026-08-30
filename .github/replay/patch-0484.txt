@@ -1,0 +1,105 @@
+*** Begin Patch
+*** Add File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainSegmentIdentity.java
++package com.metallum.client.metal.render;
++
++import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
++
++import java.lang.reflect.Method;
++
++/**
++ * Reads the optional Sodium segment methods without loading a class from the
++ * Fabric-defined mixin package directly. Mixin-owned interfaces are markers
++ * for the transformed target, not application APIs; direct references to
++ * those interfaces are rejected by the Mixin transformer at runtime.
++ */
++final class TerrainSegmentIdentity {
++    private static final String FREE_METHOD = "metallum$isFree";
++    private static final String GENERATION_METHOD = "metallum$generation";
++
++    private TerrainSegmentIdentity() {
++    }
++
++    static boolean isFree(final GlBufferSegment segment) {
++        Object value = invoke(segment, FREE_METHOD);
++        return Boolean.TRUE.equals(value);
++    }
++
++    /** Returns -1 when the generation method is not present or cannot be read. */
++    static long generation(final GlBufferSegment segment) {
++        Object value = invoke(segment, GENERATION_METHOD);
++        return value instanceof Number number ? number.longValue() : -1L;
++    }
++
++    private static Object invoke(final GlBufferSegment segment, final String methodName) {
++        if (segment == null) {
++            return null;
++        }
++        try {
++            Method method = segment.getClass().getMethod(methodName);
++            return method.invoke(segment);
++        } catch (ReflectiveOperationException | RuntimeException ignored) {
++            return null;
++        }
++    }
++}
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainCandidateSnapshot.java
+@@
+-import com.metallum.mixin.sodium.GlBufferSegmentAccessor;
+-import com.metallum.mixin.sodium.GlBufferSegmentGeneration;
+ import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
+@@
+             if (allocation instanceof GlBufferSegment segment) {
+-                if (!(segment instanceof GlBufferSegmentAccessor accessor)
+-                        || accessor.metallum$isFree()
+-                        || !(segment instanceof GlBufferSegmentGeneration stamped)) {
++                long liveGeneration = TerrainSegmentIdentity.generation(segment);
++                if (TerrainSegmentIdentity.isFree(segment) || liveGeneration < 0L) {
+                     return false;
+                 }
+                 try {
+                     return segment.getOffset() == offset
+                             && segment.getLength() == length
+-                            && stamped.metallum$generation() == generation;
++                            && liveGeneration == generation;
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainCandidateRegistry.java
+@@
+-import com.metallum.mixin.sodium.GlBufferSegmentAccessor;
+-import com.metallum.mixin.sodium.GlBufferSegmentGeneration;
+@@
+     private static TerrainCandidateSnapshot.AllocationIdentity allocation(final GlBufferSegment segment) {
+-        if (segment == null || !(segment instanceof GlBufferSegmentAccessor accessor)
+-                || accessor.metallum$isFree()
+-                || !(segment instanceof GlBufferSegmentGeneration generation)) {
++        long stamp = TerrainSegmentIdentity.generation(segment);
++        if (segment == null || TerrainSegmentIdentity.isFree(segment) || stamp < 0L) {
+             return null;
+         }
+         long offset = segment.getOffset();
+         long length = segment.getLength();
+-        long stamp = generation.metallum$generation();
+         if (offset < 0L || length <= 0L || stamp < 0L) {
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainDrawMetadata.java
+@@
+ import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
+-import com.metallum.mixin.sodium.GlBufferSegmentAccessor;
+-import com.metallum.mixin.sodium.GlBufferSegmentGeneration;
+@@
+-            long generation = allocation instanceof GlBufferSegmentGeneration stamped
+-                    ? stamped.metallum$generation()
+-                    : 0L;
++            long generation = TerrainSegmentIdentity.generation(allocation);
+             return new AllocationStamp(allocation, allocation.getOffset(), allocation.getLength(), generation);
+@@
+             }
+             if (allocation instanceof GlBufferSegment segment) {
+-                if (!(segment instanceof GlBufferSegmentAccessor accessor)
+-                        || accessor.metallum$isFree()
+-                        || !(segment instanceof GlBufferSegmentGeneration stamped)) {
++                long liveGeneration = TerrainSegmentIdentity.generation(segment);
++                if (TerrainSegmentIdentity.isFree(segment) || liveGeneration < 0L) {
+                     return false;
+                 }
+-                return stamped.metallum$generation() == generation
++                return liveGeneration == generation
+                         && segment.getOffset() == offset
+*** End Patch
