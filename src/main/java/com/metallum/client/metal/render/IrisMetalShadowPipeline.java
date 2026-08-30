@@ -1515,7 +1515,14 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
     }
 
     private static int[] shadowDrawBuffers(final ProgramDirectives directives) {
-        return directives.hasUnknownDrawBuffers() ? new int[]{0, 1} : directives.getDrawBuffers().clone();
+        // Iris represents an absent DRAWBUFFERS/RENDERTARGETS directive as
+        // the default single output [0] and marks it as "unknown" so callers
+        // can distinguish that default from an explicit directive. Unknown
+        // does not mean "all shadowcolor attachments": synthesizing [0, 1]
+        // creates a second framebuffer attachment that the shader did not
+        // declare and makes the Metal PSO signature diverge from the shadow
+        // render pass. Preserve Iris's effective layout verbatim.
+        return directives.getDrawBuffers().clone();
     }
 
     private static void validateDrawBuffers(final int[] drawBuffers, final int targetCount, final String label) {

@@ -1509,7 +1509,13 @@ public final class IrisMetalPipelineOverrides {
             if (globalOverride != null) {
                 globalBlend = irisBlendFunction(globalOverride);
             }
-            int[] drawBuffers = program.drawBuffers();
+            // Shadow descriptors are built from ShadowProgram's effective
+            // Iris layout. Reuse that exact snapshot for the synthetic PSO;
+            // rebuilding it from the translated program would let linker
+            // metadata diverge from the attachment contract.
+            int[] drawBuffers = shadowProgram == null
+                    ? program.drawBuffers()
+                    : shadowProgram.drawBuffers();
             for (int slot = 0; slot < drawBuffers.length; slot++) {
                 int logicalTarget = drawBuffers[slot];
                 Optional<BlendFunction> blend = globalBlend;
@@ -2249,7 +2255,7 @@ public final class IrisMetalPipelineOverrides {
                                         "Iris storage image '" + imageName + "' exceeds generation target count"
                                 );
                             }
-                            return targets.colorTargets().sampleReadView(colorTarget);
+                            return targets.colorTargets().storageReadView(colorTarget);
                         }
                         IrisMetalComputeResources compute = computeResources;
                         return compute == null ? null : compute.storageImage(imageName);
@@ -2386,7 +2392,7 @@ public final class IrisMetalPipelineOverrides {
                 IrisMetalRenderTargets targets = this.renderTargets;
                 return targets == null || colorTarget >= targets.colorTargets().targetCount()
                         ? null
-                        : targets.colorTargets().sampleReadView(colorTarget);
+                        : targets.colorTargets().storageReadView(colorTarget);
             }
             if (name.startsWith("shadowcolorimg")) {
                 IrisMetalShadowPipeline shadows = this.shadowPipeline;

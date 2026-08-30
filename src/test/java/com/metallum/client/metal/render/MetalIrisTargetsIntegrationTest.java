@@ -480,6 +480,17 @@ final class MetalIrisTargetsIntegrationTest {
                 WIDTH,
                 HEIGHT
         )) {
+            assertSame(source.readView(0), source.storageReadView(0),
+                    "storage-image binding must use the unswizzled readable view");
+            assertNotSame(source.sampleReadView(0), source.storageReadView(0),
+                    "sampled RGB view must remain distinct from the storage-image view");
+            assertTrue(
+                    MetalPipelineSupport.sameHandle(
+                            source.storageReadView(0).nativeHandle(), source.mainTexture(0).nativeHandle()
+                    ),
+                    "storage-image view must retain the parent texture handle"
+            );
+
             RenderPipeline sourcePipeline = RenderPipeline.builder()
                     .withLocation("metallum_iris/iris_rgb_physical")
                     .withVertexShader("metallum_iris/fullscreen")
