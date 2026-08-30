@@ -1,0 +1,91 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+repositories {
+    maven { url "https://api.modrinth.com/maven" }
+}
+
+def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
+def boolProp = { String name, boolean defaultValue ->
+    providers.gradleProperty(name).map { it.toBoolean() }.orElse(defaultValue).get()
+}
+def warmupTicks = providers.gradleProperty("gpuWarmupTicks").orElse("40").get()
+def sampleTicks = providers.gradleProperty("gpuSampleTicks").orElse("100").get()
+def deferredStore = boolProp("deferredStore", true)
+def deferredColorStore = boolProp("deferredColorStore", true)
+def blitBatch = boolProp("blitBatch", true)
+def encoderStateShadow = boolProp("encoderStateShadow", true)
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+    compileOnly files(metallumJarProvider)
+
+    productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
+    productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+tasks.register("runProductionGpuBenchmark", net.fabricmc.loom.task.prod.ClientProductionRunTask) {
+    dependsOn tasks.named("jar")
+
+    doFirst {
+        def metallumJar = metallumJarProvider.get()
+        if (!metallumJar.isFile()) {
+            throw new GradleException("MetalUniversal production JAR does not exist: ${metallumJar}")
+        }
+    }
+
+    mods.from(tasks.named("jar"))
+    mods.from(metallumJarProvider)
+    mods.from(configurations.productionRuntimeMods)
+
+    jvmArgs.add("-Dfabric.client.gametest")
+    jvmArgs.add("-Dmetallum.ci.gpuBenchmark=true")
+    jvmArgs.add("-Dmetallum.validation.gpuTiming=true")
+    jvmArgs.add("-Dmetallum.validation.gpuPassTiming=false")
+    jvmArgs.add("-Dmetallum.iris.semantic=false")
+    jvmArgs.add("-Dmetallum.metalfx.mode=OFF")
+    jvmArgs.add("-Dmetallum.metalfx.frameGeneration=false")
+    jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
+    jvmArgs.add("-Dmetallum.metal.hud=false")
+    jvmArgs.add("-Dmetallum.hotpath.telemetry=false")
+    jvmArgs.add("-Dmetallum.presentation.telemetry=false")
+
+    // Keep the hosted lane strictly on the common Metal 3 path. These flags
+    // mirror the currently runnable GitHub client and avoid pretending the
+    // Apple Paravirtual device can validate Metal 4 residency/presentation.
+    jvmArgs.add("-Dmetallum.opt.metal4=false")
+    jvmArgs.add("-Dmetallum.opt.metal4Compiler=false")
+    jvmArgs.add("-Dmetallum.opt.metal4Present=false")
+    jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=false")
+    jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
+    jvmArgs.add("-Dmetallum.opt.renderStatePacket=false")
+    jvmArgs.add("-Dmetallum.opt.residencySet=false")
+
+    // Shared Metal 3/4 renderer knobs under search. Everything else stays fixed.
+    jvmArgs.add("-Dmetallum.opt.psoArchive=true")
+    jvmArgs.add("-Dmetallum.opt.bindingTokens=true")
+    jvmArgs.add("-Dmetallum.opt.compiledBindingPlan=true")
+    jvmArgs.add("-Dmetallum.opt.mslCache=true")
+    jvmArgs.add("-Dmetallum.opt.deferredStore=${deferredStore}")
+    jvmArgs.add("-Dmetallum.opt.deferredColorStore=${deferredColorStore}")
+    jvmArgs.add("-Dmetallum.opt.blitBatch=${blitBatch}")
+    jvmArgs.add("-Dmetallum.opt.encoderStateShadow=${encoderStateShadow}")
+
+    jvmArgs.add("-Dmetallum.ci.gpuWarmupTicks=${warmupTicks}")
+    jvmArgs.add("-Dmetallum.ci.gpuSampleTicks=${sampleTicks}")
+    jvmArgs.add("-Dmetallum.ci.gpuEvidenceDir=${file("${buildDir}/evidence").absolutePath}")
+
+    useXVFB = false
+    runDir = file("${buildDir}/run/clientGameTest")
+}

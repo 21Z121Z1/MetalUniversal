@@ -1,0 +1,146 @@
+name: Hosted Metal 3 GPU p95 hill climb
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample_ticks:
+        description: Measured Client GameTest ticks per trial
+        required: false
+        default: '60'
+  push:
+    branches:
+      - experiment/apple-terrain-hillclimb
+    paths:
+      - '.github/ci/gpu-bench/**'
+      - 'scripts/gpu-hillclimb.py'
+      - '.github/workflows/gpu-hillclimb.yml'
+      - 'src/main/java/com/metallum/client/metal/render/**'
+      - 'src/main/native/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-hillclimb-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gpu-hillclimb:
+    name: Shared Metal renderer / hosted GPU p95 proxy
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+      MTL_HUD_ENABLED: '0'
+      MTLFX_HUD_ENABLED: '0'
+      METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
+      GRADLE_OPTS: '-Dorg.gradle.caching=true'
+
+    steps:
+      - name: Checkout exact experiment SHA
+        uses: actions/checkout@v6
+
+      - name: Describe hosted Apple Silicon proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          sw_vers
+          system_profiler SPHardwareDataType SPDisplaysDataType || true
+          test "$(uname -m)" = "arm64"
+          echo "logical CPUs: $(sysctl -n hw.logicalcpu)"
+
+      - name: Setup Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle caches
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-cleanup: on-success
+
+      - name: Build production MetalUniversal JAR
+        id: metallum
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew \
+            --build-cache \
+            --stacktrace \
+            -x buildIOSNative \
+            -x buildIOSSpvc \
+            jar verifyIsolatedClientProfiles
+          jar="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-dev.jar' ! -name '*-validation.jar' \
+            -print | head -n 1)"
+          test -n "$jar"
+          test -s "$jar"
+          jar="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
+          unzip -l "$jar" | grep -F 'natives/macos/libmetallum.dylib'
+          echo "jar=$jar" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Hill-climb shared Metal renderer knobs by GPU p95
+        shell: bash
+        env:
+          SAMPLE_TICKS: ${{ github.event.inputs.sample_ticks || '60' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/gpu-hillclimb.py \
+            --repo-root "$PWD" \
+            --bench-project .github/ci/gpu-bench \
+            --metallum-jar "${{ steps.metallum.outputs.jar }}" \
+            --warmup-ticks 20 \
+            --sample-ticks "$SAMPLE_TICKS" \
+            --min-improvement 0.01 \
+            --throughput-regression-limit 0.05 \
+            --gpu-p50-regression-limit 0.05 \
+            --output build/gpu-hillclimb/report.json
+
+      - name: Summarize proxy recommendation
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          report="build/gpu-hillclimb/report.json"
+          if [[ -s "$report" ]]; then
+            cat "$report"
+            python3 - "$report" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding='utf-8'))
+          print('## Hosted Metal 3 GPU p95 hill climb')
+          print()
+          print(f"- Authority: `{data['authority']}`")
+          print(f"- State: `{data['state']}`")
+          print(f"- A/A relative p95 delta: {data['aANoise']['relativeDelta'] * 100:.2f}%")
+          print(f"- Required move threshold: {data['aANoise']['moveThreshold'] * 100:.2f}%")
+          print(f"- Original: `{data['original']}`")
+          print(f"- Champion: `{data['champion']}`")
+          print(f"- Trials: {data['trialCount']}")
+          confirmation = data.get('confirmation')
+          if confirmation:
+              print(f"- Four-block ABBA median GPU p95 improvement: {confirmation['medianGpuP95Improvement'] * 100:.2f}%")
+              print(f"- Positive paired blocks: {confirmation['positiveFraction'] * 100:.1f}%")
+              print(f"- Proxy confirmed: `{confirmation['proxyConfirmed']}`")
+          print()
+          print('This workflow is screening evidence only; physical-Mac Metal 4 and full render-contract correctness remain promotion gates.')
+          PY
+          else
+            echo 'GPU hill-climb report was not produced.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload GPU hill-climb evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gpu-hillclimb-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            build/gpu-hillclimb/**
+            .github/ci/gpu-bench/build/evidence/**
+            .github/ci/gpu-bench/build/run/clientGameTest/logs/latest.log
