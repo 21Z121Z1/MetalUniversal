@@ -19,39 +19,24 @@ jobs:
         with:
           fetch-depth: 0
           ref: codex/master-merge-resolved-20260830
-      - name: Route GPU integration tests through capability tasks
+      - name: Update Metal 4 hot-path verifier for current bridge visibility
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           python3 - <<'PY'
           from pathlib import Path
-          path = Path("build.gradle")
+          path = Path("scripts/agent/verify_metal4_main_hotpath.py")
           data = path.read_text()
-          old = '''\tif (hostedCi) {
-          \t\texclude "**/IrisMetalPostChainCompilationTest.class"
-          \t\texclude "**/IrisMetalShadowPipelineTest.class"
-          \t\texclude "**/IrisMetalShadowComputeConformanceTest.class"
-          \t\texclude "**/MetalGenericVertexAttributeIntegrationTest.class"
-          \t\texclude "**/MetalIrisCustomTexturesIntegrationTest.class"
-          \t\texclude "**/MetalRenderContractGpuIntegrationTest.class"
-          \t}
-          '''
-          new = '''\t// GPU integrations are routed through explicit capability tasks instead of
-          \t// changing the generic unit-test suite according to CI=true/false.
-          \texclude "**/IrisMetalPostChainCompilationTest.class"
-          \texclude "**/IrisMetalShadowPipelineTest.class"
-          \texclude "**/IrisMetalShadowComputeConformanceTest.class"
-          \texclude "**/MetalGenericVertexAttributeIntegrationTest.class"
-          \texclude "**/MetalIrisCustomTexturesIntegrationTest.class"
-          \texclude "**/MetalRenderContractGpuIntegrationTest.class"
-          '''
+          old = 'CLASS_END = "private final class Metal4MainRenderEncoderBridge {"'
+          new = 'CLASS_END = "final class Metal4MainRenderEncoderBridge {"'
           if data.count(old) != 1:
-              raise SystemExit(f"expected one legacy hostedCi test gate, found {data.count(old)}")
+              raise SystemExit(f"expected one old bridge marker, found {data.count(old)}")
           path.write_text(data.replace(old, new, 1))
           PY
           git diff --check
-          git diff -- build.gradle
-          git add build.gradle
-          git commit -m "ci: route GPU integration tests through capability tasks"
+          python3 scripts/agent/verify_metal4_main_hotpath.py >/tmp/metal4-hotpath.json
+          cat /tmp/metal4-hotpath.json
+          git add scripts/agent/verify_metal4_main_hotpath.py
+          git commit -m "ci: accept current Metal 4 bridge visibility"
           git push origin HEAD:codex/master-merge-resolved-20260830
