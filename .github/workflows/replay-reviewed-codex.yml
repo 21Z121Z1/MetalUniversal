@@ -32,6 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           cat .github/replay-reviewed/chunk*.b64 | base64 --decode > scripts/agent/replay_reviewed_codex.py
+          python3 .github/replay-reviewed/fix-parser.py
           python3 -m py_compile scripts/agent/replay_reviewed_codex.py
 
       - name: replay reviewed product changes
