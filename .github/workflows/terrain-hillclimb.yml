@@ -15,7 +15,7 @@ on:
       - 'src/main/java/com/metallum/client/terrain/**'
       - 'src/main/resources/metallum.mixins.json'
       - 'scripts/terrain-hillclimb.py'
-      - '.github/ci/minecraft-e2e/**'
+      - '.github/ci/terrain-bench/**'
       - '.github/workflows/terrain-hillclimb.yml'
 
 permissions:
@@ -93,6 +93,7 @@ jobs:
           set -euo pipefail
           python3 scripts/terrain-hillclimb.py \
             --repo-root "$PWD" \
+            --bench-project .github/ci/terrain-bench \
             --metallum-jar "${{ steps.metallum.outputs.jar }}" \
             --repeats "$REPEATS" \
             --min-improvement 0.02 \
@@ -118,6 +119,7 @@ jobs:
           print(f"- Hill-climb path: {' → '.join(map(str, search['path']))}")
           print(f"- Winner: {winner['threads']} workers")
           print(f"- Winner median chunkRenderTicks: {winner['medianChunkRenderTicks']}")
+          print(f"- Winner median readiness: {winner['medianChunkRenderElapsedMillis']:.3f} ms")
           print(f"- Relative median improvement: {winner['relativeMedianImprovementVsSodiumDefault'] * 100:.2f}%")
           print(f"- Runtime recommendation: `{winner['recommendedSystemProperty']}`")
           PY
@@ -134,5 +136,5 @@ jobs:
           retention-days: 7
           path: |
             build/terrain-hillclimb/**
-            .github/ci/minecraft-e2e/build/evidence/**
-            .github/ci/minecraft-e2e/build/run/clientGameTest/logs/latest.log
+            .github/ci/terrain-bench/build/evidence/**
+            .github/ci/terrain-bench/build/run/clientGameTest/logs/latest.log
