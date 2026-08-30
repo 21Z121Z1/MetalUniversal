@@ -471,6 +471,11 @@ public final class MetalNativeBridge {
                             INT
                     )
             );
+            MTLRenderPipelineStateSupportsIndirectCommandBuffers = optionalDowncall(
+                    lookup,
+                    "metallum_MTLRenderPipelineState_supportsIndirectCommandBuffers",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
+            );
             MTLDeviceCreateTerrainVisibleGpuIndexedIcb = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb",
@@ -1097,6 +1102,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLDeviceCreateTerrainIndexedIcb;
     @Nullable
     private static final MethodHandle MTLDeviceCreateTerrainGpuIndexedIcb;
+    @Nullable
+    private static final MethodHandle MTLRenderPipelineStateSupportsIndirectCommandBuffers;
     @Nullable
     private static final MethodHandle MTLDeviceCreateTerrainVisibleGpuIndexedIcb;
     @Nullable
@@ -2731,6 +2738,23 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable ignored) {
             return MemorySegment.NULL;
+        }
+    }
+
+    /** Returns true only when the final compiled PSO is eligible for ICB commands. */
+    public static boolean MTLRenderPipelineState_supportsIndirectCommandBuffers(
+            final MemorySegment pipeline
+    ) {
+        if (MTLRenderPipelineStateSupportsIndirectCommandBuffers == null
+                || isNullHandle(pipeline)) {
+            return false;
+        }
+        try {
+            return (int) MTLRenderPipelineStateSupportsIndirectCommandBuffers.invokeExact(
+                    segment(pipeline)
+            ) != 0;
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
