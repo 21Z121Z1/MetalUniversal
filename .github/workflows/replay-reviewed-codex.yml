@@ -1,0 +1,60 @@
+name: replay-reviewed-codex
+
+on:
+  push:
+    branches:
+      - chatgpt/replay-iris-correctness-20260830
+    paths:
+      - .github/replay-reviewed-codex.trigger
+
+permissions:
+  contents: write
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: verify pinned baseline
+        shell: bash
+        env:
+          PINNED_BASE: cf4e66250c8fd3bcf6fdf58e00e0cd841052cd58
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD "$PINNED_BASE")" = "$PINNED_BASE"
+
+      - name: reconstruct reviewed replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/replay-reviewed/chunk*.b64 | base64 --decode > scripts/agent/replay_reviewed_codex.py
+          python3 -m py_compile scripts/agent/replay_reviewed_codex.py
+
+      - name: replay reviewed product changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/agent/replay_reviewed_codex.py
+          git diff --check
+
+      - name: commit product diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            build.gradle \
+            docs/agent/unified-evaluation-loop.md \
+            docs/iris-audit/advanced-optimization-runtime-handoff.md \
+            scripts/agent/run_unified_eval_cycle.sh \
+            src/main \
+            src/test
+          git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
+          git commit -m "fix(iris): close advanced optimization correctness gaps"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
