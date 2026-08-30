@@ -207,6 +207,10 @@ final class MetalGpuTexture extends GpuTexture {
         if (this.closed) {
             return;
         }
+        // Deferred clears are keyed by the Java texture object. Remove this
+        // resource before its native handle can be retired; a resize may
+        // otherwise leave a stale clear for the next compute/render boundary.
+        this.device.commandEncoder().discardPendingClear(this);
         this.closed = true;
         this.removeView();
     }

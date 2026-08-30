@@ -352,6 +352,30 @@ final class MetalIrisTargetsIntegrationTest {
     }
 
     @Test
+    void resizeDiscardsDeferredClearsForRetiredTextures() {
+        try (IrisMetalRenderTargets targets = new IrisMetalRenderTargets(
+                device, new GpuFormat[]{GpuFormat.RGBA8_UNORM}, WIDTH, HEIGHT)) {
+            MetalGpuTexture retired = targets.colorTargets().mainTexture(0);
+            encoder.clearColorTexture(retired, new Vector4f(0.25F, 0.5F, 0.75F, 1.0F));
+            assertTrue(encoder.hasPendingClear(retired));
+
+            targets.resize(WIDTH * 2, HEIGHT * 2);
+
+            assertTrue(retired.isClosed(), "resize must retire the old texture");
+            assertFalse(
+                    encoder.hasPendingClear(retired),
+                    "retiring a texture must remove its deferred clear"
+            );
+            assertDoesNotThrow(() -> {
+                try (MetalComputePass ignored = encoder.createComputePass()) {
+                    // The original failure occurred while this boundary
+                    // flushed stale clears from the pre-resize generation.
+                }
+            });
+        }
+    }
+
+    @Test
     void postTargetRenderMipmapRenderFollowsPhysicalReadSide() {
         fragmentShaders.put("iris_mip_source", """
                 #version 450

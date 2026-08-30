@@ -425,6 +425,19 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return pendingColorClears.containsKey(texture) || pendingDepthClears.containsKey(texture);
     }
 
+    /**
+     * Drops a deferred clear for a resource that is about to be retired.
+     *
+     * <p>A resize can close a texture before the next encoder boundary has a
+     * chance to materialize its clear. The replacement generation owns the
+     * new clear state, so retaining the old entry would make a later
+     * {@link #flushAllPendingClears()} dereference a closed native texture.</p>
+     */
+    void discardPendingClear(final MetalGpuTexture texture) {
+        pendingColorClears.remove(texture);
+        pendingDepthClears.remove(texture);
+    }
+
     void endComputePass(final MTLComputeCommandEncoder encoder) {
         if (currentEncoder != encoder) {
             throw new IllegalStateException(
