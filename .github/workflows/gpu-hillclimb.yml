@@ -107,10 +107,12 @@ jobs:
         run: |
           set -u
           report="build/gpu-hillclimb/report.json"
+          bottleneck="build/gpu-hillclimb/bottleneck-report.json"
           if [[ -s "$report" ]]; then
             cat "$report"
-            python3 - "$report" >> "$GITHUB_STEP_SUMMARY" <<'PY'
-          import json, sys
+            [[ ! -s "$bottleneck" ]] || cat "$bottleneck"
+            python3 - "$report" "$bottleneck" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, pathlib, sys
           data = json.load(open(sys.argv[1], encoding='utf-8'))
           print('## Hosted Metal 3 GPU p95 hill climb')
           print()
@@ -126,6 +128,19 @@ jobs:
               print(f"- Four-block ABBA median GPU p95 improvement: {confirmation['medianGpuP95Improvement'] * 100:.2f}%")
               print(f"- Positive paired blocks: {confirmation['positiveFraction'] * 100:.1f}%")
               print(f"- Proxy confirmed: `{confirmation['proxyConfirmed']}`")
+          bottleneck_path = pathlib.Path(sys.argv[2])
+          if bottleneck_path.is_file():
+              profile = json.load(open(bottleneck_path, encoding='utf-8'))
+              queue = profile['mainQueue']
+              print()
+              print('### Next bottleneck')
+              print()
+              print(f"- Classification: `{profile['classification']}`")
+              print(f"- Confidence: `{profile['confidence']}`")
+              print(f"- Main-queue busy ratio: {queue['mainQueueBusyRatio'] * 100:.2f}%")
+              print(f"- Idle-gap p95: {queue['idleGapP95Millis']:.4f} ms")
+              print(f"- GPU service p95: {queue['gpuServiceP95Millis']:.4f} ms")
+              print(f"- Direction: {profile['recommendedDirection']}")
           print()
           print('This workflow is screening evidence only; physical-Mac Metal 4 and full render-contract correctness remain promotion gates.')
           PY
