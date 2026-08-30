@@ -1,0 +1,70 @@
+*** Begin Patch
+*** Add File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/mixin/sodium/SectionRenderDataStorageOwner.java
++package com.metallum.mixin.sodium;
++
++/** Stable region/pass ownership attached to one Sodium terrain storage. */
++public interface SectionRenderDataStorageOwner {
++    void metallum$setOwner(
++            int regionX,
++            int regionY,
++            int regionZ,
++            int baseChunkX,
++            int baseChunkY,
++            int baseChunkZ,
++            boolean translucent
++    );
++
++    boolean metallum$hasOwner();
++
++    int metallum$regionX();
++
++    int metallum$regionY();
++
++    int metallum$regionZ();
++
++    int metallum$baseChunkX();
++
++    int metallum$baseChunkY();
++
++    int metallum$baseChunkZ();
++
++    boolean metallum$isTranslucent();
++}
+*** Add File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/mixin/sodium/GlBufferSegmentGeneration.java
++package com.metallum.mixin.sodium;
++
++/** Exposes the per-segment allocation generation installed by the Sodium mixin. */
++public interface GlBufferSegmentGeneration {
++    long metallum$generation();
++}
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainStorageBridge.java
+@@
+-    static Owner owner(final SectionRenderDataStorage storage) {
++    static Owner owner(final Object storage) {
+@@
+-    static GlBufferSegment[] vertexAllocations(final SectionRenderDataStorage storage) {
++    static GlBufferSegment[] vertexAllocations(final SectionRenderDataStorage storage) {
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainCandidateRegistry.java
+@@
+     static SectionKey keyOf(
+             final TerrainStorageBridge.Owner owner,
+             final int localIndex
+@@
+                 owner.baseChunkZ() + LocalSectionIndex.unpackZ(localIndex)
+         );
+     }
++
++    /**
++     * Test and migration boundary for an owner-shaped object. Production
++     * callers use the bridge record above; this overload keeps old contract
++     * fakes source-compatible without linking the runtime registry to a
++     * mixin-defined interface.
++     */
++    static SectionKey keyOf(final Object owner, final int localIndex) {
++        TerrainStorageBridge.Owner bridged = TerrainStorageBridge.owner(owner);
++        if (bridged == null) {
++            throw new IllegalArgumentException("Missing terrain storage owner metadata");
++        }
++        return keyOf(bridged, localIndex);
++    }
+*** End Patch
