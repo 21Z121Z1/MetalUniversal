@@ -18,18 +18,40 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: codex/master-merge-staging-20260830
-      - name: Merge master into validated integration tree
-        env:
-          INTEGRATION_SHA: c73a66efcaf4dd3e4f1a571d96901e15e3b07552
-          MASTER_SHA: 6a8ef77d8fe7b960bc09275533991c05d3588204
-          TARGET_BRANCH: codex/master-merge-resolved-20260830
+          ref: codex/master-merge-resolved-20260830
+      - name: Route GPU integration tests through capability tasks
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B "$TARGET_BRANCH" "$INTEGRATION_SHA"
-          git merge --no-ff -X ours "$MASTER_SHA" -m "Merge master history into validated Metal integration line"
-          git diff --check "$MASTER_SHA"..HEAD
-          git log -1 --pretty=raw
-          git push --force-with-lease origin HEAD:"$TARGET_BRANCH"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("build.gradle")
+          data = path.read_text()
+          old = '''\tif (hostedCi) {
+          \t\texclude "**/IrisMetalPostChainCompilationTest.class"
+          \t\texclude "**/IrisMetalShadowPipelineTest.class"
+          \t\texclude "**/IrisMetalShadowComputeConformanceTest.class"
+          \t\texclude "**/MetalGenericVertexAttributeIntegrationTest.class"
+          \t\texclude "**/MetalIrisCustomTexturesIntegrationTest.class"
+          \t\texclude "**/MetalRenderContractGpuIntegrationTest.class"
+          \t}
+          '''
+          new = '''\t// GPU integrations are routed through explicit capability tasks instead of
+          \t// changing the generic unit-test suite according to CI=true/false.
+          \texclude "**/IrisMetalPostChainCompilationTest.class"
+          \texclude "**/IrisMetalShadowPipelineTest.class"
+          \texclude "**/IrisMetalShadowComputeConformanceTest.class"
+          \texclude "**/MetalGenericVertexAttributeIntegrationTest.class"
+          \texclude "**/MetalIrisCustomTexturesIntegrationTest.class"
+          \texclude "**/MetalRenderContractGpuIntegrationTest.class"
+          '''
+          if data.count(old) != 1:
+              raise SystemExit(f"expected one legacy hostedCi test gate, found {data.count(old)}")
+          path.write_text(data.replace(old, new, 1))
+          PY
+          git diff --check
+          git diff -- build.gradle
+          git add build.gradle
+          git commit -m "ci: route GPU integration tests through capability tasks"
+          git push origin HEAD:codex/master-merge-resolved-20260830
