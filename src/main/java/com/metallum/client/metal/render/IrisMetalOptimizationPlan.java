@@ -437,7 +437,7 @@ final class IrisMetalOptimizationPlan {
                     names.add(node.name());
                     continue;
                 }
-                if (hazards.mayMergeAdjacent(i - 1, i)) {
+                if (mayMergeAdjacent(i - 1, i, prefix)) {
                     names.add(node.name());
                 } else {
                     flush(output, start, i - 1, names);
@@ -447,6 +447,23 @@ final class IrisMetalOptimizationPlan {
                 }
             }
             flush(output, start, hazards.nodes().size() - 1, names);
+        }
+
+        private boolean mayMergeAdjacent(final int first, final int second, final String prefix) {
+            if (!hazards.mayMergeAdjacent(first, second)
+                    || first < 0
+                    || second >= passReceipt.size()) {
+                return false;
+            }
+            PlanPass previous = passReceipt.get(first);
+            PlanPass current = passReceipt.get(second);
+            PassType expected = "render/".equals(prefix) ? PassType.RENDER : PassType.COMPUTE;
+            if (previous.type() != expected || current.type() != expected
+                    || !previous.stage().equals(current.stage())) {
+                return false;
+            }
+            return expected != PassType.RENDER
+                    || previous.attachmentCompatibilityKey().equals(current.attachmentCompatibilityKey());
         }
 
         private static void flush(
