@@ -1,0 +1,71 @@
+name: Replay validated Minecraft 26.2 commits
+
+on:
+  push:
+    branches:
+      - codex/real-client-replay-staging-20260830
+    paths:
+      - .github/workflows/codex-real-client-replay.yml
+
+permissions:
+  contents: write
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/real-client-replay-staging-20260830
+      - name: Replay the four real-client-validated commits
+        env:
+          BASE_SHA: a0010490941eb43926e830308ce87793612fe5d5
+          TARGET_BRANCH: codex/real-client-acceptance-20260830
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/metallum-replay
+          cp .github/replay/apply_rollout_patch.py .github/replay/patch-*.txt /tmp/metallum-replay/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$TARGET_BRANCH" "$BASE_SHA"
+
+          python /tmp/metallum-replay/apply_rollout_patch.py \
+            /tmp/metallum-replay/patch-0484.txt \
+            /tmp/metallum-replay/patch-0523.txt \
+            /tmp/metallum-replay/patch-0573.txt \
+            /tmp/metallum-replay/patch-0579.txt \
+            /tmp/metallum-replay/patch-0599.txt \
+            /tmp/metallum-replay/patch-0834.txt \
+            /tmp/metallum-replay/patch-1205.txt \
+            /tmp/metallum-replay/patch-1244.txt \
+            /tmp/metallum-replay/patch-1250.txt
+          git diff --check
+          test "$(git diff --name-only | wc -l | tr -d ' ')" = 11
+          git add src/main/java src/main/native
+          git commit -m "fix(minecraft-26.2): fail closed for Sodium terrain hooks"
+
+          python /tmp/metallum-replay/apply_rollout_patch.py \
+            /tmp/metallum-replay/patch-0445.txt \
+            /tmp/metallum-replay/patch-1022.txt \
+            /tmp/metallum-replay/patch-1331.txt
+          chmod +x scripts/experience/launch-minecraft-26.2.sh
+          bash -n scripts/experience/launch-minecraft-26.2.sh
+          git diff --check
+          git add scripts/experience/launch-minecraft-26.2.sh docs/agent/minecraft-26.2-experience.md
+          git commit -m "feat(experience): add Minecraft 26.2 profile launcher"
+
+          python /tmp/metallum-replay/apply_rollout_patch.py /tmp/metallum-replay/patch-1715.txt
+          git add docs/agent/minecraft-26.2-experience.md
+          git commit -m "docs(experience): align matrix with final client evidence"
+
+          python /tmp/metallum-replay/apply_rollout_patch.py /tmp/metallum-replay/patch-1860.txt
+          git add docs/agent/minecraft-26.2-experience.md
+          git commit -m "docs(experience): keep runtime matrix counter-agnostic"
+
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" = 4
+          git diff --check "$BASE_SHA"..HEAD
+          git diff --shortstat "$BASE_SHA"..HEAD | grep -F "13 files changed, 494 insertions(+), 85 deletions(-)"
+          git log --oneline --reverse "$BASE_SHA"..HEAD
+          git push --force-with-lease origin HEAD:"$TARGET_BRANCH"
