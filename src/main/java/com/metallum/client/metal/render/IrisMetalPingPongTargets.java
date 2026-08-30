@@ -145,6 +145,8 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
                     labelPrefix + index + "-main", usage, formats[index], newWidth, newHeight, 1, mipLevels);
             alt[index] = (MetalGpuTexture) device.createTexture(
                     labelPrefix + index + "-alt", usage, formats[index], newWidth, newHeight, 1, mipLevels);
+            main[index].registerAllocationIdentity();
+            alt[index].registerAllocationIdentity();
             mainViews[index] = new MetalGpuTextureView(main[index], 0, mipLevels);
             altViews[index] = new MetalGpuTextureView(alt[index], 0, mipLevels);
             if (this.alphaOneSampleTargets.get(index)) {

@@ -47,8 +47,6 @@
       "compute-grouping": "computeGroupingRuntime.admissions > 0 and deferredPassCloses > 0",
       "depth-liveness": "depthLivenessRuntime.prunedPairs > 0 or captureSkips > 0",
       "argument-tables": "argumentBindingRuntime.enabled is true and encodedSnapshots > 0",
-      "terrain-icb": "attempts, accepted batches and draws are positive; attempts and windowed native allocations equal accepted batches; completion lag is within three in-flight submissions; exhausted-budget batches are skipped in Java before FFM; native budget and zero-sized-allocation fallbacks are forbidden",
-      "pipeline-prewarm": "runtimePipelineCompiles is present and equals zero after warmup",
       "all-safe-lanes": "at least one selected Iris lane proves runtime activation"
     },
     "failure_state": "rejected-no-admission",

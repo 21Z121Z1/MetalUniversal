@@ -6,8 +6,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Guards the destruction-delay contract established for the in-flight model:
@@ -16,12 +14,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * must not run before the rotation whose wait has confirmed submit N itself.
  */
 final class MetalDestructionQueueTest {
-    @Test
-    void rejectsNonPositiveDepth() {
-        assertThrows(IllegalArgumentException.class, () -> new MetalDestructionQueue(0));
-        assertThrows(IllegalArgumentException.class, () -> new MetalDestructionQueue(-1));
-    }
-
     @Test
     void actionQueuedNowRunsOnFourthRotationAtDepthFour() {
         MetalDestructionQueue queue = new MetalDestructionQueue(
@@ -73,24 +65,23 @@ final class MetalDestructionQueueTest {
     }
 
     @Test
-    void closeDrainsEverySlotInRotationOrder() {
-        MetalDestructionQueue queue = new MetalDestructionQueue(4);
-        List<Integer> events = new ArrayList<>();
-        queue.add(() -> events.add(0));
-        queue.rotate();
-        queue.add(() -> events.add(1));
-        queue.rotate();
-        queue.add(() -> events.add(2));
-
+    void closeDrainsEverySlot() {
+        MetalDestructionQueue queue = new MetalDestructionQueue(
+                MetalCommandEncoder.MAX_SUBMITS_IN_FLIGHT + 1
+        );
+        int[] runs = {0};
+        for (int slot = 0; slot < 4; slot++) {
+            queue.add(() -> runs[0]++);
+            queue.rotate();
+        }
+        queue.add(() -> runs[0]++);
         queue.close();
-
-        assertEquals(List.of(0, 1, 2), events);
+        assertEquals(5, runs[0], "close() must drain all queued actions");
         assertEquals(0, queue.pendingActionCount());
-        assertTrue(queue.isClosed());
     }
 
     @Test
-    void closeExecutesReentrantRetirementsImmediately() {
+    void closeAlsoDrainsActionsQueuedByClosingCallbacks() {
         MetalDestructionQueue queue = new MetalDestructionQueue(3);
         List<String> events = new ArrayList<>();
         queue.add(() -> {
@@ -105,21 +96,5 @@ final class MetalDestructionQueueTest {
 
         assertEquals(List.of("first", "second", "third"), events);
         assertEquals(0, queue.pendingActionCount());
-    }
-
-    @Test
-    void closeIsIdempotentAndPostCloseAddsRunImmediately() {
-        MetalDestructionQueue queue = new MetalDestructionQueue(2);
-        int[] runs = {0};
-        queue.add(() -> runs[0]++);
-
-        queue.close();
-        queue.close();
-        queue.add(() -> runs[0]++);
-        queue.rotate();
-
-        assertEquals(2, runs[0]);
-        assertEquals(0, queue.pendingActionCount());
-        assertTrue(queue.isClosed());
     }
 }

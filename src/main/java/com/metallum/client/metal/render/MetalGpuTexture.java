@@ -13,11 +13,8 @@ import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
-import java.util.concurrent.atomic.AtomicLong;
-
 @Environment(EnvType.CLIENT)
 final class MetalGpuTexture extends GpuTexture {
-    private static final AtomicLong NEXT_VALIDATION_RESOURCE_ID = new AtomicLong(1L);
     static final int USAGE_SHADER_WRITE = 1 << 5;
     // Minimal usage flags keep Apple GPU lossless bandwidth compression alive:
     // MTLTextureUsage.ShaderWrite disables it on pre-M5 GPUs, so it is only
@@ -27,7 +24,7 @@ final class MetalGpuTexture extends GpuTexture {
     private static final boolean MINIMAL_USAGE =
             Boolean.parseBoolean(System.getProperty("metallum.opt.minimalTextureUsage", "true"));
     private final MetalDevice device;
-    private final long validationResourceId = NEXT_VALIDATION_RESOURCE_ID.getAndIncrement();
+    private final MetalAllocationIdentity allocationIdentity;
     private final MTLPixelFormat mtlPixelFormat;
     private boolean closed;
     @Nullable
@@ -68,6 +65,7 @@ final class MetalGpuTexture extends GpuTexture {
     ) {
         super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
+        this.allocationIdentity = MetalAllocationIdentity.allocate(label);
         this.mtlPixelFormat = MTLPixelFormat.from(format);
 
         this.nativeHandle = MetalNativeBridge.metallum_create_texture(
@@ -95,13 +93,42 @@ final class MetalGpuTexture extends GpuTexture {
         return this.getFormat().blockSize();
     }
 
-    /** Process-local allocation identity; never use the native pointer as a contract key. */
-    long validationResourceId() {
-        return validationResourceId;
+    /** Renderer-owned allocation identity; never use the native pointer as a hazard key. */
+    MetalAllocationIdentity allocationIdentity() {
+        return allocationIdentity;
     }
 
+    long allocationId() {
+        return allocationIdentity.allocationId();
+    }
+
+    String allocationDebugId() {
+        return "metal-texture-" + allocationId();
+    }
+
+    /** Observes the renderer-owned identity at the existing contract seam. */
+    void registerAllocationIdentity() {
+        if (RenderContractRuntime.observing()) {
+            MetalCommandEncoder.contractResource(this, 0);
+        }
+    }
+
+    /** Narrow source compatibility for the pre-authority eager trace hook. */
+    @Deprecated
+    long validationResourceId() {
+        return allocationId();
+    }
+
+    /** Narrow source compatibility for existing validation call sites. */
+    @Deprecated
     String validationDebugId() {
-        return "metal-texture-" + validationResourceId;
+        return allocationDebugId();
+    }
+
+    /** Narrow source compatibility for existing Iris creation sites. */
+    @Deprecated
+    void registerValidationIdentity() {
+        registerAllocationIdentity();
     }
 
     void recordMaterializedClear(@Nullable final Vector4fc color, @Nullable final Double depth) {
@@ -146,11 +173,11 @@ final class MetalGpuTexture extends GpuTexture {
         if (this.closed && this.views == 0 && this.nativeHandle != null) {
             MemorySegment handle = this.nativeHandle;
             this.nativeHandle = null;
-            if (!this.validationAllocationInvalidated && RenderContractRuntime.enabled()) {
+            if (!this.validationAllocationInvalidated && RenderContractRuntime.observing()) {
                 this.validationAllocationInvalidated = true;
                 RenderContractRuntime.invalidateResourceAllocations(
-                        this.validationResourceId,
-                        this.validationDebugId()
+                        this.allocationId(),
+                        this.allocationDebugId()
                 );
             }
             this.device.queueResourceRelease(handle);

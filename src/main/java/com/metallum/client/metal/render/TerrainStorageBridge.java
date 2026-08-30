@@ -1,0 +1,131 @@
+package com.metallum.client.metal.render;
+
+import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
+import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
+
+import java.lang.reflect.Method;
+
+/**
+ * Reflective bridge for Sodium methods injected by mixins. Mixin-defined
+ * interfaces are not application APIs: loading one directly from production
+ * code violates Fabric's defined-mixin-package rule on current Loader/Mixin.
+ */
+public final class TerrainStorageBridge {
+    private TerrainStorageBridge() {
+    }
+
+    static Owner owner(final Object storage) {
+        if (storage == null || !Boolean.TRUE.equals(invoke(storage, "metallum$hasOwner"))) {
+            return null;
+        }
+        Integer regionX = number(invoke(storage, "metallum$regionX"));
+        Integer regionY = number(invoke(storage, "metallum$regionY"));
+        Integer regionZ = number(invoke(storage, "metallum$regionZ"));
+        Integer baseChunkX = number(invoke(storage, "metallum$baseChunkX"));
+        Integer baseChunkY = number(invoke(storage, "metallum$baseChunkY"));
+        Integer baseChunkZ = number(invoke(storage, "metallum$baseChunkZ"));
+        Object translucent = invoke(storage, "metallum$isTranslucent");
+        if (regionX == null || regionY == null || regionZ == null
+                || baseChunkX == null || baseChunkY == null || baseChunkZ == null
+                || !(translucent instanceof Boolean)) {
+            return null;
+        }
+        return new Owner(
+                regionX, regionY, regionZ,
+                baseChunkX, baseChunkY, baseChunkZ,
+                (Boolean) translucent
+        );
+    }
+
+    public static void setOwner(
+            final SectionRenderDataStorage storage,
+            final int regionX,
+            final int regionY,
+            final int regionZ,
+            final int baseChunkX,
+            final int baseChunkY,
+            final int baseChunkZ,
+            final boolean translucent
+    ) {
+        invoke(storage, "metallum$setOwner", regionX, regionY, regionZ,
+                baseChunkX, baseChunkY, baseChunkZ, translucent);
+    }
+
+    static GlBufferSegment[] vertexAllocations(final SectionRenderDataStorage storage) {
+        return segments(invoke(storage, "metallum$getVertexAllocations"));
+    }
+
+    static GlBufferSegment[] elementAllocations(final SectionRenderDataStorage storage) {
+        return segments(invoke(storage, "metallum$getElementAllocations"));
+    }
+
+    static GlBufferSegment sharedIndexAllocation(final SectionRenderDataStorage storage) {
+        Object value = invoke(storage, "metallum$getSharedIndexAllocation");
+        return value instanceof GlBufferSegment segment ? segment : null;
+    }
+
+    static boolean hasMetadataBatch(final Object batch) {
+        return batch != null && hasMethod(batch, "metallum$terrainDrawMetadata")
+                && hasMethod(batch, "metallum$setTerrainDrawMetadata", TerrainDrawMetadataStore.class);
+    }
+
+    static TerrainDrawMetadataStore metadata(final Object batch) {
+        Object value = invoke(batch, "metallum$terrainDrawMetadata");
+        return value instanceof TerrainDrawMetadataStore store ? store : null;
+    }
+
+    static void setMetadata(final Object batch, final TerrainDrawMetadataStore store) {
+        invoke(batch, "metallum$setTerrainDrawMetadata", store);
+    }
+
+    private static GlBufferSegment[] segments(final Object value) {
+        return value instanceof GlBufferSegment[] segments ? segments : null;
+    }
+
+    private static Integer number(final Object value) {
+        return value instanceof Number number ? number.intValue() : null;
+    }
+
+    private static boolean hasMethod(final Object target, final String name, final Class<?>... parameterTypes) {
+        try {
+            target.getClass().getMethod(name, parameterTypes);
+            return true;
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private static Object invoke(final Object target, final String name, final Object... arguments) {
+        if (target == null) {
+            return null;
+        }
+        try {
+            Class<?>[] parameterTypes = new Class<?>[arguments.length];
+            for (int index = 0; index < arguments.length; index++) {
+                parameterTypes[index] = primitiveType(arguments[index]);
+            }
+            Method method = target.getClass().getMethod(name, parameterTypes);
+            return method.invoke(target, arguments);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private static Class<?> primitiveType(final Object value) {
+        if (value instanceof Integer) return int.class;
+        if (value instanceof Boolean) return boolean.class;
+        if (value instanceof Long) return long.class;
+        return value == null ? Object.class : value.getClass();
+    }
+
+    record Owner(
+            int regionX,
+            int regionY,
+            int regionZ,
+            int baseChunkX,
+            int baseChunkY,
+            int baseChunkZ,
+            boolean translucent
+    ) {
+    }
+}

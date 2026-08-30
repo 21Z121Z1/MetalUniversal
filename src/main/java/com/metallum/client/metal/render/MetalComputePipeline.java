@@ -161,23 +161,9 @@ final class MetalComputePipeline implements AutoCloseable {
                             + " (entry " + entryPoint + ")"
             );
         }
-        String shaderHash = sha256(msl);
-        String compileIdentity = "compute:" + label
-                + "|shader=" + shaderHash
-                + "|entry=" + entryPoint
-                + "|local=" + localSizeX + "x" + localSizeY + "x" + localSizeZ
-                + "|metal4=" + device.metal4MainRendererEnabled();
-        MemorySegment pipelineState = MemorySegment.NULL;
-        try {
-            pipelineState = MetalNativeBridge.MTLDevice_makeComputePipelineState(
-                    device.metalDeviceHandle(), function
-            );
-        } finally {
-            MetalPipelineCompilationTelemetry.recordCompute(
-                    compileIdentity,
-                    !MetalNativeBridge.isNullHandle(pipelineState)
-            );
-        }
+        MemorySegment pipelineState = MetalNativeBridge.MTLDevice_makeComputePipelineState(
+                device.metalDeviceHandle(), function
+        );
         if (MetalNativeBridge.isNullHandle(pipelineState)) {
             throw new IllegalStateException("Failed to create MTLComputePipelineState for " + label);
         }
@@ -188,7 +174,7 @@ final class MetalComputePipeline implements AutoCloseable {
                 localSizeX,
                 localSizeY,
                 localSizeZ,
-                shaderHash
+                sha256(msl)
         );
     }
 
@@ -239,13 +225,19 @@ final class MetalComputePipeline implements AutoCloseable {
         }
     }
 
+    private static final char[] HEX_DIGITS = {
+            '0', '1', '2', '3', '4', '5', '6', '7',
+            '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
+    };
+
     private static String sha256(final String value) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
                     .digest(value.getBytes(StandardCharsets.UTF_8));
             StringBuilder result = new StringBuilder(digest.length * 2);
             for (byte valueByte : digest) {
-                result.append(String.format("%02x", valueByte));
+                int unsigned = valueByte & 0xFF;
+                result.append(HEX_DIGITS[unsigned >>> 4]).append(HEX_DIGITS[unsigned & 0x0F]);
             }
             return result.toString();
         } catch (NoSuchAlgorithmException exception) {

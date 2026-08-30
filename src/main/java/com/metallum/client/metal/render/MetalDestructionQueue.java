@@ -14,17 +14,13 @@ import java.util.List;
  * rotation swaps pending with the slot's empty drain list, so callbacks may
  * enqueue additional retirements without mutating the list currently being
  * iterated. The drained list is cleared and reused on the slot's next turn.</p>
- *
- * <p>Closing is a terminal state. Once every submitted GPU operation has been
- * observed complete, delayed retirement no longer provides safety and would
- * instead strand releases in slots that can never rotate again. Additions made
- * during or after close therefore run synchronously.</p>
  */
 @Environment(EnvType.CLIENT)
 final class MetalDestructionQueue {
+    private static final int MAX_CLOSE_ROTATIONS_PER_SLOT = 1024;
+
     private final Slot[] slots;
     private int currentQueueIndex;
-    private boolean closed;
 
     MetalDestructionQueue(final int queueCount) {
         if (queueCount <= 0) {
@@ -40,33 +36,45 @@ final class MetalDestructionQueue {
         if (destroyAction == null) {
             return;
         }
-        if (this.closed) {
-            runDestroyAction(destroyAction);
-            return;
-        }
         this.slots[this.currentQueueIndex].pending.add(destroyAction);
     }
 
     void rotate() {
-        if (this.closed) {
-            return;
-        }
         this.currentQueueIndex = (this.currentQueueIndex + 1) % this.slots.length;
-        this.drainSlot(this.currentQueueIndex);
+        Slot slot = this.slots[this.currentQueueIndex];
+        List<Runnable> toDestroy = slot.beginDrain();
+        for (int index = 0; index < toDestroy.size(); index++) {
+            Runnable destroyAction = toDestroy.get(index);
+            try {
+                destroyAction.run();
+            } catch (Exception exception) {
+                Metallum.LOGGER.error(
+                        "[metallum] Destroy action threw an exception; resource may have leaked",
+                        exception
+                );
+            }
+        }
+        toDestroy.clear();
     }
 
     void close() {
-        if (this.closed) {
-            return;
+        int rotations = 0;
+        int maximumRotations = Math.multiplyExact(
+                this.slots.length,
+                MAX_CLOSE_ROTATIONS_PER_SLOT
+        );
+        while (this.pendingActionCount() > 0 && rotations < maximumRotations) {
+            this.rotate();
+            rotations++;
         }
-        this.closed = true;
-
-        // Preserve the order produced by repeated rotations. Marking the queue
-        // closed first is load-bearing: a callback that retires another object
-        // executes that retirement immediately instead of placing it into a slot
-        // already visited by this terminal drain.
-        for (int offset = 1; offset <= this.slots.length; offset++) {
-            this.drainSlot((this.currentQueueIndex + offset) % this.slots.length);
+        int remaining = this.pendingActionCount();
+        if (remaining > 0) {
+            Metallum.LOGGER.error(
+                    "[metallum] Deferred destruction queue did not quiesce during close; "
+                            + "{} action(s) remain after {} rotations",
+                    remaining,
+                    rotations
+            );
         }
     }
 
@@ -77,29 +85,6 @@ final class MetalDestructionQueue {
             count += slot.draining.size();
         }
         return count;
-    }
-
-    boolean isClosed() {
-        return this.closed;
-    }
-
-    private void drainSlot(final int queueIndex) {
-        List<Runnable> toDestroy = this.slots[queueIndex].beginDrain();
-        for (int index = 0; index < toDestroy.size(); index++) {
-            runDestroyAction(toDestroy.get(index));
-        }
-        toDestroy.clear();
-    }
-
-    private static void runDestroyAction(final Runnable destroyAction) {
-        try {
-            destroyAction.run();
-        } catch (Exception exception) {
-            Metallum.LOGGER.error(
-                    "[metallum] Destroy action threw an exception; resource may have leaked",
-                    exception
-            );
-        }
     }
 
     private static final class Slot {

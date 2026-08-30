@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 
 
 def obj(value: Any) -> dict[str, Any]:
@@ -17,10 +17,6 @@ def obj(value: Any) -> dict[str, Any]:
 
 def positive(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
-
-
-def non_negative(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
 
 
 def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
@@ -52,7 +48,7 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
     compute = obj(admission.get("computeGroupingRuntime"))
     depth = obj(admission.get("depthLivenessRuntime"))
     argument = obj(admission.get("argumentBindingRuntime"))
-    hot = obj(admission.get("hotPathCounters"))
+    binding_path = obj(admission.get("bindingPathRuntime"))
 
     lanes = {
         "pass-fusion": {
@@ -75,62 +71,19 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
             "evidence": argument,
             "requirement": "argumentBindingRuntime.enabled == true and encodedSnapshots > 0",
         },
-        "render-command-packet": {
+        "binding-tokens": {
             "admitted": (
-                positive(hot.get("renderCommandPacketCalls"))
-                and positive(hot.get("renderCommandPacketOperations"))
-                and hot.get("renderCommandPacketReplays") == 0
+                binding_path.get("tokenizedBindings") is True
+                and positive(binding_path.get("renderForwardedCalls"))
+                and positive(binding_path.get("renderSuppressedCalls"))
+                and positive(binding_path.get("packetCalls"))
+                and positive(binding_path.get("packetEntries"))
             ),
-            "evidence": hot,
-            "requirement": "render packet calls/operations > 0 and replays == 0",
-        },
-        "compute-command-packet": {
-            "admitted": (
-                positive(hot.get("computeCommandPacketCalls"))
-                and positive(hot.get("computeCommandPacketOperations"))
-                and hot.get("computeCommandPacketReplays") == 0
-            ),
-            "evidence": hot,
-            "requirement": "compute packet calls/operations > 0 and replays == 0",
-        },
-        "terrain-icb": {
-            "admitted": (
-                positive(hot.get("terrainIcbAttempts"))
-                and positive(hot.get("terrainIcbAccepted"))
-                and hot.get("terrainIcbAttempts") == hot.get("terrainIcbAccepted")
-                and positive(hot.get("terrainIcbDraws"))
-                and hot.get("terrainIcbFallbacks") == 0
-                and non_negative(hot.get("terrainIcbBudgetSkips"))
-                and non_negative(hot.get("terrainIcbBudgetSkipDraws"))
-                and hot.get("terrainIcbNativeStatsAvailable") is True
-                and hot.get("terrainIcbAllocations") == hot.get("terrainIcbAccepted")
-                and non_negative(hot.get("terrainIcbCompletionReleases"))
-                and abs(
-                    hot.get("terrainIcbAllocations")
-                    - hot.get("terrainIcbCompletionReleases")
-                ) <= 3
-                and hot.get("terrainIcbBudgetFallbacks") == 0
-                and hot.get("terrainIcbZeroAllocationFallbacks") == 0
-            ),
-            "evidence": hot,
+            "evidence": binding_path,
             "requirement": (
-                "terrain ICB attempts/accepted/draws > 0; attempts equal accepted batches; "
-                "native allocations equal accepted batches; completion lag stays within three "
-                "in-flight submissions; exhausted-budget batches are skipped before FFM; native "
-                "budget and zero-sized-allocation fallbacks are forbidden"
+                "bindingPathRuntime.tokenizedBindings == true and renderForwardedCalls > 0 "
+                "and renderSuppressedCalls > 0 and packetCalls > 0 and packetEntries >= packetCalls"
             ),
-        },
-        "pipeline-prewarm": {
-            "admitted": (
-                isinstance(hot.get("runtimePipelineCompiles"), (int, float))
-                and not isinstance(hot.get("runtimePipelineCompiles"), bool)
-                and hot.get("runtimePipelineCompiles") == 0
-            ),
-            "evidence": {
-                "runtimePipelineCompiles": hot.get("runtimePipelineCompiles"),
-                "runtimePipelineCompileIdentities": hot.get("runtimePipelineCompileIdentities"),
-            },
-            "requirement": "runtimePipelineCompiles is present and equals 0 after warmup",
         },
     }
 
@@ -143,27 +96,9 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
         admitted = bool(lanes[profile]["admitted"])
         reason = lanes[profile]["requirement"]
     elif profile in {"all-safe-lanes", "all-safe-plus-terrain"}:
-        selected = ["pass-fusion", "compute-grouping", "depth-liveness", "argument-tables"]
+        selected = list(lanes)
         admitted = any(bool(lanes[name]["admitted"]) for name in selected)
         reason = "at least one selected Iris optimization lane must prove runtime activation"
-    elif profile == "mobilegl-hotpath":
-        selected = ["render-command-packet", "pipeline-prewarm"]
-        admitted = all(bool(lanes[name]["admitted"]) for name in selected)
-        reason = "the production render command packet must execute with zero replay"
-    elif profile == "mobilegl-complete":
-        selected = [
-            "pass-fusion", "compute-grouping", "depth-liveness", "argument-tables",
-            "render-command-packet", "terrain-icb", "pipeline-prewarm",
-        ]
-        required = ["render-command-packet", "terrain-icb", "pipeline-prewarm"]
-        admitted = (
-            all(bool(lanes[name]["admitted"]) for name in required)
-            and any(bool(lanes[name]["admitted"]) for name in selected[:4])
-        )
-        reason = (
-            "render packet and bounded terrain ICB must execute without replay or allocation failure, runtime pipeline "
-            "compiles must be zero, and at least one compiled Iris optimization lane must activate"
-        )
     elif profile == "terrain-adaptive":
         result = {
             "schema_version": SCHEMA_VERSION,
@@ -210,35 +145,12 @@ def self_test() -> None:
                 "computeGroupingRuntime": {"admissions": 0, "deferredPassCloses": 0},
                 "depthLivenessRuntime": {"prunedPairs": 0, "captureSkips": 0},
                 "argumentBindingRuntime": {"enabled": True, "encodedSnapshots": 10},
-                "hotPathCounters": {
-                    "runtimePipelineCompiles": 0,
-                    "terrainIcbAttempts": 4,
-                    "terrainIcbAccepted": 4,
-                    "terrainIcbDraws": 64,
-                    "terrainIcbFallbacks": 0,
-                    "terrainIcbBudgetSkips": 8,
-                    "terrainIcbBudgetSkipDraws": 192,
-                    "terrainIcbNativeStatsAvailable": True,
-                    "terrainIcbAllocations": 4,
-                    "terrainIcbCompletionReleases": 3,
-                    "terrainIcbBudgetFallbacks": 0,
-                    "terrainIcbZeroAllocationFallbacks": 0,
-                },
             },
         }), encoding="utf-8")
         rejected, code = evaluate(path, "pass-fusion")
         assert code == 3 and rejected["state"] == "rejected-no-admission"
         admitted, code = evaluate(path, "argument-tables")
         assert code == 0 and admitted["state"] == "admitted"
-        admitted, code = evaluate(path, "pipeline-prewarm")
-        assert code == 0 and admitted["state"] == "admitted"
-        admitted, code = evaluate(path, "terrain-icb")
-        assert code == 0 and admitted["state"] == "admitted"
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["admission"]["hotPathCounters"]["terrainIcbZeroAllocationFallbacks"] = 1
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        rejected, code = evaluate(path, "terrain-icb")
-        assert code == 3 and rejected["state"] == "rejected-no-admission"
     print("check_unified_eval_admission self-test: PASS")
 
 

@@ -1,7 +1,6 @@
 package com.metallum.client.metal.render.bridge;
 
 import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.invoke.MethodHandle;
 import java.nio.file.Files;
@@ -28,20 +27,7 @@ final class MetalNativeInterfaceTest {
     private static SymbolLookup shippedDylib(final Arena arena) {
         assumeTrue(Files.isRegularFile(DYLIB),
                 "no macOS dylib built at " + DYLIB.toAbsolutePath() + "; run :buildMacNative");
-        // MetalNativeBridge owns extraction/loading. Re-opening the shipped
-        // path here after another integration test has initialized the bridge
-        // loads a second Swift image into the same JVM and produces duplicate
-        // Objective-C class registrations. Resolve the already-loaded image
-        // through dyld instead; the file-presence check above still keeps the
-        // test tied to the shipped artifact.
-        MetalNativeBridge.isIOS();
-        SymbolLookup loadedImage = name -> {
-            MemorySegment address = DarwinLoadedSymbolLookup.find(name);
-            return address == null ? Optional.empty() : Optional.of(address);
-        };
-        assumeTrue(loadedImage.find("metallum_get_interface").isPresent(),
-                "the loaded Metallum image does not export metallum_get_interface");
-        return loadedImage;
+        return SymbolLookup.libraryLookup(DYLIB, arena);
     }
 
     @Test

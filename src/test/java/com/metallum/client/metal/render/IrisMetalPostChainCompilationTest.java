@@ -26,6 +26,8 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -76,7 +78,46 @@ final class IrisMetalPostChainCompilationTest {
                     assertEquals(Set.of(0), chain.mipmappedTargets(),
                             "Potato composite4 requires a full colortex0 mip chain");
 
+                    IrisMetalOptimizationBootstrap.onPostChainCreated(chain);
                     chain.prepare(device, targets, GpuFormat.RGBA8_UNORM, fallback);
+                    IrisMetalOptimizationPlan plan = IrisMetalExperimentalOptimizer.active();
+                    assertNotNull(plan, "production post-chain plan must be published");
+                    IrisMetalOptimizationPlan.AttachmentLifetimeReceipt before =
+                            plan.attachmentLifetimeReceipt();
+                    assertNotNull(before, "prepare must publish a live-target attachment receipt");
+                    assertEquals(targets.allocationStamp(), before.targetEpoch());
+                    Set<Long> liveAllocations = new java.util.HashSet<>();
+                    for (int logical = 0; logical < targets.colorTargets().targetCount(); logical++) {
+                        liveAllocations.add(targets.colorTargets().mainTexture(logical).allocationId());
+                        liveAllocations.add(targets.colorTargets().altTexture(logical).allocationId());
+                    }
+                    var resolved = before.attachments().stream()
+                            .filter(attachment -> attachment.resolution()
+                                    == IrisMetalOptimizationPlan.AttachmentResolution.RESOLVED_RASTER)
+                            .toList();
+                    assertFalse(resolved.isEmpty(),
+                            "at least one production raster candidate must bind a live allocation");
+                    assertTrue(resolved.stream()
+                                    .allMatch(attachment -> liveAllocations.contains(attachment.allocationId())),
+                            "production receipt must use live main/alt allocation ids");
+
+                    long oldEpoch = before.targetEpoch();
+                    String oldSignature = before.targetSignature();
+                    targets.resize(64, 8);
+                    IrisMetalOptimizationPlan.AttachmentLifetimeReceipt stale =
+                            IrisMetalExperimentalOptimizer.active().attachmentLifetimeReceipt();
+                    assertNotNull(stale);
+                    assertEquals("STALE_UNRESOLVED", stale.status());
+                    assertNotEquals(oldEpoch, stale.targetEpoch());
+
+                    chain.prepare(device, targets, GpuFormat.RGBA8_UNORM, fallback);
+                    IrisMetalOptimizationPlan.AttachmentLifetimeReceipt after =
+                            IrisMetalExperimentalOptimizer.active().attachmentLifetimeReceipt();
+                    assertNotNull(after);
+                    assertNotEquals("STALE_UNRESOLVED", after.status());
+                    assertNotEquals(oldEpoch, after.targetEpoch());
+                    assertNotEquals(oldSignature, after.targetSignature());
+                    IrisMetalOptimizationBootstrap.onPostChainClosed();
                 }
             } finally {
                 MetalFxManager.close();

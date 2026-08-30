@@ -86,8 +86,11 @@ final class MetalComputePass implements AutoCloseable {
         }
         encoder.setBuffer(buffer.nativeHandle(), offset, index);
         this.boundBuffers.put(index, new BufferBinding(buffer, bindingVersion(buffer), offset));
+        if (this.contractPassToken >= 0L) {
+            MetalCommandEncoder.contractResource(buffer);
+        }
         if (this.boundResources != null) {
-            this.boundResources.put("buffer[" + index + "]", buffer.validationDebugId() + "+" + offset);
+            this.boundResources.put("buffer[" + index + "]", buffer.allocationDebugId() + "+" + offset);
         }
         return this;
     }

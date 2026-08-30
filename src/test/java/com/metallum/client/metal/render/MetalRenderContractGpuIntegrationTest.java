@@ -1,5 +1,7 @@
 package com.metallum.client.metal.render;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.validation.contract.AttachmentSemantic;
 import com.metallum.client.validation.contract.CapturePoint;
@@ -32,9 +34,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.StreamSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Real Metal texture capture through the production render-contract boundary. */
@@ -197,6 +202,199 @@ final class MetalRenderContractGpuIntegrationTest {
 
         color0.close();
         color1.close();
+    }
+
+    @Test
+    void eagerlyTracesIrisAllocationGenerationsAndRetainsIdentityAcrossUses() throws Exception {
+        IrisMetalRenderTargets targets = new IrisMetalRenderTargets(
+                device, new GpuFormat[]{GpuFormat.RGBA8_UNORM}, WIDTH, HEIGHT
+        );
+        IrisMetalShadowTargets shadow = new IrisMetalShadowTargets(
+                device, new GpuFormat[]{GpuFormat.RGBA8_UNORM}, WIDTH
+        );
+        List<String> semanticNames = List.of(
+                "iris-colortex0-main",
+                "iris-colortex0-alt",
+                "iris-depthtex0",
+                "iris-depthtex1",
+                "iris-depthtex2",
+                "iris-shadowcolor0-main",
+                "iris-shadowcolor0-alt",
+                "iris-shadowtex0",
+                "iris-shadowtex1"
+        );
+        try {
+            MetalGpuTexture color = targets.colorTargets().readTexture(0);
+            JsonObject initial = manifest();
+            for (String semanticName : semanticNames) {
+                assertEquals(1L, lifecycleCount(initial, "ALLOCATE", semanticName), semanticName);
+                assertEquals(0L, lifecycleCount(initial, "INVALIDATE", semanticName), semanticName);
+            }
+
+            // The same level-zero lookup used by a readback must not create a
+            // second allocation event after eager registration.
+            RenderContractRuntime.requestReadbacks(
+                    new CapturePoint(0L, "iris/eager-registration", CapturePointKind.AFTER_PASS, -1),
+                    List.of(request(color.getLabel(), color)),
+                    List.of()
+            );
+            JsonObject afterReadbackLookup = manifest();
+            assertEquals(
+                    lifecycleCount(initial, "ALLOCATE", "iris-colortex0-main"),
+                    lifecycleCount(afterReadbackLookup, "ALLOCATE", "iris-colortex0-main")
+            );
+
+            targets.resize(WIDTH + 1, HEIGHT + 1);
+            shadow.resize(WIDTH + 1);
+            JsonObject resized = manifest();
+            for (String semanticName : semanticNames) {
+                assertEquals(2L, lifecycleCount(resized, "ALLOCATE", semanticName), semanticName);
+                assertEquals(1L, lifecycleCount(resized, "INVALIDATE", semanticName), semanticName);
+            }
+
+            shadow.close();
+            targets.close();
+            JsonObject closed = manifest();
+            for (String semanticName : semanticNames) {
+                assertEquals(2L, lifecycleCount(closed, "ALLOCATE", semanticName), semanticName);
+                assertEquals(2L, lifecycleCount(closed, "INVALIDATE", semanticName), semanticName);
+            }
+        } finally {
+            shadow.close();
+            targets.close();
+        }
+    }
+
+    @Test
+    void retainedTextureViewDefersInvalidationUntilLastClose() throws Exception {
+        MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "eager-retained-view", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1
+        );
+        texture.registerValidationIdentity();
+        MetalGpuTextureView retainedView = new MetalGpuTextureView(texture, 0, 1);
+        try {
+            texture.close();
+            assertEquals(0L, lifecycleCount(manifest(), "INVALIDATE", "eager-retained-view"));
+
+            retainedView.close();
+            assertEquals(1L, lifecycleCount(manifest(), "INVALIDATE", "eager-retained-view"));
+        } finally {
+            retainedView.close();
+            texture.close();
+        }
+    }
+
+    @Test
+    void disabledTracingDoesNotRegisterTextureAllocations() throws Exception {
+        // Keep the recorder alive, then disable the contract switch. This
+        // catches helpers that only test for a stale/closed recorder state.
+        System.setProperty("metallum.renderContract.enabled", "false");
+        MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "eager-disabled", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1
+        );
+        MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
+                () -> "eager-disabled-buffer", GpuBuffer.USAGE_MAP_WRITE, 16L
+        );
+        try {
+            texture.registerValidationIdentity();
+            buffer.registerAllocationIdentity();
+            assertTrue(RenderContractRuntime.enabled(), "the recorder must remain live for this disabled-switch test");
+            assertNotEquals(texture.allocationId(), buffer.allocationId());
+            assertEquals(0L, lifecycleCount(manifest(), "ALLOCATE", "eager-disabled"));
+        } finally {
+            texture.close();
+            buffer.close();
+        }
+    }
+
+    @Test
+    void eagerRegistrationUsesBaseMipAndLaterMipIdentityWithoutCollision() throws Exception {
+        MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "eager-mip-test", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 2
+        );
+        texture.registerValidationIdentity();
+        MetalGpuTextureView baseView = new MetalGpuTextureView(texture, 0, 1);
+        MetalGpuTextureView mipView = new MetalGpuTextureView(texture, 1, 1);
+        try {
+            JsonObject base = manifest();
+            assertEquals(1L, lifecycleCount(base, "ALLOCATE", "eager-mip-test", 0));
+            assertEquals(0L, lifecycleCount(base, "ALLOCATE", "eager-mip-test", 1));
+
+            MetalCommandEncoder.contractResource(texture, 1);
+            JsonObject laterMip = manifest();
+            assertEquals(1L, lifecycleCount(laterMip, "ALLOCATE", "eager-mip-test", 0));
+            assertEquals(1L, lifecycleCount(laterMip, "ALLOCATE", "eager-mip-test", 1));
+        } finally {
+            texture.close();
+            baseView.close();
+            mipView.close();
+        }
+        JsonObject closed = manifest();
+        assertEquals(1L, lifecycleCount(closed, "INVALIDATE", "eager-mip-test", 0));
+        assertEquals(1L, lifecycleCount(closed, "INVALIDATE", "eager-mip-test", 1));
+    }
+
+    @Test
+    void authoritativeBufferBackingSwapRetiresAndReallocatesGeneration() throws Exception {
+        int dynamicUsage = GpuBuffer.USAGE_UNIFORM
+                | GpuBuffer.USAGE_COPY_DST
+                | GpuBuffer.USAGE_MAP_WRITE;
+        MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
+                () -> "identity-buffer", dynamicUsage, 16L
+        );
+        buffer.registerAllocationIdentity();
+        try {
+            JsonObject initial = manifest();
+            assertEquals(1L, lifecycleCount(initial, "ALLOCATE", "identity-buffer"));
+            assertEquals(0L, lifecycleCount(initial, "INVALIDATE", "identity-buffer"));
+
+            ByteBuffer update = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
+            update.putLong(0x0102030405060708L).putLong(0x1112131415161718L).flip();
+            encoder.writeToBuffer(buffer.slice(), update);
+
+            JsonObject swapped = manifest();
+            assertEquals(2L, lifecycleCount(swapped, "ALLOCATE", "identity-buffer"));
+            assertEquals(1L, lifecycleCount(swapped, "INVALIDATE", "identity-buffer"));
+        } finally {
+            buffer.close();
+        }
+        assertTrue(buffer.isClosed());
+        assertThrows(IllegalStateException.class, buffer::allocationId);
+        assertThrows(IllegalStateException.class, buffer::allocationIdentity);
+        // A second close must not enqueue another native retirement.
+        buffer.close();
+        JsonObject closed = manifest();
+        assertEquals(2L, lifecycleCount(closed, "INVALIDATE", "identity-buffer"));
+    }
+
+    private JsonObject manifest() throws Exception {
+        RenderContractRuntime.flushManifest();
+        return JsonParser.parseString(
+                Files.readString(output.resolve("render-contract/pass-manifest.json"))
+        ).getAsJsonObject();
+    }
+
+    private static long lifecycleCount(
+            final JsonObject manifest,
+            final String action,
+            final String semanticName
+    ) {
+        return lifecycleCount(manifest, action, semanticName, -1);
+    }
+
+    private static long lifecycleCount(
+            final JsonObject manifest,
+            final String action,
+            final String semanticName,
+            final int mipLevel
+    ) {
+        return StreamSupport.stream(manifest.getAsJsonArray("resourceLifecycle").spliterator(), false)
+                .map(element -> element.getAsJsonObject())
+                .filter(event -> action.equals(event.get("action").getAsString()))
+                .map(event -> event.getAsJsonObject("resource"))
+                .filter(resource -> semanticName.equals(resource.get("semanticName").getAsString()))
+                .filter(resource -> mipLevel < 0 || mipLevel == resource.get("mipLevel").getAsInt())
+                .count();
     }
 
     private static RenderContractRuntime.ReadbackRequest request(

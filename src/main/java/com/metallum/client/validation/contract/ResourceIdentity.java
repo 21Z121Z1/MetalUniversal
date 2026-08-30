@@ -32,6 +32,11 @@ public record ResourceIdentity(
         return semanticName + "@" + generation;
     }
 
+    /** Allocation/subresource key for future hazard and physical-plan consumers. */
+    public String allocationKey() {
+        return "allocation/" + runtimeId + "/generation/" + generation + "/mip/" + mipLevel;
+    }
+
     private static String requireName(final String value, final String field) {
         Objects.requireNonNull(value, field);
         if (value.isBlank()) {

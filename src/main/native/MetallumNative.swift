@@ -39,9 +39,49 @@ private struct PipelineVariantKey: Hashable {
     let writeColor: Bool
 }
 
-private struct CopyPipelineKey: Hashable {
+private struct TerrainGpuComputePipelineKey: Hashable {
     let deviceAddress: UInt
-    let colorFormat: MTLPixelFormat
+    let primitiveType: UInt
+    let indexType: UInt
+    let variant: UInt8
+}
+
+private struct TerrainVisibilityComputePipelineKey: Hashable {
+    let deviceAddress: UInt
+}
+
+private let terrainVisibilityMaxCandidates = 1 << 20
+
+private final class TerrainGpuComputePipeline {
+    let state: MTLComputePipelineState
+    let function: MTLFunction
+
+    init(state: MTLComputePipelineState, function: MTLFunction) {
+        self.state = state
+        self.function = function
+    }
+}
+
+private final class TerrainVisibilityCompactionPipelines {
+    let visibility: MTLComputePipelineState
+    let blockScan: MTLComputePipelineState
+    let blockSumsScan: MTLComputePipelineState
+    let groupScan: MTLComputePipelineState
+    let scatter: MTLComputePipelineState
+
+    init(
+        visibility: MTLComputePipelineState,
+        blockScan: MTLComputePipelineState,
+        blockSumsScan: MTLComputePipelineState,
+        groupScan: MTLComputePipelineState,
+        scatter: MTLComputePipelineState
+    ) {
+        self.visibility = visibility
+        self.blockScan = blockScan
+        self.blockSumsScan = blockSumsScan
+        self.groupScan = groupScan
+        self.scatter = scatter
+    }
 }
 
 private struct SamplerKey: Hashable {
@@ -55,11 +95,43 @@ private struct SamplerKey: Hashable {
     let lodMaxClampBits: UInt32
 }
 
+#if os(macOS) && canImport(MetalFX)
+private enum MetalFxBackend: UInt8, Hashable {
+    case metal3
+    case metal4
+}
+
+private enum MetalFxScalerKind: UInt8, Hashable {
+    case spatial
+    case temporal
+}
+
+/// Numeric identity for a MetalFX scaler configuration. Every field that can
+/// affect descriptor construction is represented directly so cache lookup does
+/// not allocate, format or hash a String on each encode.
+private struct MetalFxScalerKey: Hashable {
+    let deviceAddress: UInt
+    let backend: MetalFxBackend
+    let kind: MetalFxScalerKind
+    let colorFormat: MTLPixelFormat
+    let depthFormat: MTLPixelFormat
+    let motionFormat: MTLPixelFormat
+    let outputFormat: MTLPixelFormat
+    let reactiveFormat: MTLPixelFormat
+    let inputWidth: Int
+    let inputHeight: Int
+    let outputWidth: Int
+    let outputHeight: Int
+}
+#endif
+
 private enum NativeState {
     static var debugLabelsEnabled = false
     // When true, makeRenderCommandEncoder_v2 leaves the depth attachment with
-    // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
-    // before endEncoding. Toggled once at device init from
+        // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
+        // before endEncoding. Color stores remain concrete in V3 because Metal
+        // does not allow mutating actions known at encoder creation. Toggled once
+        // at device init from
     // metallum_set_deferred_depth_store; must match the Java flag exactly.
     static var deferredDepthStore = false
     // Split-fence mode (metallum.opt.splitFence): non-nil while the Java
@@ -86,10 +158,45 @@ private enum NativeState {
     // normally.
     static var binaryArchiveReadOnly = false
     // Metal 4 (migration spec M2). Enabled from Java once the capability gate
-    // and compiler policy hold. With the main MTL4 queue active a translation
-    // or compile failure is terminal; compiler-only diagnostics may still
-    // exercise the separately validated Metal 3 fallback.
+    // and metallum.opt.metal4Compiler both hold; false means every PSO takes
+    // the Metal 3 path below, unchanged.
     static var metal4CompilerEnabled = false
+    // Terrain ICB is a separate opt-in. The Java capability gate sets this
+    // only when Metal 4 is available; all pipeline descriptors then carry the
+    // explicit support bit required by the Metal 4 compiler.
+    static var terrainIcbEnabled = false
+    // Strictly opt-in all-visible GPU ICB authoring. This is a producer-scoped
+    // encoding seam, not visibility culling; unsupported compute/ICB paths
+    // return nil so Java retries CPU ICB authoring before indirect draw.
+    static var terrainGpuEncodeEnabled = false
+    // Optional optimization for sparse GPU-authored visible ICBs. Keep it
+    // independently reversible until physical-GPU A/B establishes benefit.
+    static var terrainVisibleIcbOptimizeEnabled = false
+    // The explicit diagnostic probe needs stable prefix/scatter output. The
+    // shipping visible-ICB lane consumes only the visibility bitset and can
+    // skip every compaction dispatch and candidate-sized scratch buffer.
+    static var terrainVisibilityCompactionEnabled = true
+    // Focused native proof counters. They are session-local diagnostics, not a
+    // cache or a render-path decision.
+    static var terrainIcbEncodedCount: UInt64 = 0
+    static var terrainIcbExecutedCount: UInt64 = 0
+    static var terrainIcbGpuEncodedCount: UInt64 = 0
+    static var terrainIcbGpuDispatchCount: UInt64 = 0
+    static var terrainGpuEncodeLogged = false
+    // Device/variant-scoped compute PSOs are reusable pipeline state, not
+    // terrain ICB or scene state. The lock also serializes first-use compile
+    // so concurrent Sodium batches cannot compile the same kernel twice.
+    static let terrainGpuPipelineLock = NSLock()
+    static var terrainGpuPipelines: [TerrainGpuComputePipelineKey: TerrainGpuComputePipeline] = [:]
+    static var terrainGpuPipelineCompileCount: UInt64 = 0
+    static let terrainVisibilityPipelineLock = NSLock()
+    static var terrainVisibilityPipelines: [TerrainVisibilityComputePipelineKey: TerrainVisibilityCompactionPipelines] = [:]
+    // Shipping visible-ICB only needs the frustum/bitset kernel. Keep a
+    // separate cache so first use does not compile four scan/scatter PSOs
+    // that the non-diagnostic path never dispatches.
+    static var terrainVisibilityOnlyPipelines: [TerrainVisibilityComputePipelineKey: MTLComputePipelineState] = [:]
+    // Persistent-scene visibility uses a distinct entry point but the same device-scoped cache key.
+    static var terrainVisibilityScenePipelines: [TerrainVisibilityComputePipelineKey: MTLComputePipelineState] = [:]
     // Metal 4 frame-generation present pilot (spec M4). Read once when the
     // presenter is constructed; flipping it later has no effect, which matches how
     // the presenter is started.
@@ -99,35 +206,6 @@ private enum NativeState {
     // macOS 26, not on Metal 4 family support.
     static var metal4BarrierEnabled = false
     static var gpuEncoderTimingEnabled = false
-    // Validation-only A/B for MTL4 argument-table lifetime. This is outside the
-    // MetalFX conditional block because the MTL4 main queue is shared by the
-    // platform native builds.
-    static let freshComputeArgumentTables = ProcessInfo.processInfo.environment[
-        "METALLUM_METALFX_FRESH_COMPUTE_ARGUMENT_TABLE"
-    ] == "1"
-    // Validation-only A/B for the Java-driven MTL4 render path. The normal
-    // renderer reuses one vertex/fragment argument-table pair per in-flight
-    // command-buffer slot. When enabled, each MTL4 render encoder gets a fresh
-    // pair, which isolates cross-encoder and slot-reuse lifetime effects without
-    // changing Java's binding order or the draw/ICB implementation.
-    static let freshMetal4RenderArgumentTables = ProcessInfo.processInfo.environment[
-        "METALLUM_METAL4_FRESH_RENDER_ARGUMENT_TABLE"
-    ] == "1"
-    // Validation-only A/B for the MTL4 argument-table descriptor. The current
-    // pipeline uses static vertex strides and binds with setAddress(_:atIndex:);
-    // disabling this reservation checks whether the optional dynamic-stride
-    // table storage itself affects the main render path.
-    static let metal4SupportAttributeStrides = (ProcessInfo.processInfo.environment[
-        "METALLUM_METAL4_SUPPORT_ATTRIBUTE_STRIDES"
-    ] ?? "1") != "0"
-    // Validation-only A/B for raw MTL4 GPU-address bindings. Argument tables
-    // store addresses rather than MTLBuffer objects, so retain every buffer
-    // touched by a submitted encoder until commit feedback proves that the
-    // GPU is finished. The normal path remains governed by Java's deferred
-    // destruction queue and the explicit residency set.
-    static let metal4RetainBoundBuffers = ProcessInfo.processInfo.environment[
-        "METALLUM_METAL4_RETAIN_BOUND_BUFFERS"
-    ] == "1"
     // MTL4LibraryFunctionDescriptor requires the MTLLibrary a function came
     // from, and MTLFunction does not expose it, so the association is kept
     // beside it. Weak keys: the entry disappears when the function is released,
@@ -151,15 +229,6 @@ private enum NativeState {
     static var metal4SpatialEncodeCount: UInt64 = 0
     static var metal4TemporalEncodeCount: UInt64 = 0
     static var metal4FrameGenerationInputCount: UInt64 = 0
-    // Backend-closure diagnostics. These counters distinguish the generic
-    // Iris/Blaze3D bridge from the dedicated MetalFX producers above and make a
-    // legacy-encoder escape observable when the MTL4 main queue is active.
-    static var metal4GenericComputeEncodeCount: UInt64 = 0
-    static var metal4GenericBlitEncodeCount: UInt64 = 0
-    static var metal4GenericRenderEncodeCount: UInt64 = 0
-    static var metal3GenericComputeEncodeCount: UInt64 = 0
-    static var metal3GenericBlitEncodeCount: UInt64 = 0
-    static var metal4LegacyEncoderViolationCount: UInt64 = 0
     // The upload bridge cannot identify the destination allocation or range
     // from its ABI, so this counts encoded MTL4 upload/copy barriers rather
     // than pretending to be a resource hazard tracker. Keep the diagnostic
@@ -167,15 +236,6 @@ private enum NativeState {
     static let metal4UploadBarrierTelemetryLock = NSLock()
     static var metal4UploadBarrierCount: UInt64 = 0
     static var metal4UploadBarrierLogged = false
-    static let freshRenderArgumentTableTelemetryLock = NSLock()
-    static var freshRenderArgumentTableCount: UInt64 = 0
-    static var freshRenderArgumentTableLogged = false
-    static let terrainIcbTelemetryLock = NSLock()
-    static var terrainIcbAllocations: UInt64 = 0
-    static var terrainIcbCompletionReleases: UInt64 = 0
-    static var terrainIcbBudgetFallbacks: UInt64 = 0
-    static var terrainIcbZeroAllocationFallbacks: UInt64 = 0
-    static var terrainIcbAllocationFailureLogged = false
     static let metal4CompilerLock = NSLock()
     // Residency set (migration spec M3), enabled by metallum.opt.residencySet.
     // MTLResidencySet is macOS 15 / iOS 18 and needs no Metal 4, so the table of
@@ -187,20 +247,64 @@ private enum NativeState {
     // frame-generation present thread and the async precompile thread all able to
     // create and destroy resources, so the lock is not optional.
     static var residencySetStorage: AnyObject?
+    // The explicit set is process-local, but the Metal device is not. Keep its
+    // identity beside the erased set so a second device cannot silently reuse
+    // the first device's allocations (or its pipeline states).
+    static var residencyDeviceStorage: AnyObject?
     static let residencyLock = NSLock()
     static var residencyDirty = false
     static var residencyRequested = false
+    // MTLResidencySet de-duplicates allocations, but keeping the ownership
+    // ledger here makes add/remove symmetry explicit and prevents a borrowed
+    // owner (or a cache teardown) from removing an allocation twice.
+    static var residencyTrackedAllocations: Set<ObjectIdentifier> = []
+    static var residencyCreatedCount: UInt64 = 0
+    static var residencyReleasedCount: UInt64 = 0
     // One-shot logging so a run can tell "the Metal 4 pipeline path worked" from
     // "every pipeline silently fell back to Metal 3" — the two are otherwise
     // indistinguishable, since falling back is by design never an error. Racing
     // on these only ever costs a duplicate log line.
     static var metal4PipelineLogged = false
     static var metal4PipelineFallbackLogged = false
+    // Pipeline compilation (MTLCompiler XPC scheduling) must not execute on an
+    // embedded-VM worker thread. On hosted Apple Paravirtual devices, a render
+    // PSO compile request issued from a JVM-created pool thread crashes inside
+    // MTLCompilerScheduler's own dispatch workloop (objc_msgSend on a corrupted
+    // cache), while the identical call passes from process main threads and
+    // from inside the shipping GLFW client. Route every blocking pipeline
+    // compilation onto this dedicated serial queue: it keeps the FFM boundary
+    // non-critical-compliant (the calling thread blocks in a plain semaphore,
+    // never inside compiler machinery) and gives the compiler scheduler a
+    // thread domain the embedded VM has never touched. Disable with
+    // METALLUM_PSO_COMPILE_HOP=0.
+    static let pipelineCompilerQueue = DispatchQueue(label: "com.metallum.pipeline-compiler", qos: .userInitiated)
+    static var pipelineCompilerHopLogged = false
+    static var pipelineCompilerHopDebug: Bool? = nil
 
     static func logMetal4PipelineFallback(_ reason: String) {
         guard !metal4PipelineFallbackLogged else { return }
         metal4PipelineFallbackLogged = true
         NSLog("[metallum] Metal 4 pipeline path unavailable, using Metal 3: %@", reason)
+    }
+
+    /// Runs a blocking pipeline-compilation body on the dedicated compiler
+    /// thread. The whole body moves atomically, so lock ordering inside the
+    /// body is unchanged; the queue is private and never re-entered by any
+    /// hopped entry, so `sync` cannot deadlock.
+    static func onCompilerThread<T>(_ body: () -> T) -> T {
+        if pipelineCompilerHopDebug == nil {
+            pipelineCompilerHopDebug = ProcessInfo.processInfo.environment["METALLUM_PSO_HOP_DEBUG"] == "1"
+        }
+        if ProcessInfo.processInfo.environment["METALLUM_PSO_COMPILE_HOP"] == "0" {
+            return autoreleasepool { body() }
+        }
+        if !pipelineCompilerHopLogged {
+            pipelineCompilerHopLogged = true
+            NSLog("[metallum] pipeline compiler hop engaged (dedicated serial compiler thread)")
+        }
+        return pipelineCompilerQueue.sync {
+            autoreleasepool { body() }
+        }
     }
 
     static func register(function: MTLFunction, library: MTLLibrary) {
@@ -225,7 +329,7 @@ private enum NativeState {
             NSLog(
                 "[metallum] Metal 4 upload barrier contract active: "
                     + "afterQueueStages=vertex|fragment|dispatch|blit "
-                    + "beforeStages=blit visibility=device|resourceAlias"
+                    + "beforeStages=blit visibility=device"
             )
         }
     }
@@ -236,316 +340,13 @@ private enum NativeState {
         return metal4UploadBarrierCount
     }
 
-    static func recordFreshRenderArgumentTable() {
-        freshRenderArgumentTableTelemetryLock.lock()
-        freshRenderArgumentTableCount &+= 1
-        let firstUse = !freshRenderArgumentTableLogged
-        freshRenderArgumentTableLogged = true
-        freshRenderArgumentTableTelemetryLock.unlock()
-        if firstUse {
-            NSLog(
-                "[metallum] Metal 4 render argument-table A/B active: "
-                    + "fresh vertex+fragment tables per render encoder"
-            )
-        }
-    }
-
-    // Bounded MTL4 indexed-draw diagnostics. MTL4 receives an address and a
-    // byte length instead of the MTL3 buffer+offset pair, so validate the
-    // exact range before encoding without changing the draw arguments.
-    static let metal4IndexedDrawTelemetryLock = NSLock()
-    static var metal4IndexedDrawCount: UInt64 = 0
-    static var metal4IndexedDrawRangeViolationCount: UInt64 = 0
-    static var metal4IndexedDrawUnknownIndexTypeCount: UInt64 = 0
-    static var metal4IndexedDrawZeroAddressCount: UInt64 = 0
-    static var metal4IndexedDrawViolationLogged = false
-    static var metal4IndexedTerrainDrawLogged = false
-
-    // Validation-only native snapshot for the MTL4 argument-table path. The
-    // Java-side snapshot proves which MTLBuffer object and logical slot were
-    // requested; this records the address/length/stride that the native bridge
-    // actually writes into the vertex argument table. Keep it bounded and
-    // terrain-prioritized so startup GUI traffic cannot consume the evidence.
-    static let metal4VertexBindingTelemetryEnabled = ProcessInfo.processInfo.environment[
-        "METALLUM_METAL4_VERTEX_BINDING_TELEMETRY"
-    ] == "1"
-    static let metal4VertexBindingTelemetryLock = NSLock()
-    static var metal4VertexBindingTelemetryCount: UInt64 = 0
-    static var metal4VertexBindingTelemetryNonTerrainCount: UInt64 = 0
-    static let metal4VertexBindingTelemetryLimit: UInt64 = 64
-    static let metal4VertexBindingTelemetryNonTerrainLimit: UInt64 = 8
-
-    // A binding call can be correct while a later draw observes a different
-    // argument-table state. Capture the bridge's shadow state immediately
-    // before the MTL4 indexed draw, after all Java-side mutations for that
-    // draw have completed.
-    static let metal4IndexedDrawSnapshotLock = NSLock()
-    static var metal4IndexedDrawSnapshotCount: UInt64 = 0
-    static let metal4IndexedDrawSnapshotLimit: UInt64 = 24
-
-    @available(macOS 26.0, iOS 26.0, *)
-    static func recordMetal4VertexBinding(
-        buffer: MTLBuffer?,
-        offset: Int,
-        stride: Int,
-        index: Int,
-        stageMask: Int32,
-        pipelineLabel: String
-    ) {
-        guard metal4VertexBindingTelemetryEnabled else { return }
-        let isTerrain = pipelineLabel.localizedCaseInsensitiveContains("terrain")
-
-        metal4VertexBindingTelemetryLock.lock()
-        if !isTerrain {
-            if metal4VertexBindingTelemetryNonTerrainCount >= metal4VertexBindingTelemetryNonTerrainLimit {
-                metal4VertexBindingTelemetryLock.unlock()
-                return
-            }
-            metal4VertexBindingTelemetryNonTerrainCount &+= 1
-        }
-        if metal4VertexBindingTelemetryCount >= metal4VertexBindingTelemetryLimit {
-            metal4VertexBindingTelemetryLock.unlock()
-            return
-        }
-        metal4VertexBindingTelemetryCount &+= 1
-        let snapshotNumber = metal4VertexBindingTelemetryCount
-        metal4VertexBindingTelemetryLock.unlock()
-
-        let gpuAddress = buffer?.gpuAddress ?? 0
-        let bufferLength = buffer?.length ?? 0
-        let boundAddress: UInt64
-        if buffer != nil && offset >= 0 {
-            boundAddress = gpuAddress + UInt64(offset)
-        } else {
-            boundAddress = 0
-        }
-        NSLog(
-            "[metallum] M4 native vertex binding #%llu pipeline=%@ index=%d "
-                + "stageMask=%d bufferLength=%ld gpuAddress=0x%llu "
-                + "boundAddress=0x%llu offset=%ld attributeStride=%ld",
-            snapshotNumber,
-            pipelineLabel,
-            index,
-            stageMask,
-            bufferLength,
-            gpuAddress,
-            boundAddress,
-            offset,
-            stride
-        )
-    }
-
-    @available(macOS 26.0, iOS 26.0, *)
-    static func recordMetal4IndexedDrawSnapshot(
-        indexCount: Int,
-        indexType: MTLIndexType,
-        indexBuffer: MTLBuffer,
-        indexBufferOffset: Int,
-        baseVertex: Int,
-        instanceCount: Int,
-        baseInstance: Int,
-        pipelineLabel: String,
-        vertexBindings: String
-    ) {
-        guard metal4VertexBindingTelemetryEnabled else { return }
-        guard pipelineLabel.localizedCaseInsensitiveContains("terrain") else { return }
-
-        metal4IndexedDrawSnapshotLock.lock()
-        guard metal4IndexedDrawSnapshotCount < metal4IndexedDrawSnapshotLimit else {
-            metal4IndexedDrawSnapshotLock.unlock()
-            return
-        }
-        metal4IndexedDrawSnapshotCount &+= 1
-        let snapshotNumber = metal4IndexedDrawSnapshotCount
-        metal4IndexedDrawSnapshotLock.unlock()
-
-        let indexBytes: Int
-        if indexType == .uint16 {
-            indexBytes = MemoryLayout<UInt16>.stride
-        } else if indexType == .uint32 {
-            indexBytes = MemoryLayout<UInt32>.stride
-        } else {
-            indexBytes = 0
-        }
-        NSLog(
-            "[metallum] M4 indexed draw snapshot #%llu pipeline=%@ "
-                + "vertexBindings=%@ indexLength=%ld indexGpuAddress=0x%llu "
-                + "indexOffset=%ld indexCount=%ld indexBytes=%ld "
-                + "baseVertex=%ld instanceCount=%ld baseInstance=%ld",
-            snapshotNumber,
-            pipelineLabel,
-            vertexBindings,
-            indexBuffer.length,
-            indexBuffer.gpuAddress,
-            indexBufferOffset,
-            indexCount,
-            indexBytes,
-            baseVertex,
-            instanceCount,
-            baseInstance
-        )
-    }
-
-    @available(macOS 26.0, iOS 26.0, *)
-    static func recordMetal4IndexedDraw(
-        indexCount: Int,
-        indexType: MTLIndexType,
-        indexBuffer: MTLBuffer,
-        indexBufferOffset: Int,
-        baseVertex: Int,
-        pipelineLabel: String
-    ) {
-        let indexBytes: Int
-        if indexType == .uint16 {
-            indexBytes = MemoryLayout<UInt16>.stride
-        } else if indexType == .uint32 {
-            indexBytes = MemoryLayout<UInt32>.stride
-        } else {
-            indexBytes = 0
-        }
-
-        var requiredEnd = -1
-        var rangeViolation = indexCount < 0 || indexBufferOffset < 0 || indexBytes == 0
-        if !rangeViolation {
-            let (byteCount, multiplicationOverflow) = indexCount.multipliedReportingOverflow(by: indexBytes)
-            let (end, additionOverflow) = indexBufferOffset.addingReportingOverflow(byteCount)
-            requiredEnd = end
-            rangeViolation = multiplicationOverflow || additionOverflow || end > indexBuffer.length
-        }
-        let unknownIndexType = indexBytes == 0
-        let zeroAddress = indexBuffer.gpuAddress == 0
-
-        metal4IndexedDrawTelemetryLock.lock()
-        metal4IndexedDrawCount &+= 1
-        let drawNumber = metal4IndexedDrawCount
-        if rangeViolation { metal4IndexedDrawRangeViolationCount &+= 1 }
-        if unknownIndexType { metal4IndexedDrawUnknownIndexTypeCount &+= 1 }
-        if zeroAddress { metal4IndexedDrawZeroAddressCount &+= 1 }
-        let firstDraw = drawNumber == 1
-        let firstTerrainDraw = pipelineLabel.localizedCaseInsensitiveContains("terrain")
-            && !metal4IndexedTerrainDrawLogged
-        if firstTerrainDraw { metal4IndexedTerrainDrawLogged = true }
-        let shouldLog = (rangeViolation || unknownIndexType || zeroAddress) && !metal4IndexedDrawViolationLogged
-        metal4IndexedDrawViolationLogged = metal4IndexedDrawViolationLogged || shouldLog
-        metal4IndexedDrawTelemetryLock.unlock()
-
-        if firstDraw || firstTerrainDraw {
-            NSLog(
-                "[metallum] Metal 4 indexed draw range telemetry active: "
-                    + "first indexCount=%ld indexBytes=%ld offset=%ld requiredEnd=%ld "
-                    + "bufferLength=%ld gpuAddress=0x%llu baseVertex=%ld range=%d pipeline=%@",
-                indexCount,
-                indexBytes,
-                indexBufferOffset,
-                requiredEnd,
-                indexBuffer.length,
-                indexBuffer.gpuAddress,
-                baseVertex,
-                rangeViolation ? 1 : 0,
-                pipelineLabel
-            )
-        }
-        if shouldLog {
-            NSLog(
-                "[metallum] Metal 4 indexed draw parameter violation: "
-                    + "indexCount=%ld indexBytes=%ld offset=%ld requiredEnd=%ld "
-                    + "bufferLength=%ld gpuAddress=0x%llu baseVertex=%ld "
-                    + "range=%d unknownType=%d zeroAddress=%d",
-                indexCount,
-                indexBytes,
-                indexBufferOffset,
-                requiredEnd,
-                indexBuffer.length,
-                indexBuffer.gpuAddress,
-                baseVertex,
-                rangeViolation ? 1 : 0,
-                unknownIndexType ? 1 : 0,
-                zeroAddress ? 1 : 0
-            )
-        }
-    }
-
-    static func metal4IndexedDrawTelemetryStats() -> (UInt64, UInt64, UInt64, UInt64) {
-        metal4IndexedDrawTelemetryLock.lock()
-        defer { metal4IndexedDrawTelemetryLock.unlock() }
-        return (
-            metal4IndexedDrawCount,
-            metal4IndexedDrawRangeViolationCount,
-            metal4IndexedDrawUnknownIndexTypeCount,
-            metal4IndexedDrawZeroAddressCount
-        )
-    }
-
-    static func resetMetal4IndexedDrawTelemetry() {
-        metal4IndexedDrawTelemetryLock.lock()
-        metal4IndexedDrawCount = 0
-        metal4IndexedDrawRangeViolationCount = 0
-        metal4IndexedDrawUnknownIndexTypeCount = 0
-        metal4IndexedDrawZeroAddressCount = 0
-        metal4IndexedDrawViolationLogged = false
-        metal4IndexedTerrainDrawLogged = false
-        metal4IndexedDrawTelemetryLock.unlock()
-    }
-
-    static func recordTerrainIcbAllocation() {
-        terrainIcbTelemetryLock.lock()
-        terrainIcbAllocations &+= 1
-        terrainIcbTelemetryLock.unlock()
-    }
-
-    static func recordTerrainIcbCompletionRelease() {
-        terrainIcbTelemetryLock.lock()
-        terrainIcbCompletionReleases &+= 1
-        terrainIcbTelemetryLock.unlock()
-    }
-
-    static func recordTerrainIcbBudgetFallback() {
-        terrainIcbTelemetryLock.lock()
-        terrainIcbBudgetFallbacks &+= 1
-        terrainIcbTelemetryLock.unlock()
-    }
-
-    static func recordTerrainIcbZeroAllocation(drawCount: Int, indexBytes: Int) {
-        terrainIcbTelemetryLock.lock()
-        terrainIcbZeroAllocationFallbacks &+= 1
-        let shouldLog = !terrainIcbAllocationFailureLogged
-        terrainIcbAllocationFailureLogged = true
-        terrainIcbTelemetryLock.unlock()
-        if shouldLog {
-            NSLog(
-                "[metallum] terrain ICB allocation returned zero backing; "
-                    + "using zero-execution fallback (draws=%d indexBytes=%d)",
-                drawCount,
-                indexBytes
-            )
-        }
-    }
-
-    static func terrainIcbStats() -> (UInt64, UInt64, UInt64, UInt64) {
-        terrainIcbTelemetryLock.lock()
-        defer { terrainIcbTelemetryLock.unlock() }
-        return (
-            terrainIcbAllocations,
-            terrainIcbCompletionReleases,
-            terrainIcbBudgetFallbacks,
-            terrainIcbZeroAllocationFallbacks
-        )
-    }
-
     /// Process-wide compiler, built on first use. Nil means Metal 4 pipeline
     /// creation is unavailable and callers must fall back to the Metal 3 path.
     @available(macOS 26.0, iOS 26.0, *)
     static func metal4Compiler(_ device: MTLDevice) -> MTL4Compiler? {
         metal4CompilerLock.lock()
         defer { metal4CompilerLock.unlock() }
-        if let existing = metal4CompilerStorage as? MTL4Compiler {
-            if objectAddress(existing.device) == objectAddress(device) {
-                return existing
-            }
-            metal4CompilerStorage = nil
-            metal4Serializer = nil
-            metal4LookupArchive = nil
-        }
+        if let existing = metal4CompilerStorage as? MTL4Compiler { return existing }
         let descriptor = MTL4CompilerDescriptor()
         descriptor.label = "metallum-compiler"
         if let serializer = metal4Serializer as? MTL4PipelineDataSetSerializer {
@@ -562,7 +363,7 @@ private enum NativeState {
     static var presentPipeline: MTLRenderPipelineState!
     static var presentNearestSampler: MTLSamplerState!
     static var presentLinearSampler: MTLSamplerState!
-    static var copyPipelines: [CopyPipelineKey: MTLRenderPipelineState] = [:]
+    static var copyPipelines: [Int: MTLRenderPipelineState] = [:]
     #if os(macOS)
     // Present mode the game last asked for, so stopping the frame-generation
     // presenter can hand the layer back in the state Minecraft expects instead
@@ -570,10 +371,10 @@ private enum NativeState {
     static var immediatePresentModeRequested = false
     #endif
     #if os(macOS) && canImport(MetalFX)
-    static var metalFxScalers: [String: AnyObject] = [:]
-    static var metalFxPreviousDepthTextures: [String: MTLTexture] = [:]
-    static var metalFxValidationReactiveTextures: [String: MTLTexture] = [:]
-    static var metalFxPreviousDepthValid: Set<String> = []
+    static var metalFxScalers: [MetalFxScalerKey: AnyObject] = [:]
+    static var metalFxPreviousDepthTextures: [MetalFxScalerKey: MTLTexture] = [:]
+    static var metalFxValidationReactiveTextures: [MetalFxScalerKey: MTLTexture] = [:]
+    static var metalFxPreviousDepthValid: Set<MetalFxScalerKey> = []
     static let metalFxHistoryLock = NSLock()
     static var motionPipeline: MTLComputePipelineState?
     static var motionV2Pipeline: MTLComputePipelineState?
@@ -644,225 +445,123 @@ private enum NativeState {
     #endif
 }
 
-/// Counts actual Metal pipeline-state creation attempts only while a validation
-/// sample is active. Pipeline compilation is rare, so a lock gives an exact
-/// cross-thread snapshot without adding any draw-path synchronization.
-private enum PipelineCompileTelemetry {
-    private static let lock = NSLock()
-    private static let maxIdentities = 32
-    private static var active = false
-    private static var renderAttempts: UInt64 = 0
-    private static var computeAttempts: UInt64 = 0
-    private static var failures: UInt64 = 0
-    private static var identities: [String] = []
+/// Thread-independent state for ordinary CAMetalLayer presentation evidence.
+///
+/// This deliberately excludes MetalFX frame-generation drawables.  The state
+/// accepts only finite, strictly increasing presented timestamps, so a zero or
+/// out-of-order WindowServer callback cannot replace the last useful interval.
+/// Pending IDs make a command-buffer failure and a later drawable callback
+/// idempotent without using a per-frame telemetry object.
+struct NativePresentationTelemetryState {
+    private var nextPresentationID: UInt64 = 1
+    private var pendingPresentationIDs: Set<UInt64> = []
+    private(set) var latestPresentIntervalNanos: Int64 = -1
+    private(set) var latestDrawableWaitNanos: Int64 = -1
+    private(set) var framesInFlight: Int64 = 0
+    private var lastPresentedTime: CFTimeInterval = 0.0
 
-    static func resetAndBegin() {
-        lock.lock()
-        renderAttempts = 0
-        computeAttempts = 0
-        failures = 0
-        identities.removeAll(keepingCapacity: true)
-        active = true
-        lock.unlock()
+    init() {
+        pendingPresentationIDs.reserveCapacity(8)
     }
 
-    static func record(render: Bool, identity: String, succeeded: Bool) {
-        lock.lock()
-        guard active else {
-            lock.unlock()
+    mutating func recordDrawableWait(nanos: Int64) {
+        guard nanos >= 0 else { return }
+        latestDrawableWaitNanos = nanos
+    }
+
+    mutating func schedulePresentation() -> UInt64 {
+        let identifier = nextPresentationID
+        nextPresentationID &+= 1
+        pendingPresentationIDs.insert(identifier)
+        framesInFlight += 1
+        return identifier
+    }
+
+    @discardableResult
+    mutating func resolvePresentation(_ identifier: UInt64) -> Bool {
+        guard pendingPresentationIDs.remove(identifier) != nil else { return false }
+        framesInFlight = max(0, framesInFlight - 1)
+        return true
+    }
+
+    mutating func recordPresented(
+        _ identifier: UInt64,
+        presentedTime: CFTimeInterval
+    ) {
+        guard pendingPresentationIDs.contains(identifier),
+              presentedTime.isFinite,
+              presentedTime > 0.0 else {
+            // A callback with a zero timestamp still closes the pending
+            // drawable, but it is not evidence of a display interval.
+            _ = resolvePresentation(identifier)
             return
         }
-        if render {
-            renderAttempts &+= 1
-        } else {
-            computeAttempts &+= 1
+        if lastPresentedTime > 0.0, presentedTime > lastPresentedTime {
+            let interval = (presentedTime - lastPresentedTime) * 1_000_000_000.0
+            if interval.isFinite,
+               interval > 0.0,
+               interval <= Double(Int64.max) {
+                latestPresentIntervalNanos = Int64(interval.rounded())
+            }
         }
-        if !succeeded {
-            failures &+= 1
+        if presentedTime > lastPresentedTime {
+            lastPresentedTime = presentedTime
         }
-        if identities.count < maxIdentities && !identities.contains(identity) {
-            identities.append(identity)
-        }
+        _ = resolvePresentation(identifier)
+    }
+}
+
+private final class NativePresentationTelemetry {
+    static let shared = NativePresentationTelemetry()
+
+    private let lock = NSLock()
+    private var state = NativePresentationTelemetryState()
+
+    func recordDrawableWait(nanos: Int64) {
+        lock.lock()
+        state.recordDrawableWait(nanos: nanos)
         lock.unlock()
-        NSLog(
-            "[metallum-pipeline-sample] late %@ pipeline compile %@: %@",
-            render ? "render" : "compute",
-            succeeded ? "succeeded" : "failed",
-            identity
-        )
     }
 
-    static func finish() -> (UInt64, UInt64, UInt64, [String]) {
+    func schedulePresentation(_ drawable: CAMetalDrawable) -> UInt64 {
+        lock.lock()
+        let identifier = state.schedulePresentation()
+        lock.unlock()
+
+        drawable.addPresentedHandler { [weak self] drawable in
+            self?.recordPresented(identifier, presentedTime: drawable.presentedTime)
+        }
+        return identifier
+    }
+
+    func recordPresented(_ identifier: UInt64, presentedTime: CFTimeInterval) {
+        lock.lock()
+        state.recordPresented(identifier, presentedTime: presentedTime)
+        lock.unlock()
+    }
+
+    func resolveFailure(_ identifier: UInt64) {
+        lock.lock()
+        _ = state.resolvePresentation(identifier)
+        lock.unlock()
+    }
+
+    func latestPresentIntervalNanos() -> Int64 {
         lock.lock()
         defer { lock.unlock() }
-        active = false
-        return (renderAttempts, computeAttempts, failures, identities.sorted())
+        return state.latestPresentIntervalNanos
     }
 
-    static func identity(at index: Int) -> String? {
+    func latestDrawableWaitNanos() -> Int64 {
         lock.lock()
         defer { lock.unlock() }
-        let sorted = identities.sorted()
-        guard index >= 0 && index < sorted.count else { return nil }
-        return sorted[index]
+        return state.latestDrawableWaitNanos
     }
-}
 
-private func registeredFunction(_ library: MTLLibrary, name: String) -> MTLFunction? {
-    guard let function = library.makeFunction(name: name) else { return nil }
-    NativeState.register(function: function, library: library)
-    return function
-}
-
-private func metal4PipelineFailure(_ message: String) -> Error {
-    NSError(
-        domain: "com.metallum.metal4.pipeline",
-        code: 1,
-        userInfo: [NSLocalizedDescriptionKey: message]
-    )
-}
-
-@available(macOS 26.0, iOS 26.0, *)
-private func metal4CompilerTaskOptions() -> MTL4CompilerTaskOptions? {
-    guard let archive = NativeState.metal4LookupArchive as? MTL4Archive else { return nil }
-    let options = MTL4CompilerTaskOptions()
-    options.lookupArchives = [archive]
-    return options
-}
-
-@available(macOS 26.0, iOS 26.0, *)
-private func compileMetal4RenderPipeline(
-    device: MTLDevice,
-    descriptor: MTLRenderPipelineDescriptor,
-    identity: String
-) throws -> MTLRenderPipelineState? {
-    guard NativeState.metal4CompilerEnabled else { return nil }
-    let strict = NativeState.metal4MainQueueStorage != nil
-    guard let compiler = NativeState.metal4Compiler(device),
-          let metal4Descriptor = makeMetal4Descriptor(descriptor) else {
-        let reason = "Metal 4 render descriptor is not compilable: \(identity)"
-        PipelineCompileTelemetry.record(render: true, identity: "metal4/\(identity)", succeeded: false)
-        if strict { throw metal4PipelineFailure(reason) }
-        NativeState.logMetal4PipelineFallback(reason)
-        return nil
-    }
-    do {
-        let state: MTLRenderPipelineState
-        if let options = metal4CompilerTaskOptions() {
-            state = try compiler.makeRenderPipelineState(
-                descriptor: metal4Descriptor,
-                compilerTaskOptions: options
-            )
-        } else {
-            state = try compiler.makeRenderPipelineState(descriptor: metal4Descriptor)
-        }
-        PipelineCompileTelemetry.record(render: true, identity: "metal4/\(identity)", succeeded: true)
-        if !NativeState.metal4PipelineLogged {
-            NativeState.metal4PipelineLogged = true
-            NSLog("[metallum] Metal 4 pipeline path engaged (MTL4Compiler)")
-        }
-        return state
-    } catch {
-        PipelineCompileTelemetry.record(render: true, identity: "metal4/\(identity)", succeeded: false)
-        if strict { throw error }
-        NativeState.logMetal4PipelineFallback(
-            "MTL4Compiler rejected \(identity): \(String(describing: error))"
-        )
-        return nil
-    }
-}
-
-@available(macOS 26.0, iOS 26.0, *)
-private func compileMetal4ComputePipeline(
-    device: MTLDevice,
-    function: MTLFunction,
-    identity: String
-) throws -> MTLComputePipelineState? {
-    guard NativeState.metal4CompilerEnabled else { return nil }
-    let strict = NativeState.metal4MainQueueStorage != nil
-    guard let compiler = NativeState.metal4Compiler(device),
-          let library = NativeState.library(for: function) else {
-        let reason = "Metal 4 compute function library is unavailable: \(identity)"
-        PipelineCompileTelemetry.record(render: false, identity: "metal4/\(identity)", succeeded: false)
-        if strict { throw metal4PipelineFailure(reason) }
-        NativeState.logMetal4PipelineFallback(reason)
-        return nil
-    }
-    let functionDescriptor = MTL4LibraryFunctionDescriptor()
-    functionDescriptor.library = library
-    functionDescriptor.name = function.name
-    let descriptor = MTL4ComputePipelineDescriptor()
-    descriptor.label = function.label ?? identity
-    descriptor.computeFunctionDescriptor = functionDescriptor
-    do {
-        let state: MTLComputePipelineState
-        if let options = metal4CompilerTaskOptions() {
-            state = try compiler.makeComputePipelineState(
-                descriptor: descriptor,
-                compilerTaskOptions: options
-            )
-        } else {
-            state = try compiler.makeComputePipelineState(descriptor: descriptor)
-        }
-        PipelineCompileTelemetry.record(render: false, identity: "metal4/\(identity)", succeeded: true)
-        return state
-    } catch {
-        PipelineCompileTelemetry.record(render: false, identity: "metal4/\(identity)", succeeded: false)
-        if strict { throw error }
-        NativeState.logMetal4PipelineFallback(
-            "MTL4Compiler rejected \(identity): \(String(describing: error))"
-        )
-        return nil
-    }
-}
-
-private func trackedRenderPipelineState(
-    device: MTLDevice,
-    descriptor: MTLRenderPipelineDescriptor,
-    identity: String
-) throws -> MTLRenderPipelineState {
-    if #available(macOS 26.0, iOS 26.0, *),
-       let pipeline = try compileMetal4RenderPipeline(
-           device: device,
-           descriptor: descriptor,
-           identity: identity
-       ) {
-        residencyTrackCreated(pipeline)
-        return pipeline
-    }
-    do {
-        let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
-        PipelineCompileTelemetry.record(render: true, identity: identity, succeeded: true)
-        residencyTrackCreated(pipeline)
-        return pipeline
-    } catch {
-        PipelineCompileTelemetry.record(render: true, identity: identity, succeeded: false)
-        throw error
-    }
-}
-
-private func trackedComputePipelineState(
-    device: MTLDevice,
-    function: MTLFunction,
-    identity: String
-) throws -> MTLComputePipelineState {
-    if #available(macOS 26.0, iOS 26.0, *),
-       let pipeline = try compileMetal4ComputePipeline(
-           device: device,
-           function: function,
-           identity: identity
-       ) {
-        residencyTrackCreated(pipeline)
-        return pipeline
-    }
-    do {
-        let pipeline = try device.makeComputePipelineState(function: function)
-        PipelineCompileTelemetry.record(render: false, identity: identity, succeeded: true)
-        residencyTrackCreated(pipeline)
-        return pipeline
-    } catch {
-        PipelineCompileTelemetry.record(render: false, identity: identity, succeeded: false)
-        throw error
+    func framesInFlight() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.framesInFlight
     }
 }
 
@@ -975,8 +674,6 @@ private func finishGpuEncoderTimings(_ commandBuffer: MTLCommandBuffer) {
 private final class Metal4MainQueuePilot {
     private static let validationByteCount = 256
 
-    private let device: MTLDevice
-
     private struct Slot {
         let commandBuffer: MTL4CommandBuffer
         let allocator: MTL4CommandAllocator
@@ -1032,16 +729,11 @@ private final class Metal4MainQueuePilot {
         residencySet.commit()
         residencySet.requestResidency()
         queue.addResidencySet(residencySet)
-        self.device = device
         self.queue = queue
         self.slots = slots
         self.sourceBuffer = sourceBuffer
         self.destinationBuffer = destinationBuffer
         self.residencySet = residencySet
-    }
-
-    func owns(_ candidate: MTLDevice) -> Bool {
-        objectAddress(device) == objectAddress(candidate)
     }
 
     func submitAndWait() -> Bool {
@@ -1085,26 +777,18 @@ private final class Metal4MainQueuePilot {
     }
 }
 
-// Single source of truth shared by the MTL4 lease and the append-only native
-// interface queried once by Java. A value of one keeps dynamic Sodium terrain
-// ICBs bounded without making Java rediscover the exhausted budget through an
-// FFM call for every later batch in the same submission.
-let metallumMetal4TerrainIcbSubmissionBudget = 1
-
 @available(macOS 26.0, iOS 26.0, *)
 private final class Metal4MainCommandBufferLease {
     fileprivate let owner: Metal4MainQueueContext
     fileprivate let slotIndex: Int
     private let condition = NSCondition()
-    private let retainedBuffersLock = NSLock()
-    private var retainedBuffers: [ObjectIdentifier: MTLBuffer] = [:]
     private var submitted = false
     private var completed = false
     private var completionError: Error?
     private var startTime = 0.0
     private var endTime = 0.0
-    private var terrainIcbAllocations = 0
     fileprivate var presentDrawable: CAMetalDrawable?
+    fileprivate var presentationTelemetryID: UInt64?
     private var completionHandlers: [(Error?, CFTimeInterval, CFTimeInterval) -> Void] = []
     fileprivate var postCommitSignals: [(MTLSharedEvent, UInt64)] = []
 
@@ -1113,63 +797,16 @@ private final class Metal4MainCommandBufferLease {
         self.slotIndex = slotIndex
     }
 
+    deinit {
+        // A Java-side close/abort can release an unsubmitted lease after the
+        // drawable was acquired.  Treat that as cancellation so the shared
+        // drawable count cannot leak when no Metal 4 feedback callback exists.
+        if let presentationTelemetryID {
+            NativePresentationTelemetry.shared.resolveFailure(presentationTelemetryID)
+        }
+    }
+
     var commandBuffer: MTL4CommandBuffer { owner.commandBuffer(at: slotIndex) }
-
-    /// MTL4 argument tables consume a GPU address, not an owning MTLBuffer
-    /// reference. This diagnostic keeps the corresponding object alive until
-    /// queue feedback, which cleanly separates address lifetime from residency
-    /// and Java destruction-queue timing.
-    func retainBoundBuffer(_ buffer: MTLBuffer?) {
-        guard let buffer, NativeState.metal4RetainBoundBuffers else { return }
-        retainedBuffersLock.lock()
-        if retainedBuffers.isEmpty {
-            NSLog("[metallum] MTL4 bound-buffer retention A/B enabled")
-        }
-        retainedBuffers[ObjectIdentifier(buffer as AnyObject)] = buffer
-        retainedBuffersLock.unlock()
-    }
-
-    func releaseRetainedBuffers() {
-        guard NativeState.metal4RetainBoundBuffers else { return }
-        retainedBuffersLock.lock()
-        retainedBuffers.removeAll(keepingCapacity: false)
-        retainedBuffersLock.unlock()
-    }
-
-    func acquireTerrainIcb(
-        descriptor: MTLIndirectCommandBufferDescriptor,
-        device: MTLDevice,
-        commandCount: Int
-    ) -> MTLIndirectCommandBuffer? {
-        // Sodium's visible terrain batches change with camera/chunk state, so
-        // they are not the static command streams Apple recommends retaining
-        // as CPU-encoded ICBs. Reusing an executed ICB on an MTL4 queue also
-        // crashes Metal GPU Validation on macOS 26. Bound admission to one
-        // qualifying batch per submission; later batches take the existing
-        // native multi-draw fallback without any partial ICB execution.
-        guard terrainIcbAllocations < metallumMetal4TerrainIcbSubmissionBudget else {
-            NativeState.recordTerrainIcbBudgetFallback()
-            return nil
-        }
-        terrainIcbAllocations += 1
-        guard let buffer = device.makeIndirectCommandBuffer(
-                  descriptor: descriptor,
-                  maxCommandCount: commandCount,
-                  options: []
-              ),
-              buffer.size > 0 else {
-            NativeState.recordTerrainIcbZeroAllocation(drawCount: commandCount, indexBytes: 0)
-            return nil
-        }
-        buffer.label = "Metallum Sodium Terrain ICB"
-        residencyTrackCreated(buffer)
-        addCompletionHandler { [buffer] _, _, _ in
-            residencyRemove(buffer)
-            NativeState.recordTerrainIcbCompletionRelease()
-        }
-        NativeState.recordTerrainIcbAllocation()
-        return buffer
-    }
 
     func markSubmitted() {
         condition.lock()
@@ -1247,9 +884,10 @@ private final class Metal4MainCommandBufferLease {
 @available(macOS 26.0, iOS 26.0, *)
 private final class Metal4MainQueueContext {
     // Metal 4 collects argument-table bindings when a draw or dispatch is
-    // encoded. One table per stage and in-flight slot is therefore enough:
-    // later rewrites cannot affect commands already recorded, while the slot
-    // boundary prevents CPU mutation during GPU execution.
+    // encoded. A table can therefore be rebound between commands and shared
+    // by multiple encoders. Keep one long-lived table per stage family and
+    // in-flight slot; the three slots isolate concurrent GPU submissions.
+
     private enum SlotState {
         case free
         case recording
@@ -1280,10 +918,6 @@ private final class Metal4MainQueueContext {
             self.fragmentArguments = fragmentArguments
             self.computeArguments = computeArguments
             self.uniformBuffer = uniformBuffer
-        }
-
-        deinit {
-            residencyRemove(uniformBuffer)
         }
     }
 
@@ -1322,7 +956,7 @@ private final class Metal4MainQueueContext {
             tableDescriptor.maxTextureBindCount = 128
             tableDescriptor.maxSamplerStateBindCount = 16
             tableDescriptor.initializeBindings = true
-            tableDescriptor.supportAttributeStrides = NativeState.metal4SupportAttributeStrides
+            tableDescriptor.supportAttributeStrides = true
             tableDescriptor.label = "Metallum Main Arguments \(index) (Metal 4)"
             guard let allocator = try? device.makeCommandAllocator(descriptor: allocatorDescriptor),
               let commandBuffer = device.makeCommandBuffer(),
@@ -1330,8 +964,8 @@ private final class Metal4MainQueueContext {
               let fragmentArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
               let computeArguments = try? device.makeArgumentTable(descriptor: tableDescriptor),
               let uniformBuffer = device.makeBuffer(length: 65_536, options: .storageModeShared) else {
-                return nil
-            }
+            return nil
+        }
             uniformBuffer.label = "Metallum Uniforms \(index) (Metal 4)"
             residencyTrackCreated(uniformBuffer)
             commandBuffer.label = "Metallum Main Buffer \(index) (Metal 4)"
@@ -1353,35 +987,11 @@ private final class Metal4MainQueueContext {
         }
     }
 
-    func owns(_ candidate: MTLDevice) -> Bool {
-        objectAddress(device) == objectAddress(candidate)
-    }
-
     func commandBuffer(at index: Int) -> MTL4CommandBuffer { slots[index].commandBuffer }
 
     func argumentTables(at index: Int) -> (MTL4ArgumentTable, MTL4ArgumentTable) {
-        if NativeState.freshMetal4RenderArgumentTables,
-           let fresh = makeRenderArgumentTables(slotIndex: index) {
-            NativeState.recordFreshRenderArgumentTable()
-            return fresh
-        }
         let slot = slots[index]
         return (slot.vertexArguments, slot.fragmentArguments)
-    }
-
-    private func makeRenderArgumentTables(slotIndex: Int) -> (MTL4ArgumentTable, MTL4ArgumentTable)? {
-        let descriptor = MTL4ArgumentTableDescriptor()
-        descriptor.maxBufferBindCount = 31
-        descriptor.maxTextureBindCount = 128
-        descriptor.maxSamplerStateBindCount = 16
-        descriptor.initializeBindings = true
-        descriptor.supportAttributeStrides = NativeState.metal4SupportAttributeStrides
-        descriptor.label = "Metallum Render Arguments \(slotIndex) fresh (Metal 4)"
-        guard let vertex = try? device.makeArgumentTable(descriptor: descriptor),
-              let fragment = try? device.makeArgumentTable(descriptor: descriptor) else {
-            return nil
-        }
-        return (vertex, fragment)
     }
 
     func computeArgumentTable(at index: Int) -> MTL4ArgumentTable {
@@ -1464,16 +1074,23 @@ private final class Metal4MainQueueContext {
         let commandBuffer = slots[lease.slotIndex].commandBuffer
         commandBuffer.endCommandBuffer()
         lease.markSubmitted()
+        if let drawable = lease.presentDrawable,
+           lease.presentationTelemetryID == nil {
+            // Metal 4 does not arrange the drawable present until this submit
+            // path. Delay accounting until the lease is actually submitted.
+            lease.presentationTelemetryID = NativePresentationTelemetry.shared.schedulePresentation(drawable)
+        }
         let options = MTL4CommitOptions()
+        let presentationTelemetryID = lease.presentationTelemetryID
         options.addFeedbackHandler { [self, lease] feedback in
+            if let presentationTelemetryID, feedback.error != nil {
+                NativePresentationTelemetry.shared.resolveFailure(presentationTelemetryID)
+            }
             let completionHandlers = lease.markCompleted(
                 error: feedback.error,
                 gpuStartTime: feedback.gpuStartTime,
                 gpuEndTime: feedback.gpuEndTime
             )
-            // Feedback is the first point at which it is safe to drop the
-            // strong references held by the address-lifetime A/B.
-            lease.releaseRetainedBuffers()
             self.slotCondition.lock()
             self.slots[lease.slotIndex].state = .free
             self.slotCondition.broadcast()
@@ -1497,6 +1114,7 @@ private final class Metal4MainQueueContext {
             queue.signalDrawable(drawable)
             drawable.present()
             lease.presentDrawable = nil
+            lease.presentationTelemetryID = nil
         }
     }
 
@@ -1508,18 +1126,18 @@ private final class Metal4MainQueueContext {
 }
 
 @available(macOS 26.0, iOS 26.0, *)
-final class Metal4MainRenderEncoderBridge {
+private final class Metal4MainRenderEncoderBridge {
     let encoder: MTL4RenderCommandEncoder
-    fileprivate let lease: Metal4MainCommandBufferLease
+    let lease: Metal4MainCommandBufferLease
     private let vertexArguments: MTL4ArgumentTable
     private let fragmentArguments: MTL4ArgumentTable
-    private var vertexBuffers = Array<MTLBuffer?>(repeating: nil, count: 31)
-    private var vertexOffsets = Array<Int>(repeating: 0, count: 31)
-    private var vertexStrides = Array<Int>(repeating: -1, count: 31)
-    private var fragmentBuffers = Array<MTLBuffer?>(repeating: nil, count: 31)
-    private(set) var currentPipelineLabel = "unbound"
+    // Fixed-size binding shadows are part of the bridge allocation itself.
+    // Keep the original MTLBuffer retain semantics while removing the two
+    // growable Array backing allocations and their COW machinery.
+    private var vertexBuffers: InlineArray<31, MTLBuffer?> = .init(repeating: nil)
+    private var fragmentBuffers: InlineArray<31, MTLBuffer?> = .init(repeating: nil)
 
-    fileprivate init(
+    init(
         encoder: MTL4RenderCommandEncoder,
         lease: Metal4MainCommandBufferLease,
         vertexArguments: MTL4ArgumentTable,
@@ -1531,12 +1149,6 @@ final class Metal4MainRenderEncoderBridge {
         self.fragmentArguments = fragmentArguments
         encoder.setArgumentTable(vertexArguments, stages: MTLRenderStages.vertex)
         encoder.setArgumentTable(fragmentArguments, stages: MTLRenderStages.fragment)
-        NativeState.metal4GenericRenderEncodeCount &+= 1
-    }
-
-    func setRenderPipelineState(_ pipeline: MTLRenderPipelineState) {
-        currentPipelineLabel = pipeline.label ?? "unlabeled"
-        encoder.setRenderPipelineState(pipeline)
     }
 
     func setBuffer(_ buffer: MTLBuffer?, offset: Int, index: Int, stageMask: Int32) {
@@ -1544,19 +1156,8 @@ final class Metal4MainRenderEncoderBridge {
             NSLog("[metallum] Metal 4 rejected buffer binding index %d (maximum 30)", index)
             return
         }
-        lease.retainBoundBuffer(buffer)
         if (stageMask & 1) != 0 {
-            NativeState.recordMetal4VertexBinding(
-                buffer: buffer,
-                offset: offset,
-                stride: -1,
-                index: index,
-                stageMask: stageMask,
-                pipelineLabel: currentPipelineLabel
-            )
             vertexBuffers[index] = buffer
-            vertexOffsets[index] = offset
-            vertexStrides[index] = -1
             vertexArguments.setAddress(buffer.map { $0.gpuAddress + UInt64(offset) } ?? 0, index: index)
         }
         if (stageMask & 2) != 0 {
@@ -1565,74 +1166,14 @@ final class Metal4MainRenderEncoderBridge {
         }
     }
 
-    func setVertexBufferWithAttributeStride(_ buffer: MTLBuffer?, offset: Int, stride: Int, index: Int) {
-        guard index >= 0, index < 31, offset >= 0, stride >= 0 else {
-            NSLog("[metallum] Metal 4 rejected dynamic vertex binding index=%d offset=%d stride=%d", index, offset, stride)
-            return
-        }
-        lease.retainBoundBuffer(buffer)
-        NativeState.recordMetal4VertexBinding(
-            buffer: buffer,
-            offset: offset,
-            stride: stride,
-            index: index,
-            stageMask: 1,
-            pipelineLabel: currentPipelineLabel
-        )
-        vertexBuffers[index] = buffer
-        vertexOffsets[index] = offset
-        vertexStrides[index] = stride
-        vertexArguments.setAddress(
-            buffer.map { $0.gpuAddress + UInt64(offset) } ?? 0,
-            attributeStride: stride,
-            index: index
-        )
-    }
-
     func setBufferOffset(_ offset: Int, index: Int, stageMask: Int32) {
         guard index >= 0, index < 31 else { return }
         if (stageMask & 1) != 0, let buffer = vertexBuffers[index] {
-            vertexOffsets[index] = offset
             vertexArguments.setAddress(buffer.gpuAddress + UInt64(offset), index: index)
         }
         if (stageMask & 2) != 0, let buffer = fragmentBuffers[index] {
             fragmentArguments.setAddress(buffer.gpuAddress + UInt64(offset), index: index)
         }
-    }
-
-    func recordIndexedDrawSnapshot(
-        indexCount: Int,
-        indexType: MTLIndexType,
-        indexBuffer: MTLBuffer,
-        indexBufferOffset: Int,
-        baseVertex: Int,
-        instanceCount: Int,
-        baseInstance: Int
-    ) {
-        guard NativeState.metal4VertexBindingTelemetryEnabled else { return }
-        guard currentPipelineLabel.localizedCaseInsensitiveContains("terrain") else { return }
-
-        let bindings = (0..<vertexBuffers.count).compactMap { index -> String? in
-            guard let buffer = vertexBuffers[index] else { return nil }
-            let offset = vertexOffsets[index]
-            let gpuAddress = buffer.gpuAddress
-            let boundAddress = offset >= 0 ? gpuAddress + UInt64(offset) : 0
-            let stride = vertexStrides[index]
-            return "v\(index){len=\(buffer.length),gpu=0x\(String(gpuAddress, radix: 16)),"
-                + "bound=0x\(String(boundAddress, radix: 16)),offset=\(offset),stride=\(stride)}"
-        }.joined(separator: " ")
-
-        NativeState.recordMetal4IndexedDrawSnapshot(
-            indexCount: indexCount,
-            indexType: indexType,
-            indexBuffer: indexBuffer,
-            indexBufferOffset: indexBufferOffset,
-            baseVertex: baseVertex,
-            instanceCount: instanceCount,
-            baseInstance: baseInstance,
-            pipelineLabel: currentPipelineLabel,
-            vertexBindings: bindings
-        )
     }
 
     func setTexture(_ texture: MTLTexture?, index: Int, stageMask: Int32) {
@@ -1668,126 +1209,14 @@ private final class Metal4MainBlitEncoderBridge {
     init(_ encoder: MTL4ComputeCommandEncoder) { self.encoder = encoder }
 }
 
-/// Generic compute bridge used by Iris and every future Blaze3D compute pass.
-/// MTL4 has no setBuffer/setTexture calls; bindings are written into one
-/// argument table and snapshotted by each dispatch command.
-@available(macOS 26.0, iOS 26.0, *)
-private final class Metal4MainComputeEncoderBridge {
-    let encoder: MTL4ComputeCommandEncoder
-    private let arguments: MTL4ArgumentTable
-    private var encodedDispatch = false
-
-    init(encoder: MTL4ComputeCommandEncoder, arguments: MTL4ArgumentTable) {
-        self.encoder = encoder
-        self.arguments = arguments
-        encoder.setArgumentTable(arguments)
-    }
-
-    func setBuffer(_ buffer: MTLBuffer?, offset: Int, index: Int) {
-        guard index >= 0, index < 31, offset >= 0 else {
-            NSLog("[metallum] Metal 4 rejected compute buffer binding index=%d offset=%d", index, offset)
-            return
-        }
-        arguments.setAddress(buffer.map { $0.gpuAddress + UInt64(offset) } ?? 0, index: index)
-    }
-
-    func setTexture(_ texture: MTLTexture?, index: Int) {
-        guard index >= 0, index < 128 else {
-            NSLog("[metallum] Metal 4 rejected compute texture binding index=%d", index)
-            return
-        }
-        arguments.setTexture(texture?.gpuResourceID ?? MTLResourceID(), index: index)
-    }
-
-    func setSampler(_ sampler: MTLSamplerState?, index: Int) {
-        guard index >= 0, index < 16 else {
-            NSLog("[metallum] Metal 4 rejected compute sampler binding index=%d", index)
-            return
-        }
-        arguments.setSamplerState(sampler?.gpuResourceID ?? MTLResourceID(), index: index)
-    }
-
-    func prepareDispatch() {
-        if encodedDispatch {
-            // A generic compute pass may bind a producer and consumer in one
-            // encoder. Metal 3 relied on tracked encoder ordering here; MTL4
-            // needs an explicit intra-pass dispatch dependency.
-            encoder.barrier(
-                afterEncoderStages: .dispatch,
-                beforeEncoderStages: .dispatch,
-                visibilityOptions: .device
-            )
-        }
-        encodedDispatch = true
-    }
-
-    func publishWrites() {
-        guard encodedDispatch else { return }
-        encoder.barrier(
-            afterStages: .dispatch,
-            beforeQueueStages: [.vertex, .fragment, .dispatch, .blit],
-            visibilityOptions: .device
-        )
-    }
-}
-
 @available(macOS 26.0, iOS 26.0, *)
 private func metal4RenderBridge(_ pointer: UnsafeMutableRawPointer) -> Metal4MainRenderEncoderBridge? {
     Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? Metal4MainRenderEncoderBridge
 }
 
-/// Executes an already validated inherited-state terrain ICB on the Metal 4
-/// bridge. Returning false means no command was encoded, so the Java caller may
-/// use the ordinary multi-draw path without risking duplicate draws.
-@available(macOS 26.0, iOS 26.0, *)
-func metallumMetal4AcquireTerrainIcb(
-    encoderPointer: UnsafeMutableRawPointer,
-    descriptor: MTLIndirectCommandBufferDescriptor,
-    device: MTLDevice,
-    commandCount: Int
-) -> MTLIndirectCommandBuffer? {
-    guard let bridge = metal4RenderBridge(encoderPointer) else { return nil }
-    return bridge.lease.acquireTerrainIcb(
-        descriptor: descriptor,
-        device: device,
-        commandCount: commandCount
-    )
-}
-
-func metallumRecordTerrainIcbZeroAllocation(drawCount: Int, indexBytes: Int) {
-    NativeState.recordTerrainIcbZeroAllocation(
-        drawCount: drawCount,
-        indexBytes: indexBytes
-    )
-}
-
-func metallumTerrainIcbStatsSnapshot() -> (UInt64, UInt64, UInt64, UInt64) {
-    NativeState.terrainIcbStats()
-}
-
-@available(macOS 26.0, iOS 26.0, *)
-func metallumMetal4ExecuteTerrainIcb(
-    encoderPointer: UnsafeMutableRawPointer,
-    indirectCommandBuffer: MTLIndirectCommandBuffer,
-    commandCount: Int
-) -> Bool {
-    guard commandCount > 0,
-          let bridge = metal4RenderBridge(encoderPointer) else { return false }
-    bridge.encoder.__executeCommands(
-        in: indirectCommandBuffer,
-        with: NSRange(location: 0, length: commandCount)
-    )
-    return true
-}
-
 @available(macOS 26.0, iOS 26.0, *)
 private func metal4BlitBridge(_ pointer: UnsafeMutableRawPointer) -> Metal4MainBlitEncoderBridge? {
     Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? Metal4MainBlitEncoderBridge
-}
-
-@available(macOS 26.0, iOS 26.0, *)
-private func metal4ComputeBridge(_ pointer: UnsafeMutableRawPointer) -> Metal4MainComputeEncoderBridge? {
-    Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? Metal4MainComputeEncoderBridge
 }
 
 private func metal3RenderEncoder(_ pointer: UnsafeMutableRawPointer) -> MTLRenderCommandEncoder {
@@ -1796,10 +1225,6 @@ private func metal3RenderEncoder(_ pointer: UnsafeMutableRawPointer) -> MTLRende
 
 private func metal3BlitEncoder(_ pointer: UnsafeMutableRawPointer) -> MTLBlitCommandEncoder {
     Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLBlitCommandEncoder
-}
-
-private func metal3ComputeEncoder(_ pointer: UnsafeMutableRawPointer) -> MTLComputeCommandEncoder {
-    Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLComputeCommandEncoder
 }
 
 @available(macOS 26.0, iOS 26.0, *)
@@ -1892,7 +1317,8 @@ struct MetalFrameGenerationDiagnosticSnapshot {
 
 /// Metal 4 side of the frame-generation present path (migration spec M4).
 ///
-/// This auxiliary MTL4 queue is self-contained: no Java ABI crosses it, one
+/// This is the migration's first MTL4 queue, and the present thread is the pilot
+/// because it is the smallest self-contained surface: no Java ABI crosses it, one
 /// command buffer carries at most an interpolator encode plus a three-vertex copy
 /// pass, the binding surface is one texture and one sampler, and — decisively —
 /// it touches no MTLFence. Metal 4 fences are same-queue only, so a pilot that
@@ -1955,12 +1381,20 @@ final class Metal4PresentPath {
     private let slots: [FrameSlot]
     private let argumentTable: MTL4ArgumentTable
     private let residencySet: MTLResidencySet
+    // These PSOs are borrowed from MetalFrameGenerationPresenter. They execute
+    // on this private MTL4 queue, so they must be published to this queue's set
+    // rather than the process-wide main-queue set.
+    private var residentPipelines: [MTLRenderPipelineState]
     private let slotLock = NSLock()
     /// Only the display-link callback records commands, so at most one slot is
     /// recording. Completion feedback can release submitted slots concurrently.
     private var recordingSlotIndex: Int?
 
-    init?(device: MTLDevice, layer: CAMetalLayer) {
+    init?(
+        device: MTLDevice,
+        layer: CAMetalLayer,
+        pipelines: [MTLRenderPipelineState] = []
+    ) {
         let queueDescriptor = MTL4CommandQueueDescriptor()
         // MTL4CommandQueue.label is get-only, unlike MTLCommandQueue's: the label
         // has to come from the descriptor.
@@ -1996,17 +1430,33 @@ final class Metal4PresentPath {
         self.slots = slots
         self.argumentTable = argumentTable
         self.residencySet = residencySet
+        self.residentPipelines = pipelines
         queue.addResidencySet(residencySet)
         // Read-only and drawable-tracking: never add anything to it by hand.
         queue.addResidencySet(layer.residencySet)
+        // The present path owns a separate MTL4 queue and therefore cannot use
+        // NativeState's main-queue residency set. Publish its PSOs into this
+        // queue-local set before the first frame can bind one.
+        adopt(textures: [])
     }
 
     /// Republishes the presenter's texture set after every rebuild. Metal 4 has no
     /// automatic residency, so a texture missing here is read as unmapped memory.
     /// Memoryless textures are excluded: they have no backing allocation.
-    func adopt(textures: [MTLTexture]) {
+    func adopt(
+        textures: [MTLTexture],
+        pipelines: [MTLRenderPipelineState]? = nil
+    ) {
+        if let pipelines {
+            residentPipelines = pipelines
+        }
         residencySet.removeAllAllocations()
-        residencySet.addAllocations(textures.filter { $0.storageMode != .memoryless })
+        for texture in textures where texture.storageMode != .memoryless {
+            residencySet.addAllocation(texture)
+        }
+        for pipeline in residentPipelines {
+            residencySet.addAllocation(pipeline)
+        }
         residencySet.commit()
         residencySet.requestResidency()
     }
@@ -2473,13 +1923,22 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         layer.displaySyncEnabled = true
         presentQueue.label = "MetalFX Frame Generation Present"
         readyEvent.label = "MetalFX Frame Generation Ready"
-        // Metal 4 frame-generation path (spec M4). Built only when asked for and supported; any
+        // Metal 4 pilot (spec M4). Built only when asked for and supported; any
         // failure leaves metal4Path nil and the Metal 3 path runs unchanged. The
         // Metal 3 presentQueue above is still created either way, because the
         // render thread's own submissions and the readyEvent signalling side stay
         // on Metal 3 regardless.
         if NativeState.metal4PresentEnabled, device.supportsFamily(.metal4) {
-            if let path = Metal4PresentPath(device: device, layer: layer),
+            if let path = Metal4PresentPath(
+                   device: device,
+                   layer: layer,
+                   pipelines: [
+                       copyPipeline,
+                       fusedPresentPipeline,
+                       motionResamplePipeline,
+                       depthResamplePipeline
+                   ]
+               ),
                let interpolator = Self.makeMetal4FrameInterpolator(
                    device: device,
                    sceneColor: sceneColor,
@@ -2915,6 +2374,20 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
         self.copyPipeline = newCopyPipeline
         self.fusedPresentPipeline = newFusedPresentPipeline
+        metal4Path?.adopt(
+            textures: textureSet.scene
+                + textureSet.nativeScene
+                + textureSet.uiOverlay
+                + textureSet.depth
+                + textureSet.motion
+                + textureSet.interpolation,
+            pipelines: [
+                newCopyPipeline,
+                newFusedPresentPipeline,
+                motionResamplePipeline,
+                depthResamplePipeline
+            ]
+        )
         self.copyFormat = layer.pixelFormat
         self.nextBufferIndex = 0
         self.lastPresentedIndex = nil
@@ -3654,7 +3127,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     }
 
     private func present(_ work: PresentationWork) {
-        // Metal 4 frame-generation dispatch (spec M4). Two-way dispatch on the switch; everything
+        // Metal 4 pilot (spec M4). Two-way dispatch on the switch; everything
         // below this point is the original Metal 3 branch, unmodified.
         if let metal4Path, let metal4Interpolator {
             presentMetal4(work, path: metal4Path, interpolator: metal4Interpolator)
@@ -4071,7 +3544,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     }
 
     private func applyLifecycleActionsLocked(
-        _ actions: [MetalFrameGenerationLifecycleAction],
+        _ actions: MetalFrameGenerationLifecycleAction,
         eventValue: UInt64
     ) {
         if actions.contains(.invalidateHistory) {
@@ -4095,7 +3568,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     }
 
     private func applyQueuedLifecycleActionsLocked(
-        _ actions: [MetalFrameGenerationLifecycleAction],
+        _ actions: MetalFrameGenerationLifecycleAction,
         eventValue: UInt64
     ) {
         if actions.contains(.invalidateHistory) {
@@ -4796,8 +4269,8 @@ private func buildClearPipeline(
         let library = try device.makeLibrary(source: clearMslSource(), options: nil)
 
         guard
-            let vertexFunction = registeredFunction(library, name: "metallum_clear_vs"),
-            let fragmentFunction = registeredFunction(library, name: "metallum_clear_fs")
+            let vertexFunction = library.makeFunction(name: "metallum_clear_vs"),
+            let fragmentFunction = library.makeFunction(name: "metallum_clear_fs")
         else {
             NSLog("[metallum] Failed to create clear shader functions")
             return nil
@@ -4811,11 +4284,7 @@ private func buildClearPipeline(
         descriptor.colorAttachments[0].isBlendingEnabled = false
         descriptor.colorAttachments[0].writeMask = writeColor ? .all : []
 
-        return try trackedRenderPipelineState(
-            device: device,
-            descriptor: descriptor,
-            identity: "clear/color=\(colorFormat.rawValue)/depth=\(depthFormat.rawValue)/write=\(writeColor)"
-        )
+        return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create clear pipeline: %@", String(describing: error))
         return nil
@@ -4830,8 +4299,8 @@ private func buildPresentPipeline(
         let library = try device.makeLibrary(source: presentMslSource(), options: nil)
 
         guard
-            let vertexFunction = registeredFunction(library, name: "metallum_present_vs"),
-            let fragmentFunction = registeredFunction(library, name: "metallum_present_fs")
+            let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
+            let fragmentFunction = library.makeFunction(name: "metallum_present_fs")
         else {
             NSLog("[metallum] Failed to create present shader functions")
             return nil
@@ -4843,11 +4312,7 @@ private func buildPresentPipeline(
         descriptor.colorAttachments[0].pixelFormat = colorFormat
         descriptor.colorAttachments[0].isBlendingEnabled = false
 
-        return try trackedRenderPipelineState(
-            device: device,
-            descriptor: descriptor,
-            identity: "present/color=\(colorFormat.rawValue)"
-        )
+        return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create present render pipeline: %@", String(describing: error))
         return nil
@@ -4860,19 +4325,15 @@ private func buildDepthResamplePipeline(
 ) -> MTLRenderPipelineState? {
     do {
         let library = try device.makeLibrary(source: presentMslSource(), options: nil)
-        guard let vertexFunction = registeredFunction(library, name: "metallum_present_vs"),
-              let fragmentFunction = registeredFunction(library, name: "metallum_depth_resample_fs") else {
+        guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
+              let fragmentFunction = library.makeFunction(name: "metallum_depth_resample_fs") else {
             return nil
         }
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertexFunction
         descriptor.fragmentFunction = fragmentFunction
         descriptor.depthAttachmentPixelFormat = depthFormat
-        return try trackedRenderPipelineState(
-            device: device,
-            descriptor: descriptor,
-            identity: "depth-resample/depth=\(depthFormat.rawValue)"
-        )
+        return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create depth-resample pipeline: %@", String(describing: error))
         return nil
@@ -4892,8 +4353,8 @@ private func buildOverlayPipeline(
 ) -> MTLRenderPipelineState? {
     do {
         let library = try device.makeLibrary(source: presentMslSource(), options: nil)
-        guard let vertexFunction = registeredFunction(library, name: "metallum_present_vs"),
-              let fragmentFunction = registeredFunction(library, name: "metallum_present_fs") else {
+        guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
+              let fragmentFunction = library.makeFunction(name: "metallum_present_fs") else {
             return nil
         }
         let descriptor = MTLRenderPipelineDescriptor()
@@ -4911,11 +4372,7 @@ private func buildOverlayPipeline(
         attachment.alphaBlendOperation = .add
         attachment.sourceAlphaBlendFactor = .one
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        return try trackedRenderPipelineState(
-            device: device,
-            descriptor: descriptor,
-            identity: "ui-overlay/color=\(colorFormat.rawValue)"
-        )
+        return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create native UI overlay pipeline: %@", String(describing: error))
         return nil
@@ -4928,8 +4385,8 @@ private func buildFusedPresentPipeline(
 ) -> MTLRenderPipelineState? {
     do {
         let library = try device.makeLibrary(source: presentMslSource(), options: nil)
-        guard let vertexFunction = registeredFunction(library, name: "metallum_present_vs"),
-              let fragmentFunction = registeredFunction(library, name: "metallum_present_composite_fs") else {
+        guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
+              let fragmentFunction = library.makeFunction(name: "metallum_present_composite_fs") else {
             return nil
         }
         let descriptor = MTLRenderPipelineDescriptor()
@@ -4937,11 +4394,7 @@ private func buildFusedPresentPipeline(
         descriptor.fragmentFunction = fragmentFunction
         descriptor.colorAttachments[0].pixelFormat = colorFormat
         descriptor.colorAttachments[0].isBlendingEnabled = false
-        return try trackedRenderPipelineState(
-            device: device,
-            descriptor: descriptor,
-            identity: "fused-present/color=\(colorFormat.rawValue)"
-        )
+        return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create fused present pipeline: %@", String(describing: error))
         return nil
@@ -4958,11 +4411,21 @@ private func buildPresentSampler(device: MTLDevice, filter: MTLSamplerMinMagFilt
     return device.makeSamplerState(descriptor: descriptor)
 }
 
+/// Builds the present samplers on first use. metallum_init_pipelines only
+/// runs for presentation-backed devices, but the texture-copy path (readback,
+/// resolve, Iris conformance transfers) needs these samplers on offscreen
+/// devices as well, so both copy entries call this before consuming them.
+private func ensurePresentSamplers(_ device: MTLDevice) {
+    if NativeState.presentLinearSampler == nil {
+        NativeState.presentLinearSampler = buildPresentSampler(device: device, filter: .linear)
+    }
+    if NativeState.presentNearestSampler == nil {
+        NativeState.presentNearestSampler = buildPresentSampler(device: device, filter: .nearest)
+    }
+}
+
 private func ensureCopyPipeline(_ device: MTLDevice, _ colorFormat: MTLPixelFormat) -> MTLRenderPipelineState? {
-    let key = CopyPipelineKey(
-        deviceAddress: objectAddress(device),
-        colorFormat: colorFormat
-    )
+    let key = Int(colorFormat.rawValue)
     if let pipeline = NativeState.copyPipelines[key] {
         return pipeline
     }
@@ -4972,8 +4435,8 @@ private func ensureCopyPipeline(_ device: MTLDevice, _ colorFormat: MTLPixelForm
     }
 
     guard
-        let vertexFunction = registeredFunction(library, name: "metallum_present_vs"),
-        let fragmentFunction = registeredFunction(library, name: "metallum_present_fs")
+        let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
+        let fragmentFunction = library.makeFunction(name: "metallum_present_fs")
     else {
         NSLog("[metallum] Failed to create texture-copy shader functions")
         return nil
@@ -4984,15 +4447,14 @@ private func ensureCopyPipeline(_ device: MTLDevice, _ colorFormat: MTLPixelForm
     descriptor.fragmentFunction = fragmentFunction
     descriptor.colorAttachments[0].pixelFormat = colorFormat
     descriptor.colorAttachments[0].isBlendingEnabled = false
-    guard let pipeline = try? trackedRenderPipelineState(
-        device: device,
-        descriptor: descriptor,
-        identity: "texture-copy/color=\(colorFormat.rawValue)"
-    ) else {
+    guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else {
         NSLog("[metallum] Failed to create texture-copy render pipeline")
         return nil
     }
     NativeState.copyPipelines[key] = pipeline
+    // This cache is consumed by both the ordinary MTLCommandQueue and the
+    // Metal 4 main queue. The latter has no implicit PSO residency.
+    residencyTrackCreated(pipeline)
     return pipeline
 }
 
@@ -5004,6 +4466,9 @@ private func ensureClearColorDepthPipeline(_ device: MTLDevice, _ colorFormat: M
     let pipeline = buildClearPipeline(device: device, colorFormat: colorFormat, depthFormat: depthFormat, writeColor: writeColor)
     if let pipeline {
         NativeState.clearPipelines[key] = pipeline
+        // Clear PSOs are used by the main render queue's MTL4 encoder and are
+        // intentionally retained for the process lifetime.
+        residencyTrackCreated(pipeline)
     }
     return pipeline
 }
@@ -5092,16 +4557,13 @@ private func ensureTransparencyMaskPipeline(_ device: MTLDevice) -> MTLComputePi
     }
     do {
         let library = try device.makeLibrary(source: transparencyMaskMslSource(), options: nil)
-        guard let function = registeredFunction(library, name: "metallum_transparency_mask") else {
+        guard let function = library.makeFunction(name: "metallum_transparency_mask") else {
             NSLog("[Metallum] MetalFX transparency mask function missing")
             return nil
         }
         function.label = "Transparency Mask"
-        let pipeline = try trackedComputePipelineState(
-            device: device,
-            function: function,
-            identity: "metalfx-transparency-mask"
-        )
+        let pipeline = try device.makeComputePipelineState(function: function)
+        residencyTrackCreated(pipeline)
         NativeState.transparencyMaskPipeline = pipeline
         return pipeline
     } catch {
@@ -5181,16 +4643,13 @@ private func ensureCutoutReactivePipeline(_ device: MTLDevice) -> MTLComputePipe
     }
     do {
         let library = try device.makeLibrary(source: cutoutReactiveDilationMslSource(), options: nil)
-        guard let function = registeredFunction(library, name: "metallum_cutout_reactive_dilate") else {
+        guard let function = library.makeFunction(name: "metallum_cutout_reactive_dilate") else {
             NSLog("[Metallum] CUTOUT reactive dilation function missing")
             return nil
         }
         function.label = "CUTOUT Reactive Dilation"
-        let pipeline = try trackedComputePipelineState(
-            device: device,
-            function: function,
-            identity: "metalfx-cutout-reactive"
-        )
+        let pipeline = try device.makeComputePipelineState(function: function)
+        residencyTrackCreated(pipeline)
         NativeState.cutoutReactivePipeline = pipeline
         return pipeline
     } catch {
@@ -5260,16 +4719,13 @@ private func ensureHandOverlayPipeline(_ device: MTLDevice) -> MTLComputePipelin
     }
     do {
         let library = try device.makeLibrary(source: handOverlayMslSource(), options: nil)
-        guard let function = registeredFunction(library, name: "metallum_hand_overlay_motion") else {
+        guard let function = library.makeFunction(name: "metallum_hand_overlay_motion") else {
             NSLog("[Metallum] hand overlay motion function missing")
             return nil
         }
         function.label = "Hand Overlay Motion"
-        let pipeline = try trackedComputePipelineState(
-            device: device,
-            function: function,
-            identity: "metalfx-hand-overlay"
-        )
+        let pipeline = try device.makeComputePipelineState(function: function)
+        residencyTrackCreated(pipeline)
         NativeState.handOverlayPipeline = pipeline
         return pipeline
     } catch {
@@ -5426,16 +4882,13 @@ private func ensureMotionPipeline(_ device: MTLDevice) -> MTLComputePipelineStat
     }
     do {
         let library = try device.makeLibrary(source: motionReconstructionMslSource(), options: nil)
-        guard let function = registeredFunction(library, name: "metallum_motion_reconstruction") else {
+        guard let function = library.makeFunction(name: "metallum_motion_reconstruction") else {
             NSLog("[Metallum] MetalFX motion reconstruction function missing")
             return nil
         }
         function.label = "Motion Reconstruction"
-        let pipeline = try trackedComputePipelineState(
-            device: device,
-            function: function,
-            identity: "metalfx-motion-reconstruction"
-        )
+        let pipeline = try device.makeComputePipelineState(function: function)
+        residencyTrackCreated(pipeline)
         NativeState.motionPipeline = pipeline
         return pipeline
     } catch {
@@ -5989,25 +5442,21 @@ private func ensureMotionV2Pipelines(_ device: MTLDevice) -> (
         let mergeLibrary = try device.makeLibrary(source: motionMergeV2MslSource(), options: nil)
         let fusedLibrary = try device.makeLibrary(source: motionFusedV2MslSource(), options: nil)
         let clearLibrary = try device.makeLibrary(source: motionClearV2MslSource(), options: nil)
-        guard let cameraFunction = registeredFunction(cameraLibrary, name: "metallum_motion_camera_v2"),
-              let mergeFunction = registeredFunction(mergeLibrary, name: "metallum_motion_merge_v2"),
-              let fusedFunction = registeredFunction(fusedLibrary, name: "metallum_motion_fused_v2"),
-              let clearFunction = registeredFunction(clearLibrary, name: "metallum_motion_clear_v2") else {
+        guard let cameraFunction = cameraLibrary.makeFunction(name: "metallum_motion_camera_v2"),
+              let mergeFunction = mergeLibrary.makeFunction(name: "metallum_motion_merge_v2"),
+              let fusedFunction = fusedLibrary.makeFunction(name: "metallum_motion_fused_v2"),
+              let clearFunction = clearLibrary.makeFunction(name: "metallum_motion_clear_v2") else {
             NSLog("[Metallum] MetalFX v2 motion compute function missing")
             return nil
         }
-        let camera = try trackedComputePipelineState(
-            device: device, function: cameraFunction, identity: "metalfx-motion-v2-camera"
-        )
-        let merge = try trackedComputePipelineState(
-            device: device, function: mergeFunction, identity: "metalfx-motion-v2-merge"
-        )
-        let fused = try trackedComputePipelineState(
-            device: device, function: fusedFunction, identity: "metalfx-motion-v2-fused"
-        )
-        let clear = try trackedComputePipelineState(
-            device: device, function: clearFunction, identity: "metalfx-motion-v2-clear"
-        )
+        let camera = try device.makeComputePipelineState(function: cameraFunction)
+        let merge = try device.makeComputePipelineState(function: mergeFunction)
+        let fused = try device.makeComputePipelineState(function: fusedFunction)
+        let clear = try device.makeComputePipelineState(function: clearFunction)
+        residencyTrackCreated(camera)
+        residencyTrackCreated(merge)
+        residencyTrackCreated(fused)
+        residencyTrackCreated(clear)
         NativeState.motionV2Pipeline = camera
         NativeState.motionMergePipeline = merge
         NativeState.motionFusedPipeline = fused
@@ -6019,17 +5468,52 @@ private func ensureMotionV2Pipelines(_ device: MTLDevice) -> (
     }
 }
 
-private func metalFxScalerKey(_ device: MTLDevice, _ temporal: Bool, _ color: MTLTexture, _ output: MTLTexture) -> String {
-    "\(objectAddress(device))-\(temporal ? 1 : 0)-\(color.pixelFormat.rawValue)-\(output.pixelFormat.rawValue)-\(color.width)x\(color.height)-\(output.width)x\(output.height)"
+@inline(__always)
+private func metalFxScalerKey(
+    _ device: MTLDevice,
+    backend: MetalFxBackend,
+    kind: MetalFxScalerKind,
+    color: MTLTexture,
+    output: MTLTexture,
+    depth: MTLTexture? = nil,
+    motion: MTLTexture? = nil,
+    reactive: MTLTexture? = nil
+) -> MetalFxScalerKey {
+    MetalFxScalerKey(
+        deviceAddress: objectAddress(device),
+        backend: backend,
+        kind: kind,
+        colorFormat: color.pixelFormat,
+        depthFormat: depth?.pixelFormat ?? .invalid,
+        motionFormat: motion?.pixelFormat ?? .invalid,
+        outputFormat: output.pixelFormat,
+        reactiveFormat: reactive?.pixelFormat ?? .invalid,
+        inputWidth: color.width,
+        inputHeight: color.height,
+        outputWidth: output.width,
+        outputHeight: output.height
+    )
 }
 #endif
 
 @_cdecl("metallum_init_pipelines")
 public func metallum_init_pipelines(_ device: MTLDevice) {
     autoreleasepool {
-        NativeState.presentPipeline = buildPresentPipeline(device: device, colorFormat: .bgra8Unorm)
-        NativeState.presentLinearSampler = buildPresentSampler(device: device, filter: .linear)
-        NativeState.presentNearestSampler = buildPresentSampler(device: device, filter: .nearest)
+        // Initialization is intentionally idempotent. The present PSO may be
+        // referenced by a submitted Metal 3 or Metal 4 command buffer, so a
+        // live re-init must never remove and replace it. The constructor calls
+        // this once after residency is enabled; repeated calls simply reuse the
+        // same device-owned objects.
+        if NativeState.presentPipeline == nil {
+            NativeState.presentPipeline = buildPresentPipeline(device: device, colorFormat: .bgra8Unorm)
+            residencyTrackCreated(NativeState.presentPipeline)
+        }
+        if NativeState.presentLinearSampler == nil {
+            NativeState.presentLinearSampler = buildPresentSampler(device: device, filter: .linear)
+        }
+        if NativeState.presentNearestSampler == nil {
+            NativeState.presentNearestSampler = buildPresentSampler(device: device, filter: .nearest)
+        }
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .depth32Float)
         _ = ensureClearColorDepthPipeline(device, .rgba8Unorm, .depth32Float)
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .invalid)
@@ -6661,7 +6145,15 @@ private func metal3MetalFxEncode(
     if #available(macOS 13.0, *) {
         return autoreleasepool {
             let temporal = motionTexture != nil && depthTexture != nil
-            let key = metalFxScalerKey(device, temporal, colorTexture, outputTexture)
+            let key = metalFxScalerKey(
+                device,
+                backend: .metal3,
+                kind: temporal ? .temporal : .spatial,
+                color: colorTexture,
+                output: outputTexture,
+                depth: depthTexture,
+                motion: motionTexture
+            )
             let scalerObject: AnyObject?
             if temporal {
                 // Temporal upscaling lives in metallum_metalfx_encode_v2, which
@@ -6767,7 +6259,13 @@ public func metallumMetalFxEncodeEntry(
         guard depthTexture == nil, motionTexture == nil,
               inputWidth > 0, inputHeight > 0,
               let compiler = NativeState.metal4Compiler(device) else { return 0 }
-        let key = "m4-spatial-" + metalFxScalerKey(device, false, colorTexture, outputTexture)
+        let key = metalFxScalerKey(
+            device,
+            backend: .metal4,
+            kind: .spatial,
+            color: colorTexture,
+            output: outputTexture
+        )
         let scaler: any MTL4FXSpatialScaler
         if let cached = NativeState.metalFxScalers[key] as? any MTL4FXSpatialScaler {
             scaler = cached
@@ -6851,8 +6349,16 @@ private func metal4MetalFxEncodeV2(
         return 0
     }
 
-    let baseKey = metalFxScalerKey(device, true, colorTexture, outputTexture)
-    let key = "m4-temporal-" + baseKey
+    let key = metalFxScalerKey(
+        device,
+        backend: .metal4,
+        kind: .temporal,
+        color: colorTexture,
+        output: outputTexture,
+        depth: depthTexture,
+        motion: motionTexture,
+        reactive: reactiveTexture
+    )
     let previousDepthTexture: MTLTexture
     let previousDepthIsValid: Bool
     NativeState.metalFxHistoryLock.lock()
@@ -7136,7 +6642,16 @@ private func metal3MetalFxEncodeV2(
                 return 0
             }
 
-            let key = metalFxScalerKey(device, true, colorTexture, outputTexture)
+            let key = metalFxScalerKey(
+                device,
+                backend: .metal3,
+                kind: .temporal,
+                color: colorTexture,
+                output: outputTexture,
+                depth: depthTexture,
+                motion: motionTexture,
+                reactive: reactiveTexture
+            )
             let previousDepthTexture: MTLTexture
             let previousDepthIsValid: Bool
             NativeState.metalFxHistoryLock.lock()
@@ -7733,6 +7248,11 @@ private func metal3EncodeTextureCopy(
     _ fence: MTLFence?
 ) -> Int32 {
     autoreleasepool {
+        // Texture copies serve readback/resolve contracts on offscreen devices
+        // too, so they cannot rely on metallum_init_pipelines having prewarmed
+        // the present samplers: layerless devices deliberately skip that eager
+        // presentation prewarm. Build them on first use instead.
+        ensurePresentSamplers(commandBuffer.device)
         guard let pipeline = ensureCopyPipeline(commandBuffer.device, destinationTexture.pixelFormat) else {
             #if os(macOS) && canImport(MetalFX)
             logMetalFxFailureOnce("copy-pipeline", "could not create copy pipeline for output format \(destinationTexture.pixelFormat.rawValue)")
@@ -7797,6 +7317,9 @@ public func metallumEncodeTextureCopyEntry(
 ) -> Int32 {
     if #available(macOS 26.0, iOS 26.0, *),
        let lease = metal4MainLease(commandBufferPointer) {
+        // Same lazy-sampler contract as the Metal 3 copy path: offscreen
+        // devices never ran metallum_init_pipelines.
+        ensurePresentSamplers(sourceTexture.device)
         guard let pipeline = ensureCopyPipeline(sourceTexture.device, destinationTexture.pixelFormat),
               let sampler = linear != 0 ? NativeState.presentLinearSampler : NativeState.presentNearestSampler else {
             return 0
@@ -7855,6 +7378,7 @@ public func metallum_metalfx_release_scalers() {
     NativeState.lastTemporalScalerForInterpolation = nil
     NativeState.metalFxHistoryLock.lock()
     NativeState.metalFxPreviousDepthTextures.removeAll()
+    NativeState.metalFxValidationReactiveTextures.removeAll()
     NativeState.metalFxPreviousDepthValid.removeAll()
     NativeState.metalFxHistoryLock.unlock()
     #endif
@@ -7868,6 +7392,14 @@ public func metallum_metalfx_shutdown() {
     NativeState.frameGenerationPresenter = nil
     }
     metallum_metalfx_release_scalers()
+    residencyTrackReleased(NativeState.motionPipeline)
+    residencyTrackReleased(NativeState.motionV2Pipeline)
+    residencyTrackReleased(NativeState.motionMergePipeline)
+    residencyTrackReleased(NativeState.motionFusedPipeline)
+    residencyTrackReleased(NativeState.motionClearPipeline)
+    residencyTrackReleased(NativeState.transparencyMaskPipeline)
+    residencyTrackReleased(NativeState.cutoutReactivePipeline)
+    residencyTrackReleased(NativeState.handOverlayPipeline)
     NativeState.motionPipeline = nil
     NativeState.motionV2Pipeline = nil
     NativeState.motionMergePipeline = nil
@@ -7877,6 +7409,9 @@ public func metallum_metalfx_shutdown() {
     NativeState.cutoutReactivePipeline = nil
     NativeState.frameGenerationLogged = false
     #endif
+    for pipeline in NativeState.copyPipelines.values {
+        residencyTrackReleased(pipeline)
+    }
     NativeState.copyPipelines.removeAll()
     #if os(macOS)
     MetalFxNativeHudMetrics.resetMetalFx()
@@ -7961,20 +7496,16 @@ private func writeIndexedTriangleFanIndices(
 
 @_cdecl("metallum_create_system_default_device")
 public func metallum_create_system_default_device() -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
+    return NativeState.onCompilerThread {
         #if os(macOS)
         // Metal's HUD subsystem must be enabled before the device is created.
         // A mod cannot add MetalHUDEnabled to the host launcher's Info.plist,
         // so prime the equivalent documented environment switch here. The
         // persisted Sodium option supplies the layer request at next startup.
-        if getenv("MTL_HUD_ENABLED") == nil {
-            setenv("MTL_HUD_ENABLED", "1", 1)
-        }
+        setenv("MTL_HUD_ENABLED", "1", 1)
         // MetalFX registers its Temporal and Frame Interpolator sections only
         // when this separate switch is present before the effects are built.
-        if getenv("MTLFX_HUD_ENABLED") == nil {
-            setenv("MTLFX_HUD_ENABLED", "1", 1)
-        }
+        setenv("MTLFX_HUD_ENABLED", "1", 1)
         #endif
         return retainedPointer(MTLCreateSystemDefaultDevice())
     }
@@ -8562,17 +8093,112 @@ public func metallum_metal4_supported(_ device: MTLDevice) -> Int32 {
     return 0
 }
 
+@_cdecl("metallum_set_terrain_icb_enabled")
+public func metallum_set_terrain_icb_enabled(_ enabled: Int32) {
+    NativeState.terrainIcbEnabled = enabled != 0
+}
+
+@_cdecl("metallum_set_terrain_gpu_encode_enabled")
+public func metallum_set_terrain_gpu_encode_enabled(_ enabled: Int32) {
+    NativeState.terrainGpuEncodeEnabled = enabled != 0
+}
+
+@_cdecl("metallum_set_terrain_visible_icb_optimize_enabled")
+public func metallum_set_terrain_visible_icb_optimize_enabled(_ enabled: Int32) {
+    NativeState.terrainVisibleIcbOptimizeEnabled = enabled != 0
+}
+
+@_cdecl("metallum_set_terrain_visibility_compaction_enabled")
+public func metallum_set_terrain_visibility_compaction_enabled(_ enabled: Int32) {
+    NativeState.terrainVisibilityCompactionEnabled = enabled != 0
+}
+
+@_cdecl("metallum_terrain_icb_stats")
+public func metallum_terrain_icb_stats(
+    _ encoded: UnsafeMutablePointer<UInt64>?,
+    _ executed: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    encoded?.pointee = NativeState.terrainIcbEncodedCount
+    executed?.pointee = NativeState.terrainIcbExecutedCount
+    return 1
+}
+
+@_cdecl("metallum_terrain_gpu_icb_stats")
+public func metallum_terrain_gpu_icb_stats(
+    _ encoded: UnsafeMutablePointer<UInt64>?,
+    _ dispatches: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    encoded?.pointee = NativeState.terrainIcbGpuEncodedCount
+    dispatches?.pointee = NativeState.terrainIcbGpuDispatchCount
+    return 1
+}
+
+@_cdecl("metallum_terrain_gpu_icb_pipeline_stats")
+public func metallum_terrain_gpu_icb_pipeline_stats(
+    _ compiles: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    NativeState.terrainGpuPipelineLock.lock()
+    compiles?.pointee = NativeState.terrainGpuPipelineCompileCount
+    NativeState.terrainGpuPipelineLock.unlock()
+    return 1
+}
+
+/// Completion-only query for a terrain visibility owner. Visible ICB
+/// submission uses this instead of allocating CPU readback buffers after GPU
+/// completion; the explicit diagnostic probe keeps using poll_v2 below.
+@_cdecl("metallum_terrain_visibility_probe_status")
+public func metallum_terrain_visibility_probe_status(
+    _ pointer: UnsafeMutableRawPointer
+) -> Int32 {
+    guard #available(macOS 26.0, iOS 26.0, *) else { return -1 }
+    let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+    guard let owner = object as? TerrainGpuVisibilityProbeOwner else { return -1 }
+    return owner.status()
+}
+
+/// Non-blocking completion/readback for a decision-only terrain visibility
+/// probe.  The caller owns the returned probe pointer and must release it
+/// after a successful or failed poll.
+@_cdecl("metallum_terrain_visibility_probe_poll_v2")
+public func metallum_terrain_visibility_probe_poll_v2(
+    _ pointer: UnsafeMutableRawPointer,
+    _ outEpoch: UnsafeMutablePointer<UInt64>?,
+    _ outVisible: UnsafeMutablePointer<UInt32>?,
+    _ outUncertain: UnsafeMutablePointer<UInt32>?,
+    _ outWordCount: UnsafeMutablePointer<UInt32>?,
+    _ outBitset: UnsafeMutablePointer<UInt32>?,
+    _ wordCapacity: Int32,
+    _ outCompactedCount: UnsafeMutablePointer<UInt32>?,
+    _ outCompactedIndices: UnsafeMutablePointer<UInt32>?,
+    _ compactedCapacity: Int32
+) -> Int32 {
+    guard #available(macOS 26.0, iOS 26.0, *),
+          let probe = Unmanaged<AnyObject>.fromOpaque(pointer)
+              .takeUnretainedValue() as? TerrainGpuVisibilityProbeOwner else {
+        return -1
+    }
+    return probe.poll(
+        outEpoch: outEpoch,
+        outVisible: outVisible,
+        outUncertain: outUncertain,
+        outWordCount: outWordCount,
+        outBitset: outBitset,
+        wordCapacity: wordCapacity,
+        outCompactedCount: outCompactedCount,
+        outCompactedIndices: outCompactedIndices,
+        compactedCapacity: compactedCapacity
+    )
+}
+
 @_cdecl("metallum_metal4_main_queue_pilot_validate")
 public func metallum_metal4_main_queue_pilot_validate(_ device: MTLDevice) -> Int32 {
     guard #available(macOS 26.0, iOS 26.0, *), device.supportsFamily(.metal4) else {
         return 0
     }
     let pilot: Metal4MainQueuePilot
-    if let existing = NativeState.metal4MainQueuePilotStorage as? Metal4MainQueuePilot,
-       existing.owns(device) {
+    if let existing = NativeState.metal4MainQueuePilotStorage as? Metal4MainQueuePilot {
         pilot = existing
     } else {
-        NativeState.metal4MainQueuePilotStorage = nil
         guard let created = Metal4MainQueuePilot(device) else { return 0 }
         NativeState.metal4MainQueuePilotStorage = created
         pilot = created
@@ -8592,25 +8218,14 @@ public func metallum_metal4_main_renderer_enable(
     guard #available(macOS 26.0, iOS 26.0, *), device.supportsFamily(.metal4) else {
         return 0
     }
-    if let existing = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext {
-        if existing.owns(device) {
-            return 1
-        }
-        NativeState.metal4MainQueueStorage = nil
+    if NativeState.metal4MainQueueStorage is Metal4MainQueueContext {
+        return 1
     }
     guard let context = Metal4MainQueueContext(device, layer: layer) else {
         return 0
     }
     NativeState.metal4MainQueueStorage = context
-    let argumentTableMode = NativeState.freshMetal4RenderArgumentTables
-        ? "fresh-per-render-encoder"
-        : "reused-per-inflight-slot"
-    NSLog(
-        "[metallum] Metal 4 main renderer enabled: "
-            + "3 reusable command buffers, explicit residency, "
-            + "renderArgumentTables=\(argumentTableMode), "
-            + "supportAttributeStrides=\(NativeState.metal4SupportAttributeStrides)"
-    )
+    NSLog("[metallum] Metal 4 main renderer enabled: 3 reusable command buffers, explicit residency")
     return 1
 }
 
@@ -8629,45 +8244,6 @@ public func metallum_metal4_main_renderer_stats(
     submitted?.pointee = values.1
     reused?.pointee = values.2
     return 1
-}
-
-@_cdecl("metallum_pipeline_compile_telemetry_reset")
-public func metallum_pipeline_compile_telemetry_reset() {
-    PipelineCompileTelemetry.resetAndBegin()
-}
-
-/// Freezes the current sample so the identity list cannot race subsequent
-/// report-time FFM queries. A new sample begins only after the next reset.
-@_cdecl("metallum_pipeline_compile_telemetry_finish")
-public func metallum_pipeline_compile_telemetry_finish(
-    _ renderAttempts: UnsafeMutablePointer<UInt64>?,
-    _ computeAttempts: UnsafeMutablePointer<UInt64>?,
-    _ failures: UnsafeMutablePointer<UInt64>?,
-    _ identityCount: UnsafeMutablePointer<UInt64>?
-) -> Int32 {
-    let snapshot = PipelineCompileTelemetry.finish()
-    renderAttempts?.pointee = snapshot.0
-    computeAttempts?.pointee = snapshot.1
-    failures?.pointee = snapshot.2
-    identityCount?.pointee = UInt64(snapshot.3.count)
-    return 1
-}
-
-@_cdecl("metallum_pipeline_compile_telemetry_copy_identity")
-public func metallum_pipeline_compile_telemetry_copy_identity(
-    _ index: Int32,
-    _ destination: UnsafeMutablePointer<CChar>?,
-    _ capacity: Int32
-) -> Int32 {
-    guard let identity = PipelineCompileTelemetry.identity(at: Int(index)) else { return -1 }
-    let bytes = Array(identity.utf8)
-    let required = bytes.count + 1
-    guard let destination, capacity >= required else { return Int32(clamping: required) }
-    for (offset, byte) in bytes.enumerated() {
-        destination[offset] = CChar(bitPattern: byte)
-    }
-    destination[bytes.count] = 0
-    return Int32(clamping: required)
 }
 
 /// Bounded diagnostic for the shipping MTL4 upload/copy barrier path. The
@@ -8698,31 +8274,6 @@ public func metallum_metal4_metalfx_stats(
     temporal?.pointee = NativeState.metal4TemporalEncodeCount
     frameGenerationInput?.pointee = NativeState.metal4FrameGenerationInputCount
     return 1
-}
-
-/// Reports whether the Java-driven backend stayed entirely on MTL4 after
-/// enabling the main renderer. A non-zero legacy count is a release blocker.
-@_cdecl("metallum_metal4_backend_closure_stats")
-public func metallum_metal4_backend_closure_stats(
-    _ render: UnsafeMutablePointer<UInt64>?,
-    _ compute: UnsafeMutablePointer<UInt64>?,
-    _ blit: UnsafeMutablePointer<UInt64>?,
-    _ legacyViolations: UnsafeMutablePointer<UInt64>?
-) -> Int32 {
-    guard #available(macOS 26.0, iOS 26.0, *),
-          NativeState.metal4MainQueueStorage != nil else {
-        return 0
-    }
-    render?.pointee = NativeState.metal4GenericRenderEncodeCount
-    compute?.pointee = NativeState.metal4GenericComputeEncodeCount
-    blit?.pointee = NativeState.metal4GenericBlitEncodeCount
-    legacyViolations?.pointee = NativeState.metal4LegacyEncoderViolationCount
-    return 1
-}
-
-@_cdecl("metallum_metal4_no_legacy_encoder_violations")
-public func metallum_metal4_no_legacy_encoder_violations() -> Int32 {
-    NativeState.metal4LegacyEncoderViolationCount == 0 ? 1 : 0
 }
 
 @_cdecl("metallum_MTLDevice_makeCommandQueue")
@@ -8886,7 +8437,6 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
         let label = stringFromOptionalCString(labelPtr) ?? "blit"
         if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
             guard let encoder = lease.commandBuffer.makeComputeCommandEncoder() else { return nil }
-            NativeState.metal4GenericBlitEncodeCount &+= 1
             encoder.label = label
             // Upload/copy work may overwrite a mesh buffer that an earlier
             // submitted render encoder is still fetching. Metal 3's fence wait
@@ -8896,20 +8446,10 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
             encoder.barrier(
                 afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
                 beforeStages: .blit,
-                // Sodium's arena resize path can recycle the allocation behind
-                // an old GPU address. Device visibility alone orders ordinary
-                // writes, but does not flush the aliasing point required when
-                // that address changes backing generations.
-                visibilityOptions: [.device, .resourceAlias]
+                visibilityOptions: .device
             )
             return retainedPointer(Metal4MainBlitEncoderBridge(encoder))
         }
-        if #available(macOS 26.0, iOS 26.0, *), NativeState.metal4MainQueueStorage != nil {
-            NativeState.metal4LegacyEncoderViolationCount &+= 1
-            NSLog("[metallum] rejected Metal 3 blit encoder while Metal 4 main renderer is active")
-            return nil
-        }
-        NativeState.metal3GenericBlitEncodeCount &+= 1
         let commandBuffer = metal3CommandBuffer(pointer)
         let timing = gpuEncoderTimingContext(commandBuffer)
         let indices = timing?.reserve(label: label, kind: 1)
@@ -8936,10 +8476,6 @@ public func metallum_MTLCommandEncoder_endEncoding(_ pointer: UnsafeMutableRawPo
     }
     if #available(macOS 26.0, iOS 26.0, *), let blit = metal4BlitBridge(pointer) {
         blit.encoder.endEncoding()
-        return
-    }
-    if #available(macOS 26.0, iOS 26.0, *), let compute = metal4ComputeBridge(pointer) {
-        compute.encoder.endEncoding()
         return
     }
     let encoder = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as! MTLCommandEncoder
@@ -9524,9 +9060,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
             encoder.barrier(
                 afterQueueStages: [.blit, .fragment, .dispatch],
                 beforeStages: [.vertex, .fragment],
-                // Match the upload-side alias flush before vertex fetch. The
-                // arena may expose a reused virtual address after resize.
-                visibilityOptions: [.device, .resourceAlias]
+                visibilityOptions: .device
             )
             encoder.setViewport(MTLViewport(
                 originX: 0.0, originY: 0.0,
@@ -9540,11 +9074,6 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
                 vertexArguments: tables.0,
                 fragmentArguments: tables.1
             ))
-        }
-        if #available(macOS 26.0, iOS 26.0, *), NativeState.metal4MainQueueStorage != nil {
-            NativeState.metal4LegacyEncoderViolationCount &+= 1
-            NSLog("[metallum] rejected Metal 3 render encoder while Metal 4 main renderer is active")
-            return nil
         }
         let commandBuffer = metal3CommandBuffer(pointer)
         let depthFormat = depthTexture?.pixelFormat ?? .invalid
@@ -9669,9 +9198,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
             encoder.barrier(
                 afterQueueStages: [.blit, .fragment, .dispatch],
                 beforeStages: [.vertex, .fragment],
-                // Match the upload-side alias flush before vertex fetch. The
-                // arena may expose a reused virtual address after resize.
-                visibilityOptions: [.device, .resourceAlias]
+                visibilityOptions: .device
             )
             encoder.setViewport(MTLViewport(
                 originX: 0.0, originY: 0.0,
@@ -9685,12 +9212,6 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
                 vertexArguments: tables.0,
                 fragmentArguments: tables.1
             ))
-        }
-
-        if #available(macOS 26.0, iOS 26.0, *), NativeState.metal4MainQueueStorage != nil {
-            NativeState.metal4LegacyEncoderViolationCount &+= 1
-            NSLog("[metallum] rejected Metal 3 render encoder while Metal 4 main renderer is active")
-            return nil
         }
 
         let commandBuffer = metal3CommandBuffer(pointer)
@@ -9777,10 +9298,233 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
     }
 }
 
+// RenderPassDescriptorV3 ABI (P2). Per-attachment load/store actions replace
+// V2's boolean clear flags so the Iris planner's per-attachment decisions
+// become expressible: 0=dontCare, 1=load, 2=clear for loads; 0=dontCare,
+// 1=store, 2=deferred(.unknown, depth only) for stores. Unknown values map to
+// the conservative default (load/store) instead of being rejected: the Java
+// planner is fail-closed, and a stale native module must never change pixels.
+private func v3LoadAction(_ raw: Int32) -> MTLLoadAction {
+    switch raw {
+    case 0: return .dontCare
+    case 2: return .clear
+    default: return .load
+    }
+}
+
+private func v3StoreAction(_ raw: Int32) -> MTLStoreAction {
+    switch raw {
+    case 0: return .dontCare
+    case 2: return .unknown
+    default: return .store
+    }
+}
+
+/// Backend-neutral V3 color-slot semantics.  This is a value type, so parsing
+/// one raw ABI slot does not allocate a Java object or a Swift collection.
+/// Both Metal 3 and Metal 4 descriptor branches consume the same result; only
+/// the final descriptor/encoder type differs after this boundary.
+struct V3ColorAttachmentActions {
+    let loadAction: MTLLoadAction
+    let storeAction: MTLStoreAction
+    let clearColor: MTLClearColor?
+}
+
+func v3ColorAttachmentActions(
+    loadRaw: Int32,
+    storeRaw: Int32,
+    clearColors: UnsafePointer<Float>,
+    index: Int
+) -> V3ColorAttachmentActions {
+    let clearColor: MTLClearColor?
+    if loadRaw == 2 {
+        let base = index * 4
+        clearColor = makeClearColor(
+            red: clearColors[base],
+            green: clearColors[base + 1],
+            blue: clearColors[base + 2],
+            alpha: clearColors[base + 3]
+        )
+    } else {
+        clearColor = nil
+    }
+    return V3ColorAttachmentActions(
+        loadAction: v3LoadAction(loadRaw),
+        storeAction: v3StoreAction(storeRaw),
+        clearColor: clearColor
+    )
+}
+
+@_cdecl("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3")
+public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3(
+    _ pointer: UnsafeMutableRawPointer,
+    _ colorTexturePointers: UnsafePointer<UnsafeMutableRawPointer?>?,
+    _ colorCount: Int32,
+    _ depthTexture: MTLTexture?,
+    _ colorLoadActions: UnsafePointer<Int32>?,
+    _ colorStoreActions: UnsafePointer<Int32>?,
+    _ clearColors: UnsafePointer<Float>?,
+    _ depthLoadActionRaw: Int32,
+    _ depthStoreActionRaw: Int32,
+    _ clearDepth: Double,
+    _ viewportWidth: Double,
+    _ viewportHeight: Double,
+    _ labelPtr: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
+        let count = Int(colorCount)
+        guard count >= 0 && count <= 8 else {
+            NSLog("[Metallum] rejected render pass with %d color slots; Metal backend supports at most 8", colorCount)
+            return nil
+        }
+        guard count == 0 || colorTexturePointers != nil else {
+            NSLog("[Metallum] render pass color slot count is non-zero but the texture array is null")
+            return nil
+        }
+        guard count == 0 || (colorLoadActions != nil && colorStoreActions != nil && clearColors != nil) else {
+            NSLog("[Metallum] render pass color slot count is non-zero but action arrays are null")
+            return nil
+        }
+        guard count > 0 || depthTexture != nil else {
+            NSLog("[Metallum] rejected render pass with no color or depth attachment")
+            return nil
+        }
+
+        let depthFormat = depthTexture?.pixelFormat ?? .invalid
+        let stencilFormat = stencilPixelFormat(for: depthFormat)
+        let label = stringFromOptionalCString(labelPtr) ?? "render"
+
+        if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
+            let renderPass = MTL4RenderPassDescriptor()
+            for index in 0..<count {
+                guard let attachment = renderPass.colorAttachments[index] else { return nil }
+                guard let texture = textureFromUnretainedPointer(colorTexturePointers?[index]) else {
+                    attachment.loadAction = .dontCare
+                    attachment.storeAction = .dontCare
+                    continue
+                }
+                attachment.texture = texture
+                let actions = v3ColorAttachmentActions(
+                    loadRaw: colorLoadActions![index],
+                    storeRaw: colorStoreActions![index],
+                    clearColors: clearColors!,
+                    index: index
+                )
+                attachment.loadAction = actions.loadAction
+                attachment.storeAction = actions.storeAction
+                if let clearColor = actions.clearColor {
+                    attachment.clearColor = clearColor
+                }
+            }
+            if let depthTexture {
+                if depthFormat != .stencil8 {
+                    renderPass.depthAttachment.texture = depthTexture
+                    renderPass.depthAttachment.loadAction = v3LoadAction(depthLoadActionRaw)
+                    renderPass.depthAttachment.storeAction = v3StoreAction(depthStoreActionRaw)
+                    renderPass.depthAttachment.clearDepth = clearDepth
+                }
+                if stencilFormat != .invalid || depthFormat == .stencil8 {
+                    renderPass.stencilAttachment.texture = depthTexture
+                    renderPass.stencilAttachment.loadAction = .dontCare
+                    // Every pass loads stencil as .dontCare, so no pass can
+                    // ever observe a stored stencil value.
+                    renderPass.stencilAttachment.storeAction = .dontCare
+                }
+            }
+            renderPass.renderTargetWidth = Int(viewportWidth)
+            renderPass.renderTargetHeight = Int(viewportHeight)
+            guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+                return nil
+            }
+            encoder.label = label
+            encoder.barrier(
+                afterQueueStages: [.blit, .fragment, .dispatch],
+                beforeStages: [.vertex, .fragment],
+                visibilityOptions: .device
+            )
+            encoder.setViewport(MTLViewport(
+                originX: 0.0, originY: 0.0,
+                width: viewportWidth, height: viewportHeight,
+                znear: 0.0, zfar: 1.0
+            ))
+            let tables = lease.owner.argumentTables(at: lease.slotIndex)
+            return retainedPointer(Metal4MainRenderEncoderBridge(
+                encoder: encoder,
+                lease: lease,
+                vertexArguments: tables.0,
+                fragmentArguments: tables.1
+            ))
+        }
+
+        let commandBuffer = metal3CommandBuffer(pointer)
+        let renderPass = MTLRenderPassDescriptor()
+        for index in 0..<count {
+            guard let attachment = renderPass.colorAttachments[index] else {
+                NSLog("[Metallum] color attachment descriptor %d is unavailable", index)
+                return nil
+            }
+            guard let texture = textureFromUnretainedPointer(colorTexturePointers?[index]) else {
+                attachment.loadAction = .dontCare
+                attachment.storeAction = .dontCare
+                continue
+            }
+            attachment.texture = texture
+            let actions = v3ColorAttachmentActions(
+                loadRaw: colorLoadActions![index],
+                storeRaw: colorStoreActions![index],
+                clearColors: clearColors!,
+                index: index
+            )
+            attachment.loadAction = actions.loadAction
+            attachment.storeAction = actions.storeAction
+            if let clearColor = actions.clearColor {
+                attachment.clearColor = clearColor
+            }
+        }
+        if let depthTexture {
+            if depthFormat != .stencil8 {
+                renderPass.depthAttachment.texture = depthTexture
+                renderPass.depthAttachment.loadAction = v3LoadAction(depthLoadActionRaw)
+                renderPass.depthAttachment.storeAction = v3StoreAction(depthStoreActionRaw)
+                renderPass.depthAttachment.clearDepth = clearDepth
+            }
+            if stencilFormat != .invalid || depthFormat == .stencil8 {
+                renderPass.stencilAttachment.texture = depthTexture
+                renderPass.stencilAttachment.loadAction = .dontCare
+                renderPass.stencilAttachment.storeAction = .dontCare
+            }
+        }
+
+        let timing = gpuEncoderTimingContext(commandBuffer)
+        if let timing,
+           let indices = timing.reserve(label: label, kind: 0),
+           let attachment = renderPass.sampleBufferAttachments[0] {
+            attachment.sampleBuffer = timing.sampleBuffer
+            attachment.startOfVertexSampleIndex = indices.0
+            attachment.endOfFragmentSampleIndex = indices.1
+        }
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+            return nil
+        }
+        encoder.label = label
+        metal4BarrierRenderAfterUploadAndRender(encoder)
+        encoder.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: viewportWidth,
+            height: viewportHeight,
+            znear: 0.0,
+            zfar: 1.0
+        ))
+        return retainedPointer(encoder)
+    }
+}
+
 @_cdecl("metallum_MTLRenderCommandEncoder_setRenderPipelineState")
 public func metallum_MTLRenderCommandEncoder_setRenderPipelineState(_ pointer: UnsafeMutableRawPointer, _ pipeline: MTLRenderPipelineState) {
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
-        bridge.setRenderPipelineState(pipeline)
+        bridge.encoder.setRenderPipelineState(pipeline)
         return
     }
     let encoder = metal3RenderEncoder(pointer)
@@ -9854,36 +9598,6 @@ public func metallum_MTLRenderCommandEncoder_setBuffer(_ pointer: UnsafeMutableR
     }
     if (stageMask & 2) != 0 {
         encoder.setFragmentBuffer(buffer, offset: Int(offset), index: Int(index))
-    }
-}
-
-@_cdecl("metallum_MTLRenderCommandEncoder_setVertexBufferWithAttributeStride")
-public func metallum_MTLRenderCommandEncoder_setVertexBufferWithAttributeStride(
-    _ pointer: UnsafeMutableRawPointer,
-    _ buffer: MTLBuffer?,
-    _ offset: UInt64,
-    _ stride: UInt64,
-    _ index: UInt64
-) {
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
-        bridge.setVertexBufferWithAttributeStride(
-            buffer,
-            offset: Int(offset),
-            stride: Int(stride),
-            index: Int(index)
-        )
-        return
-    }
-    let encoder = metal3RenderEncoder(pointer)
-    if #available(macOS 14.0, iOS 17.0, *) {
-        encoder.setVertexBuffer(
-            buffer,
-            offset: Int(offset),
-            attributeStride: Int(stride),
-            index: Int(index)
-        )
-    } else {
-        encoder.setVertexBuffer(buffer, offset: Int(offset), index: Int(index))
     }
 }
 
@@ -9992,24 +9706,6 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
     _ baseInstance: Int
 ) {
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
-        bridge.lease.retainBoundBuffer(indexBuffer)
-        NativeState.recordMetal4IndexedDraw(
-            indexCount: indexCount,
-            indexType: indexType,
-            indexBuffer: indexBuffer,
-            indexBufferOffset: indexBufferOffset,
-            baseVertex: baseVertex,
-            pipelineLabel: bridge.currentPipelineLabel
-        )
-        bridge.recordIndexedDrawSnapshot(
-            indexCount: indexCount,
-            indexType: indexType,
-            indexBuffer: indexBuffer,
-            indexBufferOffset: indexBufferOffset,
-            baseVertex: baseVertex,
-            instanceCount: instanceCount,
-            baseInstance: baseInstance
-        )
         let offset = max(indexBufferOffset, 0)
         bridge.encoder.drawIndexedPrimitives(
             primitiveType: primitiveType,
@@ -10050,28 +9746,10 @@ public func metallum_MTLRenderCommandEncoder_multiDrawIndexed(
     _ baseInstance: Int
 ) {
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
-        bridge.lease.retainBoundBuffer(indexBuffer)
         for i in 0..<drawCount {
             let indexCount = Int(indexCounts[i])
             let offset = max(firstIndexOffsets[i], 0)
             if indexCount > 0 {
-                NativeState.recordMetal4IndexedDraw(
-                    indexCount: indexCount,
-                    indexType: indexType,
-                    indexBuffer: indexBuffer,
-                    indexBufferOffset: firstIndexOffsets[i],
-                    baseVertex: Int(vertexOffsets[i]),
-                    pipelineLabel: bridge.currentPipelineLabel
-                )
-                bridge.recordIndexedDrawSnapshot(
-                    indexCount: indexCount,
-                    indexType: indexType,
-                    indexBuffer: indexBuffer,
-                    indexBufferOffset: firstIndexOffsets[i],
-                    baseVertex: Int(vertexOffsets[i]),
-                    instanceCount: instanceCount,
-                    baseInstance: baseInstance
-                )
                 bridge.encoder.drawIndexedPrimitives(
                     primitiveType: primitiveType,
                     indexCount: indexCount,
@@ -10125,8 +9803,6 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
     guard !additionOverflow, needed >= 0, needed <= indirectBuffer.length else { return }
 
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
-        bridge.lease.retainBoundBuffer(indexBuffer)
-        bridge.lease.retainBoundBuffer(indirectBuffer)
         var offset = baseOffset
         for _ in 0..<drawCount {
             bridge.encoder.drawIndexedPrimitives(
@@ -10155,6 +9831,2095 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
     }
 }
 
+@available(macOS 26.0, iOS 26.0, *)
+private final class TerrainGpuIcbOwner {
+    let commandBuffer: MTLIndirectCommandBuffer
+    // Keep the exact main-queue lease that authored this GPU ICB alive until
+    // the Java owner releases it.  The lease identity is also the execution
+    // domain: a command buffer must not execute an ICB authored by another
+    // in-flight slot.
+    let lease: Metal4MainCommandBufferLease
+    let commandCount: Int
+    // Keep the immutable producer records alive until the command buffer
+    // completes. MTL4 argument tables bind addresses/resource IDs, not ARC
+    // ownership, so this retention is part of the producer-owned handle.
+    let packedCommands: MTLBuffer
+    let argumentBuffer: MTLBuffer
+    let indexBuffer: MTLBuffer
+    let pipeline: MTLRenderPipelineState
+    let candidateIndices: MTLBuffer?
+    let visibilityOwner: AnyObject?
+
+    init(
+        commandBuffer: MTLIndirectCommandBuffer,
+        lease: Metal4MainCommandBufferLease,
+        commandCount: Int,
+        packedCommands: MTLBuffer,
+        argumentBuffer: MTLBuffer,
+        indexBuffer: MTLBuffer,
+        pipeline: MTLRenderPipelineState,
+        candidateIndices: MTLBuffer? = nil,
+        visibilityOwner: AnyObject? = nil
+    ) {
+        self.commandBuffer = commandBuffer
+        self.lease = lease
+        self.commandCount = commandCount
+        self.packedCommands = packedCommands
+        self.argumentBuffer = argumentBuffer
+        self.indexBuffer = indexBuffer
+        self.pipeline = pipeline
+        self.candidateIndices = candidateIndices
+        self.visibilityOwner = visibilityOwner
+        residencyTrackCreated(commandBuffer)
+        residencyTrackCreated(packedCommands)
+        residencyTrackCreated(argumentBuffer)
+        if let candidateIndices { residencyTrackCreated(candidateIndices) }
+    }
+
+    deinit {
+        residencyTrackReleased(rawPointer(commandBuffer))
+        residencyTrackReleased(rawPointer(packedCommands))
+        residencyTrackReleased(rawPointer(argumentBuffer))
+        if let candidateIndices { residencyTrackReleased(rawPointer(candidateIndices)) }
+    }
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private func rawPointer(_ object: AnyObject) -> UnsafeMutableRawPointer {
+    UnsafeMutableRawPointer(Unmanaged.passUnretained(object).toOpaque())
+}
+
+private func terrainGpuIcbMslSource(
+    primitiveType: MTLPrimitiveType,
+    indexType: MTLIndexType
+) -> String? {
+    let primitive: String
+    switch primitiveType {
+    case .point: primitive = "point"
+    case .line: primitive = "line"
+    case .lineStrip: primitive = "line_strip"
+    case .triangle: primitive = "triangle"
+    case .triangleStrip: primitive = "triangle_strip"
+    default: return nil
+    }
+    let indexPointer = indexType == .uint16 ? "ushort" : "uint"
+    return """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct TerrainDrawRecord {
+      int indexCount;
+      int instanceCount;
+      int firstIndex;
+      int baseVertex;
+      int firstInstance;
+    };
+
+    struct TerrainIcbContainer {
+      command_buffer commandBuffer [[id(0)]];
+    };
+
+
+    struct TerrainVisibilitySceneCandidate {
+      int4 sectionBlock;
+      float4 localMinMaxX;
+      float4 localMaxYZRange;
+    };
+
+    struct TerrainVisibilitySceneFrame {
+      float4x4 clipFromCameraRelative;
+      int4 cameraBlock;
+      float4 cameraFraction;
+    };
+
+    kernel void metallum_terrain_gpu_encode(
+      device const TerrainDrawRecord *records [[buffer(0)]],
+      device TerrainIcbContainer *container [[buffer(1)]],
+      device \(indexPointer) *indices [[buffer(2)]],
+      uint drawIndex [[thread_position_in_grid]]) {
+      TerrainDrawRecord record = records[drawIndex];
+      if (record.indexCount < 0 || record.instanceCount < 0
+          || record.firstIndex < 0 || record.firstInstance < 0) {
+        return;
+      }
+      render_command command(container->commandBuffer, drawIndex);
+      command.draw_indexed_primitives(primitive_type::\(primitive),
+          uint(record.indexCount), indices + uint(record.firstIndex),
+          uint(record.instanceCount), as_type<uint>(record.baseVertex),
+          uint(record.firstInstance));
+    }
+
+    kernel void metallum_terrain_gpu_encode_visible(
+      device const TerrainDrawRecord *records [[buffer(0)]],
+      device TerrainIcbContainer *container [[buffer(1)]],
+      device \(indexPointer) *indices [[buffer(2)]],
+      device atomic_uint *visibilityWords [[buffer(3)]],
+      device const uint *candidateBySourceOrdinal [[buffer(4)]],
+      uint drawIndex [[thread_position_in_grid]]) {
+      uint candidateIndex = candidateBySourceOrdinal[drawIndex];
+      uint word = atomic_load_explicit(&visibilityWords[candidateIndex >> 5], memory_order_relaxed);
+      if ((word & (1u << (candidateIndex & 31))) == 0u) {
+        return;
+      }
+      TerrainDrawRecord record = records[drawIndex];
+      if (record.indexCount < 0 || record.instanceCount < 0
+          || record.firstIndex < 0 || record.firstInstance < 0) {
+        return;
+      }
+      render_command command(container->commandBuffer, drawIndex);
+      command.draw_indexed_primitives(primitive_type::\(primitive),
+          uint(record.indexCount), indices + uint(record.firstIndex),
+          uint(record.instanceCount), as_type<uint>(record.baseVertex),
+          uint(record.firstInstance));
+    }
+
+    kernel void metallum_terrain_gpu_encode_fused_visible(
+      device const TerrainDrawRecord *records [[buffer(0)]],
+      device TerrainIcbContainer *container [[buffer(1)]],
+      device \(indexPointer) *indices [[buffer(2)]],
+      device const TerrainVisibilitySceneCandidate *candidates [[buffer(3)]],
+      device const TerrainVisibilitySceneFrame *frame [[buffer(4)]],
+      device const uint *candidateBySourceOrdinal [[buffer(5)]],
+      uint drawIndex [[thread_position_in_grid]]) {
+      uint candidateIndex = candidateBySourceOrdinal[drawIndex];
+      TerrainVisibilitySceneCandidate candidate = candidates[candidateIndex];
+      int3 blockDelta = candidate.sectionBlock.xyz - frame->cameraBlock.xyz;
+      float3 cameraRelativeBase = float3(blockDelta) - frame->cameraFraction.xyz;
+      float3 localMin = candidate.localMinMaxX.xyz;
+      float3 localMax = float3(candidate.localMinMaxX.w,
+                               candidate.localMaxYZRange.x,
+                               candidate.localMaxYZRange.y);
+      float3 minBounds = cameraRelativeBase + localMin;
+      float3 maxBounds = cameraRelativeBase + localMax;
+      float range = candidate.localMaxYZRange.z;
+      bool uncertain = false;
+      bool visible = true;
+      if (!all(isfinite(minBounds)) || !all(isfinite(maxBounds)) || !isfinite(range)
+          || any(minBounds > maxBounds) || range < 0.0f
+          || !all(isfinite(frame->cameraFraction))) {
+        uncertain = true;
+      } else {
+        float3 corners[8] = {
+          float3(minBounds.x, minBounds.y, minBounds.z),
+          float3(maxBounds.x, minBounds.y, minBounds.z),
+          float3(minBounds.x, maxBounds.y, minBounds.z),
+          float3(maxBounds.x, maxBounds.y, minBounds.z),
+          float3(minBounds.x, minBounds.y, maxBounds.z),
+          float3(maxBounds.x, minBounds.y, maxBounds.z),
+          float3(minBounds.x, maxBounds.y, maxBounds.z),
+          float3(maxBounds.x, maxBounds.y, maxBounds.z)
+        };
+        float4 clip[8];
+        for (uint corner = 0; corner < 8; ++corner) {
+          clip[corner] = frame->clipFromCameraRelative * float4(corners[corner], 1.0f);
+          if (!all(isfinite(clip[corner])) || clip[corner].w <= 0.0f) {
+            uncertain = true;
+            break;
+          }
+        }
+        if (!uncertain) {
+          bool outsideLeft = true;
+          bool outsideRight = true;
+          bool outsideBottom = true;
+          bool outsideTop = true;
+          bool outsideNear = true;
+          bool outsideFar = true;
+          for (uint corner = 0; corner < 8; ++corner) {
+            outsideLeft = outsideLeft && clip[corner].x < -clip[corner].w;
+            outsideRight = outsideRight && clip[corner].x > clip[corner].w;
+            outsideBottom = outsideBottom && clip[corner].y < -clip[corner].w;
+            outsideTop = outsideTop && clip[corner].y > clip[corner].w;
+            outsideNear = outsideNear && clip[corner].z < -clip[corner].w;
+            outsideFar = outsideFar && clip[corner].z > clip[corner].w;
+          }
+          visible = !(outsideLeft || outsideRight || outsideBottom
+                      || outsideTop || outsideNear || outsideFar);
+        }
+      }
+      if (!visible && !uncertain) {
+        return;
+      }
+      TerrainDrawRecord record = records[drawIndex];
+      if (record.indexCount < 0 || record.instanceCount < 0
+          || record.firstIndex < 0 || record.firstInstance < 0) {
+        return;
+      }
+      render_command command(container->commandBuffer, drawIndex);
+      command.draw_indexed_primitives(primitive_type::\(primitive),
+          uint(record.indexCount), indices + uint(record.firstIndex),
+          uint(record.instanceCount), as_type<uint>(record.baseVertex),
+          uint(record.firstInstance));
+    }
+    """
+}
+
+/// Decision-only terrain visibility and compaction kernels. They never write
+/// an ICB or any draw command: the Java render path remains the draw authority
+/// while this probe publishes a conservative bitset and a stable candidate
+/// index list. Every prefix stage is block-local; no thread scans the whole
+/// candidate array.
+@available(macOS 26.0, iOS 26.0, *)
+private func terrainVisibilityMslSource() -> String {
+    return """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct TerrainVisibilityCandidate {
+      float minX;
+      float minY;
+      float minZ;
+      float maxX;
+      float maxY;
+      float maxZ;
+      float range;
+      float reserved;
+    };
+
+
+    struct TerrainVisibilitySceneCandidate {
+      int4 sectionBlock;
+      float4 localMinMaxX;
+      float4 localMaxYZRange;
+    };
+
+    struct TerrainVisibilitySceneFrame {
+      float4x4 clipFromCameraRelative;
+      int4 cameraBlock;
+      float4 cameraFraction;
+    };
+
+    struct TerrainVisibilityCompactionParams {
+      uint candidateCount;
+      uint blockCount;
+      uint groupCount;
+    };
+
+    kernel void metallum_terrain_gpu_visibility_probe(
+      device const TerrainVisibilityCandidate *candidates [[buffer(0)]],
+      device const float4x4 *clipFromCameraRelative [[buffer(1)]],
+      device atomic_uint *visibilityWords [[buffer(2)]],
+      device atomic_uint *counters [[buffer(3)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint candidateIndex [[thread_position_in_grid]]) {
+      if (candidateIndex >= params.candidateCount) {
+        return;
+      }
+      TerrainVisibilityCandidate candidate = candidates[candidateIndex];
+      bool uncertain = false;
+      bool visible = true;
+      if (!isfinite(candidate.minX) || !isfinite(candidate.minY)
+          || !isfinite(candidate.minZ) || !isfinite(candidate.maxX)
+          || !isfinite(candidate.maxY) || !isfinite(candidate.maxZ)
+          || !isfinite(candidate.range)
+          || candidate.minX > candidate.maxX
+          || candidate.minY > candidate.maxY
+          || candidate.minZ > candidate.maxZ
+          || candidate.range < 0.0f) {
+        uncertain = true;
+      } else {
+        float3 corners[8] = {
+          float3(candidate.minX, candidate.minY, candidate.minZ),
+          float3(candidate.maxX, candidate.minY, candidate.minZ),
+          float3(candidate.minX, candidate.maxY, candidate.minZ),
+          float3(candidate.maxX, candidate.maxY, candidate.minZ),
+          float3(candidate.minX, candidate.minY, candidate.maxZ),
+          float3(candidate.maxX, candidate.minY, candidate.maxZ),
+          float3(candidate.minX, candidate.maxY, candidate.maxZ),
+          float3(candidate.maxX, candidate.maxY, candidate.maxZ)
+        };
+        float4 clip[8];
+        for (uint corner = 0; corner < 8; ++corner) {
+          clip[corner] = (*clipFromCameraRelative) * float4(corners[corner], 1.0f);
+          if (!all(isfinite(clip[corner])) || clip[corner].w <= 0.0f) {
+            uncertain = true;
+            break;
+          }
+        }
+        if (!uncertain) {
+          bool outsideLeft = true;
+          bool outsideRight = true;
+          bool outsideBottom = true;
+          bool outsideTop = true;
+          bool outsideNear = true;
+          bool outsideFar = true;
+          for (uint corner = 0; corner < 8; ++corner) {
+            outsideLeft = outsideLeft && clip[corner].x < -clip[corner].w;
+            outsideRight = outsideRight && clip[corner].x > clip[corner].w;
+            outsideBottom = outsideBottom && clip[corner].y < -clip[corner].w;
+            outsideTop = outsideTop && clip[corner].y > clip[corner].w;
+            outsideNear = outsideNear && clip[corner].z < -clip[corner].w;
+            outsideFar = outsideFar && clip[corner].z > clip[corner].w;
+          }
+          visible = !(outsideLeft || outsideRight || outsideBottom
+                      || outsideTop || outsideNear || outsideFar);
+        }
+      }
+      if (uncertain) {
+        atomic_fetch_add_explicit(&counters[1], 1u, memory_order_relaxed);
+      }
+      if (visible || uncertain) {
+        uint word = candidateIndex >> 5;
+        uint bit = candidateIndex & 31u;
+        atomic_fetch_or_explicit(&visibilityWords[word], 1u << bit, memory_order_relaxed);
+        atomic_fetch_add_explicit(&counters[0], 1u, memory_order_relaxed);
+      }
+    }
+
+
+    // Shipping visible-ICB kernel for generation-owned static scene records.
+    // Large world coordinates remain integer until after camera subtraction;
+    // only the small camera-relative delta is converted to float32.
+    kernel void metallum_terrain_gpu_visibility_scene(
+      device const TerrainVisibilitySceneCandidate *candidates [[buffer(0)]],
+      device const TerrainVisibilitySceneFrame *frame [[buffer(1)]],
+      device atomic_uint *visibilityWords [[buffer(2)]],
+      device atomic_uint *counters [[buffer(3)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint candidateIndex [[thread_position_in_grid]]) {
+      if (candidateIndex >= params.candidateCount) {
+        return;
+      }
+      TerrainVisibilitySceneCandidate candidate = candidates[candidateIndex];
+      int3 blockDelta = candidate.sectionBlock.xyz - frame->cameraBlock.xyz;
+      float3 cameraRelativeBase = float3(blockDelta) - frame->cameraFraction.xyz;
+      float3 localMin = candidate.localMinMaxX.xyz;
+      float3 localMax = float3(candidate.localMinMaxX.w,
+                               candidate.localMaxYZRange.x,
+                               candidate.localMaxYZRange.y);
+      float3 minBounds = cameraRelativeBase + localMin;
+      float3 maxBounds = cameraRelativeBase + localMax;
+      float range = candidate.localMaxYZRange.z;
+      bool uncertain = false;
+      bool visible = true;
+      if (!all(isfinite(minBounds)) || !all(isfinite(maxBounds)) || !isfinite(range)
+          || any(minBounds > maxBounds) || range < 0.0f
+          || !all(isfinite(frame->cameraFraction))) {
+        uncertain = true;
+      } else {
+        float3 corners[8] = {
+          float3(minBounds.x, minBounds.y, minBounds.z),
+          float3(maxBounds.x, minBounds.y, minBounds.z),
+          float3(minBounds.x, maxBounds.y, minBounds.z),
+          float3(maxBounds.x, maxBounds.y, minBounds.z),
+          float3(minBounds.x, minBounds.y, maxBounds.z),
+          float3(maxBounds.x, minBounds.y, maxBounds.z),
+          float3(minBounds.x, maxBounds.y, maxBounds.z),
+          float3(maxBounds.x, maxBounds.y, maxBounds.z)
+        };
+        float4 clip[8];
+        for (uint corner = 0; corner < 8; ++corner) {
+          clip[corner] = frame->clipFromCameraRelative * float4(corners[corner], 1.0f);
+          if (!all(isfinite(clip[corner])) || clip[corner].w <= 0.0f) {
+            uncertain = true;
+            break;
+          }
+        }
+        if (!uncertain) {
+          bool outsideLeft = true;
+          bool outsideRight = true;
+          bool outsideBottom = true;
+          bool outsideTop = true;
+          bool outsideNear = true;
+          bool outsideFar = true;
+          for (uint corner = 0; corner < 8; ++corner) {
+            outsideLeft = outsideLeft && clip[corner].x < -clip[corner].w;
+            outsideRight = outsideRight && clip[corner].x > clip[corner].w;
+            outsideBottom = outsideBottom && clip[corner].y < -clip[corner].w;
+            outsideTop = outsideTop && clip[corner].y > clip[corner].w;
+            outsideNear = outsideNear && clip[corner].z < -clip[corner].w;
+            outsideFar = outsideFar && clip[corner].z > clip[corner].w;
+          }
+          visible = !(outsideLeft || outsideRight || outsideBottom
+                      || outsideTop || outsideNear || outsideFar);
+        }
+      }
+      if (uncertain) {
+        atomic_fetch_add_explicit(&counters[1], 1u, memory_order_relaxed);
+      }
+      if (visible || uncertain) {
+        uint word = candidateIndex >> 5;
+        uint bit = candidateIndex & 31u;
+        atomic_fetch_or_explicit(&visibilityWords[word], 1u << bit, memory_order_relaxed);
+        atomic_fetch_add_explicit(&counters[0], 1u, memory_order_relaxed);
+      }
+    }
+
+    // One 256-thread group computes an exclusive local rank for each
+    // candidate and emits one sum. The zero-padded final group keeps all
+    // threadgroup barriers well-defined for arbitrary candidate counts.
+    kernel void metallum_terrain_visibility_block_scan(
+      device const atomic_uint *visibilityWords [[buffer(2)]],
+      device uint *prefixLocal [[buffer(4)]],
+      device uint *blockSums [[buffer(5)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint localIndex [[thread_index_in_threadgroup]],
+      uint3 candidatePosition [[thread_position_in_grid]],
+      uint3 groupPosition [[threadgroup_position_in_grid]]) {
+      threadgroup uint scan[256];
+      uint candidateIndex = candidatePosition.x;
+      uint value = 0u;
+      if (candidateIndex < params.candidateCount) {
+        uint word = atomic_load_explicit(&visibilityWords[candidateIndex >> 5], memory_order_relaxed);
+        value = (word >> (candidateIndex & 31u)) & 1u;
+      }
+      scan[localIndex] = value;
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      for (uint offset = 1u; offset < 256u; offset <<= 1u) {
+        uint add = localIndex >= offset ? scan[localIndex - offset] : 0u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        scan[localIndex] += add;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+      }
+      if (candidateIndex < params.candidateCount) {
+        prefixLocal[candidateIndex] = scan[localIndex] - value;
+      }
+      if (localIndex == 255u) {
+        blockSums[groupPosition.x] = scan[255];
+      }
+    }
+
+    // Scan block sums using the same local primitive, producing a local
+    // offset for every block and one sum for the next hierarchy level.
+    kernel void metallum_terrain_visibility_block_sums_scan(
+      device const uint *blockSums [[buffer(5)]],
+      device uint *blockOffsets [[buffer(6)]],
+      device uint *groupSums [[buffer(7)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint localIndex [[thread_index_in_threadgroup]],
+      uint3 blockPosition [[thread_position_in_grid]],
+      uint3 groupPosition [[threadgroup_position_in_grid]]) {
+      threadgroup uint scan[256];
+      uint blockIndex = blockPosition.x;
+      uint value = blockIndex < params.blockCount ? blockSums[blockIndex] : 0u;
+      scan[localIndex] = value;
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      for (uint offset = 1u; offset < 256u; offset <<= 1u) {
+        uint add = localIndex >= offset ? scan[localIndex - offset] : 0u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        scan[localIndex] += add;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+      }
+      if (blockIndex < params.blockCount) {
+        blockOffsets[blockIndex] = scan[localIndex] - value;
+      }
+      if (localIndex == 255u) {
+        groupSums[groupPosition.x] = scan[255];
+      }
+    }
+
+    // The final hierarchy level has at most sixteen entries for the bounded
+    // one-million-candidate ABI, so it remains one padded local group rather
+    // than introducing a serial full-array scan.
+    kernel void metallum_terrain_visibility_group_scan(
+      device const uint *groupSums [[buffer(7)]],
+      device uint *groupOffsets [[buffer(8)]],
+      device uint *compactedCount [[buffer(10)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint localIndex [[thread_index_in_threadgroup]]) {
+      threadgroup uint scan[256];
+      uint value = localIndex < params.groupCount ? groupSums[localIndex] : 0u;
+      scan[localIndex] = value;
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      for (uint offset = 1u; offset < 256u; offset <<= 1u) {
+        uint add = localIndex >= offset ? scan[localIndex - offset] : 0u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        scan[localIndex] += add;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+      }
+      if (localIndex < params.groupCount) {
+        groupOffsets[localIndex] = scan[localIndex] - value;
+      }
+      if (localIndex == 0u) {
+        compactedCount[0] = scan[255];
+      }
+    }
+
+    // Scatter uses the hierarchical exclusive rank. Since candidateIndex is
+    // the source position and each rank is unique, output order is exactly
+    // ascending source candidate index without an atomic allocator.
+    kernel void metallum_terrain_visibility_scatter(
+      device const atomic_uint *visibilityWords [[buffer(2)]],
+      device const uint *prefixLocal [[buffer(4)]],
+      device const uint *blockOffsets [[buffer(6)]],
+      device const uint *groupOffsets [[buffer(8)]],
+      device uint *compactedIndices [[buffer(9)]],
+      constant TerrainVisibilityCompactionParams &params [[buffer(11)]],
+      uint candidateIndex [[thread_position_in_grid]]) {
+      if (candidateIndex >= params.candidateCount) {
+        return;
+      }
+      uint word = atomic_load_explicit(&visibilityWords[candidateIndex >> 5], memory_order_relaxed);
+      if (((word >> (candidateIndex & 31u)) & 1u) == 0u) {
+        return;
+      }
+      uint block = candidateIndex >> 8;
+      uint group = block >> 8;
+      uint rank = groupOffsets[group] + blockOffsets[block] + prefixLocal[candidateIndex];
+      if (rank < params.candidateCount) {
+        compactedIndices[rank] = candidateIndex;
+      }
+    }
+    """
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private func terrainVisibilityComputePipelines(
+    device: MTLDevice,
+    source: String
+) -> TerrainVisibilityCompactionPipelines? {
+    let key = TerrainVisibilityComputePipelineKey(deviceAddress: objectAddress(device))
+    NativeState.terrainVisibilityPipelineLock.lock()
+    defer { NativeState.terrainVisibilityPipelineLock.unlock() }
+    if let cached = NativeState.terrainVisibilityPipelines[key] {
+        return cached
+    }
+    let pipeline: TerrainVisibilityCompactionPipelines? = NativeState.onCompilerThread {
+        do {
+            let library = try device.makeLibrary(source: source, options: nil)
+            guard let visibility = library.makeFunction(name: "metallum_terrain_gpu_visibility_probe"),
+                  let blockScan = library.makeFunction(name: "metallum_terrain_visibility_block_scan"),
+                  let blockSumsScan = library.makeFunction(name: "metallum_terrain_visibility_block_sums_scan"),
+                  let groupScan = library.makeFunction(name: "metallum_terrain_visibility_group_scan"),
+                  let scatter = library.makeFunction(name: "metallum_terrain_visibility_scatter") else {
+                return nil
+            }
+            let visibilityState = try device.makeComputePipelineState(function: visibility)
+            let blockScanState = try device.makeComputePipelineState(function: blockScan)
+            let blockSumsScanState = try device.makeComputePipelineState(function: blockSumsScan)
+            let groupScanState = try device.makeComputePipelineState(function: groupScan)
+            let scatterState = try device.makeComputePipelineState(function: scatter)
+            residencyTrackCreated(visibilityState)
+            residencyTrackCreated(blockScanState)
+            residencyTrackCreated(blockSumsScanState)
+            residencyTrackCreated(groupScanState)
+            residencyTrackCreated(scatterState)
+            return TerrainVisibilityCompactionPipelines(
+                visibility: visibilityState,
+                blockScan: blockScanState,
+                blockSumsScan: blockSumsScanState,
+                groupScan: groupScanState,
+                scatter: scatterState
+            )
+        } catch {
+            NSLog("[metallum] terrain GPU visibility probe pipeline failed: %@", String(describing: error))
+            return nil
+        }
+    }
+    guard let pipeline else { return nil }
+    NativeState.terrainVisibilityPipelines[key] = pipeline
+    return pipeline
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private func terrainVisibilityOnlyPipeline(
+    device: MTLDevice,
+    source: String
+) -> MTLComputePipelineState? {
+    let key = TerrainVisibilityComputePipelineKey(deviceAddress: objectAddress(device))
+    NativeState.terrainVisibilityPipelineLock.lock()
+    defer { NativeState.terrainVisibilityPipelineLock.unlock() }
+    if let cached = NativeState.terrainVisibilityOnlyPipelines[key] {
+        return cached
+    }
+    let pipeline: MTLComputePipelineState? = NativeState.onCompilerThread {
+        do {
+            let library = try device.makeLibrary(source: source, options: nil)
+            guard let visibility = library.makeFunction(name: "metallum_terrain_gpu_visibility_probe") else {
+                return nil
+            }
+            let pipeline = try device.makeComputePipelineState(function: visibility)
+            residencyTrackCreated(pipeline)
+            return pipeline
+        } catch {
+            return nil
+        }
+    }
+    if let pipeline {
+        NativeState.terrainVisibilityOnlyPipelines[key] = pipeline
+    }
+    return pipeline
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private func terrainVisibilityScenePipeline(
+    device: MTLDevice,
+    source: String
+) -> MTLComputePipelineState? {
+    let key = TerrainVisibilityComputePipelineKey(deviceAddress: objectAddress(device))
+    NativeState.terrainVisibilityPipelineLock.lock()
+    defer { NativeState.terrainVisibilityPipelineLock.unlock() }
+    if let cached = NativeState.terrainVisibilityScenePipelines[key] {
+        return cached
+    }
+    let pipeline: MTLComputePipelineState? = NativeState.onCompilerThread {
+        do {
+            let library = try device.makeLibrary(source: source, options: nil)
+            guard let visibility = library.makeFunction(name: "metallum_terrain_gpu_visibility_scene") else {
+                return nil
+            }
+            let pipeline = try device.makeComputePipelineState(function: visibility)
+            residencyTrackCreated(pipeline)
+            return pipeline
+        } catch {
+            NSLog("[metallum] persistent terrain visibility pipeline failed: %@", String(describing: error))
+            return nil
+        }
+    }
+    if let pipeline {
+        NativeState.terrainVisibilityScenePipelines[key] = pipeline
+    }
+    return pipeline
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private final class TerrainGpuVisibilitySceneOwner {
+    static let inFlightSlotCount = 3
+
+    final class FrameSlot {
+        let frameBuffer: MTLBuffer
+        let visibilityBuffer: MTLBuffer
+        let countersBuffer: MTLBuffer
+        let prefixLocalBuffer: MTLBuffer
+        let blockSumsBuffer: MTLBuffer
+        let blockOffsetsBuffer: MTLBuffer
+        let groupSumsBuffer: MTLBuffer
+        let groupOffsetsBuffer: MTLBuffer
+        let compactedIndicesBuffer: MTLBuffer
+        let compactedCountBuffer: MTLBuffer
+        let paramsBuffer: MTLBuffer
+        let arguments: MTL4ArgumentTable
+
+        init?(
+            device: MTLDevice,
+            candidateBuffer: MTLBuffer,
+            candidateCount: Int,
+            wordCount: Int,
+            blockCount: Int,
+            groupCount: Int,
+            slotIndex: Int
+        ) {
+            guard let frameBuffer = device.makeBuffer(length: 96, options: .storageModeShared),
+                  let visibilityBuffer = device.makeBuffer(
+                    length: wordCount * MemoryLayout<UInt32>.stride, options: .storageModeShared
+                  ),
+                  let countersBuffer = device.makeBuffer(
+                    length: 2 * MemoryLayout<UInt32>.stride, options: .storageModeShared
+                  ),
+                  let prefixLocalBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let blockSumsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let blockOffsetsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let groupSumsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let groupOffsetsBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let compactedIndicesBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let compactedCountBuffer = device.makeBuffer(length: 4, options: .storageModeShared),
+                  let paramsBuffer = device.makeBuffer(length: 12, options: .storageModeShared) else {
+                return nil
+            }
+            let descriptor = MTL4ArgumentTableDescriptor()
+            descriptor.maxBufferBindCount = 12
+            descriptor.initializeBindings = true
+            descriptor.supportAttributeStrides = false
+            descriptor.label = "Metallum Terrain Visibility Scene Arguments \(slotIndex)"
+            guard let arguments = try? device.makeArgumentTable(descriptor: descriptor) else {
+                return nil
+            }
+            frameBuffer.label = "Metallum Terrain Visibility Frame \(slotIndex)"
+            visibilityBuffer.label = "Metallum Terrain Visibility Bits \(slotIndex)"
+            countersBuffer.label = "Metallum Terrain Visibility Counters \(slotIndex)"
+            let params = paramsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+            params[0] = UInt32(candidateCount)
+            params[1] = UInt32(blockCount)
+            params[2] = UInt32(groupCount)
+            arguments.setAddress(candidateBuffer.gpuAddress, index: 0)
+            arguments.setAddress(frameBuffer.gpuAddress, index: 1)
+            arguments.setAddress(visibilityBuffer.gpuAddress, index: 2)
+            arguments.setAddress(countersBuffer.gpuAddress, index: 3)
+            arguments.setAddress(prefixLocalBuffer.gpuAddress, index: 4)
+            arguments.setAddress(blockSumsBuffer.gpuAddress, index: 5)
+            arguments.setAddress(blockOffsetsBuffer.gpuAddress, index: 6)
+            arguments.setAddress(groupSumsBuffer.gpuAddress, index: 7)
+            arguments.setAddress(groupOffsetsBuffer.gpuAddress, index: 8)
+            arguments.setAddress(compactedIndicesBuffer.gpuAddress, index: 9)
+            arguments.setAddress(compactedCountBuffer.gpuAddress, index: 10)
+            arguments.setAddress(paramsBuffer.gpuAddress, index: 11)
+            self.frameBuffer = frameBuffer
+            self.visibilityBuffer = visibilityBuffer
+            self.countersBuffer = countersBuffer
+            self.prefixLocalBuffer = prefixLocalBuffer
+            self.blockSumsBuffer = blockSumsBuffer
+            self.blockOffsetsBuffer = blockOffsetsBuffer
+            self.groupSumsBuffer = groupSumsBuffer
+            self.groupOffsetsBuffer = groupOffsetsBuffer
+            self.compactedIndicesBuffer = compactedIndicesBuffer
+            self.compactedCountBuffer = compactedCountBuffer
+            self.paramsBuffer = paramsBuffer
+            self.arguments = arguments
+        }
+
+        var buffers: [MTLBuffer] {
+            [frameBuffer, visibilityBuffer, countersBuffer, prefixLocalBuffer,
+             blockSumsBuffer, blockOffsetsBuffer, groupSumsBuffer, groupOffsetsBuffer,
+             compactedIndicesBuffer, compactedCountBuffer, paramsBuffer]
+        }
+    }
+
+    let sceneGeneration: UInt64
+    let candidateCount: Int
+    let candidateBuffer: MTLBuffer
+    let wordCount: Int
+    let blockCount: Int
+    let groupCount: Int
+    private let slots: [FrameSlot]
+
+    init?(
+        device: MTLDevice,
+        sceneGeneration: UInt64,
+        candidateCount: Int,
+        candidateBuffer: MTLBuffer
+    ) {
+        guard candidateCount > 0, candidateCount <= Int.max - 31 else { return nil }
+        let wordCount = (candidateCount + 31) / 32
+        let blockWidth = 256
+        guard candidateCount <= Int.max - (blockWidth - 1) else { return nil }
+        let blockCount = (candidateCount + blockWidth - 1) / blockWidth
+        let groupCount = max(1, (blockCount + blockWidth - 1) / blockWidth)
+        var created: [FrameSlot] = []
+        created.reserveCapacity(Self.inFlightSlotCount)
+        for slotIndex in 0..<Self.inFlightSlotCount {
+            guard let slot = FrameSlot(
+                device: device,
+                candidateBuffer: candidateBuffer,
+                candidateCount: candidateCount,
+                wordCount: wordCount,
+                blockCount: blockCount,
+                groupCount: groupCount,
+                slotIndex: slotIndex
+            ) else { return nil }
+            created.append(slot)
+        }
+        self.sceneGeneration = sceneGeneration
+        self.candidateCount = candidateCount
+        self.candidateBuffer = candidateBuffer
+        self.wordCount = wordCount
+        self.blockCount = blockCount
+        self.groupCount = groupCount
+        self.slots = created
+        residencyTrackCreated(candidateBuffer)
+        for slot in created {
+            for buffer in slot.buffers { residencyTrackCreated(buffer) }
+        }
+    }
+
+    func frameSlot(at index: Int) -> FrameSlot? {
+        guard index >= 0, index < slots.count else { return nil }
+        return slots[index]
+    }
+
+    deinit {
+        residencyTrackReleased(rawPointer(candidateBuffer))
+        for slot in slots {
+            for buffer in slot.buffers { residencyTrackReleased(rawPointer(buffer)) }
+        }
+    }
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private final class TerrainGpuVisibilityProbeOwner {
+    // Value-only lease identity avoids retaining the lease/context and
+    // forming a command-buffer completion cycle. The visible ICB must be
+    // authored from the exact lease that produced this in-flight bitset.
+    let leaseIdentity: ObjectIdentifier
+    let epoch: UInt64
+    let candidateCount: Int
+    let compactionEnabled: Bool
+    let wordCount: Int
+    let candidateBuffer: MTLBuffer
+    // A persistent scene owner keeps the shared candidate allocation live across epochs.
+    let sceneOwner: AnyObject?
+    let ownsCandidateBuffer: Bool
+    let ownsProbeBuffers: Bool
+    let matrixBuffer: MTLBuffer
+    let visibilityBuffer: MTLBuffer
+    let countersBuffer: MTLBuffer
+    let prefixLocalBuffer: MTLBuffer
+    let blockSumsBuffer: MTLBuffer
+    let blockOffsetsBuffer: MTLBuffer
+    let groupSumsBuffer: MTLBuffer
+    let groupOffsetsBuffer: MTLBuffer
+    let compactedIndicesBuffer: MTLBuffer
+    let compactedCountBuffer: MTLBuffer
+    let paramsBuffer: MTLBuffer
+    let blockCount: Int
+    let groupCount: Int
+    private let lock = NSLock()
+    private var completed = false
+    private var succeeded = false
+
+    init(
+        leaseIdentity: ObjectIdentifier,
+        epoch: UInt64,
+        candidateCount: Int,
+        compactionEnabled: Bool,
+        wordCount: Int,
+        candidateBuffer: MTLBuffer,
+        sceneOwner: AnyObject? = nil,
+        ownsCandidateBuffer: Bool = true,
+        ownsProbeBuffers: Bool = true,
+        matrixBuffer: MTLBuffer,
+        visibilityBuffer: MTLBuffer,
+        countersBuffer: MTLBuffer,
+        prefixLocalBuffer: MTLBuffer,
+        blockSumsBuffer: MTLBuffer,
+        blockOffsetsBuffer: MTLBuffer,
+        groupSumsBuffer: MTLBuffer,
+        groupOffsetsBuffer: MTLBuffer,
+        compactedIndicesBuffer: MTLBuffer,
+        compactedCountBuffer: MTLBuffer,
+        paramsBuffer: MTLBuffer,
+        blockCount: Int,
+        groupCount: Int
+    ) {
+        self.leaseIdentity = leaseIdentity
+        self.epoch = epoch
+        self.candidateCount = candidateCount
+        self.compactionEnabled = compactionEnabled
+        self.wordCount = wordCount
+        self.candidateBuffer = candidateBuffer
+        self.sceneOwner = sceneOwner
+        self.ownsCandidateBuffer = ownsCandidateBuffer
+        self.ownsProbeBuffers = ownsProbeBuffers
+        self.matrixBuffer = matrixBuffer
+        self.visibilityBuffer = visibilityBuffer
+        self.countersBuffer = countersBuffer
+        self.prefixLocalBuffer = prefixLocalBuffer
+        self.blockSumsBuffer = blockSumsBuffer
+        self.blockOffsetsBuffer = blockOffsetsBuffer
+        self.groupSumsBuffer = groupSumsBuffer
+        self.groupOffsetsBuffer = groupOffsetsBuffer
+        self.compactedIndicesBuffer = compactedIndicesBuffer
+        self.compactedCountBuffer = compactedCountBuffer
+        self.paramsBuffer = paramsBuffer
+        self.blockCount = blockCount
+        self.groupCount = groupCount
+        if ownsCandidateBuffer { residencyTrackCreated(candidateBuffer) }
+        if ownsProbeBuffers {
+            residencyTrackCreated(matrixBuffer)
+            residencyTrackCreated(visibilityBuffer)
+            residencyTrackCreated(countersBuffer)
+            residencyTrackCreated(prefixLocalBuffer)
+            residencyTrackCreated(blockSumsBuffer)
+            residencyTrackCreated(blockOffsetsBuffer)
+            residencyTrackCreated(groupSumsBuffer)
+            residencyTrackCreated(groupOffsetsBuffer)
+            residencyTrackCreated(compactedIndicesBuffer)
+            residencyTrackCreated(compactedCountBuffer)
+            residencyTrackCreated(paramsBuffer)
+        }
+    }
+
+    deinit {
+        if ownsCandidateBuffer { residencyTrackReleased(rawPointer(candidateBuffer)) }
+        if ownsProbeBuffers {
+            residencyTrackReleased(rawPointer(matrixBuffer))
+            residencyTrackReleased(rawPointer(visibilityBuffer))
+            residencyTrackReleased(rawPointer(countersBuffer))
+            residencyTrackReleased(rawPointer(prefixLocalBuffer))
+            residencyTrackReleased(rawPointer(blockSumsBuffer))
+            residencyTrackReleased(rawPointer(blockOffsetsBuffer))
+            residencyTrackReleased(rawPointer(groupSumsBuffer))
+            residencyTrackReleased(rawPointer(groupOffsetsBuffer))
+            residencyTrackReleased(rawPointer(compactedIndicesBuffer))
+            residencyTrackReleased(rawPointer(compactedCountBuffer))
+            residencyTrackReleased(rawPointer(paramsBuffer))
+        }
+    }
+
+    func complete(error: Error?) {
+        lock.lock()
+        completed = true
+        succeeded = error == nil
+        lock.unlock()
+    }
+
+    /// Completion-only query for the shipping visible-ICB lane. It deliberately
+    /// exposes no GPU-authored visibility bytes to the CPU.
+    func status() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard completed else { return 0 }
+        return succeeded ? 1 : -1
+    }
+
+    /// Returns 0 while the command buffer is in flight, 1 for a copied result,
+    /// and -1 for a completed command buffer that failed GPU execution.
+    func poll(
+        outEpoch: UnsafeMutablePointer<UInt64>?,
+        outVisible: UnsafeMutablePointer<UInt32>?,
+        outUncertain: UnsafeMutablePointer<UInt32>?,
+        outWordCount: UnsafeMutablePointer<UInt32>?,
+        outBitset: UnsafeMutablePointer<UInt32>?,
+        wordCapacity: Int32,
+        outCompactedCount: UnsafeMutablePointer<UInt32>?,
+        outCompactedIndices: UnsafeMutablePointer<UInt32>?,
+        compactedCapacity: Int32
+    ) -> Int32 {
+        lock.lock()
+        let isCompleted = completed
+        let isSucceeded = succeeded
+        lock.unlock()
+        guard isCompleted else { return 0 }
+        guard compactionEnabled else { return -1 }
+        guard isSucceeded, wordCapacity >= Int32(wordCount),
+              compactedCapacity >= 0,
+              let outEpoch, let outVisible, let outUncertain,
+              let outWordCount, let outBitset, let outCompactedCount,
+              let outCompactedIndices else {
+            return -1
+        }
+        let counters = countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        let words = visibilityBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        let compactedCount = compactedCountBuffer.contents().assumingMemoryBound(to: UInt32.self)[0]
+        guard compactedCount <= UInt32(candidateCount),
+              compactedCount == counters[0],
+              compactedCapacity >= Int32(compactedCount) else {
+            return -1
+        }
+        // Validate the GPU-authored representation before exposing it to the
+        // Java oracle. This is readback-time validation, not an intermediate
+        // CPU compaction: the GPU has already produced both rank and list.
+        let compacted = compactedIndicesBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        var previous: UInt32 = 0
+        for index in 0..<Int(compactedCount) {
+            let candidate = compacted[index]
+            guard candidate < UInt32(candidateCount), index == 0 || candidate > previous else {
+                return -1
+            }
+            let word = words[Int(candidate) >> 5]
+            guard (word & (1 << (candidate & 31))) != 0 else {
+                return -1
+            }
+            previous = candidate
+        }
+        if wordCount > 0 {
+            let remainder = candidateCount & 31
+            if remainder != 0 {
+                let tailMask = UInt32.max >> UInt32(32 - remainder)
+                guard (words[wordCount - 1] & ~tailMask) == 0 else { return -1 }
+            }
+        }
+        // The bitset and compact count are both GPU-authored; an exact set-bit
+        // count check catches a malformed scatter without creating a CPU list.
+        var setBitCount: UInt32 = 0
+        for index in 0..<wordCount {
+            setBitCount += UInt32(words[index].nonzeroBitCount)
+        }
+        guard setBitCount == compactedCount,
+              compactedCapacity >= Int32(compactedCount) else {
+            return -1
+        }
+        outEpoch.pointee = epoch
+        outVisible.pointee = counters[0]
+        outUncertain.pointee = counters[1]
+        outWordCount.pointee = UInt32(wordCount)
+        for index in 0..<wordCount {
+            outBitset[index] = words[index]
+        }
+        outCompactedCount.pointee = compactedCount
+        for index in 0..<Int(compactedCount) {
+            outCompactedIndices[index] = compacted[index]
+        }
+        return 1
+    }
+}
+
+/// Retains one typed visibility-probe owner for a short Java-side transition.
+/// The input is borrowed; the returned pointer carries exactly one ownership
+/// retain and must be released with metallum_release_object.
+@available(macOS 26.0, iOS 26.0, *)
+@_cdecl("metallum_terrain_visibility_probe_retain")
+public func metallum_terrain_visibility_probe_retain(
+    _ pointer: UnsafeMutableRawPointer?
+) -> UnsafeMutableRawPointer? {
+    guard let pointer else { return nil }
+    let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+    guard let owner = object as? TerrainGpuVisibilityProbeOwner else { return nil }
+    return retainedPointer(owner)
+}
+
+/// Retains one typed persistent-scene owner for a short Java-side transition.
+/// The input is borrowed; the returned pointer carries exactly one ownership
+/// retain and must be released with metallum_release_object.
+@available(macOS 26.0, iOS 26.0, *)
+@_cdecl("metallum_terrain_visibility_scene_retain")
+public func metallum_terrain_visibility_scene_retain(
+    _ pointer: UnsafeMutableRawPointer?
+) -> UnsafeMutableRawPointer? {
+    guard let pointer else { return nil }
+    let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+    guard let owner = object as? TerrainGpuVisibilitySceneOwner else { return nil }
+    return retainedPointer(owner)
+}
+
+@available(macOS 26.0, iOS 26.0, *)
+private func terrainGpuComputePipeline(
+    device: MTLDevice,
+    primitiveType: MTLPrimitiveType,
+    indexType: MTLIndexType,
+    source: String,
+    functionName: String,
+    variant: UInt8
+) -> TerrainGpuComputePipeline? {
+    let key = TerrainGpuComputePipelineKey(
+        deviceAddress: objectAddress(device),
+        primitiveType: primitiveType.rawValue,
+        indexType: indexType.rawValue,
+        variant: variant
+    )
+    NativeState.terrainGpuPipelineLock.lock()
+    defer { NativeState.terrainGpuPipelineLock.unlock() }
+    if let cached = NativeState.terrainGpuPipelines[key] {
+        return cached
+    }
+    let pipeline: TerrainGpuComputePipeline? = NativeState.onCompilerThread {
+        do {
+            let library = try device.makeLibrary(source: source, options: nil)
+            guard let function = library.makeFunction(name: functionName) else {
+                return nil
+            }
+            let state = try device.makeComputePipelineState(function: function)
+            residencyTrackCreated(state)
+            return TerrainGpuComputePipeline(state: state, function: function)
+        } catch {
+            NSLog("[metallum] terrain GPU ICB compute pipeline failed: %@", String(describing: error))
+            return nil
+        }
+    }
+    guard let pipeline else {
+        return nil
+    }
+    NativeState.terrainGpuPipelines[key] = pipeline
+    NativeState.terrainGpuPipelineCompileCount &+= 1
+    return pipeline
+}
+
+/// Creates one camera-independent terrain visibility scene. Java replaces this
+/// owner only when its exact mesh/candidate scene generation changes.
+@available(macOS 26.0, iOS 26.0, *)
+@_cdecl("metallum_MTLDevice_createTerrainGpuVisibilityScene")
+public func metallum_MTLDevice_createTerrainGpuVisibilityScene(
+    _ device: MTLDevice,
+    _ packedCandidates: UnsafePointer<UInt8>?,
+    _ candidateCount: Int32,
+    _ sceneGeneration: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard candidateCount > 0, let packedCandidates,
+          device.supportsFamily(.metal4),
+          candidateCount <= Int32(terrainVisibilityMaxCandidates) else {
+        return nil
+    }
+    let count = Int(candidateCount)
+    guard count <= Int.max / 48 else { return nil }
+    let words = UnsafeRawPointer(packedCandidates).assumingMemoryBound(to: UInt32.self)
+    for index in 0..<count {
+        let base = index * 12
+        let minX = Float(bitPattern: words[base + 4])
+        let minY = Float(bitPattern: words[base + 5])
+        let minZ = Float(bitPattern: words[base + 6])
+        let maxX = Float(bitPattern: words[base + 7])
+        let maxY = Float(bitPattern: words[base + 8])
+        let maxZ = Float(bitPattern: words[base + 9])
+        let range = Float(bitPattern: words[base + 10])
+        guard minX.isFinite, minY.isFinite, minZ.isFinite,
+              maxX.isFinite, maxY.isFinite, maxZ.isFinite, range.isFinite,
+              minX <= maxX, minY <= maxY, minZ <= maxZ, range >= 0 else {
+            return nil
+        }
+    }
+    guard let buffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCandidates),
+        length: count * 48,
+        options: .storageModeShared
+    ) else { return nil }
+    buffer.label = "Metallum Persistent Terrain Visibility Scene"
+    guard let owner = TerrainGpuVisibilitySceneOwner(
+        device: device,
+        sceneGeneration: sceneGeneration,
+        candidateCount: count,
+        candidateBuffer: buffer
+    ) else { return nil }
+    return retainedPointer(owner)
+}
+
+/// Dispatches visibility against a generation-owned scene. Only the 96-byte
+/// frame block and per-frame bitset/counters are allocated for each camera epoch.
+@available(macOS 26.0, iOS 26.0, *)
+@_cdecl("metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe")
+public func metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe(
+    _ pointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ scenePointer: UnsafeMutableRawPointer?,
+    _ packedFrame: UnsafePointer<UInt8>?,
+    _ expectedSceneGeneration: UInt64,
+    _ epoch: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard let scenePointer, let packedFrame,
+          let bridge = metal4RenderBridge(pointer),
+          device.supportsFamily(.metal4) else { return nil }
+    let object = Unmanaged<AnyObject>.fromOpaque(scenePointer).takeUnretainedValue()
+    guard let scene = object as? TerrainGpuVisibilitySceneOwner,
+          scene.sceneGeneration == expectedSceneGeneration,
+          scene.candidateCount > 0 else { return nil }
+    let count = scene.candidateCount
+    let frameWords = UnsafeRawPointer(packedFrame).assumingMemoryBound(to: UInt32.self)
+    for index in 0..<16 {
+        guard Float(bitPattern: frameWords[index]).isFinite else { return nil }
+    }
+    for index in 20..<23 {
+        let value = Float(bitPattern: frameWords[index])
+        guard value.isFinite, value >= 0.0, value <= 1.0 else { return nil }
+    }
+    let wordCount = scene.wordCount
+    let blockCount = scene.blockCount
+    let groupCount = scene.groupCount
+    let blockWidth = 256
+    guard let slot = scene.frameSlot(at: bridge.lease.slotIndex) else { return nil }
+    slot.frameBuffer.contents().copyMemory(from: UnsafeRawPointer(packedFrame), byteCount: 96)
+    slot.visibilityBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: wordCount)
+    slot.countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: 2)
+
+    let source = terrainVisibilityMslSource()
+    guard let pipeline = terrainVisibilityScenePipeline(device: device, source: source),
+          pipeline.maxTotalThreadsPerThreadgroup >= blockWidth,
+          let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+        return nil
+    }
+    computeEncoder.setArgumentTable(slot.arguments)
+    computeEncoder.setComputePipelineState(pipeline)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: blockWidth, height: 1, depth: 1)
+    )
+    computeEncoder.barrier(
+        afterStages: .dispatch,
+        beforeQueueStages: [.vertex, .fragment, .dispatch],
+        visibilityOptions: .device
+    )
+    computeEncoder.endEncoding()
+
+    let owner = TerrainGpuVisibilityProbeOwner(
+        leaseIdentity: ObjectIdentifier(bridge.lease),
+        epoch: epoch,
+        candidateCount: count,
+        compactionEnabled: false,
+        wordCount: wordCount,
+        candidateBuffer: scene.candidateBuffer,
+        sceneOwner: scene,
+        ownsCandidateBuffer: false,
+        ownsProbeBuffers: false,
+        matrixBuffer: slot.frameBuffer,
+        visibilityBuffer: slot.visibilityBuffer,
+        countersBuffer: slot.countersBuffer,
+        prefixLocalBuffer: slot.prefixLocalBuffer,
+        blockSumsBuffer: slot.blockSumsBuffer,
+        blockOffsetsBuffer: slot.blockOffsetsBuffer,
+        groupSumsBuffer: slot.groupSumsBuffer,
+        groupOffsetsBuffer: slot.groupOffsetsBuffer,
+        compactedIndicesBuffer: slot.compactedIndicesBuffer,
+        compactedCountBuffer: slot.compactedCountBuffer,
+        paramsBuffer: slot.paramsBuffer,
+        blockCount: blockCount,
+        groupCount: groupCount
+    )
+    bridge.lease.addCompletionHandler { [owner] error, _, _ in
+        owner.complete(error: error)
+    }
+    return retainedPointer(owner)
+}
+
+/// Dispatches the value-only visibility probe into the current Metal 4 main
+/// command buffer.  The returned owner retains all shared buffers until the
+/// command-buffer completion callback has made readback safe.
+@available(macOS 26.0, iOS 26.0, *)
+@_cdecl("metallum_MTLDevice_createTerrainGpuVisibilityProbe")
+public func metallum_MTLDevice_createTerrainGpuVisibilityProbe(
+    _ pointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ packedCandidates: UnsafePointer<UInt8>?,
+    _ packedMatrix: UnsafePointer<Float>?,
+    _ candidateCount: Int32,
+    _ epoch: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard candidateCount > 0,
+          let packedCandidates,
+          let packedMatrix,
+          let bridge = metal4RenderBridge(pointer),
+          device.supportsFamily(.metal4),
+          candidateCount <= Int32(terrainVisibilityMaxCandidates) else {
+        return nil
+    }
+    let count = Int(candidateCount)
+    guard count <= Int.max / (8 * MemoryLayout<Float>.stride) else {
+        return nil
+    }
+    let candidateBytes = count * 8 * MemoryLayout<Float>.stride
+    // The Java ABI is native little-endian float32 on Apple Silicon. The
+    // typed view below is used only after count and copy-size domains are
+    // checked; all values are still validated before dispatch.
+    let candidateFloats = UnsafeRawPointer(packedCandidates).assumingMemoryBound(to: Float.self)
+    for index in 0..<count {
+        let base = index * 8
+        let minX = candidateFloats[base]
+        let minY = candidateFloats[base + 1]
+        let minZ = candidateFloats[base + 2]
+        let maxX = candidateFloats[base + 3]
+        let maxY = candidateFloats[base + 4]
+        let maxZ = candidateFloats[base + 5]
+        let range = candidateFloats[base + 6]
+        guard minX.isFinite, minY.isFinite, minZ.isFinite,
+              maxX.isFinite, maxY.isFinite, maxZ.isFinite, range.isFinite,
+              minX <= maxX, minY <= maxY, minZ <= maxZ, range >= 0.0 else {
+            return nil
+        }
+    }
+    let matrixFloats = packedMatrix
+    for index in 0..<16 {
+        guard matrixFloats[index].isFinite else { return nil }
+    }
+    guard count <= Int.max - 31 else { return nil }
+    let wordCount = (count + 31) / 32
+    let compact = NativeState.terrainVisibilityCompactionEnabled
+    let blockWidth = 256
+    guard count <= Int.max - (blockWidth - 1) else { return nil }
+    let blockCount = (count + blockWidth - 1) / blockWidth
+    guard blockCount > 0,
+          blockCount <= Int32.max,
+          blockCount <= Int.max - (blockWidth - 1) else { return nil }
+    let groupCount = (blockCount + blockWidth - 1) / blockWidth
+    guard groupCount > 0, groupCount <= Int32.max,
+          wordCount <= Int.max / MemoryLayout<UInt32>.stride,
+          count <= Int.max / MemoryLayout<UInt32>.stride,
+          blockCount <= Int.max / MemoryLayout<UInt32>.stride,
+          groupCount <= Int.max / MemoryLayout<UInt32>.stride else { return nil }
+    guard let candidateBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCandidates),
+        length: candidateBytes,
+        options: .storageModeShared
+    ), let matrixBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedMatrix),
+        length: 16 * MemoryLayout<Float>.stride,
+        options: .storageModeShared
+    ), let visibilityBuffer = device.makeBuffer(
+        length: wordCount * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let countersBuffer = device.makeBuffer(
+        length: 2 * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let prefixLocalBuffer = device.makeBuffer(
+        length: (compact ? count : 1) * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let blockSumsBuffer = device.makeBuffer(
+        length: (compact ? blockCount : 1) * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let blockOffsetsBuffer = device.makeBuffer(
+        length: (compact ? blockCount : 1) * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let groupSumsBuffer = device.makeBuffer(
+        length: (compact ? groupCount : 1) * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let groupOffsetsBuffer = device.makeBuffer(
+        length: (compact ? groupCount : 1) * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let compactedIndicesBuffer = device.makeBuffer(
+        length: (compact ? count : 1) * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let compactedCountBuffer = device.makeBuffer(
+        length: MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ), let paramsBuffer = device.makeBuffer(
+        length: 3 * MemoryLayout<UInt32>.stride,
+        options: .storageModeShared
+    ) else {
+        return nil
+    }
+    visibilityBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: wordCount)
+    countersBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: 2)
+    prefixLocalBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: compact ? count : 1)
+    blockSumsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: compact ? blockCount : 1)
+    blockOffsetsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: compact ? blockCount : 1)
+    groupSumsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: compact ? groupCount : 1)
+    groupOffsetsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: compact ? groupCount : 1)
+    compactedIndicesBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: compact ? count : 1)
+    compactedCountBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        .initialize(repeating: 0, count: 1)
+    let params = paramsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+    params[0] = UInt32(count)
+    params[1] = UInt32(blockCount)
+    params[2] = UInt32(groupCount)
+
+    let visibilitySource = terrainVisibilityMslSource()
+    let visibilityPipeline: MTLComputePipelineState
+    let compactionPipelines: TerrainVisibilityCompactionPipelines?
+    if compact {
+        guard let pipelines = terrainVisibilityComputePipelines(
+            device: device,
+            source: visibilitySource
+        ), pipelines.visibility.maxTotalThreadsPerThreadgroup >= blockWidth,
+              pipelines.blockScan.maxTotalThreadsPerThreadgroup >= blockWidth,
+              pipelines.blockSumsScan.maxTotalThreadsPerThreadgroup >= blockWidth,
+              pipelines.groupScan.maxTotalThreadsPerThreadgroup >= blockWidth,
+              pipelines.scatter.maxTotalThreadsPerThreadgroup >= blockWidth else {
+            return nil
+        }
+        visibilityPipeline = pipelines.visibility
+        compactionPipelines = pipelines
+    } else {
+        guard let pipeline = terrainVisibilityOnlyPipeline(
+            device: device,
+            source: visibilitySource
+        ), pipeline.maxTotalThreadsPerThreadgroup >= blockWidth else {
+            return nil
+        }
+        visibilityPipeline = pipeline
+        compactionPipelines = nil
+    }
+    guard let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+        return nil
+    }
+    let argumentDescriptor = MTL4ArgumentTableDescriptor()
+    argumentDescriptor.maxBufferBindCount = 12
+    argumentDescriptor.initializeBindings = true
+    argumentDescriptor.supportAttributeStrides = false
+    guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    arguments.setAddress(candidateBuffer.gpuAddress, index: 0)
+    arguments.setAddress(matrixBuffer.gpuAddress, index: 1)
+    arguments.setAddress(visibilityBuffer.gpuAddress, index: 2)
+    arguments.setAddress(countersBuffer.gpuAddress, index: 3)
+    arguments.setAddress(prefixLocalBuffer.gpuAddress, index: 4)
+    arguments.setAddress(blockSumsBuffer.gpuAddress, index: 5)
+    arguments.setAddress(blockOffsetsBuffer.gpuAddress, index: 6)
+    arguments.setAddress(groupSumsBuffer.gpuAddress, index: 7)
+    arguments.setAddress(groupOffsetsBuffer.gpuAddress, index: 8)
+    arguments.setAddress(compactedIndicesBuffer.gpuAddress, index: 9)
+    arguments.setAddress(compactedCountBuffer.gpuAddress, index: 10)
+    arguments.setAddress(paramsBuffer.gpuAddress, index: 11)
+    computeEncoder.setArgumentTable(arguments)
+    let threadsPerBlock = MTLSize(width: blockWidth, height: 1, depth: 1)
+    computeEncoder.setComputePipelineState(visibilityPipeline)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
+        threadsPerThreadgroup: threadsPerBlock
+    )
+    if let pipeline = compactionPipelines {
+    computeEncoder.barrier(
+            afterEncoderStages: .dispatch,
+            beforeEncoderStages: .dispatch,
+            visibilityOptions: .device
+        )
+        computeEncoder.setComputePipelineState(pipeline.blockScan)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
+        threadsPerThreadgroup: threadsPerBlock
+    )
+    computeEncoder.barrier(
+        afterEncoderStages: .dispatch,
+        beforeEncoderStages: .dispatch,
+        visibilityOptions: .device
+    )
+    computeEncoder.setComputePipelineState(pipeline.blockSumsScan)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: groupCount, height: 1, depth: 1),
+        threadsPerThreadgroup: threadsPerBlock
+    )
+    computeEncoder.barrier(
+        afterEncoderStages: .dispatch,
+        beforeEncoderStages: .dispatch,
+        visibilityOptions: .device
+    )
+    computeEncoder.setComputePipelineState(pipeline.groupScan)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: 1, height: 1, depth: 1),
+        threadsPerThreadgroup: threadsPerBlock
+    )
+    computeEncoder.barrier(
+        afterEncoderStages: .dispatch,
+        beforeEncoderStages: .dispatch,
+        visibilityOptions: .device
+    )
+    computeEncoder.setComputePipelineState(pipeline.scatter)
+    computeEncoder.dispatchThreadgroups(
+        threadgroupsPerGrid: MTLSize(width: blockCount, height: 1, depth: 1),
+        threadsPerThreadgroup: threadsPerBlock
+    )
+    }
+    // The visibility/compaction results can feed either raster stages or a
+    // later GPU-authored ICB compute encoder. This is a queue dependency: the
+    // producer encoder has ended before those consumers begin, so publish the
+    // dispatch writes to every legal downstream stage instead of relying on a
+    // pass-local encoder barrier.
+    computeEncoder.barrier(
+        afterStages: .dispatch,
+        beforeQueueStages: [.vertex, .fragment, .dispatch],
+        visibilityOptions: .device
+    )
+    computeEncoder.endEncoding()
+
+    let owner = TerrainGpuVisibilityProbeOwner(
+        leaseIdentity: ObjectIdentifier(bridge.lease),
+        epoch: epoch,
+        candidateCount: count,
+        compactionEnabled: compact,
+        wordCount: wordCount,
+        candidateBuffer: candidateBuffer,
+        matrixBuffer: matrixBuffer,
+        visibilityBuffer: visibilityBuffer,
+        countersBuffer: countersBuffer,
+        prefixLocalBuffer: prefixLocalBuffer,
+        blockSumsBuffer: blockSumsBuffer,
+        blockOffsetsBuffer: blockOffsetsBuffer,
+        groupSumsBuffer: groupSumsBuffer,
+        groupOffsetsBuffer: groupOffsetsBuffer,
+        compactedIndicesBuffer: compactedIndicesBuffer,
+        compactedCountBuffer: compactedCountBuffer,
+        paramsBuffer: paramsBuffer,
+        blockCount: blockCount,
+        groupCount: groupCount
+    )
+    // Keep the owner (and therefore every GPU-addressed buffer) alive through
+    // completion even if Java abandons the result during a world reset.
+    bridge.lease.addCompletionHandler { [owner] error, _, _ in
+        owner.complete(error: error)
+    }
+    if !NativeState.terrainGpuEncodeLogged {
+        NativeState.terrainGpuEncodeLogged = true
+        NSLog("[metallum] terrain GPU visibility probe active: decision-only bitset + stable compaction; draw authority unchanged")
+    }
+    return retainedPointer(owner)
+}
+
+/// Creates one producer-owned terrain ICB. The Java owner retains the returned
+/// object for the lifetime of the real Sodium VKIndirectDrawBatch and routes
+/// replacement through the renderer destruction queue.
+@_cdecl("metallum_MTLDevice_createTerrainIndexedIcb")
+public func metallum_MTLDevice_createTerrainIndexedIcb(
+    _ device: MTLDevice,
+    _ primitiveType: MTLPrimitiveType,
+    _ indexType: MTLIndexType,
+    _ indexBuffer: MTLBuffer,
+    _ pipeline: MTLRenderPipelineState,
+    _ packedCommands: UnsafePointer<Int32>?,
+    _ drawCount: Int32
+) -> UnsafeMutableRawPointer? {
+    guard NativeState.terrainIcbEnabled,
+          drawCount > 0,
+          let packedCommands,
+          pipeline.supportIndirectCommandBuffers,
+          #available(macOS 26.0, iOS 26.0, *) else {
+        return nil
+    }
+    let commandCount = Int(drawCount)
+    guard commandCount <= Int.max / 5 else { return nil }
+
+    let descriptor = MTLIndirectCommandBufferDescriptor()
+    descriptor.commandTypes = .drawIndexed
+    descriptor.inheritPipelineState = true
+    descriptor.inheritBuffers = true
+    descriptor.maxVertexBufferBindCount = 0
+    descriptor.maxFragmentBufferBindCount = 0
+    descriptor.inheritDepthStencilState = true
+    descriptor.inheritDepthBias = true
+    descriptor.inheritDepthClipMode = true
+    descriptor.inheritCullMode = true
+    descriptor.inheritFrontFacingWinding = true
+    descriptor.inheritTriangleFillMode = true
+
+    let indexBytes = indexType == .uint16 ? 2 : 4
+    guard let commandBuffer = device.makeIndirectCommandBuffer(
+        descriptor: descriptor,
+        maxCommandCount: commandCount,
+        options: .storageModeShared
+    ) else {
+        return nil
+    }
+
+    for index in 0..<commandCount {
+        let base = index * 5
+        let indexCount = Int(packedCommands[base])
+        let instanceCount = Int(packedCommands[base + 1])
+        let firstIndex = Int(packedCommands[base + 2])
+        let baseVertex = Int(packedCommands[base + 3])
+        let firstInstance = Int(packedCommands[base + 4])
+        guard indexCount >= 0, instanceCount >= 0,
+              firstIndex >= 0, firstInstance >= 0,
+              firstIndex <= Int.max / indexBytes else {
+            return nil
+        }
+        commandBuffer.indirectRenderCommandAt(index).drawIndexedPrimitives(
+            primitiveType,
+            indexCount: indexCount,
+            indexType: indexType,
+            indexBuffer: indexBuffer,
+            indexBufferOffset: firstIndex * indexBytes,
+            instanceCount: instanceCount,
+            baseVertex: baseVertex,
+            baseInstance: firstInstance
+        )
+    }
+
+    residencyTrackCreated(commandBuffer)
+    NativeState.terrainIcbEncodedCount &+= 1
+    return retainedPointer(commandBuffer)
+}
+
+/// Creates the same indexed draw records through a Metal 4 GPU compute
+/// encoder. The first implementation is intentionally all-visible: one
+/// dispatched thread consumes one immutable producer record, leaving a clean
+/// command-authoring seam for a later visibility predicate/compaction phase.
+@_cdecl("metallum_MTLDevice_createTerrainGpuIndexedIcb")
+public func metallum_MTLDevice_createTerrainGpuIndexedIcb(
+    _ pointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ primitiveType: MTLPrimitiveType,
+    _ indexType: MTLIndexType,
+    _ indexBuffer: MTLBuffer,
+    _ pipeline: MTLRenderPipelineState,
+    _ packedCommands: UnsafePointer<Int32>?,
+    _ drawCount: Int32
+) -> UnsafeMutableRawPointer? {
+    guard NativeState.terrainIcbEnabled, NativeState.terrainGpuEncodeEnabled else {
+        NSLog("[metallum] terrain GPU ICB authoring disabled")
+        return nil
+    }
+    guard drawCount > 0, let packedCommands else {
+        NSLog("[metallum] terrain GPU ICB authoring rejected empty records")
+        return nil
+    }
+    guard pipeline.supportIndirectCommandBuffers else {
+        NSLog("[metallum] terrain GPU ICB authoring rejected a PSO without ICB support")
+        return nil
+    }
+    guard #available(macOS 26.0, iOS 26.0, *) else {
+        NSLog("[metallum] terrain GPU ICB authoring unavailable before Metal 4")
+        return nil
+    }
+    guard device.supportsFamily(.metal4) else {
+        NSLog("[metallum] terrain GPU ICB authoring rejected non-Metal-4 device")
+        return nil
+    }
+    guard let bridge = metal4RenderBridge(pointer) else {
+        NSLog("[metallum] terrain GPU ICB authoring received a non-Metal-4 render bridge")
+        return nil
+    }
+    guard let source = terrainGpuIcbMslSource(
+        primitiveType: primitiveType,
+        indexType: indexType
+    ) else {
+        NSLog("[metallum] terrain GPU ICB authoring rejected unsupported primitive/index type")
+        return nil
+    }
+    let commandCount = Int(drawCount)
+    guard commandCount <= Int.max / 5,
+          commandCount <= Int.max / (5 * MemoryLayout<Int32>.stride) else {
+        return nil
+    }
+
+    // Validate record domains without replaying a draw on the CPU. The GPU
+    // kernel remains the sole author of ICB commands; invalid producer data
+    // fails closed before any partially authored ICB can be published.
+    let indexBytes = indexType == .uint16 ? 2 : 4
+    for index in 0..<commandCount {
+        let base = index * 5
+        let indexCount = Int(packedCommands[base])
+        let instanceCount = Int(packedCommands[base + 1])
+        let firstIndex = Int(packedCommands[base + 2])
+        let firstInstance = Int(packedCommands[base + 4])
+        guard indexCount >= 0, instanceCount >= 0,
+              firstIndex >= 0, firstInstance >= 0,
+              firstIndex <= Int.max / indexBytes else {
+            return nil
+        }
+    }
+
+    let recordBytes = commandCount * 5 * MemoryLayout<Int32>.stride
+    guard let packedBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCommands),
+        length: recordBytes,
+        options: .storageModeShared
+    ) else {
+        return nil
+    }
+
+    let descriptor = MTLIndirectCommandBufferDescriptor()
+    descriptor.commandTypes = .drawIndexed
+    descriptor.inheritPipelineState = true
+    descriptor.inheritBuffers = true
+    descriptor.maxVertexBufferBindCount = 0
+    descriptor.maxFragmentBufferBindCount = 0
+    descriptor.inheritDepthStencilState = true
+    descriptor.inheritDepthBias = true
+    descriptor.inheritDepthClipMode = true
+    descriptor.inheritCullMode = true
+    descriptor.inheritFrontFacingWinding = true
+    descriptor.inheritTriangleFillMode = true
+    guard let commandBuffer = device.makeIndirectCommandBuffer(
+        descriptor: descriptor,
+        maxCommandCount: commandCount,
+        options: .storageModeShared
+    ) else {
+        return nil
+    }
+
+    guard let computePipeline = terrainGpuComputePipeline(
+        device: device,
+        primitiveType: primitiveType,
+        indexType: indexType,
+        source: source,
+        functionName: "metallum_terrain_gpu_encode",
+        variant: 0
+    ) else {
+        return nil
+    }
+    guard let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+        NSLog("[metallum] terrain GPU ICB could not create MTL4 compute encoder")
+        return nil
+    }
+
+    let argumentDescriptor = MTL4ArgumentTableDescriptor()
+    argumentDescriptor.maxBufferBindCount = 3
+    argumentDescriptor.initializeBindings = true
+    argumentDescriptor.supportAttributeStrides = false
+    guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
+    guard let argumentBuffer = device.makeBuffer(
+              length: argumentEncoder.encodedLength,
+              options: .storageModeShared
+          ) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    argumentEncoder.setArgumentBuffer(argumentBuffer, offset: 0)
+    argumentEncoder.setIndirectCommandBuffer(commandBuffer, index: 0)
+    arguments.setAddress(packedBuffer.gpuAddress, index: 0)
+    arguments.setAddress(argumentBuffer.gpuAddress, index: 1)
+    arguments.setAddress(indexBuffer.gpuAddress, index: 2)
+    computeEncoder.setArgumentTable(arguments)
+    computeEncoder.setComputePipelineState(computePipeline.state)
+    computeEncoder.resetCommands(
+        buffer: commandBuffer,
+        range: 0..<commandCount
+    )
+    computeEncoder.dispatchThreads(
+        threadsPerGrid: MTLSize(width: commandCount, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(
+            width: max(1, min(computePipeline.state.threadExecutionWidth, 64)),
+            height: 1,
+            depth: 1
+        )
+    )
+    computeEncoder.barrier(
+        afterStages: .dispatch,
+        beforeQueueStages: [.vertex, .fragment],
+        visibilityOptions: .device
+    )
+    computeEncoder.endEncoding()
+
+    let owner = TerrainGpuIcbOwner(
+        commandBuffer: commandBuffer,
+        lease: bridge.lease,
+        commandCount: commandCount,
+        packedCommands: packedBuffer,
+        argumentBuffer: argumentBuffer,
+        indexBuffer: indexBuffer,
+        pipeline: pipeline
+    )
+    NativeState.terrainIcbEncodedCount &+= 1
+    NativeState.terrainIcbGpuEncodedCount &+= 1
+    NativeState.terrainIcbGpuDispatchCount &+= 1
+    if !NativeState.terrainGpuEncodeLogged {
+        NativeState.terrainGpuEncodeLogged = true
+        NSLog("[metallum] terrain GPU ICB authoring active: all-visible records only; visibility culling not enabled")
+    }
+    return retainedPointer(owner)
+}
+
+
+/// GPU-authors a sparse source-ordinal terrain ICB directly from the visibility
+/// bitset produced earlier in the same Metal 4 command-buffer lease. Invisible
+/// source slots remain reset/no-op; the render pass executes the complete source
+/// range and never reads visibility back to the CPU.
+@_cdecl("metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb")
+public func metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
+    _ pointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ primitiveType: MTLPrimitiveType,
+    _ indexType: MTLIndexType,
+    _ indexBuffer: MTLBuffer,
+    _ pipeline: MTLRenderPipelineState,
+    _ packedCommands: UnsafePointer<Int32>?,
+    _ packedCandidateIndices: UnsafePointer<Int32>?,
+    _ drawCount: Int32,
+    _ visibilityProbePointer: UnsafeMutableRawPointer?,
+    _ expectedEpoch: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard NativeState.terrainIcbEnabled, NativeState.terrainGpuEncodeEnabled,
+          drawCount > 0, let packedCommands, let packedCandidateIndices,
+          let visibilityProbePointer,
+          pipeline.supportIndirectCommandBuffers,
+          #available(macOS 26.0, iOS 26.0, *),
+          device.supportsFamily(.metal4),
+          let bridge = metal4RenderBridge(pointer),
+          let source = terrainGpuIcbMslSource(primitiveType: primitiveType, indexType: indexType) else {
+        return nil
+    }
+    let retained = Unmanaged<AnyObject>.fromOpaque(visibilityProbePointer).takeUnretainedValue()
+    guard let visibilityOwner = retained as? TerrainGpuVisibilityProbeOwner,
+          visibilityOwner.leaseIdentity == ObjectIdentifier(bridge.lease),
+          visibilityOwner.epoch == expectedEpoch,
+          visibilityOwner.candidateCount > 0 else {
+        return nil
+    }
+    let commandCount = Int(drawCount)
+    guard commandCount <= Int.max / 5,
+          commandCount <= Int.max / (5 * MemoryLayout<Int32>.stride),
+          commandCount <= Int.max / MemoryLayout<Int32>.stride else {
+        return nil
+    }
+
+    let indexBytes = indexType == .uint16 ? 2 : 4
+    for index in 0..<commandCount {
+        let base = index * 5
+        let indexCount = Int(packedCommands[base])
+        let instanceCount = Int(packedCommands[base + 1])
+        let firstIndex = Int(packedCommands[base + 2])
+        let firstInstance = Int(packedCommands[base + 4])
+        let candidate = Int(packedCandidateIndices[index])
+        guard indexCount >= 0, instanceCount >= 0,
+              firstIndex >= 0, firstInstance >= 0,
+              firstIndex <= Int.max / indexBytes,
+              candidate >= 0, candidate < visibilityOwner.candidateCount else {
+            return nil
+        }
+    }
+
+    let recordBytes = commandCount * 5 * MemoryLayout<Int32>.stride
+    let mappingBytes = commandCount * MemoryLayout<Int32>.stride
+    guard let packedBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCommands), length: recordBytes, options: .storageModeShared
+    ), let mappingBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCandidateIndices), length: mappingBytes, options: .storageModeShared
+    ) else {
+        return nil
+    }
+
+    let descriptor = MTLIndirectCommandBufferDescriptor()
+    descriptor.commandTypes = .drawIndexed
+    descriptor.inheritPipelineState = true
+    descriptor.inheritBuffers = true
+    descriptor.maxVertexBufferBindCount = 0
+    descriptor.maxFragmentBufferBindCount = 0
+    descriptor.inheritDepthStencilState = true
+    descriptor.inheritDepthBias = true
+    descriptor.inheritDepthClipMode = true
+    descriptor.inheritCullMode = true
+    descriptor.inheritFrontFacingWinding = true
+    descriptor.inheritTriangleFillMode = true
+    guard let commandBuffer = device.makeIndirectCommandBuffer(
+        descriptor: descriptor, maxCommandCount: commandCount, options: .storageModeShared
+    ), let computePipeline = terrainGpuComputePipeline(
+        device: device,
+        primitiveType: primitiveType,
+        indexType: indexType,
+        source: source,
+        functionName: "metallum_terrain_gpu_encode_visible",
+        variant: 1
+    ), let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+        return nil
+    }
+
+    let argumentDescriptor = MTL4ArgumentTableDescriptor()
+    argumentDescriptor.maxBufferBindCount = 5
+    argumentDescriptor.initializeBindings = true
+    argumentDescriptor.supportAttributeStrides = false
+    guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
+    guard let argumentBuffer = device.makeBuffer(
+        length: argumentEncoder.encodedLength, options: .storageModeShared
+    ) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    argumentEncoder.setArgumentBuffer(argumentBuffer, offset: 0)
+    argumentEncoder.setIndirectCommandBuffer(commandBuffer, index: 0)
+    arguments.setAddress(packedBuffer.gpuAddress, index: 0)
+    arguments.setAddress(argumentBuffer.gpuAddress, index: 1)
+    arguments.setAddress(indexBuffer.gpuAddress, index: 2)
+    arguments.setAddress(visibilityOwner.visibilityBuffer.gpuAddress, index: 3)
+    arguments.setAddress(mappingBuffer.gpuAddress, index: 4)
+    computeEncoder.setArgumentTable(arguments)
+    computeEncoder.setComputePipelineState(computePipeline.state)
+    computeEncoder.resetCommands(buffer: commandBuffer, range: 0..<commandCount)
+    // The visibility producer is a previous compute encoder on this same queue.
+    // Pair its producer queue barrier with the precise dispatch consumer edge.
+    computeEncoder.barrier(
+        afterQueueStages: .dispatch,
+        beforeStages: .dispatch,
+        visibilityOptions: .device
+    )
+    computeEncoder.dispatchThreads(
+        threadsPerGrid: MTLSize(width: commandCount, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(
+            width: max(1, min(computePipeline.state.threadExecutionWidth, 64)),
+            height: 1,
+            depth: 1
+        )
+    )
+    if NativeState.terrainVisibleIcbOptimizeEnabled {
+        computeEncoder.optimizeCommands(buffer: commandBuffer, range: 0..<commandCount)
+    }
+    computeEncoder.barrier(
+        afterStages: .dispatch,
+        beforeQueueStages: [.vertex, .fragment],
+        visibilityOptions: .device
+    )
+    computeEncoder.endEncoding()
+
+    let owner = TerrainGpuIcbOwner(
+        commandBuffer: commandBuffer,
+        lease: bridge.lease,
+        commandCount: commandCount,
+        packedCommands: packedBuffer,
+        argumentBuffer: argumentBuffer,
+        indexBuffer: indexBuffer,
+        pipeline: pipeline,
+        candidateIndices: mappingBuffer,
+        visibilityOwner: visibilityOwner
+    )
+    NativeState.terrainIcbEncodedCount &+= 1
+    NativeState.terrainIcbGpuEncodedCount &+= 1
+    NativeState.terrainIcbGpuDispatchCount &+= 1
+    return retainedPointer(owner)
+}
+
+/// Fuses persistent-scene frustum testing and source-ordinal ICB authoring in
+/// one compute encoder. No intermediate visibility bitset is produced.
+@_cdecl("metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb")
+public func metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
+    _ pointer: UnsafeMutableRawPointer,
+    _ device: MTLDevice,
+    _ primitiveType: MTLPrimitiveType,
+    _ indexType: MTLIndexType,
+    _ indexBuffer: MTLBuffer,
+    _ pipeline: MTLRenderPipelineState,
+    _ packedCommands: UnsafePointer<Int32>?,
+    _ packedCandidateIndices: UnsafePointer<Int32>?,
+    _ drawCount: Int32,
+    _ scenePointer: UnsafeMutableRawPointer?,
+    _ packedFrame: UnsafePointer<UInt8>?,
+    _ expectedSceneGeneration: UInt64,
+    _ expectedCandidateCount: Int32
+) -> UnsafeMutableRawPointer? {
+    guard NativeState.terrainIcbEnabled, NativeState.terrainGpuEncodeEnabled,
+          drawCount > 0, expectedCandidateCount > 0,
+          let packedCommands, let packedCandidateIndices, let scenePointer, let packedFrame,
+          pipeline.supportIndirectCommandBuffers,
+          #available(macOS 26.0, iOS 26.0, *),
+          device.supportsFamily(.metal4),
+          let bridge = metal4RenderBridge(pointer),
+          let source = terrainGpuIcbMslSource(primitiveType: primitiveType, indexType: indexType) else {
+        return nil
+    }
+    let object = Unmanaged<AnyObject>.fromOpaque(scenePointer).takeUnretainedValue()
+    guard let scene = object as? TerrainGpuVisibilitySceneOwner,
+          scene.sceneGeneration == expectedSceneGeneration,
+          scene.candidateCount == Int(expectedCandidateCount),
+          let slot = scene.frameSlot(at: bridge.lease.slotIndex) else {
+        return nil
+    }
+    let frameWords = UnsafeRawPointer(packedFrame).assumingMemoryBound(to: UInt32.self)
+    for index in 0..<16 {
+        guard Float(bitPattern: frameWords[index]).isFinite else { return nil }
+    }
+    for index in 20..<23 {
+        let value = Float(bitPattern: frameWords[index])
+        guard value.isFinite, value >= 0.0, value <= 1.0 else { return nil }
+    }
+
+    let commandCount = Int(drawCount)
+    guard commandCount <= Int.max / 5,
+          commandCount <= Int.max / (5 * MemoryLayout<Int32>.stride),
+          commandCount <= Int.max / MemoryLayout<Int32>.stride else {
+        return nil
+    }
+    let indexBytes = indexType == .uint16 ? 2 : 4
+    for index in 0..<commandCount {
+        let base = index * 5
+        let indexCount = Int(packedCommands[base])
+        let instanceCount = Int(packedCommands[base + 1])
+        let firstIndex = Int(packedCommands[base + 2])
+        let firstInstance = Int(packedCommands[base + 4])
+        let candidate = Int(packedCandidateIndices[index])
+        guard indexCount >= 0, instanceCount >= 0,
+              firstIndex >= 0, firstInstance >= 0,
+              firstIndex <= Int.max / indexBytes,
+              candidate >= 0, candidate < scene.candidateCount else {
+            return nil
+        }
+    }
+
+    slot.frameBuffer.contents().copyMemory(from: UnsafeRawPointer(packedFrame), byteCount: 96)
+    let recordBytes = commandCount * 5 * MemoryLayout<Int32>.stride
+    let mappingBytes = commandCount * MemoryLayout<Int32>.stride
+    guard let packedBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCommands), length: recordBytes, options: .storageModeShared
+    ), let mappingBuffer = device.makeBuffer(
+        bytes: UnsafeRawPointer(packedCandidateIndices), length: mappingBytes, options: .storageModeShared
+    ) else {
+        return nil
+    }
+
+    let descriptor = MTLIndirectCommandBufferDescriptor()
+    descriptor.commandTypes = .drawIndexed
+    descriptor.inheritPipelineState = true
+    descriptor.inheritBuffers = true
+    descriptor.maxVertexBufferBindCount = 0
+    descriptor.maxFragmentBufferBindCount = 0
+    descriptor.inheritDepthStencilState = true
+    descriptor.inheritDepthBias = true
+    descriptor.inheritDepthClipMode = true
+    descriptor.inheritCullMode = true
+    descriptor.inheritFrontFacingWinding = true
+    descriptor.inheritTriangleFillMode = true
+    guard let commandBuffer = device.makeIndirectCommandBuffer(
+        descriptor: descriptor, maxCommandCount: commandCount, options: .storageModeShared
+    ), let computePipeline = terrainGpuComputePipeline(
+        device: device,
+        primitiveType: primitiveType,
+        indexType: indexType,
+        source: source,
+        functionName: "metallum_terrain_gpu_encode_fused_visible",
+        variant: 2
+    ), let computeEncoder = bridge.lease.commandBuffer.makeComputeCommandEncoder() else {
+        return nil
+    }
+
+    let argumentDescriptor = MTL4ArgumentTableDescriptor()
+    argumentDescriptor.maxBufferBindCount = 6
+    argumentDescriptor.initializeBindings = true
+    argumentDescriptor.supportAttributeStrides = false
+    guard let arguments = try? device.makeArgumentTable(descriptor: argumentDescriptor) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    let argumentEncoder = computePipeline.function.makeArgumentEncoder(bufferIndex: 1)
+    guard let argumentBuffer = device.makeBuffer(
+        length: argumentEncoder.encodedLength, options: .storageModeShared
+    ) else {
+        computeEncoder.endEncoding()
+        return nil
+    }
+    argumentEncoder.setArgumentBuffer(argumentBuffer, offset: 0)
+    argumentEncoder.setIndirectCommandBuffer(commandBuffer, index: 0)
+    arguments.setAddress(packedBuffer.gpuAddress, index: 0)
+    arguments.setAddress(argumentBuffer.gpuAddress, index: 1)
+    arguments.setAddress(indexBuffer.gpuAddress, index: 2)
+    arguments.setAddress(scene.candidateBuffer.gpuAddress, index: 3)
+    arguments.setAddress(slot.frameBuffer.gpuAddress, index: 4)
+    arguments.setAddress(mappingBuffer.gpuAddress, index: 5)
+    computeEncoder.setArgumentTable(arguments)
+    computeEncoder.setComputePipelineState(computePipeline.state)
+    computeEncoder.resetCommands(buffer: commandBuffer, range: 0..<commandCount)
+    computeEncoder.dispatchThreads(
+        threadsPerGrid: MTLSize(width: commandCount, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(
+            width: max(1, min(computePipeline.state.threadExecutionWidth, 64)),
+            height: 1,
+            depth: 1
+        )
+    )
+    if NativeState.terrainVisibleIcbOptimizeEnabled {
+        computeEncoder.optimizeCommands(buffer: commandBuffer, range: 0..<commandCount)
+    }
+    computeEncoder.barrier(
+        afterStages: .dispatch,
+        beforeQueueStages: [.vertex, .fragment],
+        visibilityOptions: .device
+    )
+    computeEncoder.endEncoding()
+
+    let owner = TerrainGpuIcbOwner(
+        commandBuffer: commandBuffer,
+        lease: bridge.lease,
+        commandCount: commandCount,
+        packedCommands: packedBuffer,
+        argumentBuffer: argumentBuffer,
+        indexBuffer: indexBuffer,
+        pipeline: pipeline,
+        candidateIndices: mappingBuffer,
+        visibilityOwner: scene
+    )
+    NativeState.terrainIcbEncodedCount &+= 1
+    NativeState.terrainIcbGpuEncodedCount &+= 1
+    NativeState.terrainIcbGpuDispatchCount &+= 1
+    return retainedPointer(owner)
+}
+
+/// Executes one already encoded terrain ICB. No command records are decoded or
+/// replayed here, preserving Sodium's one native submission call count.
+@_cdecl("metallum_MTLRenderCommandEncoder_executeTerrainIcb")
+public func metallum_MTLRenderCommandEncoder_executeTerrainIcb(
+    _ pointer: UnsafeMutableRawPointer,
+    _ indirectCommandBufferPointer: UnsafeMutableRawPointer,
+    _ drawCount: Int32
+) -> Int32 {
+    guard NativeState.terrainIcbEnabled,
+          drawCount > 0,
+          #available(macOS 26.0, iOS 26.0, *),
+          let bridge = metal4RenderBridge(pointer) else {
+        return 0
+    }
+    let indirectCommandBuffer: MTLIndirectCommandBuffer
+    let object = Unmanaged<AnyObject>.fromOpaque(indirectCommandBufferPointer).takeUnretainedValue()
+    if let owner = object as? TerrainGpuIcbOwner {
+        // GPU-authored ICBs are scoped to the exact Metal 4 main-queue lease
+        // that produced them.  Also require the complete source range: a
+        // shorter execute would silently omit source-ordinal slots, while a
+        // longer one would address outside the encoded command buffer.
+        guard owner.lease === bridge.lease,
+              Int(drawCount) == owner.commandCount else {
+            return 0
+        }
+        indirectCommandBuffer = owner.commandBuffer
+    } else if let raw = object as? MTLIndirectCommandBuffer {
+        indirectCommandBuffer = raw
+    } else {
+        return 0
+    }
+    bridge.encoder.executeCommands(
+        buffer: indirectCommandBuffer,
+        range: 0..<Int(drawCount)
+    )
+    NativeState.terrainIcbExecutedCount &+= 1
+    return 1
+}
+
 @_cdecl("metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect")
 public func metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect(
     _ pointer: UnsafeMutableRawPointer,
@@ -10165,7 +11930,6 @@ public func metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect(
     _ stride: UInt64
 ) {
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
-        bridge.lease.retainBoundBuffer(indirectBuffer)
         var offset = Int(indirectBufferOffset)
         for _ in 0..<drawCount {
             bridge.encoder.drawPrimitives(
@@ -10212,25 +11976,6 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesTriangleFan(
         return
     }
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
-        bridge.lease.retainBoundBuffer(indexBuffer)
-        bridge.lease.retainBoundBuffer(fanIndexBuffer)
-        NativeState.recordMetal4IndexedDraw(
-            indexCount: generatedIndexCount,
-            indexType: .uint32,
-            indexBuffer: fanIndexBuffer,
-            indexBufferOffset: fanIndexBufferOffset,
-            baseVertex: baseVertex,
-            pipelineLabel: bridge.currentPipelineLabel
-        )
-        bridge.recordIndexedDrawSnapshot(
-            indexCount: generatedIndexCount,
-            indexType: .uint32,
-            indexBuffer: fanIndexBuffer,
-            indexBufferOffset: fanIndexBufferOffset,
-            baseVertex: baseVertex,
-            instanceCount: instanceCount,
-            baseInstance: baseInstance
-        )
         bridge.encoder.drawIndexedPrimitives(
             primitiveType: .triangle,
             indexCount: generatedIndexCount,
@@ -10533,18 +12278,31 @@ public func metallum_configure_layer(_ layer: CAMetalLayer, _ width: Double, _ h
     #endif
 }
 
-@_cdecl("metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
-public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
+private func monotonicElapsedNanos(since start: UInt64) -> Int64 {
+    let now = DispatchTime.now().uptimeNanoseconds
+    guard now >= start else { return 0 }
+    let elapsed = now - start
+    return elapsed > UInt64(Int64.max) ? Int64.max : Int64(elapsed)
+}
+
+private func encodePresentTextureToDrawable(
     _ pointer: UnsafeMutableRawPointer,
     _ layer: CAMetalLayer,
     _ sourceTexture: MTLTexture,
     _ globalFence: MTLFence?
-) {
+) -> Int64 {
     return autoreleasepool {
+        let drawableWaitStart = DispatchTime.now().uptimeNanoseconds
         guard let drawable: CAMetalDrawable = layer.nextDrawable() else {
+            NativePresentationTelemetry.shared.recordDrawableWait(
+                nanos: monotonicElapsedNanos(since: drawableWaitStart)
+            )
             NSLog("[Metallum] WARNING: nextDrawable() returned nil (drawableSize=\(layer.drawableSize), frame=\(layer.frame), isOpaque=\(layer.isOpaque), device=\(layer.device != nil ? "set" : "nil"))")
-            return
+            return 0
         }
+        NativePresentationTelemetry.shared.recordDrawableWait(
+            nanos: monotonicElapsedNanos(since: drawableWaitStart)
+        )
 
         if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
             let renderPass = MTL4RenderPassDescriptor()
@@ -10554,7 +12312,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             renderPass.renderTargetWidth = drawable.texture.width
             renderPass.renderTargetHeight = drawable.texture.height
             guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
-                return
+                return 0
             }
             encoder.barrier(
                 afterQueueStages: [.fragment, .dispatch, .blit],
@@ -10576,14 +12334,14 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                     ? NativeState.presentLinearSampler
                     : NativeState.presentNearestSampler else {
                 encoder.endEncoding()
-                return
+                return 0
             }
             tables.1.setSamplerState(sampler.gpuResourceID, index: 0)
             encoder.setArgumentTable(tables.1, stages: MTLRenderStages.fragment)
             encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
             encoder.endEncoding()
             lease.presentDrawable = drawable
-            return
+            return 0
         }
 
         let commandBuffer = metal3CommandBuffer(pointer)
@@ -10594,7 +12352,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         renderPass.colorAttachments[0].storeAction = .store
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
-            return
+            return 0
         }
 
         metal4BarrierRenderAfterRender(encoder)
@@ -10634,11 +12392,67 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             encoder.updateFence(globalFence, after: .fragment)
         }
         encoder.endEncoding()
+        // Register before present so a fast callback cannot beat handler
+        // installation. The Java owner receives the id and cancels it if the
+        // command buffer is closed without a later commit.
+        let presentationTelemetryID = NativePresentationTelemetry.shared.schedulePresentation(drawable)
+        commandBuffer.addCompletedHandler { completedCommandBuffer in
+            if completedCommandBuffer.error != nil {
+                NativePresentationTelemetry.shared.resolveFailure(presentationTelemetryID)
+            }
+        }
         commandBuffer.present(drawable)
         #if os(iOS)
         CATransaction.flush()
         #endif
+        return Int64(presentationTelemetryID)
     }
+}
+
+/// Legacy void ABI retained for older Java/native pairs. New Java code uses
+/// the v2 export below so an uncommitted Metal 3 buffer can cancel its id.
+@_cdecl("metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
+public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
+    _ pointer: UnsafeMutableRawPointer,
+    _ layer: CAMetalLayer,
+    _ sourceTexture: MTLTexture,
+    _ globalFence: MTLFence?
+) {
+    _ = encodePresentTextureToDrawable(pointer, layer, sourceTexture, globalFence)
+}
+
+@_cdecl("metallum_MTLCommandBuffer_encodePresentTextureToDrawable_v2")
+public func metallum_MTLCommandBuffer_encodePresentTextureToDrawableV2(
+    _ pointer: UnsafeMutableRawPointer,
+    _ layer: CAMetalLayer,
+    _ sourceTexture: MTLTexture,
+    _ globalFence: MTLFence?
+) -> Int64 {
+    encodePresentTextureToDrawable(pointer, layer, sourceTexture, globalFence)
+}
+
+/// Ordinary CAMetalLayer presentation telemetry.  MetalFX frame-generation
+/// presenters intentionally do not feed these getters: their presented times
+/// belong to a separate display-link timeline.
+@_cdecl("metallum_presentation_latest_present_interval_nanos")
+public func metallum_presentation_latest_present_interval_nanos() -> Int64 {
+    NativePresentationTelemetry.shared.latestPresentIntervalNanos()
+}
+
+@_cdecl("metallum_presentation_latest_drawable_wait_nanos")
+public func metallum_presentation_latest_drawable_wait_nanos() -> Int64 {
+    NativePresentationTelemetry.shared.latestDrawableWaitNanos()
+}
+
+@_cdecl("metallum_presentation_frames_in_flight")
+public func metallum_presentation_frames_in_flight() -> Int64 {
+    NativePresentationTelemetry.shared.framesInFlight()
+}
+
+@_cdecl("metallum_presentation_cancel")
+public func metallum_presentation_cancel(_ identifier: Int64) {
+    guard identifier > 0 else { return }
+    NativePresentationTelemetry.shared.resolveFailure(UInt64(identifier))
 }
 
 @_cdecl("metallum_set_transfer_fence")
@@ -10697,100 +12511,62 @@ public func MTLBlitCommandEncoder_waitForFence(
 
 // MARK: - Generic compute / mipmap / compare-sampler ABI (Iris backend B0)
 //
-// The ABI remains pointer-shaped for Java FFM, but every operation now branches
-// on the concrete Metal 3 encoder or Metal 4 bridge. No MTL4 command-buffer lease
-// is force-cast to an MTLCommandBuffer, and no MTL4 compute encoder is force-cast
-// to MTLComputeCommandEncoder.
+// Vanilla Blaze3D 26.2 has no compute, storage-resource, mipmap-generation or
+// depth-compare-sampler concepts, so these exports are mod-private extensions
+// consumed by the Java layer through optional FFM downcalls. Compute encoders
+// participate in the same single-MTLFence hazard chain as render/blit encoders
+// (resources are allocated untracked): the Java owner must waitForFence on
+// begin and updateFence on end, exactly like MetalCommandEncoder does for the
+// other encoder kinds.
 
 @_cdecl("metallum_MTLCommandBuffer_makeComputeCommandEncoder")
 public func metallum_MTLCommandBuffer_makeComputeCommandEncoder(
-    _ pointer: UnsafeMutableRawPointer
+    _ commandBuffer: MTLCommandBuffer
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
-            guard let encoder = lease.commandBuffer.makeComputeCommandEncoder() else { return nil }
-            encoder.label = "Metallum Generic Compute (Metal 4)"
-            encoder.barrier(
-                afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
-                beforeStages: .dispatch,
-                visibilityOptions: .device
-            )
-            let arguments = lease.owner.computeArgumentTable(at: lease.slotIndex)
-            NativeState.metal4GenericComputeEncodeCount &+= 1
-            return retainedPointer(Metal4MainComputeEncoderBridge(
-                encoder: encoder,
-                arguments: arguments
-            ))
-        }
-        if #available(macOS 26.0, iOS 26.0, *), NativeState.metal4MainQueueStorage != nil {
-            NativeState.metal4LegacyEncoderViolationCount &+= 1
-            NSLog("[metallum] rejected Metal 3 compute encoder while Metal 4 main renderer is active")
-            return nil
-        }
-        NativeState.metal3GenericComputeEncodeCount &+= 1
-        return retainedPointer(metal3CommandBuffer(pointer).makeComputeCommandEncoder())
+        retainedPointer(commandBuffer.makeComputeCommandEncoder())
     }
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_setComputePipelineState")
 public func metallum_MTLComputeCommandEncoder_setComputePipelineState(
-    _ pointer: UnsafeMutableRawPointer,
+    _ encoder: MTLComputeCommandEncoder,
     _ pipelineState: MTLComputePipelineState
 ) {
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-        bridge.encoder.setComputePipelineState(pipelineState)
-        return
-    }
-    metal3ComputeEncoder(pointer).setComputePipelineState(pipelineState)
+    encoder.setComputePipelineState(pipelineState)
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_setBuffer")
 public func metallum_MTLComputeCommandEncoder_setBuffer(
-    _ pointer: UnsafeMutableRawPointer,
+    _ encoder: MTLComputeCommandEncoder,
     _ buffer: MTLBuffer?,
-    _ offset: UInt64,
+    _ offset: Int,
     _ index: Int32
 ) {
-    guard let nativeOffset = Int(exactly: offset) else {
-        NSLog("[metallum] rejected compute buffer offset outside Int range: %llu", offset)
-        return
-    }
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-        bridge.setBuffer(buffer, offset: nativeOffset, index: Int(index))
-        return
-    }
-    metal3ComputeEncoder(pointer).setBuffer(buffer, offset: nativeOffset, index: Int(index))
+    encoder.setBuffer(buffer, offset: offset, index: Int(index))
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_setTexture")
 public func metallum_MTLComputeCommandEncoder_setTexture(
-    _ pointer: UnsafeMutableRawPointer,
+    _ encoder: MTLComputeCommandEncoder,
     _ texture: MTLTexture?,
     _ index: Int32
 ) {
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-        bridge.setTexture(texture, index: Int(index))
-        return
-    }
-    metal3ComputeEncoder(pointer).setTexture(texture, index: Int(index))
+    encoder.setTexture(texture, index: Int(index))
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_setSamplerState")
 public func metallum_MTLComputeCommandEncoder_setSamplerState(
-    _ pointer: UnsafeMutableRawPointer,
+    _ encoder: MTLComputeCommandEncoder,
     _ sampler: MTLSamplerState?,
     _ index: Int32
 ) {
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-        bridge.setSampler(sampler, index: Int(index))
-        return
-    }
-    metal3ComputeEncoder(pointer).setSamplerState(sampler, index: Int(index))
+    encoder.setSamplerState(sampler, index: Int(index))
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_dispatchThreadgroups")
 public func metallum_MTLComputeCommandEncoder_dispatchThreadgroups(
-    _ pointer: UnsafeMutableRawPointer,
+    _ encoder: MTLComputeCommandEncoder,
     _ groupsX: Int32,
     _ groupsY: Int32,
     _ groupsZ: Int32,
@@ -10798,86 +12574,50 @@ public func metallum_MTLComputeCommandEncoder_dispatchThreadgroups(
     _ threadsPerGroupY: Int32,
     _ threadsPerGroupZ: Int32
 ) {
-    let groups = MTLSize(width: Int(groupsX), height: Int(groupsY), depth: Int(groupsZ))
-    let threads = MTLSize(
-        width: Int(threadsPerGroupX),
-        height: Int(threadsPerGroupY),
-        depth: Int(threadsPerGroupZ)
-    )
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-        bridge.prepareDispatch()
-        bridge.encoder.dispatchThreadgroups(
-            threadgroupsPerGrid: groups,
-            threadsPerThreadgroup: threads
+    encoder.dispatchThreadgroups(
+        MTLSize(width: Int(groupsX), height: Int(groupsY), depth: Int(groupsZ)),
+        threadsPerThreadgroup: MTLSize(
+            width: Int(threadsPerGroupX),
+            height: Int(threadsPerGroupY),
+            depth: Int(threadsPerGroupZ)
         )
-        return
-    }
-    metal3ComputeEncoder(pointer).dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
+    )
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect")
 public func metallum_MTLComputeCommandEncoder_dispatchThreadgroupsIndirect(
-    _ pointer: UnsafeMutableRawPointer,
+    _ encoder: MTLComputeCommandEncoder,
     _ indirectBuffer: MTLBuffer,
-    _ indirectOffset: UInt64,
+    _ indirectOffset: Int,
     _ threadsPerGroupX: Int32,
     _ threadsPerGroupY: Int32,
     _ threadsPerGroupZ: Int32
 ) {
-    let byteCount = 3 * MemoryLayout<UInt32>.stride
-    guard let nativeOffset = Int(exactly: indirectOffset),
-          nativeOffset % MemoryLayout<UInt32>.alignment == 0,
-          nativeOffset <= indirectBuffer.length,
-          byteCount <= indirectBuffer.length - nativeOffset else {
-        NSLog(
-            "[metallum] rejected invalid indirect compute range offset=%llu length=%d",
-            indirectOffset,
-            indirectBuffer.length
-        )
-        return
-    }
-    let threads = MTLSize(
-        width: Int(threadsPerGroupX),
-        height: Int(threadsPerGroupY),
-        depth: Int(threadsPerGroupZ)
-    )
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-        bridge.prepareDispatch()
-        bridge.encoder.dispatchThreadgroups(
-            indirectBuffer: indirectBuffer.gpuAddress + indirectOffset,
-            threadsPerThreadgroup: threads
-        )
-        return
-    }
-    metal3ComputeEncoder(pointer).dispatchThreadgroups(
+    encoder.dispatchThreadgroups(
         indirectBuffer: indirectBuffer,
-        indirectBufferOffset: nativeOffset,
-        threadsPerThreadgroup: threads
+        indirectBufferOffset: indirectOffset,
+        threadsPerThreadgroup: MTLSize(
+            width: Int(threadsPerGroupX),
+            height: Int(threadsPerGroupY),
+            depth: Int(threadsPerGroupZ)
+        )
     )
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_updateFence")
 public func metallum_MTLComputeCommandEncoder_updateFence(
-    _ pointer: UnsafeMutableRawPointer,
+    _ encoder: MTLComputeCommandEncoder,
     _ fence: MTLFence
 ) {
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-        bridge.publishWrites()
-        return
-    }
-    metal3ComputeEncoder(pointer).updateFence(fence)
+    encoder.updateFence(fence)
 }
 
 @_cdecl("metallum_MTLComputeCommandEncoder_waitForFence")
 public func metallum_MTLComputeCommandEncoder_waitForFence(
-    _ pointer: UnsafeMutableRawPointer,
+    _ encoder: MTLComputeCommandEncoder,
     _ fence: MTLFence
 ) {
-    if #available(macOS 26.0, iOS 26.0, *), metal4ComputeBridge(pointer) != nil {
-        // The MTL4 consumer barrier is encoded when the bridge is created.
-        return
-    }
-    metal3ComputeEncoder(pointer).waitForFence(fence)
+    encoder.waitForFence(fence)
 }
 
 @_cdecl("metallum_MTLDevice_makeComputePipelineState")
@@ -10885,14 +12625,11 @@ public func metallum_MTLDevice_makeComputePipelineState(
     _ device: MTLDevice,
     _ function: MTLFunction
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
+    return NativeState.onCompilerThread {
         do {
-            let pipeline = try trackedComputePipelineState(
-                device: device,
-                function: function,
-                identity: "java-compute/\(function.label ?? function.name)"
-            )
-            return retainedPointer(pipeline)
+            let state = try device.makeComputePipelineState(function: function)
+            residencyTrackCreated(state)
+            return retainedPointer(state)
         } catch {
             NSLog("[metallum] Failed to create compute pipeline state: %@", String(describing: error))
             return nil
@@ -10909,18 +12646,10 @@ public func metallum_MTLComputePipelineState_maxTotalThreadsPerThreadgroup(
 
 @_cdecl("metallum_MTLBlitCommandEncoder_generateMipmaps")
 public func metallum_MTLBlitCommandEncoder_generateMipmaps(
-    _ pointer: UnsafeMutableRawPointer,
+    _ encoder: MTLBlitCommandEncoder,
     _ texture: MTLTexture
 ) {
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4BlitBridge(pointer) {
-        bridge.encoder.generateMipmaps(texture: texture)
-        return
-    }
-    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4ComputeBridge(pointer) {
-        bridge.encoder.generateMipmaps(texture: texture)
-        return
-    }
-    metal3BlitEncoder(pointer).generateMipmaps(for: texture)
+    encoder.generateMipmaps(for: texture)
 }
 
 // Sampler creation with an optional depth-compare function. compareFunction
@@ -10980,11 +12709,6 @@ public func metallum_create_sampler_v3(
         descriptor.lodMinClamp = 0.0
         descriptor.lodMaxClamp = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
         descriptor.normalizedCoordinates = normalizedCoordinates != 0
-        // Every Java-visible sampler may be referenced through a compiled
-        // argument buffer. Metal validation aborts if this creation-time
-        // capability is omitted, even when the same sampler also supports the
-        // direct setter fallback used by internal native passes.
-        descriptor.supportArgumentBuffers = true
         if compareFunction >= 0, let compare = MTLCompareFunction(rawValue: UInt(compareFunction)) {
             descriptor.compareFunction = compare
         }
@@ -10992,9 +12716,6 @@ public func metallum_create_sampler_v3(
     }
 }
 
-/// Resolves a depth attachment that was created with storeAction=.unknown
-/// (deferred store mode). Only legal on encoders whose descriptor deferred
-/// the decision; the Java side tracks that invariant.
 @_cdecl("metallum_MTLRenderCommandEncoder_setDepthStoreAction")
 public func metallum_MTLRenderCommandEncoder_setDepthStoreAction(
     _ pointer: UnsafeMutableRawPointer,
@@ -11011,6 +12732,25 @@ public func metallum_MTLRenderCommandEncoder_setDepthStoreAction(
 @_cdecl("metallum_set_deferred_depth_store")
 public func metallum_set_deferred_depth_store(_ enabled: Int32) {
     NativeState.deferredDepthStore = enabled != 0
+}
+
+/// Resolves a color attachment store that was created as .unknown (deferred).
+/// The successor pass supplies the kill evidence while this encoder is still
+/// open, exactly like the depth contract; an unresolved .unknown at
+/// endEncoding is a Metal validation error, so the Java side must resolve
+/// every deferred slot it created.
+@_cdecl("metallum_MTLRenderCommandEncoder_setColorStoreAction")
+public func metallum_MTLRenderCommandEncoder_setColorStoreAction(
+    _ pointer: UnsafeMutableRawPointer,
+    _ index: Int32,
+    _ store: Int32
+) {
+    if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
+        bridge.encoder.setColorStoreAction(store != 0 ? .store : .dontCare, index: Int(index))
+        return
+    }
+    let encoder = metal3RenderEncoder(pointer)
+    encoder.setColorStoreAction(store != 0 ? .store : .dontCare, index: Int(index))
 }
 
 /// Routes render pipeline creation through MTL4Compiler (migration spec M2).
@@ -11102,93 +12842,6 @@ public func metallum_set_metal4_present_enabled(_ enabled: Int32) {
     NativeState.metal4PresentEnabled = enabled != 0
 }
 
-private func teardownMetalDeviceSession(_ device: MTLDevice) {
-    let address = objectAddress(device)
-
-    #if os(macOS) && canImport(MetalFX)
-    metallum_metalfx_shutdown()
-    #endif
-
-    if #available(macOS 26.0, iOS 26.0, *) {
-        if let context = NativeState.metal4MainQueueStorage as? Metal4MainQueueContext,
-           context.owns(device) {
-            NativeState.metal4MainQueueStorage = nil
-        }
-        if let pilot = NativeState.metal4MainQueuePilotStorage as? Metal4MainQueuePilot,
-           pilot.owns(device) {
-            NativeState.metal4MainQueuePilotStorage = nil
-        }
-        NativeState.metal4CompilerLock.lock()
-        if let compiler = NativeState.metal4CompilerStorage as? MTL4Compiler,
-           objectAddress(compiler.device) == address {
-            NativeState.metal4CompilerStorage = nil
-            NativeState.metal4Serializer = nil
-            NativeState.metal4LookupArchive = nil
-        }
-        NativeState.metal4CompilerLock.unlock()
-    }
-
-    if #available(macOS 15.0, iOS 18.0, *) {
-        NativeState.residencyLock.lock()
-        if let set = NativeState.residencySetStorage as? MTLResidencySet,
-           objectAddress(set.device) == address {
-            set.endResidency()
-            NativeState.residencySetStorage = nil
-            NativeState.residencyDirty = false
-            NativeState.residencyRequested = false
-        }
-        NativeState.residencyLock.unlock()
-    }
-
-    NativeState.depthStencilStates.removeAll()
-    NativeState.samplerStates.removeAll()
-    NativeState.clearPipelines.removeAll()
-    NativeState.copyPipelines.removeAll()
-    NativeState.presentPipeline = nil
-    NativeState.presentLinearSampler = nil
-    NativeState.presentNearestSampler = nil
-    NativeState.functionLibraries.removeAllObjects()
-    NativeState.binaryArchiveLock.lock()
-    NativeState.binaryArchive = nil
-    NativeState.binaryArchiveReadOnly = false
-    NativeState.binaryArchiveLock.unlock()
-
-    let indexedDrawStats = NativeState.metal4IndexedDrawTelemetryStats()
-    if indexedDrawStats.0 > 0 {
-        NSLog(
-            "[metallum] Metal 4 indexed draw telemetry: draws=%llu "
-                + "rangeViolations=%llu unknownIndexTypes=%llu zeroAddresses=%llu",
-            indexedDrawStats.0,
-            indexedDrawStats.1,
-            indexedDrawStats.2,
-            indexedDrawStats.3
-        )
-    }
-    NativeState.resetMetal4IndexedDrawTelemetry()
-
-    NativeState.metal4GenericComputeEncodeCount = 0
-    NativeState.metal4GenericBlitEncodeCount = 0
-    NativeState.metal4GenericRenderEncodeCount = 0
-    NativeState.metal3GenericComputeEncodeCount = 0
-    NativeState.metal3GenericBlitEncodeCount = 0
-    NativeState.metal4LegacyEncoderViolationCount = 0
-    NativeState.metal4AuxiliaryComputeEncodeCount = 0
-    NativeState.metal4SpatialEncodeCount = 0
-    NativeState.metal4TemporalEncodeCount = 0
-    NativeState.metal4FrameGenerationInputCount = 0
-    NativeState.metal4PipelineLogged = false
-    NativeState.metal4PipelineFallbackLogged = false
-    NativeState.metal4CompilerEnabled = false
-    NativeState.metal4PresentEnabled = false
-}
-
-@_cdecl("metallum_metal_device_shutdown")
-public func metallum_metal_device_shutdown(_ device: MTLDevice) {
-    autoreleasepool {
-        teardownMetalDeviceSession(device)
-    }
-}
-
 @_cdecl("metallum_release_object")
 public func metallum_release_object(_ obj: UnsafeMutableRawPointer?) {
     autoreleasepool {
@@ -11247,27 +12900,9 @@ public func metallum_MTLVertexDescriptor_setLayout(
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_create")
 public func metallum_MTLRenderPipelineDescriptor_create() -> UnsafeMutableRawPointer? {
-    let descriptor = MTLRenderPipelineDescriptor()
-    return retainedPointer(descriptor)
-}
-
-@_cdecl("metallum_MTLRenderPipelineDescriptor_setLabel")
-public func metallum_MTLRenderPipelineDescriptor_setLabel(
-    _ desc: MTLRenderPipelineDescriptor,
-    _ labelPtr: UnsafePointer<CChar>?
-) {
-    desc.label = stringFromOptionalCString(labelPtr)
-}
-
-@_cdecl("metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers")
-public func metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
-    _ desc: MTLRenderPipelineDescriptor,
-    _ enabled: Int32
-) {
-    // ICB-capable PSOs impose stricter shader resource-access rules. Declare
-    // the capability only for compiled argument-buffer layouts consumed by the
-    // inherited-state terrain ICB path.
-    desc.supportIndirectCommandBuffers = enabled != 0
+    NativeState.onCompilerThread {
+        retainedPointer(MTLRenderPipelineDescriptor())
+    }
 }
 
 @_cdecl("metallum_create_shader_function")
@@ -11276,20 +12911,22 @@ public func metallum_create_shader_function(
     _ sourcePtr: UnsafePointer<CChar>?,
     _ entryPtr: UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
+    return NativeState.onCompilerThread {
         guard let sourcePtr, let entryPtr else {
             return nil
         }
         do {
             let library = try device.makeLibrary(source: String(cString: sourcePtr), options: nil)
-            guard let function = registeredFunction(library, name: String(cString: entryPtr)) else {
+            guard let function = library.makeFunction(name: String(cString: entryPtr)) else {
                 NSLog("[metallum] Failed to resolve MSL entry point '%s'", entryPtr)
                 return nil
             }
             // Metal 4 needs the library back when it builds a pipeline from this
             // function (MTL4LibraryFunctionDescriptor), and MTLFunction does not
-            // carry it. registeredFunction records that association.
+            // carry it. Registering unconditionally keeps the Metal 3 and Metal 4
+            // paths from disagreeing when the switch is flipped mid-session; the
             // table is weak-keyed, so the cost is one entry per live function.
+            NativeState.register(function: function, library: library)
             return retainedPointer(function)
         } catch {
             NSLog("[metallum] Failed to compile MSL: %@", String(describing: error))
@@ -11304,8 +12941,10 @@ public func metallum_MTLRenderPipelineDescriptor_setCompiledFunctions(
     _ vertexFunction: MTLFunction,
     _ fragmentFunction: MTLFunction
 ) {
-    desc.vertexFunction = vertexFunction
-    desc.fragmentFunction = fragmentFunction
+    NativeState.onCompilerThread {
+        desc.vertexFunction = vertexFunction
+        desc.fragmentFunction = fragmentFunction
+    }
 }
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setVertexDescriptor")
@@ -11340,16 +12979,18 @@ public func metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat(
     _ index: Int32,
     _ format: MTLPixelFormat
 ) -> Int32 {
-    guard index >= 0 && index < 8 else {
-        NSLog("[Metallum] rejected color attachment format index %d", index)
-        return 0
+    NativeState.onCompilerThread {
+        guard index >= 0 && index < 8 else {
+            NSLog("[Metallum] rejected color attachment format index %d", index)
+            return 0
+        }
+        guard let attachment = desc.colorAttachments[Int(index)] else {
+            NSLog("[Metallum] color attachment descriptor %d is unavailable", index)
+            return 0
+        }
+        attachment.pixelFormat = format
+        return 1
     }
-    guard let attachment = desc.colorAttachments[Int(index)] else {
-        NSLog("[Metallum] color attachment descriptor %d is unavailable", index)
-        return 0
-    }
-    attachment.pixelFormat = format
-    return 1
 }
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats")
@@ -11367,6 +13008,14 @@ public func metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats(
     if stencilFormat != .invalid {
         desc.stencilAttachmentPixelFormat = stencilFormat
     }
+}
+
+@_cdecl("metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers")
+public func metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
+    _ desc: MTLRenderPipelineDescriptor,
+    _ enabled: Int32
+) {
+    desc.supportIndirectCommandBuffers = enabled != 0
 }
 
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState")
@@ -11744,12 +13393,11 @@ final class Metal4BumpAllocatorRing {
 
 // MARK: - Residency set (migration spec M3)
 
-/// Adds a freshly created Metal allocation to the residency set, if one is
-/// active. MTLResource is only one part of the Metal 4 allocation model:
-/// pipeline states also conform to MTLAllocation and must be resident before a
-/// command buffer uses them.
-/// Memoryless textures are excluded: they have no backing allocation, so adding
-/// them is invalid.
+/// Adds a freshly created allocation to the residency set, if one is active.
+/// `MTLRenderPipelineState` and `MTLComputePipelineState` conform to
+/// `MTLAllocation` but not `MTLResource`; using the latter here silently leaves
+/// Metal 4 pipeline state unmapped. Memoryless textures remain excluded because
+/// they have no backing allocation.
 @available(macOS 15.0, iOS 18.0, *)
 private func residencyAdd(_ allocation: any MTLAllocation) {
     NativeState.residencyLock.lock()
@@ -11758,26 +13406,57 @@ private func residencyAdd(_ allocation: any MTLAllocation) {
     if let texture = allocation as? MTLTexture, texture.storageMode == .memoryless {
         return
     }
+    let identity = ObjectIdentifier(allocation as AnyObject)
+    guard NativeState.residencyTrackedAllocations.insert(identity).inserted else {
+        return
+    }
+    // A resource can be proven to belong to a device; an unknown allocation is
+    // still passed through because MTLAllocation intentionally exposes no
+    // device property. All allocations created by this module are one of the
+    // three known types below.
+    if let resource = allocation as? MTLResource,
+       let residencyDevice = NativeState.residencyDeviceStorage,
+       objectAddress(resource.device) != objectAddress(residencyDevice) {
+        NativeState.residencyTrackedAllocations.remove(identity)
+        return
+    }
+    if let renderPipeline = allocation as? MTLRenderPipelineState,
+       let residencyDevice = NativeState.residencyDeviceStorage,
+       objectAddress(renderPipeline.device) != objectAddress(residencyDevice) {
+        NativeState.residencyTrackedAllocations.remove(identity)
+        return
+    }
+    if let computePipeline = allocation as? MTLComputePipelineState,
+       let residencyDevice = NativeState.residencyDeviceStorage,
+       objectAddress(computePipeline.device) != objectAddress(residencyDevice) {
+        NativeState.residencyTrackedAllocations.remove(identity)
+        return
+    }
     set.addAllocation(allocation)
+    NativeState.residencyCreatedCount &+= 1
     NativeState.residencyDirty = true
 }
 
-/// Drops an allocation from the residency set. Called from the release path,
-/// which the Java destruction queue already defers past the frames still in
-/// flight.
+/// Drops an allocation from the residency set. Called from the raw release
+/// path, which the Java destruction queue already defers past frames still in
+/// flight, and from explicit cache teardown for privately retained PSOs.
 @available(macOS 15.0, iOS 18.0, *)
 private func residencyRemove(_ allocation: any MTLAllocation) {
     NativeState.residencyLock.lock()
     defer { NativeState.residencyLock.unlock() }
     guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
+    let identity = ObjectIdentifier(allocation as AnyObject)
+    guard NativeState.residencyTrackedAllocations.remove(identity) != nil else {
+        return
+    }
     set.removeAllocation(allocation)
+    NativeState.residencyReleasedCount &+= 1
     NativeState.residencyDirty = true
 }
 
 /// Publishes pending additions and removals. commit() is expensive, so it runs
 /// at most once per submit — this is the one performance trap of residency sets.
-/// A later commit can add newly-created allocations, so requestResidency() must
-/// follow every commit rather than being treated as a one-time initialization.
+/// requestResidency() is persistent and only needs the first commit.
 @available(macOS 15.0, iOS 18.0, *)
 private func residencyCommitIfDirty() {
     NativeState.residencyLock.lock()
@@ -11785,21 +13464,27 @@ private func residencyCommitIfDirty() {
     guard NativeState.residencyDirty,
           let set = NativeState.residencySetStorage as? MTLResidencySet else { return }
     set.commit()
-    // `commit()` publishes the staged membership, but newly-added allocations
-    // still need the residency preparation request. This is especially
-    // important for Sodium, which creates a geometry arena when a newly
-    // visible RenderRegion first receives uploads.
-    set.requestResidency()
     NativeState.residencyDirty = false
-    NativeState.residencyRequested = true
+    if !NativeState.residencyRequested {
+        set.requestResidency()
+        NativeState.residencyRequested = true
+    }
 }
 
-/// Version-erased entry points so the call sites stay free of #available noise.
-private func residencyTrackCreated(_ allocation: AnyObject?) {
-    guard let allocation, NativeState.residencySetStorage != nil else { return }
-    if #available(macOS 15.0, iOS 18.0, *) {
-        guard let metalAllocation = allocation as? any MTLAllocation else { return }
-        residencyAdd(metalAllocation)
+/// Version-erased entry points so call sites stay free of #available noise.
+private func residencyTrackCreated(_ object: AnyObject?) {
+    guard let object, NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *), let allocation = object as? any MTLAllocation {
+        residencyAdd(allocation)
+    }
+}
+
+/// Object form used when a private cache releases a strong PSO reference
+/// without going through the Java raw-pointer ABI.
+private func residencyTrackReleased(_ object: AnyObject?) {
+    guard let object, NativeState.residencySetStorage != nil else { return }
+    if #available(macOS 15.0, iOS 18.0, *), let allocation = object as? any MTLAllocation {
+        residencyRemove(allocation)
     }
 }
 
@@ -11810,10 +13495,8 @@ private func residencyTrackCreated(_ allocation: AnyObject?) {
 private func residencyTrackReleased(_ pointer: UnsafeMutableRawPointer) {
     guard NativeState.residencySetStorage != nil else { return }
     if #available(macOS 15.0, iOS 18.0, *) {
-        guard let allocation = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? any MTLAllocation else {
-            return
-        }
-        residencyRemove(allocation)
+        let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+        residencyTrackReleased(object)
     }
 }
 
@@ -11833,15 +13516,25 @@ public func metallum_residency_set_enable(_ device: MTLDevice, _ queue: MTLComma
         guard #available(macOS 15.0, iOS 18.0, *) else { return 0 }
         NativeState.residencyLock.lock()
         defer { NativeState.residencyLock.unlock() }
-        if let existing = NativeState.residencySetStorage as? MTLResidencySet {
-            if objectAddress(existing.device) == objectAddress(device) {
-                queue.addResidencySet(existing)
-                return 1
+        if NativeState.residencySetStorage != nil {
+            // A process may expose more than one MTLDevice (for example an
+            // offscreen validation device and the presentation device). A
+            // residency set is device-scoped; never report success while
+            // attaching a second device to the first device's set.
+            if let activeDevice = NativeState.residencyDeviceStorage,
+               objectAddress(activeDevice) != objectAddress(device) {
+                NSLog("[metallum] residency set already belongs to another Metal device")
+                return 0
             }
-            existing.endResidency()
-            NativeState.residencySetStorage = nil
-            NativeState.residencyDirty = false
-            NativeState.residencyRequested = false
+            // The same residency set can be associated with each queue that
+            // executes work for this device. This call is harmless when the
+            // queue was already attached, and avoids returning success for a
+            // second same-device queue that would otherwise have no explicit
+            // residency guarantee.
+            if let set = NativeState.residencySetStorage as? MTLResidencySet {
+                queue.addResidencySet(set)
+            }
+            return 1
         }
         let descriptor = MTLResidencySetDescriptor()
         descriptor.label = "metallum-residency"
@@ -11851,8 +13544,12 @@ public func metallum_residency_set_enable(_ device: MTLDevice, _ queue: MTLComma
             return 0
         }
         NativeState.residencySetStorage = set
+        NativeState.residencyDeviceStorage = device
         NativeState.residencyDirty = false
         NativeState.residencyRequested = false
+        NativeState.residencyTrackedAllocations.removeAll()
+        NativeState.residencyCreatedCount = 0
+        NativeState.residencyReleasedCount = 0
         queue.addResidencySet(set)
         NSLog("[metallum] residency set attached to the main command queue")
         return 1
@@ -11876,6 +13573,26 @@ public func metallum_residency_set_stats(
         guard let set = NativeState.residencySetStorage as? MTLResidencySet else { return 0 }
         outAllocations?.pointee = UInt32(set.allAllocations.count)
         outBytes?.pointee = UInt64(set.allocatedSize)
+        return 1
+    }
+}
+
+/// Returns successful allocation add/remove counts for the active explicit
+/// set. These counters are intentionally separate from `allAllocations`: the
+/// latter is a live snapshot, while this pair proves that every test-created
+/// pipeline state was removed symmetrically after its raw owner was released.
+@_cdecl("metallum_residency_set_lifetime_stats")
+public func metallum_residency_set_lifetime_stats(
+    _ outCreated: UnsafeMutablePointer<UInt64>?,
+    _ outReleased: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    return autoreleasepool {
+        guard #available(macOS 15.0, iOS 18.0, *) else { return 0 }
+        NativeState.residencyLock.lock()
+        defer { NativeState.residencyLock.unlock() }
+        guard NativeState.residencySetStorage is MTLResidencySet else { return 0 }
+        outCreated?.pointee = NativeState.residencyCreatedCount
+        outReleased?.pointee = NativeState.residencyReleasedCount
         return 1
     }
 }
@@ -11957,20 +13674,6 @@ public func metallum_pso_archive_open(
 ) -> Int32 {
     return autoreleasepool {
         guard let pathPtr else { return 0 }
-        // The macOS 26 GPU-validation interposer crashes inside
-        // MTLMetalScriptBuilder while deserializing an existing AIRNT binary
-        // archive, before Metal can return an NSError.  This cannot be caught
-        // in Swift (the process receives SIGSEGV), so validation sessions must
-        // compile from source and leave the production archive untouched.
-        // MTL_DEBUG_LAYER alone is archive-safe; MTL_SHADER_VALIDATION is the
-        // switch that installs MTLGPUDebugDevice and triggers the bad loader.
-        let shaderValidation = ProcessInfo.processInfo.environment["MTL_SHADER_VALIDATION"]
-        if shaderValidation == "1" || shaderValidation?.lowercased() == "true" {
-            NSLog("[metallum] PSO binary archive disabled under Metal GPU validation")
-            NativeState.binaryArchive = nil
-            NativeState.metal4LookupArchive = nil
-            return 0
-        }
         // Metal 4 path (migration spec M2c). MTL4PipelineDataSetSerializer has no
         // equivalent of MTLBinaryArchive's "an archive loaded from disk can never
         // be re-serialized" defect, so there is no read-only mode here: every
@@ -12079,52 +13782,107 @@ public func metallum_MTLDevice_makeRenderPipelineState(
     _ device: MTLDevice,
     _ descriptor: MTLRenderPipelineDescriptor
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
-        if ProcessInfo.processInfo.environment["METALLUM_MRT_ABI_DEBUG"] == "1" {
-            let colorFormats = (0..<8)
-                .map { String(descriptor.colorAttachments[$0].pixelFormat.rawValue) }
-                .joined(separator: ",")
-            NSLog(
-                "[Metallum] MRT PSO descriptor colors=[%@] depth=%lu stencil=%lu",
-                colorFormats,
-                descriptor.depthAttachmentPixelFormat.rawValue,
-                descriptor.stencilAttachmentPixelFormat.rawValue
-            )
-        }
-        #if os(macOS)
-        if (descriptor.depthAttachmentPixelFormat == .depth24Unorm_stencil8
-            || descriptor.stencilAttachmentPixelFormat == .depth24Unorm_stencil8)
-            && !device.isDepth24Stencil8PixelFormatSupported {
-                return nil
-            }
-        #endif
-        if let archive = NativeState.binaryArchive {
-            descriptor.binaryArchives = [archive]
-        }
-        do {
-            let state = try trackedRenderPipelineState(
-                device: device,
-                descriptor: descriptor,
-                identity: "java-render/\(descriptor.label ?? "unlabeled")"
-            )
-            // Harvest for the next launch; failure only means this PSO is
-            // not archived, never a pipeline creation failure. Serialize()
-            // rejects entries whose fragment stage the AOT packer stripped
-            // ("expecting 'fragment' stage in pipeline no. N"), and one bad
-            // entry poisons the whole archive, so only harvest pipelines
-            // with a fragment function and at least one live color write.
-            if let archive = NativeState.binaryArchive,
-               !NativeState.binaryArchiveReadOnly,
-               descriptor.fragmentFunction != nil,
-               descriptorHasLiveColorWrite(descriptor) {
-                NativeState.binaryArchiveLock.lock()
-                try? archive.addRenderPipelineFunctions(descriptor: descriptor)
-                NativeState.binaryArchiveLock.unlock()
-            }
-            return retainedPointer(state)
-        } catch {
-            NSLog("[metallum] Failed to create render pipeline state: %@", String(describing: error))
+    return NativeState.onCompilerThread {
+        createRenderPipelineState(device: device, descriptor: descriptor)
+    }
+}
+
+private func createRenderPipelineState(
+    device: MTLDevice,
+    descriptor: MTLRenderPipelineDescriptor
+) -> UnsafeMutableRawPointer? {
+    if ProcessInfo.processInfo.environment["METALLUM_MRT_ABI_DEBUG"] == "1" {
+        let colorFormats = (0..<8)
+            .map { String(descriptor.colorAttachments[$0].pixelFormat.rawValue) }
+            .joined(separator: ",")
+        NSLog(
+            "[Metallum] MRT PSO descriptor colors=[%@] depth=%lu stencil=%lu",
+            colorFormats,
+            descriptor.depthAttachmentPixelFormat.rawValue,
+            descriptor.stencilAttachmentPixelFormat.rawValue
+        )
+    }
+    #if os(macOS)
+    if (descriptor.depthAttachmentPixelFormat == .depth24Unorm_stencil8
+        || descriptor.stencilAttachmentPixelFormat == .depth24Unorm_stencil8)
+        && !device.isDepth24Stencil8PixelFormatSupported {
             return nil
         }
+    #endif
+    // Metal 4 path (migration spec M2b). MTL4Compiler returns an ordinary
+    // MTLRenderPipelineState that binds to the existing Metal 3 encoders
+    // (proved by metal4PipelineSmokeTest), so this needs no encoder changes.
+    // Any failure — no compiler, an untranslatable descriptor, a compile
+    // error — falls through to the unchanged Metal 3 path below.
+    if NativeState.metal4CompilerEnabled, #available(macOS 26.0, iOS 26.0, *) {
+        if let compiler = NativeState.metal4Compiler(device),
+           let metal4Descriptor = makeMetal4Descriptor(descriptor) {
+            do {
+                // lookupArchives is Metal 4's replacement for
+                // descriptor.binaryArchives: last launch's compiled pipelines
+                // are found here instead of being recompiled. The serializer
+                // attached to the compiler collects this launch's, and
+                // metallum_pso_archive_flush writes them back.
+                let state: MTLRenderPipelineState
+                if let archive = NativeState.metal4LookupArchive as? MTL4Archive {
+                    let options = MTL4CompilerTaskOptions()
+                    options.lookupArchives = [archive]
+                    state = try compiler.makeRenderPipelineState(
+                        descriptor: metal4Descriptor,
+                        compilerTaskOptions: options
+                    )
+                } else {
+                    state = try compiler.makeRenderPipelineState(descriptor: metal4Descriptor)
+                }
+                if !NativeState.metal4PipelineLogged {
+                    NativeState.metal4PipelineLogged = true
+                    NSLog("[metallum] Metal 4 pipeline path engaged (MTL4Compiler)")
+                }
+                residencyTrackCreated(state)
+                return retainedPointer(state)
+            } catch {
+                NativeState.logMetal4PipelineFallback(
+                    "MTL4Compiler rejected the descriptor: \(String(describing: error))"
+                )
+                // The Metal 4 compiler is stricter than the Metal 3 device
+                // compiler about supportIndirectCommandBuffers.  A terrain
+                // pipeline may be eligible for the optional ICB lane while
+                // its fragment stage is not legal for an MTL4 ICB descriptor
+                // (for example on the M1 Pro driver).  Clear only that
+                // Metal-4-specific descriptor bit before the established
+                // Metal 3 fallback.  The Java caller already treats a failed
+                // ICB encode/execute as non-terminal and retries the ordinary
+                // indirect draw path, so returning a regular Metal 3 PSO keeps
+                // the world renderable without claiming ICB execution.
+                descriptor.supportIndirectCommandBuffers = false
+            }
+        } else {
+            NativeState.logMetal4PipelineFallback("no compiler, or descriptor not translatable")
+        }
+    }
+    if let archive = NativeState.binaryArchive {
+        descriptor.binaryArchives = [archive]
+    }
+    do {
+        let state = try device.makeRenderPipelineState(descriptor: descriptor)
+        // Harvest for the next launch; failure only means this PSO is
+        // not archived, never a pipeline creation failure. Serialize()
+        // rejects entries whose fragment stage the AOT packer stripped
+        // ("expecting 'fragment' stage in pipeline no. N"), and one bad
+        // entry poisons the whole archive, so only harvest pipelines
+        // with a fragment function and at least one live color write.
+        if let archive = NativeState.binaryArchive,
+           !NativeState.binaryArchiveReadOnly,
+           descriptor.fragmentFunction != nil,
+           descriptorHasLiveColorWrite(descriptor) {
+            NativeState.binaryArchiveLock.lock()
+            try? archive.addRenderPipelineFunctions(descriptor: descriptor)
+            NativeState.binaryArchiveLock.unlock()
+        }
+        residencyTrackCreated(state)
+        return retainedPointer(state)
+    } catch {
+        NSLog("[metallum] Failed to create render pipeline state: %@", String(describing: error))
+        return nil
     }
 }

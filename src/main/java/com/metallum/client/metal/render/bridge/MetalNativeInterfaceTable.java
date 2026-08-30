@@ -166,15 +166,13 @@ public final class MetalNativeInterfaceTable {
                 if (address == null || address.address() == 0L) {
                     return null;
                 }
-                return MetalFfmCallTelemetry.instrumentDowncall(
-                        LINKER.downcallHandle(
-                                address,
-                                FunctionDescriptor.of(
-                                        INT,
-                                        INT,
-                                        INT,
-                                        ValueLayout.ADDRESS
-                                )
+                return LINKER.downcallHandle(
+                        address,
+                        FunctionDescriptor.of(
+                                INT,
+                                INT,
+                                INT,
+                                ValueLayout.ADDRESS
                         )
                 );
             } catch (Throwable ignored) {

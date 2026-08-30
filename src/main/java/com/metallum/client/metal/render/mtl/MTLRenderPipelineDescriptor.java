@@ -16,17 +16,6 @@ public final class MTLRenderPipelineDescriptor implements AutoCloseable {
         return this.handle;
     }
 
-    public void setLabel(final String label) {
-        MetalNativeBridge.metallum_MTLRenderPipelineDescriptor_setLabel(this.handle, label);
-    }
-
-    public void setSupportIndirectCommandBuffers(final boolean enabled) {
-        MetalNativeBridge.metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
-                this.handle,
-                enabled
-        );
-    }
-
     public void setCompiledFunctions(final MemorySegment vertexFunction, final MemorySegment fragmentFunction) {
         MetalNativeBridge.metallum_MTLRenderPipelineDescriptor_setCompiledFunctions(
                 this.handle,
@@ -36,6 +25,14 @@ public final class MTLRenderPipelineDescriptor implements AutoCloseable {
     }
 
     public void setVertexDescriptor(final MTLVertexDescriptor vertexDescriptor) {
+        // Metal's vertexDescriptor is optional and only describes per-vertex
+        // stage-in data. Keep the native descriptor at its default nil value
+        // when the Java-side layout builder found no physical or generic
+        // vertex attributes instead of attaching an allocated-but-empty
+        // MTLVertexDescriptor.
+        if (vertexDescriptor.isEmpty()) {
+            return;
+        }
         MetalNativeBridge.metallum_MTLRenderPipelineDescriptor_setVertexDescriptor(
                 this.handle,
                 vertexDescriptor.handle()
@@ -64,6 +61,13 @@ public final class MTLRenderPipelineDescriptor implements AutoCloseable {
                 this.handle,
                 depthFormat,
                 stencilFormat
+        );
+    }
+
+    public void setSupportIndirectCommandBuffers(final boolean enabled) {
+        MetalNativeBridge.metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
+                this.handle,
+                enabled
         );
     }
 

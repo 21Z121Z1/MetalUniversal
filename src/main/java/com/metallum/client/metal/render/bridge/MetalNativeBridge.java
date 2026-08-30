@@ -157,7 +157,7 @@ public final class MetalNativeBridge {
             SymbolLookup lookup = createSymbolLookup();
 
 
-            createSystemDefaultDevice = downcall(lookup, "metallum_create_system_default_device", FunctionDescriptor.of(ValueLayout.ADDRESS));
+            createSystemDefaultDevice = downcallWithoutCritical(lookup, "metallum_create_system_default_device", FunctionDescriptor.of(ValueLayout.ADDRESS));
             copyDeviceName = downcall(lookup, "metallum_copy_device_name", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             NSWindowBackingScaleFactor = downcall(lookup, "metallum_NSWindow_backingScaleFactor", FunctionDescriptor.of(DOUBLE, ValueLayout.ADDRESS));
             createMetalLayer = downcall(lookup, "metallum_create_metal_layer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, DOUBLE));
@@ -167,7 +167,22 @@ public final class MetalNativeBridge {
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setDebugLabelsEnabled = downcall(lookup, "metallum_set_debug_labels_enabled", FunctionDescriptor.ofVoid(INT));
             systemThermalState = optionalDowncall(lookup, "metallum_system_thermal_state", FunctionDescriptor.of(INT));
-            initPipelines = downcall(lookup, "metallum_init_pipelines", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+            presentationLatestPresentIntervalNanos = optionalDowncall(
+                    lookup,
+                    "metallum_presentation_latest_present_interval_nanos",
+                    FunctionDescriptor.of(LONG)
+            );
+            presentationLatestDrawableWaitNanos = optionalDowncall(
+                    lookup,
+                    "metallum_presentation_latest_drawable_wait_nanos",
+                    FunctionDescriptor.of(LONG)
+            );
+            presentationFramesInFlight = optionalDowncall(
+                    lookup,
+                    "metallum_presentation_frames_in_flight",
+                    FunctionDescriptor.of(LONG)
+            );
+            initPipelines = downcallWithoutCritical(lookup, "metallum_init_pipelines", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             metalfxSupportsSpatial = downcall(lookup, "metallum_metalfx_supports_spatial", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metalfxSupportsTemporal = downcall(lookup, "metallum_metalfx_supports_temporal", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metalfxSupportsFrameGeneration = downcall(lookup, "metallum_metalfx_supports_frame_generation", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
@@ -359,6 +374,29 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS
                     )
             );
+            // RenderPassDescriptorV3 (P2): per-attachment load/store actions.
+            // Optional: an older shipping dylib without the symbol falls back
+            // to the V2 mapping at the call site.
+            MTLCommandBufferMakeRenderCommandEncoderV3 = optionalDowncall(
+                    lookup,
+                    "metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            DOUBLE,
+                            DOUBLE,
+                            DOUBLE,
+                            ValueLayout.ADDRESS
+                    )
+            );
             MTLRenderCommandEncoderSetRenderPipelineState = downcall(lookup, "metallum_MTLRenderCommandEncoder_setRenderPipelineState", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLRenderCommandEncoderSetDepthStencilState = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthStencilState", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLRenderCommandEncoderSetDepthBias = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthBias", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, FLOAT, FLOAT, FLOAT));
@@ -366,7 +404,6 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderSetCullMode = downcall(lookup, "metallum_MTLRenderCommandEncoder_setCullMode", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG));
             MTLRenderCommandEncoderSetTriangleFillMode = downcall(lookup, "metallum_MTLRenderCommandEncoder_setTriangleFillMode", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT));
             MTLRenderCommandEncoderSetBuffer = downcall(lookup, "metallum_MTLRenderCommandEncoder_setBuffer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, INT));
-            MTLRenderCommandEncoderSetVertexBufferWithAttributeStride = downcall(lookup, "metallum_MTLRenderCommandEncoder_setVertexBufferWithAttributeStride", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG));
             MTLRenderCommandEncoderSetBufferOffset = downcall(lookup, "metallum_MTLRenderCommandEncoder_setBufferOffset", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, INT));
             MTLRenderCommandEncoderSetTexture = downcall(lookup, "metallum_MTLRenderCommandEncoder_setTexture", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, INT));
             MTLRenderCommandEncoderSetTextureAndSampler = downcall(lookup, "metallum_MTLRenderCommandEncoder_setTextureAndSampler", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, INT));
@@ -405,6 +442,145 @@ public final class MetalNativeBridge {
                     "metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG)
             );
+            MTLDeviceCreateTerrainIndexedIcb = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainIndexedIcb",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT
+                    )
+            );
+            MTLDeviceCreateTerrainGpuIndexedIcb = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainGpuIndexedIcb",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT
+                    )
+            );
+            MTLDeviceCreateTerrainVisibleGpuIndexedIcb = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            ValueLayout.ADDRESS,
+                            LONG
+                    )
+            );
+            MTLDeviceCreateTerrainFusedVisibleGpuIndexedIcb = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainFusedVisibleGpuIndexedIcb",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            INT
+                    )
+            );
+            MTLDeviceCreateTerrainGpuVisibilityScene = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainGpuVisibilityScene",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, LONG
+                    )
+            );
+            MTLDeviceCreateTerrainGpuVisibilitySceneProbe = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainGpuVisibilitySceneProbe",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, LONG, LONG
+                    )
+            );
+            MTLDeviceCreateTerrainGpuVisibilityProbe = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLDevice_createTerrainGpuVisibilityProbe",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            LONG
+                    )
+            );
+            TerrainVisibilityProbeRetain = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_terrain_visibility_probe_retain",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            TerrainVisibilitySceneRetain = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_terrain_visibility_scene_retain",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            TerrainVisibilityProbePoll = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_terrain_visibility_probe_poll_v2",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT
+                    )
+            );
+            TerrainVisibilityProbeStatus = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_terrain_visibility_probe_status",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
+            );
+            MTLRenderCommandEncoderExecuteTerrainIcb = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLRenderCommandEncoder_executeTerrainIcb",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT
+                    )
+            );
             MTLRenderCommandEncoderDrawPrimitivesIndirect = downcall(
                     lookup,
                     "metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect",
@@ -439,6 +615,22 @@ public final class MetalNativeBridge {
                     "metallum_MTLCommandBuffer_encodePresentTextureToDrawable",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
+            MTLCommandBufferEncodePresentTextureToDrawableV2 = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLCommandBuffer_encodePresentTextureToDrawable_v2",
+                    FunctionDescriptor.of(
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS
+                    )
+            );
+            presentationCancel = optionalDowncall(
+                    lookup,
+                    "metallum_presentation_cancel",
+                    FunctionDescriptor.ofVoid(LONG)
+            );
             createBuffer = downcall(lookup, "metallum_create_buffer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
             createTexture2d = downcall(
                     lookup,
@@ -470,67 +662,62 @@ public final class MetalNativeBridge {
                     "metallum_create_sampler",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, INT, DOUBLE)
             );
-            MTLVertexDescriptorCreate = downcall(
+            MTLVertexDescriptorCreate = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLVertexDescriptor_create",
                     FunctionDescriptor.of(ValueLayout.ADDRESS)
             );
-            MTLVertexDescriptorSetAttribute = downcall(
+            MTLVertexDescriptorSetAttribute = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLVertexDescriptor_setAttribute",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG, LONG)
             );
-            MTLVertexDescriptorSetLayout = downcall(
+            MTLVertexDescriptorSetLayout = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLVertexDescriptor_setLayout",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG, LONG)
             );
-            MTLRenderPipelineDescriptorCreate = downcall(
+            MTLRenderPipelineDescriptorCreate = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_create",
                     FunctionDescriptor.of(ValueLayout.ADDRESS)
-            );
-            MTLRenderPipelineDescriptorSetLabel = downcall(
-                    lookup,
-                    "metallum_MTLRenderPipelineDescriptor_setLabel",
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-            );
-            MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers = downcall(
-                    lookup,
-                    "metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers",
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT)
             );
             createShaderFunction = downcallWithoutCritical(
                     lookup,
                     "metallum_create_shader_function",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
-            MTLRenderPipelineDescriptorSetCompiledFunctions = downcall(
+            MTLRenderPipelineDescriptorSetCompiledFunctions = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setCompiledFunctions",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
-            MTLRenderPipelineDescriptorSetVertexDescriptor = downcall(
+            MTLRenderPipelineDescriptorSetVertexDescriptor = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setVertexDescriptor",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
-            MTLRenderPipelineDescriptorSetAttachmentFormats = downcall(
+            MTLRenderPipelineDescriptorSetAttachmentFormats = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setAttachmentFormats",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG)
             );
-            MTLRenderPipelineDescriptorSetColorAttachmentFormat = optionalDowncall(
+            MTLRenderPipelineDescriptorSetColorAttachmentFormat = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setColorAttachmentFormat",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT, LONG)
             );
-            MTLRenderPipelineDescriptorSetDepthStencilFormats = optionalDowncall(
+            MTLRenderPipelineDescriptorSetDepthStencilFormats = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setDepthStencilFormats",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG)
             );
-            MTLRenderPipelineDescriptorSetColorAttachmentBlendState = optionalDowncall(
+            MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers = optionalDowncallWithoutCritical(
+                    lookup,
+                    "metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT)
+            );
+            MTLRenderPipelineDescriptorSetColorAttachmentBlendState = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState",
                     FunctionDescriptor.of(
@@ -547,12 +734,12 @@ public final class MetalNativeBridge {
                             LONG
                     )
             );
-            MTLRenderPipelineDescriptorSetBlendState = downcall(
+            MTLRenderPipelineDescriptorSetBlendState = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setBlendState",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT, LONG, LONG, LONG, LONG, LONG, LONG, LONG)
             );
-            MTLDeviceMakeRenderPipelineState = downcall(
+            MTLDeviceMakeRenderPipelineState = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLDevice_makeRenderPipelineState",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
@@ -565,16 +752,36 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderUpdateFence = downcall(lookup, "MTLRenderCommandEncoder_updateFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             MTLRenderCommandEncoderWaitForFence = downcallWithoutCritical(lookup, "MTLRenderCommandEncoder_waitForFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             MTLRenderCommandEncoderSetDepthStoreAction = downcall(lookup, "metallum_MTLRenderCommandEncoder_setDepthStoreAction", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT));
+            // Optional: older shipping dylibs without color store resolution
+            // keep every V3 color store concrete (no deferral, no suppression).
+            MTLRenderCommandEncoderSetColorStoreAction = optionalDowncall(
+                    lookup,
+                    "metallum_MTLRenderCommandEncoder_setColorStoreAction",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT, INT)
+            );
             setDeferredDepthStore = downcall(lookup, "metallum_set_deferred_depth_store", FunctionDescriptor.ofVoid(INT));
             metal4Supported = downcall(lookup, "metallum_metal4_supported", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
-            metalDeviceShutdown = downcall(lookup, "metallum_metal_device_shutdown", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             metal4MainQueuePilotValidate = downcall(lookup, "metallum_metal4_main_queue_pilot_validate", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             metal4MainRendererEnable = downcall(lookup, "metallum_metal4_main_renderer_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             metal4MainRendererStats = downcall(lookup, "metallum_metal4_main_renderer_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             metal4MetalFxStats = downcall(lookup, "metallum_metal4_metalfx_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-            metal4BackendClosureStats = downcall(lookup, "metallum_metal4_backend_closure_stats", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
-            metal4NoLegacyEncoderViolations = downcall(lookup, "metallum_metal4_no_legacy_encoder_violations", FunctionDescriptor.of(INT));
             setMetal4CompilerEnabled = downcall(lookup, "metallum_set_metal4_compiler_enabled", FunctionDescriptor.ofVoid(INT));
+            setTerrainIcbEnabled = optionalDowncall(lookup, "metallum_set_terrain_icb_enabled", FunctionDescriptor.ofVoid(INT));
+            setTerrainGpuEncodeEnabled = optionalDowncall(lookup, "metallum_set_terrain_gpu_encode_enabled", FunctionDescriptor.ofVoid(INT));
+            setTerrainVisibleIcbOptimizeEnabled = optionalDowncall(lookup, "metallum_set_terrain_visible_icb_optimize_enabled", FunctionDescriptor.ofVoid(INT));
+            setTerrainVisibilityCompactionEnabled = optionalDowncall(
+                    lookup, "metallum_set_terrain_visibility_compaction_enabled", FunctionDescriptor.ofVoid(INT)
+            );
+            terrainIcbStats = optionalDowncall(
+                    lookup,
+                    "metallum_terrain_icb_stats",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            terrainGpuIcbStats = optionalDowncall(
+                    lookup,
+                    "metallum_terrain_gpu_icb_stats",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
             residencySetEnable = downcall(lookup, "metallum_residency_set_enable", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
             setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
@@ -584,27 +791,6 @@ public final class MetalNativeBridge {
             gpuEncoderTimingMilliseconds = downcall(lookup, "metallum_gpu_encoder_timing_milliseconds", FunctionDescriptor.of(DOUBLE, INT));
             gpuEncoderTimingKind = downcall(lookup, "metallum_gpu_encoder_timing_kind", FunctionDescriptor.of(INT, INT));
             gpuEncoderTimingCopyLabel = downcall(lookup, "metallum_gpu_encoder_timing_copy_label", FunctionDescriptor.of(INT, INT, ValueLayout.ADDRESS, LONG));
-            pipelineCompileTelemetryReset = downcall(
-                    lookup,
-                    "metallum_pipeline_compile_telemetry_reset",
-                    FunctionDescriptor.ofVoid()
-            );
-            pipelineCompileTelemetryFinish = downcall(
-                    lookup,
-                    "metallum_pipeline_compile_telemetry_finish",
-                    FunctionDescriptor.of(
-                            INT,
-                            ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS
-                    )
-            );
-            pipelineCompileTelemetryCopyIdentity = downcall(
-                    lookup,
-                    "metallum_pipeline_compile_telemetry_copy_identity",
-                    FunctionDescriptor.of(INT, INT, ValueLayout.ADDRESS, INT)
-            );
             // The archive open path performs disk IO inside the native call;
             // avoid the critical-linker fast path like other IO-adjacent calls.
             psoArchiveOpen = downcallWithoutCritical(lookup, "metallum_pso_archive_open", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -659,7 +845,7 @@ public final class MetalNativeBridge {
                     "metallum_MTLComputeCommandEncoder_waitForFence",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
-            MTLDeviceMakeComputePipelineState = optionalDowncall(
+            MTLDeviceMakeComputePipelineState = optionalDowncallWithoutCritical(
                     lookup,
                     "metallum_MTLDevice_makeComputePipelineState",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
@@ -848,6 +1034,12 @@ public final class MetalNativeBridge {
     private static final MethodHandle setDebugLabelsEnabled;
     @Nullable
     private static final MethodHandle systemThermalState;
+    @Nullable
+    private static final MethodHandle presentationLatestPresentIntervalNanos;
+    @Nullable
+    private static final MethodHandle presentationLatestDrawableWaitNanos;
+    @Nullable
+    private static final MethodHandle presentationFramesInFlight;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
     private static final MethodHandle MTLCommandQueueMakeCommandBuffer;
@@ -873,6 +1065,17 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLDeviceMakeDepthStencilState;
     private static final MethodHandle MTLCommandBufferMakeRenderCommandEncoder;
     private static final MethodHandle MTLCommandBufferMakeRenderCommandEncoderV2;
+    private static final MethodHandle MTLCommandBufferMakeRenderCommandEncoderV3;
+
+    /** True when the loaded dylib exposes the RenderPassDescriptorV3 symbol. */
+    public static boolean renderCommandEncoderV3Available() {
+        return MTLCommandBufferMakeRenderCommandEncoderV3 != null;
+    }
+
+    /** True when the loaded dylib can resolve deferred color store decisions. */
+    public static boolean colorStoreResolutionAvailable() {
+        return MTLRenderCommandEncoderSetColorStoreAction != null;
+    }
     private static final MethodHandle MTLRenderCommandEncoderSetRenderPipelineState;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthStencilState;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthBias;
@@ -880,7 +1083,6 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderSetCullMode;
     private static final MethodHandle MTLRenderCommandEncoderSetTriangleFillMode;
     private static final MethodHandle MTLRenderCommandEncoderSetBuffer;
-    private static final MethodHandle MTLRenderCommandEncoderSetVertexBufferWithAttributeStride;
     private static final MethodHandle MTLRenderCommandEncoderSetBufferOffset;
     private static final MethodHandle MTLRenderCommandEncoderSetTexture;
     private static final MethodHandle MTLRenderCommandEncoderSetTextureAndSampler;
@@ -891,9 +1093,37 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderMultiDrawIndexed;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesTriangleFan;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesIndirect;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainIndexedIcb;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainGpuIndexedIcb;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainVisibleGpuIndexedIcb;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainFusedVisibleGpuIndexedIcb;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilityScene;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilitySceneProbe;
+    @Nullable
+    private static final MethodHandle MTLDeviceCreateTerrainGpuVisibilityProbe;
+    @Nullable
+    private static final MethodHandle TerrainVisibilityProbeRetain;
+    @Nullable
+    private static final MethodHandle TerrainVisibilitySceneRetain;
+    @Nullable
+    private static final MethodHandle TerrainVisibilityProbePoll;
+    @Nullable
+    private static final MethodHandle TerrainVisibilityProbeStatus;
+    @Nullable
+    private static final MethodHandle MTLRenderCommandEncoderExecuteTerrainIcb;
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitivesIndirect;
     private static final MethodHandle MTLCommandBufferClearColorDepthTexturesRegion;
     private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawable;
+    @Nullable
+    private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawableV2;
+    @Nullable
+    private static final MethodHandle presentationCancel;
     private static final MethodHandle createBuffer;
     private static final MethodHandle createTexture2d;
     private static final MethodHandle createTexture;
@@ -905,14 +1135,14 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLVertexDescriptorSetAttribute;
     private static final MethodHandle MTLVertexDescriptorSetLayout;
     private static final MethodHandle MTLRenderPipelineDescriptorCreate;
-    private static final MethodHandle MTLRenderPipelineDescriptorSetLabel;
-    private static final MethodHandle MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers;
     private static final MethodHandle createShaderFunction;
     private static final MethodHandle MTLRenderPipelineDescriptorSetCompiledFunctions;
     private static final MethodHandle MTLRenderPipelineDescriptorSetVertexDescriptor;
     private static final MethodHandle MTLRenderPipelineDescriptorSetAttachmentFormats;
     private static final MethodHandle MTLRenderPipelineDescriptorSetColorAttachmentFormat;
     private static final MethodHandle MTLRenderPipelineDescriptorSetDepthStencilFormats;
+    @Nullable
+    private static final MethodHandle MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers;
     private static final MethodHandle MTLRenderPipelineDescriptorSetColorAttachmentBlendState;
     private static final MethodHandle MTLRenderPipelineDescriptorSetBlendState;
     private static final MethodHandle MTLDeviceMakeRenderPipelineState;
@@ -924,16 +1154,26 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderUpdateFence;
     private static final MethodHandle MTLRenderCommandEncoderWaitForFence;
     private static final MethodHandle MTLRenderCommandEncoderSetDepthStoreAction;
+    private static final MethodHandle MTLRenderCommandEncoderSetColorStoreAction;
     private static final MethodHandle setDeferredDepthStore;
     private static final MethodHandle metal4Supported;
-    private static final MethodHandle metalDeviceShutdown;
     private static final MethodHandle metal4MainQueuePilotValidate;
     private static final MethodHandle metal4MainRendererEnable;
     private static final MethodHandle metal4MainRendererStats;
     private static final MethodHandle metal4MetalFxStats;
-    private static final MethodHandle metal4BackendClosureStats;
-    private static final MethodHandle metal4NoLegacyEncoderViolations;
     private static final MethodHandle setMetal4CompilerEnabled;
+    @Nullable
+    private static final MethodHandle setTerrainIcbEnabled;
+    @Nullable
+    private static final MethodHandle setTerrainGpuEncodeEnabled;
+    @Nullable
+    private static final MethodHandle setTerrainVisibleIcbOptimizeEnabled;
+    @Nullable
+    private static final MethodHandle setTerrainVisibilityCompactionEnabled;
+    @Nullable
+    private static final MethodHandle terrainIcbStats;
+    @Nullable
+    private static final MethodHandle terrainGpuIcbStats;
     private static final MethodHandle setMetalHud;
     private static final MethodHandle metalHudStatus;
     private static final MethodHandle residencySetEnable;
@@ -945,9 +1185,6 @@ public final class MetalNativeBridge {
     private static final MethodHandle gpuEncoderTimingMilliseconds;
     private static final MethodHandle gpuEncoderTimingKind;
     private static final MethodHandle gpuEncoderTimingCopyLabel;
-    private static final MethodHandle pipelineCompileTelemetryReset;
-    private static final MethodHandle pipelineCompileTelemetryFinish;
-    private static final MethodHandle pipelineCompileTelemetryCopyIdentity;
     private static final MethodHandle psoArchiveOpen;
     private static final MethodHandle psoArchiveFlush;
     private static final MethodHandle MTLBlitCommandEncoderUpdateFence;
@@ -998,23 +1235,27 @@ public final class MetalNativeBridge {
 
 
     private static MethodHandle downcall(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
-        return MetalFfmCallTelemetry.instrumentDowncall(
-                LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor, Linker.Option.critical(false))
-        );
+        return LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor, Linker.Option.critical(false));
     }
 
     private static MethodHandle optionalDowncall(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
         return lookup.find(symbol)
-                .map(address -> MetalFfmCallTelemetry.instrumentDowncall(
-                        LINKER.downcallHandle(address, descriptor, Linker.Option.critical(false))
-                ))
+                .map(address -> LINKER.downcallHandle(address, descriptor, Linker.Option.critical(false)))
                 .orElse(null);
     }
 
     private static MethodHandle downcallWithoutCritical(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
-        return MetalFfmCallTelemetry.instrumentDowncall(
-                LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor)
-        );
+        return LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor);
+    }
+
+    private static MethodHandle optionalDowncallWithoutCritical(
+            final SymbolLookup lookup,
+            final String symbol,
+            final FunctionDescriptor descriptor
+    ) {
+        return lookup.find(symbol)
+                .map(address -> LINKER.downcallHandle(address, descriptor))
+                .orElse(null);
     }
 
     public static MemorySegment metallum_create_system_default_device() {
@@ -1044,6 +1285,42 @@ public final class MetalNativeBridge {
             return (int) systemThermalState.invokeExact();
         } catch (Throwable ignored) {
             return -1;
+        }
+    }
+
+    /** Latest interval between two ordinary CAMetalLayer presented callbacks, or -1. */
+    public static long metallum_presentation_latest_present_interval_nanos() {
+        if (presentationLatestPresentIntervalNanos == null) {
+            return -1L;
+        }
+        try {
+            return (long) presentationLatestPresentIntervalNanos.invokeExact();
+        } catch (Throwable ignored) {
+            return -1L;
+        }
+    }
+
+    /** Latest layer.nextDrawable() wait duration, or -1 when the native symbol is unavailable. */
+    public static long metallum_presentation_latest_drawable_wait_nanos() {
+        if (presentationLatestDrawableWaitNanos == null) {
+            return -1L;
+        }
+        try {
+            return (long) presentationLatestDrawableWaitNanos.invokeExact();
+        } catch (Throwable ignored) {
+            return -1L;
+        }
+    }
+
+    /** Number of ordinary presents scheduled but not yet resolved, or -1. */
+    public static long metallum_presentation_frames_in_flight() {
+        if (presentationFramesInFlight == null) {
+            return -1L;
+        }
+        try {
+            return (long) presentationFramesInFlight.invokeExact();
+        } catch (Throwable ignored) {
+            return -1L;
         }
     }
 
@@ -2085,6 +2362,99 @@ public final class MetalNativeBridge {
         }
     }
 
+    /**
+     * RenderPassDescriptorV3: per-attachment load/store actions.
+     * Action encodings match the Swift side: 0=dontCare, 1=load, 2=clear for
+     * loads; 0=dontCare, 1=store, 2=deferred(.unknown) for stores. When the
+     * loaded dylib has no V3 symbol this falls back to the V2 boolean-clear
+     * mapping, which is exactly the conservative projection of the V3 actions
+     * the caller builds, so pixels cannot change across the fallback.
+     */
+    public static MemorySegment MTLCommandBuffer_makeRenderCommandEncoderV3(
+            final MemorySegment commandBuffer,
+            final MemorySegment[] colorTextures,
+            final MemorySegment depthTexture,
+            final int[] colorLoadActions,
+            final int[] colorStoreActions,
+            final float[] clearColors,
+            final int depthLoadAction,
+            final int depthStoreAction,
+            final double clearDepth,
+            final double viewportWidth,
+            final double viewportHeight,
+            final String label
+    ) {
+        if (colorTextures == null || colorLoadActions == null || colorStoreActions == null || clearColors == null
+                || colorLoadActions.length != colorTextures.length
+                || colorStoreActions.length != colorTextures.length
+                || clearColors.length != colorTextures.length * 4) {
+            throw new IllegalArgumentException("MRT texture and action arrays must have matching lengths");
+        }
+
+        if (MTLCommandBufferMakeRenderCommandEncoderV3 == null) {
+            int[] clearColorEnabled = new int[colorTextures.length];
+            for (int index = 0; index < colorTextures.length; index++) {
+                clearColorEnabled[index] = colorLoadActions[index] == 2 ? 1 : 0;
+            }
+            return MTLCommandBuffer_makeRenderCommandEncoderV2(
+                    commandBuffer,
+                    colorTextures,
+                    depthTexture,
+                    viewportWidth,
+                    viewportHeight,
+                    clearColorEnabled,
+                    clearColors,
+                    depthLoadAction == 2 ? 1 : 0,
+                    clearDepth,
+                    label
+            );
+        }
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment textureArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(ValueLayout.ADDRESS, colorTextures.length);
+            MemorySegment loadArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(INT, colorLoadActions.length);
+            MemorySegment storeArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(INT, colorStoreActions.length);
+            MemorySegment clearColorArray = colorTextures.length == 0
+                    ? MemorySegment.NULL
+                    : arena.allocate(FLOAT, clearColors.length);
+
+            for (int index = 0; index < colorTextures.length; index++) {
+                textureArray.setAtIndex(ValueLayout.ADDRESS, index, segment(colorTextures[index]));
+                loadArray.setAtIndex(INT, index, colorLoadActions[index]);
+                storeArray.setAtIndex(INT, index, colorStoreActions[index]);
+            }
+            for (int index = 0; index < clearColors.length; index++) {
+                clearColorArray.setAtIndex(FLOAT, index, clearColors[index]);
+            }
+
+            try {
+                return (MemorySegment) MTLCommandBufferMakeRenderCommandEncoderV3.invokeExact(
+                        segment(commandBuffer),
+                        textureArray,
+                        colorTextures.length,
+                        segment(depthTexture),
+                        loadArray,
+                        storeArray,
+                        clearColorArray,
+                        depthLoadAction,
+                        depthStoreAction,
+                        clearDepth,
+                        viewportWidth,
+                        viewportHeight,
+                        toCString(arena, label)
+                );
+            } catch (Throwable throwable) {
+                throw bridgeFailure("metallum_MTLCommandBuffer_makeRenderCommandEncoder_v3", throwable);
+            }
+        }
+    }
+
     public static void MTLRenderCommandEncoder_clearDraw(
             final MemorySegment encoder,
             final MemorySegment colorTexture,
@@ -2172,26 +2542,6 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderSetBuffer.invokeExact(segment(encoder), segment(buffer), offset, index, stageMask);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLRenderCommandEncoder_setBuffer", throwable);
-        }
-    }
-
-    public static void MTLRenderCommandEncoder_setVertexBufferWithAttributeStride(
-            final MemorySegment encoder,
-            final MemorySegment buffer,
-            final long offset,
-            final long stride,
-            final long index
-    ) {
-        try {
-            MTLRenderCommandEncoderSetVertexBufferWithAttributeStride.invokeExact(
-                    segment(encoder),
-                    segment(buffer),
-                    offset,
-                    stride,
-                    index
-            );
-        } catch (Throwable throwable) {
-            throw bridgeFailure("metallum_MTLRenderCommandEncoder_setVertexBufferWithAttributeStride", throwable);
         }
     }
 
@@ -2323,6 +2673,359 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect", throwable);
+        }
+    }
+
+    /** Creates one producer-owned, already encoded terrain ICB. */
+    public static MemorySegment MTLDevice_createTerrainIndexedIcb(
+            final MemorySegment device,
+            final long primitiveType,
+            final long indexType,
+            final MemorySegment indexBuffer,
+            final MemorySegment pipeline,
+            final MemorySegment packedCommands,
+            final int drawCount
+    ) {
+        if (MTLDeviceCreateTerrainIndexedIcb == null || drawCount <= 0) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainIndexedIcb.invokeExact(
+                    segment(device),
+                    primitiveType,
+                    indexType,
+                    segment(indexBuffer),
+                    segment(pipeline),
+                    segment(packedCommands),
+                    drawCount
+            );
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    /** Creates an all-visible terrain ICB by dispatching a Metal 4 compute encoder. */
+    public static MemorySegment MTLDevice_createTerrainGpuIndexedIcb(
+            final MemorySegment renderEncoder,
+            final MemorySegment device,
+            final long primitiveType,
+            final long indexType,
+            final MemorySegment indexBuffer,
+            final MemorySegment pipeline,
+            final MemorySegment packedCommands,
+            final int drawCount
+    ) {
+        if (MTLDeviceCreateTerrainGpuIndexedIcb == null || drawCount <= 0) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainGpuIndexedIcb.invokeExact(
+                    segment(renderEncoder),
+                    segment(device),
+                    primitiveType,
+                    indexType,
+                    segment(indexBuffer),
+                    segment(pipeline),
+                    segment(packedCommands),
+                    drawCount
+            );
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    /** Encodes one value-only terrain visibility probe on the active MTL4 buffer. */
+    public static boolean terrainVisibleGpuIcbAvailable() {
+        return MTLDeviceCreateTerrainVisibleGpuIndexedIcb != null;
+    }
+
+    /** Creates a source-ordinal terrain ICB whose slots are masked by an in-flight GPU visibility bitset. */
+    public static MemorySegment MTLDevice_createTerrainVisibleGpuIndexedIcb(
+            final MemorySegment renderEncoder,
+            final MemorySegment device,
+            final long primitiveType,
+            final long indexType,
+            final MemorySegment indexBuffer,
+            final MemorySegment pipeline,
+            final MemorySegment packedCommands,
+            final MemorySegment candidateBySourceOrdinal,
+            final int drawCount,
+            final MemorySegment visibilityProbeOwner,
+            final long expectedEpoch
+    ) {
+        if (MTLDeviceCreateTerrainVisibleGpuIndexedIcb == null
+                || drawCount <= 0 || expectedEpoch < 0L
+                || isNullHandle(visibilityProbeOwner)) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainVisibleGpuIndexedIcb.invokeExact(
+                    segment(renderEncoder),
+                    segment(device),
+                    primitiveType,
+                    indexType,
+                    segment(indexBuffer),
+                    segment(pipeline),
+                    segment(packedCommands),
+                    segment(candidateBySourceOrdinal),
+                    drawCount,
+                    segment(visibilityProbeOwner),
+                    expectedEpoch
+            );
+        } catch (Throwable throwable) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    public static MemorySegment MTLDevice_createTerrainGpuVisibilityScene(
+            final MemorySegment device,
+            final MemorySegment packedCandidates,
+            final int candidateCount,
+            final long sceneGeneration
+    ) {
+        if (MTLDeviceCreateTerrainGpuVisibilityScene == null || candidateCount <= 0 || sceneGeneration < 0L) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainGpuVisibilityScene.invokeExact(
+                    segment(device), segment(packedCandidates), candidateCount, sceneGeneration
+            );
+        } catch (Throwable throwable) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    public static MemorySegment MTLDevice_createTerrainGpuVisibilitySceneProbe(
+            final MemorySegment renderEncoder,
+            final MemorySegment device,
+            final MemorySegment scene,
+            final MemorySegment packedFrame,
+            final long expectedSceneGeneration,
+            final long epoch
+    ) {
+        if (MTLDeviceCreateTerrainGpuVisibilitySceneProbe == null
+                || isNullHandle(scene) || expectedSceneGeneration < 0L || epoch < 0L) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainGpuVisibilitySceneProbe.invokeExact(
+                    segment(renderEncoder), segment(device), segment(scene), segment(packedFrame),
+                    expectedSceneGeneration, epoch
+            );
+        } catch (Throwable throwable) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    public static boolean terrainFusedVisibleGpuIcbAvailable() {
+        return MTLDeviceCreateTerrainFusedVisibleGpuIndexedIcb != null
+                && MTLDeviceCreateTerrainGpuVisibilityScene != null
+                && TerrainVisibilitySceneRetain != null;
+    }
+
+    /** Fuses persistent-scene frustum testing and source-ordinal ICB authoring. */
+    public static MemorySegment MTLDevice_createTerrainFusedVisibleGpuIndexedIcb(
+            final MemorySegment renderEncoder,
+            final MemorySegment device,
+            final long primitiveType,
+            final long indexType,
+            final MemorySegment indexBuffer,
+            final MemorySegment pipeline,
+            final MemorySegment packedCommands,
+            final MemorySegment packedCandidateIndices,
+            final int drawCount,
+            final MemorySegment persistentSceneOwner,
+            final MemorySegment packedFrame,
+            final long expectedSceneGeneration,
+            final int expectedCandidateCount
+    ) {
+        MethodHandle handle = MTLDeviceCreateTerrainFusedVisibleGpuIndexedIcb;
+        if (handle == null) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) handle.invokeExact(
+                    segment(renderEncoder), segment(device), primitiveType, indexType,
+                    segment(indexBuffer), segment(pipeline), segment(packedCommands),
+                    segment(packedCandidateIndices), drawCount, segment(persistentSceneOwner),
+                    segment(packedFrame), expectedSceneGeneration, expectedCandidateCount
+            );
+        } catch (Throwable throwable) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    public static boolean terrainPersistentVisibilitySceneAvailable() {
+        return MTLDeviceCreateTerrainGpuVisibilityScene != null
+                && MTLDeviceCreateTerrainGpuVisibilitySceneProbe != null
+                && TerrainVisibilitySceneRetain != null
+                && TerrainVisibilityProbeStatus != null;
+    }
+
+    /** True when the typed probe-owner retain ABI is available. */
+    public static boolean terrainVisibilityProbeRetainAvailable() {
+        return TerrainVisibilityProbeRetain != null;
+    }
+
+    /** True when the typed persistent-scene retain ABI is available. */
+    public static boolean terrainVisibilitySceneRetainAvailable() {
+        return TerrainVisibilitySceneRetain != null;
+    }
+
+    /**
+     * Retains a borrowed visibility-probe owner for one short Java/native
+     * transition. The returned handle is owned by the caller and must be
+     * released exactly once with {@link #metallum_release_object(MemorySegment)}.
+     */
+    public static MemorySegment terrainVisibilityProbeRetain(final MemorySegment probe) {
+        if (TerrainVisibilityProbeRetain == null || isNullHandle(probe)) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) TerrainVisibilityProbeRetain.invokeExact(segment(probe));
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    /**
+     * Retains a borrowed persistent-scene owner for one short Java/native
+     * transition. The returned handle is owned by the caller and must be
+     * released exactly once with {@link #metallum_release_object(MemorySegment)}.
+     */
+    public static MemorySegment terrainVisibilitySceneRetain(final MemorySegment scene) {
+        if (TerrainVisibilitySceneRetain == null || isNullHandle(scene)) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) TerrainVisibilitySceneRetain.invokeExact(segment(scene));
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    public static MemorySegment MTLDevice_createTerrainGpuVisibilityProbe(
+            final MemorySegment renderEncoder,
+            final MemorySegment device,
+            final MemorySegment packedCandidates,
+            final MemorySegment packedMatrix,
+            final int candidateCount,
+            final long epoch
+    ) {
+        if (MTLDeviceCreateTerrainGpuVisibilityProbe == null || candidateCount <= 0 || epoch < 0L) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) MTLDeviceCreateTerrainGpuVisibilityProbe.invokeExact(
+                    segment(renderEncoder),
+                    segment(device),
+                    segment(packedCandidates),
+                    segment(packedMatrix),
+                    candidateCount,
+                    epoch
+            );
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    public static boolean terrainVisibilityProbeAvailable() {
+        return MTLDeviceCreateTerrainGpuVisibilityProbe != null
+                && TerrainVisibilityProbePoll != null
+                && TerrainVisibilityProbeRetain != null;
+    }
+
+    /** True when visible-only terrain completion can avoid GPU-result readback. */
+    public static boolean terrainVisibilityProbeStatusAvailable() {
+        return TerrainVisibilityProbeStatus != null;
+    }
+
+    /** Non-blocking completion-only query; returns 0 in-flight, 1 success, -1 failure. */
+    public static int terrainVisibilityProbeStatus(final MemorySegment probe) {
+        if (TerrainVisibilityProbeStatus == null || isNullHandle(probe)) {
+            return -1;
+        }
+        try {
+            return (int) TerrainVisibilityProbeStatus.invokeExact(segment(probe));
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    /** Non-blocking completion/readback poll for one terrain visibility probe. */
+    public static int terrainVisibilityProbePoll(
+            final MemorySegment probe,
+            final MemorySegment epoch,
+            final MemorySegment visible,
+            final MemorySegment uncertain,
+            final MemorySegment wordCount,
+            final MemorySegment bitset,
+            final int wordCapacity,
+            final MemorySegment compactedCount,
+            final MemorySegment compactedIndices,
+            final int compactedCapacity
+    ) {
+        if (TerrainVisibilityProbePoll == null || wordCapacity < 0 || compactedCapacity < 0) {
+            return 0;
+        }
+        try {
+            return (int) TerrainVisibilityProbePoll.invokeExact(
+                    segment(probe),
+                    segment(epoch),
+                    segment(visible),
+                    segment(uncertain),
+                    segment(wordCount),
+                    segment(bitset),
+                    wordCapacity,
+                    segment(compactedCount),
+                    segment(compactedIndices),
+                    compactedCapacity
+            );
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    /** Executes a producer-owned ICB without decoding or replaying its draws. */
+    public static int MTLRenderCommandEncoder_executeTerrainIcb(
+            final MemorySegment encoder,
+            final MemorySegment indirectCommandBuffer,
+            final int drawCount
+    ) {
+        if (MTLRenderCommandEncoderExecuteTerrainIcb == null || drawCount <= 0) {
+            return 0;
+        }
+        try {
+            return (int) MTLRenderCommandEncoderExecuteTerrainIcb.invokeExact(
+                    segment(encoder),
+                    segment(indirectCommandBuffer),
+                    drawCount
+            );
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    /** Native counters used by the focused Metal 4 reuse proof. */
+    public static int terrainIcbStats(final MemorySegment encoded, final MemorySegment executed) {
+        if (terrainIcbStats == null) {
+            return 0;
+        }
+        try {
+            return (int) terrainIcbStats.invokeExact(segment(encoded), segment(executed));
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    public static int terrainGpuIcbStats(final MemorySegment encoded, final MemorySegment dispatches) {
+        if (terrainGpuIcbStats == null) {
+            return 0;
+        }
+        try {
+            return (int) terrainGpuIcbStats.invokeExact(segment(encoded), segment(dispatches));
+        } catch (Throwable ignored) {
+            return 0;
         }
     }
 
@@ -2458,36 +3161,6 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static void metallum_MTLRenderPipelineDescriptor_setLabel(
-            final MemorySegment desc,
-            final String label
-    ) {
-        try (Arena arena = Arena.ofConfined()) {
-            MTLRenderPipelineDescriptorSetLabel.invokeExact(
-                    segment(desc),
-                    toCString(arena, label)
-            );
-        } catch (Throwable throwable) {
-            throw bridgeFailure("metallum_MTLRenderPipelineDescriptor_setLabel", throwable);
-        }
-    }
-
-    public static void metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
-            final MemorySegment desc,
-            final boolean enabled
-    ) {
-        try {
-            MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers.invokeExact(
-                    segment(desc), enabled ? 1 : 0
-            );
-        } catch (Throwable throwable) {
-            throw bridgeFailure(
-                    "metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers",
-                    throwable
-            );
-        }
-    }
-
     public static MemorySegment metallum_create_shader_function(
             final MemorySegment device,
             final String source,
@@ -2585,6 +3258,25 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static void metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
+            final MemorySegment desc,
+            final boolean enabled
+    ) {
+        if (MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers == null) {
+            return;
+        }
+        try {
+            MTLRenderPipelineDescriptorSetSupportIndirectCommandBuffers.invokeExact(
+                    segment(desc), enabled ? 1 : 0
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure(
+                    "metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers",
+                    throwable
+            );
+        }
+    }
+
     public static void metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState(
             final MemorySegment desc,
             final int index,
@@ -2673,11 +3365,31 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static void MTLCommandBuffer_encodePresentTextureToDrawable(final MemorySegment commandBuffer, final MemorySegment layer, final MemorySegment sourceTexture, final MemorySegment globalFence) {
+    public static long MTLCommandBuffer_encodePresentTextureToDrawable(final MemorySegment commandBuffer, final MemorySegment layer, final MemorySegment sourceTexture, final MemorySegment globalFence) {
         try {
-            MTLCommandBufferEncodePresentTextureToDrawable.invokeExact(segment(commandBuffer), segment(layer), segment(sourceTexture), segment(globalFence));
+            if (MTLCommandBufferEncodePresentTextureToDrawableV2 != null) {
+                return (long) MTLCommandBufferEncodePresentTextureToDrawableV2.invokeExact(
+                        segment(commandBuffer), segment(layer), segment(sourceTexture), segment(globalFence)
+                );
+            }
+            MTLCommandBufferEncodePresentTextureToDrawable.invokeExact(
+                    segment(commandBuffer), segment(layer), segment(sourceTexture), segment(globalFence)
+            );
+            return 0L;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_encodePresentTextureToDrawable", throwable);
+        }
+    }
+
+    public static void metallum_presentation_cancel(final long identifier) {
+        if (identifier <= 0L || presentationCancel == null) {
+            return;
+        }
+        try {
+            presentationCancel.invokeExact(identifier);
+        } catch (Throwable ignored) {
+            // Cancellation is best-effort for an optional ABI; native
+            // presented/completion callbacks remain authoritative after commit.
         }
     }
 
@@ -2727,6 +3439,22 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static void MTLRenderCommandEncoder_setColorStoreAction(
+            final MemorySegment encoder,
+            final int index,
+            final int store
+    ) {
+        if (MTLRenderCommandEncoderSetColorStoreAction == null) {
+            throw bridgeFailure("metallum_MTLRenderCommandEncoder_setColorStoreAction",
+                    new IllegalStateException("loaded native bridge has no color store resolution symbol"));
+        }
+        try {
+            MTLRenderCommandEncoderSetColorStoreAction.invokeExact(segment(encoder), index, store);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderCommandEncoder_setColorStoreAction", throwable);
+        }
+    }
+
     public static void metallum_set_deferred_depth_store(final int enabled) {
         try {
             setDeferredDepthStore.invokeExact(enabled);
@@ -2754,14 +3482,6 @@ public final class MetalNativeBridge {
             return (int) metal4MainQueuePilotValidate.invokeExact(segment(device));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metal4_main_queue_pilot_validate", throwable);
-        }
-    }
-
-    public static void metallum_metal_device_shutdown(final MemorySegment device) {
-        try {
-            metalDeviceShutdown.invokeExact(segment(device));
-        } catch (Throwable throwable) {
-            throw bridgeFailure("metallum_metal_device_shutdown", throwable);
         }
     }
 
@@ -2814,29 +3534,6 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static long[] metallum_metal4_backend_closure_stats() {
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment render = arena.allocate(LONG);
-            MemorySegment compute = arena.allocate(LONG);
-            MemorySegment blit = arena.allocate(LONG);
-            MemorySegment legacyViolations = arena.allocate(LONG);
-            int engaged = (int) metal4BackendClosureStats.invokeExact(
-                    render, compute, blit, legacyViolations
-            );
-            int noLegacyViolations = (int) metal4NoLegacyEncoderViolations.invokeExact();
-            return new long[] {
-                    engaged,
-                    render.get(LONG, 0L),
-                    compute.get(LONG, 0L),
-                    blit.get(LONG, 0L),
-                    legacyViolations.get(LONG, 0L),
-                    noLegacyViolations
-            };
-        } catch (Throwable throwable) {
-            throw bridgeFailure("metallum_metal4_backend_closure_stats", throwable);
-        }
-    }
-
     /**
      * Appends the Metal 4 barrier map's consumer barriers to the existing Metal 3
      * encoders (spec M6-B). Strengthens ordering only, so rendering must be
@@ -2864,65 +3561,6 @@ public final class MetalNativeBridge {
             gpuEncoderTimingReset.invokeExact();
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gpu_encoder_timing_reset", throwable);
-        }
-    }
-
-    public static void metallum_pipeline_compile_telemetry_reset() {
-        try {
-            pipelineCompileTelemetryReset.invokeExact();
-        } catch (Throwable throwable) {
-            throw bridgeFailure("metallum_pipeline_compile_telemetry_reset", throwable);
-        }
-    }
-
-    public static NativePipelineCompilationSnapshot metallum_pipeline_compile_telemetry_finish() {
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment render = arena.allocate(LONG);
-            MemorySegment compute = arena.allocate(LONG);
-            MemorySegment failures = arena.allocate(LONG);
-            MemorySegment identityCount = arena.allocate(LONG);
-            int available = (int) pipelineCompileTelemetryFinish.invokeExact(
-                    render, compute, failures, identityCount
-            );
-            if (available == 0) {
-                throw new IllegalStateException("Native pipeline compilation telemetry is unavailable");
-            }
-            long count = identityCount.get(LONG, 0L);
-            if (count < 0L || count > 32L) {
-                throw new IllegalStateException("Invalid native pipeline identity count: " + count);
-            }
-            java.util.ArrayList<String> identities = new java.util.ArrayList<>(Math.toIntExact(count));
-            for (int index = 0; index < count; index++) {
-                MemorySegment destination = arena.allocate(1024L, 1L);
-                int copied = (int) pipelineCompileTelemetryCopyIdentity.invokeExact(
-                        index, destination, Math.toIntExact(destination.byteSize())
-                );
-                if (copied <= 0 || copied > destination.byteSize()) {
-                    throw new IllegalStateException(
-                            "Invalid native pipeline identity length at " + index + ": " + copied
-                    );
-                }
-                identities.add(destination.getString(0L));
-            }
-            return new NativePipelineCompilationSnapshot(
-                    render.get(LONG, 0L),
-                    compute.get(LONG, 0L),
-                    failures.get(LONG, 0L),
-                    java.util.List.copyOf(identities)
-            );
-        } catch (Throwable throwable) {
-            throw bridgeFailure("metallum_pipeline_compile_telemetry_finish", throwable);
-        }
-    }
-
-    public record NativePipelineCompilationSnapshot(
-            long renderAttempts,
-            long computeAttempts,
-            long failures,
-            java.util.List<String> identities
-    ) {
-        public long attempts() {
-            return renderAttempts + computeAttempts;
         }
     }
 
@@ -2997,6 +3635,50 @@ public final class MetalNativeBridge {
             setMetal4CompilerEnabled.invokeExact(enabled);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_metal4_compiler_enabled", throwable);
+        }
+    }
+
+    public static void metallum_set_terrain_icb_enabled(final int enabled) {
+        if (setTerrainIcbEnabled == null) {
+            return;
+        }
+        try {
+            setTerrainIcbEnabled.invokeExact(enabled);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_terrain_icb_enabled", throwable);
+        }
+    }
+
+    public static void metallum_set_terrain_gpu_encode_enabled(final int enabled) {
+        if (setTerrainGpuEncodeEnabled == null) {
+            return;
+        }
+        try {
+            setTerrainGpuEncodeEnabled.invokeExact(enabled);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_terrain_gpu_encode_enabled", throwable);
+        }
+    }
+
+    public static void metallum_set_terrain_visible_icb_optimize_enabled(final boolean enabled) {
+        if (setTerrainVisibleIcbOptimizeEnabled == null) {
+            return;
+        }
+        try {
+            setTerrainVisibleIcbOptimizeEnabled.invokeExact(enabled ? 1 : 0);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_terrain_visible_icb_optimize_enabled", throwable);
+        }
+    }
+
+    public static void metallum_set_terrain_visibility_compaction_enabled(final boolean enabled) {
+        if (setTerrainVisibilityCompactionEnabled == null) {
+            return;
+        }
+        try {
+            setTerrainVisibilityCompactionEnabled.invokeExact(enabled ? 1 : 0);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_terrain_visibility_compaction_enabled", throwable);
         }
     }
 

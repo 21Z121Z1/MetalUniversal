@@ -1,0 +1,115 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+repositories {
+    maven { url "https://api.modrinth.com/maven" }
+}
+
+def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
+def legacyRequireMetal4MainRenderer = providers.gradleProperty("p1Metal4MainRenderer")
+        .map { it.toBoolean() }
+        .orElse(false)
+        .get()
+def p1Metal4Lane = providers.gradleProperty("p1Metal4Lane")
+        .map { it.trim().toLowerCase() }
+        .orElse(legacyRequireMetal4MainRenderer ? "candidate" : "off")
+        .get()
+if (!(p1Metal4Lane in ["off", "baseline", "candidate"])) {
+    throw new GradleException("p1Metal4Lane must be off, baseline, or candidate (got ${p1Metal4Lane})")
+}
+def p1SourceSha = providers.gradleProperty("p1SourceSha").orElse("unrecorded").get().trim()
+def p1ProductionJarSha256 = providers.gradleProperty("p1ProductionJarSha256").orElse("unrecorded").get().trim()
+def p1NativeDylibSha256 = providers.gradleProperty("p1NativeDylibSha256").orElse("unrecorded").get().trim()
+def requireMetal4MainRenderer = p1Metal4Lane == "candidate"
+def requireP1Metal4Evidence = p1Metal4Lane != "off"
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+    // The CI probe lives in com.metallum.client.metal.render so it can exercise
+    // the exact package-private production MetalDevice/MetalCommandEncoder
+    // texture -> buffer path. Keep this compile-only: the runtime still loads
+    // the independently-built production MetalUniversal JAR below.
+    compileOnly files(metallumJarProvider)
+
+    // Production runtime mirrors MetalUniversal's shipping client dependencies.
+    productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
+    productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.ClientProductionRunTask) {
+    dependsOn tasks.named("jar")
+
+    doFirst {
+        def metallumJar = metallumJarProvider.get()
+        if (!metallumJar.isFile()) {
+            throw new GradleException("MetalUniversal production JAR does not exist: ${metallumJar}")
+        }
+    }
+
+    // Minecraft 26.2 uses Loom's non-obfuscated plugin, so ordinary JARs are
+    // the production artifacts; there is intentionally no remapJar task.
+    mods.from(tasks.named("jar"))
+    mods.from(metallumJarProvider)
+    mods.from(configurations.productionRuntimeMods)
+
+    jvmArgs.add("-Dfabric.client.gametest")
+    jvmArgs.add("-Dmetallum.ci.e2e=true")
+    jvmArgs.add("-Dmetallum.ci.p1Metal4Lane=${p1Metal4Lane}")
+    jvmArgs.add("-Dmetallum.ci.p1SourceSha=${p1SourceSha}")
+    jvmArgs.add("-Dmetallum.ci.p1ProductionJarSha256=${p1ProductionJarSha256}")
+    jvmArgs.add("-Dmetallum.ci.p1NativeDylibSha256=${p1NativeDylibSha256}")
+    // Compatibility seam for older invocations while P1 switches to the
+    // explicit off/baseline/candidate lane contract.
+    jvmArgs.add("-Dmetallum.ci.requireMetal4MainRenderer=${requireMetal4MainRenderer}")
+    jvmArgs.add("-Dmetallum.iris.semantic=true")
+    jvmArgs.add("-Dmetallum.metalfx.mode=OFF")
+    jvmArgs.add("-Dmetallum.metalfx.frameGeneration=false")
+    jvmArgs.add("-Dmetallum.metalfx.objectMotionProducer=false")
+    jvmArgs.add("-Dmetallum.metal.hud=false")
+    jvmArgs.add("-Dmetallum.hotpath.telemetry=true")
+    jvmArgs.add("-Dmetallum.presentation.telemetry=true")
+
+    if (requireP1Metal4Evidence) {
+        // Physical-Mac P1 A/B contract. Both lanes keep Metal 4 compilation,
+        // presentation, and explicit residency identical. The only intended
+        // execution-model difference is whether the main renderer is enabled.
+        jvmArgs.add("-Dmetallum.opt.metal4=true")
+        jvmArgs.add("-Dmetallum.opt.metal4Compiler=true")
+        jvmArgs.add("-Dmetallum.opt.metal4Present=true")
+        jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=${requireMetal4MainRenderer}")
+        jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
+        jvmArgs.add("-Dmetallum.opt.residencySet=true")
+    } else {
+        // Hosted P0 regression keeps the already-validated shipping path. The
+        // GitHub Apple Paravirtual device does not expose residency sets, so it
+        // cannot close P1 activation and must not pretend to do so.
+        jvmArgs.add("-Dmetallum.opt.metal4=false")
+        jvmArgs.add("-Dmetallum.opt.metal4Compiler=false")
+        jvmArgs.add("-Dmetallum.opt.metal4Present=false")
+        jvmArgs.add("-Dmetallum.opt.metal4MainRenderer=false")
+        jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
+        // Keep the hosted Apple-paravirtual workaround scoped to the Minecraft JVM.
+        // Do not put this in JAVA_TOOL_OPTIONS: doing so changes the Gradle daemon's
+        // JVM identity and prevents reuse of the daemon already started by root tasks.
+        jvmArgs.add("-Dmetallum.opt.renderStatePacket=false")
+        jvmArgs.add("-Dmetallum.opt.residencySet=false")
+    }
+
+    jvmArgs.add("-Dmetallum.ci.evidenceDir=${file("${buildDir}/evidence").absolutePath}")
+
+    // Xvfb is Linux-only. macos-26 has an Aqua session and a paravirtual Metal
+    // device; authoritative evidence is read from Metal textures, not scan-out.
+    useXVFB = false
+    runDir = file("${buildDir}/run/clientGameTest")
+}
