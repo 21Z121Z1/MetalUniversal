@@ -39,6 +39,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          import base64, importlib.util, json, zlib
+          spec = importlib.util.spec_from_file_location("reviewed_replay", "scripts/agent/replay_reviewed_codex.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          patches = json.loads(zlib.decompress(base64.b64decode(module.PAYLOAD)).decode("utf-8"))
+          print("=== REVIEWED PATCH 40 ===")
+          print(patches[-1])
+          print("=== END REVIEWED PATCH 40 ===")
+          PY
           python3 scripts/agent/replay_reviewed_codex.py
           git diff --check
 
