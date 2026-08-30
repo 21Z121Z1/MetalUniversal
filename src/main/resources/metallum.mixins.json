@@ -45,6 +45,7 @@
     "render.IrisMetalArgumentSnapshotMixin",
     "render.IrisMetalArgumentSnapshotSubmitMixin",
     "sodium.MinecraftTerrainSchedulingMixin",
+    "sodium.ChunkBuilderThreadTuningMixin",
     "sodium.RenderRegionManagerTerrainSchedulingMixin",
     "sodium.RenderSectionManagerTerrainSchedulingMixin",
     "sodium.SodiumWorldRendererTerrainSchedulingMixin",
