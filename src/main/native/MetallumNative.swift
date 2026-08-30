@@ -13018,6 +13018,13 @@ public func metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffer
     desc.supportIndirectCommandBuffers = enabled != 0
 }
 
+@_cdecl("metallum_MTLRenderPipelineState_supportsIndirectCommandBuffers")
+public func metallum_MTLRenderPipelineState_supportsIndirectCommandBuffers(
+    _ pipeline: MTLRenderPipelineState
+) -> Int32 {
+    pipeline.supportIndirectCommandBuffers ? 1 : 0
+}
+
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState")
 public func metallum_MTLRenderPipelineDescriptor_setColorAttachmentBlendState(
     _ desc: MTLRenderPipelineDescriptor,

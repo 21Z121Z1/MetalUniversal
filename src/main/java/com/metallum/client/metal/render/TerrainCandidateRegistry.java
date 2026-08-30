@@ -37,7 +37,10 @@ public final class TerrainCandidateRegistry {
     }
 
     public static boolean enabled() {
-        return ENABLED;
+        return Boolean.parseBoolean(System.getProperty(PROPERTY, "false"))
+                || TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED
+                || (TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED
+                && TerrainIcbRuntimeAdmission.gpuIcbAdmitted());
     }
 
     /** Called at setupTerrain HEAD, before Sodium schedules/consumes cull work. */
@@ -47,7 +50,7 @@ public final class TerrainCandidateRegistry {
             final double cameraZ,
             final Matrix4fc cullMatrix
     ) {
-        if (!ENABLED) {
+        if (!enabled()) {
             return;
         }
         synchronized (TerrainCandidateRegistry.class) {
@@ -68,7 +71,7 @@ public final class TerrainCandidateRegistry {
     }
 
     public static TerrainCandidateSnapshot latestSnapshot() {
-        return ENABLED ? latest : null;
+        return enabled() ? latest : null;
     }
 
     /** Latest completed probe result; it is diagnostic/decision data only. */
@@ -186,6 +189,7 @@ public final class TerrainCandidateRegistry {
         // world. Their Metal buffers remain owned by the encoded command until
         // completion; the native owner is never reused for a new epoch.
         TerrainGpuVisibilityProbe.reset();
+        TerrainIcbRuntimeAdmission.reset();
         synchronized (TerrainCandidateRegistry.class) {
             state = null;
             latest = null;
