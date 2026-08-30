@@ -8,7 +8,7 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
-public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
+public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements MetalRenderStateFlushable {
     private static final boolean STATE_SHADOW_ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.encoderStateShadow", "true")
     );
@@ -190,28 +190,6 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
             MetalHotPathTelemetry.renderForwarded();
         }
         this.stateShadow.recordBuffer(buffer, offset, index, stageMask);
-    }
-
-    /**
-     * Diagnostic-only direct path for vertex descriptors whose layout stride is
-     * MTLBufferLayoutStrideDynamic. It deliberately bypasses the ordinary
-     * buffer shadow/packet path so the native Metal 4 argument-table call is
-     * the only binding operation under test.
-     */
-    public void setVertexBufferWithAttributeStride(
-            final MemorySegment buffer,
-            final long offset,
-            final long stride,
-            final long index
-    ) {
-        MetalNativeBridge.MTLRenderCommandEncoder_setVertexBufferWithAttributeStride(
-                handle(),
-                buffer,
-                offset,
-                stride,
-                index
-        );
-        MetalHotPathTelemetry.renderForwarded();
     }
 
     public void setBufferOffset(final long offset, final long index, final int stageMask) {
@@ -416,6 +394,20 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
         );
     }
 
+    /** Executes an already encoded producer-owned terrain ICB once. */
+    public boolean executeTerrainIcb(
+            final MemorySegment indirectCommandBuffer,
+            final int drawCount
+    ) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        return MetalNativeBridge.MTLRenderCommandEncoder_executeTerrainIcb(
+                encoder,
+                indirectCommandBuffer,
+                drawCount
+        ) != 0;
+    }
+
     public void drawPrimitivesIndirect(
             final MTLPrimitiveType primitiveType,
             final MemorySegment indirectBuffer,
@@ -468,13 +460,22 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
      * descriptor deferred the depth store decision, and must not be called on
      * encoders whose descriptor set a concrete store action.
      */
-    public void setDepthStoreAction(final boolean store) {
+    public void setDeferredDepthStore(final boolean store) {
         MemorySegment encoder = handle();
         flushState(encoder);
-        MetalNativeBridge.MTLRenderCommandEncoder_setDepthStoreAction(
-                encoder,
-                store ? 1 : 0
-        );
+        MetalNativeBridge.MTLRenderCommandEncoder_setDepthStoreAction(encoder, store ? 1 : 0);
+    }
+
+    /**
+     * Resolves one color attachment's deferred (.unknown) store decision.
+     * Must be called before {@code endEncoding()} on every slot whose V3
+     * descriptor used the deferred store encoding; must not be called on
+     * slots with concrete store actions.
+     */
+    public void setDeferredColorStore(final int index, final boolean store) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        MetalNativeBridge.MTLRenderCommandEncoder_setColorStoreAction(encoder, index, store ? 1 : 0);
     }
 
     public void updateFence(final MemorySegment fence, final MTLRenderStages stages) {
@@ -511,11 +512,8 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
         }
     }
 
-    /**
-     * Flushes all state/command packets before a native operation that is not
-     * represented by the ordinary encoder methods (for example an ICB batch).
-     */
-    public void flushPendingState() {
+    @Override
+    public void metallum$flushPendingRenderState() {
         flushState(handle());
     }
 

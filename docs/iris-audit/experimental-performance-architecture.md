@@ -325,6 +325,21 @@ IrisMetalExperimentalOptimizer.active();
 IrisMetalExperimentalOptimizer.toJson(plan);
 ```
 
+### Stage A diagnostic plan receipt
+
+The optimizer now emits an immutable logical pass receipt alongside the
+existing hazard/liveness plan. The receipt contains the chain generation, and
+each entry contains a deterministic
+`iris/<stage>/<type>/<ordinal>/<normalized-name>` key, the
+canonical semantic pass ID resolved by `SemanticPassIdResolver`, pass type,
+logical resource uses/access modes, and attachment load/store candidates with
+their compatibility key. The receipt is explicitly
+`UNBOUND_DIAGNOSTIC_ONLY`: it does not construct `ResourceIdentity` values,
+resolve native handles, or alter V2/V3 actions. Physical identity binding
+remains owned by the render-contract recorder when a real backend allocation
+exists. Repeated builds with the same descriptors produce byte-identical JSON;
+same raw names in different stages or ordinals remain distinct.
+
 ## Required integration work for the local agent
 
 ### Phase A: planner population

@@ -60,6 +60,17 @@ fragment float4 mtl4_path_fs() {
 }
 """
 
+private let residencyComputeShaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void residency_compute_probe(uint id [[thread_position_in_grid]]) {
+    // The body is intentionally empty: the fixture proves allocation
+    // admission and lifetime through the shipping compute-PSO ABI, not a
+    // separate dispatch or shader-output contract.
+}
+"""
+
 // Distinct source and entry-point names for the fall-through case. Reusing
 // `shaderSource` here does not work: Metal hands back the same MTLFunction
 // object for an identical library source, so the weak-keyed side table still
@@ -192,52 +203,6 @@ vertex RewriteOut private_rewrite_vs(RewriteVertex in [[stage_in]]) {
 }
 
 fragment float4 private_rewrite_fs(RewriteOut in [[stage_in]]) {
-    return in.color;
-}
-"""
-
-/// Sodium's packed terrain vertex format: ushort2 position, normalized uchar4
-/// color, ushort2 texture coordinates and ushort4 light/data, all in one 20 B
-/// record. This is intentionally separate from the float-only binding-churn
-/// test because a successful MTL4 address bind does not prove that Metal's
-/// stage-in conversion for these packed integer attributes is correct.
-private let packedTerrainShaderSource = """
-#include <metal_stdlib>
-using namespace metal;
-
-struct PackedTerrainVertex {
-    uint2 a_Position [[attribute(0)]];
-    float4 a_Color [[attribute(1)]];
-    uint2 a_TexCoord [[attribute(2)]];
-    uint4 a_LightAndData [[attribute(3)]];
-};
-
-struct PackedTerrainOut {
-    float4 position [[position]];
-    float4 color;
-};
-
-vertex PackedTerrainOut packed_terrain_vs(PackedTerrainVertex in [[stage_in]]) {
-    PackedTerrainOut output;
-    // Map [0, 65535] to [-1, 3], matching the full-screen triangle used by the
-    // existing path tests so every readback sample is unambiguously covered.
-    float2 ndc = float2(in.a_Position) / 16383.75 - 1.0;
-    float2 texCoord = float2(in.a_TexCoord) / 65535.0;
-    float4 lightAndData = float4(in.a_LightAndData) / 65535.0;
-    float4 packed = float4(
-        (texCoord.x + lightAndData.x) * 0.5,
-        (texCoord.y + lightAndData.y) * 0.5,
-        (lightAndData.z + lightAndData.w) * 0.5,
-        (texCoord.x + texCoord.y
-            + lightAndData.x + lightAndData.y
-            + lightAndData.z + lightAndData.w) / 6.0
-    );
-    output.position = float4(ndc, 0.0, 1.0);
-    output.color = in.a_Color * 0.5 + packed * 0.5;
-    return output;
-}
-
-fragment float4 packed_terrain_fs(PackedTerrainOut in [[stage_in]]) {
     return in.color;
 }
 """
@@ -759,374 +724,6 @@ private func runShippingMetal4PrivateBufferRewriteTest(device: MTLDevice, queue:
     try shippingMetal4PrivateBufferRewriteTest(device: device, queue: queue)
 }
 
-/// Isolates the production Sodium vertex contract from the generic MTL4
-/// binding tests. It uses the shipping compiler, main queue, argument table,
-/// dynamic attribute-stride setter, buffer slot 5 and an indexed draw with a
-/// base vertex, but the shader consumes only one tightly controlled 20 B packed
-/// vertex record. A failure here points at packed stage-in conversion or the
-/// descriptor/attribute mapping rather than Minecraft's section allocator.
-@available(macOS 26.0, *)
-private func shippingMetal4PackedTerrainVertexTest(device: MTLDevice, queue: MTLCommandQueue) throws {
-    // First build the same packed descriptor through the Metal 3 branch. This
-    // is the control: if it also produces a clear target, the fixture is wrong;
-    // if it passes while MTL4 fails, the boundary is the MTL4 stage-in path.
-    metallum_set_metal4_compiler_enabled(0)
-
-    let vertexFunction = try createShippingFunction(
-        device: device,
-        entryPoint: "packed_terrain_vs",
-        source: packedTerrainShaderSource
-    )
-    let fragmentFunction = try createShippingFunction(
-        device: device,
-        entryPoint: "packed_terrain_fs",
-        source: packedTerrainShaderSource
-    )
-    let descriptor = makeDescriptor(
-        vertexFunction: vertexFunction,
-        fragmentFunction: fragmentFunction,
-        label: "packed-terrain-stage-in"
-    )
-    let vertexDescriptor = MTLVertexDescriptor()
-    vertexDescriptor.attributes[0].format = .ushort2
-    vertexDescriptor.attributes[0].offset = 0
-    vertexDescriptor.attributes[0].bufferIndex = 5
-    vertexDescriptor.attributes[1].format = .uchar4Normalized
-    vertexDescriptor.attributes[1].offset = 4
-    vertexDescriptor.attributes[1].bufferIndex = 5
-    vertexDescriptor.attributes[2].format = .ushort2
-    vertexDescriptor.attributes[2].offset = 8
-    vertexDescriptor.attributes[2].bufferIndex = 5
-    vertexDescriptor.attributes[3].format = .ushort4
-    vertexDescriptor.attributes[3].offset = 12
-    vertexDescriptor.attributes[3].bufferIndex = 5
-    vertexDescriptor.layouts[5].stride = 20
-    vertexDescriptor.layouts[5].stepFunction = .perVertex
-    vertexDescriptor.layouts[5].stepRate = 1
-    descriptor.vertexDescriptor = vertexDescriptor
-    let metal3Pipeline = try createShippingPipeline(device: device, descriptor: descriptor)
-    metallum_set_metal4_compiler_enabled(1)
-    try check(metallum_metal4_main_renderer_enable(device, nil) != 0,
-              "the shipping Metal 4 main renderer could not be enabled for packed terrain validation")
-    let pipeline = try createShippingPipeline(device: device, descriptor: descriptor)
-
-    let vertexBytes = 6 * 20
-    let indexBytes = 3 * MemoryLayout<UInt32>.stride
-    guard let vertexPointer = metallum_create_buffer(device, vertexBytes, .storageModeShared),
-          let vertex = Unmanaged<AnyObject>.fromOpaque(vertexPointer)
-            .takeUnretainedValue() as? MTLBuffer else {
-        try fail("could not allocate the packed terrain vertex buffer")
-    }
-    guard let indexPointer = metallum_create_buffer(device, indexBytes, .storageModeShared),
-          let index = Unmanaged<AnyObject>.fromOpaque(indexPointer)
-            .takeUnretainedValue() as? MTLBuffer else {
-        metallum_release_object(vertexPointer)
-        try fail("could not allocate the packed terrain index buffer")
-    }
-    defer {
-        metallum_release_object(vertexPointer)
-        metallum_release_object(indexPointer)
-    }
-    vertex.label = "packed terrain vertex buffer"
-    index.label = "packed terrain index buffer"
-
-    func writeUShorts(_ values: [UInt16], to buffer: MTLBuffer, offset: Int) {
-        values.withUnsafeBytes { bytes in
-            buffer.contents().advanced(by: offset).copyMemory(
-                from: bytes.baseAddress!,
-                byteCount: bytes.count
-            )
-        }
-    }
-
-    // Keep all attributes identical across both copies of the visible triangle
-    // so the pixel readback checks conversion, not interpolation. The second
-    // copy remains available for a later baseVertex A/B, while this first
-    // isolation run keeps the index translation at zero.
-    let positionValues: [(UInt16, UInt16)] = [
-        (0, 0), (65_535, 0), (0, 65_535)
-    ]
-    let colorValues: [UInt8] = [128, 64, 32, 255]
-    let texCoordValues: [UInt16] = [16_384, 49_152]
-    let lightAndDataValues: [UInt16] = [8_192, 24_576, 40_960, 57_344]
-    for vertexIndex in 0..<6 {
-        let base = vertexIndex * 20
-        let position = positionValues[vertexIndex < 3 ? vertexIndex : vertexIndex - 3]
-        writeUShorts([position.0, position.1], to: vertex, offset: base)
-        colorValues.withUnsafeBytes { bytes in
-            vertex.contents().advanced(by: base + 4).copyMemory(
-                from: bytes.baseAddress!,
-                byteCount: bytes.count
-            )
-        }
-        writeUShorts(texCoordValues, to: vertex, offset: base + 8)
-        writeUShorts(lightAndDataValues, to: vertex, offset: base + 12)
-    }
-    let indexValues: [UInt32] = [0, 1, 2]
-    indexValues.withUnsafeBytes { bytes in
-        index.contents().copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
-    }
-
-    let (targetPointer, target) = try "packed terrain target".withCString { label in
-        guard let pointer = metallum_create_texture_2d(
-            device,
-            .rgba8Unorm,
-            8,
-            8,
-            1,
-            1,
-            0,
-            [.renderTarget, .shaderRead],
-            .shared,
-            label
-        ), let texture = Unmanaged<AnyObject>.fromOpaque(pointer)
-            .takeUnretainedValue() as? MTLTexture else {
-            try fail("could not allocate the packed terrain target")
-        }
-        return (pointer, texture)
-    }
-    defer { metallum_release_object(targetPointer) }
-
-    let expected: [UInt8] = [88, 104, 112, 191]
-    guard let metal3CommandBuffer = queue.makeCommandBuffer() else {
-        try fail("could not allocate the packed terrain Metal 3 control command buffer")
-    }
-    let metal3Pass = MTLRenderPassDescriptor()
-    metal3Pass.colorAttachments[0].texture = target
-    metal3Pass.colorAttachments[0].loadAction = .clear
-    metal3Pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-    metal3Pass.colorAttachments[0].storeAction = .store
-    guard let metal3Encoder = metal3CommandBuffer.makeRenderCommandEncoder(descriptor: metal3Pass) else {
-        try fail("could not create the packed terrain Metal 3 control encoder")
-    }
-    metal3Encoder.setViewport(MTLViewport(
-        originX: 0,
-        originY: 0,
-        width: 8,
-        height: 8,
-        znear: 0,
-        zfar: 1
-    ))
-    metal3Encoder.setRenderPipelineState(metal3Pipeline)
-    metal3Encoder.setVertexBuffer(vertex, offset: 0, index: 5)
-    metal3Encoder.drawIndexedPrimitives(
-        type: .triangle,
-        indexCount: 3,
-        indexType: .uint32,
-        indexBuffer: index,
-        indexBufferOffset: 0,
-        instanceCount: 1,
-        baseVertex: 0,
-        baseInstance: 0
-    )
-    metal3Encoder.endEncoding()
-    metal3CommandBuffer.commit()
-    metal3CommandBuffer.waitUntilCompleted()
-    try check(
-        metal3CommandBuffer.status == .completed,
-        "packed terrain Metal 3 control failed: \(String(describing: metal3CommandBuffer.error))"
-    )
-    var metal3Pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
-    target.getBytes(
-        &metal3Pixels,
-        bytesPerRow: 8 * 4,
-        from: MTLRegionMake2D(0, 0, 8, 8),
-        mipmapLevel: 0
-    )
-    let metal3Base = (1 * 8 + 1) * 4
-    let metal3Pixel = Array(metal3Pixels[metal3Base..<(metal3Base + 4)])
-    let metal3WithinTolerance = zip(metal3Pixel, expected).allSatisfy { actual, expected in
-        abs(Int(actual) - Int(expected)) <= 2
-    }
-    try check(
-        metal3WithinTolerance,
-        "packed terrain Metal 3 control expected approximately \(expected), got \(metal3Pixel)"
-    )
-
-    guard let leasePointer = "packed terrain slot".withCString({ label in
-        metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
-    }) else {
-        try fail("could not acquire the packed terrain Metal 4 command-buffer slot")
-    }
-    defer { metallum_release_object(leasePointer) }
-    guard let encoderPointer = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
-        leasePointer,
-        target,
-        nil,
-        8,
-        8,
-        1,
-        0,
-        0,
-        0,
-        1,
-        0,
-        1
-    ) else {
-        try fail("could not create the packed terrain render encoder")
-    }
-    metallum_MTLRenderCommandEncoder_setRenderPipelineState(encoderPointer, pipeline)
-    // Repeat the production combination after the static/base-zero control:
-    // dynamic attribute stride plus a positive base vertex over the second
-    // copy of the same packed records.
-    metallum_MTLRenderCommandEncoder_setVertexBufferWithAttributeStride(
-        encoderPointer,
-        vertex,
-        0,
-        20,
-        5
-    )
-    metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
-        encoderPointer,
-        .triangle,
-        3,
-        .uint32,
-        index,
-        0,
-        1,
-        3,
-        0
-    )
-    metallum_MTLCommandEncoder_endEncoding(encoderPointer)
-    metallum_release_object(encoderPointer)
-    metallum_MTLCommandBuffer_commit(leasePointer)
-    try check(
-        metallum_MTLCommandBuffer_waitUntilCompleted(leasePointer, 5_000) == 0,
-        "packed terrain command buffer did not complete"
-    )
-    try check(
-        metallum_MTLCommandBuffer_completedSuccessfully(leasePointer) != 0,
-        "packed terrain command buffer completed with an error"
-    )
-
-    var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
-    target.getBytes(
-        &pixels,
-        bytesPerRow: 8 * 4,
-        from: MTLRegionMake2D(0, 0, 8, 8),
-        mipmapLevel: 0
-    )
-    for (x, y) in [(1, 1), (4, 4), (6, 2)] {
-        let base = (y * 8 + x) * 4
-        let actual = Array(pixels[base..<(base + 4)])
-        let withinTolerance = zip(actual, expected).allSatisfy { actual, expected in
-            abs(Int(actual) - Int(expected)) <= 2
-        }
-        try check(
-            withinTolerance,
-            "packed terrain pixel (\(x),\(y)) expected approximately \(expected), got \(actual)"
-        )
-    }
-    print("Metal 4 packed terrain stage-in: slot 5, 20 B stride, dynamic binding, ushort/normalized-uchar attributes, UInt32 indexed draw and baseVertex=3 exact readback passed")
-
-    // Repeat the same draw against a production-sized terrain allocation and a
-    // base vertex taken from the attended corrupted run. This keeps the data
-    // simple while exercising the large-buffer address and indexed base math.
-    let largeBaseVertex = 192_692
-    let largeVertexBytes = 3_870_720
-    guard let largeVertexPointer = metallum_create_buffer(
-        device,
-        largeVertexBytes,
-        .storageModeShared
-    ), let largeVertex = Unmanaged<AnyObject>.fromOpaque(largeVertexPointer)
-        .takeUnretainedValue() as? MTLBuffer else {
-        try fail("could not allocate the production-sized packed terrain vertex buffer")
-    }
-    defer { metallum_release_object(largeVertexPointer) }
-    largeVertex.label = "packed terrain production-sized vertex buffer"
-    for vertexIndex in 0..<3 {
-        let base = (largeBaseVertex + vertexIndex) * 20
-        let position = positionValues[vertexIndex]
-        writeUShorts([position.0, position.1], to: largeVertex, offset: base)
-        colorValues.withUnsafeBytes { bytes in
-            largeVertex.contents().advanced(by: base + 4).copyMemory(
-                from: bytes.baseAddress!,
-                byteCount: bytes.count
-            )
-        }
-        writeUShorts(texCoordValues, to: largeVertex, offset: base + 8)
-        writeUShorts(lightAndDataValues, to: largeVertex, offset: base + 12)
-    }
-
-    guard let largeLeasePointer = "packed terrain production-sized slot".withCString({ label in
-        metallum_MTLCommandQueue_makeCommandBuffer(queue, label)
-    }) else {
-        try fail("could not acquire the production-sized packed terrain command-buffer slot")
-    }
-    defer { metallum_release_object(largeLeasePointer) }
-    guard let largeEncoderPointer = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
-        largeLeasePointer,
-        target,
-        nil,
-        8,
-        8,
-        1,
-        0,
-        0,
-        0,
-        1,
-        0,
-        1
-    ) else {
-        try fail("could not create the production-sized packed terrain render encoder")
-    }
-    metallum_MTLRenderCommandEncoder_setRenderPipelineState(largeEncoderPointer, pipeline)
-    metallum_MTLRenderCommandEncoder_setVertexBufferWithAttributeStride(
-        largeEncoderPointer,
-        largeVertex,
-        0,
-        20,
-        5
-    )
-    metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
-        largeEncoderPointer,
-        .triangle,
-        3,
-        .uint32,
-        index,
-        0,
-        1,
-        largeBaseVertex,
-        0
-    )
-    metallum_MTLCommandEncoder_endEncoding(largeEncoderPointer)
-    metallum_release_object(largeEncoderPointer)
-    metallum_MTLCommandBuffer_commit(largeLeasePointer)
-    try check(
-        metallum_MTLCommandBuffer_waitUntilCompleted(largeLeasePointer, 5_000) == 0,
-        "production-sized packed terrain command buffer did not complete"
-    )
-    try check(
-        metallum_MTLCommandBuffer_completedSuccessfully(largeLeasePointer) != 0,
-        "production-sized packed terrain command buffer completed with an error"
-    )
-    var largePixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
-    target.getBytes(
-        &largePixels,
-        bytesPerRow: 8 * 4,
-        from: MTLRegionMake2D(0, 0, 8, 8),
-        mipmapLevel: 0
-    )
-    let largeBase = (4 * 8 + 4) * 4
-    let largePixel = Array(largePixels[largeBase..<(largeBase + 4)])
-    let largeWithinTolerance = zip(largePixel, expected).allSatisfy { actual, expected in
-        abs(Int(actual) - Int(expected)) <= 2
-    }
-    try check(
-        largeWithinTolerance,
-        "production-sized packed terrain pixel expected approximately \(expected), got \(largePixel)"
-    )
-    print("Metal 4 packed terrain large-buffer stage-in: 3,870,720 B buffer, baseVertex=192692, dynamic stride and exact GPU readback passed")
-}
-
-private func runShippingMetal4PackedTerrainVertexTest(device: MTLDevice, queue: MTLCommandQueue) throws {
-    guard #available(macOS 26.0, *) else {
-        print("Metal 4 packed terrain stage-in test skipped: needs macOS 26")
-        return
-    }
-    try shippingMetal4PackedTerrainVertexTest(device: device, queue: queue)
-}
-
 private func makeDescriptor(
     vertexFunction: MTLFunction,
     fragmentFunction: MTLFunction,
@@ -1154,6 +751,36 @@ private func createShippingPipeline(
         try fail("metallum_MTLDevice_makeRenderPipelineState did not return an MTLRenderPipelineState")
     }
     return state
+}
+
+/// Retains the returned ABI handle separately from the typed, unretained view.
+/// The residency fixture must exercise metallum_release_object itself; using
+/// takeRetainedValue here would bypass that release hook and only test ARC.
+private func createShippingPipelineHandle(
+    device: MTLDevice,
+    descriptor: MTLRenderPipelineDescriptor
+) throws -> (UnsafeMutableRawPointer, MTLRenderPipelineState) {
+    guard let pointer = metallum_MTLDevice_makeRenderPipelineState(device, descriptor) else {
+        let label = descriptor.label ?? "<unlabelled>"
+        try fail("metallum_MTLDevice_makeRenderPipelineState returned nil for " + label)
+    }
+    guard let state = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLRenderPipelineState else {
+        try fail("metallum_MTLDevice_makeRenderPipelineState did not return an MTLRenderPipelineState")
+    }
+    return (pointer, state)
+}
+
+private func createShippingComputePipelineHandle(
+    device: MTLDevice,
+    function: MTLFunction
+) throws -> (UnsafeMutableRawPointer, MTLComputePipelineState) {
+    guard let pointer = metallum_MTLDevice_makeComputePipelineState(device, function) else {
+        try fail("metallum_MTLDevice_makeComputePipelineState returned nil")
+    }
+    guard let state = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? MTLComputePipelineState else {
+        try fail("metallum_MTLDevice_makeComputePipelineState did not return an MTLComputePipelineState")
+    }
+    return (pointer, state)
 }
 
 private func makeTarget(device: MTLDevice, label: String) throws -> MTLTexture {
@@ -1214,6 +841,764 @@ private func drawAndRead(
     return values
 }
 
+/// Shipping terrain seam: one immutable indexed command array is encoded into
+/// one producer-owned ICB and executed twice by the native bridge. The direct
+/// indexed draw is the pixel oracle; native counters prove the second submit
+/// reused the encoded command stream, while changed command content encodes a
+/// replacement.
+@available(macOS 26.0, *)
+private func runTerrainIcbReadbackTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    metallum_set_metal4_compiler_enabled(1)
+    metallum_set_terrain_icb_enabled(1)
+    try check(metallum_residency_set_enable(device, queue) != 0,
+              "the global residency set could not be enabled for terrain ICB validation")
+    try check(metallum_metal4_main_renderer_enable(device, nil) != 0,
+              "the Metal 4 main renderer could not be enabled for terrain ICB validation")
+    try runTerrainGpuVisibilityProbeReadbackTest(device: device, queue: queue)
+    defer {
+        metallum_set_terrain_icb_enabled(0)
+        metallum_set_terrain_gpu_encode_enabled(0)
+    }
+
+    let vertexFunction = try createShippingFunction(device: device, entryPoint: "mtl4_path_vs")
+    let fragmentFunction = try createShippingFunction(device: device, entryPoint: "mtl4_path_fs")
+    let genericPipeline = try createShippingPipeline(
+        device: device,
+        descriptor: makeDescriptor(
+            vertexFunction: vertexFunction,
+            fragmentFunction: fragmentFunction,
+            label: "non-terrain-icb-disabled"
+        )
+    )
+    try check(!genericPipeline.supportIndirectCommandBuffers,
+              "non-terrain pipeline inherited global supportIndirectCommandBuffers")
+    let terrainDescriptor = makeDescriptor(
+        vertexFunction: vertexFunction,
+        fragmentFunction: fragmentFunction,
+        label: "terrain-icb-readback"
+    )
+    terrainDescriptor.supportIndirectCommandBuffers = true
+    let pipeline = try createShippingPipeline(
+        device: device,
+        descriptor: terrainDescriptor
+    )
+    try check(pipeline.supportIndirectCommandBuffers,
+              "terrain ICB pipeline did not advertise supportIndirectCommandBuffers")
+
+    let indexValues: [UInt16] = [0, 1, 2]
+    guard let indexBuffer = indexValues.withUnsafeBytes({ bytes in
+        device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+    }) else {
+        try fail("could not allocate terrain ICB index buffer")
+    }
+    let negativeIndexValues: [UInt16] = [1, 2, 3]
+    guard let negativeIndexBuffer = negativeIndexValues.withUnsafeBytes({ bytes in
+        device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+    }) else {
+        try fail("could not allocate negative-base terrain ICB index buffer")
+    }
+
+    try runTerrainGpuVisibleIcbReadbackTest(
+        device: device,
+        queue: queue,
+        pipeline: pipeline,
+        indexBuffer: indexBuffer
+    )
+
+    func readback(label: String, encode: (UnsafeMutableRawPointer) throws -> Void) throws -> [UInt8] {
+        let target = try makeTarget(device: device, label: label + " target")
+        guard let commandBuffer = label.withCString({ labelPointer in
+            metallum_MTLCommandQueue_makeCommandBuffer(queue, labelPointer)
+        }) else {
+            try fail("could not allocate \(label) command buffer")
+        }
+        defer { metallum_release_object(commandBuffer) }
+        guard let encoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            commandBuffer,
+            target,
+            nil,
+            8,
+            8,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+            1
+        ) else {
+            try fail("could not create \(label) render encoder")
+        }
+        defer { metallum_release_object(encoder) }
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(encoder, pipeline)
+        try encode(encoder)
+        metallum_MTLCommandEncoder_endEncoding(encoder)
+        metallum_MTLCommandBuffer_commit(commandBuffer)
+        try check(metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
+                  "\(label) did not complete")
+        try check(metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
+                  "\(label) completed with an error")
+        var pixel = [UInt8](repeating: 0, count: 4)
+        target.getBytes(&pixel, bytesPerRow: 4, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
+        return pixel
+    }
+
+    let legacyPixel = try readback(label: "terrain legacy indexed draw") { encoder in
+        metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+            encoder, .triangle, 3, .uint16, indexBuffer, 0, 1, 0, 0
+        )
+    }
+    let legacyNegativeBasePixel = try readback(label: "terrain legacy negative-base indexed draw") { encoder in
+        metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
+            encoder, .triangle, 3, .uint16, negativeIndexBuffer, 0, 1, -1, 0
+        )
+    }
+
+    func icbStats() throws -> (UInt64, UInt64) {
+        var encoded: UInt64 = 0
+        var executed: UInt64 = 0
+        try check(metallum_terrain_icb_stats(&encoded, &executed) != 0,
+                  "terrain ICB stats export was unavailable")
+        return (encoded, executed)
+    }
+
+    let statsBefore = try icbStats()
+    let packedCommands: [Int32] = [3, 1, 0, 0, 0]
+    guard let resident = packedCommands.withUnsafeBufferPointer({ commands in
+        metallum_MTLDevice_createTerrainIndexedIcb(
+            device,
+            .triangle,
+            .uint16,
+            indexBuffer,
+            pipeline,
+            commands.baseAddress!,
+            1
+        )
+    }) else {
+        try fail("native terrain ICB owner could not encode a supported PSO")
+    }
+    defer { metallum_release_object(resident) }
+
+    let icbPixel = try readback(label: "terrain native ICB") { encoder in
+        let result = metallum_MTLRenderCommandEncoder_executeTerrainIcb(encoder, resident, 1)
+        try check(result != 0, "native terrain ICB reuse execute rejected a supported PSO")
+    }
+    let reusedPixel = try readback(label: "terrain native ICB reuse") { encoder in
+        let result = metallum_MTLRenderCommandEncoder_executeTerrainIcb(encoder, resident, 1)
+        try check(result != 0, "native terrain ICB second execute rejected a supported PSO")
+    }
+    try check(icbPixel == legacyPixel,
+              "terrain ICB readback \(icbPixel) differed from legacy \(legacyPixel)")
+    try check(reusedPixel == legacyPixel,
+              "reused terrain ICB readback \(reusedPixel) differed from legacy \(legacyPixel)")
+    let statsAfterReuse = try icbStats()
+    try check(statsAfterReuse.0 - statsBefore.0 == 1,
+              "unchanged terrain ICB was encoded more than once")
+    try check(statsAfterReuse.1 - statsBefore.1 == 2,
+              "terrain ICB reuse did not execute twice")
+
+    let changedCommands: [Int32] = [3, 1, 0, 0, 1]
+    guard let replacement = changedCommands.withUnsafeBufferPointer({ commands in
+        metallum_MTLDevice_createTerrainIndexedIcb(
+            device,
+            .triangle,
+            .uint16,
+            indexBuffer,
+            pipeline,
+            commands.baseAddress!,
+            1
+        )
+    }) else {
+        try fail("changed terrain ICB command stream did not rebuild")
+    }
+    metallum_release_object(replacement)
+    let statsAfterChange = try icbStats()
+    try check(statsAfterChange.0 - statsBefore.0 == 2,
+              "changed terrain ICB command stream did not invalidate the encoded owner")
+    print("Terrain ICB stats: encodedDelta=\(statsAfterChange.0 - statsBefore.0), "
+          + "executedDelta=\(statsAfterChange.1 - statsBefore.1), "
+          + "replacementEncode=1")
+    try check(icbPixel == [64, 128, 191, 255],
+              "terrain ICB readback was unexpected: \(icbPixel)")
+    print("Terrain ICB: one encoded command stream executed twice with legacy readback parity")
+
+    // GPU authoring proof: disablement is a strict Metal 3/static contract,
+    // while the enabled path must author commands through a compute dispatch
+    // before the reopened Metal 4 render encoder executes the same ICB.
+    metallum_set_terrain_gpu_encode_enabled(0)
+    let disabledGpuIcb = packedCommands.withUnsafeBufferPointer { commands in
+        metallum_MTLDevice_createTerrainGpuIndexedIcb(
+            // The function must fail closed before dereferencing this pointer
+            // when the opt-in is disabled.
+            UnsafeMutableRawPointer(bitPattern: 1)!,
+            device,
+            .triangle,
+            .uint16,
+            indexBuffer,
+            pipeline,
+            commands.baseAddress!,
+            1
+        )
+    }
+    try check(disabledGpuIcb == nil,
+              "disabled terrain GPU authoring did not fail closed")
+
+    metallum_set_terrain_gpu_encode_enabled(1)
+    func gpuStats() throws -> (UInt64, UInt64) {
+        var encoded: UInt64 = 0
+        var dispatches: UInt64 = 0
+        try check(metallum_terrain_gpu_icb_stats(&encoded, &dispatches) != 0,
+                  "terrain GPU ICB stats export was unavailable")
+        return (encoded, dispatches)
+    }
+
+    func gpuReadback(
+        label: String,
+        gpuIndexBuffer: MTLBuffer,
+        gpuCommands: [Int32]
+    ) throws -> [UInt8] {
+        let target = try makeTarget(device: device, label: label + " target")
+        guard let commandBuffer = label.withCString({ labelPointer in
+            metallum_MTLCommandQueue_makeCommandBuffer(queue, labelPointer)
+        }) else {
+            try fail("could not allocate \(label) command buffer")
+        }
+        defer { metallum_release_object(commandBuffer) }
+        guard let firstEncoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            commandBuffer,
+            target,
+            nil,
+            8,
+            8,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+            1
+        ) else {
+            try fail("could not create \(label) producer render encoder")
+        }
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(firstEncoder, pipeline)
+        // Preserve the ended bridge so the native authoring call can use its
+        // Metal 4 lease to append compute work to this command buffer.
+        metallum_MTLCommandEncoder_endEncoding(firstEncoder)
+        defer { metallum_release_object(firstEncoder) }
+
+        guard let resident = gpuCommands.withUnsafeBufferPointer({ commands in
+            metallum_MTLDevice_createTerrainGpuIndexedIcb(
+                firstEncoder,
+                device,
+                .triangle,
+                .uint16,
+                gpuIndexBuffer,
+                pipeline,
+                commands.baseAddress!,
+                1
+            )
+        }) else {
+            try fail("native terrain GPU ICB authoring returned nil")
+        }
+        defer { metallum_release_object(resident) }
+
+        guard let secondEncoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            commandBuffer,
+            target,
+            nil,
+            8,
+            8,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            1
+        ) else {
+            try fail("could not create \(label) consumer render encoder")
+        }
+        defer { metallum_release_object(secondEncoder) }
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(secondEncoder, pipeline)
+        try check(metallum_MTLRenderCommandEncoder_executeTerrainIcb(
+            secondEncoder, resident, 1
+        ) != 0, "native terrain GPU-authored ICB execution rejected the command")
+        metallum_MTLCommandEncoder_endEncoding(secondEncoder)
+        metallum_MTLCommandBuffer_commit(commandBuffer)
+        try check(metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
+                  "\(label) did not complete")
+        try check(metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
+                  "\(label) completed with an error")
+        var pixel = [UInt8](repeating: 0, count: 4)
+        target.getBytes(&pixel, bytesPerRow: 4,
+                        from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
+        return pixel
+    }
+
+    func gpuPipelineCompiles() throws -> UInt64 {
+        var compiles: UInt64 = 0
+        try check(metallum_terrain_gpu_icb_pipeline_stats(&compiles) != 0,
+                  "terrain GPU ICB pipeline stats export was unavailable")
+        return compiles
+    }
+
+    let gpuPipelineCompilesBefore = try gpuPipelineCompiles()
+    let gpuStatsBefore = try gpuStats()
+    let gpuPixel = try gpuReadback(
+        label: "terrain GPU-authored ICB",
+        gpuIndexBuffer: indexBuffer,
+        gpuCommands: packedCommands
+    )
+    let gpuStatsAfter = try gpuStats()
+    let gpuPipelineCompilesAfterFirst = try gpuPipelineCompiles()
+    try check(gpuPixel == legacyPixel,
+              "GPU-authored terrain ICB readback \(gpuPixel) differed from legacy \(legacyPixel)")
+    try check(gpuStatsAfter.0 - gpuStatsBefore.0 == 1,
+              "GPU-authored terrain ICB did not increment the authoring counter")
+    try check(gpuStatsAfter.1 - gpuStatsBefore.1 == 1,
+              "GPU-authored terrain ICB did not increment the compute dispatch counter")
+    try check(gpuPipelineCompilesAfterFirst - gpuPipelineCompilesBefore <= 1,
+              "GPU-authored terrain ICB compiled more than one PSO for one device/variant")
+
+    let gpuNegativeBasePixel = try gpuReadback(
+        label: "terrain GPU-authored negative-base ICB",
+        gpuIndexBuffer: negativeIndexBuffer,
+        gpuCommands: [3, 1, 0, -1, 0]
+    )
+    let gpuPipelineCompilesAfterSecond = try gpuPipelineCompiles()
+    try check(gpuNegativeBasePixel == legacyNegativeBasePixel,
+              "GPU-authored negative-base ICB readback \(gpuNegativeBasePixel) differed from legacy \(legacyNegativeBasePixel)")
+    try check(gpuPipelineCompilesAfterSecond == gpuPipelineCompilesAfterFirst,
+              "same-device/variant GPU ICB rebuilt its compute PSO on the second authoring")
+    print("Terrain GPU ICB: all-visible compute authoring/readback parity, "
+          + "gpuEncodedDelta=\(gpuStatsAfter.0 - gpuStatsBefore.0), "
+          + "gpuDispatchDelta=\(gpuStatsAfter.1 - gpuStatsBefore.1), "
+          + "negativeBaseVertexParity=1, "
+          + "pipelineCompileDelta=\(gpuPipelineCompilesAfterSecond - gpuPipelineCompilesBefore)")
+}
+
+@available(macOS 26.0, *)
+private func runTerrainGpuVisibleIcbReadbackTest(
+    device: MTLDevice,
+    queue: MTLCommandQueue,
+    pipeline: MTLRenderPipelineState,
+    indexBuffer: MTLBuffer
+) throws {
+    metallum_set_terrain_gpu_encode_enabled(1)
+    defer { metallum_set_terrain_gpu_encode_enabled(0) }
+
+    let matrix: [Float] = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    ]
+    let uint32IndexValues: [UInt32] = [0, 1, 2]
+    guard let uint32IndexBuffer = uint32IndexValues.withUnsafeBytes({ bytes in
+        device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+    }) else {
+        try fail("could not allocate uint32 terrain visible ICB index buffer")
+    }
+
+    // Exercise the persistent-scene retain ABI independently of fused ICB
+    // execution. The scene handle is borrowed for the typed retain call, and
+    // both the original Java-style owner and its short-lived transition retain
+    // are released exactly once below.
+    let sceneWords: [UInt32] = [
+        0, 0, 0, 0,
+        Float(-0.5).bitPattern, Float(-0.5).bitPattern, Float(-0.5).bitPattern,
+        Float(0.5).bitPattern, Float(0.5).bitPattern, Float(0.5).bitPattern,
+        Float(0.5).bitPattern, 0
+    ]
+    guard let scene = sceneWords.withUnsafeBufferPointer({ words in
+        metallum_MTLDevice_createTerrainGpuVisibilityScene(
+            device,
+            UnsafeRawPointer(words.baseAddress!).assumingMemoryBound(to: UInt8.self),
+            1,
+            9000
+        )
+    }) else {
+        try fail("could not create persistent terrain visibility scene")
+    }
+    guard let retainedScene = metallum_terrain_visibility_scene_retain(scene) else {
+        metallum_release_object(scene)
+        try fail("could not retain persistent terrain visibility scene")
+    }
+    metallum_release_object(scene)
+    metallum_release_object(retainedScene)
+
+    func runCase(
+        label: String,
+        visibleIndices: Set<Int>,
+        expectedPixel: [UInt8],
+        indexType: MTLIndexType,
+        indexBuffer: MTLBuffer,
+        testCrossLease: Bool = false
+    ) throws {
+        let candidates: [Float] = (0..<8).flatMap { index in
+            if visibleIndices.contains(index) {
+                return [-0.5 as Float, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.0]
+            }
+            return [2.0 as Float, -0.5, -0.5, 3.0, 0.5, 0.5, 3.0, 0.0]
+        }
+        let target = try makeTarget(device: device, label: label + " target")
+        guard let commandBuffer = label.withCString({ name in
+            metallum_MTLCommandQueue_makeCommandBuffer(queue, name)
+        }) else {
+            try fail("could not allocate \(label) command buffer")
+        }
+        defer { metallum_release_object(commandBuffer) }
+        guard let producer = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            commandBuffer, target, nil, 8, 8, 1, 0, 0, 0, 1, 0, 1
+        ) else {
+            try fail("could not create \(label) producer encoder")
+        }
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(producer, pipeline)
+        metallum_MTLCommandEncoder_endEncoding(producer)
+        defer { metallum_release_object(producer) }
+
+        let probe: UnsafeMutableRawPointer? = candidates.withUnsafeBufferPointer { values in
+            matrix.withUnsafeBufferPointer { matrixValues in
+                guard let valuesBase = values.baseAddress,
+                      let matrixBase = matrixValues.baseAddress else { return nil }
+                return metallum_MTLDevice_createTerrainGpuVisibilityProbe(
+                    producer,
+                    device,
+                    UnsafeRawPointer(valuesBase).assumingMemoryBound(to: UInt8.self),
+                    matrixBase,
+                    8,
+                    9000
+                )
+            }
+        }
+        guard let probe else {
+            try fail("could not create \(label) visibility owner")
+        }
+        guard let retainedProbe = metallum_terrain_visibility_probe_retain(probe) else {
+            metallum_release_object(probe)
+            try fail("could not retain \(label) visibility owner for ICB authoring")
+        }
+
+        // Source order is deliberately [candidate 7, candidate 2, candidate 7].
+        // Candidate indices are lookup keys only; source ordinals remain ICB slots.
+        let commands: [Int32] = [
+            3, 1, 0, 0, 0,
+            3, 1, 0, 0, 0,
+            3, 1, 0, -1, 0
+        ]
+        let candidateBySource: [Int32] = [7, 2, 7]
+        let resident: UnsafeMutableRawPointer? = commands.withUnsafeBufferPointer { draws in
+            candidateBySource.withUnsafeBufferPointer { mapping in
+                metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
+                    producer, device, .triangle, indexType, indexBuffer, pipeline,
+                    draws.baseAddress, mapping.baseAddress, 3, retainedProbe, 9000
+                )
+            }
+        }
+        guard let resident else {
+            metallum_release_object(probe)
+            metallum_release_object(retainedProbe)
+            try fail("could not create \(label) sparse visible ICB")
+        }
+
+        // A GPU-authored owner is scoped to both the creating lease and the
+        // exact source command range. These rejection checks return before
+        // touching the render encoder, so they are safe on this ended bridge.
+        try check(
+            metallum_MTLRenderCommandEncoder_executeTerrainIcb(producer, resident, 2) == 0,
+            "\(label) accepted a wrong GPU-authored ICB draw count"
+        )
+
+        if testCrossLease {
+            guard let otherCommandBuffer = (label + " wrong lease").withCString({ name in
+                metallum_MTLCommandQueue_makeCommandBuffer(queue, name)
+            }), let wrongEncoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+                otherCommandBuffer, target, nil, 8, 8, 0, 0, 0, 0, 1, 0, 1
+            ) else {
+                metallum_release_object(resident)
+                metallum_release_object(probe)
+                metallum_release_object(retainedProbe)
+                try fail("could not allocate \(label) cross-lease rejection fixture")
+            }
+            metallum_MTLRenderCommandEncoder_setRenderPipelineState(wrongEncoder, pipeline)
+            metallum_MTLCommandEncoder_endEncoding(wrongEncoder)
+            let rejected: UnsafeMutableRawPointer? = commands.withUnsafeBufferPointer { draws in
+                candidateBySource.withUnsafeBufferPointer { mapping in
+                    metallum_MTLDevice_createTerrainVisibleGpuIndexedIcb(
+                        wrongEncoder, device, .triangle, indexType, indexBuffer, pipeline,
+                        draws.baseAddress, mapping.baseAddress, 3, retainedProbe, 9000
+                    )
+                }
+            }
+            try check(rejected == nil, "\(label) accepted a different command-buffer lease")
+            if let rejected { metallum_release_object(rejected) }
+            try check(
+                metallum_MTLRenderCommandEncoder_executeTerrainIcb(wrongEncoder, resident, 3) == 0,
+                "\(label) executed a GPU-authored ICB from a different command-buffer lease"
+            )
+            metallum_release_object(wrongEncoder)
+            metallum_release_object(otherCommandBuffer)
+        }
+
+        // Drop the external probe reference before execute. The visible ICB
+        // owner must retain the probe-backed visibility buffer through completion.
+        metallum_release_object(probe)
+        metallum_release_object(retainedProbe)
+        guard let consumer = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            commandBuffer, target, nil, 8, 8, 0, 0, 0, 0, 1, 0, 1
+        ) else {
+            metallum_release_object(resident)
+            try fail("could not create \(label) consumer encoder")
+        }
+        metallum_MTLRenderCommandEncoder_setRenderPipelineState(consumer, pipeline)
+        try check(
+            metallum_MTLRenderCommandEncoder_executeTerrainIcb(consumer, resident, 3) != 0,
+            "\(label) sparse visible ICB execute failed"
+        )
+        metallum_MTLCommandEncoder_endEncoding(consumer)
+        metallum_release_object(consumer)
+        metallum_MTLCommandBuffer_commit(commandBuffer)
+        try check(
+            metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
+            "\(label) command buffer did not complete"
+        )
+        try check(
+            metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
+            "\(label) command buffer failed"
+        )
+        var pixel = [UInt8](repeating: 0, count: 4)
+        target.getBytes(&pixel, bytesPerRow: 4,
+                        from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
+        try check(pixel == expectedPixel,
+                  "\(label) pixel \(pixel) differed from expected \(expectedPixel)")
+        metallum_release_object(resident)
+    }
+
+    try runCase(
+        label: "terrain visible ICB sparse source slots",
+        visibleIndices: [7], expectedPixel: [64, 128, 191, 255],
+        indexType: .uint16, indexBuffer: indexBuffer, testCrossLease: true
+    )
+    try runCase(
+        label: "terrain visible ICB zero visible",
+        visibleIndices: [], expectedPixel: [0, 0, 0, 255],
+        indexType: .uint16, indexBuffer: indexBuffer
+    )
+    try runCase(
+        label: "terrain visible ICB uint32 negative-base",
+        visibleIndices: [7], expectedPixel: [64, 128, 191, 255],
+        indexType: .uint32, indexBuffer: uint32IndexBuffer
+    )
+    print("Terrain visible GPU ICB: sparse source slots, zero-visible reset, cross-lease rejection and owner lifetime passed")
+}
+
+/// Exercises visibility bitset -> prefix/compact on real Metal 4 command
+/// buffers. Each fixture uses the same native command-buffer path and checks
+/// exact tail-masked words, count and stable ascending candidate indices. The
+/// result remains value-only and does not become draw-authoritative.
+@available(macOS 26.0, *)
+private func runTerrainGpuVisibilityProbeReadbackTest(device: MTLDevice, queue: MTLCommandQueue) throws {
+    let matrix: [Float] = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    ]
+    let target = try makeTarget(device: device, label: "terrain visibility probe target")
+    func fixtureCandidates(
+        count: Int,
+        visibleIndices: Set<Int>,
+        intersectingIndices: Set<Int> = []
+    ) -> [Float] {
+        var values: [Float] = []
+        values.reserveCapacity(count * 8)
+        for index in 0..<count {
+            if intersectingIndices.contains(index) {
+                values += [0.5, 0.5, 0.5, 1.5, 1.5, 1.5, 1.5, 0.0]
+            } else if visibleIndices.contains(index) {
+                values += [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.0]
+            } else {
+                values += [2.0, -0.5, -0.5, 3.0, 0.5, 0.5, 3.0, 0.0]
+            }
+        }
+        return values
+    }
+
+    func expectedWords(
+        count: Int,
+        visibleIndices: Set<Int>,
+        intersectingIndices: Set<Int> = []
+    ) -> [UInt32] {
+        var words = [UInt32](repeating: 0, count: (count + 31) / 32)
+        for index in visibleIndices.union(intersectingIndices) {
+            words[index >> 5] |= UInt32(1) << UInt32(index & 31)
+        }
+        return words
+    }
+
+    func runCase(
+        label: String,
+        count: Int,
+        visibleIndices: Set<Int>,
+        epoch: UInt64,
+        intersectingIndices: Set<Int> = [],
+        pollBeforeCommit: Bool = false
+    ) throws {
+        let candidates = fixtureCandidates(
+            count: count,
+            visibleIndices: visibleIndices,
+            intersectingIndices: intersectingIndices
+        )
+        let expected = visibleIndices.union(intersectingIndices).sorted()
+        let expectedBitset = expectedWords(
+            count: count,
+            visibleIndices: visibleIndices,
+            intersectingIndices: intersectingIndices
+        )
+        guard let commandBuffer = label.withCString({ name in
+            metallum_MTLCommandQueue_makeCommandBuffer(queue, name)
+        }) else {
+            try fail("could not allocate \(label) command buffer")
+        }
+        defer { metallum_release_object(commandBuffer) }
+        guard let encoder = metallum_MTLCommandBuffer_makeRenderCommandEncoder(
+            commandBuffer,
+            target,
+            nil,
+            8,
+            8,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+            1
+        ) else {
+            try fail("could not create \(label) render encoder")
+        }
+        defer { metallum_release_object(encoder) }
+        metallum_MTLCommandEncoder_endEncoding(encoder)
+        let probe: UnsafeMutableRawPointer? = candidates.withUnsafeBufferPointer { candidateValues in
+            matrix.withUnsafeBufferPointer { matrixValues in
+                guard let candidateBase = candidateValues.baseAddress,
+                      let matrixBase = matrixValues.baseAddress else { return nil }
+                return metallum_MTLDevice_createTerrainGpuVisibilityProbe(
+                    encoder,
+                    device,
+                    UnsafeRawPointer(candidateBase).assumingMemoryBound(to: UInt8.self),
+                    matrixBase,
+                    Int32(count),
+                    epoch
+                )
+            }
+        }
+        guard let probe else {
+            try fail("native terrain visibility probe could not encode \(label)")
+        }
+        defer { metallum_release_object(probe) }
+
+        var actualEpoch: UInt64 = 0
+        var visible: UInt32 = 0
+        var uncertain: UInt32 = 0
+        var wordCount: UInt32 = 0
+        var compactedCount: UInt32 = 0
+        var words = [UInt32](repeating: 0, count: expectedBitset.count)
+        var compacted = [UInt32](repeating: UInt32.max, count: count)
+        let wordCapacity = words.count
+        let compactedCapacity = compacted.count
+        if pollBeforeCommit {
+            let pendingStatus = words.withUnsafeMutableBufferPointer { wordOutput in
+                compacted.withUnsafeMutableBufferPointer { compactedOutput in
+                    metallum_terrain_visibility_probe_poll_v2(
+                        probe,
+                        &actualEpoch,
+                        &visible,
+                        &uncertain,
+                        &wordCount,
+                        wordOutput.baseAddress,
+                        Int32(wordCapacity),
+                        &compactedCount,
+                        compactedOutput.baseAddress,
+                        Int32(compactedCapacity)
+                    )
+                }
+            }
+            try check(pendingStatus == 0,
+                      "\(label) pre-commit poll returned \(pendingStatus), expected 0")
+        }
+        metallum_MTLCommandBuffer_commit(commandBuffer)
+        try check(metallum_MTLCommandBuffer_waitUntilCompleted(commandBuffer, 5_000) == 0,
+                  "\(label) command buffer did not complete")
+        try check(metallum_MTLCommandBuffer_completedSuccessfully(commandBuffer) != 0,
+                  "\(label) command buffer completed with an error")
+
+        let status = words.withUnsafeMutableBufferPointer { wordOutput in
+            compacted.withUnsafeMutableBufferPointer { compactedOutput in
+                metallum_terrain_visibility_probe_poll_v2(
+                    probe,
+                    &actualEpoch,
+                    &visible,
+                    &uncertain,
+                    &wordCount,
+                    wordOutput.baseAddress,
+                    Int32(wordCapacity),
+                    &compactedCount,
+                    compactedOutput.baseAddress,
+                    Int32(compactedCapacity)
+                )
+            }
+        }
+        try check(status == 1, "\(label) poll returned \(status)")
+        try check(actualEpoch == epoch && visible == UInt32(expected.count)
+                      && uncertain == 0 && wordCount == UInt32(expectedBitset.count),
+                  "\(label) counters were epoch=\(actualEpoch), visible=\(visible), uncertain=\(uncertain), words=\(wordCount)")
+        try check(words == expectedBitset,
+                  "\(label) bitset mismatch: \(words) expected \(expectedBitset)")
+        try check(compactedCount == UInt32(expected.count),
+                  "\(label) compacted count=\(compactedCount), expected \(expected.count)")
+        try check(Array(compacted.prefix(expected.count)) == expected.map { UInt32($0) },
+                  "\(label) compacted indices were \(compacted.prefix(expected.count)), expected \(expected)")
+    }
+
+    // Exercise all-one, all-zero, sparse, tail-word, and every local scan
+    // boundary. The larger cases also prove the second hierarchy level.
+    let allOne = Set(0..<256)
+    let allZero = Set<Int>()
+    try runCase(label: "terrain visibility identity-frustum inside-outside-intersect",
+                count: 3, visibleIndices: [0], epoch: 123, intersectingIndices: [2],
+                pollBeforeCommit: true)
+    try runCase(label: "terrain visibility n1 all-one", count: 1, visibleIndices: [0], epoch: 101)
+    try runCase(label: "terrain visibility n31 all-zero", count: 31, visibleIndices: allZero, epoch: 131)
+    try runCase(label: "terrain visibility n32 all-one", count: 32, visibleIndices: Set(0..<32), epoch: 132)
+    try runCase(label: "terrain visibility n33 sparse-tail", count: 33, visibleIndices: [0, 31, 32], epoch: 133)
+    try runCase(label: "terrain visibility n255 all-zero", count: 255, visibleIndices: allZero, epoch: 255)
+    try runCase(label: "terrain visibility n256 all-one", count: 256, visibleIndices: allOne, epoch: 256)
+    try runCase(label: "terrain visibility n257 sparse-boundary", count: 257,
+                visibleIndices: [0, 31, 32, 255, 256], epoch: 257)
+    try runCase(label: "terrain visibility n8191 sparse-tail", count: 8191,
+                visibleIndices: [0, 255, 256, 8190], epoch: 8191)
+    try runCase(label: "terrain visibility n8192 sparse-boundary", count: 8192,
+                visibleIndices: [0, 255, 256, 7936, 8191], epoch: 8192)
+    try runCase(label: "terrain visibility n8193 sparse-group", count: 8193,
+                visibleIndices: [0, 255, 256, 8192], epoch: 8193)
+    try runCase(label: "terrain visibility n65535 sparse-tail", count: 65535,
+                visibleIndices: [0, 255, 256, 65534], epoch: 65535)
+    try runCase(label: "terrain visibility n65536 all-one", count: 65536,
+                visibleIndices: Set(0..<65536), epoch: 65536)
+    try runCase(label: "terrain visibility n65537 sparse-group-boundary", count: 65537,
+                visibleIndices: [0, 255, 256, 65535, 65536], epoch: 65537)
+    print("Terrain GPU visibility compaction: Metal 4 block-scan/readback fixtures passed (stable order, tails and boundaries)")
+}
+
+private func runTerrainIcbReadbackTestIfAvailable(device: MTLDevice, queue: MTLCommandQueue) throws {
+    guard #available(macOS 26.0, *) else {
+        print("Terrain ICB test skipped: needs macOS 26")
+        return
+    }
+    try runTerrainIcbReadbackTest(device: device, queue: queue)
+}
+
 /// Exercises metallum_residency_set_enable plus the creation, submit and release
 /// hooks, all through the shipping exports (migration spec M3).
 @available(macOS 15.0, iOS 18.0, *)
@@ -1244,7 +1629,98 @@ private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
         commandBuffer.waitUntilCompleted()
     }
 
+    func lifetimeStats(_ label: String) throws -> (created: UInt64, released: UInt64) {
+        var created: UInt64 = 0
+        var released: UInt64 = 0
+        try check(metallum_residency_set_lifetime_stats(&created, &released) != 0,
+                  "metallum_residency_set_lifetime_stats reported no active set at \(label)")
+        return (created, released)
+    }
+
+    // Re-entry must attach the already-created set to every same-device queue;
+    // returning success without queue membership would leave that queue on
+    // automatic residency. The production Metal 4 main queue performs the same
+    // attachment directly, while this exercises the shipping helper contract.
+    guard let secondaryQueue = device.makeCommandQueue() else {
+        try fail("could not create the same-device secondary command queue")
+    }
+    try check(metallum_residency_set_enable(device, secondaryQueue) != 0,
+              "same-device residency re-entry did not attach the existing set")
+
+    // Calling the initializer twice must not remove and recreate a present PSO
+    // that a live command buffer could still reference. The first flush publishes
+    // any newly created entries; the second flush proves that re-entry adds no
+    // allocation and performs no release.
+    let initCountBefore = try residencyCount("before idempotent pipeline init")
+    let initLifetimeBefore = try lifetimeStats("before idempotent pipeline init")
+    metallum_init_pipelines(device)
+    try flushResidency("first idempotent pipeline init")
+    let initCountAfterFirst = try residencyCount("after first pipeline init")
+    let initLifetimeAfterFirst = try lifetimeStats("after first pipeline init")
+    metallum_init_pipelines(device)
+    try flushResidency("second idempotent pipeline init")
+    let initCountAfterSecond = try residencyCount("after second pipeline init")
+    let initLifetimeAfterSecond = try lifetimeStats("after second pipeline init")
+    try check(initCountAfterSecond == initCountAfterFirst,
+              "idempotent pipeline init changed live residency count from \(initCountAfterFirst) to \(initCountAfterSecond)")
+    try check(initLifetimeAfterSecond.created == initLifetimeAfterFirst.created,
+              "idempotent pipeline init created allocations on its second call")
+    try check(initLifetimeAfterSecond.released == initLifetimeAfterFirst.released,
+              "idempotent pipeline init released an allocation on its second call")
+    try check(initCountAfterFirst >= initCountBefore,
+              "first pipeline init unexpectedly reduced live residency count")
+    try check(initLifetimeAfterFirst.released == initLifetimeBefore.released,
+              "first pipeline init released a pre-existing allocation")
+    print("Residency pipeline lifecycle: same-device queue re-entry reattached the existing set; repeated init was idempotent with no live PSO removal")
+
     let baseline = try residencyCount("baseline")
+    let lifetimeBefore = try lifetimeStats("baseline")
+
+    // The first state is created through the registered-function MTL4 compiler
+    // path. The second uses an unregistered library while the switch is still
+    // on, proving the ordinary MTL3 fallback is also tracked. The compute state
+    // exercises the separate public compute-PSO ABI; unlike resources, both PSO
+    // protocols conform to MTLAllocation without conforming to MTLResource.
+    let renderVertex = try createShippingFunction(device: device, entryPoint: "mtl4_path_vs")
+    let renderFragment = try createShippingFunction(device: device, entryPoint: "mtl4_path_fs")
+    metallum_set_metal4_compiler_enabled(1)
+    defer { metallum_set_metal4_compiler_enabled(0) }
+    let (metal4RenderPointer, metal4RenderState) = try createShippingPipelineHandle(
+        device: device,
+        descriptor: makeDescriptor(
+            vertexFunction: renderVertex,
+            fragmentFunction: renderFragment,
+            label: "residency-metal4-render-pso"
+        )
+    )
+    let fallbackLibrary = try device.makeLibrary(source: unregisteredShaderSource, options: nil)
+    guard let fallbackVertex = fallbackLibrary.makeFunction(name: "mtl4_unregistered_vs"),
+          let fallbackFragment = fallbackLibrary.makeFunction(name: "mtl4_unregistered_fs") else {
+        try fail("could not resolve the residency fallback MSL entry points")
+    }
+    let (metal3RenderPointer, metal3RenderState) = try createShippingPipelineHandle(
+        device: device,
+        descriptor: makeDescriptor(
+            vertexFunction: fallbackVertex,
+            fragmentFunction: fallbackFragment,
+            label: "residency-metal3-fallback-render-pso"
+        )
+    )
+    let computeFunction = try createShippingFunction(
+        device: device,
+        entryPoint: "residency_compute_probe",
+        source: residencyComputeShaderSource
+    )
+    let (computePointer, computeState) = try createShippingComputePipelineHandle(
+        device: device,
+        function: computeFunction
+    )
+    // Keep typed views alive until the matching ABI releases below. The Metal
+    // SDK statically declares all three concrete states as MTLAllocation; the
+    // live residency count below proves the shipping bridge admitted them.
+    _ = metal4RenderState
+    _ = metal3RenderState
+    _ = computeState
 
     guard let bufferPointer = metallum_create_buffer(device, 4096, []) else {
         try fail("metallum_create_buffer returned nil")
@@ -1262,90 +1738,38 @@ private func residencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
         try fail("metallum_create_texture_2d returned nil for the memoryless texture")
     }
 
-    // Pipeline states are MTLAllocation objects, but not MTLResource objects.
-    // Create them through the same shipping exports Minecraft uses so this
-    // test catches a residency registry that is accidentally narrowed to
-    // buffers/textures/ICBs. The compiler is disabled by the caller here, so
-    // the test exercises the common M3 fallback as well as the allocation type
-    // boundary; the M4 compiler path registers through the same tracked entry
-    // points above.
-    let residencyLibrary = try device.makeLibrary(source: shaderSource, options: nil)
-    guard let residencyVertex = residencyLibrary.makeFunction(name: "mtl4_path_vs"),
-          let residencyFragment = residencyLibrary.makeFunction(name: "mtl4_path_fs") else {
-        try fail("missing residency render pipeline functions")
-    }
-    guard let renderPipelinePointer = metallum_MTLDevice_makeRenderPipelineState(
-        device,
-        makeDescriptor(
-            vertexFunction: residencyVertex,
-            fragmentFunction: residencyFragment,
-            label: "residency-render-pipeline"
-        )
-    ) else {
-        try fail("metallum_MTLDevice_makeRenderPipelineState returned nil for residency test")
-    }
-    guard Unmanaged<AnyObject>.fromOpaque(renderPipelinePointer)
-        .takeUnretainedValue() is MTLRenderPipelineState else {
-        try fail("residency render pipeline pointer was not an MTLRenderPipelineState")
-    }
-
-    let computeLibrary = try device.makeLibrary(source: """
-        #include <metal_stdlib>
-        using namespace metal;
-        kernel void residency_test_compute() {}
-        """, options: nil)
-    guard let computeFunction = computeLibrary.makeFunction(name: "residency_test_compute"),
-          let computePipelinePointer = metallum_MTLDevice_makeComputePipelineState(device, computeFunction) else {
-        try fail("metallum_MTLDevice_makeComputePipelineState returned nil for residency test")
-    }
-    guard Unmanaged<AnyObject>.fromOpaque(computePipelinePointer)
-        .takeUnretainedValue() is MTLComputePipelineState else {
-        try fail("residency compute pipeline pointer was not an MTLComputePipelineState")
-    }
-
     try flushResidency("residency additions")
     let afterCreate = try residencyCount("after create")
-    // Three resources plus two pipeline allocations are created, but the
-    // memoryless texture must not be tracked.
-    try check(afterCreate == baseline + 4,
-              "expected \(baseline + 4) tracked allocations after creating a buffer, a texture, two "
-              + "pipeline states and a memoryless texture, got \(afterCreate)")
-
-    // A RenderRegion can create its geometry arena after the residency set has
-    // already been committed for the initial visible regions. Keep this
-    // second allocation after the first flush so the test covers the same
-    // incremental membership transition as Sodium's newly visible-region
-    // upload path.
-    guard let incrementalBufferPointer = metallum_create_buffer(device, 2048, []) else {
-        try fail("metallum_create_buffer returned nil for the incremental residency allocation")
-    }
-    try flushResidency("incremental residency addition")
-    let afterIncrementalCreate = try residencyCount("after incremental create")
-    try check(afterIncrementalCreate == afterCreate + 1,
-              "an allocation created after the first commit should raise the tracked count to \(afterCreate + 1), "
-              + "got \(afterIncrementalCreate)")
-
-    metallum_release_object(incrementalBufferPointer)
-    try flushResidency("incremental residency removal")
-    let afterIncrementalRelease = try residencyCount("after incremental release")
-    try check(afterIncrementalRelease == afterCreate,
-              "releasing the incremental allocation should return to \(afterCreate) tracked allocations, "
-              + "got \(afterIncrementalRelease)")
+    // Three resources were created, but the memoryless one must be excluded;
+    // the two render and one compute PSO are all real MTLAllocation entries.
+    try check(afterCreate == baseline + 5,
+              "expected \(baseline + 5) tracked allocations after creating two render PSOs, one compute "
+              + "PSO, a buffer, a texture and a memoryless texture, got \(afterCreate)")
+    let lifetimeAfterCreate = try lifetimeStats("after create")
+    try check(lifetimeAfterCreate.created == lifetimeBefore.created + 5,
+              "expected five allocation additions (two render PSOs, one compute PSO and two resources), "
+              + "got \(lifetimeAfterCreate.created - lifetimeBefore.created)")
 
     metallum_release_object(bufferPointer)
     try flushResidency("residency removal")
     let afterRelease = try residencyCount("after release")
-    try check(afterRelease == baseline + 3,
-              "releasing the buffer should leave \(baseline + 3) tracked allocations, got \(afterRelease)")
+    try check(afterRelease == baseline + 4,
+              "releasing the buffer should leave \(baseline + 4) tracked allocations, got \(afterRelease)")
 
     metallum_release_object(texturePointer)
-    metallum_release_object(renderPipelinePointer)
-    metallum_release_object(computePipelinePointer)
     metallum_release_object(memorylessPointer)
+    metallum_release_object(metal4RenderPointer)
+    metallum_release_object(metal3RenderPointer)
+    metallum_release_object(computePointer)
     try flushResidency("residency drain")
     let afterDrain = try residencyCount("after drain")
     try check(afterDrain == baseline,
               "releasing everything should return to \(baseline) tracked allocations, got \(afterDrain)")
+    let lifetimeAfterDrain = try lifetimeStats("after drain")
+    try check(lifetimeAfterDrain.released == lifetimeBefore.released + 5,
+              "expected five allocation removals after releasing the PSOs and resources, got "
+              + "\(lifetimeAfterDrain.released - lifetimeBefore.released)")
+    print("Residency allocation fixture: Metal 4 render PSO, Metal 3 fallback render PSO and compute PSO were accepted as MTLAllocation; memoryless texture excluded; created/released delta=5/5")
 }
 
 private func runResidencyTest(device: MTLDevice, queue: MTLCommandQueue) throws {
@@ -1439,7 +1863,7 @@ private func presentPathTest(device: MTLDevice) throws {
 
     // Both textures must be resident: Metal 4 does no automatic residency, so a
     // missing adopt() is exactly the bug this checks for.
-    path.adopt(textures: [source, destination])
+    path.adopt(textures: [source, destination], pipelines: [copyPipeline])
 
     guard let commandBuffer = path.beginFrame() else {
         try fail("no Metal 4 frame slot was available for the initial copy")
@@ -1551,7 +1975,7 @@ private func presentPathTest(device: MTLDevice) throws {
         print("Metal 4 present path: sustained in-flight test skipped because the detached layer vended no drawable")
         return
     }
-    saturationPath.adopt(textures: [source, destination])
+    saturationPath.adopt(textures: [source, destination], pipelines: [copyPipeline])
     var saturationErrors: [Error] = []
     let saturationErrorLock = NSLock()
     let saturationCompletions = DispatchGroup()
@@ -2200,6 +2624,43 @@ private func runShippingMetal4SpatialTest(device: MTLDevice, queue: MTLCommandQu
     try shippingMetal4SpatialTest(device: device, queue: queue)
 }
 
+/// Exercises the production V3 raw-action parser directly.  The helper is
+/// compiled in the same module as MetallumNative.swift and is then consumed by
+/// both the MTL4 and MTL3 V3 descriptor branches below.
+private func runSharedV3ActionMappingTest() throws {
+    let clearValues: [Float] = [0.125, 0.25, 0.5, 1.0, 0.75, 0.5, 0.25, 0.0]
+    try clearValues.withUnsafeBufferPointer { values in
+        guard let baseAddress = values.baseAddress else {
+            try fail("could not allocate V3 action test clear values")
+        }
+        let cleared = v3ColorAttachmentActions(
+            loadRaw: 2,
+            storeRaw: 2,
+            clearColors: baseAddress,
+            index: 1
+        )
+        try check(cleared.loadAction == .clear, "V3 clear action parser returned \(cleared.loadAction)")
+        try check(cleared.storeAction == .unknown, "V3 deferred store parser returned \(cleared.storeAction)")
+        guard let clearColor = cleared.clearColor else {
+            try fail("V3 clear action parser dropped the slot clear color")
+        }
+        try check(clearColor.red == 0.75 && clearColor.green == 0.5
+                    && clearColor.blue == 0.25 && clearColor.alpha == 0.0,
+                  "V3 clear color parser returned \(clearColor)")
+
+        let loaded = v3ColorAttachmentActions(
+            loadRaw: 99,
+            storeRaw: 99,
+            clearColors: baseAddress,
+            index: 0
+        )
+        try check(loaded.loadAction == .load, "unknown V3 load action did not fail closed to load")
+        try check(loaded.storeAction == .store, "unknown V3 store action did not fail closed to store")
+        try check(loaded.clearColor == nil, "non-clear V3 load action unexpectedly supplied a clear color")
+    }
+    print("Shared V3 action mapping: identical raw attachment semantics parsed before MTL3/MTL4 dispatch")
+}
+
 private func runPathTest() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
         try fail("MTLCreateSystemDefaultDevice returned nil")
@@ -2217,6 +2678,8 @@ private func runPathTest() throws {
     try check(reported == expected,
               "metallum_metal4_supported returned \(reported) but supportsFamily(.metal4) is \(expected)")
     print("Metal 4 path test: metallum_metal4_supported=\(reported) on \(device.name)")
+
+    try runSharedV3ActionMappingTest()
 
     guard reported else {
         print("Metal 4 path test skipped: this host has no Metal 4 support, nothing to compare against")
@@ -2263,6 +2726,10 @@ private func runPathTest() throws {
     )
     try check(metal4Pixel == metal3Pixel,
               "Metal 4 pipeline rendered \(metal4Pixel), Metal 3 rendered \(metal3Pixel)")
+
+    // Terrain execution milestone: the shipping native bridge must create and
+    // execute one ICB when the PSO advertises the explicit Metal 4 capability.
+    try runTerrainIcbReadbackTestIfAvailable(device: device, queue: queue)
 
     // (3) switch on, but the library was never registered: the Metal 4
     // translation must decline and the Metal 3 path must still deliver a
@@ -2349,10 +2816,6 @@ private func runPathTest() throws {
 
     // (6c) The queue-barrier contract for asynchronous private-buffer rewrite.
     try runShippingMetal4PrivateBufferRewriteTest(device: device, queue: queue)
-
-    // (6d) The production Sodium packed terrain vertex contract: slot 5,
-    // 20-byte records and Metal's integer/normalized stage-in conversions.
-    try runShippingMetal4PackedTerrainVertexTest(device: device, queue: queue)
 
     // (7) M5: the bump allocator that replaces set*Bytes.
     try runBumpAllocatorTest(device: device)

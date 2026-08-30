@@ -3,6 +3,7 @@ name: Unified eval verification
 on:
   push:
     branches:
+      - integration/iris-metal-next
       - agent/unified-render-eval-performance
   pull_request:
     paths:

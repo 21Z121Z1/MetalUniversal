@@ -2,7 +2,6 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCompareFunction;
-import com.metallum.client.metal.render.mtl.MetalCommandPacketTelemetry;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -18,7 +17,6 @@ import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuTexture;
 import org.joml.Vector4f;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -76,66 +74,6 @@ final class MetalComputeBackendIntegrationTest {
         MetalFxManager.close();
         if (device != null) {
             device.close();
-        }
-    }
-
-    @AfterAll
-    static void verifyComputeCommandPacketTelemetry() {
-        if ("false".equalsIgnoreCase(System.getProperty("metallum.opt.computeCommandPacket"))) {
-            return;
-        }
-        MetalCommandPacketTelemetry.Snapshot packets = MetalCommandPacketTelemetry.snapshot();
-        assertTrue(packets.computePacketCalls() > 0L, "compute command packet never executed");
-        assertEquals(0L, packets.computeLegacyReplays(), "compute packet replayed legacy operations");
-    }
-
-    @Test
-    void dynamicBufferOrphaningAdvancesBackendGeneration() {
-        try (MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
-                () -> "generation-aware-dynamic-buffer",
-                GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_DST,
-                16L
-        )) {
-            MetalGpuBuffer.BackingSnapshot first = buffer.backingSnapshot();
-            ByteBuffer update = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());
-            update.putLong(0, 0x1122334455667788L);
-            update.putLong(8, 0x1020304050607080L);
-            encoder.writeToBuffer(buffer.slice(), update);
-            MetalGpuBuffer.BackingSnapshot second = buffer.backingSnapshot();
-
-            assertEquals(first.resourceId(), second.resourceId(), "API object identity must remain stable");
-            assertEquals(first.generation() + 1L, second.generation());
-            assertNotEquals(first.handle().address(), second.handle().address());
-            assertTrue(buffer.validationDebugId().endsWith("#" + second.generation()));
-            assertEquals(0x1122334455667788L, buffer.currentStorage().getLong(0));
-            assertEquals(0x1020304050607080L, buffer.currentStorage().getLong(8));
-        }
-    }
-
-    @Test
-    void nativePipelineCompileTelemetryCountsActualPsoCreation() {
-        String glsl = """
-                #version 450
-                layout(local_size_x = 1) in;
-                void main() {}
-                """;
-        MetalNativeBridge.metallum_pipeline_compile_telemetry_reset();
-        try (MetalComputePipeline ignored = MetalComputePipeline.compileGlsl(
-                device, "pipeline_compile_telemetry", glsl
-        )) {
-            MetalNativeBridge.NativePipelineCompilationSnapshot snapshot =
-                    MetalNativeBridge.metallum_pipeline_compile_telemetry_finish();
-            assertEquals(0L, snapshot.renderAttempts());
-            assertEquals(1L, snapshot.computeAttempts());
-            assertEquals(0L, snapshot.failures());
-            String expectedPrefix = device.metal4MainRendererEnabled()
-                    ? "metal4/java-compute/"
-                    : "java-compute/";
-            assertTrue(
-                    snapshot.identities().stream().anyMatch(identity ->
-                            identity.startsWith(expectedPrefix)),
-                    () -> "missing compute pipeline identity: " + snapshot.identities()
-            );
         }
     }
 

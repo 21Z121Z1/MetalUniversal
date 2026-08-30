@@ -2,10 +2,12 @@ package com.metallum.mixin.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalGpuBuffer;
+import com.metallum.client.metal.render.TerrainGpuVisibilityProbe;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLIndexType;
 import com.metallum.client.metal.render.mtl.MTLPrimitiveType;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
+import com.metallum.client.metal.render.mtl.MetalRenderStateFlushable;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import org.jspecify.annotations.Nullable;
@@ -84,6 +86,26 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
             MTLIndexType indexType,
             int baseInstance
     );
+
+    @Invoker("terrainSnapshotAuthorized")
+    protected abstract boolean metallum$terrainSnapshotAuthorized(GpuBufferSlice commands, int drawCount);
+
+    @Invoker("terrainSnapshotSubmitted")
+    protected abstract boolean metallum$terrainSnapshotSubmitted(
+            MTLPrimitiveType primitiveType,
+            GpuBufferSlice commands,
+            int drawCount
+    );
+
+    @Invoker("submitIndexedIndirect")
+    protected abstract void metallum$submitIndexedIndirect(
+            MTLPrimitiveType primitiveType,
+            GpuBufferSlice commands,
+            int drawCount
+    );
+
+    @Invoker("prepareTerrainDrawForVisibility")
+    protected abstract void metallum$prepareTerrainDrawForVisibility();
 
     @Inject(method = "drawIndexed(IIIII)V", at = @At("HEAD"), cancellable = true)
     private void metallum$drawIndexedWithoutTraceObjects(
@@ -173,7 +195,7 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) this.indexBuffer;
         MTLRenderCommandEncoder encoder = this.metallum$invokeRenderEncoder();
         this.metallum$invokeBindDrawState(encoder);
-        encoder.flushPendingState();
+        ((MetalRenderStateFlushable) encoder).metallum$flushPendingRenderState();
         MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
                 encoder.handle(),
                 primitiveType.value,
@@ -211,7 +233,7 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
             final CallbackInfo ci
     ) {
         MTLRenderCommandEncoder encoder = this.metallum$invokeRenderEncoder();
-        encoder.flushPendingState();
+        ((MetalRenderStateFlushable) encoder).metallum$flushPendingRenderState();
     }
 
     @Inject(
@@ -255,6 +277,29 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
             );
             ci.cancel();
             return;
+        }
+        // Keep no-trace terrain submission structurally identical to the
+        // recorded path: prepare the producer visibility probe while the
+        // current encoder is live, then let terrainSnapshotSubmitted attempt
+        // the visible/fused ICB before the one existing indirect fallback.
+        if (TerrainGpuVisibilityProbe.inTerrainDrawScope()) {
+            this.metallum$prepareTerrainDrawForVisibility();
+        }
+        if (com.metallum.client.metal.render.TerrainSceneSnapshot.captureEnabled()) {
+            if (com.metallum.client.metal.render.TerrainSceneSnapshot.ICB_ENABLED
+                    || com.metallum.client.metal.render.TerrainSceneSnapshot.GPU_ICB_ENABLED
+                    || com.metallum.client.metal.render.TerrainSceneSnapshot.VISIBLE_GPU_ICB_ENABLED) {
+                if (this.metallum$terrainSnapshotSubmitted(primitiveType, commands, drawCount)) {
+                    ci.cancel();
+                    return;
+                }
+            } else if (this.metallum$terrainSnapshotAuthorized(commands, drawCount)) {
+                // The diagnostic snapshot path preserves the same single
+                // native indirect submission; it never expands the command list.
+                this.metallum$submitIndexedIndirect(primitiveType, commands, drawCount);
+                ci.cancel();
+                return;
+            }
         }
         MTLRenderCommandEncoder encoder = this.metallum$invokeRenderEncoder();
         this.metallum$invokeBindDrawState(encoder);

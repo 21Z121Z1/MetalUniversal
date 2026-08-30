@@ -34,6 +34,7 @@ final class RenderContractCoreTest {
         assertEquals(first, same);
         assertNotEquals(first.generation(), resized.generation());
         assertEquals("colortex0@1", first.stableKey());
+        assertEquals("allocation/10/generation/1/mip/0", first.allocationKey());
         assertEquals("colortex0@2", resized.stableKey());
         assertTrue(Files.exists(output.resolve("pass-manifest.json")));
     }

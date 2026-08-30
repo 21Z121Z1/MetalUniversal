@@ -1,8 +1,6 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
-import com.metallum.client.metal.render.bridge.MetalRenderArgumentBindingBridge;
-import com.metallum.client.metal.render.bridge.MetalRenderArgumentBindingBridge.Layout;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BlendFunction;
@@ -49,43 +47,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     static final int STAGE_FRAGMENT = 2;
     static final int STAGE_ALL = STAGE_VERTEX | STAGE_FRAGMENT;
 
-    /** Validation-only: use Metal's dynamic vertex layout/attribute-stride binding path. */
-    private static final boolean DYNAMIC_VERTEX_STRIDES = Boolean.parseBoolean(
-            System.getProperty("metallum.opt.metal4DynamicVertexStrides", "false")
-    );
-
-    record ResourceBinding(
-            ResourceKind kind,
-            String name,
-            int bindingIndex,
-            int stageMask,
-            @Nullable GpuFormat texelBufferFormat,
-            int vertexArgumentIndex,
-            int vertexSamplerArgumentIndex,
-            int fragmentArgumentIndex,
-            int fragmentSamplerArgumentIndex
-    ) {
-        ResourceBinding(
-                final ResourceKind kind,
-                final String name,
-                final int bindingIndex,
-                final int stageMask,
-                @Nullable final GpuFormat texelBufferFormat
-        ) {
-            this(kind, name, bindingIndex, stageMask, texelBufferFormat, -1, -1, -1, -1);
-        }
-
-        boolean argumentBuffered() {
-            return vertexArgumentIndex >= 0 || fragmentArgumentIndex >= 0;
-        }
-
-        int argumentIndex(final int stage) {
-            return stage == STAGE_VERTEX ? vertexArgumentIndex : fragmentArgumentIndex;
-        }
-
-        int samplerArgumentIndex(final int stage) {
-            return stage == STAGE_VERTEX ? vertexSamplerArgumentIndex : fragmentSamplerArgumentIndex;
-        }
+    record ResourceBinding(ResourceKind kind, String name, int bindingIndex, int stageMask,
+                           @Nullable GpuFormat texelBufferFormat) {
     }
 
     private final List<ResourceBinding> resources;
@@ -100,17 +63,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final float depthBiasConstant;
     private final MTLPrimitiveType topology;
     private final int vertexBufferCount;
-    private final long[] vertexBufferStrides;
 
     private final MemorySegment depthStencilState;
     private final boolean hasDepthStencilState;
     private final MTLPixelFormat[] colorFormats;
+    private final List<MTLPixelFormat> colorFormatsView;
     private final Map<PipelineSignature, MemorySegment> pipelineStates;
     private final MemorySegment withoutDepthPipeline;
-    // Lazy-variant support (S9C, active only with metallum.opt.asyncPrecompile):
-    // the constructor builds the two signatures the game actually starts with
-    // and the rest are built on the prewarm thread or on first demand, all
-    // under MetalDevice.COMPILE_CHAIN_LOCK.
+    // asyncPrewarm controls only proactive background creation. Every supported
+    // attachment signature is buildable on first demand regardless of this flag;
+    // the constructor intentionally compiles only the two startup signatures.
     private final boolean lazyVariants;
     private final MetalDevice device;
     private final RenderPipeline info;
@@ -118,9 +80,6 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final List<String> validationShaderIds;
     private final MemorySegment vertexFunction;
     private final MemorySegment fragmentFunction;
-    @Nullable
-    private final Layout argumentLayout;
-    private final boolean terrainIcbCompatible;
     /** Guarded by MetalDevice.COMPILE_CHAIN_LOCK (close runs inside clearPipelineCache). */
     private boolean closed;
 
@@ -158,11 +117,6 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
         this.vertexBufferCount = info.getVertexFormatBindings().length;
-        this.vertexBufferStrides = new long[this.vertexBufferCount];
-        for (int i = 0; i < this.vertexBufferCount; i++) {
-            VertexFormat binding = info.getVertexFormatBindings()[i];
-            this.vertexBufferStrides[i] = binding == null ? 0L : binding.getVertexSize();
-        }
         this.genericVertexBufferSlot = resolveGenericVertexBufferSlot(
                 this.firstAvailableVertexBufferSlot,
                 this.vertexBufferCount,
@@ -247,6 +201,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             ColorTargetState target = colorTargets[index];
             this.colorFormats[index] = target == null ? MTLPixelFormat.Invalid : MTLPixelFormat.from(target.format());
         }
+        this.colorFormatsView = List.of(this.colorFormats);
 
         this.device = device;
         this.info = info;
@@ -254,33 +209,6 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 "sha256:" + sha256(vertexMsl),
                 "sha256:" + sha256(fragmentMsl)
         );
-        this.lazyVariants = device.asyncPrewarmEnabled();
-        this.vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
-        this.fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
-        boolean hasVertexArguments = resources.stream().anyMatch(
-                binding -> binding.vertexArgumentIndex() >= 0
-        );
-        boolean hasFragmentArguments = resources.stream().anyMatch(
-                binding -> binding.fragmentArgumentIndex() >= 0
-        );
-        if (hasVertexArguments || hasFragmentArguments) {
-            this.argumentLayout = MetalRenderArgumentBindingBridge.createLayout(
-                    this.vertexFunction,
-                    this.fragmentFunction,
-                    hasVertexArguments,
-                    hasFragmentArguments
-            );
-            if (this.argumentLayout == null) {
-                throw new IllegalStateException(
-                        "Unable to create native argument layout for pipeline " + info.getLocation()
-                );
-            }
-            IrisMetalArgumentBindingRuntime.recordLayout();
-        } else {
-            this.argumentLayout = null;
-        }
-        this.terrainIcbCompatible = MetalTerrainIcbScope.enabled()
-                && this.argumentLayout != null;
         this.validationPipelineId = "sha256:" + sha256(
                 vertexMsl + "\u0000" + fragmentMsl + "\u0000"
                         + stablePipelineState(
@@ -292,10 +220,15 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         this.genericVertexBufferSlot
                 )
                         + "\u0000metal4=" + device.metal4MainRendererEnabled()
-                        + "\u0000terrainIcb=" + this.terrainIcbCompatible
         );
+        this.lazyVariants = device.asyncPrewarmEnabled();
+        this.vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
+        this.fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
 
-        List<DepthStencilFormats> eagerFormats = this.lazyVariants ? eagerDepthStencilFormats() : supportedDepthStencilFormats();
+        // Compile only the signatures every session actually needs up front.
+        // Other supported signatures are created on first real demand below;
+        // this keeps unsupported or unused formats out of the Metal compiler.
+        List<DepthStencilFormats> eagerFormats = eagerDepthStencilFormats();
         Map<PipelineSignature, MemorySegment> states = new java.util.concurrent.ConcurrentHashMap<>();
         try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(
                 info, this.firstAvailableVertexBufferSlot, this.genericVertexInputs, this.genericVertexBufferSlot
@@ -309,8 +242,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         vertexDescriptor,
                         this.colorFormats,
                         formats.depthFormat(),
-                        formats.stencilFormat(),
-                        this.terrainIcbCompatible
+                        formats.stencilFormat()
                 );
                 if (!MetalNativeBridge.isNullHandle(pipeline)) {
                     states.put(this.signatureFor(formats.depthFormat(), formats.stencilFormat()), pipeline);
@@ -383,11 +315,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         for (ResourceBinding resource : resources) {
             result.append(resource.kind()).append('/').append(resource.name()).append('/')
                     .append(resource.bindingIndex()).append('/').append(resource.stageMask()).append('/')
-                    .append(resource.texelBufferFormat()).append('/')
-                    .append(resource.vertexArgumentIndex()).append('/')
-                    .append(resource.vertexSamplerArgumentIndex()).append('/')
-                    .append(resource.fragmentArgumentIndex()).append('/')
-                    .append(resource.fragmentSamplerArgumentIndex()).append(';');
+                    .append(resource.texelBufferFormat()).append(';');
         }
         result.append("|vertexBindings=");
         for (VertexFormat binding : pipeline.getVertexFormatBindings()) {
@@ -412,7 +340,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     private PipelineSignature signatureFor(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
-        return new PipelineSignature(List.copyOf(Arrays.asList(this.colorFormats)), depthFormat, stencilFormat, 1);
+        return new PipelineSignature(this.colorFormatsView, depthFormat, stencilFormat, 1);
     }
 
     /**
@@ -446,8 +374,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         vertexDescriptor,
                         this.colorFormats,
                         depthFormat,
-                        stencilFormat,
-                        this.terrainIcbCompatible
+                        stencilFormat
                 );
             }
             if (MetalNativeBridge.isNullHandle(pipeline)) {
@@ -461,12 +388,24 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private record DepthStencilFormats(MTLPixelFormat depthFormat, MTLPixelFormat stencilFormat) {
     }
 
+    /**
+     * Shipping macOS natives are built for arm64 Apple Silicon. Metal's packed
+     * Depth24Unorm_Stencil8 format is never supported on Apple Silicon, so it is
+     * deliberately absent here; Depth32Float_Stencil8 is the supported packed
+     * depth/stencil representation for this target.
+     */
+    static boolean isSupportedDepthStencilFormatPair(
+            final MTLPixelFormat depthFormat,
+            final MTLPixelFormat stencilFormat
+    ) {
+        return supportedDepthStencilFormats().contains(new DepthStencilFormats(depthFormat, stencilFormat));
+    }
+
     private static List<DepthStencilFormats> supportedDepthStencilFormats() {
         return List.of(
                 new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Invalid),
                 new DepthStencilFormats(MTLPixelFormat.Depth16Unorm, MTLPixelFormat.Invalid),
                 new DepthStencilFormats(MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid),
-                new DepthStencilFormats(MTLPixelFormat.Depth24Unorm_Stencil8, MTLPixelFormat.Depth24Unorm_Stencil8),
                 new DepthStencilFormats(MTLPixelFormat.Depth32Float_Stencil8, MTLPixelFormat.Depth32Float_Stencil8),
                 new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Stencil8)
         );
@@ -474,8 +413,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     /**
      * The two signatures every session starts with: depthless (UI, isValid)
-     * and the Depth32Float main framebuffer. Everything else is built lazily
-     * in lazy-variant mode.
+     * and the Depth32Float main framebuffer. Everything else is built on first
+     * real demand; async prewarm may additionally create it in the background.
      */
     private static List<DepthStencilFormats> eagerDepthStencilFormats() {
         return List.of(
@@ -492,16 +431,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MTLVertexDescriptor vertexDescriptor,
             final MTLPixelFormat[] colorFormats,
             final MTLPixelFormat depthFormat,
-            final MTLPixelFormat stencilFormat,
-            final boolean terrainIcbCompatible
+            final MTLPixelFormat stencilFormat
     ) {
         if (MetalNativeBridge.isNullHandle(vertexFunction) || MetalNativeBridge.isNullHandle(fragmentFunction)) {
             return MemorySegment.NULL;
         }
 
         try (MTLRenderPipelineDescriptor pipelineDesc = new MTLRenderPipelineDescriptor()) {
-            pipelineDesc.setLabel("java-render/" + info.getLocation());
-            pipelineDesc.setSupportIndirectCommandBuffers(terrainIcbCompatible);
             pipelineDesc.setCompiledFunctions(vertexFunction, fragmentFunction);
             pipelineDesc.setVertexDescriptor(vertexDescriptor);
             ColorTargetState[] colorTargets = info.getColorTargetStates();
@@ -534,26 +470,15 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             }
 
             pipelineDesc.setDepthStencilFormats(depthFormat, stencilFormat);
-
-            String compileIdentity = "render:" + info.getLocation()
-                    + "|colors=" + Arrays.toString(colorFormats)
-                    + "|depth=" + depthFormat
-                    + "|stencil=" + stencilFormat
-                    + "|terrainIcb=" + terrainIcbCompatible
-                    + "|metal4=" + device.metal4MainRendererEnabled();
-            MemorySegment pipeline = MemorySegment.NULL;
-            try {
-                pipeline = MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
-                        device.metalDeviceHandle(),
-                        pipelineDesc.handle()
-                );
-                return pipeline;
-            } finally {
-                MetalPipelineCompilationTelemetry.recordRender(
-                        compileIdentity,
-                        !MetalNativeBridge.isNullHandle(pipeline)
-                );
+            if ((TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED)
+                    && isSodiumTerrainPipeline(info.getVertexShader())) {
+                pipelineDesc.setSupportIndirectCommandBuffers(true);
             }
+
+            return MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
+                    device.metalDeviceHandle(),
+                    pipelineDesc.handle()
+            );
         }
     }
 
@@ -584,6 +509,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return "u_BlockTex".equals(bindingName) && SODIUM_TERRAIN_VERTEX_SHADER.equals(vertexShader);
     }
 
+    static boolean isSodiumTerrainPipeline(final Identifier vertexShader) {
+        return SODIUM_TERRAIN_VERTEX_SHADER.equals(vertexShader);
+    }
+
     int firstAvailableVertexBufferSlot() {
         return this.firstAvailableVertexBufferSlot;
     }
@@ -601,11 +530,17 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     MemorySegment getNativePipeline(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
+        if (!isSupportedDepthStencilFormatPair(depthFormat, stencilFormat)) {
+            throw new IllegalArgumentException(
+                    "Unsupported Metal depth/stencil attachment signature: depth=" + depthFormat
+                            + ", stencil=" + stencilFormat
+            );
+        }
         MemorySegment pipeline = this.pipelineStates.get(this.signatureFor(depthFormat, stencilFormat));
-        if (pipeline == null && this.lazyVariants) {
-            // First demand beat the prewarm thread to this variant; build it
-            // now (bounded by one PSO compile, may wait out the prewarm
-            // thread's current item).
+        if (pipeline == null) {
+            // First real use builds exactly the requested supported signature.
+            // This is independent of async prewarm so normal production startup
+            // never needs to compile every possible attachment combination.
             pipeline = this.buildVariantLocked(depthFormat, stencilFormat);
         }
         if (pipeline == null || MetalNativeBridge.isNullHandle(pipeline)) {
@@ -620,7 +555,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     MTLPixelFormat[] colorAttachmentFormats() {
-        return this.colorFormats.clone();
+        return this.colorFormats;
     }
 
     MTLCullMode cullMode() {
@@ -639,41 +574,32 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return this.vertexBufferCount;
     }
 
-    long vertexBufferStride(final int slot) {
-        if (slot < 0 || slot >= this.vertexBufferStrides.length) {
-            throw new IndexOutOfBoundsException("Vertex buffer slot " + slot + " is outside 0.." + (this.vertexBufferStrides.length - 1));
+    /** Returns the stride for the logical RenderPass slot, not the Metal ABI slot. */
+    int vertexStride(final int logicalSlot) {
+        int binding = logicalSlot;
+        VertexFormat[] formats = this.info.getVertexFormatBindings();
+        if (binding < 0 || binding >= formats.length || formats[binding] == null) {
+            return 0;
         }
-        return this.vertexBufferStrides[slot];
-    }
-
-    static boolean dynamicVertexStridesEnabled() {
-        return DYNAMIC_VERTEX_STRIDES;
+        return formats[binding].getVertexSize();
     }
 
     int genericVertexBufferSlot() {
         return this.genericVertexBufferSlot;
     }
 
-    @Nullable
-    Layout argumentLayout() {
-        return this.argumentLayout;
-    }
-
-    boolean terrainIcbCompatible() {
-        return this.terrainIcbCompatible;
-    }
-
     String validationPipelineId() {
         return validationPipelineId;
-    }
-
-    String pipelineLocation() {
-        return info.getLocation().toString();
     }
 
     List<String> validationShaderIds() {
         return validationShaderIds;
     }
+
+    private static final char[] HEX_DIGITS = {
+            '0', '1', '2', '3', '4', '5', '6', '7',
+            '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
+    };
 
     private static String sha256(final String value) {
         try {
@@ -681,7 +607,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                     .digest(value.getBytes(StandardCharsets.UTF_8));
             StringBuilder result = new StringBuilder(digest.length * 2);
             for (byte item : digest) {
-                result.append(String.format(java.util.Locale.ROOT, "%02x", item));
+                int unsigned = item & 0xFF;
+                result.append(HEX_DIGITS[unsigned >>> 4]).append(HEX_DIGITS[unsigned & 0x0F]);
             }
             return result.toString();
         } catch (NoSuchAlgorithmException exception) {
@@ -725,10 +652,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
             int metalSlot = firstMetalVertexBufferSlot + i;
 
-            // MTLBufferLayoutStrideDynamic is NSUIntegerMax. The native
-            // bridge receives this Int-sized field as a signed long, so -1
-            // preserves the required all-bits-one sentinel on 64-bit macOS.
-            long stride = DYNAMIC_VERTEX_STRIDES ? -1L : binding.getVertexSize();
+            long stride = binding.getVertexSize();
             long stepRate = binding.getStepRate();
             MTLVertexStepFunction stepFunction = stepRate > 0 ? MTLVertexStepFunction.PerInstance : MTLVertexStepFunction.PerVertex;
             vertexDesc.setLayout(metalSlot, stride, stepFunction, stepRate > 0 ? stepRate : 1);
@@ -772,14 +696,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private static int firstAvailableVertexBufferSlot(final List<ResourceBinding> resources) {
         int maxVertexBufferBinding = -1;
         for (ResourceBinding resource : resources) {
-            if (resource.vertexArgumentIndex() >= 0) {
-                // Descriptor set zero occupies [[buffer(0)]] in the generated
-                // vertex entry point, irrespective of member kind.
-                maxVertexBufferBinding = Math.max(maxVertexBufferBinding, 0);
-            }
             if ((resource.kind() == ResourceKind.UNIFORM_BUFFER
                     || resource.kind() == ResourceKind.STORAGE_BUFFER)
-                    && !resource.argumentBuffered()
                     && (resource.stageMask() & STAGE_VERTEX) != 0) {
                 maxVertexBufferBinding = Math.max(maxVertexBufferBinding, resource.bindingIndex());
             }
@@ -797,9 +715,6 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             if (!MetalNativeBridge.isNullHandle(state)) {
                 MetalNativeBridge.metallum_release_object(state);
             }
-        }
-        if (this.argumentLayout != null) {
-            this.argumentLayout.close();
         }
     }
 }

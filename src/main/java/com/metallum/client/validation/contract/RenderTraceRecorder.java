@@ -341,9 +341,99 @@ public final class RenderTraceRecorder implements AutoCloseable {
         String normalizedHandle = debugId == null || debugId.isBlank()
                 ? "debug-" + runtimeId
                 : debugId;
+        for (ResourceIdentity active : resourceIdentities.values()) {
+            if (active.runtimeId() == runtimeId
+                    && active.semanticName().equals(resolvedSemanticName)
+                    && active.nativeHandleHashOrDebugId().equals(normalizedHandle)
+                    && active.format().equals(format)
+                    && active.width() == width
+                    && active.height() == height
+                    && active.depthOrLayers() == depthOrLayers
+                    && active.mipLevel() == mipLevel
+                    && active.sampleCount() == sampleCount
+                    && active.usage() == usage) {
+                return active;
+            }
+        }
+        long generation = nextGenerationBySemantic.merge(resolvedSemanticName, 1L, Long::sum);
+        return identifyResourceWithGeneration(
+                resolvedSemanticName,
+                runtimeId,
+                generation,
+                normalizedHandle,
+                format,
+                width,
+                height,
+                depthOrLayers,
+                mipLevel,
+                sampleCount,
+                usage
+        );
+    }
+
+    /**
+     * Records a renderer-owned allocation identity without allocating a
+     * generation in the validation layer. Production Metal resources use
+     * this entry point; the legacy overload above remains for synthetic
+     * validation fixtures.
+     */
+    public synchronized ResourceIdentity identifyAllocation(
+            final String semanticName,
+            final long allocationId,
+            final long generation,
+            final String debugId,
+            final String format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevel,
+            final int sampleCount,
+            final int usage
+    ) {
+        ensureOpen();
+        if (allocationId <= 0L || generation <= 0L) {
+            throw new IllegalArgumentException("Renderer allocation identity values must be positive");
+        }
+        String resolvedSemanticName = resolveResourceSemanticName(
+                semanticName, allocationId, debugId, format, width, height, depthOrLayers,
+                mipLevel, sampleCount, usage
+        );
+        String normalizedHandle = debugId == null || debugId.isBlank()
+                ? "debug-" + allocationId
+                : debugId;
+        nextGenerationBySemantic.merge(resolvedSemanticName, generation, Math::max);
+        return identifyResourceWithGeneration(
+                resolvedSemanticName,
+                allocationId,
+                generation,
+                normalizedHandle,
+                format,
+                width,
+                height,
+                depthOrLayers,
+                mipLevel,
+                sampleCount,
+                usage
+        );
+    }
+
+    private ResourceIdentity identifyResourceWithGeneration(
+            final String resolvedSemanticName,
+            final long runtimeId,
+            final long generation,
+            final String normalizedHandle,
+            final String format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevel,
+            final int sampleCount,
+            final int usage
+    ) {
         ResourceKey key = new ResourceKey(
                 resolvedSemanticName,
                 runtimeId,
+                generation,
                 normalizedHandle,
                 format,
                 width,
@@ -357,7 +447,6 @@ public final class RenderTraceRecorder implements AutoCloseable {
         if (existing != null) {
             return existing;
         }
-        long generation = nextGenerationBySemantic.merge(resolvedSemanticName, 1L, Long::sum);
         ResourceIdentity identity = new ResourceIdentity(
                 resolvedSemanticName,
                 runtimeId,
@@ -403,19 +492,25 @@ public final class RenderTraceRecorder implements AutoCloseable {
         String normalizedHandle = debugId == null || debugId.isBlank()
                 ? "debug-" + runtimeId
                 : debugId;
-        ResourceKey key = new ResourceKey(
-                resolvedSemanticName,
-                runtimeId,
-                normalizedHandle,
-                format,
-                width,
-                height,
-                depthOrLayers,
-                mipLevel,
-                sampleCount,
-                usage
-        );
-        ResourceIdentity removed = resourceIdentities.remove(key);
+        ResourceIdentity removed = null;
+        for (var iterator = resourceIdentities.entrySet().iterator(); iterator.hasNext();) {
+            var entry = iterator.next();
+            ResourceIdentity active = entry.getValue();
+            if (active.runtimeId() == runtimeId
+                    && active.semanticName().equals(resolvedSemanticName)
+                    && active.nativeHandleHashOrDebugId().equals(normalizedHandle)
+                    && active.format().equals(format)
+                    && active.width() == width
+                    && active.height() == height
+                    && active.depthOrLayers() == depthOrLayers
+                    && active.mipLevel() == mipLevel
+                    && active.sampleCount() == sampleCount
+                    && active.usage() == usage) {
+                removed = active;
+                iterator.remove();
+                break;
+            }
+        }
         if (removed != null) {
             resourceLifecycleEvents.add(new ResourceLifecycleEvent("INVALIDATE", removed));
             manifestFinalized = false;
@@ -745,6 +840,7 @@ public final class RenderTraceRecorder implements AutoCloseable {
     private record ResourceKey(
             String semanticName,
             long runtimeId,
+            long generation,
             String nativeHandleHashOrDebugId,
             String format,
             int width,

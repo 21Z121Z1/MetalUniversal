@@ -1,6 +1,5 @@
 package com.metallum.mixin;
 
-import com.metallum.client.metal.render.MetalTerrainIcbScope;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
@@ -14,8 +13,7 @@ import java.util.Locale;
 import java.util.Set;
 
 public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
-    private static final String PREFERRED_GRAPHICS_API_MIXIN =
-            "com.metallum.mixin.render.PreferredGraphicsApiMixin";
+    private static final String PREFERRED_GRAPHICS_API_MIXIN = "com.metallum.mixin.render.PreferredGraphicsApiMixin";
     private static final String BACKEND_FRAME_COMPARISON_MIXIN =
             "com.metallum.mixin.render.BackendFrameComparisonMixin";
     private static final String BACKEND_FRAME_COMPARISON_GAME_RENDERER_MIXIN =
@@ -24,18 +22,6 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.render.BackendFrameComparisonServerMixin";
     private static final String BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN =
             "com.metallum.mixin.render.BackendFrameComparisonDeltaTrackerMixin";
-    private static final String RENDER_COMMAND_PACKET_MIXIN =
-            "com.metallum.mixin.render.MTLRenderCommandEncoderPacketMixin";
-    private static final String RENDER_COMMAND_PACKET_BOUNDARY_MIXIN =
-            "com.metallum.mixin.render.MetalRenderPassCommandPacketBoundaryMixin";
-    private static final String HOT_PATH_TELEMETRY_REPORT_MIXIN =
-            "com.metallum.mixin.render.MetalHotPathTelemetryReportMixin";
-    private static final String VALIDATION_FRAME_DRIVER_MIXIN =
-            "com.metallum.mixin.render.MinecraftMetalFxMixin";
-    private static final String TERRAIN_ICB_SCOPE_MIXIN =
-            "com.metallum.mixin.sodium.DefaultChunkRendererTerrainIcbScopeMixin";
-    private static final String SODIUM_ARENA_REUSE_FIX_MIXIN =
-            "com.metallum.mixin.sodium.GlBufferArenaReuseFixMixin";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -66,45 +52,17 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                 || BACKEND_FRAME_COMPARISON_DELTA_TRACKER_MIXIN.equals(mixinClassName)) {
             return Boolean.getBoolean("metallum.backend.compare.enabled");
         }
-        if (VALIDATION_FRAME_DRIVER_MIXIN.equals(mixinClassName)
-                && Boolean.getBoolean("metallum.validation.enabled")) {
-            // The mixin keeps its MetalFX redirects dormant on non-Metal
-            // backends, but its before/after hooks drive the same deterministic
-            // scene for the stock OpenGL differential lane.
-            return true;
-        }
-        if (RENDER_COMMAND_PACKET_MIXIN.equals(mixinClassName)
-                || RENDER_COMMAND_PACKET_BOUNDARY_MIXIN.equals(mixinClassName)) {
-            return !"false".equalsIgnoreCase(System.getProperty(
-                    "metallum.opt.renderCommandPacket", "true"))
-                    && this.isDefaultGraphicsApi;
-        }
-        if (HOT_PATH_TELEMETRY_REPORT_MIXIN.equals(mixinClassName)) {
-            return Boolean.getBoolean("metallum.hotpath.telemetry")
-                    && this.isDefaultGraphicsApi;
-        }
-        if (TERRAIN_ICB_SCOPE_MIXIN.equals(mixinClassName)) {
-            return MetalTerrainIcbScope.configuredEnabled()
-                    && FabricLoader.getInstance().isModLoaded("sodium")
-                    && this.isDefaultGraphicsApi;
-        }
-        if (SODIUM_ARENA_REUSE_FIX_MIXIN.equals(mixinClassName)) {
-            return Boolean.parseBoolean(System.getProperty(
-                            "metallum.opt.sodiumDisableArenaBufferReuse", "false"))
-                    && Boolean.parseBoolean(System.getProperty(
-                            "metallum.opt.metal4MainRenderer", "false"))
-                    && FabricLoader.getInstance().isModLoaded("sodium")
-                    && this.isDefaultGraphicsApi;
-        }
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
         }
         if (mixinClassName.contains(".mixin.iris.")) {
-            return FabricLoader.getInstance().isModLoaded("iris")
-                    && this.isDefaultGraphicsApi;
+            // Iris-dormancy compat shims: only meaningful when Iris is present
+            // and the default (Metal-first) backend selection is active. The
+            // injected handlers additionally check the LIVE backend at runtime
+            // so a Vulkan/GL fallback leaves Iris untouched.
+            return FabricLoader.getInstance().isModLoaded("iris") && this.isDefaultGraphicsApi;
         }
-        return PREFERRED_GRAPHICS_API_MIXIN.equals(mixinClassName)
-                || this.isDefaultGraphicsApi;
+        return PREFERRED_GRAPHICS_API_MIXIN.equals(mixinClassName) || this.isDefaultGraphicsApi;
     }
 
     @Override
@@ -117,21 +75,11 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     }
 
     @Override
-    public void preApply(
-            String targetClassName,
-            ClassNode targetClass,
-            String mixinClassName,
-            IMixinInfo mixinInfo
-    ) {
+    public void preApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
     }
 
     @Override
-    public void postApply(
-            String targetClassName,
-            ClassNode targetClass,
-            String mixinClassName,
-            IMixinInfo mixinInfo
-    ) {
+    public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
     }
 
     private static boolean isDefaultGraphicsApiSelected() {

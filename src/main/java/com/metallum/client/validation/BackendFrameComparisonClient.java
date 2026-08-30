@@ -361,30 +361,6 @@ public final class BackendFrameComparisonClient {
     }
 
     /**
-     * Captures the deterministic validation driver's exact logical frame on
-     * any Blaze3D backend. This keeps the stock OpenGL reference aligned with
-     * MetalValidationClient's scene mutations instead of a second wall-clock
-     * frame counter.
-     */
-    public static void captureValidationTimelineFrame(
-            final GameRenderer renderer,
-            final int validationFrame
-    ) {
-        if (!Boolean.getBoolean("metallum.validation.referenceCapture")
-                || !CAPTURE_FRAMES.contains(validationFrame)
-                || COMPLETED_FRAMES.contains(validationFrame)) {
-            return;
-        }
-        capture(renderer, validationFrame);
-        writeSession(
-                failedCaptures == 0 && COMPLETED_FRAMES.size() == CAPTURE_FRAMES.size()
-                        ? "passed"
-                        : "running",
-                null
-        );
-    }
-
-    /**
      * Runs from {@code GameRenderer.renderLevel}, after Iris has advanced its
      * wall-clock timer at {@code GameRenderer.render} HEAD but before either
      * backend uploads pack uniforms.
@@ -1352,11 +1328,7 @@ public final class BackendFrameComparisonClient {
                 // against their own background. Keep the exact RGBA bytes in
                 // the sibling .bin, but make the inspection PNG unambiguously
                 // represent the presented RGB channels.
-                // Blaze3D readbacks retain the render target's bottom-left
-                // origin. Raw .bin evidence deliberately keeps that order;
-                // human-facing PNG evidence is normalized to top-left.
-                image.setRGB(x, height - 1 - y,
-                        0xff000000 | (red << 16) | (green << 8) | blue);
+                image.setRGB(x, y, 0xff000000 | (red << 16) | (green << 8) | blue);
                 offset += 4;
             }
         }
@@ -1445,7 +1417,6 @@ public final class BackendFrameComparisonClient {
                         + "  \"bytes\": %d,\n"
                         + "  \"targetLabel\": \"%s\",\n"
                         + "  \"rowOrder\": \"backend-native-copy-order\",\n"
-                        + "  \"pngRowOrder\": \"top-to-bottom; vertically normalized from raw readback\",\n"
                         + "  \"pngAlpha\": \"forced-opaque; raw RGBA retained in .bin\",\n"
                         + "  \"hudRequested\": %s,\n"
                         + "  \"irisSemanticRequested\": %s,\n"

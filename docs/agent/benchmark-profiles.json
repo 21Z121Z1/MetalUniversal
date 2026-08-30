@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "contract": "p0-minecraft-metal-benchmarks",
+  "reference_branch": "integration/iris-metal-next",
+  "rules": {
+    "mutable_latest_inputs_forbidden": true,
+    "external_files_are_content_addressed": true,
+    "metalfx_mode": "OFF",
+    "frame_generation": false,
+    "performance_runs_require_exact_candidate_sha": true,
+    "performance_runs_require_world_sha256": true,
+    "shader_profiles_require_shader_pack_sha256": true
+  },
+  "profiles": [
+    {
+      "id": "V0",
+      "purpose": "No-shader Metal renderer baseline and launch sanity profile",
+      "stack": {
+        "minecraft": "26.2",
+        "sodium": true,
+        "iris_loaded": true,
+        "iris_semantic": false,
+        "shader_pack": null,
+        "metalfx_mode": "OFF",
+        "frame_generation": false
+      },
+      "scenario": "baseline-static",
+      "required_identity": [
+        "candidate_sha",
+        "production_jar_sha256",
+        "native_dylib_sha256",
+        "world_sha256",
+        "world_scenario_id",
+        "resolution",
+        "ui_scale",
+        "render_distance",
+        "camera_pose",
+        "minecraft_version",
+        "sodium_version",
+        "macos_version",
+        "java_version"
+      ]
+    },
+    {
+      "id": "V1",
+      "purpose": "Deterministic Sodium fixed-world/fixed-camera no-shader performance profile",
+      "stack": {
+        "minecraft": "26.2",
+        "sodium": true,
+        "iris_loaded": true,
+        "iris_semantic": false,
+        "shader_pack": null,
+        "metalfx_mode": "OFF",
+        "frame_generation": false
+      },
+      "scenario": "fixed-world-camera",
+      "required_identity": [
+        "candidate_sha",
+        "production_jar_sha256",
+        "native_dylib_sha256",
+        "world_sha256",
+        "world_scenario_id",
+        "resolution",
+        "ui_scale",
+        "render_distance",
+        "camera_pose",
+        "camera_script_sha256",
+        "minecraft_version",
+        "sodium_version",
+        "macos_version",
+        "java_version"
+      ]
+    },
+    {
+      "id": "I0",
+      "purpose": "Iris semantic path with the externally supplied Potato shader-pack baseline",
+      "stack": {
+        "minecraft": "26.2",
+        "sodium": true,
+        "iris_loaded": true,
+        "iris_semantic": true,
+        "shader_pack": "Potato",
+        "metalfx_mode": "OFF",
+        "frame_generation": false
+      },
+      "scenario": "fixed-world-camera",
+      "required_identity": [
+        "candidate_sha",
+        "production_jar_sha256",
+        "native_dylib_sha256",
+        "world_sha256",
+        "world_scenario_id",
+        "resolution",
+        "ui_scale",
+        "render_distance",
+        "camera_pose",
+        "camera_script_sha256",
+        "shader_pack_name",
+        "shader_pack_version",
+        "shader_pack_sha256",
+        "shader_options_sha256",
+        "minecraft_version",
+        "sodium_version",
+        "iris_version",
+        "macos_version",
+        "java_version"
+      ]
+    },
+    {
+      "id": "I1",
+      "purpose": "Iris semantic path with the externally supplied BSL shader-pack performance profile",
+      "stack": {
+        "minecraft": "26.2",
+        "sodium": true,
+        "iris_loaded": true,
+        "iris_semantic": true,
+        "shader_pack": "BSL",
+        "metalfx_mode": "OFF",
+        "frame_generation": false
+      },
+      "scenario": "fixed-world-camera",
+      "required_identity": [
+        "candidate_sha",
+        "production_jar_sha256",
+        "native_dylib_sha256",
+        "world_sha256",
+        "world_scenario_id",
+        "resolution",
+        "ui_scale",
+        "render_distance",
+        "camera_pose",
+        "camera_script_sha256",
+        "shader_pack_name",
+        "shader_pack_version",
+        "shader_pack_sha256",
+        "shader_options_sha256",
+        "minecraft_version",
+        "sodium_version",
+        "iris_version",
+        "macos_version",
+        "java_version"
+      ]
+    }
+  ],
+  "terrain_workloads": [
+    {
+      "id": "T0",
+      "purpose": "Static high-render-distance steady-state terrain workload",
+      "camera_motion": "none",
+      "requires": [
+        "profile_id",
+        "world_sha256",
+        "world_scenario_id",
+        "render_distance",
+        "camera_pose"
+      ],
+      "authoritative_metrics": [
+        "fps_median",
+        "gpu_frame_time_ms_median",
+        "cpu_render_encode_time_ms_median",
+        "native_encoder_count_per_frame_median",
+        "resident_render_resource_bytes"
+      ]
+    },
+    {
+      "id": "T1",
+      "purpose": "Fixed-path high-speed flight, turn and new-chunk streaming workload",
+      "camera_motion": "content-addressed-script",
+      "requires": [
+        "profile_id",
+        "world_sha256",
+        "world_scenario_id",
+        "render_distance",
+        "camera_script_sha256"
+      ],
+      "authoritative_metrics": [
+        "fps_median",
+        "gpu_frame_time_ms_median",
+        "cpu_render_encode_time_ms_median",
+        "frame_time_stutter_count",
+        "resident_render_resource_bytes",
+        "time_to_first_visible_ms"
+      ]
+    }
+  ],
+  "measurement": {
+    "warmup_seconds_min": 30,
+    "sample_seconds_min": 120,
+    "minimum_paired_blocks": 4,
+    "pairing": "ABBA-or-equivalent-interleaving",
+    "minimum_positive_block_fraction": 0.75,
+    "correctness_gate_required_before_performance": true
+  }
+}

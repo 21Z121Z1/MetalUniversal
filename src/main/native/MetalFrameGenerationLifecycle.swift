@@ -1,5 +1,4 @@
 import Foundation
-import Metal
 
 enum MetalFrameGenerationAdmissionDecision: Equatable {
     case wait(until: CFTimeInterval)
@@ -53,11 +52,16 @@ enum MetalFrameGenerationPresentationStep: Equatable {
     case real
 }
 
-enum MetalFrameGenerationLifecycleAction: Equatable {
-    case releaseOwnership
-    case invalidateHistory
+struct MetalFrameGenerationLifecycleAction: OptionSet, Equatable {
+    let rawValue: UInt8
+
+    static let releaseOwnership = MetalFrameGenerationLifecycleAction(rawValue: 1 << 0)
+    static let invalidateHistory = MetalFrameGenerationLifecycleAction(rawValue: 1 << 1)
 }
 
+/// Identifies which source most recently established each presenter history.
+/// Drawable callbacks can arrive after source ownership has moved on; a stale
+/// failure must not invalidate history produced by a newer source.
 struct MetalFrameGenerationHistoryOwnership {
     private(set) var interpolatorEventValue: UInt64?
     private(set) var displayEventValue: UInt64?
@@ -93,6 +97,11 @@ struct MetalFrameGenerationHistoryOwnership {
     }
 }
 
+/// Metal-independent reducer for one source frame.
+///
+/// All calls are expected to be serialized by the presenter. The reducer owns
+/// no Metal objects; it only decides whether work may advance and when the
+/// presenter's source ownership token can be released.
 struct MetalFrameGenerationLifecycle {
     let sourceFrameID: UInt64
 
@@ -130,13 +139,16 @@ struct MetalFrameGenerationLifecycle {
         if hasInterpolation && !generatedSubmitted {
             return .generated
         }
+        // Generated and real command buffers share one serial presenter queue.
+        // Submission order is therefore sufficient; waiting for the generated
+        // completion handler here can unnecessarily skip the next display update.
         if (!hasInterpolation || generatedSubmitted) && !realSubmitted {
             return .real
         }
         return nil
     }
 
-    mutating func submitInput() -> [MetalFrameGenerationLifecycleAction] {
+    mutating func submitInput() -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased, !inputSubmitted else {
             return []
         }
@@ -159,7 +171,7 @@ struct MetalFrameGenerationLifecycle {
 
     mutating func submitPresentation(
         _ step: MetalFrameGenerationPresentationStep
-    ) -> [MetalFrameGenerationLifecycleAction] {
+    ) -> MetalFrameGenerationLifecycleAction {
         guard nextPresentationStep == step else {
             return []
         }
@@ -177,13 +189,15 @@ struct MetalFrameGenerationLifecycle {
     mutating func failBeforeSubmission(
         _ step: MetalFrameGenerationPresentationStep,
         reason: String
-    ) -> [MetalFrameGenerationLifecycleAction] {
+    ) -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased, nextPresentationStep == step else {
             return []
         }
         failureReason = reason
         switch step {
         case .generated:
+            // A generated-frame failure invalidates interpolation history, but
+            // the real source frame may still be presented on a later update.
             generatedSubmitted = true
             generatedCompleted = true
             generatedSucceeded = false
@@ -202,7 +216,7 @@ struct MetalFrameGenerationLifecycle {
         _ work: MetalFrameGenerationGPUWork,
         succeeded: Bool,
         reason: String? = nil
-    ) -> [MetalFrameGenerationLifecycleAction] {
+    ) -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased else {
             return []
         }
@@ -237,9 +251,10 @@ struct MetalFrameGenerationLifecycle {
             failureReason = reason ?? "\(work) command buffer failed"
             phase = .failed
             if work == .generated {
+                // Preserve the source long enough to try its real frame.
                 return [.invalidateHistory]
             }
-            return [.invalidateHistory] + terminalActions()
+            return MetalFrameGenerationLifecycleAction.invalidateHistory.union(terminalActions())
         }
 
         switch work {
@@ -256,6 +271,11 @@ struct MetalFrameGenerationLifecycle {
                 }
                 return terminalActions()
             }
+            // The present command buffer has finished reading the source slot
+            // and writing the CAMetalDrawable, so the slot is safe to reuse.
+            // WindowServer may report the actual scanout several refreshes
+            // later in windowed mode; retaining ownership until that callback
+            // serializes this latency into the game's source-frame rate.
             phase = .realPresentPending
             terminalPhase = .realPresentPending
             ownershipReleased = true
@@ -268,7 +288,7 @@ struct MetalFrameGenerationLifecycle {
     mutating func recordPresented(
         _ step: MetalFrameGenerationPresentationStep,
         presentedTime: CFTimeInterval
-    ) -> [MetalFrameGenerationLifecycleAction] {
+    ) -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased else {
             return []
         }
@@ -306,26 +326,26 @@ struct MetalFrameGenerationLifecycle {
         }
     }
 
-    mutating func cancel(reason: String) -> [MetalFrameGenerationLifecycleAction] {
+    mutating func cancel(reason: String) -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased else {
             return []
         }
         cancellationRequested = true
         failureReason = reason
         phase = .cancelled
-        return [.invalidateHistory] + terminalActions()
+        return MetalFrameGenerationLifecycleAction.invalidateHistory.union(terminalActions())
     }
 
-    mutating func failPendingPresentation(reason: String) -> [MetalFrameGenerationLifecycleAction] {
+    mutating func failPendingPresentation(reason: String) -> MetalFrameGenerationLifecycleAction {
         guard !ownershipReleased, realSubmitted, realCompleted, !realPresentedCallbackReceived else {
             return []
         }
         failureReason = reason
         phase = .failed
-        return [.invalidateHistory] + terminalActions()
+        return MetalFrameGenerationLifecycleAction.invalidateHistory.union(terminalActions())
     }
 
-    private mutating func terminalActions() -> [MetalFrameGenerationLifecycleAction] {
+    private mutating func terminalActions() -> MetalFrameGenerationLifecycleAction {
         guard gpuWorkInFlight == 0, !ownershipReleased else {
             return []
         }
@@ -336,23 +356,5 @@ struct MetalFrameGenerationLifecycle {
         ownershipReleased = true
         phase = .released
         return [.releaseOwnership]
-    }
-}
-
-// The current Swift overlay exposes Range<Int>; the Objective-C selector uses
-// NSRange. Keep the packet implementation source-compatible with both forms.
-extension MTLRenderCommandEncoder {
-    func executeCommandsInBuffer(
-        _ buffer: MTLIndirectCommandBuffer,
-        range executionRange: NSRange
-    ) {
-        let (upperBound, overflow) = executionRange.location.addingReportingOverflow(
-            executionRange.length
-        )
-        precondition(!overflow && executionRange.location >= 0 && executionRange.length >= 0)
-        self.executeCommandsInBuffer(
-            buffer,
-            range: executionRange.location..<upperBound
-        )
     }
 }

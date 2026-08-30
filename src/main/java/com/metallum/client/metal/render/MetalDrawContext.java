@@ -4,13 +4,13 @@ import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.systems.RenderPass;
-import net.caffeinemc.mods.sodium.client.gpu.device.context.DrawContext;
+import net.caffeinemc.mods.sodium.client.gpu.device.context.VKIndirectContext;
 import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegion;
 import net.caffeinemc.mods.sodium.client.render.viewport.CameraTransform;
 
 import java.nio.ByteBuffer;
 
-public final class MetalDrawContext extends DrawContext {
+public final class MetalDrawContext extends VKIndirectContext {
     private MetalRenderPass metalPass;
 
     @Override
@@ -37,21 +37,5 @@ public final class MetalDrawContext extends DrawContext {
         }
 
         this.metalPass.setUniform("push_constants", pushConstantsBufferSlice);
-    }
-
-    @Override
-    public void rotate() {
-        // Direct multi-draw commands are consumed synchronously by the pass;
-        // there is no Sodium-owned indirect ring allocation to rotate.
-    }
-
-    @Override
-    public void delete() {
-        // All per-region transient uniform slices are owned by MetalRenderPass.
-    }
-
-    @Override
-    public void endDraw() {
-        // MetalRenderPass.close() owns encoder finalization and packet flushes.
     }
 }

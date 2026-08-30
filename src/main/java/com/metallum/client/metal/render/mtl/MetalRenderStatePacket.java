@@ -1,7 +1,6 @@
 package com.metallum.client.metal.render.mtl;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
-import com.metallum.client.metal.render.bridge.MetalRenderCommandPacketBridge;
 import com.metallum.client.metal.render.bridge.MetalRenderStatePacketBridge;
 import org.jspecify.annotations.Nullable;
 
@@ -13,9 +12,11 @@ import java.lang.foreign.ValueLayout;
  * Reusable off-heap render-state packet for one native render encoder.
  *
  * <p>Entries are appended only after the Java state shadow admits a real
- * change. A draw flushes the packet through one ordinary FFM call. The native
- * decoder validates the complete packet before applying it; a failure is
- * replayed through the legacy setters and disables packet use for this encoder.</p>
+ * change. A draw flushes the packet through one ordinary FFM call. Structural
+ * packet failures apply no native state; an invalid later entry may report a
+ * partially applied prefix, in which case the complete packet is replayed
+ * through idempotent legacy setters and packet use is disabled for this
+ * encoder.</p>
  */
 final class MetalRenderStatePacket implements AutoCloseable {
     static final int MAGIC = 0x4D525350;
@@ -38,9 +39,6 @@ final class MetalRenderStatePacket implements AutoCloseable {
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.renderStatePacket", "true")
     );
-    private static final boolean COMMAND_PACKET_REQUESTED = Boolean.getBoolean(
-            "metallum.opt.renderCommandPacket"
-    );
     private static final int CAPACITY = Math.clamp(
             Integer.getInteger("metallum.opt.renderStatePacketEntries", 256),
             16,
@@ -59,12 +57,7 @@ final class MetalRenderStatePacket implements AutoCloseable {
     private boolean closed;
 
     static @Nullable MetalRenderStatePacket createIfAvailable() {
-        // Never mirror state into both packet formats. The command packet is
-        // selected only when its negotiated native ABI is actually available;
-        // otherwise the established state-only path remains active.
-        if (!ENABLED
-                || (COMMAND_PACKET_REQUESTED && MetalRenderCommandPacketBridge.available())
-                || !MetalRenderStatePacketBridge.available()) {
+        if (!ENABLED || !MetalRenderStatePacketBridge.available()) {
             return null;
         }
         return new MetalRenderStatePacket(CAPACITY);
@@ -219,6 +212,9 @@ final class MetalRenderStatePacket implements AutoCloseable {
         if (applied == this.entryCount) {
             MetalRenderStatePacketTelemetry.recordPacket(this.entryCount);
         } else {
+            // State setters are idempotent. Even if a future decoder reports a
+            // partial positive count, replaying the complete packet restores
+            // the exact final encoder state.
             replayLegacy(encoder);
             this.active = false;
         }

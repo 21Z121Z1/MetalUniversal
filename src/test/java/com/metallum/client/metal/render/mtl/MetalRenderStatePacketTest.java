@@ -74,22 +74,6 @@ final class MetalRenderStatePacketTest {
     }
 
     @Test
-    void preservesNullableMetalBindingsAsZeroAddresses() {
-        try (MetalRenderStatePacket packet = new MetalRenderStatePacket(2)) {
-            assertTrue(packet.appendDepthStencil(ENCODER, null));
-            assertTrue(packet.appendTextureAndSampler(ENCODER, null, null, 2L, 3));
-
-            MemorySegment storage = packet.storageForTest();
-            long depthStencil = MetalRenderStatePacket.HEADER_SIZE;
-            assertEquals(0L, storage.get(ValueLayout.JAVA_LONG, depthStencil + 16L));
-
-            long textureAndSampler = depthStencil + MetalRenderStatePacket.ENTRY_SIZE;
-            assertEquals(0L, storage.get(ValueLayout.JAVA_LONG, textureAndSampler + 16L));
-            assertEquals(0L, storage.get(ValueLayout.JAVA_LONG, textureAndSampler + 24L));
-        }
-    }
-
-    @Test
     void closedPacketRejectsFurtherWrites() {
         MetalRenderStatePacket packet = new MetalRenderStatePacket(2);
         packet.close();

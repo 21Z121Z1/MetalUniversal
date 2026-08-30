@@ -4,6 +4,7 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLHazardTrackingMode;
 import com.metallum.client.metal.render.mtl.MTLResourceOptions;
 import com.metallum.client.metal.render.mtl.MTLStorageMode;
+import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import net.fabricmc.api.EnvType;
@@ -14,7 +15,7 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 @Environment(EnvType.CLIENT)
 /**
@@ -23,31 +24,40 @@ import java.util.concurrent.atomic.AtomicLong;
  * must be able to resolve this method-descriptor type at runtime.
  */
 public class MetalGpuBuffer extends GpuBuffer {
-    /**
-     * Diagnostic only: force every newly-created buffer onto Shared storage so
-     * Metal 4 geometry can be separated from the Private-buffer upload/address
-     * path without changing the normal configuration.
-     */
-    private static final boolean FORCE_SHARED_STORAGE = Boolean.parseBoolean(
-            System.getProperty("metallum.opt.metal4SharedBuffers", "false")
-    );
-    private static final AtomicLong NEXT_VALIDATION_RESOURCE_ID = new AtomicLong(1L);
     private final MetalDevice device;
-    private final long validationResourceId = NEXT_VALIDATION_RESOURCE_ID.getAndIncrement();
+    private final String logicalLabel;
     private final boolean cpuAccessible;
     private final boolean dynamic;
     private final long resourceOptions;
     private final long allocationSize;
+    /**
+     * The identity is present only while this backing is live.  Keeping the
+     * value after close would let a stale Sodium arena segment look valid in a
+     * later contract/resource lookup even though its native handle has already
+     * been retired.
+     */
+    @Nullable
+    private MetalAllocationIdentity allocationIdentity;
     @Nullable
     private MemorySegment nativeHandle;
     @Nullable
     private ByteBuffer storage;
-    private long backingGeneration = 1L;
     private boolean closed;
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size) {
+        this(device, null, usage, size);
+    }
+
+    MetalGpuBuffer(
+            final MetalDevice device,
+            final @Nullable Supplier<String> label,
+            @GpuBuffer.Usage final int usage,
+            final long size
+    ) {
         super(usage, size);
         this.device = device;
+        this.logicalLabel = normalizeLabel(label == null ? null : label.get());
+        this.allocationIdentity = MetalAllocationIdentity.allocate(this.logicalLabel);
 
         this.dynamic = isDynamic(usage);
         this.cpuAccessible = isCpuAccessible(usage) || this.dynamic;
@@ -100,6 +110,8 @@ public class MetalGpuBuffer extends GpuBuffer {
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size, final @Nullable MemorySegment wrappedHandle) {
         super(usage, size);
         this.device = device;
+        this.logicalLabel = "metal-buffer";
+        this.allocationIdentity = MetalAllocationIdentity.allocate(this.logicalLabel);
         this.cpuAccessible = false;
         this.dynamic = false;
         this.resourceOptions = 0L;
@@ -126,24 +138,37 @@ public class MetalGpuBuffer extends GpuBuffer {
         return this.nativeHandle;
     }
 
+    MetalAllocationIdentity allocationIdentity() {
+        return liveAllocationIdentity();
+    }
+
+    long allocationId() {
+        return liveAllocationIdentity().allocationId();
+    }
+
+    String allocationDebugId() {
+        return "metal-buffer-" + allocationId();
+    }
+
+    String logicalLabel() {
+        return logicalLabel;
+    }
+
+    /** Observes the current renderer-owned backing identity when tracing is enabled. */
+    void registerAllocationIdentity() {
+        observeAllocationIdentity();
+    }
+
+    /** Narrow source compatibility for existing validation call sites. */
+    @Deprecated
     long validationResourceId() {
-        return validationResourceId;
+        return allocationId();
     }
 
+    /** Narrow source compatibility for existing validation call sites. */
+    @Deprecated
     String validationDebugId() {
-        return "metal-buffer-" + validationResourceId + "#" + backingGeneration;
-    }
-
-    long backingGeneration() {
-        return this.backingGeneration;
-    }
-
-    BackingSnapshot backingSnapshot() {
-        return new BackingSnapshot(
-                this.validationResourceId,
-                this.backingGeneration,
-                this.nativeHandle()
-        );
+        return allocationDebugId();
     }
 
     boolean isDynamic() {
@@ -166,24 +191,24 @@ public class MetalGpuBuffer extends GpuBuffer {
     }
 
     void swapBacking(final MemorySegment handle, final ByteBuffer storage) {
-        if (this.closed) {
-            throw new IllegalStateException("Cannot replace the backing of a closed Metal buffer");
+        MetalAllocationIdentity previous = liveAllocationIdentity();
+        if (RenderContractRuntime.observing()) {
+            RenderContractRuntime.invalidateResourceAllocations(
+                    previous.allocationId(),
+                    "metal-buffer-" + previous.allocationId()
+            );
         }
-        if (MetalNativeBridge.isNullHandle(handle)) {
-            throw new IllegalArgumentException("Replacement Metal buffer handle must be non-null");
-        }
-        if (storage == null) {
-            throw new IllegalArgumentException("Replacement Metal buffer storage must be non-null");
-        }
-        long nextGeneration = Math.incrementExact(this.backingGeneration);
+        this.allocationIdentity = MetalAllocationIdentity.allocate(this.logicalLabel);
         this.nativeHandle = handle;
         this.storage = storage;
-        this.backingGeneration = nextGeneration;
+        observeAllocationIdentity();
     }
 
     @Override
     public boolean isClosed() {
-        return this.closed || this.nativeHandle == null;
+        return this.closed
+                || this.nativeHandle == null
+                || this.nativeHandle.address() == 0L;
     }
 
     @Override
@@ -191,12 +216,19 @@ public class MetalGpuBuffer extends GpuBuffer {
         if (this.closed) {
             return;
         }
+        MetalAllocationIdentity retired = liveAllocationIdentity();
         this.closed = true;
+        this.allocationIdentity = null;
         this.storage = null;
         if (this.nativeHandle != null) {
+            if (RenderContractRuntime.observing()) {
+                RenderContractRuntime.invalidateResourceAllocations(
+                        retired.allocationId(),
+                        "metal-buffer-" + retired.allocationId()
+                );
+            }
             MemorySegment handle = this.nativeHandle;
             this.nativeHandle = null;
-            this.backingGeneration = Math.incrementExact(this.backingGeneration);
             this.device.queueBufferRelease(handle, this.allocationSize, this.resourceOptions);
         }
     }
@@ -235,17 +267,44 @@ public class MetalGpuBuffer extends GpuBuffer {
     }
 
     private static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {
-        MTLStorageMode storageMode = FORCE_SHARED_STORAGE
-                ? MTLStorageMode.Shared
-                : (isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private);
+        MTLStorageMode storageMode = isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private;
         return MTLResourceOptions.of(storageMode, MTLHazardTrackingMode.Untracked);
     }
 
-    record BackingSnapshot(long resourceId, long generation, MemorySegment handle) {
-        BackingSnapshot {
-            if (resourceId <= 0L || generation <= 0L || MetalNativeBridge.isNullHandle(handle)) {
-                throw new IllegalArgumentException("Metal buffer backing snapshot must be live and positive");
-            }
+    private void observeAllocationIdentity() {
+        if (!RenderContractRuntime.observing() || this.nativeHandle == null || this.allocationIdentity == null) {
+            return;
         }
+        MetalAllocationIdentity live = this.allocationIdentity;
+        RenderContractRuntime.identifyAllocation(
+                this.logicalLabel,
+                live.allocationId(),
+                live.generation(),
+                "metal-buffer-" + live.allocationId(),
+                "BUFFER",
+                Math.toIntExact(Math.min(this.allocationSize, Integer.MAX_VALUE)),
+                1,
+                1,
+                0,
+                1,
+                this.usage()
+        );
+    }
+
+    private MetalAllocationIdentity liveAllocationIdentity() {
+        MetalAllocationIdentity identity = this.allocationIdentity;
+        if (this.closed
+                || this.nativeHandle == null
+                || this.nativeHandle.address() == 0L
+                || identity == null) {
+            throw new IllegalStateException(
+                    "Metal buffer allocation identity is retired or unavailable: " + this.logicalLabel
+            );
+        }
+        return identity;
+    }
+
+    private static String normalizeLabel(final String label) {
+        return label == null || label.isBlank() ? "metal-buffer" : label;
     }
 }

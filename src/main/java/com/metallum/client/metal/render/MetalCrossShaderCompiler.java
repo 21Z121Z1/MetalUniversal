@@ -39,14 +39,6 @@ final class MetalCrossShaderCompiler {
     private static final String IRIS_SSBO_DESCRIPTOR_PREFIX = "iris_ssbo/";
     private static final Set<String> BUILT_IN_UNIFORMS = Set.of("Projection", "Lighting", "Fog", "Globals");
     private static final int MSL_VERSION_4_0 = 0x040000;
-    /**
-     * Production resource path. An explicit false is retained only as a
-     * diagnostic A/B escape hatch; argument buffers are not a default-off
-     * experiment.
-     */
-    static final boolean ARGUMENT_BUFFERS_ENABLED = !"false".equalsIgnoreCase(
-            System.getProperty("metallum.opt.argumentBuffers", "true")
-    );
     static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
     /** 未连接 varying 的一次性告警去重（pipeline+变量名）。 */
@@ -151,7 +143,6 @@ final class MetalCrossShaderCompiler {
                             vertexFormatSignature(pipeline),
                             bindGroupSignature(pipeline),
                             Integer.toHexString(Float.floatToIntBits(sampleLodBias)),
-                            "argumentBuffers=" + ARGUMENT_BUFFERS_ENABLED,
                             MetalMslDiskCache.CACHE_SALT
                     );
                     MetalMslDiskCache.Entry cached = diskCache.load(cacheKey);
@@ -160,7 +151,6 @@ final class MetalCrossShaderCompiler {
                         if (device.isDebuggingEnabled()) {
                             Metallum.LOGGER.info("[metallum] MSL cache hit for {}", pipeline.getLocation());
                         }
-                        validateFragmentOutputSignature(pipeline, cached.fragmentOutputs());
                         return new MetalCompiledRenderPipeline(
                                 device,
                                 pipeline,
@@ -222,7 +212,7 @@ final class MetalCrossShaderCompiler {
                     Map.of(),
                     explicitFragmentOutputLocations(fragmentSource)
             );
-            validateFragmentOutputSignature(pipeline, fragmentMsl.fragmentOutputs());
+            validateFragmentOutputSignature(pipeline, fragmentMsl.stageOutputLocations());
             String fragmentMslSource = applySampleLodBias(
                     fragmentMsl.source(),
                     sampleLodBias
@@ -243,7 +233,7 @@ final class MetalCrossShaderCompiler {
             if (cacheKey != null) {
                 diskCache.store(cacheKey, new MetalMslDiskCache.Entry(
                         vertexMsl.source(), fragmentMslSource, vertexEntryPoint, fragmentEntryPoint,
-                        resources, genericVertexInputs, fragmentMsl.fragmentOutputs()
+                        resources, genericVertexInputs
                 ));
             }
             return new MetalCompiledRenderPipeline(
@@ -837,15 +827,7 @@ final class MetalCrossShaderCompiler {
                 case TEXEL_BUFFER -> MetalCompiledRenderPipeline.ResourceKind.TEXEL_BUFFER;
             };
             GpuFormat texelFormat = entry.type() == VulkanBindGroupLayout.VulkanBindGroupEntryType.TEXEL_BUFFER ? entry.texelBufferFormat() : null;
-            resources.add(argumentBufferedResource(
-                    kind,
-                    entry.name(),
-                    index,
-                    stageMask(entry.name(), vertexMsl, fragmentMsl),
-                    texelFormat,
-                    vertexMsl,
-                    fragmentMsl
-            ));
+            resources.add(new MetalCompiledRenderPipeline.ResourceBinding(kind, entry.name(), index, stageMask(entry.name(), vertexMsl, fragmentMsl), texelFormat));
         }
 
         for (RasterStorageResource storage : storageResources) {
@@ -853,14 +835,12 @@ final class MetalCrossShaderCompiler {
                 case BUFFER -> MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER;
                 case IMAGE -> MetalCompiledRenderPipeline.ResourceKind.STORAGE_IMAGE;
             };
-            resources.add(argumentBufferedResource(
+            resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
                     kind,
                     storage.descriptorName(),
                     storage.physicalBinding(),
                     storage.stageMask(),
-                    null,
-                    vertexMsl,
-                    fragmentMsl
+                    null
             ));
         }
 
@@ -876,30 +856,6 @@ final class MetalCrossShaderCompiler {
             ));
         }
         return resources;
-    }
-
-    private static MetalCompiledRenderPipeline.ResourceBinding argumentBufferedResource(
-            final MetalCompiledRenderPipeline.ResourceKind kind,
-            final String name,
-            final int bindingIndex,
-            final int stageMask,
-            @Nullable final GpuFormat texelFormat,
-            final MslShader vertexMsl,
-            final MslShader fragmentMsl
-    ) {
-        ArgumentResourceBinding vertex = vertexMsl.argumentBindings().get(bindingIndex);
-        ArgumentResourceBinding fragment = fragmentMsl.argumentBindings().get(bindingIndex);
-        return new MetalCompiledRenderPipeline.ResourceBinding(
-                kind,
-                name,
-                bindingIndex,
-                stageMask,
-                texelFormat,
-                vertex == null ? -1 : vertex.primaryIndex(),
-                vertex == null ? -1 : vertex.secondaryIndex(),
-                fragment == null ? -1 : fragment.primaryIndex(),
-                fragment == null ? -1 : fragment.secondaryIndex()
-        );
     }
 
     private static int stageMask(
@@ -1319,7 +1275,7 @@ final class MetalCrossShaderCompiler {
         return Map.copyOf(locations);
     }
 
-    private static Map<Integer, FragmentOutputClass> applyExplicitFragmentOutputLocations(
+    private static Set<Integer> applyExplicitFragmentOutputLocations(
             final MemoryStack stack,
             final long compiler,
             final Map<String, Integer> explicitLocations
@@ -1340,10 +1296,10 @@ final class MetalCrossShaderCompiler {
 
         int count = (int) pCount.get(0);
         if (count == 0) {
-            return Map.of();
+            return Set.of();
         }
         SpvcReflectedResource.Buffer outputs = SpvcReflectedResource.create(pList.get(0), count);
-        Map<Integer, FragmentOutputClass> activeOutputs = new HashMap<>();
+        Set<Integer> activeLocations = new HashSet<>();
         for (int index = 0; index < count; index++) {
             SpvcReflectedResource output = outputs.get(index);
             Integer location = explicitLocations.get(output.nameString());
@@ -1355,77 +1311,17 @@ final class MetalCrossShaderCompiler {
             if (!Spvc.spvc_compiler_has_decoration(
                     compiler, output.id(), Spv.SpvDecorationBuiltIn
             )) {
-                int resolvedLocation = Spvc.spvc_compiler_get_decoration(
+                activeLocations.add(Spvc.spvc_compiler_get_decoration(
                         compiler, output.id(), Spv.SpvDecorationLocation
-                );
-                long type = Spvc.spvc_compiler_get_type_handle(compiler, output.type_id());
-                FragmentOutputClass outputClass = fragmentOutputClass(
-                        output.nameString(), Spvc.spvc_type_get_basetype(type)
-                );
-                FragmentOutputClass previous = activeOutputs.putIfAbsent(resolvedLocation, outputClass);
-                if (previous != null) {
-                    throw new ShaderCompileException(
-                            "Multiple active fragment outputs use color location " + resolvedLocation
-                    );
-                }
+                ));
             }
         }
-        return Map.copyOf(activeOutputs);
-    }
-
-    private static FragmentOutputClass fragmentOutputClass(final String name, final int baseType)
-            throws ShaderCompileException {
-        return switch (baseType) {
-            case Spvc.SPVC_BASETYPE_FP16, Spvc.SPVC_BASETYPE_FP32, Spvc.SPVC_BASETYPE_FP64 ->
-                    FragmentOutputClass.FLOAT;
-            case Spvc.SPVC_BASETYPE_INT8, Spvc.SPVC_BASETYPE_INT16,
-                    Spvc.SPVC_BASETYPE_INT32, Spvc.SPVC_BASETYPE_INT64 -> FragmentOutputClass.SINT;
-            case Spvc.SPVC_BASETYPE_UINT8, Spvc.SPVC_BASETYPE_UINT16,
-                    Spvc.SPVC_BASETYPE_UINT32, Spvc.SPVC_BASETYPE_UINT64 -> FragmentOutputClass.UINT;
-            default -> throw new ShaderCompileException(
-                    "Unsupported fragment output base type for " + name + ": " + baseType
-            );
-        };
-    }
-
-    private static FragmentOutputClass colorTargetClass(final GpuFormat format)
-            throws ShaderCompileException {
-        if (!format.hasColorAspect()) {
-            throw new ShaderCompileException(
-                    "Non-color format cannot be used as a color target: " + format
-            );
-        }
-
-        // Mojang represents packed 32-bit color formats as OPAQUE_32 because
-        // their channels do not share one ComponentType width.  Their shader
-        // output class still follows the format's declared numeric semantics.
-        if (format == GpuFormat.RG11B10_FLOAT || format == GpuFormat.RGB10A2_UNORM) {
-            return FragmentOutputClass.FLOAT;
-        }
-        if (format == GpuFormat.RGB10A2_UINT) {
-            return FragmentOutputClass.UINT;
-        }
-
-        String componentType = format.componentType().name();
-        if (componentType.startsWith("UINT")) {
-            return FragmentOutputClass.UINT;
-        }
-        if (componentType.startsWith("SINT")) {
-            return FragmentOutputClass.SINT;
-        }
-        if (componentType.startsWith("UNORM")
-                || componentType.startsWith("SNORM")
-                || componentType.startsWith("FLOAT")) {
-            return FragmentOutputClass.FLOAT;
-        }
-        throw new ShaderCompileException(
-                "Unsupported color-target component type " + componentType + " for " + format
-        );
+        return Set.copyOf(activeLocations);
     }
 
     static void validateFragmentOutputSignature(
             final RenderPipeline pipeline,
-            final Map<Integer, FragmentOutputClass> shaderOutputs
+            final Set<Integer> shaderLocations
     ) throws ShaderCompileException {
         Set<Integer> targetLocations = new HashSet<>();
         ColorTargetState[] targets = pipeline.getColorTargetStates();
@@ -1434,23 +1330,11 @@ final class MetalCrossShaderCompiler {
                 targetLocations.add(index);
             }
         }
-        if (!targetLocations.containsAll(shaderOutputs.keySet())) {
+        if (!targetLocations.containsAll(shaderLocations)) {
             throw new ShaderCompileException(
                     "Fragment output/color-target location mismatch for " + pipeline.getLocation()
-                            + ": shader=" + shaderOutputs.keySet() + ", targets=" + targetLocations
+                            + ": shader=" + shaderLocations + ", targets=" + targetLocations
             );
-        }
-        for (Map.Entry<Integer, FragmentOutputClass> output : shaderOutputs.entrySet()) {
-            GpuFormat targetFormat = targets[output.getKey()].format();
-            FragmentOutputClass targetClass = colorTargetClass(targetFormat);
-            if (output.getValue() != targetClass) {
-                throw new ShaderCompileException(
-                        "Fragment output/color-target numeric-class mismatch for " + pipeline.getLocation()
-                                + " at location " + output.getKey()
-                                + ": shader=" + output.getValue()
-                                + ", target=" + targetClass + " (" + targetFormat + ')'
-                );
-            }
         }
     }
 
@@ -1523,38 +1407,13 @@ final class MetalCrossShaderCompiler {
                         "spvc_compiler_options_set_uint(MSL_VERSION)"
                 );
                 checkSpvc(
-                        Spvc.spvc_compiler_options_set_bool(
-                                options,
-                                Spvc.SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING,
-                                !ARGUMENT_BUFFERS_ENABLED
-                        ),
+                        Spvc.spvc_compiler_options_set_bool(options, Spvc.SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING, true),
                         "spvc_compiler_options_set_bool(MSL_ENABLE_DECORATION_BINDING)"
                 );
                 checkSpvc(
                         Spvc.spvc_compiler_options_set_bool(options, Spvc.SPVC_COMPILER_OPTION_MSL_TEXTURE_BUFFER_NATIVE, true),
                         "spvc_compiler_options_set_bool(MSL_TEXTURE_BUFFER_NATIVE)"
                 );
-                if (ARGUMENT_BUFFERS_ENABLED) {
-                    checkSpvc(
-                            Spvc.spvc_compiler_options_set_bool(
-                                    options,
-                                    Spvc.SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS,
-                                    true
-                            ),
-                            "spvc_compiler_options_set_bool(MSL_ARGUMENT_BUFFERS)"
-                    );
-                    // Tier 1 is the portable macOS contract. Tier 2 is not
-                    // required by any layout emitted here, so do not exclude a
-                    // conforming older Metal device merely for denser limits.
-                    checkSpvc(
-                            Spvc.spvc_compiler_options_set_uint(
-                                    options,
-                                    Spvc.SPVC_COMPILER_OPTION_MSL_ARGUMENT_BUFFERS_TIER,
-                                    0
-                            ),
-                            "spvc_compiler_options_set_uint(MSL_ARGUMENT_BUFFERS_TIER)"
-                    );
-                }
                 checkSpvc(
                         Spvc.spvc_compiler_options_set_bool(options, Spvc.SPVC_COMPILER_OPTION_FLIP_VERTEX_Y, true),
                         "spvc_compiler_options_set_bool(FLIP_VERTEX_Y)"
@@ -1562,7 +1421,7 @@ final class MetalCrossShaderCompiler {
                 checkSpvc(Spvc.spvc_compiler_install_compiler_options(compiler, options), "spvc_compiler_install_compiler_options");
 
                 registerIntegerInputConversions(stack, compiler, attributeFormats);
-                Map<Integer, FragmentOutputClass> fragmentOutputs = applyExplicitFragmentOutputLocations(
+                Set<Integer> stageOutputLocations = applyExplicitFragmentOutputLocations(
                         stack, compiler, explicitFragmentOutputLocations
                 );
 
@@ -1584,44 +1443,14 @@ final class MetalCrossShaderCompiler {
                 PointerBuffer pCount = stack.mallocPointer(1);
                 checkSpvc(Spvc.spvc_resources_get_resource_list_for_type(resources, Spvc.SPVC_RESOURCE_TYPE_PUSH_CONSTANT, pList, pCount), "spvc_resources_get_resource_list_for_type");
                 boolean hasPushConstants = pCount.get(0) > 0;
-                int pushConstantResourceId = -1;
                 if (hasPushConstants) {
                     SpvcReflectedResource.Buffer list = SpvcReflectedResource.create(pList.get(0), 1);
-                    pushConstantResourceId = list.get(0).id();
-                    Spvc.spvc_compiler_set_decoration(
-                            compiler,
-                            pushConstantResourceId,
-                            Spv.SpvDecorationBinding,
-                            pushConstantBinding
-                    );
+                    Spvc.spvc_compiler_set_decoration(compiler, list.get(0).id(), Spv.SpvDecorationBinding, pushConstantBinding);
                 }
 
                 PointerBuffer pSource = stack.mallocPointer(1);
-                int compileResult = Spvc.spvc_compiler_compile(compiler, pSource);
-                if (compileResult != Spvc.SPVC_SUCCESS) {
-                    throw new ShaderCompileException(
-                            "SPIRV-Cross error at spvc_compiler_compile: " + compileResult
-                                    + "; " + Spvc.spvc_context_get_last_error_string(context)
-                    );
-                }
+                checkSpvc(Spvc.spvc_compiler_compile(compiler, pSource), "spvc_compiler_compile");
                 String mslSource = MemoryUtil.memUTF8(pSource.get(0));
-                if (hasPushConstants && ARGUMENT_BUFFERS_ENABLED) {
-                    int automaticPushBinding = Spvc.spvc_compiler_msl_get_automatic_resource_binding(
-                            compiler,
-                            pushConstantResourceId
-                    );
-                    if (automaticPushBinding >= 0 && automaticPushBinding != pushConstantBinding) {
-                        String automaticAttribute = "[[buffer(" + automaticPushBinding + ")]]";
-                        String requestedAttribute = "[[buffer(" + pushConstantBinding + ")]]";
-                        if (!mslSource.contains(automaticAttribute)) {
-                            throw new ShaderCompileException(
-                                    "Unable to relocate Metal push constants from buffer "
-                                            + automaticPushBinding + " to " + pushConstantBinding
-                            );
-                        }
-                        mslSource = mslSource.replace(automaticAttribute, requestedAttribute);
-                    }
-                }
                 if (hasRectangleSampler) {
                     mslSource = mslSource.replace("unknown_texture_type<", "texture2d<");
                     if (mslSource.contains("unknown_texture_type")) {
@@ -1630,15 +1459,11 @@ final class MetalCrossShaderCompiler {
                         );
                     }
                 }
-                Map<Integer, ArgumentResourceBinding> argumentBindings = ARGUMENT_BUFFERS_ENABLED
-                        ? collectAutomaticArgumentBindings(stack, compiler, resources)
-                        : Map.of();
                 return new MslShader(
                         mslSource,
                         hasPushConstants,
                         activeResources,
-                        fragmentOutputs,
-                        argumentBindings
+                        stageOutputLocations
                 );
             } finally {
                 Spvc.spvc_context_destroy(context);
@@ -1678,95 +1503,8 @@ final class MetalCrossShaderCompiler {
             String source,
             boolean hasPushConstants,
             Set<String> activeResources,
-            Map<Integer, FragmentOutputClass> fragmentOutputs,
-            Map<Integer, ArgumentResourceBinding> argumentBindings
+            Set<Integer> stageOutputLocations
     ) {
-    }
-
-    enum FragmentOutputClass {
-        FLOAT,
-        SINT,
-        UINT
-    }
-
-    record ArgumentResourceBinding(int primaryIndex, int secondaryIndex) {
-    }
-
-    private static Map<Integer, ArgumentResourceBinding> collectAutomaticArgumentBindings(
-            final MemoryStack stack,
-            final long compiler,
-            final long resources
-    ) throws ShaderCompileException {
-        Map<Integer, ArgumentResourceBinding> result = new HashMap<>();
-        int[] resourceTypes = {
-                Spvc.SPVC_RESOURCE_TYPE_UNIFORM_BUFFER,
-                Spvc.SPVC_RESOURCE_TYPE_STORAGE_BUFFER,
-                Spvc.SPVC_RESOURCE_TYPE_STORAGE_IMAGE,
-                Spvc.SPVC_RESOURCE_TYPE_SAMPLED_IMAGE,
-                Spvc.SPVC_RESOURCE_TYPE_SEPARATE_IMAGE,
-                Spvc.SPVC_RESOURCE_TYPE_SEPARATE_SAMPLERS,
-                Spvc.SPVC_RESOURCE_TYPE_ATOMIC_COUNTER
-        };
-        PointerBuffer listPointer = stack.mallocPointer(1);
-        PointerBuffer countPointer = stack.mallocPointer(1);
-        for (int resourceType : resourceTypes) {
-            listPointer.put(0, 0L);
-            countPointer.put(0, 0L);
-            checkSpvc(
-                    Spvc.spvc_resources_get_resource_list_for_type(
-                            resources,
-                            resourceType,
-                            listPointer,
-                            countPointer
-                    ),
-                    "spvc_resources_get_resource_list_for_type(argument buffer)"
-            );
-            int count = Math.toIntExact(countPointer.get(0));
-            if (count == 0) {
-                continue;
-            }
-            SpvcReflectedResource.Buffer entries = SpvcReflectedResource.create(listPointer.get(0), count);
-            for (SpvcReflectedResource resource : entries) {
-                int descriptorSet = Spvc.spvc_compiler_get_decoration(
-                        compiler,
-                        resource.id(),
-                        Spv.SpvDecorationDescriptorSet
-                );
-                if (descriptorSet != 0) {
-                    throw new ShaderCompileException(
-                            "Metal argument binding uses unsupported descriptor set " + descriptorSet
-                                    + " for " + resource.nameString()
-                    );
-                }
-                int logicalBinding = Spvc.spvc_compiler_get_decoration(
-                        compiler,
-                        resource.id(),
-                        Spv.SpvDecorationBinding
-                );
-                int primary = Spvc.spvc_compiler_msl_get_automatic_resource_binding(
-                        compiler,
-                        resource.id()
-                );
-                int secondary = Spvc.spvc_compiler_msl_get_automatic_resource_binding_secondary(
-                        compiler,
-                        resource.id()
-                );
-                if (primary < 0) {
-                    continue;
-                }
-                ArgumentResourceBinding previous = result.put(
-                        logicalBinding,
-                        new ArgumentResourceBinding(primary, secondary)
-                );
-                if (previous != null && (previous.primaryIndex() != primary
-                        || previous.secondaryIndex() != secondary)) {
-                    throw new ShaderCompileException(
-                            "Conflicting Metal argument ids for descriptor binding " + logicalBinding
-                    );
-                }
-            }
-        }
-        return Map.copyOf(result);
     }
 
     private static Set<String> collectActiveResourceNames(final MemoryStack stack, final long compiler, final long activeSet) throws ShaderCompileException {

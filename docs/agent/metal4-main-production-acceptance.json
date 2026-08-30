@@ -1,0 +1,217 @@
+{
+  "schema_version": 7,
+  "stage": "P1-metal4-main-production",
+  "base_stage": {
+    "name": "P0-minecraft-metal-e2e",
+    "validated_sha": "4e6be7b27edbed43731dc5ddee58ab28c9f2cd9a",
+    "merged_to_canonical_as": "5f1fa66e8a08576dfe026a41888107f3c842c947"
+  },
+  "scope": {
+    "platform": "macOS",
+    "amethyst_specific_compatibility": false,
+    "metalfx_required": false,
+    "frame_generation_required": false,
+    "default_enablement_allowed_before_acceptance": false
+  },
+  "structural_gates": {
+    "argument_table_model": "one-long-lived-table-per-stage-family-per-in-flight-slot",
+    "argument_tables_per_slot": 3,
+    "argument_table_allocations_during_encoding": 0,
+    "compute_table_overflow": 0,
+    "render_table_high_water": 1,
+    "allocator_reset_requires_free_slot": true,
+    "allocator_resets_per_acquire": 1,
+    "free_slot_requires_metal_completion_feedback": true
+  },
+  "runtime_gates": {
+    "metal4_supported": true,
+    "residency_set_enabled": true,
+    "candidate_main_renderer_engagement_fraction": 1.0,
+    "baseline_main_renderer_engagement_fraction": 0.0,
+    "native_begin_must_equal_java_acquire_delta": true,
+    "native_submit_must_equal_java_commit_delta": true,
+    "outstanding_submissions_after_gpu_drain": 0,
+    "metal_validation_errors": 0,
+    "failed_command_buffers": 0,
+    "failed_present_command_buffers": 0,
+    "nil_drawables": 0,
+    "framebuffer_equivalence_required": true,
+    "resource_reload_recovery_required": true
+  },
+  "required_runtime_metrics": [
+    "metal4.commandAllocatorResets",
+    "metal4.slotWaitNanos",
+    "metal4.slotWaitCount",
+    "metal4.commandBuffersPerFrame",
+    "metal4.commitCallsPerFrame",
+    "metal4.argumentTableAllocationsDuringEncoding",
+    "metal4.computeTableOverflow",
+    "metal4.renderTableHighWater"
+  ],
+  "runtime_telemetry": {
+    "enabled_by": "metallum.hotpath.telemetry=true",
+    "native_cross_check": "metallum_metal4_main_renderer_stats",
+    "queue_capability_evidence": [
+      "MTLCommandQueue.metal4Supported()",
+      "MTLCommandQueue.residencySetEnabled()"
+    ],
+    "command_allocator_resets": "derived one-for-one from successful Metal4 acquire; the native static gate independently proves exactly one allocator.reset after free-slot acquisition",
+    "slot_wait_nanos": "conservative upper bound: wall time of native command-buffer acquisition only when all three Java-side submissions are still unretired",
+    "slot_wait_safety": "the conservative upper bound may reject noise but cannot hide a real slot-wait regression",
+    "per_frame_rates": "computed from cumulative counter deltas divided by presentation encode delta over the same measurement window",
+    "hot_path_stats_ffm_queries_per_frame": 0,
+    "evidence_producer": ".github/ci/minecraft-e2e/src/main/java/com/metallum/client/metal/render/Metal4MainRendererEvidenceGameTest.java",
+    "evidence_artifact": "metal4-main-renderer-evidence.json"
+  },
+  "physical_ab_contract": {
+    "lanes": [
+      "baseline",
+      "candidate"
+    ],
+    "identical_properties": [
+      "metallum.opt.metal4=true",
+      "metallum.opt.metal4Compiler=true",
+      "metallum.opt.metal4Present=true",
+      "metallum.opt.residencySet=true",
+      "metallum.opt.metal4MainQueuePilot=false",
+      "metallum.metalfx.mode=OFF",
+      "metallum.metalfx.frameGeneration=false"
+    ],
+    "only_intended_lane_difference": "metallum.opt.metal4MainRenderer",
+    "baseline_value": false,
+    "candidate_value": true,
+    "identity_fields_must_match": [
+      "sourceSha",
+      "productionJarSha256",
+      "nativeDylibSha256"
+    ],
+    "unrecorded_identity_is_rejected": true,
+    "pair_gate": "scripts/agent/check_metal4_main_e2e_pair.py"
+  },
+  "capability_policy": {
+    "metal4_required": true,
+    "residency_set_required": true,
+    "unsupported_hosted_runner_result": "blocked-capability",
+    "blocked_capability_is_stage_pass": false,
+    "physical_mac_activation_required_to_close_stage": true
+  },
+  "regression_gates": {
+    "p0_default_renderer_e2e_must_pass": true,
+    "headless_harness_must_pass": true,
+    "macos_26_native_compile_must_pass": true,
+    "ordinary_build_must_pass": true
+  },
+  "physical_mac_evidence": {
+    "correctness_runner": "scripts/agent/run_metal4_main_p1_physical_correctness.sh",
+    "correctness_command": "bash scripts/agent/run_metal4_main_p1_physical_correctness.sh",
+    "runner_builds_production_bits_once": true,
+    "runner_hashes_source_jar_and_native": true,
+    "runner_executes_baseline_then_candidate": true,
+    "runner_enables_metal_validation": true,
+    "runner_uses_normal_physical_presentation_path": true,
+    "hosted_offscreen_override_forbidden": true,
+    "runner_checks_runtime_framebuffer_present_reload_and_readback_guardrails": true,
+    "required_environment": "physical Apple GPU with Metal 4 and MTLResidencySet support",
+    "same_exact_product_sha_required": true,
+    "same_exact_production_jar_required": true,
+    "same_exact_native_dylib_required": true,
+    "amethyst_or_ios_required": false
+  },
+  "performance_policy": {
+    "correctness_before_performance": true,
+    "profile_runner": "scripts/agent/run_metal4_main_p1_physical_performance.sh",
+    "matrix_runner": "scripts/agent/run_metal4_main_p1_physical_matrix.sh",
+    "matrix_command": "WORLD=<validation-world> P1_CORRECTNESS_GATE=<physical-correctness-root>/pair-decision.json POTATO_SHADER_PACK=<potato-file> POTATO_SHADER_PACK_VERSION=<version> BSL_SHADER_PACK=<bsl-file> BSL_SHADER_PACK_VERSION=<version> bash scripts/agent/run_metal4_main_p1_physical_matrix.sh",
+    "correctness_gate_source_sha_must_equal_current_head": true,
+    "benchmark_contract": "docs/agent/benchmark-profiles.json",
+    "required_profiles": [
+      "V1",
+      "I0",
+      "I1"
+    ],
+    "profile_contracts": {
+      "V1": {
+        "iris_loaded": true,
+        "iris_semantic": false,
+        "shader_pack": null
+      },
+      "I0": {
+        "iris_loaded": true,
+        "iris_semantic": true,
+        "shader_pack": "Potato",
+        "shader_pack_input_must_be_explicit": true,
+        "shader_pack_version_must_be_explicit": true,
+        "shader_pack_sha256_required": true,
+        "shader_options_sha256_required": true,
+        "exact_runtime_activation_log_required": true
+      },
+      "I1": {
+        "iris_loaded": true,
+        "iris_semantic": true,
+        "shader_pack": "BSL",
+        "shader_pack_input_must_be_explicit": true,
+        "shader_pack_version_must_be_explicit": true,
+        "shader_pack_sha256_required": true,
+        "shader_options_sha256_required": true,
+        "exact_runtime_activation_log_required": true
+      }
+    },
+    "metalfx_mode": "OFF",
+    "frame_generation": false,
+    "immutable_world_snapshot_per_trial": true,
+    "world_scenario_id": "metal-validation-fixed-camera-v1",
+    "camera_policy": "world-player pose snapped to x/z block centers, y half-block, yaw nearest 90 degrees and pitch 0, then held fixed by MetalValidationClient",
+    "camera_driver_must_be_content_addressed": true,
+    "framebuffer": [
+      1708,
+      960
+    ],
+    "ui_scale_default": 3,
+    "render_distance_default": 16,
+    "mutable_options_iris_config_and_staged_shader_inputs_are_restored_or_removed": true,
+    "common_identity_fields_must_match_across_profiles": [
+      "candidate_sha",
+      "production_jar_sha256",
+      "native_dylib_sha256",
+      "world_sha256",
+      "world_scenario_id",
+      "resolution",
+      "ui_scale",
+      "render_distance",
+      "camera_pose",
+      "camera_script_sha256",
+      "minecraft_version",
+      "sodium_version",
+      "macos_version",
+      "java_version"
+    ],
+    "shader_profile_identity_fields": [
+      "shader_pack_name",
+      "shader_pack_version",
+      "shader_pack_sha256",
+      "shader_options_sha256",
+      "iris_version"
+    ],
+    "trial_guardrails": [
+      "drawable resolution equals 1708x960",
+      "native main readback completed and passed",
+      "explicit residency remains active",
+      "main renderer engagement matches the lane",
+      "shader profile proves exact staged pack activation",
+      "Metal API validation is disabled during timing"
+    ],
+    "baseline_candidate_dependencies_must_match": true,
+    "pairing": "ABBA-equivalent alternating order",
+    "warmup_seconds_min": 30,
+    "sample_seconds_min": 120,
+    "paired_performance_required_before_default_enablement": true,
+    "minimum_paired_blocks_per_profile": 4,
+    "minimum_positive_block_fraction": 0.75,
+    "accepted_state_required_per_profile": "accepted-candidate",
+    "matrix_accepted_state_required": "accepted-candidate"
+  },
+  "stage_transition": {
+    "next_stage": "P2-iris-tbdr-render-graph-v3",
+    "allowed_only_if_all_structural_runtime_regression_correctness_and_three_profile_performance_gates_pass": true
+  }
+}

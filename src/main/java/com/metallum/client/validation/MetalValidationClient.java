@@ -5,35 +5,29 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalGpuTimingRecorder;
-import com.metallum.client.metal.render.MetalDynamicBackingPoolTelemetry;
 import com.metallum.client.metal.render.MetalFxManager;
-import com.metallum.client.metal.render.MetalTransientArenaTelemetry;
-import com.metallum.client.metal.render.MetalPipelineCompilationTelemetry;
+import com.metallum.client.metal.render.TerrainGpuVisibilityProbe;
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.IrisMetalRenderFusionRuntime;
 import com.metallum.client.metal.render.IrisMetalComputeGroupingRuntime;
 import com.metallum.client.metal.render.IrisMetalDepthAllocationRuntime;
 import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;
-import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
-import com.metallum.client.metal.render.bridge.MetalNativeBridge;
-import com.metallum.client.metal.render.bridge.MetalFfmCallTelemetry;
-import com.metallum.client.metal.render.bridge.MetalTerrainIcbBridge;
-import com.metallum.client.metal.render.mtl.MetalCommandPacketTelemetry;
 import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
 import com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry;
+import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.terrain.PresentationPacingEvidenceAdapter;
+import com.metallum.client.terrain.TerrainSchedulingController;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.validation.storage.ValidationStorageBudget;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
 import net.fabricmc.api.ClientModInitializer;
-import net.irisshaders.iris.Iris;
 import net.minecraft.client.CloudStatus;
 import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.registries.Registries;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -63,6 +57,9 @@ import net.minecraft.world.level.saveddata.WeatherData;
 import net.minecraft.world.phys.Vec3;
 
 import java.io.IOException;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -91,12 +88,6 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final boolean REQUIRE_METAL = Boolean.getBoolean(
             "metallum.validation.requireMetal"
     );
-    private static final boolean REQUIRE_IRIS_PACK = Boolean.getBoolean(
-            "metallum.validation.requireIrisPack"
-    );
-    private static final String EXPECTED_IRIS_PACK = System.getProperty(
-            "metallum.validation.expectedIrisPack", ""
-    ).trim();
     private static final boolean NATIVE_DIRECT_FRAME_GENERATION = Boolean.getBoolean(
             "metallum.metalfx.nativeDirectFrameGeneration"
     );
@@ -116,10 +107,7 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final List<Double> baselineCpuFrameMillis = new ArrayList<>();
     private static long baselinePreviousFrameNanos;
     private static long baselineTimelineStartNanos;
-    private static long baselineSampleStartNanos;
     private static long baselineCpuFrameStartNanos;
-    private static boolean baselineSampleStarted;
-    private static MetalTerrainIcbBridge.NativeStats baselineTerrainIcbNativeStats;
     private static final int CONTROLLED_ENTITY_ID = -2_147_000_001;
     private static final UUID CONTROLLED_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf01");
@@ -129,11 +117,6 @@ public final class MetalValidationClient implements ClientModInitializer {
     // yield wall-clock time instead of only render-loop iterations.
     private static final int WARMUP_FRAMES = 40;
     private static final long WARMUP_FRAME_SLEEP_MILLIS = 50L;
-    // Sky-facing validation scenes must not inherit whatever time happened to
-    // be persisted in the source world.  The original sealed-room captures
-    // were insensitive to daylight, but the later LOD/translucency scenes open
-    // that room and otherwise turn a night save into a black "missing world".
-    private static final long VALIDATION_DAY_TIME = 6_000L;
     // Static-camera hold on the cutout grass scene: only the Halton jitter
     // varies between these frames, so any output delta is temporal
     // instability. 24 consecutive frames cover the full 18-phase cycle.
@@ -188,10 +171,7 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final int TRANSLUCENT_FLICKER_END_FRAME = 303;
     private static final int TRANSLUCENT_SERIES_END_FRAME = 308;
     private static final float HAND_TRANSLUCENT_SCENE_PITCH = 14.0F;
-    private static final boolean TEMPORAL_VALIDATION = "TEMPORAL".equalsIgnoreCase(
-            System.getProperty("metallum.metalfx.mode", "TEMPORAL")
-    );
-    private static final int EXPECTED_GPU_CAPTURES = TEMPORAL_VALIDATION ? 17 : 0;
+    private static final int EXPECTED_GPU_CAPTURES = 17;
     // Attachment readbacks deliberately block GPU progress. When frame
     // generation is under test, follow them with a clean steady-state tail so
     // the same Quick Play run can measure sustained source/present pacing and
@@ -292,6 +272,10 @@ public final class MetalValidationClient implements ClientModInitializer {
             throw new IllegalStateException("Could not create Minecraft validation output directory", exception);
         }
         Metallum.LOGGER.info("Automated Minecraft MetalFX validation enabled: {}", outputDirectory);
+        RenderContractRuntime.start(
+                outputDirectory,
+                System.getProperty("metallum.renderContract.runId", "minecraft-current")
+        );
         try {
             // ReplayMod's FlawlessFrames protocol, implemented by Sodium:
             // while active, every frame builds all pending chunk sections
@@ -478,9 +462,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                 baselineCpuFrameMillis.clear();
                 baselinePreviousFrameNanos = 0L;
                 baselineTimelineStartNanos = 0L;
-                baselineSampleStartNanos = 0L;
                 baselineCpuFrameStartNanos = 0L;
-                baselineSampleStarted = false;
             }
         }
 
@@ -566,13 +548,6 @@ public final class MetalValidationClient implements ClientModInitializer {
                 previous.y,
                 previous.z
         );
-        if (RenderContractRuntime.enabled() && MetalFxManager.isValidationCaptureFrame(frame)) {
-            // The render-contract lane must carry real image evidence even when
-            // MetalFX is deliberately OFF for fair native-render comparison.
-            // Request after the scripted mutation/pose has landed so a held
-            // terrain frame cannot capture the preceding scene under this id.
-            RenderContractRuntime.requestFinalDrawableCapture(frame);
-        }
         requestFlickerFrameIfDue(
                 frame, "cutout_grass_hold",
                 FLICKER_START_FRAME, FLICKER_END_FRAME, SKY_SCENE_FRAME - 1);
@@ -593,11 +568,11 @@ public final class MetalValidationClient implements ClientModInitializer {
         frame++;
         if (frame >= OBJECT_SERIES_END_FRAME
                 && MetalFxManager.validationCapturesPending() == 0
-                && (!TEMPORAL_VALIDATION || (!MetalFxManager.flickerSeriesPending()
+                && !MetalFxManager.flickerSeriesPending()
                 && MetalFxManager.flickerMetricCompleted("cutout_grass_hold")
                 && MetalFxManager.flickerMetricCompleted("cutout_sky_hold")
                 && MetalFxManager.flickerMetricCompleted("lod_horizon_hold")
-                && MetalFxManager.flickerMetricCompleted("hand_translucent_motion_series")))) {
+                && MetalFxManager.flickerMetricCompleted("hand_translucent_motion_series")) {
             int completed = MetalFxManager.validationCapturesCompleted();
             int failures = MetalFxManager.validationCaptureFailures();
             if (completed != EXPECTED_GPU_CAPTURES || failures != 0) {
@@ -646,7 +621,6 @@ public final class MetalValidationClient implements ClientModInitializer {
         }
         if (timelineAnchored && !PERFORMANCE_ONLY && frame > 0) {
             RenderContractRuntime.endFrame(frame - 1L);
-            BackendFrameComparisonClient.captureValidationTimelineFrame(renderer, frame - 1);
         }
     }
 
@@ -661,42 +635,6 @@ public final class MetalValidationClient implements ClientModInitializer {
                     "Automated Minecraft validation requires the Metal backend, but observed "
                             + observedBackend + ". The run is rejected before any contract result is accepted."
             );
-        }
-        if (renderContractApplicable()) {
-            RenderContractRuntime.start(
-                    outputDirectory,
-                    System.getProperty("metallum.renderContract.runId", "minecraft-current")
-            );
-        } else if (renderContractRequested()) {
-            Metallum.LOGGER.info(
-                    "Render-contract recorder is not applicable to the {} differential backend; "
-                            + "exact validation-timeline framebuffer capture remains enabled",
-                    observedBackend
-            );
-        }
-        if (REQUIRE_IRIS_PACK) {
-            boolean shadersEnabled = Iris.getIrisConfig().areShadersEnabled();
-            boolean packPresent = Iris.getCurrentPack().isPresent();
-            String packName = packPresent ? Iris.getCurrentPackName() : "";
-            Object pipeline = Iris.getPipelineManager().getPipelineNullable();
-            boolean semanticPipeline = "Metal".equalsIgnoreCase(observedBackend)
-                    ? pipeline instanceof com.metallum.client.metal.render.MetalWorldRenderingPipeline
-                    : pipeline != null
-                    && !(pipeline instanceof net.irisshaders.iris.pipeline.VanillaRenderingPipeline);
-            boolean expectedPackSelected = EXPECTED_IRIS_PACK.isEmpty()
-                    || EXPECTED_IRIS_PACK.equals(packName);
-            if (!shadersEnabled || !packPresent || !semanticPipeline || !expectedPackSelected) {
-                throw new IllegalStateException(
-                        "Automated Minecraft Iris validation rejected a shaders-off or substituted pipeline:"
-                                + " enabled=" + shadersEnabled
-                                + ", packPresent=" + packPresent
-                                + ", pack=" + (packName.isEmpty() ? "<none>" : packName)
-                                + ", expectedPack="
-                                + (EXPECTED_IRIS_PACK.isEmpty() ? "<any>" : EXPECTED_IRIS_PACK)
-                                + ", pipeline="
-                                + (pipeline == null ? "<none>" : pipeline.getClass().getName())
-                );
-            }
         }
     }
 
@@ -717,41 +655,26 @@ public final class MetalValidationClient implements ClientModInitializer {
                 frame++;
                 return;
             }
-            if (!baselineSampleStarted) {
-                beginNativePerformanceSample(now);
-                frame++;
-                return;
+            if (baselinePreviousFrameNanos != 0L) {
+                baselineFrameIntervalsMillis.add((now - baselinePreviousFrameNanos) / 1_000_000.0);
             }
+            baselinePreviousFrameNanos = now;
         } else {
-            if (!baselineSampleStarted) {
-                if (frame < BASELINE_SETTLE_FRAMES) {
-                    baselinePreviousFrameNanos = now;
-                    frame++;
-                    return;
-                }
-                beginNativePerformanceSample(now);
-                frame++;
-                return;
+            if (baselinePreviousFrameNanos != 0L && frame > BASELINE_SETTLE_FRAMES) {
+                baselineFrameIntervalsMillis.add((now - baselinePreviousFrameNanos) / 1_000_000.0);
             }
+            baselinePreviousFrameNanos = now;
         }
-
-        if (baselinePreviousFrameNanos != 0L) {
-            baselineFrameIntervalsMillis.add((now - baselinePreviousFrameNanos) / 1_000_000.0);
-        }
-        baselinePreviousFrameNanos = now;
         frame++;
         if (durationProtocol) {
-            long sampleElapsedMillis = (now - baselineSampleStartNanos) / 1_000_000L;
-            if (sampleElapsedMillis < BASELINE_SAMPLE_MILLIS) {
+            long elapsedMillis = (now - baselineTimelineStartNanos) / 1_000_000L;
+            if (elapsedMillis < BASELINE_WARMUP_MILLIS + BASELINE_SAMPLE_MILLIS) {
                 return;
             }
-        } else if (baselineFrameIntervalsMillis.size() < BASELINE_MEASURED_FRAMES) {
+        } else if (frame < BASELINE_SETTLE_FRAMES + BASELINE_MEASURED_FRAMES + 1) {
             return;
         }
 
-        // Freeze all hot-path counters before report-time native timing and
-        // diagnostic queries add their own FFM calls.
-        HotPathSample hotPathSample = captureHotPathSample();
         List<Double> gpuMilliseconds = MetalGpuTimingRecorder.snapshot().stream()
                 .map(MetalGpuTimingRecorder.Sample::milliseconds)
                 .filter(value -> value > 0.0 && Double.isFinite(value))
@@ -763,14 +686,9 @@ public final class MetalValidationClient implements ClientModInitializer {
         );
         double frameP50 = percentile(baselineFrameIntervalsMillis, 0.50);
         double frameP95 = percentile(baselineFrameIntervalsMillis, 0.95);
-        double frameP99 = percentile(baselineFrameIntervalsMillis, 0.99);
-        double frameP999 = percentile(baselineFrameIntervalsMillis, 0.999);
         double frameMax = baselineFrameIntervalsMillis.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
-        double frameAverage = baselineFrameIntervalsMillis.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
         double gpuP50 = percentile(steadyGpuMilliseconds, 0.50);
         double gpuP95 = percentile(steadyGpuMilliseconds, 0.95);
-        double gpuP99 = percentile(steadyGpuMilliseconds, 0.99);
-        double gpuP999 = percentile(steadyGpuMilliseconds, 0.999);
         double gpuMax = steadyGpuMilliseconds.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
         MetalFxManager.NativeOffDiagnostics offDiagnostics = MetalFxManager.nativeOffDiagnostics();
         MetalFxManager.NativeOffReadbackDiagnostics readbackDiagnostics =
@@ -802,18 +720,8 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.addProperty("measuredGpuCommandBuffers", steadyGpuMilliseconds.size());
             report.addProperty("frameIntervalP50Milliseconds", frameP50);
             report.addProperty("frameIntervalP95Milliseconds", frameP95);
-            report.addProperty("frameIntervalP99Milliseconds", frameP99);
-            report.addProperty("frameIntervalP999Milliseconds", frameP999);
             report.addProperty("frameIntervalMaxMilliseconds", frameMax);
-            report.addProperty("frameIntervalAverageMilliseconds", frameAverage);
             report.addProperty("sourceFpsFromP50", frameP50 > 0.0 ? 1_000.0 / frameP50 : 0.0);
-            report.addProperty("averageFps", frameAverage > 0.0 ? 1_000.0 / frameAverage : 0.0);
-            report.addProperty("medianFps", frameP50 > 0.0 ? 1_000.0 / frameP50 : 0.0);
-            report.addProperty("onePercentLowFps", frameP99 > 0.0 ? 1_000.0 / frameP99 : 0.0);
-            report.addProperty("pointOnePercentLowFps", frameP999 > 0.0 ? 1_000.0 / frameP999 : 0.0);
-            report.addProperty("framesOver33_3Milliseconds", countAbove(baselineFrameIntervalsMillis, 33.3));
-            report.addProperty("framesOver50Milliseconds", countAbove(baselineFrameIntervalsMillis, 50.0));
-            report.addProperty("framesOver100Milliseconds", countAbove(baselineFrameIntervalsMillis, 100.0));
             double stutterThreshold = frameP50 > 0.0 ? frameP50 * 2.0 : 0.0;
             long stutterCount = baselineFrameIntervalsMillis.stream()
                     .filter(value -> stutterThreshold > 0.0 && value > stutterThreshold)
@@ -822,8 +730,6 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.addProperty("frameTimeStutterThresholdMilliseconds", stutterThreshold);
             report.addProperty("gpuP50Milliseconds", gpuP50);
             report.addProperty("gpuP95Milliseconds", gpuP95);
-            report.addProperty("gpuP99Milliseconds", gpuP99);
-            report.addProperty("gpuP999Milliseconds", gpuP999);
             report.addProperty("gpuMaxMilliseconds", gpuMax);
             report.add("cpuRenderEncodeFrameMilliseconds", summarizeScalarDurations(baselineCpuFrameMillis));
             report.addProperty(
@@ -856,15 +762,6 @@ public final class MetalValidationClient implements ClientModInitializer {
             metal4MetalFx.addProperty("temporalScalerEncodes", metal4MetalFxStats[3]);
             metal4MetalFx.addProperty("frameGenerationInputSubmissions", metal4MetalFxStats[4]);
             report.add("metal4MetalFx", metal4MetalFx);
-            long[] metal4BackendStats = MetalNativeBridge.metallum_metal4_backend_closure_stats();
-            JsonObject metal4Backend = new JsonObject();
-            metal4Backend.addProperty("engaged", metal4BackendStats[0] != 0L);
-            metal4Backend.addProperty("renderEncodes", metal4BackendStats[1]);
-            metal4Backend.addProperty("computeEncodes", metal4BackendStats[2]);
-            metal4Backend.addProperty("blitEncodes", metal4BackendStats[3]);
-            metal4Backend.addProperty("legacyEncoderViolations", metal4BackendStats[4]);
-            metal4Backend.addProperty("noLegacyEncoderViolations", metal4BackendStats[5] != 0L);
-            report.add("metal4BackendClosure", metal4Backend);
             MetalGpuTimingRecorder.RenderEncoderLookupStats encoderLookupStats =
                     MetalGpuTimingRecorder.renderEncoderLookupStats();
             JsonObject encoderLookup = new JsonObject();
@@ -879,7 +776,12 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.add("gpuNativeEncoders", summarizeGpuEncoders(gpuEncoderSamples));
             addNativeEncoderCounts(report, gpuEncoderSamples, keep);
             addPerformanceCounters(report, IrisMetalPerformanceCounters.snapshot());
-            addHotPathCounters(report, baselineFrameIntervalsMillis.size(), hotPathSample);
+            report.add(
+                    "presentationPacing",
+                    PresentationPacingEvidenceAdapter.toJson(
+                            TerrainSchedulingController.runtime().lastSnapshot().presentationPacing()
+                    )
+            );
             JsonObject unavailable = new JsonObject();
             unavailable.addProperty(
                     "attachmentStoreLoadBytes",
@@ -896,6 +798,10 @@ public final class MetalValidationClient implements ClientModInitializer {
             unavailable.addProperty(
                     "nativeComputeEncoderCountPerFrame",
                     "unavailable — the current timing ABI exports render and blit kinds only"
+            );
+            unavailable.addProperty(
+                    "javaToNativeFfmCallCount",
+                    "unavailable — the current FFM bridge does not expose per-frame downcall counters"
             );
             unavailable.addProperty(
                     "descriptorBindingMutationCount",
@@ -946,41 +852,6 @@ public final class MetalValidationClient implements ClientModInitializer {
         minecraft.stop();
     }
 
-    private static void beginNativePerformanceSample(final long now) {
-        baselineSampleStarted = true;
-        baselineSampleStartNanos = now;
-        baselinePreviousFrameNanos = now;
-        baselineFrameIntervalsMillis.clear();
-        baselineCpuFrameMillis.clear();
-        MetalGpuTimingRecorder.reset();
-        IrisMetalPerformanceCounters.reset();
-        IrisMetalRenderFusionRuntime.reset();
-        IrisMetalComputeGroupingRuntime.reset();
-        IrisMetalDepthAllocationRuntime.reset();
-        IrisMetalArgumentBindingRuntime.resetStats();
-        MetalPipelineCompilationTelemetry.reset();
-        MetalNativeBridge.metallum_pipeline_compile_telemetry_reset();
-        // Native ICB lifetime counters are process-monotonic because completion
-        // handlers may still be retiring warmup work. Snapshot them before the
-        // measurement-window FFM reset and report a delta at the end; resetting
-        // the native counters here would race those completion callbacks.
-        baselineTerrainIcbNativeStats = MetalTerrainIcbBridge.nativeStats();
-        MetalFfmCallTelemetry.reset();
-        MetalHotPathTelemetry.reset();
-        MetalRenderStatePacketTelemetry.reset();
-        MetalCommandPacketTelemetry.reset();
-        MetalTransientArenaTelemetry.reset();
-        MetalDynamicBackingPoolTelemetry.reset();
-        Metallum.LOGGER.info(
-                "Native renderer performance sample started after warmup: duration={}ms",
-                BASELINE_SAMPLE_MILLIS
-        );
-    }
-
-    private static long countAbove(final List<Double> values, final double thresholdMillis) {
-        return values.stream().filter(value -> value > thresholdMillis).count();
-    }
-
     private static double percentile(final List<Double> values, final double quantile) {
         if (values.isEmpty()) {
             return 0.0;
@@ -1012,146 +883,11 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static JsonObject summarizeScalarDurations(final List<Double> values) {
         JsonObject result = new JsonObject();
         result.addProperty("samples", values.size());
-        result.addProperty("averageMilliseconds", values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0));
         result.addProperty("p50Milliseconds", percentile(values, 0.50));
         result.addProperty("p95Milliseconds", percentile(values, 0.95));
-        result.addProperty("p99Milliseconds", percentile(values, 0.99));
-        result.addProperty("p999Milliseconds", percentile(values, 0.999));
         result.addProperty("minimumMilliseconds", values.stream().mapToDouble(Double::doubleValue).min().orElse(0.0));
         result.addProperty("maximumMilliseconds", values.stream().mapToDouble(Double::doubleValue).max().orElse(0.0));
         return result;
-    }
-
-    private static void addHotPathCounters(
-            final JsonObject report,
-            final int measuredFrames,
-            final HotPathSample sample
-    ) {
-        MetalFfmCallTelemetry.Snapshot ffm = sample.ffm();
-        MetalHotPathTelemetry.Snapshot hot = sample.hot();
-        MetalRenderStatePacketTelemetry.Snapshot state = sample.state();
-        MetalCommandPacketTelemetry.Snapshot command = sample.command();
-        MetalTransientArenaTelemetry.Snapshot arena = sample.arena();
-        MetalDynamicBackingPoolTelemetry.Snapshot backing = sample.backing();
-        MetalPipelineCompilationTelemetry.Snapshot javaPipelines = sample.javaPipelines();
-        MetalNativeBridge.NativePipelineCompilationSnapshot nativePipelines = sample.nativePipelines();
-        MetalTerrainIcbBridge.NativeStats terrainIcbNative = sample.terrainIcbNative();
-        JsonObject counters = new JsonObject();
-        counters.addProperty("enabled", Boolean.getBoolean("metallum.hotpath.telemetry"));
-        counters.addProperty("measuredFrames", measuredFrames);
-        counters.addProperty("javaToNativeFfmCalls", ffm.downcalls());
-        counters.addProperty("javaToNativeFfmCallsPerFrame", ffm.perFrame(measuredFrames));
-        counters.addProperty("renderNativeSetterOperations", hot.renderForwardedCalls());
-        counters.addProperty("computeNativeSetterOperations", hot.computeForwardedCalls());
-        counters.addProperty(
-                "nativeSetterOperations",
-                hot.renderForwardedCalls() + hot.computeForwardedCalls()
-        );
-        counters.addProperty("renderSettersSuppressed", hot.renderSuppressedCalls());
-        counters.addProperty("computeSettersSuppressed", hot.computeSuppressedCalls());
-        counters.addProperty("renderOffsetOnlyOperations", hot.renderOffsetOnlyCalls());
-        counters.addProperty("multiDrawBatches", hot.nativeMultiDrawBatches());
-        counters.addProperty("multiDrawCommands", hot.nativeMultiDrawCommands());
-        counters.addProperty("statePacketCalls", state.packetCalls());
-        counters.addProperty("statePacketEntries", state.packetEntries());
-        counters.addProperty("statePacketReplays", state.legacyReplays());
-        counters.addProperty("statePacketReplayEntries", state.legacyReplayEntries());
-        counters.addProperty("statePacketCapacityFlushes", state.capacityFlushes());
-        counters.addProperty("renderCommandPacketCalls", command.renderPacketCalls());
-        counters.addProperty("renderCommandPacketOperations", command.renderOperations());
-        counters.addProperty("renderCommandPacketReplays", command.renderLegacyReplays());
-        counters.addProperty("computeCommandPacketCalls", command.computePacketCalls());
-        counters.addProperty("computeCommandPacketOperations", command.computeOperations());
-        counters.addProperty("computeCommandPacketReplays", command.computeLegacyReplays());
-        counters.addProperty("terrainIcbAttempts", command.terrainIcbAttempts());
-        counters.addProperty("terrainIcbAccepted", command.terrainIcbAccepted());
-        counters.addProperty("terrainIcbDraws", command.terrainIcbDraws());
-        counters.addProperty("terrainIcbFallbacks", command.terrainIcbFallbacks());
-        counters.addProperty("terrainIcbBudgetSkips", command.terrainIcbBudgetSkips());
-        counters.addProperty("terrainIcbBudgetSkipDraws", command.terrainIcbBudgetSkipDraws());
-        counters.addProperty("terrainIcbNativeStatsAvailable", terrainIcbNative.available());
-        counters.addProperty("terrainIcbAllocations", terrainIcbNative.allocations());
-        counters.addProperty(
-                "terrainIcbCompletionReleases",
-                terrainIcbNative.completionReleases()
-        );
-        counters.addProperty("terrainIcbBudgetFallbacks", terrainIcbNative.budgetFallbacks());
-        counters.addProperty(
-                "terrainIcbZeroAllocationFallbacks",
-                terrainIcbNative.zeroAllocationFallbacks()
-        );
-        counters.addProperty("transientWrapperHits", arena.wrapperHits());
-        counters.addProperty("transientWrapperMisses", arena.wrapperMisses());
-        counters.addProperty("multiUploadCalls", arena.multiUploadCalls());
-        counters.addProperty("multiUploadItems", arena.multiUploadItems());
-        counters.addProperty(
-                "argumentTableUpdates",
-                IrisMetalArgumentBindingRuntime.stats().updates()
-        );
-        counters.addProperty("backingPoolTrims", backing.trims());
-        counters.addProperty("backingPoolReleasedBytes", backing.releasedBytes());
-        counters.addProperty("backingPoolReleasedHandles", backing.releasedHandles());
-        counters.addProperty("backingPoolPeakBytes", backing.peakObservedBytes());
-        counters.addProperty("runtimePipelineCompiles", nativePipelines.attempts());
-        counters.addProperty("runtimeRenderPipelineCompiles", nativePipelines.renderAttempts());
-        counters.addProperty("runtimeComputePipelineCompiles", nativePipelines.computeAttempts());
-        counters.addProperty("runtimePipelineCompileFailures", nativePipelines.failures());
-        counters.addProperty("runtimeJavaPipelineCompileRequests", javaPipelines.attempts());
-        JsonArray latePipelineIdentities = new JsonArray();
-        nativePipelines.identities().forEach(latePipelineIdentities::add);
-        counters.add("runtimePipelineCompileIdentities", latePipelineIdentities);
-        JsonArray lateJavaPipelineIdentities = new JsonArray();
-        javaPipelines.identities().forEach(lateJavaPipelineIdentities::add);
-        counters.add("runtimeJavaPipelineCompileIdentities", lateJavaPipelineIdentities);
-        report.add("hotPathCounters", counters);
-    }
-
-    private static HotPathSample captureHotPathSample() {
-        MetalTerrainIcbBridge.NativeStats currentTerrainIcb = MetalTerrainIcbBridge.nativeStats();
-        return new HotPathSample(
-                MetalFfmCallTelemetry.snapshot(),
-                MetalHotPathTelemetry.snapshot(),
-                MetalRenderStatePacketTelemetry.snapshot(),
-                MetalCommandPacketTelemetry.snapshot(),
-                MetalTransientArenaTelemetry.snapshot(),
-                MetalDynamicBackingPoolTelemetry.snapshot(),
-                MetalPipelineCompilationTelemetry.snapshot(),
-                MetalNativeBridge.metallum_pipeline_compile_telemetry_finish(),
-                terrainIcbDelta(baselineTerrainIcbNativeStats, currentTerrainIcb)
-        );
-    }
-
-    private static MetalTerrainIcbBridge.NativeStats terrainIcbDelta(
-            final MetalTerrainIcbBridge.NativeStats start,
-            final MetalTerrainIcbBridge.NativeStats end
-    ) {
-        if (start == null || !start.available() || !end.available()
-                || end.allocations() < start.allocations()
-                || end.completionReleases() < start.completionReleases()
-                || end.budgetFallbacks() < start.budgetFallbacks()
-                || end.zeroAllocationFallbacks() < start.zeroAllocationFallbacks()) {
-            return new MetalTerrainIcbBridge.NativeStats(false, 0L, 0L, 0L, 0L);
-        }
-        return new MetalTerrainIcbBridge.NativeStats(
-                true,
-                end.allocations() - start.allocations(),
-                end.completionReleases() - start.completionReleases(),
-                end.budgetFallbacks() - start.budgetFallbacks(),
-                end.zeroAllocationFallbacks() - start.zeroAllocationFallbacks()
-        );
-    }
-
-    private record HotPathSample(
-            MetalFfmCallTelemetry.Snapshot ffm,
-            MetalHotPathTelemetry.Snapshot hot,
-            MetalRenderStatePacketTelemetry.Snapshot state,
-            MetalCommandPacketTelemetry.Snapshot command,
-            MetalTransientArenaTelemetry.Snapshot arena,
-            MetalDynamicBackingPoolTelemetry.Snapshot backing,
-            MetalPipelineCompilationTelemetry.Snapshot javaPipelines,
-            MetalNativeBridge.NativePipelineCompilationSnapshot nativePipelines,
-            MetalTerrainIcbBridge.NativeStats terrainIcbNative
-    ) {
     }
 
     private static void addNativeEncoderCounts(
@@ -1215,13 +951,40 @@ public final class MetalValidationClient implements ClientModInitializer {
             JsonObject argumentReport = new JsonObject();
             argumentReport.addProperty(
                     "enabled",
-                    IrisMetalArgumentBindingRuntime.enabled()
+                    Boolean.getBoolean("metallum.iris.experimental.argumentTables")
+                            || Boolean.getBoolean("metallum.iris.argumentTables")
             );
             argumentReport.addProperty("layouts", argumentStats.layouts());
             argumentReport.addProperty("bindingMutations", argumentStats.updates());
             argumentReport.addProperty("encodedSnapshots", argumentStats.encodedSnapshots());
-            argumentReport.addProperty("failures", argumentStats.failures());
             report.add("argumentBindingRuntime", argumentReport);
+            // P3 token-native binding path: activation evidence from the
+            // encoder funnel the tokens feed (state-shadow suppression +
+            // state-packet batching). Counters are zero unless
+            // -Dmetallum.hotpath.telemetry=true, which paired profiles set
+            // symmetrically on both arms.
+            MetalHotPathTelemetry.Snapshot hotPath = MetalHotPathTelemetry.snapshot();
+            JsonObject bindingPathReport = new JsonObject();
+            bindingPathReport.addProperty(
+                    "tokenizedBindings",
+                    !"false".equalsIgnoreCase(System.getProperty("metallum.opt.bindingTokens", "true"))
+            );
+            bindingPathReport.addProperty(
+                    "compiledBindingPlan",
+                    !"false".equalsIgnoreCase(System.getProperty("metallum.opt.compiledBindingPlan", "true"))
+            );
+            bindingPathReport.addProperty("renderForwardedCalls", hotPath.renderForwardedCalls());
+            bindingPathReport.addProperty("renderSuppressedCalls", hotPath.renderSuppressedCalls());
+            bindingPathReport.addProperty("renderOffsetOnlyCalls", hotPath.renderOffsetOnlyCalls());
+            bindingPathReport.addProperty("computeForwardedCalls", hotPath.computeForwardedCalls());
+            bindingPathReport.addProperty("computeSuppressedCalls", hotPath.computeSuppressedCalls());
+            MetalRenderStatePacketTelemetry.Snapshot packet = MetalRenderStatePacketTelemetry.snapshot();
+            bindingPathReport.addProperty("packetCalls", packet.packetCalls());
+            bindingPathReport.addProperty("packetEntries", packet.packetEntries());
+            bindingPathReport.addProperty("legacyReplays", packet.legacyReplays());
+            bindingPathReport.addProperty("singleEntryBypasses", packet.singleEntryBypasses());
+            bindingPathReport.addProperty("capacityFlushes", packet.capacityFlushes());
+            report.add("bindingPathRuntime", bindingPathReport);
     }
 
     private static JsonArray summarizeCpuPasses(final List<MetalGpuTimingRecorder.CpuPassSample> samples) {
@@ -1363,9 +1126,6 @@ public final class MetalValidationClient implements ClientModInitializer {
             final int endFrame,
             final int retryDeadline
     ) {
-        if (!TEMPORAL_VALIDATION) {
-            return;
-        }
         if (timelineFrame < startFrame || timelineFrame > retryDeadline) {
             return;
         }
@@ -1424,12 +1184,18 @@ public final class MetalValidationClient implements ClientModInitializer {
         minecraft.player.setYBodyRot(cameraYaw);
         Vec3 baseEntity = cameraOrigin.add(horizontalLook(cameraYaw).scale(4.0));
         Vec3 entityPosition = baseEntity.add(right.scale(pose.entityOffset()));
-        // Never use Entity#setInvisible as a validation-scene culling tool.
-        // Minecraft deliberately renders an invisible entity translucently to
-        // players who may see invisible entities, which produced the ghosted
-        // ArmorStand in visual evidence. Isolation scenes park it outside the
-        // view below; the LOD scene keeps the ordinary opaque entity visible.
-        controlledEntity.setInvisible(false);
+        // Keep the CUTOUT material gate free of a separate alpha-blended
+        // producer. The controlled ArmorStand's 0.4-alpha entity shadow is
+        // rendered into item_entity; with the production 0.9 transparency
+        // scale it correctly writes about 0.36 reactive on top of foliage.
+        // That is valid translucent content, but it must not be counted as a
+        // standing CUTOUT-interior policy violation. Object scenarios restore
+        // the stand before parking it behind the camera below.
+        controlledEntity.setInvisible(
+                pose.scenario().startsWith("cutout_")
+                        || pose.scenario().startsWith("lod_horizon")
+                        || pose.scenario().startsWith("hand_translucent_motion")
+        );
         if (pose.scenario().startsWith("hand_translucent_motion")) {
             // Keep the full sequence visibly on screen. Vanilla's attack
             // transform at progress 1.0 legitimately moves the held item out
@@ -1461,15 +1227,6 @@ public final class MetalValidationClient implements ClientModInitializer {
         controlledEntity.yBodyRotO = 0.0F;
         controlledEntity.yHeadRot = 0.0F;
         controlledEntity.yHeadRotO = 0.0F;
-        if (pose.scenario().startsWith("cutout_")
-                || pose.scenario().startsWith("hand_translucent_motion")) {
-            // Keep material-only captures free of entity/shadow pixels without
-            // changing the entity's observable render mode to translucent.
-            Vec3 parked = cameraOrigin.add(horizontalLook(cameraYaw).scale(-4.0));
-            controlledEntity.setOldPosAndRot(parked, 0.0F, 0.0F);
-            controlledEntity.setPos(parked);
-            return entityPosition;
-        }
         if (isObjectMotionScenario(pose.scenario())) {
             // The ArmorStand would otherwise contribute a second silhouette of
             // zero-motion object pixels, and the spread metric is taken over
@@ -1797,17 +1554,6 @@ public final class MetalValidationClient implements ClientModInitializer {
         }
         server.execute(() -> {
             ServerLevel level = server.overworld();
-            // Minecraft 26.2 moved daylight from Level's legacy game-time
-            // counter to registry-backed world clocks. Pin every clock through
-            // that API and force a client sync; setting only level data leaves
-            // the visible sky at the save's old time.
-            var clockRegistry = server.registryAccess().lookupOrThrow(Registries.WORLD_CLOCK);
-            clockRegistry.stream().forEach(clock -> {
-                var holder = clockRegistry.wrapAsHolder(clock);
-                server.clockManager().setTotalTicks(holder, VALIDATION_DAY_TIME);
-                server.clockManager().setPaused(holder, true);
-            });
-            server.forceGameTimeSynchronization();
             GameRules rules = level.getGameRules();
             rules.set(GameRules.ADVANCE_TIME, false, server);
             rules.set(GameRules.ADVANCE_WEATHER, false, server);
@@ -1827,9 +1573,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             }
             strays.forEach(Entity::discard);
             Metallum.LOGGER.info(
-                    "Validation world determinism applied: dayTime={}, cycles frozen,"
-                            + " {} stray entities discarded",
-                    VALIDATION_DAY_TIME,
+                    "Validation world determinism applied: cycles frozen, {} stray entities discarded",
                     strays.size()
             );
         });
@@ -2183,10 +1927,9 @@ public final class MetalValidationClient implements ClientModInitializer {
     }
 
     /**
-     * Builds a static, oblique cobblestone runway that recedes to the real
-     * fixed-world horizon. Repeated 16x16 atlas detail across dozens of blocks
-     * exercises mip selection while daylight and the opaque ArmorStand keep
-     * the visual evidence readable instead of resembling missing geometry.
+     * Builds a static, oblique cobblestone plane that recedes to a cleared sky
+     * boundary. Repeated 16x16 atlas detail across dozens of blocks exercises
+     * mip selection; the far edge provides a deterministic ground/sky seam.
      */
     private static void installDistantLodScene(final Minecraft minecraft) {
         removeCutoutScene(minecraft);
@@ -2209,7 +1952,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                         cleared++;
                     }
                 }
-                if (forward <= 48) {
+                if (forward <= 40) {
                     Vec3 floorSample = cameraOrigin
                             .add(look.scale(forward))
                             .add(right.scale(lateral))
@@ -2566,36 +2309,12 @@ public final class MetalValidationClient implements ClientModInitializer {
             final int completed,
             final int failures
     ) {
-        long[] metal4BackendStats = MetalNativeBridge.metallum_metal4_backend_closure_stats();
-        boolean metal4ClosureFailed = metal4BackendStats[0] != 0L
-                && (metal4BackendStats[1] <= 0L
-                || metal4BackendStats[3] <= 0L
-                || metal4BackendStats[4] != 0L
-                || metal4BackendStats[5] == 0L);
-        String finalStatus = (renderContractApplicable()
-                && !RenderContractRuntime.completionGatePassed())
-                || metal4ClosureFailed
+        String finalStatus = RenderContractRuntime.enabled()
+                && !RenderContractRuntime.completionGatePassed()
                 ? "failed"
                 : "passed";
         if ("failed".equals(finalStatus)) {
-            if (metal4ClosureFailed) {
-                Metallum.LOGGER.error(
-                        "Metal 4 backend closure failed: engaged={} render={} compute={} blit={}"
-                                + " legacyViolations={} noLegacy={}",
-                        metal4BackendStats[0] != 0L,
-                        metal4BackendStats[1],
-                        metal4BackendStats[2],
-                        metal4BackendStats[3],
-                        metal4BackendStats[4],
-                        metal4BackendStats[5] != 0L
-                );
-            }
-            if (renderContractApplicable() && !RenderContractRuntime.completionGatePassed()) {
-                Metallum.LOGGER.error(
-                        "Render-contract completion gate failed: {}",
-                        RenderContractRuntime.snapshot()
-                );
-            }
+            Metallum.LOGGER.error("Render-contract completion gate failed: {}", RenderContractRuntime.snapshot());
         }
         finishRunState(finalStatus, completed, failures + ("failed".equals(finalStatus) ? 1 : 0));
         Metallum.LOGGER.info(
@@ -2635,25 +2354,15 @@ public final class MetalValidationClient implements ClientModInitializer {
             final int completed,
             final int failures
     ) {
-        boolean contractRequested = renderContractRequested();
-        boolean contractApplicable = renderContractApplicable();
         RenderContractRuntime.Snapshot contractBeforeClose = RenderContractRuntime.snapshot();
         // Render-contract validation is intentionally independent from the
         // MetalFX-owned failure taxonomy. Keeping the two reports separate
         // lets this validation source set run against the stable MetalFX
         // manager without importing its dirty task state.
         List<String> validationFailureScenarios = new ArrayList<>();
-        if (contractApplicable && contractBeforeClose.enabled() && !contractBeforeClose.ready()
+        if (contractBeforeClose.enabled() && !contractBeforeClose.ready()
                 && !validationFailureScenarios.contains("render-contract")) {
             validationFailureScenarios.add("render-contract");
-        }
-        long[] metal4BackendStats = MetalNativeBridge.metallum_metal4_backend_closure_stats();
-        if (metal4BackendStats[0] != 0L
-                && (metal4BackendStats[1] <= 0L
-                || metal4BackendStats[3] <= 0L
-                || metal4BackendStats[4] != 0L
-                || metal4BackendStats[5] == 0L)) {
-            validationFailureScenarios.add("metal4-backend-closure");
         }
         if (!"passed".equals(status) && validationFailureScenarios.isEmpty()) {
             validationFailureScenarios.add("validation-run");
@@ -2666,19 +2375,31 @@ public final class MetalValidationClient implements ClientModInitializer {
         }
         RenderContractRuntime.close();
         RenderContractRuntime.Snapshot contract = RenderContractRuntime.snapshot();
-        String contractStatus = contractRequested && !contractApplicable
-                ? "not-applicable"
-                : contract.status();
-        boolean contractReady = !contractApplicable || ("passed".equals(status)
-                && contractBeforeClose.ready() && contract.manifestFinalized());
         long[] metal4MainStats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
         long[] metal4MetalFxStats = MetalNativeBridge.metallum_metal4_metalfx_stats();
-        boolean irisShadersEnabled = Iris.getIrisConfig().areShadersEnabled();
-        boolean irisPackPresent = Iris.getCurrentPack().isPresent();
-        String irisPackName = irisPackPresent ? Iris.getCurrentPackName() : null;
-        Object irisPipeline = Iris.getPipelineManager().getPipelineNullable();
-        String irisPipelineClass = irisPipeline == null ? null : irisPipeline.getClass().getName();
-        int irisMetalGeneration = IrisMetalPipelineOverrides.activeGenerationForDiagnostics();
+        long[] terrainIcbStats = readTerrainIcbStats();
+        long[] terrainGpuIcbStats = readTerrainGpuIcbStats();
+        TerrainGpuVisibilityProbe.Telemetry terrainGpuVisibility = TerrainGpuVisibilityProbe.telemetry();
+        String terrainGpuVisibilityJson = terrainGpuVisibilityJson(terrainGpuVisibility);
+        Metallum.LOGGER.info(
+                "Terrain ICB validation counters: encoded={} executed={} gpuEncoded={} gpuDispatches={}",
+                terrainIcbStats[0],
+                terrainIcbStats[1],
+                terrainGpuIcbStats[0],
+                terrainGpuIcbStats[1]
+        );
+        Metallum.LOGGER.info(
+                "Terrain GPU visibility probe validation counters: enabled={} candidates={} attempts={} "
+                        + "dispatches={} produced={} fallbacks={} falseNegativeOracle={} lastCompletedEpoch={}",
+                terrainGpuVisibility.enabled(),
+                terrainGpuVisibility.candidateCount(),
+                terrainGpuVisibility.attemptedCount(),
+                terrainGpuVisibility.dispatchCount(),
+                terrainGpuVisibility.producedCount(),
+                terrainGpuVisibility.fallbackCount(),
+                terrainGpuVisibility.falseNegativeOracleCount(),
+                terrainGpuVisibility.lastCompletedEpoch()
+        );
         try {
             ValidationStorageBudget storage = ValidationStorageBudget.shared(outputDirectory);
             writeStateArtifact(
@@ -2719,14 +2440,11 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "metal4SpatialScalerEncodes": %d,
                       "metal4TemporalScalerEncodes": %d,
                       "metal4FrameGenerationInputSubmissions": %d,
-                      "metal4BackendClosureEngaged": %s,
-                      "metal4GenericRenderEncodes": %d,
-                      "metal4GenericComputeEncodes": %d,
-                      "metal4GenericBlitEncodes": %d,
-                      "metal4LegacyEncoderViolations": %d,
-                      "metal4NoLegacyEncoderViolations": %s,
-                      "renderContractRequested": %s,
-                      "renderContractApplicable": %s,
+                      "terrainIcbEncoded": %d,
+                      "terrainIcbExecuted": %d,
+                      "terrainIcbGpuEncoded": %d,
+                      "terrainIcbGpuDispatches": %d,
+                      %s
                       "renderContractEnabled": %s,
                       "renderContractStatus": "%s",
                       "renderContractReady": %s,
@@ -2742,12 +2460,6 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "renderContractMaxArtifactBytes": %d,
                       "renderContractStorageBudgetExceeded": %s,
                       "validationFailureScenarios": %s,
-                      "irisPackRequired": %s,
-                      "irisShadersEnabled": %s,
-                      "irisPackPresent": %s,
-                      "irisPackName": %s,
-                      "irisPipelineClass": %s,
-                      "irisMetalGeneration": %d,
                       "renderBackend": "%s",
                       "status": "%s"
                     }
@@ -2771,17 +2483,15 @@ public final class MetalValidationClient implements ClientModInitializer {
                             metal4MetalFxStats[2],
                             metal4MetalFxStats[3],
                             metal4MetalFxStats[4],
-                            metal4BackendStats[0] != 0L,
-                            metal4BackendStats[1],
-                            metal4BackendStats[2],
-                            metal4BackendStats[3],
-                            metal4BackendStats[4],
-                            metal4BackendStats[5] != 0L,
-                            contractRequested,
-                            contractApplicable,
+                            terrainIcbStats[0],
+                            terrainIcbStats[1],
+                            terrainGpuIcbStats[0],
+                            terrainGpuIcbStats[1],
+                            terrainGpuVisibilityJson,
                             contract.enabled(),
-                            contractStatus,
-                            contractReady,
+                            contract.status(),
+                            "passed".equals(status)
+                                    && contractBeforeClose.ready() && contract.manifestFinalized(),
                             contract.requestedCaptures(),
                             contract.completedCaptures(),
                             contract.failedCaptures(),
@@ -2794,18 +2504,84 @@ public final class MetalValidationClient implements ClientModInitializer {
                             contract.maxArtifactBytes(),
                             contract.storageBudgetExceeded(),
                             failureReasonsJson,
-                            REQUIRE_IRIS_PACK,
-                            irisShadersEnabled,
-                            irisPackPresent,
-                            jsonStringOrNull(irisPackName),
-                            jsonStringOrNull(irisPipelineClass),
-                            irisMetalGeneration,
                             jsonEscape(observedBackend),
                             jsonEscape(status)
                     )
             );
         } catch (IOException exception) {
             throw new IllegalStateException("Could not write Minecraft validation state", exception);
+        }
+    }
+
+    static String terrainGpuVisibilityJson(
+            final TerrainGpuVisibilityProbe.Telemetry telemetry
+    ) {
+        return String.format(
+                Locale.ROOT,
+                "                      \"terrainGpuVisibilityProbeEnabled\": %s,\n"
+                        + "                      \"terrainGpuVisibilityCandidateCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityVisibleCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityUncertainCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityAttempts\": %d,\n"
+                        + "                      \"terrainGpuVisibilityDispatches\": %d,\n"
+                        + "                      \"terrainGpuVisibilityProduced\": %d,\n"
+                        + "                      \"terrainGpuVisibilityFallbacks\": %d,\n"
+                        + "                      \"terrainGpuVisibilityFalseNegativeOracleCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactedCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionDispatches\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionProduced\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionFallbacks\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionMismatchOracleCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityLastCompletedEpoch\": %d,",
+                telemetry.enabled(),
+                telemetry.candidateCount(),
+                telemetry.visibleCount(),
+                telemetry.uncertainCount(),
+                telemetry.attemptedCount(),
+                telemetry.dispatchCount(),
+                telemetry.producedCount(),
+                telemetry.fallbackCount(),
+                telemetry.falseNegativeOracleCount(),
+                telemetry.compactedCount(),
+                telemetry.compactionDispatchCount(),
+                telemetry.compactionProducedCount(),
+                telemetry.compactionFallbackCount(),
+                telemetry.compactionMismatchOracleCount(),
+                telemetry.lastCompletedEpoch()
+        );
+    }
+
+    private static long[] readTerrainIcbStats() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment encoded = arena.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment executed = arena.allocate(ValueLayout.JAVA_LONG);
+            int available = MetalNativeBridge.terrainIcbStats(encoded, executed);
+            if (available == 0) {
+                return new long[]{0L, 0L};
+            }
+            return new long[]{
+                    encoded.get(ValueLayout.JAVA_LONG, 0),
+                    executed.get(ValueLayout.JAVA_LONG, 0)
+            };
+        } catch (RuntimeException ignored) {
+            return new long[]{0L, 0L};
+        }
+    }
+
+    private static long[] readTerrainGpuIcbStats() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment encoded = arena.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment dispatches = arena.allocate(ValueLayout.JAVA_LONG);
+            int available = MetalNativeBridge.terrainGpuIcbStats(encoded, dispatches);
+            if (available == 0) {
+                return new long[]{0L, 0L};
+            }
+            return new long[]{
+                    encoded.get(ValueLayout.JAVA_LONG, 0),
+                    dispatches.get(ValueLayout.JAVA_LONG, 0)
+            };
+        } catch (RuntimeException ignored) {
+            return new long[]{0L, 0L};
         }
     }
 
@@ -2841,14 +2617,6 @@ public final class MetalValidationClient implements ClientModInitializer {
         }
     }
 
-    private static boolean renderContractRequested() {
-        return Boolean.parseBoolean(System.getProperty("metallum.renderContract.enabled", "false"));
-    }
-
-    private static boolean renderContractApplicable() {
-        return renderContractRequested() && "Metal".equalsIgnoreCase(observedBackend);
-    }
-
     private static String jsonEscape(final String value) {
         if (value == null) {
             return "unknown";
@@ -2857,9 +2625,5 @@ public final class MetalValidationClient implements ClientModInitializer {
                 .replace("\"", "\\\"")
                 .replace("\n", "\\n")
                 .replace("\r", "\\r");
-    }
-
-    private static String jsonStringOrNull(final String value) {
-        return value == null ? "null" : "\"" + jsonEscape(value) + "\"";
     }
 }
