@@ -32,10 +32,10 @@ if old_find not in text:
     raise SystemExit("could not locate find_subsequence helper")
 text = text.replace(old_find, new_find, 1)
 
-# The rollout contains one malformed patch whose original tool result is
-# explicitly `Script failed`; apply_patch therefore made no repository change.
-# Keep that event atomic/no-op so the two subsequent successful retry patches
-# are the only changes replayed. The exact raw signature uniquely identifies it.
+# Preserve the original failed rollout event as a no-op, then repair one
+# character-level construction mistake in our final benchmark-hardening patch:
+# the existing blank line between two shell functions is context and therefore
+# needs the unified-diff single-space prefix.
 normalizer = '''def normalize_rollout_patch(patch):
     signature = 'prefix = key + "="'
     lines = patch.splitlines()
@@ -44,6 +44,12 @@ normalizer = '''def normalize_rollout_patch(patch):
         if len(raw_matches) != 1:
             fail(f"failed rollout patch signature count: {len(raw_matches)}")
         return "*** Begin Patch\\n*** End Patch"
+    if "+pin_staged_shader_pack() {" in lines:
+        marker = lines.index("+pin_staged_shader_pack() {")
+        if marker == 0 or lines[marker - 1] != "":
+            fail("benchmark hardening patch missing expected context blank line")
+        lines[marker - 1] = " "
+        return "\\n".join(lines) + ("\\n" if patch.endswith("\\n") else "")
     return patch
 
 '''
