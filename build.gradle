@@ -2203,6 +2203,237 @@ if (nonIrisCaptureRequested && org.gradle.internal.os.OperatingSystem.current().
 	}
 }
 
+// Fixed-scene BSL A2 diagnostic. This is intentionally a separate profile
+// from the shaders-off non-Iris lanes above: a shader-pack run needs the same
+// exact input identity, but must keep Iris enabled and must retain the pass
+// trace needed to diagnose CUTOUT and terrain residency differences.
+def bslA2CaptureRequested = gradle.startParameter.taskNames.any {
+	it == "bslA2MetalCapture" || it.endsWith(":bslA2MetalCapture")
+}
+tasks.register("bslA2MetalCapture") {
+	group = "verification"
+	description = "Captures an isolated fixed-scene BSL Iris-on-Metal A2 diagnostic."
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		dependsOn "runClient"
+	} else {
+		doLast {
+			logger.lifecycle("bslA2MetalCapture SKIPPED: macOS Metal is required")
+		}
+	}
+}
+
+if (bslA2CaptureRequested && org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+	def requestedGameDir = findProperty("bslA2GameDir")?.toString()
+	def gameDir = requestedGameDir == null ? null : new File(requestedGameDir)
+	def root = file(findProperty("bslA2Root")
+			?: "${buildDir}/agent-runs/bsl-a2-fixed-scene-current")
+	def worldName = (findProperty("bslA2World") ?: "New World").toString()
+	def scenarioId = (findProperty("bslA2Scenario") ?: "bsl-a2-fixed-scene-v1").toString()
+	def frames = (findProperty("bslA2Frames") ?: "82").toString()
+	def fixedClock = (findProperty("bslA2Clock") ?: "108500").toString()
+	def playerName = (findProperty("bslA2PlayerName") ?: "MetalA2").toString()
+	def playerUuid = (findProperty("bslA2PlayerUuid")
+			?: "7a294d59-ecbe-4b47-b864-66c57a3dbf00").toString()
+	def fixedCamera = (findProperty("bslA2Camera")
+			?: "579.4938336701937,90.45083448610046,-177.71662902161114,"
+			+ "-164.09991455078125,29.249996185302734").toString()
+	def shaderPack = (findProperty("bslA2ShaderPack") ?: "bsl-shaders.zip").toString()
+	def stableSceneFrames = (findProperty("bslA2StableSceneFrames") ?: "240").toString()
+	def stableSceneMillis = (findProperty("bslA2StableSceneMillis") ?: "8000").toString()
+
+	def hashFile = { File candidate ->
+		def digest = java.security.MessageDigest.getInstance("SHA-256")
+		candidate.withInputStream { input ->
+			def buffer = new byte[64 * 1024]
+			int read
+			while ((read = input.read(buffer)) >= 0) {
+				if (read > 0) digest.update(buffer, 0, read)
+			}
+		}
+		java.util.HexFormat.of().formatHex(digest.digest())
+	}
+	def hashWorldSnapshot = { File worldDirectory ->
+		def digest = java.security.MessageDigest.getInstance("SHA-256")
+		def files = []
+		worldDirectory.eachFileRecurse(groovy.io.FileType.FILES) { candidate ->
+			def relative = worldDirectory.toPath().relativize(candidate.toPath()).toString()
+				.replace(File.separatorChar, '/' as char)
+			if (relative != "session.lock") files << candidate
+		}
+		files.sort { left, right ->
+			def leftRelative = worldDirectory.toPath().relativize(left.toPath()).toString()
+			def rightRelative = worldDirectory.toPath().relativize(right.toPath()).toString()
+			leftRelative <=> rightRelative
+		}
+		def buffer = new byte[64 * 1024]
+		files.each { candidate ->
+			def relative = worldDirectory.toPath().relativize(candidate.toPath()).toString()
+				.replace(File.separatorChar, '/' as char)
+			digest.update(relative.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+			digest.update((byte) 0)
+			candidate.withInputStream { input ->
+				int read
+				while ((read = input.read(buffer)) >= 0) {
+					if (read > 0) digest.update(buffer, 0, read)
+				}
+			}
+		}
+		java.util.HexFormat.of().formatHex(digest.digest())
+	}
+
+	if (gameDir != null) {
+		// RunGameTask owns the actual Java working directory. Passing --gameDir
+		// alone is insufficient because the runtime identity gate also checks
+		// relative log/cache paths against the parsed Minecraft directory.
+		loom.runs.named("client") {
+			runDir project.relativePath(gameDir)
+		}
+	}
+
+	tasks.named("runClient") {
+		doFirst {
+			if (gameDir == null || !gameDir.isAbsolute()) {
+				throw new GradleException(
+						"-PbslA2GameDir=<absolute isolated game directory> is required."
+				)
+			}
+			if (!gameDir.isDirectory()) {
+				throw new GradleException("BSL A2 game directory does not exist: ${gameDir}")
+			}
+			if (root.exists()) {
+				throw new GradleException(
+						"Refusing to overwrite existing BSL A2 evidence: ${root}"
+				)
+			}
+			def worldDirectory = new File(new File(gameDir, "saves"), worldName)
+			if (!new File(worldDirectory, "level.dat").isFile()) {
+				throw new GradleException(
+						"bslA2GameDir has no '${worldName}' save: ${worldDirectory}"
+				)
+			}
+			def irisConfig = new File(new File(gameDir, "config"), "iris.properties")
+			if (!irisConfig.isFile()) {
+				throw new GradleException("Missing Iris config: ${irisConfig}")
+			}
+			def irisProperties = new Properties()
+			irisConfig.withInputStream { irisProperties.load(it) }
+			if (!"true".equalsIgnoreCase(irisProperties.getProperty("enableShaders", ""))) {
+				throw new GradleException(
+						"${irisConfig} must contain enableShaders=true for the BSL A2 gate."
+				)
+			}
+			if (!shaderPack.equals(irisProperties.getProperty("shaderPack", ""))) {
+				throw new GradleException(
+						"${irisConfig} must select '${shaderPack}', found '${irisProperties.getProperty("shaderPack", "")}'."
+				)
+			}
+			def shaderPackFile = new File(new File(gameDir, "shaderpacks"), shaderPack)
+			if (!shaderPackFile.isFile()) {
+				throw new GradleException("Missing BSL shader pack: ${shaderPackFile}")
+			}
+			if (playerName.isBlank() || playerName.length() > 16) {
+				throw new GradleException("bslA2PlayerName must contain 1 to 16 characters.")
+			}
+			try {
+				java.util.UUID.fromString(playerUuid)
+			} catch (IllegalArgumentException invalidUuid) {
+				throw new GradleException(
+						"bslA2PlayerUuid must be a canonical UUID: ${playerUuid}", invalidUuid
+				)
+			}
+			def snapshotSha256 = hashWorldSnapshot(worldDirectory)
+			def packSha256 = hashFile(shaderPackFile)
+			systemProperty "metallum.backend.compare.world-snapshot-sha256", snapshotSha256
+			root.parentFile.mkdirs()
+			root.mkdirs()
+			new File(root, "inputs.properties").text =
+				"schema=1\n" +
+				"sourceCommit=${renderContractSourceCommit}\n" +
+				"scenarioId=${scenarioId}\n" +
+				"gameDirectory=${gameDir.absolutePath}\n" +
+				"worldName=${worldName}\n" +
+				"worldSnapshotSha256=${snapshotSha256}\n" +
+				"shaderPack=${shaderPack}\n" +
+				"shaderPackSha256=${packSha256}\n" +
+				"playerName=${playerName}\n" +
+				"playerUuid=${playerUuid}\n" +
+				"fixedClockTicks=${fixedClock}\n" +
+				"fixedCamera=${fixedCamera}\n" +
+				"frames=${frames}\n"
+			logger.lifecycle(
+					"BSL A2 fixed-scene input: gameDir=${gameDir}, " +
+							"worldSnapshotSha256=${snapshotSha256}, shaderPackSha256=${packSha256}, " +
+							"player=${playerName}/${playerUuid}"
+			)
+		}
+		systemProperty "metallum.validation.forceMetal", "true"
+		systemProperty "metallum.validation.requireMetal", "true"
+		systemProperty "metallum.validation.sourceCommit", renderContractSourceCommit
+		systemProperty "metallum.backend.compare.enabled", "true"
+		systemProperty "metallum.backend.compare.auto-stop", "true"
+		systemProperty "metallum.backend.compare.output", root.absolutePath
+		systemProperty "metallum.backend.compare.name", "metal-a2"
+		systemProperty "metallum.backend.compare.scenario-id", scenarioId
+		systemProperty "metallum.backend.compare.world-name", worldName
+		systemProperty "metallum.backend.compare.game-directory", gameDir == null ? "" : gameDir.absolutePath
+		systemProperty "metallum.backend.compare.player-name", playerName
+		systemProperty "metallum.backend.compare.player-uuid", playerUuid
+		systemProperty "metallum.backend.compare.frames", frames
+		systemProperty "metallum.backend.compare.fixed-clock-ticks", fixedClock
+		systemProperty "metallum.backend.compare.fixed-camera", fixedCamera
+		systemProperty "metallum.backend.compare.fixed-iris-frame-millis", "16"
+		systemProperty "metallum.backend.compare.fixed-player-on-ground", "true"
+		systemProperty "metallum.backend.compare.freeze-simulation", "true"
+		systemProperty "metallum.backend.compare.freeze-atlas-animation", "true"
+		systemProperty "metallum.backend.compare.fixed-weather", "clear"
+		systemProperty "metallum.backend.compare.stable-scene-frames", stableSceneFrames
+		systemProperty "metallum.backend.compare.stable-scene-millis", stableSceneMillis
+		systemProperty "metallum.backend.compare.iris-reload-frame", "-1"
+	systemProperty "metallum.iris.semantic", "true"
+		systemProperty "metallum.iris.trace", "true"
+		systemProperty "metallum.iris.trace.path", new File(root, "iris-pass-trace.jsonl").absolutePath
+		systemProperty "metallum.metalfx.mode", "OFF"
+		systemProperty "metallum.metalfx.frameGeneration", "false"
+		systemProperty "metallum.metalfx.objectMotionProducer", "false"
+		systemProperty "metallum.metal.hud", "false"
+	// A2 observes correctness on the default-safe path. Deferred stores and
+	// terrain GPU/ICB lanes remain out of scope until the visual matrix closes.
+	systemProperty "metallum.opt.deferredColorStore", "false"
+	systemProperty "metallum.opt.terrainGpuEncode", "false"
+	systemProperty "metallum.opt.terrainIcb", "false"
+	systemProperty "metallum.opt.terrainVisibleGpuIcb", "false"
+	systemProperty "metallum.opt.terrainFusedVisibleIcb", "false"
+	systemProperty "metallum.renderContract.enabled", "true"
+	systemProperty "metallum.renderContract.runId", "bsl-a2-fixed-scene"
+	systemProperty "metallum.renderContract.captureProducers", "false"
+	systemProperty "metallum.renderContract.capturePassFrame", frames
+	systemProperty "metallum.renderContract.capturePass",
+			"iris/gbuffers/terrain,iris/deferred/1,iris/composite/7,iris/final"
+	systemProperty "metallum.renderContract.captureFinalDrawableFrame", frames
+	args "--gameDir", gameDir == null ? "" : gameDir.absolutePath
+	args "--username", playerName, "--uuid", playerUuid
+	args "--quickPlaySingleplayer", worldName, "--width", "854", "--height", "480"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+}
+
+	tasks.named("bslA2MetalCapture") {
+		doLast {
+			def session = new File(new File(root, "metal-a2"), "session.json")
+			if (!session.isFile()) {
+				throw new GradleException("BSL A2 produced no session receipt at ${session}")
+			}
+			def receipt = new groovy.json.JsonSlurper().parse(session)
+			if (receipt.status != "passed" || receipt.failedCaptures != 0) {
+				throw new GradleException(
+						"BSL A2 client did not pass: status=${receipt.status}, failedCaptures=${receipt.failedCaptures}"
+				)
+			}
+			logger.lifecycle("bslA2MetalCapture: PASS; evidence=${root}")
+		}
+	}
+}
+
 // Shaders-off safety gate. The two client lanes are launched deliberately and
 // stored as durable evidence; this task is an offline consumer and never
 // starts Minecraft or deletes a capture directory.

@@ -385,7 +385,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
             return;
         }
         if (this.strict) {
-            requireUniformSources(token, layout);
+            requireUniformSources(token, layout, alphaTestReference);
         }
         Block existing = this.blocksByToken.get(token);
         if (existing != null) {
@@ -405,7 +405,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
                 layout,
                 size,
                 alphaTestReference,
-                buildPlan(token, layout)
+                buildPlan(token, layout, alphaTestReference)
         );
         this.blocks.add(block);
         this.blocksByToken.put(token, block);
@@ -413,7 +413,8 @@ final class IrisMetalUniformValues implements AutoCloseable {
 
     private ProgramPlan buildPlan(
             final Object token,
-            final List<MetalIrisShaderCompiler.UniformMember> layout
+            final List<MetalIrisShaderCompiler.UniformMember> layout,
+            final OptionalDouble alphaTestReference
     ) {
         List<PlanEntry> entries = new ArrayList<>(layout.size());
         for (MetalIrisShaderCompiler.UniformMember member : layout) {
@@ -432,10 +433,12 @@ final class IrisMetalUniformValues implements AutoCloseable {
                     );
                 }
                 phase = cachedPhase(cached);
-            } else if (this.dynamicUniforms != null && this.dynamicUniforms.canMaterialize(member)) {
+            } else if (this.dynamicUniforms != null
+                    && !isFrameOwnedDynamicUniform(alphaTestReference, member)
+                    && this.dynamicUniforms.canMaterialize(member)) {
                 phase = UniformPhase.PROGRAM_DRAW;
             } else {
-                phase = backendPhase(token, member);
+                phase = backendPhase(token, member, alphaTestReference);
             }
             entries.add(new PlanEntry(member, phase, cached));
         }
@@ -453,7 +456,8 @@ final class IrisMetalUniformValues implements AutoCloseable {
 
     private static UniformPhase backendPhase(
             final Object token,
-            final MetalIrisShaderCompiler.UniformMember member
+            final MetalIrisShaderCompiler.UniformMember member,
+            final OptionalDouble alphaTestReference
     ) {
         if ("gbufferPreviousModelView".equals(member.name())
                 || "gbufferPreviousProjection".equals(member.name())
@@ -463,16 +467,25 @@ final class IrisMetalUniformValues implements AutoCloseable {
         if (isLiveFogUniform(member.name())
                 || (isCoreDrawUniform(member.name()) && usesMojangCoreTransforms(token))
                 || ("iris_currentAlphaTest".equals(member.name())
-                && !isFrameOwnedDynamicUniformName(member))) {
+                && !isFrameOwnedDynamicUniform(alphaTestReference, member))) {
             return UniformPhase.DRAW;
         }
         return UniformPhase.FRAME;
     }
 
-    private static boolean isFrameOwnedDynamicUniformName(
+    private static boolean isFrameOwnedDynamicUniform(
+            final OptionalDouble alphaTestReference,
             final MetalIrisShaderCompiler.UniformMember member
     ) {
-        return "iris_currentAlphaTest".equals(member.name()) && "float".equals(member.type());
+        // IrisInternalUniforms registers iris_currentAlphaTest dynamically
+        // for every program, but a translated shader-pack program also carries
+        // the AlphaTest selected by ShaderCreator. Sodium terrain does not
+        // execute Iris's GL Program.use() state transition, so that fixed
+        // program reference must stay in the frame block instead of being
+        // replaced by CapturedRenderingState at draw time.
+        return alphaTestReference.isPresent()
+                && "iris_currentAlphaTest".equals(member.name())
+                && "float".equals(member.type());
     }
 
     /**
@@ -1061,8 +1074,7 @@ final class IrisMetalUniformValues implements AutoCloseable {
             final Block block,
             final MetalIrisShaderCompiler.UniformMember member
     ) {
-        return "iris_currentAlphaTest".equals(member.name())
-                && block.alphaTestReference.isPresent();
+        return isFrameOwnedDynamicUniform(block.alphaTestReference, member);
     }
 
     /**
@@ -1074,7 +1086,8 @@ final class IrisMetalUniformValues implements AutoCloseable {
      */
     private void requireUniformSources(
             final Object token,
-            final List<MetalIrisShaderCompiler.UniformMember> layout
+            final List<MetalIrisShaderCompiler.UniformMember> layout,
+            final OptionalDouble alphaTestReference
     ) {
         for (MetalIrisShaderCompiler.UniformMember member : layout) {
             String name = member.name();
@@ -1084,10 +1097,12 @@ final class IrisMetalUniformValues implements AutoCloseable {
             if (this.customUniforms != null && this.customUniforms.hasVariable(name)) {
                 continue;
             }
-            if (this.dynamicUniforms != null && this.dynamicUniforms.canMaterialize(member)) {
+            if (this.dynamicUniforms != null
+                    && !isFrameOwnedDynamicUniform(alphaTestReference, member)
+                    && this.dynamicUniforms.canMaterialize(member)) {
                 continue;
             }
-            if (isBackendOwnedUniform(token, member)) {
+            if (isBackendOwnedUniform(token, member, alphaTestReference)) {
                 continue;
             }
             throw new IllegalStateException(
@@ -1099,8 +1114,12 @@ final class IrisMetalUniformValues implements AutoCloseable {
 
     private static boolean isBackendOwnedUniform(
             final Object token,
-            final MetalIrisShaderCompiler.UniformMember member
+            final MetalIrisShaderCompiler.UniformMember member,
+            final OptionalDouble alphaTestReference
     ) {
+        if (isFrameOwnedDynamicUniform(alphaTestReference, member)) {
+            return true;
+        }
         if ("iris_LightmapTextureMatrix".equals(member.name())) {
             return member.arrayCount() == 0 && "mat4".equals(member.type());
         }
