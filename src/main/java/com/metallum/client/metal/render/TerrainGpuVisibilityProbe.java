@@ -54,7 +54,7 @@ public final class TerrainGpuVisibilityProbe {
     }
 
     public static boolean enabled() {
-        return ENABLED;
+        return ENABLED && (ORACLE_ENABLED || TerrainIcbRuntimeAdmission.gpuIcbAdmitted());
     }
 
     public static void beginTerrainDrawScope() {
@@ -124,7 +124,7 @@ public final class TerrainGpuVisibilityProbe {
         // therefore must not create an intermediate bitset/probe encoder. Keep
         // the explicit diagnostic oracle untouched so it can still falsify the
         // fused decision on hardware when both switches are enabled.
-        if (!ENABLED || (TerrainCandidateSnapshot.FUSED_VISIBLE_GPU_ICB_ENABLED && !ORACLE_ENABLED)) {
+        if (!enabled() || (TerrainCandidateSnapshot.FUSED_VISIBLE_GPU_ICB_ENABLED && !ORACLE_ENABLED)) {
             return false;
         }
         synchronized (LOCK) {
