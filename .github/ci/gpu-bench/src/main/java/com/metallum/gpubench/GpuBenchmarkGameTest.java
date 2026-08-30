@@ -75,6 +75,10 @@ public final class GpuBenchmarkGameTest implements FabricClientGameTest {
             double elapsedSeconds = sampleElapsedNanos / 1_000_000_000.0;
             double completedGpuFramesPerSecond = millis.size() / elapsedSeconds;
 
+            // Preserve every completed command-buffer timing only after the measured
+            // window has ended. This makes the hosted runner useful to an automated
+            // bottleneck finder without adding file I/O or JSON work to the render path.
+            writeFrameTrace(evidenceDir.resolve("gpu-frame-trace.jsonl"), raw);
             writeEvidence(
                     evidenceDir.resolve("gpu-benchmark.json"),
                     backend,
@@ -115,6 +119,37 @@ public final class GpuBenchmarkGameTest implements FabricClientGameTest {
         return sorted.get(low) * (1.0 - weight) + sorted.get(high) * weight;
     }
 
+    private static void writeFrameTrace(Path path, List<MetalGpuTimingRecorder.Sample> samples) {
+        StringBuilder jsonl = new StringBuilder(Math.max(1, samples.size()) * 192);
+        int ordinal = 0;
+        for (MetalGpuTimingRecorder.Sample sample : samples) {
+            double milliseconds = sample.milliseconds();
+            if (!(milliseconds > 0.0)
+                    || !Double.isFinite(milliseconds)
+                    || !Double.isFinite(sample.gpuStartTime())
+                    || !Double.isFinite(sample.gpuEndTime())) {
+                continue;
+            }
+            jsonl.append(String.format(
+                    Locale.ROOT,
+                    "{\"schema\":1,\"authority\":\"hosted-metal3-proxy-screening\","
+                            + "\"ordinal\":%d,\"submitIndex\":%d,"
+                            + "\"gpuStartTimeSeconds\":%.9f,\"gpuEndTimeSeconds\":%.9f,"
+                            + "\"gpuMillis\":%.6f}%n",
+                    ordinal++,
+                    sample.submitIndex(),
+                    sample.gpuStartTime(),
+                    sample.gpuEndTime(),
+                    milliseconds
+            ));
+        }
+        try {
+            Files.writeString(path, jsonl, StandardCharsets.UTF_8);
+        } catch (IOException exception) {
+            throw new IllegalStateException("Could not write GPU frame trace " + path, exception);
+        }
+    }
+
     private static void writeEvidence(
             Path path,
             String backend,
@@ -145,6 +180,8 @@ public final class GpuBenchmarkGameTest implements FabricClientGameTest {
                         "  \"sampleTicks\": %d,\n" +
                         "  \"sampleElapsedNanos\": %d,\n" +
                         "  \"gpuSampleCount\": %d,\n" +
+                        "  \"gpuFrameTraceFile\": \"gpu-frame-trace.jsonl\",\n" +
+                        "  \"gpuFrameTraceSchema\": 1,\n" +
                         "  \"gpuMeanMillis\": %.6f,\n" +
                         "  \"gpuP50Millis\": %.6f,\n" +
                         "  \"gpuP90Millis\": %.6f,\n" +
