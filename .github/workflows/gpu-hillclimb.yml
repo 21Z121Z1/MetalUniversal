@@ -6,7 +6,7 @@ on:
       sample_ticks:
         description: Measured Client GameTest ticks per trial
         required: false
-        default: '60'
+        default: '240'
   push:
     branches:
       - experiment/apple-terrain-hillclimb
@@ -87,14 +87,14 @@ jobs:
       - name: Hill-climb shared Metal renderer knobs by GPU p95
         shell: bash
         env:
-          SAMPLE_TICKS: ${{ github.event.inputs.sample_ticks || '60' }}
+          SAMPLE_TICKS: ${{ github.event.inputs.sample_ticks || '240' }}
         run: |
           set -euo pipefail
           python3 scripts/gpu-hillclimb.py \
             --repo-root "$PWD" \
             --bench-project .github/ci/gpu-bench \
             --metallum-jar "${{ steps.metallum.outputs.jar }}" \
-            --warmup-ticks 20 \
+            --warmup-ticks 120 \
             --sample-ticks "$SAMPLE_TICKS" \
             --min-improvement 0.01 \
             --throughput-regression-limit 0.05 \
