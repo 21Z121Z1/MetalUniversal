@@ -27,6 +27,18 @@ text = text.replace(
     return -1
 '''
 )
+# Codex's custom apply_patch accepts unprefixed lines inside an added heredoc
+# body. Keep that compatibility narrow: only an otherwise unsupported line in
+# an already parsed hunk is treated as an insertion. Context/deletion matching
+# remains unchanged and still has to identify the existing source text.
+text = text.replace(
+'''        else:
+            raise SystemExit(f"unsupported patch line for {path}: {patch_line!r}")
+''',
+'''        else:
+            new.append(patch_line)
+'''
+)
 text = text.replace(
 '''        lines[index:index + len(old)] = new
         cursor = index + len(new)
@@ -44,6 +56,8 @@ text = text.replace(
                 old_offset += 1
             elif prefix == "+":
                 replacement.append(value)
+            else:
+                replacement.append(patch_line)
         lines[index:index + len(old)] = replacement
         cursor = index + len(replacement)
 '''
