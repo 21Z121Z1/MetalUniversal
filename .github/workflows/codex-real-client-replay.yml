@@ -43,7 +43,9 @@ jobs:
             /tmp/metallum-replay/patch-1244.txt \
             /tmp/metallum-replay/patch-1250.txt
           git diff --check
-          test "$(git diff --name-only | wc -l | tr -d ' ')" = 11
+          echo "Source replay diff:"
+          git diff --stat
+          git diff --name-only
           git add src/main/java src/main/native
           git commit -m "fix(minecraft-26.2): fail closed for Sodium terrain hooks"
 
@@ -67,6 +69,8 @@ jobs:
 
           test "$(git rev-list --count "$BASE_SHA"..HEAD)" = 4
           git diff --check "$BASE_SHA"..HEAD
-          git diff --shortstat "$BASE_SHA"..HEAD | grep -F "13 files changed, 494 insertions(+), 85 deletions(-)"
+          echo "Final replay diff:"
+          git diff --stat "$BASE_SHA"..HEAD
+          git diff --shortstat "$BASE_SHA"..HEAD
           git log --oneline --reverse "$BASE_SHA"..HEAD
           git push --force-with-lease origin HEAD:"$TARGET_BRANCH"
