@@ -64,6 +64,13 @@ public final class MTLRenderPipelineDescriptor implements AutoCloseable {
         );
     }
 
+    public void setSupportIndirectCommandBuffers(final boolean enabled) {
+        MetalNativeBridge.metallum_MTLRenderPipelineDescriptor_setSupportIndirectCommandBuffers(
+                this.handle,
+                enabled
+        );
+    }
+
     public void setBlendState(
             final MTLBlendFactor sourceColorBlendFactor,
             final MTLBlendFactor destinationColorBlendFactor,

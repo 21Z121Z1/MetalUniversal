@@ -81,20 +81,37 @@ final class MetalDevice implements GpuDeviceBackend {
                     "true"
             ));
     private boolean stableTerrainSamplerLogged;
+    /** Optional symbols are capability gates, never required bridge ABI. */
+    private static final boolean EXPLICIT_GPU_VISIBILITY_PROBE_METAL4 =
+            TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED
+                    && MetalNativeBridge.terrainVisibilityProbeAvailable();
+    private static final boolean VISIBLE_GPU_ICB_METAL4 =
+            TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED
+                    && MetalNativeBridge.terrainVisibilityProbeAvailable()
+                    && MetalNativeBridge.terrainVisibilityProbeStatusAvailable()
+                    && MetalNativeBridge.terrainVisibleGpuIcbAvailable();
+    private static final boolean GPU_VISIBILITY_PROBE_METAL4 =
+            EXPLICIT_GPU_VISIBILITY_PROBE_METAL4 || VISIBLE_GPU_ICB_METAL4;
+    private static final boolean VISIBLE_GPU_ICB_OPTIMIZE =
+            Boolean.getBoolean("metallum.opt.terrainVisibleIcbOptimize");
     /**
      * Master kill switch for every Metal 4 path (migration spec M1, appendix C).
+     * The terrain ICB opt-in is self-contained: it requests the Metal 4
+     * capability check, while unsupported hardware still leaves this false.
      * Metal 4 code is a parallel branch: the Metal 3 path stays byte-for-byte
-     * intact and is what runs whenever this is false, whenever the device or SDK
-     * lacks Metal 4, or whenever a sub-switch is off.
+     * intact whenever this is false or the device/SDK lacks Metal 4.
      */
     private static final boolean METAL4_REQUESTED =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "false"));
-    /**
-     * Routes render pipeline creation through MTL4Compiler (spec M2). Depends on
-     * the master switch; on its own it does nothing.
-     */
+                    Boolean.parseBoolean(System.getProperty("metallum.opt.metal4", "false"))
+                    || TerrainSceneSnapshot.ICB_ENABLED
+                    || TerrainSceneSnapshot.GPU_ICB_ENABLED
+                    || GPU_VISIBILITY_PROBE_METAL4;
+    /** Routes render pipeline creation through MTL4Compiler (spec M2). */
     private static final boolean METAL4_COMPILER =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"));
+                    Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Compiler", "false"))
+                    || TerrainSceneSnapshot.ICB_ENABLED
+                    || TerrainSceneSnapshot.GPU_ICB_ENABLED
+                    || GPU_VISIBILITY_PROBE_METAL4;
     /**
      * Runs the frame-generation present thread on a Metal 4 queue (spec M4).
      * Depends on the compiler switch, because the MTL4 frame interpolator is built
@@ -104,8 +121,25 @@ final class MetalDevice implements GpuDeviceBackend {
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4Present", "false"));
     private static final boolean METAL4_MAIN_QUEUE_PILOT =
             Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainQueuePilot", "false"));
+    /** The terrain ICB requires the real MTL4 encoder/residency path. */
     private static final boolean METAL4_MAIN_RENDERER =
-            Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainRenderer", "false"));
+                    Boolean.parseBoolean(System.getProperty("metallum.opt.metal4MainRenderer", "false"))
+                    || TerrainSceneSnapshot.ICB_ENABLED
+                    || TerrainSceneSnapshot.GPU_ICB_ENABLED
+                    || GPU_VISIBILITY_PROBE_METAL4;
+    /**
+     * The visibility probe is a diagnostic opt-in and must degrade to the
+     * existing Metal 3 renderer if its optional Metal 4 queue cannot start.
+     * Existing explicit/ICB Metal 4 lanes retain their established fail-fast
+     * initialization contract.
+     */
+    private static final boolean VISIBILITY_PROBE_FALLBACK_ALLOWED =
+            (TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED
+                    || TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED)
+                    && !TerrainSceneSnapshot.ICB_ENABLED
+                    && !TerrainSceneSnapshot.GPU_ICB_ENABLED
+                    && !Boolean.parseBoolean(System.getProperty(
+                    "metallum.opt.metal4MainRenderer", "false"));
     /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
     private final boolean metal4Available;
     private final boolean metal4MainRenderer;
@@ -186,23 +220,37 @@ final class MetalDevice implements GpuDeviceBackend {
         this.metal4Available = METAL4_REQUESTED
                 && MetalNativeBridge.metallum_metal4_supported(metalDeviceHandle) != 0;
         boolean metal4MainRenderer = this.metal4Available && METAL4_MAIN_RENDERER;
-        this.metal4MainRenderer = metal4MainRenderer;
         // Before metallum_init_pipelines and before any texture or buffer exists:
         // resources created earlier would never enter the set.
         if ((RESIDENCY_SET || metal4MainRenderer)
                 && !this.commandQueue.enableResidencySet(metalDeviceHandle)) {
-            if (metal4MainRenderer) {
+            if (metal4MainRenderer && VISIBILITY_PROBE_FALLBACK_ALLOWED) {
+                Metallum.LOGGER.warn(
+                        "[metallum] terrain visibility probe Metal 4 residency unavailable; falling back"
+                );
+                metal4MainRenderer = false;
+            } else if (metal4MainRenderer) {
                 throw new IllegalStateException("Metal 4 main renderer requires explicit residency");
             }
-            Metallum.LOGGER.warn("[metallum] residency set unavailable; residency stays automatic");
+            if (!metal4MainRenderer) {
+                Metallum.LOGGER.warn("[metallum] residency set unavailable; residency stays automatic");
+            }
         }
         if (metal4MainRenderer
                 && MetalNativeBridge.metallum_metal4_main_renderer_enable(
                         metalDeviceHandle,
                         metalLayer
                 ) == 0) {
-            throw new IllegalStateException("Metal 4 main renderer initialization failed");
+            if (VISIBILITY_PROBE_FALLBACK_ALLOWED) {
+                Metallum.LOGGER.warn(
+                        "[metallum] terrain visibility probe Metal 4 main renderer unavailable; falling back"
+                );
+                metal4MainRenderer = false;
+            } else {
+                throw new IllegalStateException("Metal 4 main renderer initialization failed");
+            }
         }
+        this.metal4MainRenderer = metal4MainRenderer;
         // metallum_init_pipelines eagerly builds the swapchain/present PSO and
         // associated presentation samplers. An offscreen MetalDevice has no
         // CAMetalLayer by contract, so do not initialize presentation-only state
@@ -226,6 +274,25 @@ final class MetalDevice implements GpuDeviceBackend {
         // compiler even when its independent pilot switch is absent.
         boolean metal4Compiler = this.metal4Available && (METAL4_COMPILER || metal4MainRenderer);
         MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4Compiler ? 1 : 0);
+        // Terrain ICB requires both the Metal 4 capability and an active
+        // MTL4Compiler PSO path. Snapshot capture remains enabled when the
+        // opt-in is requested, but native execution will fail closed otherwise.
+        MetalNativeBridge.metallum_set_terrain_icb_enabled(
+                (TerrainSceneSnapshot.ICB_ENABLED
+                        || TerrainSceneSnapshot.GPU_ICB_ENABLED
+                        || VISIBLE_GPU_ICB_METAL4)
+                        && metal4Compiler ? 1 : 0
+        );
+        MetalNativeBridge.metallum_set_terrain_gpu_encode_enabled(
+                (TerrainSceneSnapshot.GPU_ICB_ENABLED || VISIBLE_GPU_ICB_METAL4)
+                        && metal4Compiler ? 1 : 0
+        );
+        MetalNativeBridge.metallum_set_terrain_visible_icb_optimize_enabled(
+                VISIBLE_GPU_ICB_METAL4 && VISIBLE_GPU_ICB_OPTIMIZE && metal4Compiler
+        );
+        MetalNativeBridge.metallum_set_terrain_visibility_compaction_enabled(
+                TerrainCandidateSnapshot.GPU_VISIBILITY_PROBE_ENABLED
+        );
         // Depends on the compiler switch: the MTL4 frame interpolator factory
         // takes an MTL4Compiler, so the present pilot cannot run without it.
         boolean metal4Present = metal4Compiler && (METAL4_PRESENT || metal4MainRenderer);
@@ -432,7 +499,7 @@ final class MetalDevice implements GpuDeviceBackend {
         if (size <= 0L) {
             throw new IllegalArgumentException("Metal buffer size must be > 0 (got " + size + ")");
         }
-        return new MetalGpuBuffer(this, usage, size);
+        return new MetalGpuBuffer(this, label, usage, size);
     }
 
     @Override
@@ -634,6 +701,14 @@ final class MetalDevice implements GpuDeviceBackend {
 
     MemorySegment metalDeviceHandle() {
         return this.metalDeviceHandle;
+    }
+
+    boolean metal4Available() {
+        return this.metal4Available;
+    }
+
+    boolean metal4MainRenderer() {
+        return this.metal4MainRenderer;
     }
 
     MetalCommandEncoder commandEncoder() {

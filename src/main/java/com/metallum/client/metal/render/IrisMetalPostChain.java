@@ -800,6 +800,7 @@ final class IrisMetalPostChain implements AutoCloseable {
     ) {
         ensureOpen();
         validateTargets(targets);
+        IrisMetalOptimizationBootstrap.onPostChainTargetsReady(this, targets);
         Objects.requireNonNull(finalColorFormat, "finalColorFormat");
         if (this.prepared && this.preparedFinalFormat != finalColorFormat) {
             throw new IllegalStateException(
@@ -866,6 +867,7 @@ final class IrisMetalPostChain implements AutoCloseable {
     ) {
         ensurePrepared();
         validateTargets(targets);
+        IrisMetalOptimizationBootstrap.onPostChainTargetsReady(this, targets);
         Objects.requireNonNull(resources, "resources");
         IrisMetalPingPongTargets colors = targets.colorTargets();
         colors.restore(this.stageInputs.get(stage));
@@ -912,6 +914,7 @@ final class IrisMetalPostChain implements AutoCloseable {
     ) {
         ensurePrepared();
         validateTargets(targets);
+        IrisMetalOptimizationBootstrap.onPostChainTargetsReady(this, targets);
         Objects.requireNonNull(mainColor, "mainColor");
         Objects.requireNonNull(resources, "resources");
         if (mainColor.texture().getFormat() != this.preparedFinalFormat) {
@@ -1104,6 +1107,10 @@ final class IrisMetalPostChain implements AutoCloseable {
 
     boolean hasFinalShader() {
         return this.finalPass != null;
+    }
+
+    int generation() {
+        return this.generation;
     }
 
     /** Whether any executable post/final program declares the named sampler. */
@@ -1922,6 +1929,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                 1,
                 1
         );
+        this.colorSpaceSwap.registerAllocationIdentity();
         this.colorSpaceSwapView = new MetalGpuTextureView(this.colorSpaceSwap, 0, 1);
         if (this.colorSpaceSampler == null) {
             this.colorSpaceSampler = new MetalGpuSampler(

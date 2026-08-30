@@ -18,6 +18,8 @@ public final class TerrainSchedulingTelemetry implements AutoCloseable {
             "pressure_level",
             "build_budget_nanos",
             "upload_budget_nanos",
+            "budget_target_frame_nanos",
+            "budget_target_source",
             "backlog_jobs",
             "busy_threads",
             "total_threads",
@@ -31,7 +33,22 @@ public final class TerrainSchedulingTelemetry implements AutoCloseable {
             "submitted_tasks",
             "upload_results",
             "forward_boost",
-            "turn_detected"
+            "turn_detected",
+            "target_present_interval_nanos",
+            "target_present_interval_measured",
+            "target_present_interval_derived",
+            "target_present_interval_provenance",
+            "target_present_interval_fallback_reason",
+            "measured_present_interval_nanos",
+            "measured_present_interval_available",
+            "measured_present_interval_provenance",
+            "measured_present_interval_fallback_reason",
+            "drawable_wait_nanos",
+            "drawable_wait_available",
+            "frames_in_flight",
+            "frames_in_flight_available",
+            "pacing_provenance",
+            "pacing_fallback_reason"
     );
 
     private final Path path;

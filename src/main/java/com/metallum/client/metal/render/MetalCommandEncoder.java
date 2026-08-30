@@ -247,13 +247,23 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     void endEncoder() {
-        endEncoder(false, null);
+        endEncoder(false, null, false);
     }
 
-    private void endEncoder(
+    /**
+     * Ends the current render encoder but keeps its native Metal 4 bridge alive
+     * long enough for a compute encoder to be opened on the same command buffer.
+     */
+    MemorySegment endEncoderForTerrainGpuAuthoring() {
+        return endEncoder(false, null, true);
+    }
+
+    private MemorySegment endEncoder(
             final boolean incomingClearsSameDepth,
-            final boolean[] colorStoresKilled
+            final boolean[] colorStoresKilled,
+            final boolean retainNativeHandle
     ) {
+        MemorySegment retainedHandle = MemorySegment.NULL;
         if (currentEncoder != null) {
             if (currentEncoder instanceof MTLRenderCommandEncoder renderEncoder) {
                 if (renderEncoderDeferredStore) {
@@ -316,7 +326,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 // Render fence in both modes; see computeCommandEncoder().
                 computeEncoder.updateFence(fence);
             }
-            currentEncoder.endEncoding();
+            if (retainNativeHandle) {
+                retainedHandle = currentEncoder.endEncodingRetainingHandle();
+            } else {
+                currentEncoder.endEncoding();
+            }
             currentEncoder = null;
         }
         renderColorAttachments = new MemorySegment[0];
@@ -329,6 +343,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         renderDepthTexture = null;
         renderEncoderDeferredStore = false;
         renderEncoderDeferredColorStores = null;
+        return retainedHandle;
     }
 
     /**
@@ -552,7 +567,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                         && deferredColorStorePixelBytes[index] > 0;
             }
         }
-        endEncoder(incomingClearsSameDepth, colorStoreKilled);
+        endEncoder(incomingClearsSameDepth, colorStoreKilled, false);
         MTLRenderCommandEncoder encoder;
         if (renderPassDescriptorV3Active()) {
             // P2.3 admitted policy: live color slots defer their store
@@ -929,10 +944,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     static ResourceIdentity contractResource(final MetalGpuTexture texture, final int mipLevel) {
-        return RenderContractRuntime.identifyResource(
+        MetalAllocationIdentity allocation = texture.allocationIdentity();
+        return RenderContractRuntime.identifyAllocation(
                 texture.getLabel(),
-                texture.validationResourceId(),
-                texture.validationDebugId(),
+                allocation.allocationId(),
+                allocation.generation(),
+                texture.allocationDebugId(),
                 texture.getFormat().toString(),
                 texture.getWidth(mipLevel),
                 texture.getHeight(mipLevel),
@@ -940,6 +957,23 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 mipLevel,
                 1,
                 texture.usage()
+        );
+    }
+
+    static ResourceIdentity contractResource(final MetalGpuBuffer buffer) {
+        MetalAllocationIdentity allocation = buffer.allocationIdentity();
+        return RenderContractRuntime.identifyAllocation(
+                buffer.logicalLabel(),
+                allocation.allocationId(),
+                allocation.generation(),
+                buffer.allocationDebugId(),
+                "BUFFER",
+                Math.toIntExact(Math.min(buffer.allocationSize(), Integer.MAX_VALUE)),
+                1,
+                1,
+                0,
+                1,
+                buffer.usage()
         );
     }
 
@@ -975,8 +1009,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         CapturePoint point = new CapturePoint(frameId, "metallum/present", CapturePointKind.FINAL_DRAWABLE, -1);
         RenderContractRuntime.ReadbackRequest request = new RenderContractRuntime.ReadbackRequest(
                 "final-drawable",
-                source.validationResourceId(),
-                source.validationDebugId(),
+                source.allocationId(),
+                source.allocationDebugId(),
                 source.getFormat().toString(),
                 source.pixelSize(),
                 width,
@@ -1001,8 +1035,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 RenderContractRuntime.recordReadback(
                         point,
                         "final-drawable",
-                        source.validationResourceId(),
-                        source.validationDebugId(),
+                        source.allocationId(),
+                        source.allocationDebugId(),
                         source.getFormat().toString(),
                         source.pixelSize(),
                         width,

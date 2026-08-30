@@ -470,6 +470,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             }
 
             pipelineDesc.setDepthStencilFormats(depthFormat, stencilFormat);
+            if ((TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED)
+                    && isSodiumTerrainPipeline(info.getVertexShader())) {
+                pipelineDesc.setSupportIndirectCommandBuffers(true);
+            }
 
             return MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
                     device.metalDeviceHandle(),
@@ -503,6 +507,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     static boolean isSodiumTerrainBlockSampler(final String bindingName, final Identifier vertexShader) {
         return "u_BlockTex".equals(bindingName) && SODIUM_TERRAIN_VERTEX_SHADER.equals(vertexShader);
+    }
+
+    static boolean isSodiumTerrainPipeline(final Identifier vertexShader) {
+        return SODIUM_TERRAIN_VERTEX_SHADER.equals(vertexShader);
     }
 
     int firstAvailableVertexBufferSlot() {
@@ -564,6 +572,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     int vertexBufferCount() {
         return this.vertexBufferCount;
+    }
+
+    /** Returns the stride for the logical RenderPass slot, not the Metal ABI slot. */
+    int vertexStride(final int logicalSlot) {
+        int binding = logicalSlot;
+        VertexFormat[] formats = this.info.getVertexFormatBindings();
+        if (binding < 0 || binding >= formats.length || formats[binding] == null) {
+            return 0;
+        }
+        return formats[binding].getVertexSize();
     }
 
     int genericVertexBufferSlot() {

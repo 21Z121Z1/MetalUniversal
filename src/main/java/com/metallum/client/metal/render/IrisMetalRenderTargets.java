@@ -227,6 +227,9 @@ final class IrisMetalRenderTargets implements AutoCloseable {
                 "iris-depthtex1", DEPTH_USAGE, GpuFormat.D32_FLOAT, newWidth, newHeight, 1, 1);
         this.noHandDepth = (MetalGpuTexture) device.createTexture(
                 "iris-depthtex2", DEPTH_USAGE, GpuFormat.D32_FLOAT, newWidth, newHeight, 1, 1);
+        this.mainDepth.registerAllocationIdentity();
+        this.noTranslucentsDepth.registerAllocationIdentity();
+        this.noHandDepth.registerAllocationIdentity();
         this.mainDepthView = new MetalGpuTextureView(this.mainDepth, 0, 1);
         this.noTranslucentsDepthView = new MetalGpuTextureView(this.noTranslucentsDepth, 0, 1);
         this.noHandDepthView = new MetalGpuTextureView(this.noHandDepth, 0, 1);
@@ -303,6 +306,12 @@ final class IrisMetalRenderTargets implements AutoCloseable {
 
     int height() {
         return height;
+    }
+
+    /** O(1) authoritative stamp for the current live color allocation set. */
+    long allocationStamp() {
+        ensureOpen();
+        return colorTargets.mainTexture(0).allocationId();
     }
 
     void captureNoTranslucentsDepth(final MetalCommandEncoder encoder) {
@@ -426,10 +435,12 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         if (newWidth == width && newHeight == height) {
             return;
         }
+        long oldStamp = allocationStamp();
         colorTargets.resize(newWidth, newHeight);
         releaseDepthTextures();
         createDepthTextures(newWidth, newHeight);
         this.fullClearRequired = true;
+        IrisMetalOptimizationBootstrap.onTargetsReallocated(this, oldStamp);
     }
 
     private void releaseDepthTextures() {

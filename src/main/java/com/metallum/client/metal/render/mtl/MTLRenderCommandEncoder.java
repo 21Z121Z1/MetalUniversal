@@ -394,6 +394,20 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder implements 
         );
     }
 
+    /** Executes an already encoded producer-owned terrain ICB once. */
+    public boolean executeTerrainIcb(
+            final MemorySegment indirectCommandBuffer,
+            final int drawCount
+    ) {
+        MemorySegment encoder = handle();
+        flushState(encoder);
+        return MetalNativeBridge.MTLRenderCommandEncoder_executeTerrainIcb(
+                encoder,
+                indirectCommandBuffer,
+                drawCount
+        ) != 0;
+    }
+
     public void drawPrimitivesIndirect(
             final MTLPrimitiveType primitiveType,
             final MemorySegment indirectBuffer,

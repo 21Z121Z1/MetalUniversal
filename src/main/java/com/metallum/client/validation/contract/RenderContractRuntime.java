@@ -27,6 +27,12 @@ public final class RenderContractRuntime {
         return recorder != null;
     }
 
+    /** True only while the opt-in contract switch and live recorder are both active. */
+    public static boolean observing() {
+        return recorder != null
+                && Boolean.parseBoolean(System.getProperty("metallum.renderContract.enabled", "false"));
+    }
+
     public static boolean producerDetailsCaptured() {
         RenderTraceRecorder current = recorder;
         return current != null && current.producerDetailsCaptured();
@@ -277,6 +283,42 @@ public final class RenderContractRuntime {
         return current.identifyResource(
                 semanticName,
                 runtimeId,
+                debugId,
+                format,
+                width,
+                height,
+                depthOrLayers,
+                mipLevel,
+                sampleCount,
+                usage
+        );
+    }
+
+    /**
+     * Observes a renderer-owned allocation identity. The recorder must not
+     * invent a generation for a production Metal resource.
+     */
+    public static ResourceIdentity identifyAllocation(
+            final String semanticName,
+            final long allocationId,
+            final long generation,
+            final String debugId,
+            final String format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevel,
+            final int sampleCount,
+            final int usage
+    ) {
+        RenderTraceRecorder current = recorder;
+        if (current == null) {
+            return null;
+        }
+        return current.identifyAllocation(
+                semanticName,
+                allocationId,
+                generation,
                 debugId,
                 format,
                 width,

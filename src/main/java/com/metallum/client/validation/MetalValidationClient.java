@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalGpuTimingRecorder;
 import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.TerrainGpuVisibilityProbe;
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.IrisMetalRenderFusionRuntime;
 import com.metallum.client.metal.render.IrisMetalComputeGroupingRuntime;
@@ -14,6 +15,8 @@ import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;
 import com.metallum.client.metal.render.mtl.MetalHotPathTelemetry;
 import com.metallum.client.metal.render.mtl.MetalRenderStatePacketTelemetry;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.terrain.PresentationPacingEvidenceAdapter;
+import com.metallum.client.terrain.TerrainSchedulingController;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.validation.storage.ValidationStorageBudget;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -54,6 +57,9 @@ import net.minecraft.world.level.saveddata.WeatherData;
 import net.minecraft.world.phys.Vec3;
 
 import java.io.IOException;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -770,6 +776,12 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.add("gpuNativeEncoders", summarizeGpuEncoders(gpuEncoderSamples));
             addNativeEncoderCounts(report, gpuEncoderSamples, keep);
             addPerformanceCounters(report, IrisMetalPerformanceCounters.snapshot());
+            report.add(
+                    "presentationPacing",
+                    PresentationPacingEvidenceAdapter.toJson(
+                            TerrainSchedulingController.runtime().lastSnapshot().presentationPacing()
+                    )
+            );
             JsonObject unavailable = new JsonObject();
             unavailable.addProperty(
                     "attachmentStoreLoadBytes",
@@ -2365,6 +2377,29 @@ public final class MetalValidationClient implements ClientModInitializer {
         RenderContractRuntime.Snapshot contract = RenderContractRuntime.snapshot();
         long[] metal4MainStats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
         long[] metal4MetalFxStats = MetalNativeBridge.metallum_metal4_metalfx_stats();
+        long[] terrainIcbStats = readTerrainIcbStats();
+        long[] terrainGpuIcbStats = readTerrainGpuIcbStats();
+        TerrainGpuVisibilityProbe.Telemetry terrainGpuVisibility = TerrainGpuVisibilityProbe.telemetry();
+        String terrainGpuVisibilityJson = terrainGpuVisibilityJson(terrainGpuVisibility);
+        Metallum.LOGGER.info(
+                "Terrain ICB validation counters: encoded={} executed={} gpuEncoded={} gpuDispatches={}",
+                terrainIcbStats[0],
+                terrainIcbStats[1],
+                terrainGpuIcbStats[0],
+                terrainGpuIcbStats[1]
+        );
+        Metallum.LOGGER.info(
+                "Terrain GPU visibility probe validation counters: enabled={} candidates={} attempts={} "
+                        + "dispatches={} produced={} fallbacks={} falseNegativeOracle={} lastCompletedEpoch={}",
+                terrainGpuVisibility.enabled(),
+                terrainGpuVisibility.candidateCount(),
+                terrainGpuVisibility.attemptedCount(),
+                terrainGpuVisibility.dispatchCount(),
+                terrainGpuVisibility.producedCount(),
+                terrainGpuVisibility.fallbackCount(),
+                terrainGpuVisibility.falseNegativeOracleCount(),
+                terrainGpuVisibility.lastCompletedEpoch()
+        );
         try {
             ValidationStorageBudget storage = ValidationStorageBudget.shared(outputDirectory);
             writeStateArtifact(
@@ -2405,6 +2440,11 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "metal4SpatialScalerEncodes": %d,
                       "metal4TemporalScalerEncodes": %d,
                       "metal4FrameGenerationInputSubmissions": %d,
+                      "terrainIcbEncoded": %d,
+                      "terrainIcbExecuted": %d,
+                      "terrainIcbGpuEncoded": %d,
+                      "terrainIcbGpuDispatches": %d,
+                      %s
                       "renderContractEnabled": %s,
                       "renderContractStatus": "%s",
                       "renderContractReady": %s,
@@ -2443,6 +2483,11 @@ public final class MetalValidationClient implements ClientModInitializer {
                             metal4MetalFxStats[2],
                             metal4MetalFxStats[3],
                             metal4MetalFxStats[4],
+                            terrainIcbStats[0],
+                            terrainIcbStats[1],
+                            terrainGpuIcbStats[0],
+                            terrainGpuIcbStats[1],
+                            terrainGpuVisibilityJson,
                             contract.enabled(),
                             contract.status(),
                             "passed".equals(status)
@@ -2465,6 +2510,78 @@ public final class MetalValidationClient implements ClientModInitializer {
             );
         } catch (IOException exception) {
             throw new IllegalStateException("Could not write Minecraft validation state", exception);
+        }
+    }
+
+    static String terrainGpuVisibilityJson(
+            final TerrainGpuVisibilityProbe.Telemetry telemetry
+    ) {
+        return String.format(
+                Locale.ROOT,
+                "                      \"terrainGpuVisibilityProbeEnabled\": %s,\n"
+                        + "                      \"terrainGpuVisibilityCandidateCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityVisibleCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityUncertainCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityAttempts\": %d,\n"
+                        + "                      \"terrainGpuVisibilityDispatches\": %d,\n"
+                        + "                      \"terrainGpuVisibilityProduced\": %d,\n"
+                        + "                      \"terrainGpuVisibilityFallbacks\": %d,\n"
+                        + "                      \"terrainGpuVisibilityFalseNegativeOracleCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactedCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionDispatches\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionProduced\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionFallbacks\": %d,\n"
+                        + "                      \"terrainGpuVisibilityCompactionMismatchOracleCount\": %d,\n"
+                        + "                      \"terrainGpuVisibilityLastCompletedEpoch\": %d,",
+                telemetry.enabled(),
+                telemetry.candidateCount(),
+                telemetry.visibleCount(),
+                telemetry.uncertainCount(),
+                telemetry.attemptedCount(),
+                telemetry.dispatchCount(),
+                telemetry.producedCount(),
+                telemetry.fallbackCount(),
+                telemetry.falseNegativeOracleCount(),
+                telemetry.compactedCount(),
+                telemetry.compactionDispatchCount(),
+                telemetry.compactionProducedCount(),
+                telemetry.compactionFallbackCount(),
+                telemetry.compactionMismatchOracleCount(),
+                telemetry.lastCompletedEpoch()
+        );
+    }
+
+    private static long[] readTerrainIcbStats() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment encoded = arena.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment executed = arena.allocate(ValueLayout.JAVA_LONG);
+            int available = MetalNativeBridge.terrainIcbStats(encoded, executed);
+            if (available == 0) {
+                return new long[]{0L, 0L};
+            }
+            return new long[]{
+                    encoded.get(ValueLayout.JAVA_LONG, 0),
+                    executed.get(ValueLayout.JAVA_LONG, 0)
+            };
+        } catch (RuntimeException ignored) {
+            return new long[]{0L, 0L};
+        }
+    }
+
+    private static long[] readTerrainGpuIcbStats() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment encoded = arena.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment dispatches = arena.allocate(ValueLayout.JAVA_LONG);
+            int available = MetalNativeBridge.terrainGpuIcbStats(encoded, dispatches);
+            if (available == 0) {
+                return new long[]{0L, 0L};
+            }
+            return new long[]{
+                    encoded.get(ValueLayout.JAVA_LONG, 0),
+                    dispatches.get(ValueLayout.JAVA_LONG, 0)
+            };
+        } catch (RuntimeException ignored) {
+            return new long[]{0L, 0L};
         }
     }
 

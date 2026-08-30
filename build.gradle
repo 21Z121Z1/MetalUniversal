@@ -27,6 +27,7 @@ dependencies {
 	// -Dmetallum.iris.semantic=true until its runtime acceptance gates pass.
 	implementation "maven.modrinth:iris:${project.iris_version}"
 	testImplementation "org.junit.jupiter:junit-jupiter:5.12.2"
+	testImplementation "com.networknt:json-schema-validator:1.5.6"
 	testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.12.2"
 }
 
@@ -289,6 +290,7 @@ def metal4PipelineSmokeBinary = file("${buildDir}/metal-tests/Metal4PipelineSmok
 def metal4PipelinePathBinary = file("${buildDir}/metal-tests/Metal4PipelinePathTest")
 def metalHudRuntimeTestBinary = file("${buildDir}/metal-tests/MetalHudRuntimeTest")
 def metalFrameGenerationLifecycleTestBinary = file("${buildDir}/metal-tests/MetalFrameGenerationLifecycleTest")
+def nativePresentationTelemetryStateTestBinary = file("${buildDir}/metal-tests/NativePresentationTelemetryStateTest")
 def metalFrameGenerationPresentationValidationBinary = file("${buildDir}/metal-tests/MetalFrameGenerationPresentationValidation")
 def metalFxOffscreenValidationBinary = file("${buildDir}/metal-tests/MetalFXOffscreenValidation")
 def metalFxOffscreenValidationOutput = file("${buildDir}/metal-validation/offscreen-current")
@@ -470,6 +472,44 @@ tasks.register("metalFrameGenerationLifecycleTest", Exec) {
 	}
 	dependsOn "compileMetalFrameGenerationLifecycleTest"
 	commandLine metalFrameGenerationLifecycleTestBinary.absolutePath
+}
+
+tasks.register("compileNativePresentationTelemetryStateTest", Exec) {
+	group = "verification"
+	description = "Compiles the ordinary CAMetalLayer presentation telemetry state fixture."
+	onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX() }
+	workingDir project.projectDir
+	inputs.files(
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/NativePresentationTelemetryStateTest.swift"
+	)
+	outputs.file(nativePresentationTelemetryStateTestBinary)
+	doFirst { nativePresentationTelemetryStateTestBinary.parentFile.mkdirs() }
+	commandLine "swiftc",
+		"-O",
+		"-whole-module-optimization",
+		"-module-name", "metallum_native",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "AppKit",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-framework", "QuartzCore",
+		"-o", nativePresentationTelemetryStateTestBinary.absolutePath,
+		"src/main/native/MetalFrameGenerationLifecycle.swift",
+		"src/main/native/MetallumInterface.swift",
+		"src/main/native/MetallumNative.swift",
+		"src/test/native/NativePresentationTelemetryStateTest.swift"
+}
+
+tasks.register("nativePresentationTelemetryStateTest", Exec) {
+	group = "verification"
+	description = "Checks ordinary Metal 3/Metal 4 presentation telemetry lifecycle accounting."
+	onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX() }
+	dependsOn "compileNativePresentationTelemetryStateTest"
+	commandLine nativePresentationTelemetryStateTestBinary.absolutePath
 }
 
 tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
@@ -1065,6 +1105,8 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				renderContractMinecraftDiagnoseRequested ? "minecraft-diagnose-current"
 						: renderContractMinecraftValidationRequested ? "minecraft-current" : "disabled"
 		systemProperty "metallum.validation.sourceCommit", renderContractSourceCommit
+		systemProperty "metallum.opt.terrainGpuEncode",
+				System.getProperty("metallum.opt.terrainGpuEncode", "false")
 		// Normal Minecraft runs retain the complete logical pass graph and
 		// producer counts, but not every binding snapshot. A diagnostic rerun can
 		// opt into full producer evidence with -Dmetallum.renderContract.captureProducers=true.
@@ -1379,6 +1421,29 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			}
 			if (runState.renderBackend != "Metal") {
 				problems << "validation ran on ${runState.renderBackend ?: 'unknown'} instead of Metal"
+			}
+			def terrainIcbRequested = System.getProperty("metallum.opt.terrainIcb", "false").toBoolean()
+			def terrainGpuEncodeRequested = System.getProperty(
+					"metallum.opt.terrainGpuEncode", "false").toBoolean()
+			if (terrainIcbRequested || terrainGpuEncodeRequested) {
+				if (!(runState.terrainIcbEncoded instanceof Number)
+						|| runState.terrainIcbEncoded <= 0) {
+					problems << "terrain ICB encoded no native command buffers"
+				}
+				if (!(runState.terrainIcbExecuted instanceof Number)
+						|| runState.terrainIcbExecuted < runState.terrainIcbEncoded) {
+					problems << "terrain ICB executed ${runState.terrainIcbExecuted} of ${runState.terrainIcbEncoded} encoded command buffers"
+				}
+			}
+			if (terrainGpuEncodeRequested) {
+				if (!(runState.terrainIcbGpuEncoded instanceof Number)
+						|| runState.terrainIcbGpuEncoded <= 0) {
+					problems << "terrain GPU ICB authored no GPU command buffers"
+				}
+				if (!(runState.terrainIcbGpuDispatches instanceof Number)
+						|| runState.terrainIcbGpuDispatches < runState.terrainIcbGpuEncoded) {
+					problems << "terrain GPU ICB dispatches ${runState.terrainIcbGpuDispatches} of ${runState.terrainIcbGpuEncoded} GPU-authored command buffers"
+				}
 			}
 			def explicitMetal4Master = System.getProperty("metallum.opt.metal4")
 			def explicitMetal4Main = System.getProperty("metallum.opt.metal4MainRenderer")
