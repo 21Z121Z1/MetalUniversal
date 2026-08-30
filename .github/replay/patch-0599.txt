@@ -1,0 +1,64 @@
+*** Begin Patch
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainStorageBridge.java
+@@
+-final class TerrainStorageBridge {
++public final class TerrainStorageBridge {
+@@
+-    static void setOwner(
++    public static void setOwner(
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainCandidateRegistry.java
+@@
+-        if (indexIdentity == null && !localIndexMode && !owner.metallum$isTranslucent()) {
++        if (indexIdentity == null && !localIndexMode && !owner.translucent()) {
+@@
+     static boolean recordsLive(
+             final TerrainCandidateSnapshot.Candidate expected,
+             final SectionRenderDataStorage storage
+     ) {
+-        if (!ENABLED || expected == null || storage == null
+-                || TerrainStorageBridge.owner(storage) == null) {
++        TerrainStorageBridge.Owner owner = TerrainStorageBridge.owner(storage);
++        if (!ENABLED || expected == null || storage == null || owner == null) {
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainDrawMetadataCapture.java
+@@
+ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+-import com.metallum.mixin.sodium.SectionRenderDataStorageAccessor;
+-import com.metallum.mixin.sodium.TerrainDrawMetadataBatch;
+@@
+-        if (!enabled() || !(batch instanceof TerrainDrawMetadataBatch metadataBatch)) {
++        if (!enabled() || !TerrainStorageBridge.hasMetadataBatch(batch)) {
+             return;
+         }
+-        metadataBatch.metallum$setTerrainDrawMetadata(new TerrainDrawMetadataStore());
++        TerrainStorageBridge.setMetadata(batch, new TerrainDrawMetadataStore());
+@@
+-        TerrainDrawMetadataStore store = ((TerrainDrawMetadataBatch) batch).metallum$terrainDrawMetadata();
++        TerrainDrawMetadataStore store = TerrainStorageBridge.metadata(batch);
+@@
+-        if (!(storage instanceof SectionRenderDataStorageAccessor accessor)) {
+-            return null;
+-        }
+-        GlBufferSegment[] vertices = accessor.metallum$getVertexAllocations();
++        GlBufferSegment[] vertices = TerrainStorageBridge.vertexAllocations(storage);
+@@
+-        GlBufferSegment[] elements = accessor.metallum$getElementAllocations();
++        GlBufferSegment[] elements = TerrainStorageBridge.elementAllocations(storage);
+@@
+-                : accessor.metallum$getSharedIndexAllocation();
++                : TerrainStorageBridge.sharedIndexAllocation(storage);
+@@
+-            return ((TerrainDrawMetadataBatch) fill.batch).metallum$terrainDrawMetadata();
++            return TerrainStorageBridge.metadata(fill.batch);
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/mixin/sodium/VKIndirectDrawBatchTerrainSceneMixin.java
+@@
+ public abstract class VKIndirectDrawBatchTerrainSceneMixin
+-        implements TerrainIcbProducer, TerrainDrawMetadataBatch {
++        implements TerrainIcbProducer {
+@@
+-    @Override
+     public TerrainDrawMetadataStore metallum$terrainDrawMetadata() {
+@@
+-    @Override
+     public void metallum$setTerrainDrawMetadata(final TerrainDrawMetadataStore store) {
+*** Delete File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/mixin/sodium/SectionRenderDataStorageOwner.java
+*** End Patch
