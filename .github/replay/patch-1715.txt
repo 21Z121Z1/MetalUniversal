@@ -1,0 +1,11 @@
+*** Begin Patch
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/docs/agent/minecraft-26.2-experience.md
+@@
+-| Metal 4 main renderer | `metallum.opt.metal4MainRenderer` | false | Metal 4 compiler, main queue, lease/lifetime path | separate from main-queue pilot | Metal 3/main renderer path | real client: 1,338 lease begins/submissions and 1,335 factory calls avoided in Max smoke |
++| Metal 4 main renderer | `metallum.opt.metal4MainRenderer` | false | Metal 4 compiler, main queue, lease/lifetime path | separate from main-queue pilot | Metal 3/main renderer path | real client: 1,467 lease begins/submissions and 1,464 factory calls avoided in final Max smoke |
+@@
+-| GPU visibility decision probe | `metallum.opt.terrainGpuVisibilityProbe` | false | candidate snapshot, Metal compute visibility pipeline | can coexist with visible ICB, but does not itself authorize draws | CPU/ordinary draw list | real client Visible: candidates 2298, attempts 125, dispatches 124, produced 123, false-negative oracle 0 |
+-| Hierarchical prefix scan / GPU compaction | internal visibility probe path | off unless visibility probe/visible ICB requests it | visibility bitset and compaction kernels | fused path uses a different producer seam | no compaction; ordinary draw list | real client Visible: compacted 2093, compaction dispatches 124, mismatch oracle 0 |
++| GPU visibility decision probe | `metallum.opt.terrainGpuVisibilityProbe` | false | candidate snapshot, Metal compute visibility pipeline | can coexist with visible ICB, but does not itself authorize draws | CPU/ordinary draw list | real client Visible: candidates 2046, attempts 129, dispatches 128, produced 127, false-negative oracle 0 |
++| Hierarchical prefix scan / GPU compaction | internal visibility probe path | off unless visibility probe/visible ICB requests it | visibility bitset and compaction kernels | fused path uses a different producer seam | no compaction; ordinary draw list | real client Visible: compacted 1901, compaction dispatches 128, mismatch oracle 0 |
+*** End Patch
