@@ -4,7 +4,9 @@ from pathlib import Path
 path = Path("scripts/agent/replay_reviewed_codex.py")
 text = path.read_text(encoding="utf-8")
 
-original = '''def find_subsequence(haystack, needle, start=0):
+# OpenAI apply_patch tolerates indentation drift in context lines. Keep exact
+# matching first, then use indentation-insensitive matching only as fallback.
+old_find = '''def find_subsequence(haystack, needle, start=0):
     if not needle:
         return start
     limit = len(haystack) - len(needle)
@@ -13,7 +15,7 @@ original = '''def find_subsequence(haystack, needle, start=0):
             return index
     return -1
 '''
-replacement = '''def find_subsequence(haystack, needle, start=0):
+new_find = '''def find_subsequence(haystack, needle, start=0):
     if not needle:
         return start
     limit = len(haystack) - len(needle)
@@ -26,92 +28,119 @@ replacement = '''def find_subsequence(haystack, needle, start=0):
             return index
     return -1
 '''
-if original in text:
-    text = text.replace(original, replacement, 1)
-if "normalized = [line.lstrip() for line in needle]" not in text:
-    raise SystemExit("failed to install indentation-compatible context lookup")
+if old_find not in text:
+    raise SystemExit("could not locate find_subsequence helper")
+text = text.replace(old_find, new_find, 1)
 
-lines = text.splitlines()
-raw_rejections = [i for i, line in enumerate(lines) if "unsupported patch line for" in line]
-if len(raw_rejections) != 1:
-    raise SystemExit(f"expected one unsupported-line parser branch, found {len(raw_rejections)}")
-raw_rejection = raw_rejections[0]
+# The uploaded rollout contains exactly one malformed custom apply_patch call:
+# a newly-added Python/shell heredoc block in run_unified_eval_cycle.sh lost
+# unified-diff '+' prefixes from `prefix = key + "="` through the closing `}`.
+# Normalize only that uniquely-identifiable patch; every other reviewed patch
+# remains subject to the strict parser below.
+normalizer = '''def normalize_rollout_patch(patch):
+    signature = 'prefix = key + "="'
+    if signature not in patch:
+        return patch
+    lines = patch.splitlines()
+    matches = [i for i, line in enumerate(lines) if line == signature]
+    if len(matches) != 1:
+        fail(f"malformed rollout patch signature count: {len(matches)}")
+    start = matches[0]
+    end = None
+    for i in range(start + 1, len(lines) - 1):
+        if lines[i] == "+" and lines[i + 1] == "+stage_eval_shader_pack":
+            end = i
+            break
+    if end is None:
+        fail("malformed rollout patch end marker missing")
+    for i in range(start, end):
+        lines[i] = "+" + lines[i]
+    return "\\n".join(lines) + ("\\n" if patch.endswith("\\n") else "")
 
-# Anchor to the actual parser rejection site and find the nearest enclosing
-# loop that iterates patch_line. This avoids depending on the helper's local
-# variable name (hunk/hunk_lines/etc.).
-loop = None
-for i in range(raw_rejection - 1, -1, -1):
-    stripped = lines[i].strip()
-    if stripped.startswith("for patch_line in ") and stripped.endswith(":"):
-        loop = i
-        break
-if loop is None:
-    raise SystemExit("could not locate patch_line parser loop above rejection site")
-loop_indent = lines[loop][:len(lines[loop]) - len(lines[loop].lstrip())]
-body_indent = loop_indent + "    "
-lines.insert(loop, loop_indent + "raw_addition_mode = False")
-loop += 1
-raw_guard = [
-    body_indent + "if raw_addition_mode:",
-    body_indent + "    if patch_line.startswith('+'):",
-    body_indent + "        raw_addition_mode = False",
-    body_indent + "    else:",
-    body_indent + "        new.append(patch_line)",
-    body_indent + "        continue",
-]
-for offset, line in enumerate(raw_guard, 1):
-    lines.insert(loop + offset, line)
-
-# Recompute rejection positions after insertion.
-raw_rejections = [i for i, line in enumerate(lines) if "unsupported patch line for" in line]
-index = raw_rejections[0]
-indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
-lines[index:index + 1] = [indent + "raw_addition_mode = True", indent + "new.append(patch_line)"]
-
-empty_rejections = [i for i, line in enumerate(lines) if "malformed empty patch line for" in line]
-if len(empty_rejections) != 1:
-    raise SystemExit(f"expected one empty-line parser branch, found {len(empty_rejections)}")
-index = empty_rejections[0]
-indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
-lines[index:index + 1] = [indent + "raw_addition_mode = True", indent + 'new.append("")', indent + "continue"]
-text = "\n".join(lines) + "\n"
-
-old_write = '''        lines[index:index + len(old)] = new
-        cursor = index + len(new)
 '''
-new_write = '''        replacement = []
+marker = 'def parse_operations(patch):\n'
+if marker not in text:
+    raise SystemExit("could not locate parse_operations helper")
+text = text.replace(marker, normalizer + marker, 1)
+
+old_apply_patch = '''def apply_patch(patch):
+    for kind, relative, body in parse_operations(patch):
+'''
+new_apply_patch = '''def apply_patch(patch):
+    patch = normalize_rollout_patch(patch)
+    for kind, relative, body in parse_operations(patch):
+'''
+if old_apply_patch not in text:
+    raise SystemExit("could not locate apply_patch helper")
+text = text.replace(old_apply_patch, new_apply_patch, 1)
+
+# Preserve actual repository context when indentation-insensitive matching was
+# required. Otherwise fuzzy matching could rewrite unchanged context merely to
+# the rollout's whitespace rather than changing only +/- lines.
+start = text.find('def apply_update(path, body):\n')
+end = text.find('\ndef apply_add(path, body):\n', start)
+if start < 0 or end < 0:
+    raise SystemExit("could not locate apply_update helper")
+new_apply_update = '''def apply_update(path, body):
+    text = path.read_text(encoding="utf-8")
+    had_final_newline = text.endswith("\\n")
+    lines = text.splitlines()
+    hunks = []
+    current = None
+    for line in body:
+        if line.startswith("@@"):
+            if current is not None:
+                hunks.append(current)
+            current = []
+        else:
+            if current is None:
+                fail(f"update for {path} has content before first hunk")
+            current.append(line)
+    if current is not None:
+        hunks.append(current)
+
+    cursor = 0
+    for hunk in hunks:
+        old = []
+        actions = []
+        for line in hunk:
+            if not line:
+                fail(f"malformed empty patch line for {path}")
+            prefix, value = line[0], line[1:]
+            if prefix == " ":
+                old.append(value)
+                actions.append((prefix, value))
+            elif prefix == "-":
+                old.append(value)
+                actions.append((prefix, value))
+            elif prefix == "+":
+                actions.append((prefix, value))
+            elif line == "\\\\ No newline at end of file":
+                continue
+            else:
+                fail(f"unsupported patch line for {path}: {line!r}")
+        index = find_subsequence(lines, old, cursor)
+        if index < 0:
+            index = find_subsequence(lines, old, 0)
+        if index < 0:
+            preview = "\\n".join(old[:12])
+            fail(f"could not locate hunk in {path}:\\n{preview}")
+
+        replacement = []
         old_offset = 0
-        raw_addition_mode = False
-        for patch_line in hunk:
-            if raw_addition_mode:
-                if patch_line.startswith("+"):
-                    raw_addition_mode = False
-                else:
-                    replacement.append(patch_line)
-                    continue
-            if patch_line == "\\\\ No newline at end of file":
-                continue
-            if patch_line == "":
-                raw_addition_mode = True
-                replacement.append("")
-                continue
-            prefix, value = patch_line[0], patch_line[1:]
+        for prefix, value in actions:
             if prefix == " ":
                 replacement.append(lines[index + old_offset])
                 old_offset += 1
             elif prefix == "-":
                 old_offset += 1
-            elif prefix == "+":
-                replacement.append(value)
             else:
-                raw_addition_mode = True
-                replacement.append(patch_line)
+                replacement.append(value)
         lines[index:index + len(old)] = replacement
         cursor = index + len(replacement)
+
+    path.write_text("\\n".join(lines) + ("\\n" if had_final_newline else ""), encoding="utf-8")
 '''
-if old_write not in text:
-    raise SystemExit("failed to locate hunk replacement write")
-text = text.replace(old_write, new_write, 1)
+text = text[:start] + new_apply_update + text[end:]
 
 path.write_text(text, encoding="utf-8")
