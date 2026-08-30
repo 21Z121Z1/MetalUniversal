@@ -743,7 +743,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                                                 + "' exceeds target count " + this.targetCount
                                 );
                             }
-                            image = this.targets.colorView(shadowTarget, pass.readsFromAlt());
+                            image = this.targets.storageView(shadowTarget, pass.readsFromAlt());
                         } else {
                             image = resources.storageImage(info, sampler.name());
                         }
@@ -925,7 +925,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                         "Shadow storage image '" + name + "' exceeds target count " + this.targetCount
                 );
             }
-            return this.targets.colorView(shadowTarget, compute.info.readsFromAlt());
+            return this.targets.storageView(shadowTarget, compute.info.readsFromAlt());
         }
         GpuTextureView view = resources.storageImage(compute.info, name);
         if (view == null) {
@@ -953,7 +953,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
         if (target < 0 || target >= this.targetCount || this.targets == null) {
             return null;
         }
-        return this.targets.colorTargets().sampleReadView(target);
+        return this.targets.colorTargets().storageReadView(target);
     }
 
     private static GpuBufferSlice requireBuffer(
@@ -1515,7 +1515,18 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
     }
 
     private static int[] shadowDrawBuffers(final ProgramDirectives directives) {
-        return directives.hasUnknownDrawBuffers() ? new int[]{0, 1} : directives.getDrawBuffers().clone();
+        return resolveShadowDrawBuffers(
+                directives.hasUnknownDrawBuffers(),
+                directives.getDrawBuffers()
+        );
+    }
+
+    /**
+     * Iris/OptiFine compatibility: an absent DRAWBUFFERS/RENDERTARGETS
+     * declaration exposes both default shadow color attachments.
+     */
+    static int[] resolveShadowDrawBuffers(final boolean unknown, final int[] drawBuffers) {
+        return unknown ? new int[]{0, 1} : drawBuffers.clone();
     }
 
     private static void validateDrawBuffers(final int[] drawBuffers, final int targetCount, final String label) {

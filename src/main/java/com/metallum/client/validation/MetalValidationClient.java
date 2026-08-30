@@ -85,6 +85,15 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final boolean PERFORMANCE_ONLY = Boolean.getBoolean(
             "metallum.validation.performanceOnly"
     );
+    /**
+     * Render-contract correctness for the Iris lane must not implicitly run
+     * the separate MetalFX attachment/motion suite.  The Gradle task enables
+     * this bounded mode explicitly; normal MetalFX validation keeps the full
+     * scripted timeline below.
+     */
+    private static final boolean CONTRACT_ONLY = Boolean.getBoolean(
+            "metallum.validation.contractOnly"
+    );
     private static final boolean REQUIRE_METAL = Boolean.getBoolean(
             "metallum.validation.requireMetal"
     );
@@ -172,6 +181,13 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final int TRANSLUCENT_SERIES_END_FRAME = 308;
     private static final float HAND_TRANSLUCENT_SCENE_PITCH = 14.0F;
     private static final int EXPECTED_GPU_CAPTURES = 17;
+    private static final int CONTRACT_ONLY_CAPTURE_FRAME = 30;
+    private static final int CONTRACT_ONLY_END_FRAME = 45;
+    private static final int CONTRACT_ONLY_TIMEOUT_FRAME = 120;
+
+    private static int expectedGpuCaptures() {
+        return CONTRACT_ONLY ? 0 : EXPECTED_GPU_CAPTURES;
+    }
     // Attachment readbacks deliberately block GPU progress. When frame
     // generation is under test, follow them with a clean steady-state tail so
     // the same Quick Play run can measure sustained source/present pacing and
@@ -271,7 +287,11 @@ public final class MetalValidationClient implements ClientModInitializer {
         } catch (IOException exception) {
             throw new IllegalStateException("Could not create Minecraft validation output directory", exception);
         }
-        Metallum.LOGGER.info("Automated Minecraft MetalFX validation enabled: {}", outputDirectory);
+        Metallum.LOGGER.info(
+                "Automated Minecraft {} validation enabled: {}",
+                CONTRACT_ONLY ? "Iris render-contract" : "MetalFX",
+                outputDirectory
+        );
         RenderContractRuntime.start(
                 outputDirectory,
                 System.getProperty("metallum.renderContract.runId", "minecraft-current")
@@ -472,7 +492,37 @@ public final class MetalValidationClient implements ClientModInitializer {
             return;
         }
 
+        if (CONTRACT_ONLY) {
+            // The final drawable capture is scheduled by the existing present
+            // path. Wait for that one bounded readback instead of running the
+            // unrelated 17-capture MetalFX scenario timeline.
+            if (frame >= CONTRACT_ONLY_END_FRAME
+                    && RenderContractRuntime.completionGatePassed()) {
+                finishAndStop(minecraft, 0, 0);
+                return;
+            }
+            if (frame >= CONTRACT_ONLY_TIMEOUT_FRAME) {
+                RenderContractRuntime.markFailed();
+                finishAndStop(minecraft, 0, 1);
+                return;
+            }
+        }
+
         RenderContractRuntime.beginFrame(frame);
+        if (CONTRACT_ONLY) {
+            if (frame == CONTRACT_ONLY_CAPTURE_FRAME) {
+                RenderContractRuntime.requestFinalDrawableCapture(frame);
+            }
+            frame++;
+            return;
+        }
+        // The contract recorder needs one bounded, deterministic final-drawable
+        // sample before the validation timeline can close. Keep this tied to
+        // the existing translucent capture frame instead of capturing every
+        // frame or adding a second timeline.
+        if (frame == TRANSLUCENT_CAPTURE_FRAME) {
+            RenderContractRuntime.requestFinalDrawableCapture(frame);
+        }
 
         // Scene mutations must land in the frame that triggers them (the
         // prioritized Sodium rebuild is only reliably synchronous when the
@@ -951,8 +1001,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             JsonObject argumentReport = new JsonObject();
             argumentReport.addProperty(
                     "enabled",
-                    Boolean.getBoolean("metallum.iris.experimental.argumentTables")
-                            || Boolean.getBoolean("metallum.iris.argumentTables")
+                    com.metallum.client.metal.render.IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES
             );
             argumentReport.addProperty("layouts", argumentStats.layouts());
             argumentReport.addProperty("bindingMutations", argumentStats.updates());
@@ -2318,10 +2367,11 @@ public final class MetalValidationClient implements ClientModInitializer {
         }
         finishRunState(finalStatus, completed, failures + ("failed".equals(finalStatus) ? 1 : 0));
         Metallum.LOGGER.info(
-                "Automated Minecraft MetalFX validation {} {}/{} GPU captures; stopping client",
+                "Automated Minecraft {} validation {} {}/{} GPU captures; stopping client",
+                CONTRACT_ONLY ? "Iris render-contract" : "MetalFX",
                 finalStatus,
                 completed,
-                EXPECTED_GPU_CAPTURES
+                expectedGpuCaptures()
         );
         removeOcclusionWall(minecraft);
         removeCutoutScene(minecraft);
@@ -2468,7 +2518,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                             jsonEscape(sourceCommit),
                             frame,
                             FRAME_GENERATION_REQUESTED ? FRAME_GENERATION_STEADY_FRAMES : 0,
-                            EXPECTED_GPU_CAPTURES,
+                            expectedGpuCaptures(),
                             completed,
                             failures,
                             Boolean.getBoolean("metallum.metalfx.frameGeneration"),

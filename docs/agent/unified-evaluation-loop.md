@@ -38,6 +38,7 @@ export METALLUM_EVAL_POWER_STATE="<AC/battery and thermal preparation>"
 ```
 
 A run is not comparable when code/binary hashes, world, shader pack, options, resolution, render distance, display mode or power state differ.
+When `METALLUM_EVAL_SHADER_PACK_PATH` is supplied, the runner stages a content-addressed copy, re-pins `run/config/iris.properties` immediately before every client process, and requires each client log to prove that exact pack was loaded. The original Iris configuration and any newly staged archive are restored/removed when the run exits. Normalized admission/performance trials also fail closed if in-world frame-pacing evidence reports `SHORT_AFK` or `OUT_OF_LEVEL_MENU`, because those throttled samples are not comparable with an unthrottled arm.
 
 ## Entry points
 

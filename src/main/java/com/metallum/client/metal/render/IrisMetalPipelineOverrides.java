@@ -201,11 +201,21 @@ public final class IrisMetalPipelineOverrides {
      */
     public static RenderPipeline pipelineForTerrain(final RenderPipeline pipeline) {
         Instance instance = active;
-        if (instance == null || !Instance.isSodiumPipeline(pipeline)) {
+        if (instance == null) {
             return pipeline;
         }
-        TerrainKind kind = Instance.discriminate(pipeline);
         if (isShadowPassActive()) {
+            // MetalFX's CUTOUT coverage pipeline is intentionally namespaced
+            // "metallum", but it is still the pipeline for the active Sodium
+            // terrain pass. The kind captured from TerrainRenderPass is the
+            // authoritative shadow layout; checking the replacement pipeline's
+            // namespace first would bind a two-target coverage PSO to Iris's
+            // single-target shadow descriptor.
+            TerrainKind kind = ACTIVE_TERRAIN_KIND.get();
+            if (kind == null) {
+                instance.requireNoFallback("shadow terrain pipeline has no active terrain kind");
+                return pipeline;
+            }
             RenderPipeline shadow = instance.shadowSyntheticPipeline(pipeline, kind.shadowKey);
             if (shadow == null) {
                 throw new IllegalStateException(
@@ -213,6 +223,19 @@ public final class IrisMetalPipelineOverrides {
                 );
             }
             return shadow;
+        }
+        // MetalFX temporarily replaces Sodium's CUTOUT pipeline with a
+        // namespaced two-target coverage pipeline. Iris owns the active
+        // shader-pack descriptor, so route that replacement through the
+        // same one-target-or-pack-MRT synthetic PSO as the original Sodium
+        // pipeline instead of binding its coverage layout directly.
+        if (!Instance.isSodiumPipeline(pipeline)
+                && !MetalCutoutReactivePipeline.isActiveCutoutPass()) {
+            return pipeline;
+        }
+        TerrainKind kind = ACTIVE_TERRAIN_KIND.get();
+        if (kind == null) {
+            kind = Instance.discriminate(pipeline);
         }
         int[] drawBuffers = instance.drawBuffersFor(kind);
         String originalLocation = pipeline.getLocation().toString();
@@ -1509,7 +1532,13 @@ public final class IrisMetalPipelineOverrides {
             if (globalOverride != null) {
                 globalBlend = irisBlendFunction(globalOverride);
             }
-            int[] drawBuffers = program.drawBuffers();
+            // Shadow descriptors are built from ShadowProgram's effective
+            // Iris layout. Reuse that exact snapshot for the synthetic PSO;
+            // rebuilding it from the translated program would let linker
+            // metadata diverge from the attachment contract.
+            int[] drawBuffers = shadowProgram == null
+                    ? program.drawBuffers()
+                    : shadowProgram.drawBuffers();
             for (int slot = 0; slot < drawBuffers.length; slot++) {
                 int logicalTarget = drawBuffers[slot];
                 Optional<BlendFunction> blend = globalBlend;
@@ -2249,7 +2278,7 @@ public final class IrisMetalPipelineOverrides {
                                         "Iris storage image '" + imageName + "' exceeds generation target count"
                                 );
                             }
-                            return targets.colorTargets().sampleReadView(colorTarget);
+                            return targets.colorTargets().storageReadView(colorTarget);
                         }
                         IrisMetalComputeResources compute = computeResources;
                         return compute == null ? null : compute.storageImage(imageName);
@@ -2386,7 +2415,7 @@ public final class IrisMetalPipelineOverrides {
                 IrisMetalRenderTargets targets = this.renderTargets;
                 return targets == null || colorTarget >= targets.colorTargets().targetCount()
                         ? null
-                        : targets.colorTargets().sampleReadView(colorTarget);
+                        : targets.colorTargets().storageReadView(colorTarget);
             }
             if (name.startsWith("shadowcolorimg")) {
                 IrisMetalShadowPipeline shadows = this.shadowPipeline;

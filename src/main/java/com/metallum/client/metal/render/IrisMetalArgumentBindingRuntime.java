@@ -128,8 +128,7 @@ public final class IrisMetalArgumentBindingRuntime {
     }
 
     private static boolean enabled() {
-        return IrisMetalOptimizationPlan.ENABLE_ARGUMENT_TABLES
-                || IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES;
+        return IrisMetalOptimizationPlan.ENABLE_ARGUMENT_TABLES;
     }
 
     private static State state(final Object pass) {

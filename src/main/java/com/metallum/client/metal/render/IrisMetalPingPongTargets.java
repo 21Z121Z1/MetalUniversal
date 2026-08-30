@@ -218,6 +218,28 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         return this.flipped.get(checked) ? altSampleViews[checked] : mainSampleViews[checked];
     }
 
+    /**
+     * View of the current readable side for a storage-image binding.
+     *
+     * <p>Storage images must use the underlying texture view without the
+     * logical RGB alpha-one swizzle used by sampled views. Metal texture
+     * swizzle views are distinct native objects and are not valid writable
+     * image bindings even when their parent texture carries shader-write
+     * usage.</p>
+     */
+    MetalGpuTextureView storageReadView(final int index) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        return this.flipped.get(checked) ? altViews[checked] : mainViews[checked];
+    }
+
+    /** Raw view of one fixed physical side for an explicit flip snapshot. */
+    MetalGpuTextureView physicalView(final int index, final boolean alternate) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        return alternate ? altViews[checked] : mainViews[checked];
+    }
+
     /** Sampled view of the current write/history side, including logical format swizzles. */
     MetalGpuTextureView sampleWriteView(final int index) {
         ensureOpen();

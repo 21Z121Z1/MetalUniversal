@@ -37,10 +37,26 @@ public final class IrisMetalAdvancedOptimizationConfig {
             final String legacyProperty,
             final boolean fallback
     ) {
-        String stable = System.getProperty(stableProperty);
-        if (stable != null) return Boolean.parseBoolean(stable);
-        String legacy = System.getProperty(legacyProperty);
-        return legacy == null ? fallback : Boolean.parseBoolean(legacy);
+        return resolveAlias(
+                System.getProperty(stableProperty),
+                System.getProperty(legacyProperty),
+                fallback
+        );
+    }
+
+    /**
+     * Resolves one stable/legacy property pair. An explicitly supplied stable
+     * value, including {@code false}, always wins over the legacy alias.
+     * Keeping this rule in one small pure function makes the alias contract
+     * testable without mutating JVM-global system properties.
+     */
+    static boolean resolveAlias(
+            final String stableValue,
+            final String legacyValue,
+            final boolean fallback
+    ) {
+        if (stableValue != null) return Boolean.parseBoolean(stableValue);
+        return legacyValue == null ? fallback : Boolean.parseBoolean(legacyValue);
     }
 
     public static Snapshot snapshot() {

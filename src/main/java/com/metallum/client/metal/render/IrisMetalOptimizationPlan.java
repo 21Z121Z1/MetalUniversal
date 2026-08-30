@@ -18,13 +18,15 @@ import java.util.Set;
  * false so the local agent can enable one transformation at a time.
  */
 final class IrisMetalOptimizationPlan {
-    static final boolean ENABLE_PASS_FUSION = Boolean.getBoolean("metallum.iris.experimental.passFusion");
-    static final boolean ENABLE_LOAD_STORE = Boolean.getBoolean("metallum.iris.experimental.loadStoreLiveness");
-    static final boolean ENABLE_COMPUTE_GROUPING = Boolean.getBoolean("metallum.iris.experimental.computeGrouping");
-    static final boolean ENABLE_RESOURCE_PRUNING = Boolean.getBoolean("metallum.iris.experimental.resourcePruning");
-    static final boolean ENABLE_FINAL_COLOR_FUSION = Boolean.getBoolean("metallum.iris.experimental.finalColorFusion");
-    static final boolean ENABLE_ARGUMENT_TABLES = Boolean.getBoolean("metallum.iris.experimental.argumentTables");
-    static final boolean ENABLE_ICB = Boolean.getBoolean("metallum.iris.experimental.icb");
+    private static final IrisMetalAdvancedOptimizationConfig.Snapshot FEATURE_GATES =
+            IrisMetalAdvancedOptimizationConfig.snapshot();
+    static final boolean ENABLE_PASS_FUSION = FEATURE_GATES.renderPassFusion();
+    static final boolean ENABLE_LOAD_STORE = FEATURE_GATES.attachmentLiveness();
+    static final boolean ENABLE_COMPUTE_GROUPING = FEATURE_GATES.computeGrouping();
+    static final boolean ENABLE_RESOURCE_PRUNING = FEATURE_GATES.depthLiveness();
+    static final boolean ENABLE_FINAL_COLOR_FUSION = FEATURE_GATES.finalColorFusion();
+    static final boolean ENABLE_ARGUMENT_TABLES = FEATURE_GATES.argumentTables();
+    static final boolean ENABLE_ICB = FEATURE_GATES.indirectSubmission();
 
     enum LoadAction { DONT_CARE, LOAD, CLEAR }
     enum StoreAction { DONT_CARE, STORE }
@@ -435,7 +437,7 @@ final class IrisMetalOptimizationPlan {
                     names.add(node.name());
                     continue;
                 }
-                if (hazards.mayMergeAdjacent(i - 1, i)) {
+                if (mayMergeAdjacent(i - 1, i, prefix)) {
                     names.add(node.name());
                 } else {
                     flush(output, start, i - 1, names);
@@ -445,6 +447,23 @@ final class IrisMetalOptimizationPlan {
                 }
             }
             flush(output, start, hazards.nodes().size() - 1, names);
+        }
+
+        private boolean mayMergeAdjacent(final int first, final int second, final String prefix) {
+            if (!hazards.mayMergeAdjacent(first, second)
+                    || first < 0
+                    || second >= passReceipt.size()) {
+                return false;
+            }
+            PlanPass previous = passReceipt.get(first);
+            PlanPass current = passReceipt.get(second);
+            PassType expected = "render/".equals(prefix) ? PassType.RENDER : PassType.COMPUTE;
+            if (previous.type() != expected || current.type() != expected
+                    || !previous.stage().equals(current.stage())) {
+                return false;
+            }
+            return expected != PassType.RENDER
+                    || previous.attachmentCompatibilityKey().equals(current.attachmentCompatibilityKey());
         }
 
         private static void flush(

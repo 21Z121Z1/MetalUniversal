@@ -17,6 +17,14 @@ ADMISSION_SAMPLE_SECONDS="${ADMISSION_SAMPLE_SECONDS:-5}"
 RUN_ROOT="${METALLUM_AGENT_RUN_ROOT:-$ROOT/build/agent-runs}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${METALLUM_UNIFIED_EVAL_OUT:-$RUN_ROOT/unified-eval-$STAMP}"
+IRIS_CONFIG="$ROOT/run/config/iris.properties"
+SHADERPACK_DIR="$ROOT/run/shaderpacks"
+EVAL_INPUT_TMP=""
+IRIS_CONFIG_BACKUP=""
+IRIS_CONFIG_EXISTED=false
+STAGED_PACK_NAME=""
+STAGED_PACK_PATH=""
+STAGED_PACK_CREATED=false
 
 case "$MODE" in
   full|conformance|performance|diagnostic) ;;
@@ -64,6 +72,99 @@ PY
 fi
 
 mkdir -p "$OUT" "$OUT/correctness" "$OUT/admission" "$OUT/trials"
+
+pin_equals_property() {
+  local path="$1" key="$2" value="$3"
+  mkdir -p "$(dirname "$path")"
+  touch "$path"
+  python3 - "$path" "$key" "$value" <<'PY'
+import pathlib, sys
+path, key, value = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+prefix = key + "="
+out = []
+replaced = False
+for line in lines:
+    if line.startswith(prefix):
+        if not replaced:
+            out.append(prefix + value)
+            replaced = True
+    else:
+        out.append(line)
+if not replaced:
+    out.append(prefix + value)
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+}
+
+restore_eval_inputs() {
+  local status=$?
+  if [[ "$IRIS_CONFIG_EXISTED" == true ]]; then
+    mkdir -p "$(dirname "$IRIS_CONFIG")"
+    cp "$IRIS_CONFIG_BACKUP" "$IRIS_CONFIG"
+  elif [[ -n "$EVAL_INPUT_TMP" ]]; then
+    rm -f "$IRIS_CONFIG"
+  fi
+  if [[ "$STAGED_PACK_CREATED" == true ]]; then
+    rm -f "$STAGED_PACK_PATH"
+  fi
+  if [[ -n "$EVAL_INPUT_TMP" ]]; then
+    rm -rf "$EVAL_INPUT_TMP"
+  fi
+  exit "$status"
+}
+trap restore_eval_inputs EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+stage_eval_shader_pack() {
+  local source="${METALLUM_EVAL_SHADER_PACK_PATH:-}"
+  [[ -z "$source" ]] && return 0
+  if [[ -z "${METALLUM_EVAL_SHADER_PACK:-}" ]]; then
+    echo "METALLUM_EVAL_SHADER_PACK must identify the supplied shader pack" >&2
+    exit 2
+  fi
+  if [[ ! -f "$source" || ! -s "$source" ]]; then
+    echo "METALLUM_EVAL_SHADER_PACK_PATH must name a non-empty pack archive: $source" >&2
+    exit 2
+  fi
+
+  EVAL_INPUT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/metallum-unified-eval.XXXXXX")"
+  IRIS_CONFIG_BACKUP="$EVAL_INPUT_TMP/iris.properties"
+  if [[ -f "$IRIS_CONFIG" ]]; then
+    IRIS_CONFIG_EXISTED=true
+    cp "$IRIS_CONFIG" "$IRIS_CONFIG_BACKUP"
+  fi
+
+  local pack_sha safe_base
+  pack_sha="$(shasum -a 256 "$source" | awk '{print $1}')"
+  safe_base="$(basename "$source")"
+  safe_base="${safe_base//[^A-Za-z0-9._-]/_}"
+  [[ -n "$safe_base" ]] || safe_base="shader-pack.zip"
+  STAGED_PACK_NAME="metallum-unified-${pack_sha:0:12}-${safe_base}"
+  STAGED_PACK_PATH="$SHADERPACK_DIR/$STAGED_PACK_NAME"
+  mkdir -p "$SHADERPACK_DIR"
+
+  if [[ -e "$STAGED_PACK_PATH" ]]; then
+    if [[ ! -f "$STAGED_PACK_PATH" || "$(shasum -a 256 "$STAGED_PACK_PATH" | awk '{print $1}')" != "$pack_sha" ]]; then
+      echo "content-addressed shader-pack staging target is not the supplied archive: $STAGED_PACK_PATH" >&2
+      exit 2
+    fi
+  else
+    cp "$source" "$STAGED_PACK_PATH"
+    STAGED_PACK_CREATED=true
+  fi
+
+  pin_staged_shader_pack
+}
+
+pin_staged_shader_pack() {
+  [[ -z "$STAGED_PACK_NAME" ]] && return 0
+  pin_equals_property "$IRIS_CONFIG" "shaderPack" "$STAGED_PACK_NAME"
+  pin_equals_property "$IRIS_CONFIG" "enableShaders" "true"
+}
+
+stage_eval_shader_pack
 
 profile_args() {
   local profile="$1"
@@ -240,6 +341,10 @@ run_profile_task() {
   local arg status normalize_status=0
   mkdir -p "$trial_dir/artifacts"
   : > "$marker"
+  # Iris persists its runtime selection on shutdown. Re-pin immediately before
+  # every client process so A/B/B/A trials cannot inherit enableShaders=false
+  # or a different pack from the preceding arm.
+  pin_staged_shader_pack
   while IFS= read -r arg; do args+=("$arg"); done < <(profile_args "$profile" "$warmup_seconds" "$sample_seconds")
   printf '%s\n' "${args[@]}" > "$trial_dir/properties.txt"
   local command=(./gradlew --no-daemon "$task" "-Pworld=$WORLD" "${args[@]}" \
@@ -264,6 +369,20 @@ run_profile_task() {
     set -e
   fi
   if (( status != 0 )); then return "$status"; fi
+  if [[ -n "$STAGED_PACK_NAME" ]]; then
+    grep -F "Using shaderpack: $STAGED_PACK_NAME" "$trial_dir/client.log" >/dev/null || {
+      echo "$profile did not prove exact shader-pack activation: $STAGED_PACK_NAME" >&2
+      return 2
+    }
+  fi
+  # Startup/menu pacing records legitimately use OUT_OF_LEVEL_MENU with
+  # level=false. Reject only throttled records emitted while a level is live.
+  if [[ "$normalize" == "true" ]] \
+      && grep -Eq 'Metal frame pacing: .*throttle=(SHORT_AFK|OUT_OF_LEVEL_MENU).*level=true' \
+          "$trial_dir/client.log"; then
+    echo "$profile entered a throttled in-world state; performance evidence is invalid" >&2
+    return 2
+  fi
   return "$normalize_status"
 }
 

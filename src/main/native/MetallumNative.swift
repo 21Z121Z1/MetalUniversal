@@ -128,10 +128,10 @@ private struct MetalFxScalerKey: Hashable {
 private enum NativeState {
     static var debugLabelsEnabled = false
     // When true, makeRenderCommandEncoder_v2 leaves the depth attachment with
-        // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
-        // before endEncoding. Color stores remain concrete in V3 because Metal
-        // does not allow mutating actions known at encoder creation. Toggled once
-        // at device init from
+    // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
+    // before endEncoding. V3 color stores can likewise start as .unknown and
+    // be resolved per slot before endEncoding. Toggled once at device init
+    // from
     // metallum_set_deferred_depth_store; must match the Java flag exactly.
     static var deferredDepthStore = false
     // Split-fence mode (metallum.opt.splitFence): non-nil while the Java
@@ -9301,7 +9301,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
 // RenderPassDescriptorV3 ABI (P2). Per-attachment load/store actions replace
 // V2's boolean clear flags so the Iris planner's per-attachment decisions
 // become expressible: 0=dontCare, 1=load, 2=clear for loads; 0=dontCare,
-// 1=store, 2=deferred(.unknown, depth only) for stores. Unknown values map to
+// 1=store, 2=deferred(.unknown) for stores. Unknown values map to
 // the conservative default (load/store) instead of being rejected: the Java
 // planner is fail-closed, and a stale native module must never change pixels.
 private func v3LoadAction(_ raw: Int32) -> MTLLoadAction {
