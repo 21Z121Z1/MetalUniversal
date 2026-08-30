@@ -35,22 +35,32 @@ jobs:
           python3 .github/replay-reviewed/fix-parser.py
           python3 -m py_compile scripts/agent/replay_reviewed_codex.py
 
-      - name: replay reviewed product changes
+      - name: inspect product state after reviewed rollout
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import base64, importlib.util, json, zlib
+          from pathlib import Path
           spec = importlib.util.spec_from_file_location("reviewed_replay", "scripts/agent/replay_reviewed_codex.py")
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
           patches = json.loads(zlib.decompress(base64.b64decode(module.PAYLOAD)).decode("utf-8"))
-          print("=== REVIEWED PATCH 40 ===")
-          print(patches[-1])
-          print("=== END REVIEWED PATCH 40 ===")
+          for index, patch in enumerate(patches[:-1], 1):
+              module.apply_patch(patch)
+              print(f"applied reviewed patch {index}/{len(patches)}")
+          path = Path("scripts/agent/run_unified_eval_cycle.sh")
+          lines = path.read_text(encoding="utf-8").splitlines()
+          for needle in ("stage_eval_shader_pack() {", "run_profile_task() {"):
+              at = next(i for i, line in enumerate(lines) if line.strip() == needle)
+              lo = max(0, at - 5)
+              hi = min(len(lines), at + 70)
+              print(f"=== {needle} @ {at + 1} ===")
+              for number in range(lo, hi):
+                  print(f"{number + 1:04d}: {lines[number]}")
           PY
-          python3 scripts/agent/replay_reviewed_codex.py
           git diff --check
+          false
 
       - name: commit product diff
         shell: bash
