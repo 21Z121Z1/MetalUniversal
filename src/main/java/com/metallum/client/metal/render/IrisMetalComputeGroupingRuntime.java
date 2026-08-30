@@ -117,6 +117,9 @@ public final class IrisMetalComputeGroupingRuntime {
     }
 
     private static AccessSet access(final Object compute) throws ReflectiveOperationException {
+        if (compute instanceof AccessProvider provider) {
+            return provider.computeGroupingAccess();
+        }
         Object reflection = field(compute, "reflection");
         Object value = invoke(reflection, "resources");
         Set<String> reads = new LinkedHashSet<>();
@@ -128,6 +131,26 @@ public final class IrisMetalComputeGroupingRuntime {
                 if (kind.contains("STORAGE")) writes.add(name);
                 else reads.add(name);
             }
+        }
+        return new AccessSet(Set.copyOf(reads), Set.copyOf(writes));
+    }
+
+    /**
+     * Contract implemented by the renderer's planned compute objects. The
+     * reflective path above remains for compatibility with diagnostic and
+     * older objects that do not implement this small internal contract.
+     */
+    interface AccessProvider {
+        AccessSet computeGroupingAccess();
+    }
+
+    static AccessSet fromReflection(final MetalIrisShaderCompiler.ComputeReflection reflection) {
+        Set<String> reads = new LinkedHashSet<>();
+        Set<String> writes = new LinkedHashSet<>();
+        for (MetalIrisShaderCompiler.ComputeResource resource : reflection.resources()) {
+            String name = stableName(resource.name());
+            if (resource.kind().name().contains("STORAGE")) writes.add(name);
+            else reads.add(name);
         }
         return new AccessSet(Set.copyOf(reads), Set.copyOf(writes));
     }
@@ -182,7 +205,7 @@ public final class IrisMetalComputeGroupingRuntime {
         throw new NoSuchMethodException(name);
     }
 
-    private record AccessSet(Set<String> reads, Set<String> writes) {
+    record AccessSet(Set<String> reads, Set<String> writes) {
     }
 
     public record Snapshot(

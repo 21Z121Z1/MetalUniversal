@@ -422,12 +422,13 @@ final class IrisMetalPostChain implements AutoCloseable {
         }
     }
 
-    private static final class PlannedCompute {
+    private static final class PlannedCompute implements IrisMetalComputeGroupingRuntime.AccessProvider {
         private final String token;
         private final PassInfo info;
         private final ComputeSource source;
         private final MetalIrisShaderCompiler.TranslatedStage translated;
         private final MetalIrisShaderCompiler.ComputeReflection reflection;
+        private final IrisMetalComputeGroupingRuntime.AccessSet groupingAccess;
         private @Nullable MetalComputePipeline pipeline;
 
         private PlannedCompute(
@@ -443,6 +444,12 @@ final class IrisMetalPostChain implements AutoCloseable {
             this.reflection = Objects.requireNonNull(
                     translated.computeReflection(), "compute reflection for " + source.getName()
             );
+            this.groupingAccess = IrisMetalComputeGroupingRuntime.fromReflection(this.reflection);
+        }
+
+        @Override
+        public IrisMetalComputeGroupingRuntime.AccessSet computeGroupingAccess() {
+            return this.groupingAccess;
         }
     }
 
