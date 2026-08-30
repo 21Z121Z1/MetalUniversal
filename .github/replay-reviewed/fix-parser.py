@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 from pathlib import Path
-import re
 
 path = Path("scripts/agent/replay_reviewed_codex.py")
 text = path.read_text(encoding="utf-8")
@@ -33,16 +32,16 @@ if "normalized = [line.lstrip() for line in needle]" not in text:
     raise SystemExit("failed to install indentation-compatible context lookup")
 
 # Codex's custom apply_patch accepts unprefixed lines inside an added heredoc
-# body. Keep this compatibility narrow: an otherwise unsupported line inside
-# an already parsed hunk is an insertion; context and deletion matching remain
-# unchanged.
-text, raw_parse_count = re.subn(
-    r'(?m)^(?P<indent>[ \t]*)raise SystemExit\(f"unsupported patch line for \{path\}: \{patch_line!r\}"\)\s*$',
-    lambda match: match.group("indent") + "new.append(patch_line)",
-    text,
-)
-if raw_parse_count != 1:
-    raise SystemExit(f"expected one unsupported-line parser branch, found {raw_parse_count}")
+# body. Patch the single parser rejection site structurally rather than
+# depending on the exact exception type/quoting used by the generated helper.
+lines = text.splitlines()
+raw_rejections = [i for i, line in enumerate(lines) if "unsupported patch line for" in line]
+if len(raw_rejections) != 1:
+    raise SystemExit(f"expected one unsupported-line parser branch, found {len(raw_rejections)}")
+index = raw_rejections[0]
+indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
+lines[index] = indent + "new.append(patch_line)"
+text = "\n".join(lines) + "\n"
 
 old_write = '''        lines[index:index + len(old)] = new
         cursor = index + len(new)
