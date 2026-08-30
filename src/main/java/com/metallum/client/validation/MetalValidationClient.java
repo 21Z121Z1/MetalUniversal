@@ -96,6 +96,17 @@ public final class MetalValidationClient implements ClientModInitializer {
             "metallum.validation.performanceOnly"
     );
     /**
+     * Keep the performance client in the active framerate bucket. Minecraft's
+     * {@code FramerateLimitTracker} otherwise switches an unattended client to
+     * {@code SHORT_AFK} after sixty seconds and clamps it to 30 FPS. That
+     * clamp is a harness throttle, not renderer work, so allowing it into a
+     * wall-clock performance window would inflate frame p95 and hide the
+     * actual GPU/CPU bottleneck. The touch is scoped to performance-only
+     * validation and can be disabled for a deliberate AFK-throttle probe.
+     */
+    private static final boolean KEEP_PERFORMANCE_ACTIVE = PERFORMANCE_ONLY
+            && Boolean.parseBoolean(System.getProperty("metallum.validation.keepActive", "true"));
+    /**
      * Render-contract correctness for the Iris lane must not implicitly run
      * the separate MetalFX attachment/motion suite.  The Gradle task enables
      * this bounded mode explicitly; normal MetalFX validation keeps the full
@@ -335,6 +346,13 @@ public final class MetalValidationClient implements ClientModInitializer {
             return;
         }
         Minecraft minecraft = Minecraft.getInstance();
+        if (KEEP_PERFORMANCE_ACTIVE) {
+            // This only refreshes FramerateLimitTracker.latestInputTime; it
+            // does not synthesize a keyboard/mouse event or alter game state.
+            // Without it a multi-minute ABBA trial enters SHORT_AFK and the
+            // tracker clamps the client to 30 FPS after 60 seconds.
+            minecraft.getFramerateLimitTracker().onInputReceived();
+        }
         // Cleared here rather than in applyDeterministicWorldState, which only
         // runs once a level frame has already been driven. Under Gradle the
         // window usually opens unfocused, and the pause screen then opens on

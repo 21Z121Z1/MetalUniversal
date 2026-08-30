@@ -307,13 +307,20 @@ def fail_closed_trial(payload: Any, reason: str) -> dict[str, Any]:
 
 def load_trial(path: Path) -> dict[str, Any]:
     metrics_path = path / "metrics.json"
-    if metrics_path.is_file():
+    # A trial may have a cached metrics.json written before the Gradle task
+    # finished copying its authoritative report.  Prefer the report whenever
+    # it exists so a stale/incomplete cache can never hide a complete,
+    # frame-aligned measurement.  This also makes re-analysis deterministic
+    # after an interrupted runner invocation.
+    has_native_report = any(path.rglob("native-fullscreen-baseline.json"))
+    if has_native_report and normalize_strict_trial is not None:
+        payload = normalize_strict_trial(path)
+    elif metrics_path.is_file():
         try:
             payload = json.loads(metrics_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             return fail_closed_trial({}, f"metrics.json is unreadable: {exc}")
     else:
-        has_native_report = any(path.rglob("native-fullscreen-baseline.json"))
         payload = (
             normalize_strict_trial(path)
             if has_native_report and normalize_strict_trial is not None
@@ -621,13 +628,13 @@ def self_test() -> None:
         assert decision["state"] == "accepted-candidate", decision
 
         # A pre-frame-ID metrics cache must not be trusted just because it
-        # claims complete=true.  Removing it lets the strict native report be
+        # claims complete=true.  The authoritative native report wins and is
         # regenerated for the following assertions.
         stale_metrics = root / "trials" / "block-001" / "baseline" / "metrics.json"
         stale_metrics.write_text(json.dumps({"schema_version": 2, "complete": True}), encoding="utf-8")
         _, stale_decision = analyze(root)
-        assert stale_decision["complete_pair_block_count"] == 3, stale_decision
-        assert stale_decision["state"] == "inconclusive-noise", stale_decision
+        assert stale_decision["complete_pair_block_count"] == 4, stale_decision
+        assert stale_decision["state"] == "accepted-candidate", stale_decision
         stale_metrics.unlink()
 
         # Four block directories are not four paired observations when one

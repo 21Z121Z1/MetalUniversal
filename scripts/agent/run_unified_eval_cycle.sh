@@ -217,6 +217,7 @@ profile_args() {
     "-Dmetallum.validation.gpuPassTiming=true" \
     "-Dmetallum.validation.warmupSeconds=$warmup_seconds" \
     "-Dmetallum.validation.sampleSeconds=$sample_seconds" \
+    "-Dmetallum.validation.keepActive=true" \
     "-Dmetallum.iris.experimental.passFusion=$pass_fusion" \
     "-Dmetallum.iris.passFusion=$pass_fusion" \
     "-Dmetallum.iris.computeGrouping=$compute_grouping" \
@@ -295,6 +296,23 @@ manifest = {
 }
 (out / 'run-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 PY
+}
+
+presentation_block_reason() {
+  # The visible performance task has its own Gradle-side guard, but checking
+  # once here avoids launching the same client repeatedly when WindowServer is
+  # known not to produce presentedTime callbacks.  Keep this macOS-only and
+  # informational on other hosts so conformance/CI behavior is unchanged.
+  if [[ "${OSTYPE:-}" != darwin* ]] || ! command -v ioreg >/dev/null 2>&1; then
+    return 0
+  fi
+  local console_state
+  console_state="$(ioreg -n Root -d1 2>/dev/null || true)"
+  if grep -q '"IOConsoleLocked" = Yes' <<<"$console_state" \
+      || grep -q '"CGSSessionScreenIsLocked"=Yes' <<<"$console_state"; then
+    printf '%s\n' \
+      'the macOS console is locked; WindowServer cannot provide nonzero presentedTime callbacks'
+  fi
 }
 
 run_logged() {
@@ -429,6 +447,27 @@ write_manifest
 
 analysis_status=0
 admission_passed=true
+if [[ "$gate_status" == "pass" && ( "$MODE" == "full" || "$MODE" == "performance" ) ]]; then
+  blocked_reason="$(presentation_block_reason || true)"
+  if [[ -n "$blocked_reason" ]]; then
+    python3 - "$OUT/decision.json" "$blocked_reason" "$MODE" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "schema_version": 2,
+    "state": "blocked-environment",
+    "reason": sys.argv[2],
+    "mode": sys.argv[3],
+    "correctness_passed": True,
+    "performance_trials_started": False,
+    "block_count": 0,
+    "complete_pair_block_count": 0,
+}, indent=2) + "\n", encoding="utf-8")
+PY
+    printf '3\n' > "$OUT/analysis-exit-status.txt"
+    echo "Unified evaluation blocked before visible performance admission: $blocked_reason" >&2
+    exit 3
+  fi
+fi
 if [[ "$MODE" == "full" || "$MODE" == "performance" ]]; then
   if [[ "$gate_status" == "pass" ]]; then
     admission_dir="$OUT/admission/candidate"

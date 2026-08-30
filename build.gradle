@@ -1194,11 +1194,12 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				systemProperty key.toString(), value.toString()
 			}
 		}
-			[
-					"metallum.metalfx.stableCutoutAlpha",
-					"metallum.metalfx.stableTerrainSampler",
-					"metallum.metalfx.handReactiveWeight",
-					"metallum.validation.lenient"
+		[
+				"metallum.metalfx.stableCutoutAlpha",
+				"metallum.metalfx.stableTerrainSampler",
+				"metallum.metalfx.handReactiveWeight",
+				"metallum.validation.keepActive",
+				"metallum.validation.lenient"
 		].each { propertyName ->
 			def requestedValue = System.getProperty(propertyName)
 			if (requestedValue != null) {
