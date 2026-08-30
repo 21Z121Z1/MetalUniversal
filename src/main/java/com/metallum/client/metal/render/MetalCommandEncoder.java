@@ -266,6 +266,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         MemorySegment retainedHandle = MemorySegment.NULL;
         if (currentEncoder != null) {
             if (currentEncoder instanceof MTLRenderCommandEncoder renderEncoder) {
+                if (currentRenderPass != null) {
+                    currentRenderPass.resolveContractStoreActions(
+                            renderEncoderDeferredColorStores,
+                            colorStoresKilled,
+                            renderEncoderDeferredStore,
+                            renderEncoderDeferredStore && incomingClearsSameDepth
+                    );
+                }
                 if (renderEncoderDeferredStore) {
                     // The descriptor used storeAction=.unknown, so the store
                     // decision is owed before endEncoding. The depth contents
@@ -769,6 +777,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         MetalGpuTextureView[] colorTextureViews = new MetalGpuTextureView[colorAttachments.size()];
         Vector4fc[] clearColors = new Vector4fc[colorAttachments.size()];
+        boolean[] colorClearEnabled = new boolean[colorAttachments.size()];
         boolean hasColorClear = false;
         for (int index = 0; index < colorAttachments.size(); index++) {
             RenderPassDescriptor.Attachment<Optional<Vector4fc>> colorAttachment = colorAttachments.get(index);
@@ -802,6 +811,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
             if (colorClear.isPresent()) {
                 clearColors[index] = new Vector4f(colorClear.get());
+                colorClearEnabled[index] = true;
                 hasColorClear = true;
             }
             colorTex.markContentsDirty();
@@ -864,7 +874,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 depthClear.isPresent()
                         ? MetalIrisDepthConvention.hardwareClear(depthClear.getAsDouble())
                         : 0.0,
-                beginContractPass(descriptor, colorTextureViews, depthTexture, renderArea, hasColorClear, depthClear.isPresent())
+                beginContractPass(descriptor, colorTextureViews, depthTexture, renderArea, colorClearEnabled, depthClear.isPresent())
         );
         currentRenderPass = renderPass;
         renderPass.pushDebugGroup(descriptor.label());
@@ -887,7 +897,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final MetalGpuTextureView[] colorTextureViews,
             @Nullable final GpuTextureView depthTexture,
             final RenderPass.RenderArea renderArea,
-            final boolean hasColorClear,
+            final boolean[] colorClearEnabled,
             final boolean hasDepthClear
     ) {
         if (!RenderContractRuntime.enabled()) {
@@ -902,8 +912,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     slot,
                     contractResource(texture, view.baseMipLevel()),
                     AttachmentSemantic.COLOR,
-                    hasColorClear ? "clear" : "load",
-                    "store",
+                    slot < colorClearEnabled.length && colorClearEnabled[slot] ? "clear" : "load",
+                    renderPassDescriptorV3Active() && deferredColorStoreActive() ? "unknown" : "store",
                     true
             ));
         }
@@ -915,7 +925,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     contractResource(texture, depthTexture.baseMipLevel()),
                     AttachmentSemantic.DEPTH,
                     hasDepthClear ? "clear" : "load",
-                    "store",
+                    DEFERRED_DEPTH_STORE ? "unknown" : "store",
                     true
             );
         }

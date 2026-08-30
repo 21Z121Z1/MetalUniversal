@@ -55,6 +55,7 @@ final class MetalRenderPass implements RenderPassBackend {
     private boolean clearDepthEnabled;
     private final double clearDepthValue;
     private final long contractPassToken;
+    private boolean contractStoreActionsResolved;
     private final ScissorState scissorState = new ScissorState();
     private final GpuBufferSlice[] vertexBuffers = new GpuBufferSlice[MAX_VERTEX_BUFFERS];
     private final HashMap<String, GpuBufferSlice> uniforms = new HashMap<>();
@@ -977,9 +978,46 @@ final class MetalRenderPass implements RenderPassBackend {
 
     void finishContractPass() {
         if (contractPassToken >= 0L) {
+            if (!contractStoreActionsResolved) {
+                resolveContractStoreActions(null, null, false, false);
+            }
             commandEncoder.endContractTraceGroup();
             RenderContractRuntime.endPass(contractPassToken);
         }
+    }
+
+    void resolveContractStoreActions(
+            @Nullable final boolean[] deferredColorStores,
+            @Nullable final boolean[] killedColorStores,
+            final boolean deferredDepthStore,
+            final boolean killedDepthStore
+    ) {
+        if (contractPassToken < 0L || contractStoreActionsResolved) {
+            return;
+        }
+        Map<Integer, String> colorStoreActions = new HashMap<>();
+        for (int slot = 0; slot < colorTextures.length; slot++) {
+            if (colorTextures[slot] == null) {
+                continue;
+            }
+            boolean deferred = deferredColorStores != null
+                    && slot < deferredColorStores.length
+                    && deferredColorStores[slot];
+            boolean killed = deferred
+                    && killedColorStores != null
+                    && slot < killedColorStores.length
+                    && killedColorStores[slot];
+            colorStoreActions.put(slot, killed ? "dontCare" : "store");
+        }
+        String depthStoreAction = depthTexture == null
+                ? null
+                : deferredDepthStore && killedDepthStore ? "dontCare" : "store";
+        RenderContractRuntime.updateAttachmentStoreActions(
+                contractPassToken,
+                colorStoreActions,
+                depthStoreAction
+        );
+        contractStoreActionsResolved = true;
     }
 
     private void recordProducer(
