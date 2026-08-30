@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Hill-climb Sodium chunk-builder worker count on one Apple Silicon host.
 
-The benchmark intentionally scores only the time represented by Fabric's
-waitForChunksRender() tick count from MetalUniversal's existing production
-Client GameTest. World start-up, framebuffer capture, and Gradle wall time are
-recorded as diagnostics but are not part of the objective.
+Each candidate launches the isolated production terrain Client GameTest and
+scores only Fabric's waitForChunksRender() readiness interval. The benchmark
+project intentionally excludes framebuffer captures, resource reload tests,
+Iris and unrelated presentation checks so the objective stays close to Sodium
+terrain construction and upload readiness.
 
 This is an experiment harness, not an automatic shipping-policy writer. It
 emits a recommendation artifact; the production default remains Sodium's own
@@ -60,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--metallum-jar", type=Path, required=True)
+    parser.add_argument("--bench-project", type=Path,
+                        default=Path(".github/ci/terrain-bench"))
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--max-threads", type=int, default=0,
                         help="0 uses os.cpu_count(); positive values cap the search")
@@ -84,15 +87,21 @@ def main() -> int:
     if not jar.is_file():
         raise SystemExit(f"MetalUniversal JAR not found: {jar}")
 
+    bench = args.bench_project
+    if not bench.is_absolute():
+        bench = root / bench
+    bench = bench.resolve()
+    if not (bench / "build.gradle").is_file():
+        raise SystemExit(f"terrain benchmark project not found: {bench}")
+
     detected_cpus = max(1, os.cpu_count() or 1)
     max_threads = detected_cpus if args.max_threads <= 0 else min(detected_cpus, args.max_threads)
     max_threads = max(1, max_threads)
-    baseline_threads = sodium_default_thread_count(max_threads)
+    baseline_threads = min(sodium_default_thread_count(detected_cpus), max_threads)
 
-    e2e = root / ".github" / "ci" / "minecraft-e2e"
-    evidence = e2e / "build" / "evidence"
-    runtime_json = evidence / "runtime-evidence.json"
-    latest_log = e2e / "build" / "run" / "clientGameTest" / "logs" / "latest.log"
+    evidence = bench / "build" / "evidence"
+    runtime_json = evidence / "terrain-benchmark.json"
+    latest_log = bench / "build" / "run" / "clientGameTest" / "logs" / "latest.log"
     output = args.output if args.output.is_absolute() else root / args.output
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -111,8 +120,9 @@ def main() -> int:
             env["JAVA_TOOL_OPTIONS"] = append_java_tool_option(
                 env.get("JAVA_TOOL_OPTIONS"), f"-D{THREAD_PROPERTY}={threads}"
             )
-            # Isolate worker-count effects from the adaptive scheduler. A later
-            # hill-climb dimension can tune scheduling budgets independently.
+            # Isolate worker-count effects from MetalUniversal's existing dynamic
+            # build/upload budget controller. That controller becomes a separate
+            # search dimension after worker-count behavior is characterized.
             env["JAVA_TOOL_OPTIONS"] = append_java_tool_option(
                 env.get("JAVA_TOOL_OPTIONS"), f"-D{ADAPTIVE_PROPERTY}=false"
             )
@@ -122,9 +132,9 @@ def main() -> int:
                 "--no-daemon",
                 "--build-cache",
                 "--stacktrace",
-                "-p", str(e2e),
+                "-p", str(bench),
                 f"-PmetallumJar={jar}",
-                "runProductionClientGameTest",
+                "runProductionTerrainBenchmark",
             ]
             started = time.perf_counter()
             completed = subprocess.run(command, cwd=root, env=env)
@@ -135,14 +145,19 @@ def main() -> int:
                     f"with exit code {completed.returncode}"
                 )
             if not runtime_json.is_file():
-                raise RuntimeError(f"missing runtime evidence after benchmark: {runtime_json}")
+                raise RuntimeError(f"missing terrain evidence after benchmark: {runtime_json}")
 
             runtime = json.loads(runtime_json.read_text(encoding="utf-8"))
             if runtime.get("sodiumLoaded") is not True or runtime.get("chunksRendered") is not True:
                 raise RuntimeError(f"invalid terrain runtime evidence: {runtime}")
+            if str(runtime.get("backend", "")).lower() != "metal":
+                raise RuntimeError(f"terrain benchmark did not use Metal: {runtime}")
             chunk_ticks = int(runtime["chunkRenderTicks"])
-            if chunk_ticks <= 0:
-                raise RuntimeError(f"invalid chunkRenderTicks={chunk_ticks}")
+            elapsed_millis = float(runtime["chunkRenderElapsedMillis"])
+            if chunk_ticks <= 0 or elapsed_millis <= 0.0:
+                raise RuntimeError(
+                    f"invalid terrain timing: ticks={chunk_ticks} elapsedMillis={elapsed_millis}"
+                )
 
             observed_workers: list[int] = []
             if latest_log.is_file():
@@ -159,22 +174,27 @@ def main() -> int:
             sample = {
                 "repeat": repeat,
                 "chunkRenderTicks": chunk_ticks,
+                "chunkRenderElapsedMillis": elapsed_millis,
                 "wallSeconds": round(wall_seconds, 6),
                 "observedWorkerCounts": observed_workers,
             }
             samples.append(sample)
             print(
                 f"terrain-hillclimb threads={threads} repeat={repeat}/{args.repeats} "
-                f"chunkRenderTicks={chunk_ticks} wall={wall_seconds:.2f}s",
+                f"chunkRenderTicks={chunk_ticks} elapsed={elapsed_millis:.3f}ms "
+                f"wall={wall_seconds:.2f}s",
                 flush=True,
             )
 
         tick_values = [float(sample["chunkRenderTicks"]) for sample in samples]
+        elapsed_values = [float(sample["chunkRenderElapsedMillis"]) for sample in samples]
         summary = {
             "threads": threads,
             "samples": samples,
             "medianChunkRenderTicks": statistics.median(tick_values),
             "p95ChunkRenderTicks": percentile(tick_values, 0.95),
+            "medianChunkRenderElapsedMillis": statistics.median(elapsed_values),
+            "p95ChunkRenderElapsedMillis": percentile(elapsed_values, 0.95),
             "minChunkRenderTicks": min(tick_values),
             "maxChunkRenderTicks": max(tick_values),
         }
@@ -200,6 +220,7 @@ def main() -> int:
             neighbors,
             key=lambda result: (
                 result["medianChunkRenderTicks"],
+                result["medianChunkRenderElapsedMillis"],
                 result["p95ChunkRenderTicks"],
                 result["threads"],
             ),
@@ -231,9 +252,10 @@ def main() -> int:
     total_improvement = (baseline_median - winner_median) / baseline_median
 
     report = {
-        "schema": 1,
-        "objective": "minimize repeated Client GameTest chunkRenderTicks",
-        "scope": "Sodium client terrain chunk building; Minecraft world generation is not scored",
+        "schema": 2,
+        "objective": "minimize repeated isolated waitForChunksRender readiness ticks",
+        "scope": "Sodium client terrain chunk construction/upload readiness on Metal; Minecraft logical world generation is not scored",
+        "benchmarkProject": str(bench.relative_to(root)),
         "machine": {
             "detectedLogicalProcessors": detected_cpus,
             "searchMaxThreads": max_threads,
@@ -251,6 +273,7 @@ def main() -> int:
         "winner": {
             "threads": current_threads,
             "medianChunkRenderTicks": winner_median,
+            "medianChunkRenderElapsedMillis": winner["medianChunkRenderElapsedMillis"],
             "p95ChunkRenderTicks": winner["p95ChunkRenderTicks"],
             "relativeMedianImprovementVsSodiumDefault": total_improvement,
             "recommendedSystemProperty": (
