@@ -8,6 +8,10 @@ repositories {
 
 def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
 def terrainChunkBuilderThreads = providers.gradleProperty("terrainChunkBuilderThreads").orElse("1").get()
+def terrainAdaptiveScheduling = providers.gradleProperty("terrainAdaptiveScheduling").orElse("false").get()
+def terrainAdaptiveSchedulingWarmupFrames = providers.gradleProperty("terrainAdaptiveSchedulingWarmupFrames").orElse("").get()
+def terrainAdaptiveSchedulingBuildBudgetRatio = providers.gradleProperty("terrainAdaptiveSchedulingBuildBudgetRatio").orElse("").get()
+def terrainAdaptiveSchedulingUploadBudgetRatio = providers.gradleProperty("terrainAdaptiveSchedulingUploadBudgetRatio").orElse("").get()
 
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -64,7 +68,16 @@ tasks.register("runProductionTerrainBenchmark", net.fabricmc.loom.task.prod.Clie
     jvmArgs.add("-Dmetallum.opt.renderStatePacket=false")
     jvmArgs.add("-Dmetallum.opt.residencySet=false")
     jvmArgs.add("-Dmetallum.opt.terrainChunkBuilderThreads=${terrainChunkBuilderThreads}")
-    jvmArgs.add("-Dmetallum.opt.terrainAdaptiveScheduling=false")
+    jvmArgs.add("-Dmetallum.opt.terrainAdaptiveScheduling=${terrainAdaptiveScheduling}")
+    if (!terrainAdaptiveSchedulingWarmupFrames.isBlank()) {
+        jvmArgs.add("-Dmetallum.opt.terrainAdaptiveSchedulingWarmupFrames=${terrainAdaptiveSchedulingWarmupFrames}")
+    }
+    if (!terrainAdaptiveSchedulingBuildBudgetRatio.isBlank()) {
+        jvmArgs.add("-Dmetallum.opt.terrainAdaptiveSchedulingBuildBudgetRatio=${terrainAdaptiveSchedulingBuildBudgetRatio}")
+    }
+    if (!terrainAdaptiveSchedulingUploadBudgetRatio.isBlank()) {
+        jvmArgs.add("-Dmetallum.opt.terrainAdaptiveSchedulingUploadBudgetRatio=${terrainAdaptiveSchedulingUploadBudgetRatio}")
+    }
     jvmArgs.add("-Dmetallum.ci.terrainEvidenceDir=${file("${buildDir}/evidence").absolutePath}")
 
     useXVFB = false
