@@ -17,6 +17,11 @@ dependencies {
 
     productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
     productionRuntimeMods "maven.modrinth:sodium:${project.sodium_version}"
+    // MetalUniversal's shipping renderer has Iris bridge types in the production
+    // class graph even when semantic Iris rendering is disabled. Keep runtime
+    // dependency parity with the real client while leaving the benchmark lane
+    // itself on Sodium/Metal via metallum.iris.semantic=false below.
+    productionRuntimeMods "maven.modrinth:iris:${project.iris_version}"
 }
 
 java {
