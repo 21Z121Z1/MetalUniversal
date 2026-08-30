@@ -12,6 +12,8 @@ def terrainAdaptiveScheduling = providers.gradleProperty("terrainAdaptiveSchedul
 def terrainAdaptiveSchedulingWarmupFrames = providers.gradleProperty("terrainAdaptiveSchedulingWarmupFrames").orElse("").get()
 def terrainAdaptiveSchedulingBuildBudgetRatio = providers.gradleProperty("terrainAdaptiveSchedulingBuildBudgetRatio").orElse("").get()
 def terrainAdaptiveSchedulingUploadBudgetRatio = providers.gradleProperty("terrainAdaptiveSchedulingUploadBudgetRatio").orElse("").get()
+def terrainAdaptiveSchedulingConstrainedMultiplier = providers.gradleProperty("terrainAdaptiveSchedulingConstrainedMultiplier").orElse("").get()
+def terrainAdaptiveSchedulingSevereMultiplier = providers.gradleProperty("terrainAdaptiveSchedulingSevereMultiplier").orElse("").get()
 
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -77,6 +79,12 @@ tasks.register("runProductionTerrainBenchmark", net.fabricmc.loom.task.prod.Clie
     }
     if (!terrainAdaptiveSchedulingUploadBudgetRatio.isBlank()) {
         jvmArgs.add("-Dmetallum.opt.terrainAdaptiveSchedulingUploadBudgetRatio=${terrainAdaptiveSchedulingUploadBudgetRatio}")
+    }
+    if (!terrainAdaptiveSchedulingConstrainedMultiplier.isBlank()) {
+        jvmArgs.add("-Dmetallum.opt.terrainAdaptiveSchedulingConstrainedMultiplier=${terrainAdaptiveSchedulingConstrainedMultiplier}")
+    }
+    if (!terrainAdaptiveSchedulingSevereMultiplier.isBlank()) {
+        jvmArgs.add("-Dmetallum.opt.terrainAdaptiveSchedulingSevereMultiplier=${terrainAdaptiveSchedulingSevereMultiplier}")
     }
     jvmArgs.add("-Dmetallum.ci.terrainEvidenceDir=${file("${buildDir}/evidence").absolutePath}")
 
