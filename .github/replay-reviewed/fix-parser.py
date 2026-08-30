@@ -35,14 +35,14 @@ text = text.replace(old_find, new_find, 1)
 # The uploaded rollout contains exactly one malformed custom apply_patch call:
 # a newly-added Python/shell heredoc block in run_unified_eval_cycle.sh lost
 # unified-diff '+' prefixes from `prefix = key + "="` through the closing `}`.
-# Normalize only that uniquely-identifiable patch; every other reviewed patch
-# remains subject to the strict parser below.
+# Normalize only an exact raw signature line. Later normal patches may mention
+# the same source line as prefixed context and must remain untouched.
 normalizer = '''def normalize_rollout_patch(patch):
     signature = 'prefix = key + "="'
-    if signature not in patch:
-        return patch
     lines = patch.splitlines()
     matches = [i for i, line in enumerate(lines) if line == signature]
+    if not matches:
+        return patch
     if len(matches) != 1:
         fail(f"malformed rollout patch signature count: {len(matches)}")
     start = matches[0]
