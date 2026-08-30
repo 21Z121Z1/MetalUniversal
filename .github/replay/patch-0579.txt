@@ -1,0 +1,136 @@
+*** Begin Patch
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/client/metal/render/TerrainCandidateRegistry.java
+@@
+-import com.metallum.mixin.sodium.SectionRenderDataStorageAccessor;
+-import com.metallum.mixin.sodium.SectionRenderDataStorageOwner;
+@@
+     public static void onStorageMutation(final SectionRenderDataStorage storage, final int localIndex) {
+-        if (!ENABLED || storage == null || !(storage instanceof SectionRenderDataStorageOwner owner)
+-                || !owner.metallum$hasOwner()) {
++        TerrainStorageBridge.Owner owner = TerrainStorageBridge.owner(storage);
++        if (!ENABLED || storage == null || owner == null) {
+@@
+-        if (storage instanceof SectionRenderDataStorageOwner owner && owner.metallum$hasOwner()) {
++        TerrainStorageBridge.Owner owner = TerrainStorageBridge.owner(storage);
++        if (owner != null) {
+             refresh(machine, owner, storage, key.localIndex());
+@@
+-            final SectionRenderDataStorageOwner owner,
++            final TerrainStorageBridge.Owner owner,
+@@
+-            final SectionRenderDataStorageOwner owner,
++            final TerrainStorageBridge.Owner owner,
+@@
+-        if (!(storage instanceof SectionRenderDataStorageAccessor accessor)
+-                || localIndex < 0 || localIndex >= 256) {
++        if (localIndex < 0 || localIndex >= 256) {
+             return null;
+         }
+-        GlBufferSegment[] vertices = accessor.metallum$getVertexAllocations();
++        GlBufferSegment[] vertices = TerrainStorageBridge.vertexAllocations(storage);
+@@
+-            GlBufferSegment[] elements = accessor.metallum$getElementAllocations();
++            GlBufferSegment[] elements = TerrainStorageBridge.elementAllocations(storage);
+             index = elements == null || localIndex >= elements.length ? null : elements[localIndex];
+         } else {
+-            index = accessor.metallum$getSharedIndexAllocation();
++            index = TerrainStorageBridge.sharedIndexAllocation(storage);
+@@
+-                        owner.metallum$isTranslucent()
++                        owner.translucent()
+@@
+-                owner.metallum$isTranslucent()
++                owner.translucent()
+@@
+-                || !(storage instanceof SectionRenderDataStorageOwner owner)
+-                || !owner.metallum$hasOwner()) {
++                || TerrainStorageBridge.owner(storage) == null) {
+@@
+-                    || section.regionX() != owner.metallum$regionX()
+-                    || section.regionY() != owner.metallum$regionY()
+-                    || section.regionZ() != owner.metallum$regionZ()
+-                    || section.sectionX() != owner.metallum$baseChunkX()
++                    || section.regionX() != owner.regionX()
++                    || section.regionY() != owner.regionY()
++                    || section.regionZ() != owner.regionZ()
++                    || section.sectionX() != owner.baseChunkX()
+@@
+-                    || section.sectionY() != owner.metallum$baseChunkY()
++                    || section.sectionY() != owner.baseChunkY()
+@@
+-                    || section.sectionZ() != owner.metallum$baseChunkZ()
++                    || section.sectionZ() != owner.baseChunkZ()
+@@
+-            final SectionRenderDataStorageOwner owner,
++            final TerrainStorageBridge.Owner owner,
+@@
+-                owner.metallum$regionX(), owner.metallum$regionY(), owner.metallum$regionZ(),
++                owner.regionX(), owner.regionY(), owner.regionZ(),
+@@
+-                owner.metallum$baseChunkX() + LocalSectionIndex.unpackX(localIndex),
+-                owner.metallum$baseChunkY() + LocalSectionIndex.unpackY(localIndex),
+-                owner.metallum$baseChunkZ() + LocalSectionIndex.unpackZ(localIndex)
++                owner.baseChunkX() + LocalSectionIndex.unpackX(localIndex),
++                owner.baseChunkY() + LocalSectionIndex.unpackY(localIndex),
++                owner.baseChunkZ() + LocalSectionIndex.unpackZ(localIndex)
+@@
+-                    ? storage instanceof SectionRenderDataStorageOwner owner && owner.metallum$isTranslucent()
++                    ? storage instanceof SectionRenderDataStorage storageOwner
++                    && TerrainStorageBridge.owner(storageOwner) != null
++                    && TerrainStorageBridge.owner(storageOwner).translucent()
+@@
+-                if (mesh.storage instanceof SectionRenderDataStorage storage
+-                        && storage instanceof SectionRenderDataStorageOwner owner
+-                        && owner.metallum$hasOwner()) {
++                if (mesh.storage instanceof SectionRenderDataStorage storage
++                        && TerrainStorageBridge.owner(storage) != null) {
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/mixin/sodium/SectionRenderDataStorageOwnerMixin.java
+@@
+-public abstract class SectionRenderDataStorageOwnerMixin implements SectionRenderDataStorageOwner {
++public abstract class SectionRenderDataStorageOwnerMixin {
+@@
+-    @Override
+     public void metallum$setOwner(
+@@
+-    @Override
+     public boolean metallum$hasOwner() {
+@@
+-    @Override
+     public int metallum$regionX() {
+@@
+-    @Override
+     public int metallum$regionY() {
+@@
+-    @Override
+     public int metallum$regionZ() {
+@@
+-    @Override
+     public int metallum$baseChunkX() {
+@@
+-    @Override
+     public int metallum$baseChunkY() {
+@@
+-    @Override
+     public int metallum$baseChunkZ() {
+@@
+-    @Override
+     public boolean metallum$isTranslucent() {
+*** Update File: /Users/retriedstormtrooper/Documents/Codex/worktrees/metaluniversal-heap-alias-recipe-canonical/src/main/java/com/metallum/mixin/sodium/RenderRegionTerrainCandidateMixin.java
+@@
+ import com.metallum.client.metal.render.TerrainCandidateRegistry;
++import com.metallum.client.metal.render.TerrainStorageBridge;
+@@
+-        if (storage instanceof SectionRenderDataStorageOwner owner) {
++        if (storage != null) {
+             RenderRegion region = (RenderRegion) (Object) this;
+-            owner.metallum$setOwner(
+-                    region.getX(), region.getY(), region.getZ(),
+-                    region.getChunkX(), region.getChunkY(), region.getChunkZ(),
+-                    renderPass.isTranslucent()
+-            );
++            TerrainStorageBridge.setOwner(
++                    storage, region.getX(), region.getY(), region.getZ(),
++                    region.getChunkX(), region.getChunkY(), region.getChunkZ(),
++                    renderPass.isTranslucent());
+         }
+*** End Patch
