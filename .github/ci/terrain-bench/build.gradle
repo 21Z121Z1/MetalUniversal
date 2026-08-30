@@ -7,6 +7,7 @@ repositories {
 }
 
 def metallumJarProvider = providers.gradleProperty("metallumJar").map { file(it) }
+def terrainChunkBuilderThreads = providers.gradleProperty("terrainChunkBuilderThreads").orElse("1").get()
 
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -33,6 +34,11 @@ java {
 tasks.register("runProductionTerrainBenchmark", net.fabricmc.loom.task.prod.ClientProductionRunTask) {
     dependsOn tasks.named("jar")
 
+    // A performance trial is a process execution, not a cacheable build product.
+    // The hill climber removes the previous JSON before every sample, so never
+    // allow Gradle to replace a requested client launch with an UP-TO-DATE result.
+    outputs.upToDateWhen { false }
+
     doFirst {
         def metallumJar = metallumJarProvider.get()
         if (!metallumJar.isFile()) {
@@ -57,6 +63,8 @@ tasks.register("runProductionTerrainBenchmark", net.fabricmc.loom.task.prod.Clie
     jvmArgs.add("-Dmetallum.opt.metal4MainQueuePilot=false")
     jvmArgs.add("-Dmetallum.opt.renderStatePacket=false")
     jvmArgs.add("-Dmetallum.opt.residencySet=false")
+    jvmArgs.add("-Dmetallum.opt.terrainChunkBuilderThreads=${terrainChunkBuilderThreads}")
+    jvmArgs.add("-Dmetallum.opt.terrainAdaptiveScheduling=false")
     jvmArgs.add("-Dmetallum.ci.terrainEvidenceDir=${file("${buildDir}/evidence").absolutePath}")
 
     useXVFB = false
