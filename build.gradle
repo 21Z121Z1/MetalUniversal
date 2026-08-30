@@ -116,14 +116,14 @@ tasks.test {
 	exclude "**/MetalIrisShaderTranslationTest.class"
 	exclude "**/MetalIrisSodiumTerrainTest.class"
 	exclude "**/MetalRenderGraphBenchIntegrationTest.class"
-	if (hostedCi) {
-		exclude "**/IrisMetalPostChainCompilationTest.class"
-		exclude "**/IrisMetalShadowPipelineTest.class"
-		exclude "**/IrisMetalShadowComputeConformanceTest.class"
-		exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
-		exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
-		exclude "**/MetalRenderContractGpuIntegrationTest.class"
-	}
+	// GPU integrations are routed through explicit capability tasks instead of
+	// changing the generic unit-test suite according to CI=true/false.
+	exclude "**/IrisMetalPostChainCompilationTest.class"
+	exclude "**/IrisMetalShadowPipelineTest.class"
+	exclude "**/IrisMetalShadowComputeConformanceTest.class"
+	exclude "**/MetalGenericVertexAttributeIntegrationTest.class"
+	exclude "**/MetalIrisCustomTexturesIntegrationTest.class"
+	exclude "**/MetalRenderContractGpuIntegrationTest.class"
 	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
 		jvmArgs "--enable-native-access=ALL-UNNAMED"
 		environment "MTL_DEBUG_LAYER", metalApiValidation
