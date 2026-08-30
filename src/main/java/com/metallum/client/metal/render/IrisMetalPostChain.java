@@ -1235,26 +1235,32 @@ final class IrisMetalPostChain implements AutoCloseable {
             final List<PlannedCompute> computes,
             final @Nullable List<String> executed
     ) {
-        if (computes.isEmpty()) {
-            return;
-        }
-        if (this.concurrentCompute) {
-            try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/compute")) {
-                for (PlannedCompute compute : computes) {
+        try {
+            if (computes.isEmpty()) {
+                return;
+            }
+            if (this.concurrentCompute) {
+                try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/compute")) {
+                    for (PlannedCompute compute : computes) {
+                        executeCompute(pass, compute, targets, resources, executed);
+                    }
+                }
+                return;
+            }
+
+            // Fixed Iris issues image/texture-fetch/SSBO barriers before every
+            // dispatch unless the pack explicitly opts into concurrent compute.
+            // An encoder boundary on the shared Metal fence is the conservative
+            // native equivalent for hazard-untracked resources.
+            for (PlannedCompute compute : computes) {
+                try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/compute")) {
                     executeCompute(pass, compute, targets, resources, executed);
                 }
             }
-            return;
-        }
-
-        // Fixed Iris issues image/texture-fetch/SSBO barriers before every
-        // dispatch unless the pack explicitly opts into concurrent compute.
-        // An encoder boundary on the shared Metal fence is the conservative
-        // native equivalent for hazard-untracked resources.
-        for (PlannedCompute compute : computes) {
-            try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/compute")) {
-                executeCompute(pass, compute, targets, resources, executed);
-            }
+        } finally {
+            // A failed dispatch does not reach the mixin's normal-return hook.
+            // Do not let a partial group affect a later encoder acquisition.
+            IrisMetalComputeGroupingRuntime.abort();
         }
     }
 
