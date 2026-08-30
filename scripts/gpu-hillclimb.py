@@ -65,6 +65,7 @@ def main() -> int:
     trials_root.mkdir(parents=True, exist_ok=True)
     evidence = bench / "build" / "evidence"
     runtime_json = evidence / "gpu-benchmark.json"
+    runtime_trace = evidence / "gpu-frame-trace.jsonl"
     latest_log = bench / "build" / "run" / "clientGameTest" / "logs" / "latest.log"
 
     trial_index = 0
@@ -95,6 +96,8 @@ def main() -> int:
             raise RuntimeError(f"GPU benchmark failed for {label}; see {trial_dir / 'runner.log'}")
         if not runtime_json.is_file():
             raise RuntimeError(f"missing GPU benchmark evidence for {label}")
+        if not runtime_trace.is_file():
+            raise RuntimeError(f"missing raw GPU frame trace for {label}")
         data = json.loads(runtime_json.read_text(encoding="utf-8"))
         if str(data.get("backend", "")).lower() != "metal":
             raise RuntimeError(f"GPU benchmark did not use Metal: {data}")
@@ -107,14 +110,35 @@ def main() -> int:
             if bool(observed.get(knob)) != bool(config[knob]):
                 raise RuntimeError(f"{label}: requested {knob}={config[knob]}, observed {observed.get(knob)}")
 
+        trace_rows: list[dict[str, Any]] = []
+        for line_number, line in enumerate(runtime_trace.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"{label}: invalid frame trace JSON on line {line_number}") from exc
+            if row.get("authority") != "hosted-metal3-proxy-screening":
+                raise RuntimeError(f"{label}: unexpected frame trace authority on line {line_number}: {row}")
+            if "submitIndex" not in row or float(row.get("gpuMillis", 0.0)) <= 0.0:
+                raise RuntimeError(f"{label}: invalid frame trace row on line {line_number}: {row}")
+            trace_rows.append(row)
+        if len(trace_rows) != int(data["gpuSampleCount"]):
+            raise RuntimeError(
+                f"{label}: frame trace/sample mismatch: trace={len(trace_rows)} metrics={data['gpuSampleCount']}"
+            )
+
         data["trialLabel"] = label
         data["wallSeconds"] = round(wall, 6)
+        data["gpuFrameTraceRows"] = len(trace_rows)
         (trial_dir / "metrics.json").write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        shutil.copy2(runtime_trace, trial_dir / "gpu-frame-trace.jsonl")
         if latest_log.is_file():
             shutil.copy2(latest_log, trial_dir / "latest.log")
         print(
             f"gpu-hillclimb {label}: p95={data['gpuP95Millis']:.4f}ms "
-            f"p50={data['gpuP50Millis']:.4f}ms completed={data['completedGpuFramesPerSecond']:.1f}/s",
+            f"p50={data['gpuP50Millis']:.4f}ms completed={data['completedGpuFramesPerSecond']:.1f}/s ",
+            f"trace={len(trace_rows)} frames",
             flush=True,
         )
         return data
