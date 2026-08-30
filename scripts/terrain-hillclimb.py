@@ -3,9 +3,9 @@
 
 Each candidate launches the isolated production terrain Client GameTest and
 scores only Fabric's waitForChunksRender() readiness interval. The benchmark
-project intentionally excludes framebuffer captures, resource reload tests,
-Iris and unrelated presentation checks so the objective stays close to Sodium
-terrain construction and upload readiness.
+loads the same Sodium/Iris runtime dependency set as the shipping client, while
+Iris semantics, Metal 4 and unrelated presentation features stay disabled so
+the objective remains Sodium terrain construction and upload readiness.
 
 This is an experiment harness, not an automatic shipping-policy writer. It
 emits a recommendation artifact; the production default remains Sodium's own
@@ -28,7 +28,6 @@ import time
 from typing import Any
 
 THREAD_PROPERTY = "metallum.opt.terrainChunkBuilderThreads"
-ADAPTIVE_PROPERTY = "metallum.opt.terrainAdaptiveScheduling"
 WORKER_RE = re.compile(r"Started\s+(\d+)\s+worker threads")
 
 
@@ -50,11 +49,6 @@ def percentile(values: list[float], fraction: float) -> float:
         return ordered[low]
     weight = position - low
     return ordered[low] * (1.0 - weight) + ordered[high] * weight
-
-
-def append_java_tool_option(existing: str | None, option: str) -> str:
-    current = (existing or "").strip()
-    return f"{current} {option}".strip()
 
 
 def parse_args() -> argparse.Namespace:
@@ -116,17 +110,6 @@ def main() -> int:
         for repeat in range(1, args.repeats + 1):
             shutil.rmtree(evidence, ignore_errors=True)
 
-            env = os.environ.copy()
-            env["JAVA_TOOL_OPTIONS"] = append_java_tool_option(
-                env.get("JAVA_TOOL_OPTIONS"), f"-D{THREAD_PROPERTY}={threads}"
-            )
-            # Isolate worker-count effects from MetalUniversal's existing dynamic
-            # build/upload budget controller. That controller becomes a separate
-            # search dimension after worker-count behavior is characterized.
-            env["JAVA_TOOL_OPTIONS"] = append_java_tool_option(
-                env.get("JAVA_TOOL_OPTIONS"), f"-D{ADAPTIVE_PROPERTY}=false"
-            )
-
             command = [
                 str(root / "gradlew"),
                 "--no-daemon",
@@ -134,10 +117,11 @@ def main() -> int:
                 "--stacktrace",
                 "-p", str(bench),
                 f"-PmetallumJar={jar}",
+                f"-PterrainChunkBuilderThreads={threads}",
                 "runProductionTerrainBenchmark",
             ]
             started = time.perf_counter()
-            completed = subprocess.run(command, cwd=root, env=env)
+            completed = subprocess.run(command, cwd=root)
             wall_seconds = time.perf_counter() - started
             if completed.returncode != 0:
                 raise RuntimeError(
