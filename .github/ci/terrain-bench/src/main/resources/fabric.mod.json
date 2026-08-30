@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "metaluniversal_terrain_bench",
+  "version": "1.0.0",
+  "name": "MetalUniversal Terrain Benchmark",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-client-gametest": [
+      "com.metallum.terrainbench.TerrainBenchmarkGameTest"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "fabric-api": "*",
+    "minecraft": "~26.2-",
+    "java": ">=25",
+    "metallum": "*",
+    "sodium": "*"
+  }
+}
