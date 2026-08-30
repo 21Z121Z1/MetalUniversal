@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       repeats:
-        description: Repeats per worker-count candidate
+        description: Repeats per hill-climb candidate
         required: false
         default: '2'
   push:
@@ -12,9 +12,11 @@ on:
       - experiment/apple-terrain-hillclimb
     paths:
       - 'src/main/java/com/metallum/mixin/sodium/**'
+      - 'src/main/java/com/metallum/mixin/terrain/**'
       - 'src/main/java/com/metallum/client/terrain/**'
       - 'src/main/resources/metallum.mixins.json'
       - 'scripts/terrain-hillclimb.py'
+      - 'scripts/terrain-scheduler-hillclimb.py'
       - '.github/ci/terrain-bench/**'
       - '.github/workflows/terrain-hillclimb.yml'
 
@@ -69,7 +71,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chmod +x ./gradlew scripts/terrain-hillclimb.py
+          chmod +x ./gradlew scripts/terrain-hillclimb.py scripts/terrain-scheduler-hillclimb.py
           ./gradlew \
             --build-cache \
             --stacktrace \
@@ -100,20 +102,47 @@ jobs:
             --tail-regression-limit 0.05 \
             --output build/terrain-hillclimb/report.json
 
+      - name: Hill-climb MetalUniversal terrain scheduler
+        shell: bash
+        env:
+          REPEATS: ${{ github.event.inputs.repeats || '2' }}
+        run: |
+          set -euo pipefail
+          worker_report="build/terrain-hillclimb/report.json"
+          test -s "$worker_report"
+          threads="$(python3 - "$worker_report" <<'PY'
+          import json, sys
+          print(int(json.load(open(sys.argv[1], encoding='utf-8'))['winner']['threads']))
+          PY
+          )"
+          echo "fixed Sodium worker winner: $threads"
+          python3 scripts/terrain-scheduler-hillclimb.py \
+            --repo-root "$PWD" \
+            --bench-project .github/ci/terrain-bench \
+            --metallum-jar "${{ steps.metallum.outputs.jar }}" \
+            --threads "$threads" \
+            --repeats "$REPEATS" \
+            --step 0.02 \
+            --max-moves 4 \
+            --min-improvement 0.02 \
+            --tail-regression-limit 0.05 \
+            --output build/terrain-scheduler-hillclimb/report.json
+
       - name: Summarize recommendation
         if: always()
         shell: bash
         run: |
           set -u
-          report="build/terrain-hillclimb/report.json"
-          if [[ -s "$report" ]]; then
-            cat "$report"
-            python3 - "$report" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          worker_report="build/terrain-hillclimb/report.json"
+          scheduler_report="build/terrain-scheduler-hillclimb/report.json"
+          if [[ -s "$worker_report" ]]; then
+            cat "$worker_report"
+            python3 - "$worker_report" >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import json, sys
           data = json.load(open(sys.argv[1], encoding='utf-8'))
           winner = data['winner']
           search = data['search']
-          print('## Apple Silicon terrain hill climb')
+          print('## Apple Silicon terrain worker hill climb')
           print()
           print(f"- Sodium default workers: {search['sodiumDefaultThreads']}")
           print(f"- Hill-climb path: {' → '.join(map(str, search['path']))}")
@@ -122,9 +151,32 @@ jobs:
           print(f"- Winner median readiness: {winner['medianChunkRenderElapsedMillis']:.3f} ms")
           print(f"- Relative median improvement: {winner['relativeMedianImprovementVsSodiumDefault'] * 100:.2f}%")
           print(f"- Runtime recommendation: `{winner['recommendedSystemProperty']}`")
+          print()
           PY
           else
-            echo 'Terrain hill-climb report was not produced.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Terrain worker hill-climb report was not produced.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -s "$scheduler_report" ]]; then
+            cat "$scheduler_report"
+            python3 - "$scheduler_report" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding='utf-8'))
+          winner = data['winner']
+          search = data['search']
+          print('## MetalUniversal terrain scheduler hill climb')
+          print()
+          print(f"- Fixed Sodium workers: {data['fixedSodiumWorkerCount']}")
+          print(f"- Warmup during search: {search['warmupFrames']} frames")
+          print(f"- Winner build ratio: {winner['buildBudgetRatio']:.4f}")
+          print(f"- Winner upload ratio: {winner['uploadBudgetRatio']:.4f}")
+          print(f"- Winner median readiness: {winner['medianChunkRenderElapsedMillis']:.3f} ms")
+          print(f"- Adaptive frames (median): {winner['medianAdaptiveFrames']}")
+          print(f"- Improvement vs adaptive default: {winner['relativeMedianImprovementVsAdaptiveDefault'] * 100:.2f}%")
+          print(f"- Improvement vs scheduler-disabled control: {winner['relativeMedianImprovementVsSchedulerDisabledControl'] * 100:.2f}%")
+          print(f"- Search path: {search['path']}")
+          PY
+          else
+            echo 'Terrain scheduler hill-climb report was not produced.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload hill-climb evidence
@@ -136,5 +188,6 @@ jobs:
           retention-days: 7
           path: |
             build/terrain-hillclimb/**
+            build/terrain-scheduler-hillclimb/**
             .github/ci/terrain-bench/build/evidence/**
             .github/ci/terrain-bench/build/run/clientGameTest/logs/latest.log
