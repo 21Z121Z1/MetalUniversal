@@ -38,6 +38,11 @@ java {
 tasks.register("runProductionGpuBenchmark", net.fabricmc.loom.task.prod.ClientProductionRunTask) {
     dependsOn tasks.named("jar")
 
+    // A benchmark sample is a fresh client process, not a reusable build output.
+    // The hill climber deliberately deletes the previous evidence before every
+    // trial, so Gradle must never replace a requested launch with UP-TO-DATE.
+    outputs.upToDateWhen { false }
+
     doFirst {
         def metallumJar = metallumJarProvider.get()
         if (!metallumJar.isFile()) {
