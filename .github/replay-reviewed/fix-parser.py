@@ -32,30 +32,19 @@ if old_find not in text:
     raise SystemExit("could not locate find_subsequence helper")
 text = text.replace(old_find, new_find, 1)
 
-# The uploaded rollout contains exactly one malformed custom apply_patch call:
-# a newly-added Python/shell heredoc block in run_unified_eval_cycle.sh lost
-# unified-diff '+' prefixes from `prefix = key + "="` through the closing `}`.
-# Normalize only an exact raw signature line. Later normal patches may mention
-# the same source line as prefixed context and must remain untouched.
+# The rollout contains one malformed patch whose original tool result is
+# explicitly `Script failed`; apply_patch therefore made no repository change.
+# Keep that event atomic/no-op so the two subsequent successful retry patches
+# are the only changes replayed. The exact raw signature uniquely identifies it.
 normalizer = '''def normalize_rollout_patch(patch):
     signature = 'prefix = key + "="'
     lines = patch.splitlines()
-    matches = [i for i, line in enumerate(lines) if line == signature]
-    if not matches:
-        return patch
-    if len(matches) != 1:
-        fail(f"malformed rollout patch signature count: {len(matches)}")
-    start = matches[0]
-    end = None
-    for i in range(start + 1, len(lines) - 1):
-        if lines[i] == "+" and lines[i + 1] == "+stage_eval_shader_pack":
-            end = i
-            break
-    if end is None:
-        fail("malformed rollout patch end marker missing")
-    for i in range(start, end):
-        lines[i] = "+" + lines[i]
-    return "\\n".join(lines) + ("\\n" if patch.endswith("\\n") else "")
+    raw_matches = [line for line in lines if line == signature]
+    if raw_matches:
+        if len(raw_matches) != 1:
+            fail(f"failed rollout patch signature count: {len(raw_matches)}")
+        return "*** Begin Patch\\n*** End Patch"
+    return patch
 
 '''
 marker = 'def parse_operations(patch):\n'
