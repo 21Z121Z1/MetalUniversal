@@ -47,82 +47,65 @@ jobs:
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
           patches = json.loads(zlib.decompress(base64.b64decode(module.PAYLOAD)).decode("utf-8"))
-
-          # The last payload entry is our post-audit benchmark hardening. Apply
-          # the 39 reviewed rollout patches first, then harden the resulting
-          # final script structurally so it is independent of stale hunk context.
           for index, patch in enumerate(patches[:-1], 1):
               module.apply_patch(patch)
               print(f"applied reviewed rollout patch {index}/{len(patches) - 1}")
 
           script_path = Path("scripts/agent/run_unified_eval_cycle.sh")
-          script = script_path.read_text(encoding="utf-8")
+          lines = script_path.read_text(encoding="utf-8").splitlines()
 
-          old_stage = '''  pin_equals_property "$IRIS_CONFIG" "shaderPack" "$STAGED_PACK_NAME"
-          ���  pin_equals_property "$IRIS_CONFIG" "enableShaders" "true"
-          ���}
-          ���
-          ���stage_eval_shader_pack
-          ���'''.replace('          ���', '')
-          new_stage = '''  pin_staged_shader_pack
-          ���}
-          ���
-          ���pin_staged_shader_pack() {
-          ���  [[ -z "$STAGED_PACK_NAME" ]] && return 0
-          ���  pin_equals_property "$IRIS_CONFIG" "shaderPack" "$STAGED_PACK_NAME"
-          ���  pin_equals_property "$IRIS_CONFIG" "enableShaders" "true"
-          ���}
-          ���
-          ���stage_eval_shader_pack
-          ���'''.replace('          ���', '')
-          if script.count(old_stage) != 1:
-              raise SystemExit("expected one shader-pack staging tail")
-          script = script.replace(old_stage, new_stage, 1)
+          def unique_index(value, start=0):
+              matches = [i for i, line in enumerate(lines[start:], start) if line == value]
+              if len(matches) != 1:
+                  raise SystemExit(f"expected one {value!r} after line {start}, found {len(matches)}")
+              return matches[0]
 
-          marker = '''  mkdir -p "$trial_dir/artifacts"
-          ���  : > "$marker"
-          ���  while IFS= read -r arg; do args+=("$arg"); done < <(profile_args "$profile" "$warmup_seconds" "$sample_seconds")
-          ���'''.replace('          ���', '')
-          marker_hardened = '''  mkdir -p "$trial_dir/artifacts"
-          ���  : > "$marker"
-          ���  # Iris persists its runtime selection on shutdown. Re-pin immediately before
-          ���  # every client process so A/B/B/A trials cannot inherit enableShaders=false
-          ���  # or a different pack from the preceding arm.
-          ���  pin_staged_shader_pack
-          ���  while IFS= read -r arg; do args+=("$arg"); done < <(profile_args "$profile" "$warmup_seconds" "$sample_seconds")
-          ���'''.replace('          ���', '')
-          if script.count(marker) != 1:
-              raise SystemExit("expected one run-profile trial marker")
-          script = script.replace(marker, marker_hardened, 1)
+          stage_start = unique_index("stage_eval_shader_pack() {")
+          shader_pin = unique_index('  pin_equals_property "$IRIS_CONFIG" "shaderPack" "$STAGED_PACK_NAME"', stage_start)
+          enable_pin = unique_index('  pin_equals_property "$IRIS_CONFIG" "enableShaders" "true"', stage_start)
+          if enable_pin != shader_pin + 1 or lines[enable_pin + 1] != "}":
+              raise SystemExit("unexpected shader-pack staging tail")
+          stage_end = enable_pin + 1
+          lines[shader_pin:enable_pin + 1] = ["  pin_staged_shader_pack"]
+          stage_end -= 1
+          helper = [
+              "",
+              "pin_staged_shader_pack() {",
+              '  [[ -z "$STAGED_PACK_NAME" ]] && return 0',
+              '  pin_equals_property "$IRIS_CONFIG" "shaderPack" "$STAGED_PACK_NAME"',
+              '  pin_equals_property "$IRIS_CONFIG" "enableShaders" "true"',
+              "}",
+          ]
+          lines[stage_end + 1:stage_end + 1] = helper
 
-          proof = '''  if [[ -n "$STAGED_PACK_NAME" ]]; then
-          ���    grep -F "Using shaderpack: $STAGED_PACK_NAME" "$trial_dir/client.log" >/dev/null || {
-          ���      echo "$profile did not prove exact shader-pack activation: $STAGED_PACK_NAME" >&2
-          ���      return 2
-          ���    }
-          ���  fi
-          ���  return "$normalize_status"
-          ���'''.replace('          ���', '')
-          proof_hardened = '''  if [[ -n "$STAGED_PACK_NAME" ]]; then
-          ���    grep -F "Using shaderpack: $STAGED_PACK_NAME" "$trial_dir/client.log" >/dev/null || {
-          ���      echo "$profile did not prove exact shader-pack activation: $STAGED_PACK_NAME" >&2
-          ���      return 2
-          ���    }
-          ���  fi
-          ���  # Startup/menu pacing records legitimately use OUT_OF_LEVEL_MENU with
-          ���  # level=false. Reject only throttled records emitted while a level is live.
-          ���  if [[ "$normalize" == "true" ]] \
-          ���      && grep -Eq 'Metal frame pacing: .*throttle=(SHORT_AFK|OUT_OF_LEVEL_MENU).*level=true' \
-          ���          "$trial_dir/client.log"; then
-          ���    echo "$profile entered a throttled in-world state; performance evidence is invalid" >&2
-          ���    return 2
-          ���  fi
-          ���  return "$normalize_status"
-          ���'''.replace('          ���', '')
-          if script.count(proof) != 1:
-              raise SystemExit("expected one shader-pack proof block")
-          script = script.replace(proof, proof_hardened, 1)
-          script_path.write_text(script, encoding="utf-8")
+          run_start = unique_index("run_profile_task() {")
+          marker = unique_index('  : > "$marker"', run_start)
+          lines[marker + 1:marker + 1] = [
+              "  # Iris persists its runtime selection on shutdown. Re-pin immediately before",
+              "  # every client process so A/B/B/A trials cannot inherit enableShaders=false",
+              "  # or a different pack from the preceding arm.",
+              "  pin_staged_shader_pack",
+          ]
+
+          run_start = unique_index("run_profile_task() {")
+          proof_start = unique_index('  if [[ -n "$STAGED_PACK_NAME" ]]; then', run_start)
+          proof_end_candidates = [i for i in range(proof_start + 1, len(lines)) if lines[i] == "  fi"]
+          if not proof_end_candidates:
+              raise SystemExit("shader-pack proof block has no closing fi")
+          proof_end = proof_end_candidates[0]
+          if 'Using shaderpack: $STAGED_PACK_NAME' not in "\n".join(lines[proof_start:proof_end + 1]):
+              raise SystemExit("unexpected shader-pack proof block")
+          lines[proof_end + 1:proof_end + 1] = [
+              "  # Startup/menu pacing records legitimately use OUT_OF_LEVEL_MENU with",
+              "  # level=false. Reject only throttled records emitted while a level is live.",
+              '  if [[ "$normalize" == "true" ]] \\',
+              "      && grep -Eq 'Metal frame pacing: .*throttle=(SHORT_AFK|OUT_OF_LEVEL_MENU).*level=true' \\",
+              '          "$trial_dir/client.log"; then',
+              '    echo "$profile entered a throttled in-world state; performance evidence is invalid" >&2',
+              "    return 2",
+              "  fi",
+          ]
+          script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
           doc_path = Path("docs/agent/unified-evaluation-loop.md")
           doc = doc_path.read_text(encoding="utf-8")
