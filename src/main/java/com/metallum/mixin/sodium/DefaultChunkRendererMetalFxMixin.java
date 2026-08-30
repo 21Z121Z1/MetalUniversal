@@ -9,12 +9,14 @@ import com.metallum.client.metal.render.MetalTokenBindingPass;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
 import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import net.caffeinemc.mods.sodium.client.render.chunk.DefaultChunkRenderer;
+import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
 import org.joml.Vector4fc;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
@@ -39,6 +41,20 @@ public abstract class DefaultChunkRendererMetalFxMixin {
     @Unique
     private static final MetalBindingToken metallum$BLOCK_TEXTURE =
             MetalBindingTokenRegistry.resolve("u_BlockTex");
+
+    @Redirect(
+            method = "render",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/caffeinemc/mods/sodium/client/render/chunk/terrain/TerrainRenderPass;"
+                            + "getTarget()Lcom/mojang/blaze3d/pipeline/RenderTarget;"
+            ),
+            remap = false
+    )
+    private RenderTarget metallum$resolveTerrainTarget(final TerrainRenderPass pass) {
+        RenderTarget shadowTarget = IrisMetalPipelineOverrides.shadowTerrainRenderTarget();
+        return shadowTarget != null ? shadowTarget : pass.getTarget();
+    }
 
     @Redirect(
             method = "render",

@@ -196,6 +196,12 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         return alt[checkIndex(index)];
     }
 
+    /** Persistent raw view of the fixed main variant, independent of flip state. */
+    MetalGpuTextureView mainView(final int index) {
+        ensureOpen();
+        return mainViews[checkIndex(index)];
+    }
+
     /** Persistent view for the texture the next pass should sample. */
     MetalGpuTextureView readView(final int index) {
         ensureOpen();
@@ -216,6 +222,21 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
             return this.flipped.get(checked) ? altViews[checked] : mainViews[checked];
         }
         return this.flipped.get(checked) ? altSampleViews[checked] : mainSampleViews[checked];
+    }
+
+    /**
+     * View of the current readable side for a storage-image binding.
+     *
+     * <p>Storage images must use the underlying texture view without the
+     * logical RGB alpha-one swizzle used by sampled views. Metal texture
+     * swizzle views are distinct native objects and are not valid writable
+     * image bindings even when their parent texture carries shader-write
+     * usage.</p>
+     */
+    MetalGpuTextureView storageReadView(final int index) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        return this.flipped.get(checked) ? altViews[checked] : mainViews[checked];
     }
 
     /** Sampled view of the current write/history side, including logical format swizzles. */

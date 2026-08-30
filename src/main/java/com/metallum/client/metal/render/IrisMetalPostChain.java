@@ -1371,7 +1371,7 @@ final class IrisMetalPostChain implements AutoCloseable {
     ) {
         int target = colorImageIndex(name);
         if (target >= 0) {
-            return targets.colorTargets().sampleReadView(target);
+            return targets.colorTargets().storageReadView(target);
         }
         GpuTextureView view = resources.storageImage(compute.info, name);
         if (view == null) {
@@ -1602,7 +1602,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                                 + "' exceeds generation target count"
                 );
             }
-            return targets.colorTargets().sampleReadView(target);
+            return targets.colorTargets().storageReadView(target);
         }
         GpuTextureView view = resources.storageImage(info, name);
         if (view == null) {

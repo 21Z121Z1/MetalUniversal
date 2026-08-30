@@ -109,9 +109,12 @@ public final class RenderContractRuntime {
         if (recorder == null) {
             return false;
         }
+        long configuredFrame = longProperty(
+                "metallum.renderContract.captureFinalDrawableFrame", -1L
+        );
         boolean capture = Boolean.parseBoolean(
                 System.getProperty("metallum.renderContract.captureFinalDrawable", "false")
-        ) || requestedFinalDrawableFrame == frameId;
+        ) || requestedFinalDrawableFrame == frameId || configuredFrame == frameId;
         if (capture && requestedFinalDrawableFrame == frameId) {
             requestedFinalDrawableFrame = -1L;
         }
@@ -189,6 +192,49 @@ public final class RenderContractRuntime {
                 kind,
                 producerIndex,
                 captureIdentity
+        );
+    }
+
+    /**
+     * Resolves explicitly requested render-pass captures, if any.
+     *
+     * <p>The selector is intentionally frame- and semantic-pass-specific. A
+     * diagnostic run must opt in with both
+     * {@code metallum.renderContract.capturePassFrame} and
+     * {@code metallum.renderContract.capturePass}; otherwise the normal
+     * render path does not allocate readback resources. The open pass token is
+     * used so the capture retains the same generation-owned trace identity as
+     * the pass manifest. The old {@code capturePostPass*} names remain accepted
+     * as a narrow compatibility alias for earlier diagnostic commands.</p>
+     */
+    public static CapturePoint configuredAfterPassCapturePoint(final long passToken) {
+        TraceIdentity identity = traceIdentity(passToken);
+        if (identity == null) {
+            return null;
+        }
+        String configuredFrameValue = System.getProperty("metallum.renderContract.capturePassFrame");
+        if (configuredFrameValue == null || configuredFrameValue.isBlank()) {
+            configuredFrameValue = System.getProperty("metallum.renderContract.capturePostPassFrame", "-1");
+        }
+        long configuredFrame = parseLong(configuredFrameValue, -1L);
+        String configuredPass = System.getProperty("metallum.renderContract.capturePass", "").trim();
+        if (configuredPass.isEmpty()) {
+            configuredPass = System.getProperty("metallum.renderContract.capturePostPass", "").trim();
+        }
+        boolean passSelected = java.util.Arrays.stream(configuredPass.split(","))
+                .map(String::trim)
+                .anyMatch(identity.semanticPassId()::equals);
+        if (configuredFrame != identity.frameId()
+                || configuredPass.isEmpty()
+                || !passSelected) {
+            return null;
+        }
+        return new CapturePoint(
+                identity.frameId(),
+                identity.semanticPassId(),
+                CapturePointKind.AFTER_PASS,
+                -1,
+                identity
         );
     }
 
@@ -571,6 +617,18 @@ public final class RenderContractRuntime {
     private static int integerProperty(final String name, final int fallback) {
         try {
             return Integer.parseInt(System.getProperty(name, Integer.toString(fallback)));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private static long longProperty(final String name, final long fallback) {
+        return parseLong(System.getProperty(name, Long.toString(fallback)), fallback);
+    }
+
+    private static long parseLong(final String value, final long fallback) {
+        try {
+            return Long.parseLong(value);
         } catch (NumberFormatException ignored) {
             return fallback;
         }

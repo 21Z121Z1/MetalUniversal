@@ -425,6 +425,31 @@ final class MetalIrisSodiumTerrainTest {
     }
 
     @Test
+    void bslShadowProgramPreservesIrisDefaultDrawBuffer() throws IOException {
+        Path packZip = Path.of(System.getProperty(
+                "metallum.iris.bsl.path", "run/shaderpacks/bsl-shaders.zip"
+        )).toAbsolutePath();
+        assertTrue(Files.isRegularFile(packZip), "BSL shader pack is missing: " + packZip);
+
+        Iris.testing = true;
+        WorldRenderingSettings.INSTANCE.setVertexFormat(FormatAnalyzer.createFormat(true, true, true, true));
+        try (FileSystem fs = FileSystems.newFileSystem(packZip)) {
+            ProgramSet set = loadPack(packZip.getFileName().toString(), fs.getPath("/shaders"))
+                    .getProgramSet(new NamespacedId("minecraft", "overworld"));
+            try (IrisMetalShadowPipeline shadows = new IrisMetalShadowPipeline(device, set, 1)) {
+                IrisMetalShadowPipeline.ShadowProgram program = shadows
+                        .program(ShaderKey.SHADOW_SODIUM_TERRAIN_SOLID)
+                        .orElseThrow(() -> new AssertionError("BSL shadow program did not resolve"));
+                assertEquals(
+                        List.of(0),
+                        Arrays.stream(program.drawBuffers()).boxed().toList(),
+                        "an absent BSL shadow DRAWBUFFERS directive must use Iris's effective default [0]"
+                );
+            }
+        }
+    }
+
+    @Test
     void terrainProgramsCompileToDevicePipelines() throws IOException {
         List<Path> packs = discoverPacks();
         assertFalse(packs.isEmpty(),
