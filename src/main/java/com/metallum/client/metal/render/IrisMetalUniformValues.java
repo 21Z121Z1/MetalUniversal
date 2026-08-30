@@ -1458,6 +1458,14 @@ final class IrisMetalUniformValues implements AutoCloseable {
 
     private Frame sampleLiveFrame() {
         Minecraft minecraft = Minecraft.getInstance();
+        // Pipeline activation and offline/device tests can prewarm a pack
+        // before Minecraft has published its singleton.  The caller already
+        // defines the neutral-frame fallback contract; avoid dereferencing a
+        // not-yet-created client here so strict uniform registration does not
+        // turn an otherwise valid prewarm into a NullPointerException.
+        if (minecraft == null) {
+            return neutralFrame();
+        }
         CapturedRenderingState state = CapturedRenderingState.INSTANCE;
         ClientLevel level = minecraft.level;
 
