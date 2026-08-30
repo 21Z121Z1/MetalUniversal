@@ -951,8 +951,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             JsonObject argumentReport = new JsonObject();
             argumentReport.addProperty(
                     "enabled",
-                    Boolean.getBoolean("metallum.iris.experimental.argumentTables")
-                            || Boolean.getBoolean("metallum.iris.argumentTables")
+                    com.metallum.client.metal.render.IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES
             );
             argumentReport.addProperty("layouts", argumentStats.layouts());
             argumentReport.addProperty("bindingMutations", argumentStats.updates());

@@ -30,8 +30,7 @@ public final class IrisMetalComputeGroupingRuntime {
     }
 
     public static boolean begin(final List<?> computes, final boolean concurrentCompute) {
-        boolean enabled = IrisMetalOptimizationPlan.ENABLE_COMPUTE_GROUPING
-                || IrisMetalAdvancedOptimizationConfig.COMPUTE_GROUPING;
+        boolean enabled = IrisMetalOptimizationPlan.ENABLE_COMPUTE_GROUPING;
         if (concurrentCompute || !enabled || computes == null || computes.size() < 2) {
             STATE.remove();
             return false;
