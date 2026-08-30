@@ -473,6 +473,13 @@ public final class MetalValidationClient implements ClientModInitializer {
         }
 
         RenderContractRuntime.beginFrame(frame);
+        // The contract recorder needs one bounded, deterministic final-drawable
+        // sample before the validation timeline can close. Keep this tied to
+        // the existing translucent capture frame instead of capturing every
+        // frame or adding a second timeline.
+        if (frame == TRANSLUCENT_CAPTURE_FRAME) {
+            RenderContractRuntime.requestFinalDrawableCapture(frame);
+        }
 
         // Scene mutations must land in the frame that triggers them (the
         // prioritized Sodium rebuild is only reliably synchronous when the
