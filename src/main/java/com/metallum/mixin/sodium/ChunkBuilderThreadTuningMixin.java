@@ -17,7 +17,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(ChunkBuilder.class)
 public abstract class ChunkBuilderThreadTuningMixin {
-    public static final String THREADS_PROPERTY = "metallum.opt.terrainChunkBuilderThreads";
+    private static final String THREADS_PROPERTY = "metallum.opt.terrainChunkBuilderThreads";
 
     @Inject(method = "getThreadCount", at = @At("HEAD"), cancellable = true, remap = false)
     private static void metallum$overrideChunkBuilderThreads(final CallbackInfoReturnable<Integer> cir) {
