@@ -254,7 +254,12 @@ def digest(path):
     return h.hexdigest()
 
 candidates = {
-  "production_jar": next((str(p) for p in pathlib.Path('build/libs').glob('*.jar') if 'validation' not in p.name), None),
+  # The sources JAR is not loadable runtime evidence.  Keep the selection
+  # deterministic and prefer the production artifact over validation/sources
+  # classifiers so the manifest cannot accidentally bless a documentation
+  # artifact as the client binary.
+  "production_jar": next((str(p) for p in sorted(pathlib.Path('build/libs').glob('*.jar'))
+                           if 'validation' not in p.name and 'sources' not in p.name), None),
   "validation_jar": next((str(p) for p in pathlib.Path('build/libs').glob('*validation*.jar')), None),
   "native_dylib": "src/main/resources/natives/macos/libmetallum.dylib",
 }

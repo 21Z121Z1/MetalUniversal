@@ -27,6 +27,8 @@ final class IrisMetalOptimizationPlan {
     static final boolean ENABLE_FINAL_COLOR_FUSION = FEATURE_GATES.finalColorFusion();
     static final boolean ENABLE_ARGUMENT_TABLES = FEATURE_GATES.argumentTables();
     static final boolean ENABLE_ICB = FEATURE_GATES.indirectSubmission();
+    static final boolean ENABLE_MEMORYLESS_ATTACHMENTS = FEATURE_GATES.memorylessAttachments();
+    static final boolean ENABLE_HEAP_ALIASING = FEATURE_GATES.heapAliasing();
 
     enum LoadAction { DONT_CARE, LOAD, CLEAR }
     enum StoreAction { DONT_CARE, STORE }

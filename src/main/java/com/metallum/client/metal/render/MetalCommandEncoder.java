@@ -504,7 +504,18 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             callback.committed.run();
         }
 
-        inFlight[slot] = new InFlight(currentSubmitIndex, commandBuffer, completedSemaphore, callbacks);
+        // Capture the validation frame identity at submission time.  GPU
+        // completion can happen several Java frames later, so reading the
+        // recorder's current frame from the completion callback would pair a
+        // command buffer with the wrong frame.
+        long submissionFrameId = MetalGpuTimingRecorder.currentFrameId();
+        inFlight[slot] = new InFlight(
+                currentSubmitIndex,
+                submissionFrameId,
+                commandBuffer,
+                completedSemaphore,
+                callbacks
+        );
         commandBuffer = null;
         currentSubmitIndex++;
 
@@ -1943,6 +1954,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     private static final class InFlight {
         private final long index;
+        private final long frameId;
         private final MTLCommandBuffer buffer;
         private final MemorySegment completedSemaphore;
         private final List<SubmitCallback> callbacks;
@@ -1950,11 +1962,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         private InFlight(
                 final long index,
+                final long frameId,
                 final MTLCommandBuffer buffer,
                 final MemorySegment completedSemaphore,
                 final List<SubmitCallback> callbacks
         ) {
             this.index = index;
+            this.frameId = frameId;
             this.buffer = buffer;
             this.completedSemaphore = completedSemaphore;
             this.callbacks = callbacks;
@@ -1965,7 +1979,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 return;
             }
             completionHandled = true;
-            MetalGpuTimingRecorder.record(index, buffer.gpuStartTime(), buffer.gpuEndTime());
+            MetalGpuTimingRecorder.record(index, frameId, buffer.gpuStartTime(), buffer.gpuEndTime());
             if (!buffer.completedSuccessfully()) {
                 for (SubmitCallback callback : callbacks) {
                     callback.failed.run();
