@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.validation.contract.CapturePoint;
 import com.metallum.client.validation.contract.ProducerType;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.metal.render.mtl.*;
@@ -981,6 +982,21 @@ final class MetalRenderPass implements RenderPassBackend {
             if (!contractStoreActionsResolved) {
                 resolveContractStoreActions(null, null, false, false);
             }
+            CapturePoint capturePoint = RenderContractRuntime.configuredAfterPassCapturePoint(contractPassToken);
+            if (capturePoint != null) {
+                MetalGpuTexture captureTexture = firstColorTextureForCapture();
+                if (captureTexture == null) {
+                    throw new IllegalStateException(
+                            "Configured render-pass capture has no Metal color attachment for "
+                                    + capturePoint.semanticPassId()
+                    );
+                }
+                commandEncoder.scheduleValidationTextureCapture(
+                        captureTexture,
+                        capturePoint,
+                        "render-pass/" + capturePoint.semanticPassId() + "/color0"
+                );
+            }
             commandEncoder.endContractTraceGroup();
             RenderContractRuntime.endPass(contractPassToken);
         }
@@ -1018,6 +1034,21 @@ final class MetalRenderPass implements RenderPassBackend {
                 depthStoreAction
         );
         contractStoreActionsResolved = true;
+    }
+
+    @Nullable
+    private MetalGpuTexture firstColorTextureForCapture() {
+        for (GpuTextureView colorTexture : colorTextures) {
+            if (colorTexture != null && colorTexture.texture() instanceof MetalGpuTexture texture) {
+                return texture;
+            }
+        }
+        return null;
+    }
+
+    /** The open render-contract identity used by opt-in diagnostic captures. */
+    long contractPassToken() {
+        return contractPassToken;
     }
 
     private void recordProducer(

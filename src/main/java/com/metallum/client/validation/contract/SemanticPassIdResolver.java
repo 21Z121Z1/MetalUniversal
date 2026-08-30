@@ -10,6 +10,11 @@ import java.util.regex.Pattern;
 /** Converts backend labels into stable logical pass ids without pack-name rules. */
 public final class SemanticPassIdResolver {
     private static final Pattern INDEX = Pattern.compile("(?:^|[^0-9])([0-9]+)(?:$|[^0-9])");
+    private static final Pattern RESOURCE_LABEL = Pattern.compile(
+            "^(?:post\\s+pass\\s+|immediate\\s+draw\\s+with\\s+|animate\\s+)"
+                    + "([a-z0-9_.-]+):(.+)$",
+            Pattern.CASE_INSENSITIVE
+    );
 
     private SemanticPassIdResolver() {
     }
@@ -24,6 +29,10 @@ public final class SemanticPassIdResolver {
         if (hasKnownNamespace(lower)) {
             return normalizeKnownNamespace(normalized);
         }
+        String minecraftPass = resolveMinecraftLabel(normalized, lower);
+        if (minecraftPass != null) {
+            return minecraftPass;
+        }
         if (lower.matches("iris\\s+final(?:\\s*[:/_-].*)?")) {
             return "iris/final";
         }
@@ -31,11 +40,24 @@ public final class SemanticPassIdResolver {
             return indexed("iris/composite", normalized);
         }
         if (lower.startsWith("iris shadowcomp") || lower.startsWith("iris/shadowcomp")
-                || lower.startsWith("iris shadow comp")) {
+                || lower.startsWith("iris shadow comp")
+                || lower.startsWith("iris shadow_composite")) {
             return indexed("iris/shadow", normalized);
         }
         if (lower.startsWith("iris shadow")) {
             return indexed("iris/shadow", normalized);
+        }
+        if (lower.startsWith("iris deferred")) {
+            return indexed("iris/deferred", normalized);
+        }
+        if (lower.startsWith("iris prepare")) {
+            return indexed("iris/prepare", normalized);
+        }
+        if (lower.startsWith("iris begin")) {
+            return indexed("iris/begin", normalized);
+        }
+        if (lower.startsWith("iris color space")) {
+            return "iris/color-space";
         }
         if (lower.startsWith("iris gbuffer") || lower.startsWith("iris/gbuffer")) {
             String suffix = normalized.replaceFirst("(?i)^iris[ :/_-]+gbuffers?[ :/_-]*", "");
@@ -50,6 +72,29 @@ public final class SemanticPassIdResolver {
 
     public static String resolve(final String rawLabel) {
         return resolve(rawLabel, PassType.RENDER);
+    }
+
+    /**
+     * Gives the non-Iris Minecraft/Sodium labels a stable identity that can
+     * be joined with an OpenGL trace. These are renderer API labels, not
+     * shader-pack names, so they remain valid when the active pack changes.
+     */
+    private static String resolveMinecraftLabel(final String label, final String lower) {
+        Matcher resource = RESOURCE_LABEL.matcher(label);
+        if (resource.matches()) {
+            String prefix = lower.startsWith("animate ") ? "texture-animation/" : "";
+            return normalizeResourceId(resource.group(1), prefix + resource.group(2));
+        }
+        return switch (lower) {
+            case "update light" -> "minecraft/light-update";
+            case "particles - solid" -> "minecraft/particles/solid";
+            case "particles - translucent" -> "minecraft/particles/translucent";
+            case "cubemap" -> "minecraft/cubemap";
+            case "gui before blur" -> "minecraft/gui/before-blur";
+            case "gui after blur" -> "minecraft/gui/after-blur";
+            case "blit render target" -> "minecraft/blit-render-target";
+            default -> null;
+        };
     }
 
     private static String resolveMetallum(final String lower) {
@@ -77,8 +122,19 @@ public final class SemanticPassIdResolver {
     }
 
     private static String normalizeKnownNamespace(final String label) {
-        String result = label.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9._/-]+", "-");
+        int sourceSeparator = label.indexOf(" | source=");
+        String semantic = sourceSeparator < 0 ? label : label.substring(0, sourceSeparator);
+        String result = semantic.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9._/-]+", "-");
         return result.replaceAll("/{2,}", "/").replaceAll("(^/|/$)", "");
+    }
+
+    private static String normalizeResourceId(final String namespace, final String path) {
+        String normalizedNamespace = normalizeToken(namespace);
+        String normalizedPath = path.toLowerCase(Locale.ROOT).replace('\\', '/')
+                .replaceAll("[^a-z0-9._/-]+", "-")
+                .replaceAll("/{2,}", "/")
+                .replaceAll("(^/|/$)", "");
+        return normalizedNamespace + "/" + normalizedPath;
     }
 
     private static String normalizeToken(final String value) {

@@ -10,6 +10,7 @@ import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.platform.CompareOp;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.UniformType;
@@ -529,6 +530,12 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
     IrisMetalShadowTargets targets() {
         ensureOpen();
         return targets;
+    }
+
+    /** RenderTarget facade required by Sodium before its shadow pass redirect. */
+    RenderTarget terrainRenderTarget() {
+        requirePhase(Phase.OPAQUE, Phase.TRANSLUCENT);
+        return targets.terrainRenderTarget();
     }
 
     List<ShadowCompositePass> compositePasses() {

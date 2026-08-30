@@ -236,6 +236,12 @@ final class MetalIrisTargetsIntegrationTest {
                 device, new GpuFormat[]{GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM}, 128);
              IrisMetalRenderTargets main = new IrisMetalRenderTargets(
                      device, new GpuFormat[]{GpuFormat.RGBA8_UNORM}, WIDTH, HEIGHT)) {
+            assertSame(shadow.colorTargets().mainView(0), shadow.terrainRenderTarget().getColorTextureView(),
+                    "Sodium shadow facade must expose Iris shadowcolor0 main");
+            assertSame(shadow.shadowDepthView(), shadow.terrainRenderTarget().getDepthTextureView(),
+                    "Sodium shadow facade must expose Iris shadow depth");
+            assertEquals(128, shadow.terrainRenderTarget().width);
+            assertEquals(128, shadow.terrainRenderTarget().height);
             registerConstantFragment("iris_main_red", "vec4(1.0, 0.0, 0.0, 1.0)");
             runColorPass(main, "iris_main_red", new int[]{0});
 

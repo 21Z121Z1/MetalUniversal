@@ -257,6 +257,12 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         return alt[checkIndex(index)];
     }
 
+    /** Persistent raw view of the fixed main variant, independent of flip state. */
+    MetalGpuTextureView mainView(final int index) {
+        ensureOpen();
+        return mainViews[checkIndex(index)];
+    }
+
     /** Persistent view for the texture the next pass should sample. */
     MetalGpuTextureView readView(final int index) {
         ensureOpen();

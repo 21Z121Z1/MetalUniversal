@@ -433,6 +433,30 @@ final class RenderContractCoreTest {
         assertEquals("iris/final", SemanticPassIdResolver.resolve("Iris final: final0"));
         assertEquals("iris/composite/3", SemanticPassIdResolver.resolve("Iris composite 3"));
         assertEquals("iris/shadow/2", SemanticPassIdResolver.resolve("iris shadowcomp 2"));
+        assertEquals("iris/shadow/0", SemanticPassIdResolver.resolve("Iris shadow_composite: shadowcomp"));
+        assertEquals("iris/deferred/0", SemanticPassIdResolver.resolve("Iris deferred: deferred"));
+        assertEquals("iris/deferred/1", SemanticPassIdResolver.resolve("Iris deferred: deferred1"));
+        assertEquals("iris/prepare/0", SemanticPassIdResolver.resolve("Iris prepare: prepare"));
+        assertEquals("iris/begin/0", SemanticPassIdResolver.resolve("Iris begin: begin"));
+        assertEquals("iris/color-space", SemanticPassIdResolver.resolve("Iris color space: DCI_P3"));
+        assertEquals("iris/gbuffers/terrain", SemanticPassIdResolver.resolve(
+                "iris/gbuffers/terrain | source=Terrain"
+        ));
+        assertEquals("minecraft/transparency/0", SemanticPassIdResolver.resolve(
+                "Post pass minecraft:transparency/0"
+        ));
+        assertEquals("minecraft/blur/5", SemanticPassIdResolver.resolve(
+                "Post pass minecraft:blur/5"
+        ));
+        assertEquals("minecraft/pipeline/item_cutout", SemanticPassIdResolver.resolve(
+                "Immediate draw with minecraft:pipeline/item_cutout"
+        ));
+        assertEquals("minecraft/texture-animation/textures/atlas/blocks.png", SemanticPassIdResolver.resolve(
+                "Animate minecraft:textures/atlas/blocks.png"
+        ));
+        assertEquals("minecraft/particles/solid", SemanticPassIdResolver.resolve("Particles - Solid"));
+        assertEquals("minecraft/gui/before-blur", SemanticPassIdResolver.resolve("GUI before blur"));
+        assertEquals("minecraft/blit-render-target", SemanticPassIdResolver.resolve("Blit render target"));
         assertEquals("metallum/object-motion", SemanticPassIdResolver.resolve(
                 "Metallum batched ordinary entity object motion"
         ));

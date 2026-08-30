@@ -329,6 +329,59 @@ public final class IrisMetalPipelineOverrides {
         return net.irisshaders.iris.shadows.ShadowRenderingState.areShadowsCurrentlyBeingRendered();
     }
 
+    /**
+     * Supplies Sodium's target lookup with the active Iris shadow attachments.
+     * Minecraft's translucent FrameGraph handle is intentionally unavailable
+     * while Iris renders shadows, so returning its facade here keeps the
+     * lookup and the later Metal descriptor on the same generation-owned
+     * color0/depth resources.
+     */
+    public static @Nullable RenderTarget shadowTerrainRenderTarget() {
+        Instance instance = active;
+        if (instance == null || !isShadowPassActive()) {
+            return null;
+        }
+        IrisMetalShadowPipeline shadows = instance.shadowPipeline;
+        if (shadows == null) {
+            instance.requireNoFallback("shadow terrain target requested without prepared shadow resources");
+            return null;
+        }
+        return shadows.terrainRenderTarget();
+    }
+
+    /**
+     * Returns the pack-independent semantic identity for an Iris-owned core
+     * program. The program source name is the Iris ABI boundary; collapsing
+     * fallback variants such as {@code terrain_solid} to {@code terrain}
+     * keeps Sodium and Mojang core draws comparable when Iris resolves both
+     * through the same shader-pack program family.
+     */
+    static String semanticCorePassId(final ShaderKey key) {
+        Objects.requireNonNull(key, "key");
+        String sourceName = key.getProgram().getSourceName().toLowerCase(Locale.ROOT);
+        if (sourceName.startsWith("gbuffers_")) {
+            sourceName = sourceName.substring("gbuffers_".length());
+        } else if (sourceName.startsWith("shadow_")) {
+            sourceName = sourceName.substring("shadow_".length());
+        }
+        if (!key.isShadow() && sourceName.startsWith("terrain_")) {
+            sourceName = "terrain";
+        } else if (key.isShadow() && (sourceName.equals("shadow")
+                || sourceName.equals("solid")
+                || sourceName.equals("cutout")
+                || sourceName.equals("water"))) {
+            sourceName = "terrain";
+        }
+        return (key.isShadow() ? "iris/shadow/" : "iris/gbuffers/") + sourceName;
+    }
+
+    private static String semanticPassLabel(final String semanticId, final String sourceLabel) {
+        if (sourceLabel == null || sourceLabel.isBlank() || semanticId.equals(sourceLabel)) {
+            return semanticId;
+        }
+        return semanticId + " | source=" + sourceLabel;
+    }
+
     enum TerrainKind {
         SOLID(ShaderKey.SODIUM_TERRAIN_SOLID, ShaderKey.SHADOW_SODIUM_TERRAIN_SOLID),
         CUTOUT(ShaderKey.SODIUM_TERRAIN_CUTOUT, ShaderKey.SHADOW_SODIUM_TERRAIN_CUTOUT),
@@ -917,6 +970,7 @@ public final class IrisMetalPipelineOverrides {
                     );
                 }
                 RenderPassDescriptor descriptor;
+                String descriptorLabel = semanticPassLabel(semanticCorePassId(key), label.get());
                 if (key.isShadow()) {
                     IrisMetalShadowPipeline shadows = this.shadowPipeline;
                     IrisMetalShadowPipeline.ShadowProgram shadowProgram = shadows == null
@@ -925,7 +979,7 @@ public final class IrisMetalPipelineOverrides {
                     if (shadowProgram == null) {
                         throw new IllegalStateException("No active Metal shadow program for " + key);
                     }
-                    descriptor = shadows.createPersistentGbufferDescriptor(label.get(), shadowProgram);
+                    descriptor = shadows.createPersistentGbufferDescriptor(descriptorLabel, shadowProgram);
                 } else {
                     IrisMetalRenderTargets targets = this.renderTargets;
                     if (targets == null) {
@@ -933,7 +987,7 @@ public final class IrisMetalPipelineOverrides {
                         return null;
                     }
                     descriptor = targets.createTerrainWriteDescriptor(
-                            label.get(), program.drawBuffers(), sceneColor, clearColor, sceneDepth, clearDepth
+                            descriptorLabel, program.drawBuffers(), sceneColor, clearColor, sceneDepth, clearDepth
                     );
                 }
                 verifyCorePipelineDescriptor(compiled, descriptor);
@@ -1146,7 +1200,10 @@ public final class IrisMetalPipelineOverrides {
                 );
             }
             this.uniformValues.prewarm(currentDevice);
-            return encoder.createRenderPass(shadows.createPersistentGbufferDescriptor(label.get(), program));
+            RenderPassDescriptor descriptor = shadows.createPersistentGbufferDescriptor(
+                    semanticPassLabel(semanticCorePassId(kind.shadowKey), label.get()), program
+            );
+            return encoder.createRenderPass(descriptor);
         }
 
         private @Nullable RenderPass createTerrainRenderPass(
@@ -1174,7 +1231,8 @@ public final class IrisMetalPipelineOverrides {
                 return null;
             }
             return encoder.createRenderPass(targets.createTerrainWriteDescriptor(
-                    label.get(), drawBuffersFor(kind), mainColor, clearColor, sceneDepth, clearDepth
+                    semanticPassLabel(semanticCorePassId(kind.shaderKey), label.get()),
+                    drawBuffersFor(kind), mainColor, clearColor, sceneDepth, clearDepth
             ));
         }
 
