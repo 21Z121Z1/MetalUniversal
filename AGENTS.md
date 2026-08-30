@@ -1,8 +1,31 @@
 # MetalUniversal agent map
 
-The canonical continued-development base is `integration/iris-metal-next`. Create one bounded feature branch from it for each task. Superseded `agent/*`, `codex/*`, archive, bootstrap-test and pre-Iris feature branches are historical inputs only unless the operator explicitly requests extraction from them.
+The canonical continued-development base is `integration/iris-metal-next`. Create one bounded feature branch from it for each task. The repository intentionally keeps only a small set of long-lived branches; disposable task branches must be merged or deleted before the task is considered complete. Historical work is preserved by exact commit SHA and the single `research/modernization-backlog` history anchor, not by accumulating branch refs.
 
 This file is the repository entry map. The canonical autonomous workflow is the unified render evaluation loop; legacy performance scripts remain useful for focused compatibility but are not the final acceptance authority.
+
+## Branch lifecycle policy
+
+Branch count is an explicit repository invariant. Unless the operator explicitly authorizes another long-lived line, the only persistent branches are:
+
+- `master`: stable/promoted tree;
+- `integration/iris-metal-next`: canonical continued-development base;
+- `feature/ios-amethyst-runtime`: isolated Apple-mobile/Amethyst platform line;
+- `research/modernization-backlog`: history-only anchor for retired experimental branch tips and unlanded research.
+
+Keep the repository at **3–5 total branches**. A branch created for one task is disposable even if its name starts with `feature/`, `fix/`, `codex/`, `agent/`, `ci/`, `perf/`, `chore/`, `tooling/`, `archive/`, or `research/`. The prefix does not grant permanence.
+
+Mandatory end-of-task rule for every disposable branch:
+
+1. If the change is accepted, land it into the appropriate long-lived branch through the repository's required validation/merge path, then delete the disposable branch.
+2. If the experiment is rejected, superseded, diagnostic-only, or no longer needed, delete the branch instead of leaving it as an archive.
+3. If useful work is not ready to land, record the exact commit SHA, purpose, validation boundary and follow-up in `docs/agent/retired-branch-backlog.md`; make sure the commit remains reachable from `research/modernization-backlog`; then delete the disposable branch.
+4. Close or mark superseded any PR whose head branch is retired. Do not keep an open PR solely to preserve history.
+5. `*-staging-*`, `*-clean-*`, `*-audit-*`, `*-probe-*`, `*-replay-*`, bootstrap CI and one-shot workflow branches are never long-lived. Remove them as part of the same task that created them.
+6. Do not create per-task `archive/*` branches. Git history, exact SHAs, PRs, tags when appropriate, and the single research history anchor are the archive.
+7. Before the final report, run a branch inventory. If the task leaves more than five branches, it is incomplete unless the operator explicitly approved the additional persistent branch.
+
+Merging into a shared long-lived branch still requires whatever human/CI authorization the task and repository policy require. That does not relax the cleanup rule: a disposable branch may wait only for that explicit decision, and after the decision it must be merged-and-deleted or simply deleted.
 
 ## Repository objective
 
