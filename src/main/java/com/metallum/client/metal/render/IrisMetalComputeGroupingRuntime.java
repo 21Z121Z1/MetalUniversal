@@ -93,6 +93,10 @@ public final class IrisMetalComputeGroupingRuntime {
     }
 
     public static synchronized void reset() {
+        // Validation timelines can be restarted after an interrupted group.
+        // Clear the render-thread scope together with its counters so a stale
+        // partial group cannot affect the next timeline.
+        STATE.remove();
         admissionCandidates.reset();
         admissions.reset();
         rejections.reset();
