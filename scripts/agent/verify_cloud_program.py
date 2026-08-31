@@ -14,6 +14,16 @@ PROBE = ROOT / ".github/ci/HostedMetalCapabilityProbe.swift"
 HOSTED_GRADLE = ROOT / ".github/ci/HostedMetalGradle.init.gradle"
 PRESENTATION_TEST = ROOT / "src/test/java/com/metallum/client/metal/render/MetalDevicePresentationContractTest.java"
 
+# Long-lived branch policy from the repository AGENTS.md. The migration matrix is
+# historical provenance and deliberately retains branches after they are retired,
+# so it must not be treated as an exact snapshot of refs/heads.
+REQUIRED_PERSISTENT_BRANCHES = frozenset({
+    "master",
+    "integration/iris-metal-next",
+    "feature/ios-amethyst-runtime",
+    "research/modernization-backlog",
+})
+
 
 def fail(message: str) -> None:
     raise SystemExit(f"Cloud Metal program invariant failed: {message}")
@@ -53,6 +63,24 @@ def live_remote_branches() -> set[str]:
         branches.add(fields[1][len(prefix):])
     require(branches, "live GitHub branch inventory is empty")
     return branches
+
+
+def classify_remote_branch_inventory(remote: set[str], audited: set[str]) -> dict:
+    """Separate capability invariants from branch-lifecycle bookkeeping.
+
+    The migration matrix intentionally preserves retired source branches as
+    provenance. Live disposable feature branches may also appear between matrix
+    updates. Neither condition changes Metal capability. Only disappearance of
+    the repository's required persistent refs is a hard capability-program
+    invariant; the other deltas remain visible in structured evidence so branch
+    hygiene can be handled by its own lifecycle workflow.
+    """
+    return {
+        "required_persistent": sorted(REQUIRED_PERSISTENT_BRANCHES),
+        "missing_required_persistent": sorted(REQUIRED_PERSISTENT_BRANCHES - remote),
+        "live_not_in_migration_matrix": sorted(remote - audited),
+        "documented_not_live": sorted(audited - remote),
+    }
 
 
 def require_string_list(value, field: str, *, allow_empty: bool = False) -> list[str]:
@@ -139,7 +167,10 @@ def main() -> None:
     parser.add_argument(
         "--verify-remote-branches",
         action="store_true",
-        help="fail closed unless the migration matrix exactly matches git ls-remote --heads origin",
+        help=(
+            "verify required persistent GitHub refs; report live/matrix drift as evidence "
+            "without treating retired provenance or disposable branches as capability failures"
+        ),
     )
     parser.add_argument(
         "--expected-source-sha",
@@ -177,13 +208,14 @@ def main() -> None:
     audited = set(names)
 
     remote = None
+    branch_inventory = None
     if args.verify_remote_branches:
         remote = live_remote_branches()
-        missing = sorted(remote - audited)
-        stale = sorted(audited - remote)
+        branch_inventory = classify_remote_branch_inventory(remote, audited)
         require(
-            not missing and not stale,
-            f"branch migration matrix does not match live GitHub inventory: missing={missing}, stale={stale}",
+            not branch_inventory["missing_required_persistent"],
+            "required persistent GitHub branches are missing: "
+            f"{branch_inventory['missing_required_persistent']}",
         )
 
     require("integration/iris-metal-next" in audited, "canonical branch missing from migration matrix")
@@ -210,7 +242,7 @@ def main() -> None:
     require("hostedmetalgpuprobe" not in workflow_text, "workflow must use the canonical HostedMetalCapabilityProbe source path instead of an ad-hoc binary contract")
     require("hostedmetalcapabilityprobe.swift" in workflow_text, "workflow does not compile the repository-owned hosted Metal probe")
     require("--verify-remote-branches" in workflow_text,
-            "cloud contract job must verify the migration matrix against live GitHub branches")
+            "cloud contract job must verify required persistent GitHub branches")
     require("--expected-source-sha" in workflow_text,
             "cloud contract job must bind evidence to the exact candidate SHA")
     require("metallum_source_sha" in workflow_text,
@@ -265,6 +297,12 @@ def main() -> None:
         },
         "live_remote_inventory_verified": remote is not None,
         "live_remote_branch_count": len(remote) if remote is not None else None,
+        "branch_inventory": branch_inventory,
+        "branch_hygiene_requires_followup": bool(
+            branch_inventory
+            and (branch_inventory["live_not_in_migration_matrix"]
+                 or branch_inventory["documented_not_live"])
+        ),
         "hosted_mac_only_task_policy": True,
         "layerless_presentation_contract": True,
         "physical_acceptance_deferred_not_waived": True,
