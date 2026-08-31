@@ -305,6 +305,38 @@ def fail_closed_trial(payload: Any, reason: str) -> dict[str, Any]:
     return result
 
 
+def trial_drawable(payload: dict[str, Any]) -> tuple[int, int] | None:
+    """Return the actual framebuffer identity emitted by one trial.
+
+    The display description in ``run-manifest.json`` identifies the panel, but
+    it does not prove the drawable used by a particular client launch.  macOS
+    can resize or switch backing scale between launches, so paired trials must
+    compare the authoritative native dimensions as well.
+    """
+    summary = payload.get("source_summary")
+    if not isinstance(summary, dict):
+        return None
+    width = summary.get("drawable_width")
+    height = summary.get("drawable_height")
+    if isinstance(width, bool) or isinstance(height, bool):
+        return None
+    if not isinstance(width, int) or not isinstance(height, int):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def append_trial_identity_error(payload: dict[str, Any], reason: str) -> None:
+    errors = payload.get("identity_errors")
+    if not isinstance(errors, list):
+        errors = []
+    if reason not in errors:
+        errors.append(reason)
+    payload["identity_errors"] = errors
+    payload["complete"] = False
+
+
 def load_trial(path: Path) -> dict[str, Any]:
     metrics_path = path / "metrics.json"
     # A trial may have a cached metrics.json written before the Gradle task
@@ -365,7 +397,64 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             "complete_pair": bool(baseline_trial.get("complete")) and bool(candidate_trial.get("complete")),
             "baseline_identity_errors": baseline_trial.get("identity_errors", []),
             "candidate_identity_errors": candidate_trial.get("identity_errors", []),
+            "baseline_drawable": trial_drawable(baseline_trial),
+            "candidate_drawable": trial_drawable(candidate_trial),
         })
+
+    # A panel identity is not enough to compare timings.  The actual drawable
+    # can change when WindowServer moves between logical/retina/fullscreen
+    # backing sizes.  Reject mismatched pairs and reject any later pair that
+    # changes the reference geometry; otherwise a resolution change can look
+    # like a rendering optimization.
+    reference_drawable: tuple[int, int] | None = None
+    geometry_pairs: list[dict[str, Any]] = []
+    for item in block_status:
+        block = next(block for block in blocks if block.name == item["block"])
+        baseline_trial = trial_cache[block / "baseline"]
+        candidate_trial = trial_cache[block / "candidate"]
+        baseline_drawable = item["baseline_drawable"]
+        candidate_drawable = item["candidate_drawable"]
+        geometry_pairs.append({
+            "block": item["block"],
+            "baseline": baseline_drawable,
+            "candidate": candidate_drawable,
+            "matched": baseline_drawable is not None and baseline_drawable == candidate_drawable,
+        })
+        if not baseline_trial.get("complete") or not candidate_trial.get("complete"):
+            continue
+        if baseline_drawable is None or candidate_drawable is None:
+            reason = "authoritative drawable geometry is missing or invalid"
+            append_trial_identity_error(baseline_trial, reason)
+            append_trial_identity_error(candidate_trial, reason)
+            continue
+        if baseline_drawable != candidate_drawable:
+            reason = (
+                "paired drawable geometry mismatch: "
+                f"baseline={baseline_drawable[0]}x{baseline_drawable[1]}, "
+                f"candidate={candidate_drawable[0]}x{candidate_drawable[1]}"
+            )
+            append_trial_identity_error(baseline_trial, reason)
+            append_trial_identity_error(candidate_trial, reason)
+            continue
+        if reference_drawable is None:
+            reference_drawable = baseline_drawable
+        elif baseline_drawable != reference_drawable:
+            reason = (
+                "paired drawable geometry differs from the first complete pair: "
+                f"reference={reference_drawable[0]}x{reference_drawable[1]}, "
+                f"observed={baseline_drawable[0]}x{baseline_drawable[1]}"
+            )
+            append_trial_identity_error(baseline_trial, reason)
+            append_trial_identity_error(candidate_trial, reason)
+    for item in block_status:
+        block = next(block for block in blocks if block.name == item["block"])
+        baseline_trial = trial_cache[block / "baseline"]
+        candidate_trial = trial_cache[block / "candidate"]
+        item["baseline_complete"] = bool(baseline_trial.get("complete"))
+        item["candidate_complete"] = bool(candidate_trial.get("complete"))
+        item["complete_pair"] = item["baseline_complete"] and item["candidate_complete"]
+        item["baseline_identity_errors"] = baseline_trial.get("identity_errors", [])
+        item["candidate_identity_errors"] = candidate_trial.get("identity_errors", [])
     complete_pair_blocks = [item for item in block_status if item["complete_pair"]]
     comparison: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -379,6 +468,11 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "block_count": len(blocks),
         "complete_pair_block_count": len(complete_pair_blocks),
         "block_status": block_status,
+        "drawable_identity": {
+            "reference": reference_drawable,
+            "pairs": geometry_pairs,
+            "rule": "all complete paired blocks must use one identical authoritative drawable width/height",
+        },
         "metrics": {},
     }
 

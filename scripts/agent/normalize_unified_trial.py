@@ -393,6 +393,12 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
     identity_errors: list[str] = []
     if measured_frames <= 0:
         identity_errors.append("measuredFrameIntervals is missing or zero")
+    drawable_width = nonnegative_int(report.get("drawableWidth"))
+    drawable_height = nonnegative_int(report.get("drawableHeight"))
+    if drawable_width is None or drawable_width <= 0:
+        identity_errors.append("drawableWidth is missing or non-positive")
+    if drawable_height is None or drawable_height <= 0:
+        identity_errors.append("drawableHeight is missing or non-positive")
     if not metrics["fps_median"]["available"]:
         identity_errors.append("sourceFpsFromP50 is missing or non-finite")
     identity_errors.extend(sample_window_errors)
@@ -441,6 +447,8 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             "irisPerformanceCounters": report.get("irisPerformanceCounters"),
         },
         "source_summary": {
+            "drawable_width": drawable_width,
+            "drawable_height": drawable_height,
             "frame_interval_p50_ms": report.get("frameIntervalP50Milliseconds"),
             "frame_interval_p95_ms": report.get("frameIntervalP95Milliseconds"),
             "frame_interval_p99_ms": report.get("frameIntervalP99Milliseconds"),
@@ -459,6 +467,8 @@ def self_test() -> None:
         trial = Path(temp)
         (trial / "exit-status.txt").write_text("0\n", encoding="utf-8")
         report = {
+            "drawableWidth": 1920,
+            "drawableHeight": 1080,
             "measuredFrameIntervals": 3,
             "sourceFpsFromP50": 40.0,
             "gpuP50Milliseconds": 20.0,

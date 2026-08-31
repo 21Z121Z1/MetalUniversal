@@ -1,6 +1,6 @@
-[07:31:43] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:43] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:43] [Test worker/WARN]: [metallum] MSL disk cache unavailable; translating uncached
+[08:20:51] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:51] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:51] [Test worker/WARN]: [metallum] MSL disk cache unavailable; translating uncached
 java.lang.IllegalStateException: invoked too early?
 	at net.fabricmc.loader.impl.FabricLoaderImpl.getGameDir(FabricLoaderImpl.java:161)
 	at com.metallum.client.metal.render.MetalMslDiskCache.resolveDirectory(MetalMslDiskCache.java:99)
@@ -100,97 +100,97 @@ java.lang.IllegalStateException: invoked too early?
 	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:72)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)
 	at worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
-[07:31:43] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (125 ms translating)
-[07:31:43] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:43] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:43] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (125 ms translating)
-[07:31:43] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:43] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:43] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (125 ms translating)
-[07:31:43] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:43] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:43] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (125 ms translating)
-[07:31:43] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:43] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:43] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (125 ms translating)
-[07:31:43] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:43] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:43] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (125 ms translating)
-[07:31:43] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:43] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:43] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (125 ms translating)
-[07:31:43] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:43] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:44] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (125 ms translating)
-[07:31:44] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:44] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:44] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (125 ms translating)
-[07:31:44] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:44] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:44] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 2 misses (240 ms translating)
-[07:31:44] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:44] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:44] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 3 misses (350 ms translating)
-[07:31:44] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:44] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:44] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 4 misses (459 ms translating)
-[07:31:44] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:44] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:44] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 5 misses (616 ms translating)
-[07:31:44] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:44] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:44] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 7 misses (785 ms translating)
-[07:31:44] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:44] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:45] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 8 misses (895 ms translating)
-[07:31:45] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:45] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:45] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 9 misses (1003 ms translating)
-[07:31:45] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:45] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:45] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 9 misses (1003 ms translating)
-[07:31:45] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:45] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:45] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 9 misses (1003 ms translating)
-[07:31:45] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:45] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:45] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 10 misses (1110 ms translating)
-[07:31:45] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:45] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:45] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 11 misses (1222 ms translating)
-[07:31:45] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:45] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:45] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 13 misses (1389 ms translating)
-[07:31:45] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:45] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:45] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 14 misses (1498 ms translating)
-[07:31:45] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:45] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:45] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 15 misses (1609 ms translating)
-[07:31:45] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:45] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:45] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 15 misses (1609 ms translating)
-[07:31:45] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:45] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:46] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 16 misses (1718 ms translating)
-[07:31:46] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:46] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:46] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 17 misses (1833 ms translating)
-[07:31:46] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:46] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:46] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 17 misses (1833 ms translating)
-[07:31:46] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:46] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:46] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 17 misses (1833 ms translating)
-[07:31:46] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:46] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:46] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 17 misses (1833 ms translating)
-[07:31:46] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:46] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:46] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 18 misses (1943 ms translating)
-[07:31:46] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:46] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:46] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 18 misses (1943 ms translating)
-[07:31:46] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
-[07:31:46] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
-[07:31:46] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 18 misses (1943 ms translating)
+[08:20:51] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (117 ms translating)
+[08:20:51] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:51] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:51] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (117 ms translating)
+[08:20:51] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:51] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (117 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (117 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (117 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (117 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (117 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (117 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 1 misses (117 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 2 misses (223 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 3 misses (331 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 4 misses (437 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:52] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 5 misses (542 ms translating)
+[08:20:52] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:52] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:53] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 7 misses (703 ms translating)
+[08:20:53] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:53] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:53] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 8 misses (809 ms translating)
+[08:20:53] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:53] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:53] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 9 misses (915 ms translating)
+[08:20:53] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:53] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:53] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 9 misses (915 ms translating)
+[08:20:53] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:53] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:53] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 9 misses (915 ms translating)
+[08:20:53] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:53] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:53] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 10 misses (1020 ms translating)
+[08:20:53] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:53] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:53] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 11 misses (1126 ms translating)
+[08:20:53] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:53] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:53] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 13 misses (1287 ms translating)
+[08:20:53] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:53] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:53] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 14 misses (1394 ms translating)
+[08:20:53] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:53] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:54] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 15 misses (1499 ms translating)
+[08:20:54] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:54] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:54] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 15 misses (1499 ms translating)
+[08:20:54] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:54] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:54] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 16 misses (1605 ms translating)
+[08:20:54] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:54] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:54] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 17 misses (1712 ms translating)
+[08:20:54] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:54] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:54] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 17 misses (1712 ms translating)
+[08:20:54] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:54] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:54] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 17 misses (1712 ms translating)
+[08:20:54] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:54] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:54] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 17 misses (1712 ms translating)
+[08:20:54] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:54] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:54] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 18 misses (1820 ms translating)
+[08:20:54] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:54] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:54] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 18 misses (1820 ms translating)
+[08:20:54] [Test worker/INFO]: [Metallum] Metal 4: requested=true available=true compiler=false present=false mainQueuePilot=false mainRenderer=false barrier=false
+[08:20:54] [Test worker/WARN]: [metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable
+[08:20:54] [Test worker/INFO]: [metallum] MSL disk cache: 0 hits, 18 misses (1820 ms translating)
