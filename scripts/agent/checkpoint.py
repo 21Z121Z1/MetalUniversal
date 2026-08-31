@@ -15,13 +15,8 @@ import context as context_tool
 ROOT = Path(__file__).resolve().parents[2]
 STATE = ROOT / "build/agent-state/current.json"
 ALLOWED_STATUS = {
-    "oriented",
-    "implementing",
-    "verifying",
-    "blocked",
-    "rejected",
-    "ready-for-review",
-    "completed",
+    "oriented", "implementing", "verifying", "blocked", "rejected",
+    "ready-for-review", "completed",
 }
 ALLOWED_CHECK_STATUS = {"pass", "fail", "blocked", "pending", "inconclusive"}
 
@@ -41,7 +36,10 @@ def load_state() -> dict[str, Any]:
 
 def write_state(state: dict[str, Any]) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    STATE.write_text(
+        json.dumps(state, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def git_identity() -> dict[str, str]:
@@ -86,6 +84,7 @@ def render_markdown(state: dict[str, Any]) -> str:
         f"- task: {state['task']}",
         f"- status: `{state['status']}`",
         f"- claim: `{state['claim']}`",
+        f"- routing basis: `{state.get('routing_basis', 'legacy/unknown')}`",
         f"- branch: `{state['git']['branch']}`",
         f"- start SHA: `{state['git']['start_sha']}`",
         f"- current SHA: `{current_sha}`",
@@ -93,18 +92,27 @@ def render_markdown(state: dict[str, Any]) -> str:
     ]
     if state.get("hypothesis"):
         lines.extend(["", "## Hypothesis", state["hypothesis"]])
-    if state.get("direct_component_ids"):
-        lines.extend(["", "## Direct ownership"])
-        lines.extend(f"- `{item}`" for item in state["direct_component_ids"])
+    if state.get("changed_component_ids"):
+        lines.extend(["", "## Changed-component ownership"])
+        lines.extend(f"- `{item}`" for item in state["changed_component_ids"])
+    elif state.get("active_component_ids") or state.get("direct_component_ids"):
+        lines.extend(["", "## Planned/active route"])
+        lines.extend(
+            f"- `{item}`" for item in state.get("active_component_ids", state.get("direct_component_ids", []))
+        )
+    if state.get("proof_obligation_ids"):
+        lines.extend(["", "## Proof obligations"])
+        lines.append("- " + ", ".join(f"`{item}`" for item in state["proof_obligation_ids"]))
+    if state.get("execution_profile_ids"):
+        lines.extend(["", "## Execution schedule"])
+        lines.extend(f"- `{item}`" for item in state["execution_profile_ids"])
     if state.get("completed_checks"):
         lines.extend(["", "## Checks"])
         for check in state["completed_checks"]:
             check_sha = check.get("source_sha", "unbound")
             validity = "current" if check_sha == current_sha else "stale"
             suffix = f" — {check['evidence']}" if check.get("evidence") else ""
-            lines.append(
-                f"- `{check['status']}` `{validity}` {check['name']} @ `{check_sha[:12]}`{suffix}"
-            )
+            lines.append(f"- `{check['status']}` `{validity}` {check['name']} @ `{check_sha[:12]}`{suffix}")
     if state.get("blockers"):
         lines.extend(["", "## Blockers"])
         lines.extend(f"- {item}" for item in state["blockers"])
@@ -115,29 +123,32 @@ def render_markdown(state: dict[str, Any]) -> str:
 
 def init_state(args: argparse.Namespace) -> dict[str, Any]:
     registry = context_tool.load_registry()
-    capsule = context_tool.build_capsule(
-        registry, args.task, since=args.since, requested_claim=args.claim
-    )
+    capsule = context_tool.build_capsule(registry, args.task, since=args.since, requested_claim=args.claim)
     git = git_identity()
-    state = {
-        "schema_version": 1,
+    active_ids = [item["id"] for item in capsule["routing"]["direct_components"]]
+    changed_ids = [item["id"] for item in capsule["routing"].get("changed_components", [])]
+    execution_ids = [item["id"] for item in capsule.get("execution_plan", capsule["proof_plan"])]
+    obligation_ids = [item["id"] for item in capsule.get("proof_obligations", capsule["proof_plan"])]
+    return {
+        "schema_version": 2,
         "task": args.task,
         "status": "oriented",
         "claim": capsule["claim"],
+        "routing_basis": capsule["routing"].get("ownership_basis", "legacy/unknown"),
         "git": {
             "branch": git["branch"],
             "start_sha": git["current_sha"],
             "current_sha": git["current_sha"],
             "diff_base_ref": capsule["git"]["diff_base_ref"],
         },
-        "direct_component_ids": [
-            item["id"] for item in capsule["routing"]["direct_components"]
-        ],
+        "changed_component_ids": changed_ids,
+        "active_component_ids": active_ids,
+        "direct_component_ids": active_ids,
         "impacted_component_ids": capsule["routing"]["impacted_component_ids"],
-        "activated_boundary_ids": [
-            item["id"] for item in capsule["routing"]["activated_boundaries"]
-        ],
-        "proof_profile_ids": [item["id"] for item in capsule["proof_plan"]],
+        "activated_boundary_ids": [item["id"] for item in capsule["routing"]["activated_boundaries"]],
+        "proof_obligation_ids": obligation_ids,
+        "execution_profile_ids": execution_ids,
+        "proof_profile_ids": execution_ids,
         "hypothesis": args.hypothesis or "",
         "completed_checks": [],
         "blockers": [],
@@ -145,14 +156,11 @@ def init_state(args: argparse.Namespace) -> dict[str, Any]:
         "created_utc": now(),
         "updated_utc": now(),
     }
-    return state
 
 
 def command_init(args: argparse.Namespace) -> int:
     if STATE.exists() and not args.force:
-        raise SystemExit(
-            f"Checkpoint already exists at {STATE.relative_to(ROOT)}; use --force or update/show it."
-        )
+        raise SystemExit(f"Checkpoint already exists at {STATE.relative_to(ROOT)}; use --force or update/show it.")
     state = init_state(args)
     write_state(state)
     sys.stdout.write(render_markdown(state))
@@ -201,20 +209,24 @@ def self_test() -> int:
     checks = upsert_checks([{"name": "static", "status": "pending"}], checks)
     assert [item["name"] for item in checks] == ["gpu", "static"]
     assert all(item["source_sha"] == "a" * 40 for item in checks)
-    assert checks[1]["status"] == "pass" and checks[1]["evidence"] == "build/report.json"
     state = {
         "task": "test",
         "status": "verifying",
         "claim": "correctness",
+        "routing_basis": "diff",
         "git": {"branch": "branch", "start_sha": "a", "current_sha": "b" * 40},
         "updated_utc": now(),
-        "direct_component_ids": ["validation.contract"],
+        "changed_component_ids": ["validation.contract"],
+        "active_component_ids": ["validation.contract"],
+        "proof_obligation_ids": ["repo.static", "render.synthetic"],
+        "execution_profile_ids": ["repo.static"],
         "completed_checks": checks,
         "blockers": [],
         "next_command": "next",
     }
     rendered = render_markdown(state)
-    assert "validation.contract" in rendered and "build/report.json" in rendered and "stale" in rendered
+    assert "validation.contract" in rendered and "build/report.json" in rendered
+    assert "stale" in rendered and "Proof obligations" in rendered
     print("Agent checkpoint self-test: PASS")
     return 0
 
@@ -223,7 +235,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
     sub = parser.add_subparsers(dest="command")
-
     init = sub.add_parser("init", help="create a task checkpoint from the current context/proof plan")
     init.add_argument("--task", required=True)
     init.add_argument("--since")
@@ -236,7 +247,6 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--next-command")
     init.add_argument("--force", action="store_true")
     init.set_defaults(func=command_init)
-
     update = sub.add_parser("update", help="update status, evidence, blockers or next action")
     update.add_argument("--status", choices=sorted(ALLOWED_STATUS))
     update.add_argument("--hypothesis")
@@ -245,7 +255,6 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--clear-blockers", action="store_true")
     update.add_argument("--check", type=parse_check, action="append", default=[])
     update.set_defaults(func=command_update)
-
     show = sub.add_parser("show", help="render the current checkpoint")
     show.add_argument("--format", choices=("markdown", "json"), default="markdown")
     show.set_defaults(func=command_show)

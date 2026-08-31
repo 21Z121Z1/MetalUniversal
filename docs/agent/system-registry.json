@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "purpose": "Machine-readable agent control graph. It routes authority, ownership, impact and proof; it does not duplicate renderer or runtime truth.",
   "canonical": {
     "stable_branch": "master",
@@ -16,6 +16,7 @@
     "checkpoint_command": "python3 scripts/agent/checkpoint.py",
     "system_model": "docs/agent/system-model.md",
     "documentation_index": "docs/README.md",
+    "routing_fixtures": "docs/agent/routing-fixtures.json",
     "static_verification": "bash scripts/agent/verify_unified_eval.sh"
   },
   "authority_order": [
@@ -87,61 +88,86 @@
   "proof_profiles": {
     "agent.control": {
       "rank": 0,
+      "cost_class": "tiny",
       "environment": "any",
       "command": "python3 scripts/agent/verify_agent_control_plane.py",
       "depends_on": [],
-      "proves": "control graph, paths, proof DAG and bootstrap consistency"
+      "covers": [],
+      "proves": "control graph, routing fixtures, paths, proof DAG and bootstrap consistency"
     },
     "repo.static": {
       "rank": 1,
+      "cost_class": "small",
       "environment": "hosted-or-local",
       "command": "bash scripts/agent/verify_unified_eval.sh",
       "depends_on": [
         "agent.control"
       ],
+      "covers": [
+        "agent.control"
+      ],
+      "always_preflight": true,
       "proves": "schemas, analyzers, focused Java contracts and current static harness consistency"
     },
     "render.synthetic": {
       "rank": 2,
+      "cost_class": "small",
       "environment": "hosted-or-local",
       "command": "./gradlew --no-daemon renderContractSyntheticValidation",
       "depends_on": [
         "repo.static"
       ],
+      "covers": [],
       "proves": "backend-neutral render-contract fixtures and oracle behavior"
     },
     "render.gpu": {
       "rank": 3,
+      "cost_class": "medium",
       "environment": "supported-Metal-environment",
       "command": "bash scripts/agent/verify.sh gpu",
       "depends_on": [
         "repo.static"
       ],
+      "covers": [],
       "proves": "focused Java/FFM/Swift GPU execution contracts where capability exists"
     },
     "ios.build": {
       "rank": 3,
+      "cost_class": "medium",
       "environment": "macOS-with-iOS-SDK",
       "command": "./gradlew --no-daemon buildIOSNative buildIOSSpvc",
       "depends_on": [
         "repo.static"
       ],
+      "covers": [],
       "proves": "iOS native/toolchain and packaging compatibility only"
     },
     "hosted.exact-head": {
       "rank": 4,
+      "cost_class": "medium",
       "environment": "github-actions",
       "command": "GitHub Actions on exact HEAD: Unified eval verification + metal-capabilities + Minecraft reference smoke",
       "depends_on": [
+        "repo.static"
+      ],
+      "covers": [
+        "agent.control",
         "repo.static"
       ],
       "proves": "independent exact-head CI, hosted macOS native compatibility and repository capability gates"
     },
     "minecraft.conformance": {
       "rank": 5,
+      "cost_class": "large",
       "environment": "attended-or-capable-Minecraft-runtime",
       "command": "MODE=conformance WORLD=\"<world>\" CANDIDATE_PROFILE=\"<profile>\" bash scripts/agent/run_unified_eval_cycle.sh",
       "depends_on": [
+        "render.synthetic",
+        "render.gpu"
+      ],
+      "covers": [
+        "agent.control",
+        "repo.static",
         "render.synthetic",
         "render.gpu"
       ],
@@ -149,37 +175,51 @@
     },
     "minecraft.e2e": {
       "rank": 6,
+      "cost_class": "large",
       "environment": "github-actions-or-real-client-runtime",
       "command": "GitHub Actions on exact HEAD: Minecraft 26.2 production client E2E",
       "depends_on": [
         "hosted.exact-head"
       ],
+      "covers": [],
       "proves": "production-client startup/runtime path on the exact candidate SHA"
     },
     "physical.presentation": {
       "rank": 7,
+      "cost_class": "physical",
       "environment": "attended-Apple-Silicon",
       "command": "bash scripts/agent/run_metal4_main_p1_physical_correctness.sh",
       "depends_on": [
         "minecraft.conformance",
         "minecraft.e2e"
       ],
+      "covers": [],
       "proves": "physical Metal/presentation correctness that hosted runners cannot establish"
     },
     "mobile.device-e2e": {
       "rank": 7,
+      "cost_class": "physical",
       "environment": "real-iOS-Amethyst-runtime",
       "command": "real-device iOS/Amethyst startup -> swap/present -> Minecraft oracle",
       "depends_on": [
         "ios.build"
       ],
+      "covers": [],
       "proves": "real mobile runtime and presentation; build-only evidence is insufficient"
     },
     "performance.paired": {
       "rank": 8,
+      "cost_class": "very-large",
       "environment": "stable-attended-Apple-Silicon",
       "command": "MODE=full WORLD=\"<world>\" BLOCKS=4 CANDIDATE_PROFILE=\"<profile>\" bash scripts/agent/run_unified_eval_cycle.sh",
       "depends_on": [
+        "minecraft.conformance"
+      ],
+      "covers": [
+        "agent.control",
+        "repo.static",
+        "render.synthetic",
+        "render.gpu",
         "minecraft.conformance"
       ],
       "proves": "correctness-gated interleaved paired performance acceptance"
@@ -296,8 +336,7 @@
         "src/main/java/com/metallum/client/metal/render"
       ],
       "owned_paths": [
-        "src/main/java/com/metallum/mixin/**",
-        "src/main/java/com/metallum/client/metal/render/IrisMetal*.java"
+        "src/main/java/com/metallum/mixin/**"
       ],
       "canonical_docs": [
         "docs/render-contract-validation.md",
@@ -328,17 +367,21 @@
         "attachment",
         "load",
         "store",
-        "resource"
+        "resource",
+        "admission",
+        "lifetime"
       ],
       "source_roots": [
         "src/main/java/com/metallum/client/metal/render",
         "src/main/java/com/metallum/client/validation"
       ],
       "owned_paths": [
-        "src/main/java/com/metallum/client/metal/render/*Optimization*.java",
+        "src/main/java/com/metallum/client/metal/render/*Plan*.java",
         "src/main/java/com/metallum/client/metal/render/*Hazard*.java",
         "src/main/java/com/metallum/client/metal/render/*Liveness*.java",
-        "src/main/java/com/metallum/client/metal/render/*Plan*.java"
+        "src/main/java/com/metallum/client/metal/render/*LifetimeCompiler.java",
+        "src/main/java/com/metallum/client/metal/render/*Admission*.java",
+        "src/main/java/com/metallum/client/metal/render/IrisMetalAdvancedOptimizationConfig.java"
       ],
       "canonical_docs": [
         "docs/agent/system-model.md",
@@ -367,7 +410,8 @@
         "residency",
         "icb",
         "render",
-        "compute"
+        "compute",
+        "runtime"
       ],
       "source_roots": [
         "src/main/java/com/metallum/client/metal/render",
@@ -530,7 +574,7 @@
     },
     {
       "id": "evaluation.control",
-      "summary": "Agent bootstrap, impact/proof planning, experiment orchestration, structured evidence, ABBA analysis and CI authority.",
+      "summary": "Agent bootstrap, epistemic routing, impact/proof planning, experiment orchestration, structured evidence, statistics and CI authority.",
       "keywords": [
         "agent",
         "benchmark",
@@ -542,7 +586,9 @@
         "acceptance",
         "profile",
         "context",
-        "checkpoint"
+        "checkpoint",
+        "routing",
+        "proof"
       ],
       "source_roots": [
         "scripts/agent",
@@ -556,6 +602,7 @@
         "docs/AGENTS.md",
         "docs/agent/system-*.md",
         "docs/agent/system-*.json",
+        "docs/agent/routing-fixtures.json",
         "docs/agent/decisions/**"
       ],
       "canonical_docs": [

@@ -6,11 +6,14 @@ This directory is the control/evidence plane. It may route, normalize and judge 
 
 Local invariants:
 
-- Bind every decision to exact source/binary/scenario identity.
+- Bind every decision/check to exact source/binary/scenario identity; older-SHA PASS is stale.
+- Keep path-derived ownership facts distinct from task-derived routing inference and hypotheses.
 - Structured JSON is acceptance authority; log regex is discovery/diagnostic fallback only.
-- A changed oracle/analyzer needs self-tests or independent fixtures before it can approve the same candidate.
-- Preserve the distinction between capability-blocked, correctness-failed, regression, inconclusive noise and accepted candidate.
-- Keep generated task/evidence state under ignored `build/`; canonical knowledge belongs in tests/contracts/ADRs/checkers.
-- Prefer one manifest/index that links existing evidence over copying metrics into another report.
+- A changed oracle/analyzer needs independent self-tests/fixtures before it can approve the same candidate.
+- Preserve capability-blocked, correctness-failed, regression, inconclusive-noise and accepted states.
+- Keep generated task/evidence state under ignored `build/`; durable knowledge belongs in tests/contracts/ADRs/registry/checkers.
+- Prefer indexes that link existing evidence over copying metrics into another truth store.
+- Proof `depends_on` describes logical obligation; `covers` describes artifacts emitted inside one executor. Never use `covers` to erase an independent-environment requirement.
+- Retain a cheap fail-fast preflight even when an expensive integrated executor technically covers it.
 
-When adding a new gate, register it in `docs/agent/system-registry.json` only if it changes the proof ladder. Keep the cheapest sufficient gate first.
+When ownership, boundary or proof routing changes, update `docs/agent/system-registry.json` and add/adjust a representative `docs/agent/routing-fixtures.json` case. A routing change without a regression fixture should be exceptional.

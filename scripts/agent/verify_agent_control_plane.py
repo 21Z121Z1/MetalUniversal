@@ -11,6 +11,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = ROOT / "docs/agent/system-registry.json"
+ROUTING_FIXTURES = ROOT / "docs/agent/routing-fixtures.json"
 
 
 def fail(message: str) -> None:
@@ -30,6 +31,7 @@ def require_exists(path: str) -> None:
 def validate_proof_graph(profiles: dict[str, dict[str, Any]]) -> None:
     for profile_id, profile in profiles.items():
         require(isinstance(profile.get("rank"), int), f"proof {profile_id} must have integer rank")
+        require(profile.get("cost_class"), f"proof {profile_id} must declare cost_class")
         require(profile.get("environment"), f"proof {profile_id} must declare environment")
         require(profile.get("command"), f"proof {profile_id} must declare command/authority route")
         require(profile.get("proves"), f"proof {profile_id} must declare what it proves")
@@ -38,6 +40,13 @@ def validate_proof_graph(profiles: dict[str, dict[str, Any]]) -> None:
             require(
                 profiles[dependency].get("rank", 999) <= profile.get("rank", -1),
                 f"proof {profile_id} depends on a later-ranked proof {dependency}",
+            )
+        for covered in profile.get("covers", []):
+            require(covered in profiles, f"proof {profile_id} covers unknown proof {covered}")
+            require(covered != profile_id, f"proof {profile_id} cannot cover itself")
+            require(
+                profiles[covered].get("rank", 999) <= profile.get("rank", -1),
+                f"proof {profile_id} covers later-ranked proof {covered}",
             )
 
     visiting: set[str] = set()
@@ -56,6 +65,14 @@ def validate_proof_graph(profiles: dict[str, dict[str, Any]]) -> None:
 
     for profile_id in profiles:
         visit(profile_id)
+
+    preflights = [profile_id for profile_id, profile in profiles.items() if profile.get("always_preflight")]
+    require(preflights, "proof graph must retain at least one cheap fail-fast preflight")
+    for profile_id in preflights:
+        require(
+            profiles[profile_id]["rank"] <= 1,
+            f"always_preflight proof {profile_id} must remain cheap/early-ranked",
+        )
 
 
 def validate_impact_graph(components: list[dict[str, Any]]) -> set[str]:
@@ -86,13 +103,28 @@ def main() -> int:
     except Exception as exc:
         fail(f"cannot parse {REGISTRY.relative_to(ROOT)}: {exc}")
 
-    require(registry.get("schema_version") == 2, "unsupported system-registry schema_version")
+    require(registry.get("schema_version") == 3, "unsupported system-registry schema_version")
 
     canonical = registry.get("canonical", {})
     development = canonical.get("development_branch")
     stable = canonical.get("stable_branch")
     require(bool(development and stable), "canonical development/stable branches must be declared")
     require(int(canonical.get("max_persistent_branches", 0)) >= 3, "persistent branch budget is malformed")
+
+    bootstrap = registry.get("bootstrap", {})
+    require(
+        bootstrap.get("routing_fixtures") == "docs/agent/routing-fixtures.json",
+        "bootstrap must register routing fixtures",
+    )
+    require_exists(bootstrap["routing_fixtures"])
+
+    try:
+        fixtures = json.loads(ROUTING_FIXTURES.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"cannot parse {ROUTING_FIXTURES.relative_to(ROOT)}: {exc}")
+    require(fixtures.get("schema_version") == 1, "unsupported routing-fixtures schema_version")
+    require(fixtures.get("path_cases"), "routing fixtures must include path cases")
+    require(fixtures.get("execution_cases"), "routing fixtures must include execution cases")
 
     canonical_docs = registry.get("canonical_documents", [])
     require(bool(canonical_docs), "canonical_documents must not be empty")
@@ -132,7 +164,10 @@ def main() -> int:
         require(boundary.get("contract"), f"boundary {boundary_id} must state its contract")
 
     generated = registry.get("generated_evidence", {})
-    require("build/agent-state/**" in generated.get("never_commit", []), "agent checkpoints must remain generated/ignored state")
+    require(
+        "build/agent-state/**" in generated.get("never_commit", []),
+        "agent checkpoints must remain generated/ignored state",
+    )
     require(generated.get("run_manifest"), "existing unified run manifest must be registered")
     require(generated.get("decision"), "existing unified decision artifact must be registered")
 
@@ -150,6 +185,8 @@ def main() -> int:
         "OBSERVE -> ORIENT -> DECIDE -> ACT -> VERIFY -> DISTILL",
         "Context-budget model",
         "Impact graph and proof closure",
+        "Proof obligations vs execution schedule",
+        "Epistemic labels",
         "Recoverable task state",
     ):
         require(marker in system_model, f"system model missing required control-plane marker: {marker}")

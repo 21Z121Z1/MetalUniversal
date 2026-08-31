@@ -1,18 +1,18 @@
 # Unified render evaluation and autonomous optimization loop
 
-This is the canonical correctness/performance workflow for renderer work. It is one execution loop inside the broader control plane in `system-model.md`. Task/diff routing, impact closure and proof planning come from `scripts/agent/context.py`; acceptance thresholds come from `unified-evaluation-acceptance.json`; proof-profile ordering/requirements come from `system-registry.json`.
+This is the canonical correctness/performance workflow for renderer work. `system-model.md` defines the overall control plane; `system-registry.json` defines ownership, boundary and proof rules; `context.py` compiles those rules into a task-local view; `unified-evaluation-acceptance.json` defines acceptance thresholds.
 
-The canonical continued-development base is `integration/iris-metal-next`. Create one bounded task branch from that base. Historical `agent/*`, `codex/*`, prompts, dated handoffs and retired feature branches are evidence/provenance only unless current source or the registry explicitly routes to them.
+The canonical continued-development base is `integration/iris-metal-next`. Historical task branches, prompts and handoffs are provenance/recipes unless current executable truth explicitly points to them.
 
 ## 1. Evaluation model
 
-The repository has one evaluation platform and three suites with deliberately different instrumentation cost:
+One evaluation platform serves three suites with deliberately different instrumentation cost:
 
 ```text
 deterministic scenario + source/binary/environment identity
         |
         +-- conformance
-        |     logical pass trace + attachment/readback expectations
+        |     semantic pass/resource trace + targeted expectations
         |     -> first divergent semantic pass/resource/producer
         |
         +-- performance
@@ -21,50 +21,81 @@ deterministic scenario + source/binary/environment identity
         |
         +-- diagnostic
               focused producer detail + targeted readback
-              -> evidence for one already-localized divergence
+              -> one already-localized divergence
 ```
 
-`RenderTraceRecorder`, semantic pass IDs and generation-aware `ResourceIdentity` are canonical cross-backend identities. Iris construction-plan traces are oracle evidence. Timestamps, native pointers, encoder ordinals, object addresses, shader-pack names and log line numbers are never stable join keys.
+`RenderTraceRecorder`, semantic pass IDs and generation-aware `ResourceIdentity` are canonical cross-backend identities. Broad readback/producer tracing is diagnostic/conformance instrumentation, not performance instrumentation.
 
-Conformance and performance may share world/camera/profile, but not instrumentation cost. Broad readback/producer traces are disabled during performance trials. When conformance identifies a mismatch, rerun only the first divergent semantic pass in diagnostic mode.
+## 2. Bootstrap: facts, inference and proof
 
-## 2. Bootstrap, impact and proof planning
-
-Before changing/evaluating renderer behavior:
+Run:
 
 ```bash
 python3 scripts/agent/context.py --task "<candidate or problem>"
 ```
 
-Inspect **direct ownership**, **impact closure**, **boundary risk** and **minimum proof ladder** before reading broadly or editing. The diff may directly own one component while invalidating assumptions in several downstream components; downstream impact does not mean those components should all be edited.
+Read the capsule in this order:
 
-For renderer/runtime work, then run the early applicable gates returned by the capsule. Common prerequisites are:
+1. exact Git/source identity;
+2. **changed-component ownership** when path-derived;
+3. **planned route** when it is task-text inference only;
+4. downstream impact and boundary contracts;
+5. complete **proof obligations**;
+6. **minimum execution schedule** after integrated gates are collapsed.
 
-```bash
-bash scripts/agent/doctor.sh
-bash scripts/agent/verify_unified_eval.sh
-```
+Do not call task-keyword routing a fact. Do not edit every impacted component merely because it appears in the impact closure.
 
-`doctor.sh` characterizes a physical/runtime-capable host; it is not required merely to edit control-plane prose or headless Java logic. Static verification proves the harness/control plane before expensive client work begins.
-
-For multi-step work, create/update the ignored task checkpoint so an interrupted agent can recover hypothesis, exact-SHA proof state, blockers and next action:
+For a multi-step task, create/update the ignored checkpoint:
 
 ```bash
 python3 scripts/agent/checkpoint.py init \
   --task "<task>" \
-  --hypothesis "<hypothesis>" \
-  --next-command "<next cheapest proof/action>"
+  --hypothesis "<falsifiable hypothesis>" \
+  --next-command "<next cheapest action>"
 ```
 
-Do not start from an old branch/handoff copied from a historical plan. If current executable truth and historical prose disagree, executable truth wins and any canonical document must be corrected.
+Every recorded PASS is bound to the source SHA at which it ran. After HEAD changes it is stale until the relevant proof is re-established.
 
-## 3. Environment and capability truth
+## 3. Proof obligations vs minimum execution schedule
 
-Claims involving visible presentation, real-client shader-pack parity or stable GPU performance require an attended Apple Silicon Mac with the relevant macOS/Xcode/Metal SDK surfaces, Java 25, usable WindowServer, fixed display mode and stable power/thermal state.
+The registry's `depends_on` graph describes **logical evidence obligations**. It is not a command list.
 
-Hosted runners can prove Java/schema logic, Swift/Metal compilation and selected offscreen/native capability contracts. They do not replace physical presentation/device evidence when the claim actually depends on it.
+Some executors deliberately produce lower proof artifacts internally. The registry records those relationships with `covers`. The context compiler therefore emits two views:
 
-For comparable client trials record at minimum:
+- `proof_obligations` — everything that must be established for the claim;
+- `execution_plan` — the smallest command schedule that establishes those obligations without re-running integrated gates.
+
+`repo.static` remains an explicit cheap preflight even if a later executor covers it, because early falsification saves expensive client/GPU work.
+
+Typical renderer-performance example:
+
+```text
+logical obligations:
+agent.control
+repo.static
+render.synthetic
+render.gpu
+minecraft.conformance
+hosted.exact-head
+minecraft.e2e
+performance.paired
+
+minimum execution schedule:
+repo.static
+performance.paired
+hosted.exact-head
+minecraft.e2e
+```
+
+The paired runner supplies its own local correctness prerequisites; exact-head CI and production-client E2E remain independent evidence and are not erased by that integration.
+
+Run the generated execution schedule in increasing cost. Stop when an earlier gate falsifies the candidate.
+
+## 4. Environment/capability truth
+
+Hosted runners can prove Java/schema logic, Swift/Metal compilation and selected native/offscreen contracts. They cannot substitute for attended Apple Silicon or a real iOS runtime when the requested claim depends on visible presentation, device integration, hardware-specific behavior or stable GPU performance.
+
+For comparable physical performance trials record at minimum:
 
 ```bash
 export WORLD="<deterministic world>"
@@ -74,11 +105,11 @@ export METALLUM_EVAL_DISPLAY="<resolution, scale, refresh, HDR state>"
 export METALLUM_EVAL_POWER_STATE="<AC/battery and thermal preparation>"
 ```
 
-A run is not comparable when source/native hashes, world, shader pack/options, resolution/render distance, display mode or power state differ without an explicit experimental reason.
+Source/native hashes, world, shader-pack/options, display mode and power state are part of trial identity.
 
-## 4. Entry points and evidence
+## 5. Unified entry points
 
-Correctness only:
+Correctness/conformance:
 
 ```bash
 MODE=conformance WORLD="$WORLD" \
@@ -86,7 +117,7 @@ MODE=conformance WORLD="$WORLD" \
   bash scripts/agent/run_unified_eval_cycle.sh
 ```
 
-Targeted first-divergence diagnosis:
+Focused diagnosis:
 
 ```bash
 MODE=diagnostic WORLD="$WORLD" \
@@ -94,7 +125,7 @@ MODE=diagnostic WORLD="$WORLD" \
   bash scripts/agent/run_unified_eval_cycle.sh
 ```
 
-Complete correctness-gated paired experiment:
+Correctness-gated paired performance:
 
 ```bash
 MODE=full WORLD="$WORLD" BLOCKS=4 \
@@ -102,17 +133,15 @@ MODE=full WORLD="$WORLD" BLOCKS=4 \
   bash scripts/agent/run_unified_eval_cycle.sh
 ```
 
-The runner creates a unique `build/agent-runs/<run>/` directory. `run-manifest.json` binds source/binary/environment/scenario identity; correctness/admission/trial artifacts record source evidence; `decision.json` records the resulting decision. Reuse/link these artifacts rather than copying metrics into another report database.
+The runner emits a unique `build/agent-runs/<run>/` directory. `run-manifest.json` binds source/binary/environment/scenario identity; correctness/admission/trial artifacts contain source evidence; `decision.json` records the resulting decision. Reuse these artifacts rather than copying metrics into a parallel truth store.
 
-A checkpoint proof result is reusable only for the exact `source_sha` it records. After HEAD changes, old PASS records are stale until the relevant gate is rerun for the new SHA.
-
-## 5. Candidate record
+## 6. Candidate record
 
 Before changing renderer behavior, record one falsifiable candidate:
 
 ```text
 Observation:
-Owning component(s):
+Ownership fact / routing inference:
 Impacted boundary/contract:
 First suspect abstraction layer:
 Hypothesis:
@@ -123,48 +152,23 @@ Fastest falsification test:
 Rollback condition:
 ```
 
-This prevents drifting across unrelated layers when one cheap test already identifies the wrong assumption.
+One task should test one coherent hypothesis. Do not mix unrelated caching, fusion, allocation and submission ideas into one experiment.
 
-## 6. Correctness and admission
+## 7. Correctness and admission
 
-A candidate must preserve every relevant observable semantic contract. Fail closed when planner/runtime cannot prove safety.
+Correctness is mandatory and optimization admission is fail-closed.
 
-Hazard-based transforms must emit machine-readable admission/rejection reasons naming:
+Hazard/liveness transforms must use stable semantic passes, generation-aware resources, explicit access modes, RAW/WAR/WAW/barrier edges and attachment/lifetime evidence. Safety cannot be inferred from pass labels or adjacency.
 
-- semantic passes;
-- generation-aware resources;
-- access modes;
-- RAW/WAR/WAW or explicit-barrier edges;
-- attachment compatibility/liveness evidence where applicable.
+Resource pruning requires full-lifetime non-use. ABI/argument-table changes require exact layout, symbol, ownership and nullability compatibility. Unsupported transforms should remain disabled with a machine-readable rejection reason rather than approximate behavior.
 
-Safety cannot be inferred from pass labels or adjacency. Resource pruning requires full-lifetime non-use across terrain, shadow, composite/final, copy/readback and temporal consumers. Argument-table/ABI migration requires exact slot/layout/symbol/ownership compatibility. A correctly disabled optimization is preferable to an approximate enabled path.
+If `validation.contract`, an analyzer or benchmark judge changes, first prove the changed judge through independent fixtures/self-tests before it can approve the same renderer candidate.
 
-When `validation.contract` or an analyzer is itself modified, first prove the changed judge through independent fixtures/self-tests. Do not let candidate and oracle share one unverified failure mode.
-
-On failure, diagnose the first divergent pass/resource/producer before broad screenshot comparison.
-
-## 7. Canonical proof ladder
-
-The machine authority is the proof DAG in `system-registry.json`; `context.py` computes the closure needed for the current direct components, boundaries and claim. The general escalation is:
-
-```text
-agent-control consistency
-  -> repository/static contracts
-    -> synthetic semantic oracle
-      -> focused GPU/native contracts where capability exists
-        -> independent exact-HEAD hosted CI
-          -> Minecraft conformance / production E2E
-            -> physical presentation/device proof when the claim requires it
-              -> interleaved paired performance only when performance is claimed
-```
-
-Run in increasing cost. Stop when an earlier gate falsifies the candidate. Do not pay for physical/performance work for a control-plane-only diff, and do not use a later gate to erase an unmet semantic or ABI obligation.
-
-The physical step is **claim-driven**, not mechanically mandatory before every Minecraft E2E: hosted/real-client E2E may establish startup/runtime contracts, while attended presentation/physical Metal behavior remains mandatory only for conclusions that those environments cannot prove.
+On semantic failure, diagnose the first divergent pass/resource/producer before broad screenshot or capture comparison.
 
 ## 8. Performance protocol
 
-Use at least four interleaved paired blocks. Default order alternates direction across blocks:
+Use at least four interleaved paired blocks:
 
 ```text
 block 1: baseline -> candidate
@@ -173,63 +177,61 @@ block 3: baseline -> candidate
 block 4: candidate -> baseline
 ```
 
-Aggregate samples inside each trial before comparing profiles. Compare baseline/candidate within the same block, then summarize paired deltas. Do not pool all frames as independent observations.
+Aggregate within each trial, compare baseline/candidate inside each block, then summarize paired deltas. Do not pool all frame samples as independent observations.
 
-Structured JSON reports are authoritative. Log regex may discover missing instrumentation but is never acceptance evidence. An absent structured metric is `unavailable`; do not infer it from prose. FPS is mandatory whenever the client performance run completes.
+Structured JSON is acceptance authority. Log regex may reveal missing instrumentation but cannot approve a candidate. A missing structured metric is `unavailable`. FPS is mandatory whenever the performance client completed.
 
 A performance candidate is accepted only when:
 
-1. complete relevant correctness gates pass;
-2. candidate activation/admission is structured and explicit;
+1. relevant correctness gates pass;
+2. activation/admission is structured and explicit;
 3. at least four paired blocks exist;
 4. a declared target improves in at least 75% of pairs and its paired median improves;
-5. GPU time, CPU time, peak memory and stutter guardrails remain within declared limits.
+5. GPU time, CPU time, memory and stutter guardrails remain within declared limits.
 
 Positive but unstable results are `inconclusive-noise`. Zero delta is not improvement.
 
 ## 9. Evidence graph
 
-A final decision must reconstruct from:
+A final decision must reconstruct as:
 
 ```text
 source SHA
  + native/binary identity
- + environment identity
- + scenario identity
- + feature/admission activation
- + correctness result
- + paired performance result when claimed
+ + environment/scenario identity
+ + activation/admission
+ + correctness
+ + paired performance when claimed
  + exact artifact paths
  = decision
 ```
 
-Missing required edges invalidate the claim. Compilation is not activation; activation is not correctness; correctness is not performance improvement; screenshot similarity without semantic linkage is diagnostic evidence only.
+Compilation is not activation. Activation is not correctness. Correctness is not performance improvement. Screenshot similarity without semantic linkage is diagnostic evidence only. PASS from another SHA is stale evidence.
 
-## 10. Autonomous agent loop
+## 10. Autonomous loop
 
-1. Generate context; create/check the checkpoint for multi-step work.
-2. Establish direct ownership, impact closure, boundary contracts and exact starting SHA.
-3. Read only scoped source/tests/canonical docs returned by the capsule.
-4. Write the falsifiable candidate record.
-5. Implement the smallest complete change with activation and fail-closed handling.
-6. Execute the generated proof ladder in order, recording each result against its exact SHA.
-7. If conformance fails, localize the first divergence and use diagnostic mode only there.
-8. Run physical presentation/device evidence only for claims that require it.
-9. Run paired performance only after correctness/activation and only when performance is claimed.
-10. Keep/revert/extend evidence according to structured decision; do not call noise a win.
-11. Self-review ABI symmetry, Metal 3/4 paths, resource recreate/close behavior, mixin application, stale flags and generated files.
-12. Distill durable knowledge into tests/contracts/ADRs/registry/checkers; leave transient task/evidence state out of canonical docs.
+```text
+OBSERVE -> ORIENT -> DECIDE -> ACT -> VERIFY -> DISTILL
+```
+
+Operationally:
+
+1. Compile task context and exact starting state.
+2. Separate ownership facts from routing inference; inspect impact/boundaries.
+3. Read only the routed source/tests/contracts.
+4. Write one falsifiable candidate record.
+5. Implement the narrowest complete change with fail-closed activation/lifecycle handling.
+6. Execute the generated minimum schedule and bind each result to its exact SHA.
+7. Localize the first semantic divergence before broadening instrumentation.
+8. Run physical/device proof only when the claim requires it.
+9. Run paired performance only after correctness/activation and only for performance claims.
+10. Self-review the complete diff.
+11. Distill reusable lessons into tests/contracts/ADR/registry + routing fixture/checker; leave transient state in generated evidence/checkpoint.
 
 ## 11. Final report
 
-Distinguish:
+Distinguish validated, environment-blocked/unvalidated, rejected/reverted, inconclusive/noise and pre-existing policy drift.
 
-- implemented + validated;
-- implemented + environment-blocked/unvalidated;
-- rejected/reverted;
-- inconclusive/noise;
-- pre-existing policy drift.
-
-Include exact start/end SHA, direct ownership/boundaries changed, commands/exit status, correctness/first divergence, activation, latest exact-head CI, required physical evidence and limits, artifact paths, review readiness and residual risk.
+Include exact start/end SHA, changed ownership/boundaries, actual executed proof profiles and exit status, latest exact-head CI, correctness/first divergence, activation, required physical limits, artifact paths, review readiness and residual risk.
 
 For performance report before/after, raw delta, direction-normalized improvement and paired block count for every available relevant metric. Mark missing metrics `unavailable` with the exact absent structured source.
