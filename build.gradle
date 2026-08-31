@@ -1100,6 +1100,15 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 		// previous client crash persisted preferredGraphicsBackend=opengl.
 		systemProperty "metallum.validation.forceMetal", "true"
 		systemProperty "metallum.validation.requireMetal", "true"
+		// The render-contract task validates the Iris-on-Metal path. Keep it
+		// independent from the separate MetalFX attachment/motion suite, whose
+		// producer contract is intentionally validated by its own task.
+		systemProperty "metallum.validation.contractOnly",
+				renderContractMinecraftValidationRequested ? "true" : "false"
+		if (renderContractMinecraftValidationRequested) {
+			systemProperty "metallum.iris.semantic",
+				System.getProperty("metallum.iris.semantic", "true")
+		}
 		systemProperty "metallum.renderContract.enabled", renderContractMinecraftValidationRequested ? "true" : "false"
 		systemProperty "metallum.renderContract.runId",
 				renderContractMinecraftDiagnoseRequested ? "minecraft-diagnose-current"
@@ -1129,7 +1138,8 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			}
 		}
 		systemProperty "metallum.metalfx.mode",
-				nativeFullscreenBaselineRequested ? "OFF" : "TEMPORAL"
+				renderContractMinecraftValidationRequested || nativeFullscreenBaselineRequested
+					? "OFF" : "TEMPORAL"
 			if (nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested) {
 				systemProperty "metallum.validation.performanceOnly", "true"
 				systemProperty "metallum.validation.gpuTiming", "true"
@@ -1184,11 +1194,12 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				systemProperty key.toString(), value.toString()
 			}
 		}
-			[
-					"metallum.metalfx.stableCutoutAlpha",
-					"metallum.metalfx.stableTerrainSampler",
-					"metallum.metalfx.handReactiveWeight",
-					"metallum.validation.lenient"
+		[
+				"metallum.metalfx.stableCutoutAlpha",
+				"metallum.metalfx.stableTerrainSampler",
+				"metallum.metalfx.handReactiveWeight",
+				"metallum.validation.keepActive",
+				"metallum.validation.lenient"
 		].each { propertyName ->
 			def requestedValue = System.getProperty(propertyName)
 			if (requestedValue != null) {

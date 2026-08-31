@@ -209,8 +209,8 @@ public final class IrisMetalPipelineOverrides {
             // "metallum", but it is still the pipeline for the active Sodium
             // terrain pass. The kind captured from TerrainRenderPass is the
             // authoritative shadow layout; checking the replacement pipeline's
-            // namespace first would bind a coverage PSO to Iris's shadow
-            // descriptor.
+            // namespace first would bind a two-target coverage PSO to Iris's
+            // single-target shadow descriptor.
             TerrainKind kind = ACTIVE_TERRAIN_KIND.get();
             if (kind == null) {
                 instance.requireNoFallback("shadow terrain pipeline has no active terrain kind");
@@ -226,8 +226,8 @@ public final class IrisMetalPipelineOverrides {
         }
         // MetalFX temporarily replaces Sodium's CUTOUT pipeline with a
         // namespaced two-target coverage pipeline. Iris owns the active
-        // shader-pack descriptor, so route that replacement through the same
-        // one-target-or-pack-MRT synthetic PSO as the original Sodium
+        // shader-pack descriptor, so route that replacement through the
+        // same one-target-or-pack-MRT synthetic PSO as the original Sodium
         // pipeline instead of binding its coverage layout directly.
         if (!Instance.isSodiumPipeline(pipeline)
                 && !MetalCutoutReactivePipeline.isActiveCutoutPass()) {

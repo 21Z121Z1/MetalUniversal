@@ -269,6 +269,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         MemorySegment retainedHandle = MemorySegment.NULL;
         if (currentEncoder != null) {
             if (currentEncoder instanceof MTLRenderCommandEncoder renderEncoder) {
+                if (currentRenderPass != null) {
+                    currentRenderPass.resolveContractStoreActions(
+                            renderEncoderDeferredColorStores,
+                            colorStoresKilled,
+                            renderEncoderDeferredStore,
+                            renderEncoderDeferredStore && incomingClearsSameDepth
+                    );
+                }
                 if (renderEncoderDeferredStore) {
                     // The descriptor used storeAction=.unknown, so the store
                     // decision is owed before endEncoding. The depth contents
@@ -420,6 +428,19 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return pendingColorClears.containsKey(texture) || pendingDepthClears.containsKey(texture);
     }
 
+    /**
+     * Drops a deferred clear for a resource that is about to be retired.
+     *
+     * <p>A resize can close a texture before the next encoder boundary has a
+     * chance to materialize its clear. The replacement generation owns the
+     * new clear state, so retaining the old entry would make a later
+     * {@link #flushAllPendingClears()} dereference a closed native texture.</p>
+     */
+    void discardPendingClear(final MetalGpuTexture texture) {
+        pendingColorClears.remove(texture);
+        pendingDepthClears.remove(texture);
+    }
+
     void endComputePass(final MTLComputeCommandEncoder encoder) {
         if (currentEncoder != encoder) {
             throw new IllegalStateException(
@@ -486,7 +507,18 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             callback.committed.run();
         }
 
-        inFlight[slot] = new InFlight(currentSubmitIndex, commandBuffer, completedSemaphore, callbacks);
+        // Capture the validation frame identity at submission time.  GPU
+        // completion can happen several Java frames later, so reading the
+        // recorder's current frame from the completion callback would pair a
+        // command buffer with the wrong frame.
+        long submissionFrameId = MetalGpuTimingRecorder.currentFrameId();
+        inFlight[slot] = new InFlight(
+                currentSubmitIndex,
+                submissionFrameId,
+                commandBuffer,
+                completedSemaphore,
+                callbacks
+        );
         commandBuffer = null;
         currentSubmitIndex++;
 
@@ -772,6 +804,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         MetalGpuTextureView[] colorTextureViews = new MetalGpuTextureView[colorAttachments.size()];
         Vector4fc[] clearColors = new Vector4fc[colorAttachments.size()];
+        boolean[] colorClearEnabled = new boolean[colorAttachments.size()];
         boolean hasColorClear = false;
         for (int index = 0; index < colorAttachments.size(); index++) {
             RenderPassDescriptor.Attachment<Optional<Vector4fc>> colorAttachment = colorAttachments.get(index);
@@ -805,6 +838,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
             if (colorClear.isPresent()) {
                 clearColors[index] = new Vector4f(colorClear.get());
+                colorClearEnabled[index] = true;
                 hasColorClear = true;
             }
             colorTex.markContentsDirty();
@@ -867,7 +901,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 depthClear.isPresent()
                         ? MetalIrisDepthConvention.hardwareClear(depthClear.getAsDouble())
                         : 0.0,
-                beginContractPass(descriptor, colorTextureViews, depthTexture, renderArea, hasColorClear, depthClear.isPresent())
+                beginContractPass(descriptor, colorTextureViews, depthTexture, renderArea, colorClearEnabled, depthClear.isPresent())
         );
         currentRenderPass = renderPass;
         renderPass.pushDebugGroup(descriptor.label());
@@ -890,7 +924,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final MetalGpuTextureView[] colorTextureViews,
             @Nullable final GpuTextureView depthTexture,
             final RenderPass.RenderArea renderArea,
-            final boolean hasColorClear,
+            final boolean[] colorClearEnabled,
             final boolean hasDepthClear
     ) {
         if (!RenderContractRuntime.enabled()) {
@@ -905,8 +939,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     slot,
                     contractResource(texture, view.baseMipLevel()),
                     AttachmentSemantic.COLOR,
-                    hasColorClear ? "clear" : "load",
-                    "store",
+                    slot < colorClearEnabled.length && colorClearEnabled[slot] ? "clear" : "load",
+                    renderPassDescriptorV3Active() && deferredColorStoreActive() ? "unknown" : "store",
                     true
             ));
         }
@@ -918,7 +952,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     contractResource(texture, depthTexture.baseMipLevel()),
                     AttachmentSemantic.DEPTH,
                     hasDepthClear ? "clear" : "load",
-                    "store",
+                    DEFERRED_DEPTH_STORE ? "unknown" : "store",
                     true
             );
         }
@@ -1942,6 +1976,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     private static final class InFlight {
         private final long index;
+        private final long frameId;
         private final MTLCommandBuffer buffer;
         private final MemorySegment completedSemaphore;
         private final List<SubmitCallback> callbacks;
@@ -1949,11 +1984,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         private InFlight(
                 final long index,
+                final long frameId,
                 final MTLCommandBuffer buffer,
                 final MemorySegment completedSemaphore,
                 final List<SubmitCallback> callbacks
         ) {
             this.index = index;
+            this.frameId = frameId;
             this.buffer = buffer;
             this.completedSemaphore = completedSemaphore;
             this.callbacks = callbacks;
@@ -1964,7 +2001,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 return;
             }
             completionHandled = true;
-            MetalGpuTimingRecorder.record(index, buffer.gpuStartTime(), buffer.gpuEndTime());
+            MetalGpuTimingRecorder.record(index, frameId, buffer.gpuStartTime(), buffer.gpuEndTime());
             if (!buffer.completedSuccessfully()) {
                 for (SubmitCallback callback : callbacks) {
                     callback.failed.run();

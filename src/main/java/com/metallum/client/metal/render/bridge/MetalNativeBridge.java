@@ -646,6 +646,25 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS
                     )
             );
+            // Placement-heap allocation is optional.  Older dylibs keep the
+            // ordinary texture ABI and simply leave this generation-safe,
+            // fail-closed lane unavailable.
+            irisPlacementHeapCreate = optionalDowncall(
+                    lookup,
+                    "metallum_iris_placement_heap_create",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG
+                    )
+            );
+            irisPlacementHeapTexture = optionalDowncall(
+                    lookup,
+                    "metallum_iris_placement_heap_texture",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
             createTextureView = downcall(lookup, "metallum_create_texture_view", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
             createTextureViewAlphaOne = downcall(
                     lookup,
@@ -1127,6 +1146,10 @@ public final class MetalNativeBridge {
     private static final MethodHandle createBuffer;
     private static final MethodHandle createTexture2d;
     private static final MethodHandle createTexture;
+    @Nullable
+    private static final MethodHandle irisPlacementHeapCreate;
+    @Nullable
+    private static final MethodHandle irisPlacementHeapTexture;
     private static final MethodHandle createTextureView;
     private static final MethodHandle createTextureViewAlphaOne;
     private static final MethodHandle createBufferTextureView;
@@ -2171,6 +2194,46 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_texture", throwable);
+        }
+    }
+
+    public static boolean irisPlacementHeapAvailable() {
+        return irisPlacementHeapCreate != null && irisPlacementHeapTexture != null;
+    }
+
+    public static MemorySegment irisPlacementHeapCreate(
+            final MemorySegment device,
+            final MemorySegment records,
+            final long recordCount,
+            final long slotCount
+    ) {
+        if (!irisPlacementHeapAvailable() || recordCount <= 1L || slotCount <= 0L) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) irisPlacementHeapCreate.invokeExact(
+                    segment(device), segment(records), recordCount, slotCount
+            );
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
+        }
+    }
+
+    public static MemorySegment irisPlacementHeapTexture(
+            final MemorySegment owner,
+            final long textureIndex
+    ) {
+        if (!irisPlacementHeapAvailable()
+                || isNullHandle(owner)
+                || textureIndex < 0L) {
+            return MemorySegment.NULL;
+        }
+        try {
+            return (MemorySegment) irisPlacementHeapTexture.invokeExact(
+                    segment(owner), textureIndex
+            );
+        } catch (Throwable ignored) {
+            return MemorySegment.NULL;
         }
     }
 

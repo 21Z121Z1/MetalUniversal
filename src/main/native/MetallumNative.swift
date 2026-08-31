@@ -128,10 +128,10 @@ private struct MetalFxScalerKey: Hashable {
 private enum NativeState {
     static var debugLabelsEnabled = false
     // When true, makeRenderCommandEncoder_v2 leaves the depth attachment with
-        // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
-        // before endEncoding. Color stores remain concrete in V3 because Metal
-        // does not allow mutating actions known at encoder creation. Toggled once
-        // at device init from
+    // storeAction=.unknown and the Java side resolves it (setDepthStoreAction)
+    // before endEncoding. V3 color stores can likewise start as .unknown and
+    // be resolved per slot before endEncoding. Toggled once at device init
+    // from
     // metallum_set_deferred_depth_store; must match the Java flag exactly.
     static var deferredDepthStore = false
     // Split-fence mode (metallum.opt.splitFence): non-nil while the Java
@@ -142,20 +142,18 @@ private enum NativeState {
     static var transferFence: MTLFence?
     static var depthStencilStates: [DepthStencilKey: MTLDepthStencilState] = [:]
     static var samplerStates: [SamplerKey: MTLSamplerState] = [:]
-    // Disk-backed PSO cache: descriptors compiled through
-    // metallum_MTLDevice_makeRenderPipelineState look up this archive first
-    // and harvest into it after a successful compile. Serialized to disk via
-    // metallum_pso_archive_flush. The lock guards harvest/serialize because
-    // pipeline creation may move off the render thread later.
+    // Disk-backed PSO cache: a loaded archive is lookup-only while a fresh
+    // archive harvests this launch's misses. Metal rejects serializing an
+    // archive created from an existing URL on some macOS builds, so keeping
+    // the two objects separate makes lookup+harvest+flush reliable across
+    // reloads. The lock guards harvest/serialize because pipeline creation may
+    // move off the render thread later.
     static var binaryArchive: MTLBinaryArchive?
+    static var binaryArchiveLookup: MTLBinaryArchive?
     static let binaryArchiveLock = NSLock()
-    // True when the archive was loaded from an existing file. Re-serializing
-    // an archive that contains loaded entries fails on current macOS
-    // ("expecting 'fragment' stage in pipeline no. N", entry number varies),
-    // so a loaded archive is used strictly read-only: PSO creation still hits
-    // it via descriptor.binaryArchives, but harvest and flush are skipped.
-    // Fresh archives (first launch or after deletion) harvest and serialize
-    // normally.
+    // Retained for diagnostics/backward state dumps. New archive-v2 code always
+    // harvests into a fresh object, so this remains false whenever the split
+    // lookup/harvest path is active.
     static var binaryArchiveReadOnly = false
     // Metal 4 (migration spec M2). Enabled from Java once the capability gate
     // and metallum.opt.metal4Compiler both hold; false means every PSO takes
@@ -8837,6 +8835,155 @@ public func metallum_create_texture(
     }
 }
 
+// MARK: - Iris placement-heap textures
+//
+// The Java planner supplies one fixed-width record per concrete texture and a
+// stable slot number for each non-overlapping lifetime group.  Native code is
+// responsible only for size/alignment and for creating the textures at the
+// chosen offsets; lifetime ordering and generation identity stay in Java.
+private final class IrisPlacementHeapTextureSet {
+    let heap: MTLHeap
+    let textures: [MTLTexture]
+
+    init(heap: MTLHeap, textures: [MTLTexture]) {
+        self.heap = heap
+        self.textures = textures
+    }
+}
+
+private struct IrisPlacementTextureRecord {
+    let descriptor: MTLTextureDescriptor
+    let size: Int
+    let alignment: Int
+    let slot: Int
+}
+
+private func irisAlignUp(_ value: Int, _ alignment: Int) -> Int? {
+    guard value >= 0, alignment > 0 else { return nil }
+    let remainder = value % alignment
+    if remainder == 0 { return value }
+    let delta = alignment - remainder
+    guard value <= Int.max - delta else { return nil }
+    return value + delta
+}
+
+@_cdecl("metallum_iris_placement_heap_create")
+public func metallum_iris_placement_heap_create(
+    _ device: MTLDevice,
+    _ rawRecords: UnsafePointer<UInt64>?,
+    _ rawRecordCount: UInt64,
+    _ rawSlotCount: UInt64
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        guard let rawRecords,
+              rawRecordCount > 1,
+              rawRecordCount <= UInt64(Int.max),
+              rawSlotCount > 0,
+              rawSlotCount <= UInt64(Int.max) else {
+            return nil
+        }
+        let recordCount = Int(rawRecordCount)
+        let slotCount = Int(rawSlotCount)
+        var records: [IrisPlacementTextureRecord] = []
+        records.reserveCapacity(recordCount)
+        var slotSize = Array(repeating: 0, count: slotCount)
+        var slotAlignment = Array(repeating: 1, count: slotCount)
+
+        for index in 0..<recordCount {
+            let base = index * 6
+            guard let format = MTLPixelFormat(rawValue: UInt(rawRecords[base])),
+                  rawRecords[base + 1] > 0, rawRecords[base + 1] <= UInt64(Int.max),
+                  rawRecords[base + 2] > 0, rawRecords[base + 2] <= UInt64(Int.max),
+                  rawRecords[base + 3] > 0, rawRecords[base + 3] <= UInt64(Int.max),
+                  rawRecords[base + 5] < rawSlotCount else {
+                return nil
+            }
+            let width = Int(rawRecords[base + 1])
+            let height = Int(rawRecords[base + 2])
+            let mipLevels = Int(rawRecords[base + 3])
+            let slot = Int(rawRecords[base + 5])
+            let descriptor = MTLTextureDescriptor()
+            descriptor.textureType = .type2D
+            descriptor.pixelFormat = format
+            descriptor.width = width
+            descriptor.height = height
+            descriptor.depth = 1
+            descriptor.arrayLength = 1
+            descriptor.mipmapLevelCount = mipLevels
+            descriptor.sampleCount = 1
+            descriptor.storageMode = .private
+            descriptor.cpuCacheMode = .defaultCache
+            descriptor.hazardTrackingMode = .untracked
+            descriptor.usage = MTLTextureUsage(rawValue: UInt(rawRecords[base + 4]))
+
+            let sizeAndAlign = device.heapTextureSizeAndAlign(descriptor: descriptor)
+            guard sizeAndAlign.size > 0, sizeAndAlign.align > 0 else { return nil }
+            slotSize[slot] = max(slotSize[slot], sizeAndAlign.size)
+            slotAlignment[slot] = max(slotAlignment[slot], sizeAndAlign.align)
+            records.append(IrisPlacementTextureRecord(
+                descriptor: descriptor,
+                size: sizeAndAlign.size,
+                alignment: sizeAndAlign.align,
+                slot: slot
+            ))
+        }
+
+        var slotOffsets = Array(repeating: 0, count: slotCount)
+        var heapSize = 0
+        for slot in 0..<slotCount where slotSize[slot] > 0 {
+            guard let aligned = irisAlignUp(heapSize, slotAlignment[slot]),
+                  aligned <= Int.max - slotSize[slot] else {
+                return nil
+            }
+            slotOffsets[slot] = aligned
+            heapSize = aligned + slotSize[slot]
+        }
+        guard heapSize > 0 else { return nil }
+
+        for record in records {
+            if slotOffsets[record.slot] % record.alignment != 0
+                || slotOffsets[record.slot] > heapSize - record.size {
+                return nil
+            }
+        }
+
+        let heapDescriptor = MTLHeapDescriptor()
+        heapDescriptor.type = .placement
+        heapDescriptor.storageMode = .private
+        heapDescriptor.cpuCacheMode = .defaultCache
+        heapDescriptor.hazardTrackingMode = .untracked
+        heapDescriptor.size = heapSize
+        guard let heap = device.makeHeap(descriptor: heapDescriptor) else { return nil }
+        heap.label = "Iris colortex placement heap"
+
+        var textures: [MTLTexture] = []
+        textures.reserveCapacity(recordCount)
+        for (index, record) in records.enumerated() {
+            guard let texture = heap.makeTexture(
+                descriptor: record.descriptor,
+                offset: slotOffsets[record.slot]
+            ) else {
+                return nil
+            }
+            texture.label = "Iris aliased colortex \(index)"
+            residencyTrackCreated(texture)
+            textures.append(texture)
+        }
+        return retainedPointer(IrisPlacementHeapTextureSet(heap: heap, textures: textures))
+    }
+}
+
+@_cdecl("metallum_iris_placement_heap_texture")
+public func metallum_iris_placement_heap_texture(
+    _ ownerPointer: UnsafeMutableRawPointer?, _ rawIndex: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard let ownerPointer, rawIndex <= UInt64(Int.max) else { return nil }
+    let owner = Unmanaged<IrisPlacementHeapTextureSet>.fromOpaque(ownerPointer).takeUnretainedValue()
+    let index = Int(rawIndex)
+    guard index >= 0, index < owner.textures.count else { return nil }
+    return retainedPointer(owner.textures[index])
+}
+
 @_cdecl("metallum_create_texture_view")
 public func metallum_create_texture_view(_ texture: MTLTexture, _ baseMipLevel: UInt64, _ mipLevelCount: UInt64) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
@@ -9301,7 +9448,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder_v2(
 // RenderPassDescriptorV3 ABI (P2). Per-attachment load/store actions replace
 // V2's boolean clear flags so the Iris planner's per-attachment decisions
 // become expressible: 0=dontCare, 1=load, 2=clear for loads; 0=dontCare,
-// 1=store, 2=deferred(.unknown, depth only) for stores. Unknown values map to
+// 1=store, 2=deferred(.unknown) for stores. Unknown values map to
 // the conservative default (load/store) instead of being rejected: the Java
 // planner is fail-closed, and a stale native module must never change pixels.
 private func v3LoadAction(_ raw: Int32) -> MTLLoadAction {
@@ -13713,26 +13860,37 @@ public func metallum_pso_archive_open(
             return 1
         }
         let url = URL(fileURLWithPath: String(cString: pathPtr))
-        let descriptor = MTLBinaryArchiveDescriptor()
-        let loadedFromDisk = FileManager.default.fileExists(atPath: url.path)
-        if loadedFromDisk {
-            descriptor.url = url
-        }
-        do {
-            NativeState.binaryArchive = try device.makeBinaryArchive(descriptor: descriptor)
-            NativeState.binaryArchiveReadOnly = loadedFromDisk
-            if loadedFromDisk {
-                NSLog("[metallum] PSO binary archive loaded (read-only lookup mode)")
+        let lookupArchive: MTLBinaryArchive?
+        if FileManager.default.fileExists(atPath: url.path) {
+            let lookupDescriptor = MTLBinaryArchiveDescriptor()
+            lookupDescriptor.url = url
+            lookupArchive = try? device.makeBinaryArchive(descriptor: lookupDescriptor)
+            if lookupArchive == nil {
+                NSLog("[metallum] PSO binary archive lookup file unreadable; starting a fresh harvest")
             }
-            return 1
-        } catch {
-            NSLog("[metallum] PSO binary archive open failed, rebuilding: %@", String(describing: error))
-            try? FileManager.default.removeItem(at: url)
-            descriptor.url = nil
-            NativeState.binaryArchive = try? device.makeBinaryArchive(descriptor: descriptor)
-            NativeState.binaryArchiveReadOnly = false
-            return NativeState.binaryArchive != nil ? 1 : 0
+        } else {
+            lookupArchive = nil
         }
+
+        // Always create a mutable archive for this launch. New pipeline
+        // descriptors can be harvested even when the lookup archive came from
+        // a previous launch and is read-only on this OS build.
+        let harvestDescriptor = MTLBinaryArchiveDescriptor()
+        guard let harvestArchive = try? device.makeBinaryArchive(descriptor: harvestDescriptor) else {
+            NSLog("[metallum] PSO binary archive harvest creation failed")
+            NativeState.binaryArchive = nil
+            NativeState.binaryArchiveLookup = lookupArchive
+            NativeState.binaryArchiveReadOnly = false
+            return 0
+        }
+        NativeState.binaryArchiveLookup = lookupArchive
+        NativeState.binaryArchive = harvestArchive
+        NativeState.binaryArchiveReadOnly = false
+        NSLog(
+            "[metallum] PSO binary archive opened (lookup=%@, mutable-harvest=yes)",
+            lookupArchive == nil ? "cold" : "yes"
+        )
+        return 1
     }
 }
 
@@ -13754,11 +13912,6 @@ public func metallum_pso_archive_flush(_ pathPtr: UnsafePointer<CChar>?) -> Int3
             }
         }
         guard let archive = NativeState.binaryArchive else { return 0 }
-        if NativeState.binaryArchiveReadOnly {
-            // Loaded archives cannot be re-serialized on current macOS; the
-            // on-disk file from the launch that built it stays authoritative.
-            return 1
-        }
         NativeState.binaryArchiveLock.lock()
         defer { NativeState.binaryArchiveLock.unlock() }
         do {
@@ -13860,7 +14013,7 @@ private func createRenderPipelineState(
             NativeState.logMetal4PipelineFallback("no compiler, or descriptor not translatable")
         }
     }
-    if let archive = NativeState.binaryArchive {
+    if let archive = NativeState.binaryArchiveLookup {
         descriptor.binaryArchives = [archive]
     }
     do {
@@ -13872,7 +14025,6 @@ private func createRenderPipelineState(
         // entry poisons the whole archive, so only harvest pipelines
         // with a fragment function and at least one live color write.
         if let archive = NativeState.binaryArchive,
-           !NativeState.binaryArchiveReadOnly,
            descriptor.fragmentFunction != nil,
            descriptorHasLiveColorWrite(descriptor) {
             NativeState.binaryArchiveLock.lock()

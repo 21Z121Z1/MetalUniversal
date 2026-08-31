@@ -318,6 +318,13 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         return readsFromAlt.get(checked) ? colorAltViews[checked] : colorMainViews[checked];
     }
 
+    /** Raw physical view for a shadow storage-image binding. */
+    MetalGpuTextureView storageView(final int index, final BitSet readsFromAlt) {
+        ensureOpen();
+        int checked = checkColorIndex(index);
+        return colorTargets.physicalView(checked, readsFromAlt.get(checked));
+    }
+
     int resolution() {
         return resolution;
     }

@@ -71,6 +71,8 @@ final class MetalDevice implements GpuDeviceBackend {
     private int pendingExtraTextureUsage;
     private static final boolean PSO_ARCHIVE =
             Boolean.parseBoolean(System.getProperty("metallum.opt.psoArchive", "true"));
+    /** Content identity for the archive opened by this device generation. */
+    private final MetalPsoArchiveIdentity psoArchiveIdentity;
     @Nullable
     private String psoArchivePath;
     private static final boolean ASYNC_PRECOMPILE =
@@ -273,6 +275,7 @@ final class MetalDevice implements GpuDeviceBackend {
         // MTL4Compiler. Enabling the main renderer therefore implies the
         // compiler even when its independent pilot switch is absent.
         boolean metal4Compiler = this.metal4Available && (METAL4_COMPILER || metal4MainRenderer);
+        this.psoArchiveIdentity = MetalPsoArchiveIdentity.forDevice(deviceName, metal4Compiler);
         MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4Compiler ? 1 : 0);
         // Terrain ICB requires both the Metal 4 capability and an active
         // MTL4Compiler PSO path. Snapshot capture remains enabled when the
@@ -318,16 +321,38 @@ final class MetalDevice implements GpuDeviceBackend {
         );
         if (PSO_ARCHIVE) {
             try {
-                java.nio.file.Path cacheDir = net.fabricmc.loader.api.FabricLoader.getInstance()
-                        .getGameDir().resolve("metallum-cache");
-                java.nio.file.Files.createDirectories(cacheDir);
-                String archivePath = cacheDir.resolve("pso.binaryarchive").toString();
-                if (MetalNativeBridge.metallum_pso_archive_open(metalDeviceHandle, archivePath) != 0) {
-                    this.psoArchivePath = archivePath;
+                // An unidentified shader pack is not safe to share with a
+                // later session: the same platform/device key could otherwise
+                // reuse a pipeline compiled for a different pack. Keep the
+                // conservative uncached path until pack admission publishes an
+                // exact SHA-256 identity (or an operator explicitly opts into
+                // the diagnostic fallback).
+                boolean exactPackIdentity = this.psoArchiveIdentity.exactShaderPackIdentity();
+                boolean allowUnidentified = Boolean.getBoolean("metallum.opt.allowUnidentifiedPsoArchive");
+                if (!exactPackIdentity && !allowUnidentified) {
+                    Metallum.LOGGER.warn(
+                            "[metallum] PSO archive disabled: shader-pack SHA-256 identity is unavailable"
+                    );
                 } else {
-                    Metallum.LOGGER.warn("[metallum] PSO binary archive unavailable; pipelines compile uncached");
+                    java.nio.file.Path cacheDir = net.fabricmc.loader.api.FabricLoader.getInstance()
+                            .getGameDir().resolve("metallum-cache");
+                    java.nio.file.Path archiveDir = cacheDir.resolve("pso");
+                    java.nio.file.Files.createDirectories(archiveDir);
+                    String archivePath = archiveDir.resolve(this.psoArchiveIdentity.filename()).toString();
+                    int opened = MetalNativeBridge.metallum_pso_archive_open(metalDeviceHandle, archivePath);
+                    MetalPsoArchiveTelemetry.recordOpen(opened != 0);
+                    if (opened != 0) {
+                        this.psoArchivePath = archivePath;
+                        Metallum.LOGGER.info(
+                                "[metallum] PSO archive v2 opened: {} (exactShaderPackIdentity={})",
+                                this.psoArchiveIdentity.digest(), exactPackIdentity
+                        );
+                    } else {
+                        Metallum.LOGGER.warn("[metallum] PSO binary archive unavailable; pipelines compile uncached");
+                    }
                 }
             } catch (Exception e) {
+                MetalPsoArchiveTelemetry.recordOpen(false);
                 Metallum.LOGGER.warn("[metallum] PSO binary archive setup failed; pipelines compile uncached", e);
             }
         }
@@ -555,11 +580,13 @@ final class MetalDevice implements GpuDeviceBackend {
                 try {
                     this.compileInBackground(pipeline, effectiveSource, generation);
                 } catch (Throwable t) {
+                    MetalPsoArchiveTelemetry.recordPrewarmFailure();
                     // First real use on the render thread recompiles and
                     // surfaces the error with vanilla's own handling.
                     Metallum.LOGGER.warn("[metallum] background precompile failed for {}", pipeline.getLocation(), t);
                 }
             });
+            MetalPsoArchiveTelemetry.recordPrewarmSubmit();
             return PENDING_PRECOMPILE;
         }
         synchronized (COMPILE_CHAIN_LOCK) {
@@ -589,6 +616,15 @@ final class MetalDevice implements GpuDeviceBackend {
         return this.metal4MainRenderer;
     }
 
+    MetalPsoArchiveIdentity psoArchiveIdentity() {
+        return this.psoArchiveIdentity;
+    }
+
+    @Nullable
+    String psoArchivePath() {
+        return this.psoArchivePath;
+    }
+
     /**
      * Queues work on the prewarm thread; silently dropped once the executor
      * is shut down (device close), when the render thread finishes the work
@@ -598,7 +634,9 @@ final class MetalDevice implements GpuDeviceBackend {
         if (this.prewarmExecutor != null) {
             try {
                 this.prewarmExecutor.execute(task);
+                MetalPsoArchiveTelemetry.recordPrewarmSubmit();
             } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                MetalPsoArchiveTelemetry.recordPrewarmFailure();
             }
         }
     }
@@ -642,8 +680,13 @@ final class MetalDevice implements GpuDeviceBackend {
         // following this cache clear) hits the on-disk archive.
         if (this.psoArchivePath != null) {
             try {
-                MetalNativeBridge.metallum_pso_archive_flush(this.psoArchivePath);
+                int flushed = MetalNativeBridge.metallum_pso_archive_flush(this.psoArchivePath);
+                MetalPsoArchiveTelemetry.recordFlush(flushed != 0);
+                if (flushed == 0) {
+                    Metallum.LOGGER.warn("[metallum] PSO binary archive flush failed");
+                }
             } catch (Exception e) {
+                MetalPsoArchiveTelemetry.recordFlush(false);
                 Metallum.LOGGER.warn("[metallum] PSO binary archive flush failed", e);
             }
         }

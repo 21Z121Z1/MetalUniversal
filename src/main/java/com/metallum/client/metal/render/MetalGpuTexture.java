@@ -13,6 +13,7 @@ import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.util.Objects;
 @Environment(EnvType.CLIENT)
 final class MetalGpuTexture extends GpuTexture {
     static final int USAGE_SHADER_WRITE = 1 << 5;
@@ -26,6 +27,7 @@ final class MetalGpuTexture extends GpuTexture {
     private final MetalDevice device;
     private final MetalAllocationIdentity allocationIdentity;
     private final MTLPixelFormat mtlPixelFormat;
+    private final MTLStorageMode storageMode;
     private boolean closed;
     @Nullable
     private Vector4fc materializedColorClear;
@@ -63,30 +65,112 @@ final class MetalGpuTexture extends GpuTexture {
             final int mipLevels,
             final MetalTextureDimension dimension
     ) {
+        this(device, usage, label, format, width, height, depthOrLayers, mipLevels, dimension,
+                MTLStorageMode.Private, null);
+    }
+
+    /** Adopts one retained native texture while keeping renderer-owned identity/lifetime. */
+    MetalGpuTexture(
+            final MetalDevice device,
+            @GpuTexture.Usage final int usage,
+            final String label,
+            final GpuFormat format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevels,
+            final MemorySegment adoptedNativeHandle
+    ) {
+        this(
+                device, usage, label, format, width, height, depthOrLayers, mipLevels,
+                MetalTextureDimension.TWO_D, MTLStorageMode.Private, adoptedNativeHandle
+        );
+    }
+
+    private MetalGpuTexture(
+            final MetalDevice device,
+            @GpuTexture.Usage final int usage,
+            final String label,
+            final GpuFormat format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevels,
+            final MetalTextureDimension dimension,
+            final MTLStorageMode storageMode,
+            @Nullable final MemorySegment adoptedNativeHandle
+    ) {
         super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
         this.allocationIdentity = MetalAllocationIdentity.allocate(label);
         this.mtlPixelFormat = MTLPixelFormat.from(format);
+        this.storageMode = Objects.requireNonNull(storageMode, "storageMode");
+        if (storageMode == MTLStorageMode.Memoryless
+                && !memorylessCompatible(usage, dimension, depthOrLayers, mipLevels)) {
+            throw new IllegalArgumentException(
+                    "Memoryless Metal textures must be single-layer 2D render-only attachments"
+            );
+        }
 
-        this.nativeHandle = MetalNativeBridge.metallum_create_texture(
-                device.metalDeviceHandle(),
-                this.mtlPixelFormat,
-                width,
-                height,
-                depthOrLayers,
-                mipLevels,
-                dimension.nativeValue,
-                (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
-                toMtlTextureUsage(usage),
-                MTLStorageMode.Private,
-                label
-        );
+        if (adoptedNativeHandle != null && !MetalNativeBridge.isNullHandle(adoptedNativeHandle)) {
+            this.nativeHandle = adoptedNativeHandle;
+        } else {
+            this.nativeHandle = MetalNativeBridge.metallum_create_texture(
+                    device.metalDeviceHandle(),
+                    this.mtlPixelFormat,
+                    width,
+                    height,
+                    depthOrLayers,
+                    mipLevels,
+                    dimension.nativeValue,
+                    (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
+                    toMtlTextureUsage(usage, storageMode),
+                    storageMode,
+                    label
+            );
+        }
         if (MetalNativeBridge.isNullHandle(this.nativeHandle)) {
             throw new IllegalStateException(
                     "Failed to create Metal " + dimension + " texture " + label + " ("
-                            + width + 'x' + height + 'x' + depthOrLayers + ", " + format + ')'
+                            + width + 'x' + height + 'x' + depthOrLayers + ", " + format + ", "
+                            + storageMode + ')'
             );
         }
+    }
+
+    static MetalGpuTexture createMemorylessRenderTarget(
+            final MetalDevice device,
+            @GpuTexture.Usage final int usage,
+            final String label,
+            final GpuFormat format,
+            final int width,
+            final int height
+    ) {
+        return new MetalGpuTexture(
+                device,
+                usage,
+                label,
+                format,
+                width,
+                height,
+                1,
+                1,
+                MetalTextureDimension.TWO_D,
+                MTLStorageMode.Memoryless,
+                null
+        );
+    }
+
+    static boolean memorylessCompatible(
+            @GpuTexture.Usage final int usage,
+            final MetalTextureDimension dimension,
+            final int depthOrLayers,
+            final int mipLevels
+    ) {
+        return usage == GpuTexture.USAGE_RENDER_ATTACHMENT
+                && dimension == MetalTextureDimension.TWO_D
+                && depthOrLayers == 1
+                && mipLevels == 1;
     }
 
     int pixelSize() {
@@ -207,6 +291,10 @@ final class MetalGpuTexture extends GpuTexture {
         if (this.closed) {
             return;
         }
+        // Deferred clears are keyed by the Java texture object. Remove this
+        // resource before its native handle can be retired; a resize may
+        // otherwise leave a stale clear for the next compute/render boundary.
+        this.device.commandEncoder().discardPendingClear(this);
         this.closed = true;
         this.removeView();
     }
@@ -216,14 +304,43 @@ final class MetalGpuTexture extends GpuTexture {
         return this.closed;
     }
 
-    private long toMtlTextureUsage(@GpuTexture.Usage final int usage) {
+    MTLStorageMode storageMode() {
+        return this.storageMode;
+    }
+
+    private long toMtlTextureUsage(
+            @GpuTexture.Usage final int usage,
+            final MTLStorageMode storageMode
+    ) {
+        return nativeUsageFor(this.mtlPixelFormat, usage, storageMode);
+    }
+
+    static long nativeUsageFor(
+            final MTLPixelFormat pixelFormat,
+            @GpuTexture.Usage final int usage
+    ) {
+        return nativeUsageFor(pixelFormat, usage, MTLStorageMode.Private);
+    }
+
+    static long nativeUsageFor(
+            final MTLPixelFormat pixelFormat,
+            @GpuTexture.Usage final int usage,
+            final MTLStorageMode storageMode
+    ) {
         long result = 0L;
-        if ((usage & GpuTexture.USAGE_TEXTURE_BINDING) != 0 || (usage & GpuTexture.USAGE_COPY_DST) != 0 || (usage & GpuTexture.USAGE_COPY_SRC) != 0) {
+        if ((usage & GpuTexture.USAGE_TEXTURE_BINDING) != 0
+                || (usage & GpuTexture.USAGE_COPY_DST) != 0
+                || (usage & GpuTexture.USAGE_COPY_SRC) != 0) {
             result |= MTLTextureUsage.ShaderRead.value;
         }
         if ((usage & GpuTexture.USAGE_RENDER_ATTACHMENT) != 0) {
             result |= MTLTextureUsage.RenderTarget.value;
-            result |= MTLTextureUsage.ShaderRead.value;
+            // Pass-local memoryless attachments never become long-lived shader
+            // resources; keeping their usage at RenderTarget preserves tile
+            // memory assumptions and avoids illegal copy/readback use.
+            if (storageMode != MTLStorageMode.Memoryless) {
+                result |= MTLTextureUsage.ShaderRead.value;
+            }
             // Legacy path (kill switch only): blanket ShaderWrite on color
             // attachments because MetalFX outputs used to rely on it. The
             // minimal-usage path instead requires MetalFX output targets to
@@ -232,8 +349,9 @@ final class MetalGpuTexture extends GpuTexture {
             // attachments must not receive ShaderWrite, because Metal does
             // not permit storage writes to every depth format.
             if (!MINIMAL_USAGE
-                    && !this.mtlPixelFormat.hasStencil() && this.mtlPixelFormat != MTLPixelFormat.Depth16Unorm
-                    && this.mtlPixelFormat != MTLPixelFormat.Depth32Float) {
+                    && storageMode != MTLStorageMode.Memoryless
+                    && !pixelFormat.hasStencil() && pixelFormat != MTLPixelFormat.Depth16Unorm
+                    && pixelFormat != MTLPixelFormat.Depth32Float) {
                 result |= MTLTextureUsage.ShaderWrite.value;
             }
         }

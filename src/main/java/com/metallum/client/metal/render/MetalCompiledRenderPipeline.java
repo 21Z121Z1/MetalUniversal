@@ -433,53 +433,75 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MTLPixelFormat depthFormat,
             final MTLPixelFormat stencilFormat
     ) {
+        String compileIdentity = pipelineCompileIdentity(info, colorFormats, depthFormat, stencilFormat);
         if (MetalNativeBridge.isNullHandle(vertexFunction) || MetalNativeBridge.isNullHandle(fragmentFunction)) {
+            MetalPipelineCompilationTelemetry.recordRender(compileIdentity, false);
             return MemorySegment.NULL;
         }
 
-        try (MTLRenderPipelineDescriptor pipelineDesc = new MTLRenderPipelineDescriptor()) {
-            pipelineDesc.setCompiledFunctions(vertexFunction, fragmentFunction);
-            pipelineDesc.setVertexDescriptor(vertexDescriptor);
-            ColorTargetState[] colorTargets = info.getColorTargetStates();
-            for (int index = 0; index < colorFormats.length; index++) {
-                ColorTargetState colorTarget = colorTargets[index];
-                pipelineDesc.setColorAttachmentFormat(index, colorFormats[index]);
-                if (colorTarget == null) {
-                    pipelineDesc.disableBlending(index, MTLColorWriteMask.None.value);
-                    continue;
+        try {
+            try (MTLRenderPipelineDescriptor pipelineDesc = new MTLRenderPipelineDescriptor()) {
+                pipelineDesc.setCompiledFunctions(vertexFunction, fragmentFunction);
+                pipelineDesc.setVertexDescriptor(vertexDescriptor);
+                ColorTargetState[] colorTargets = info.getColorTargetStates();
+                for (int index = 0; index < colorFormats.length; index++) {
+                    ColorTargetState colorTarget = colorTargets[index];
+                    pipelineDesc.setColorAttachmentFormat(index, colorFormats[index]);
+                    if (colorTarget == null) {
+                        pipelineDesc.disableBlending(index, MTLColorWriteMask.None.value);
+                        continue;
+                    }
+
+                    Optional<BlendFunction> blendFunction = colorTarget.blendFunction();
+                    long writeMask = MTLColorWriteMask.from(colorTarget.writeMask());
+                    if (blendFunction.isPresent()) {
+                        var function = blendFunction.get();
+                        pipelineDesc.setColorAttachmentBlendState(
+                                index,
+                                true,
+                                MTLBlendFactor.from(function.color().sourceFactor()),
+                                MTLBlendFactor.from(function.color().destFactor()),
+                                MTLBlendOperation.from(function.color().op()),
+                                MTLBlendFactor.from(function.alpha().sourceFactor()),
+                                MTLBlendFactor.from(function.alpha().destFactor()),
+                                MTLBlendOperation.from(function.alpha().op()),
+                                writeMask
+                        );
+                    } else {
+                        pipelineDesc.disableBlending(index, writeMask);
+                    }
                 }
 
-                Optional<BlendFunction> blendFunction = colorTarget.blendFunction();
-                long writeMask = MTLColorWriteMask.from(colorTarget.writeMask());
-                if (blendFunction.isPresent()) {
-                    var function = blendFunction.get();
-                    pipelineDesc.setColorAttachmentBlendState(
-                            index,
-                            true,
-                            MTLBlendFactor.from(function.color().sourceFactor()),
-                            MTLBlendFactor.from(function.color().destFactor()),
-                            MTLBlendOperation.from(function.color().op()),
-                            MTLBlendFactor.from(function.alpha().sourceFactor()),
-                            MTLBlendFactor.from(function.alpha().destFactor()),
-                            MTLBlendOperation.from(function.alpha().op()),
-                            writeMask
-                    );
-                } else {
-                    pipelineDesc.disableBlending(index, writeMask);
+                pipelineDesc.setDepthStencilFormats(depthFormat, stencilFormat);
+                if ((TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED)
+                        && isSodiumTerrainPipeline(info.getVertexShader())) {
+                    pipelineDesc.setSupportIndirectCommandBuffers(true);
                 }
-            }
 
-            pipelineDesc.setDepthStencilFormats(depthFormat, stencilFormat);
-            if ((TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED)
-                    && isSodiumTerrainPipeline(info.getVertexShader())) {
-                pipelineDesc.setSupportIndirectCommandBuffers(true);
+                MemorySegment pipeline = MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
+                        device.metalDeviceHandle(),
+                        pipelineDesc.handle()
+                );
+                boolean succeeded = !MetalNativeBridge.isNullHandle(pipeline);
+                MetalPipelineCompilationTelemetry.recordRender(compileIdentity, succeeded);
+                return pipeline;
             }
-
-            return MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
-                    device.metalDeviceHandle(),
-                    pipelineDesc.handle()
-            );
+        } catch (RuntimeException | Error failure) {
+            MetalPipelineCompilationTelemetry.recordRender(compileIdentity, false);
+            throw failure;
         }
+    }
+
+    private static String pipelineCompileIdentity(
+            final RenderPipeline info,
+            final MTLPixelFormat[] colorFormats,
+            final MTLPixelFormat depthFormat,
+            final MTLPixelFormat stencilFormat
+    ) {
+        return info.getLocation()
+                + "|colors=" + Arrays.toString(colorFormats)
+                + "|depth=" + depthFormat
+                + "|stencil=" + stencilFormat;
     }
 
     @Override

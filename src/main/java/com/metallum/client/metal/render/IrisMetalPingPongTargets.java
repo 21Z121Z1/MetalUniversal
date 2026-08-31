@@ -50,6 +50,7 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
     private final BitSet alphaOneSampleTargets;
     private final BitSet mipmapsOnMain;
     private final BitSet mipmapsOnAlt;
+    private IrisMetalPlacementHeap.Allocation placementAllocation;
     private int width;
     private int height;
     private boolean closed;
@@ -123,6 +124,14 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
     }
 
     private void createTextures(final int newWidth, final int newHeight) {
+        createTextures(newWidth, newHeight, null);
+    }
+
+    private void createTextures(
+            final int newWidth,
+            final int newHeight,
+            final IrisMetalPlacementHeap.Allocation suppliedPlacement
+    ) {
         if (newWidth <= 0 || newHeight <= 0) {
             throw new IllegalArgumentException("Target extent must be positive: " + newWidth + "x" + newHeight);
         }
@@ -134,6 +143,17 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         this.altViews = new MetalGpuTextureView[formats.length];
         this.mainSampleViews = new MetalGpuTextureView[formats.length];
         this.altSampleViews = new MetalGpuTextureView[formats.length];
+        this.placementAllocation = suppliedPlacement != null
+                ? suppliedPlacement
+                : IrisMetalPlacementHeap.tryCreate(
+                        device,
+                        labelPrefix,
+                        formats,
+                        newWidth,
+                        newHeight,
+                        this.mipmappedTargets,
+                        this.storageImageTargets
+                );
         for (int index = 0; index < formats.length; index++) {
             int mipLevels = this.mipmappedTargets.get(index)
                     ? fullMipLevelCount(newWidth, newHeight)
@@ -141,9 +161,11 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
             int usage = TEXTURE_USAGE | (this.storageImageTargets.get(index)
                     ? MetalGpuTexture.USAGE_SHADER_WRITE
                     : 0);
-            main[index] = (MetalGpuTexture) device.createTexture(
+            MetalGpuTexture heapMain = placementAllocation == null ? null : placementAllocation.main(index);
+            MetalGpuTexture heapAlt = placementAllocation == null ? null : placementAllocation.alt(index);
+            main[index] = heapMain != null ? heapMain : (MetalGpuTexture) device.createTexture(
                     labelPrefix + index + "-main", usage, formats[index], newWidth, newHeight, 1, mipLevels);
-            alt[index] = (MetalGpuTexture) device.createTexture(
+            alt[index] = heapAlt != null ? heapAlt : (MetalGpuTexture) device.createTexture(
                     labelPrefix + index + "-alt", usage, formats[index], newWidth, newHeight, 1, mipLevels);
             main[index].registerAllocationIdentity();
             alt[index].registerAllocationIdentity();
@@ -154,6 +176,45 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
                 altSampleViews[index] = new MetalGpuTextureView(alt[index], 0, mipLevels, true);
             }
         }
+    }
+
+    /**
+     * Rebinds the current generation to a published placement-heap recipe.
+     * The first target allocation necessarily precedes receipt publication, so
+     * this second, pre-render boundary is what makes the recipe executable in
+     * practice. Once a frame has flipped a target we keep the dedicated
+     * allocation: replacing it would discard observable contents.
+     */
+    boolean adoptPublishedPlacementHeap() {
+        ensureOpen();
+        if (placementAllocation != null
+                || !IrisMetalOptimizationPlan.ENABLE_HEAP_ALIASING
+                || !flipped.isEmpty()
+                || !flippedAtLeastOnce.isEmpty()) {
+            return false;
+        }
+        IrisMetalHeapAliasRuntime.Published published = IrisMetalHeapAliasRuntime.current();
+        if (published == null || published.slotByResource().isEmpty()) {
+            return false;
+        }
+        IrisMetalPlacementHeap.Allocation candidate = IrisMetalPlacementHeap.tryCreate(
+                device,
+                labelPrefix,
+                formats,
+                width,
+                height,
+                mipmappedTargets,
+                storageImageTargets
+        );
+        if (candidate == null) {
+            return false;
+        }
+        releaseTextures();
+        createTextures(width, height, candidate);
+        if (placementAllocation != null) {
+            IrisMetalTransientAllocationTelemetry.heapAdopted();
+        }
+        return placementAllocation != null;
     }
 
     int targetCount() {
@@ -237,6 +298,13 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
         ensureOpen();
         int checked = checkIndex(index);
         return this.flipped.get(checked) ? altViews[checked] : mainViews[checked];
+    }
+
+    /** Raw view of one fixed physical side for an explicit flip snapshot. */
+    MetalGpuTextureView physicalView(final int index, final boolean alternate) {
+        ensureOpen();
+        int checked = checkIndex(index);
+        return alternate ? altViews[checked] : mainViews[checked];
     }
 
     /** Sampled view of the current write/history side, including logical format swizzles. */
@@ -386,6 +454,10 @@ final class IrisMetalPingPongTargets implements AutoCloseable {
                 alt[index].close();
                 alt[index] = null;
             }
+        }
+        if (placementAllocation != null) {
+            placementAllocation.retireOwner(device);
+            placementAllocation = null;
         }
     }
 

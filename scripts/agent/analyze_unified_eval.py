@@ -10,13 +10,31 @@ import statistics
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 1
+try:
+    # The strict per-trial normalizer lives next to this analyzer.  Keeping
+    # this import optional preserves a useful diagnostic fallback when the
+    # script is copied in isolation; load_trial still marks that fallback
+    # incomplete below.
+    from normalize_unified_trial import normalize as normalize_strict_trial
+except ImportError:  # pragma: no cover - exercised only outside the repo
+    normalize_strict_trial = None
+
+# The comparison/decision payload now carries environment identity and a
+# complete-paired-block gate in addition to the original metric table.
+SCHEMA_VERSION = 2
 MIN_PAIRED_BLOCKS = 4
 MIN_DIRECTION_CONSISTENCY = 0.75
-MANDATORY_METRICS = {"fps_median"}
+MANDATORY_METRICS = {
+    "fps_median",
+    "frame_time_ms_p95",
+    "gpu_frame_time_ms_p95",
+    "cpu_render_encode_time_ms_p95",
+}
 GUARDRAILS = {
     "gpu_frame_time_ms_median": 0.02,
+    "gpu_frame_time_ms_p99": 0.02,
     "cpu_render_encode_time_ms_median": 0.02,
+    "cpu_render_encode_time_ms_p99": 0.02,
     "peak_resident_memory_bytes": 0.03,
     "frame_time_stutter_count": 0.0,
 }
@@ -27,14 +45,44 @@ METRICS = {
         "direction": "higher",
         "unit": "FPS",
     },
+    "frame_time_ms_p95": {
+        "aliases": {"frame_time_ms_p95", "frame_interval_p95_ms", "frame_interval_p95_milliseconds"},
+        "direction": "lower",
+        "unit": "ms",
+    },
+    "frame_time_ms_p99": {
+        "aliases": {"frame_time_ms_p99", "frame_interval_p99_ms", "frame_interval_p99_milliseconds"},
+        "direction": "lower",
+        "unit": "ms",
+    },
     "gpu_frame_time_ms_median": {
         "aliases": {"gpu_ms", "gpu_time_ms", "gpu_frame_ms", "gpu_frame_time_ms", "gpu_frame_time_ms_median"},
+        "direction": "lower",
+        "unit": "ms",
+    },
+    "gpu_frame_time_ms_p95": {
+        "aliases": {"gpu_frame_time_ms_p95", "gpu_p95_ms", "gpu_p95_milliseconds"},
+        "direction": "lower",
+        "unit": "ms",
+    },
+    "gpu_frame_time_ms_p99": {
+        "aliases": {"gpu_frame_time_ms_p99", "gpu_p99_ms", "gpu_p99_milliseconds"},
         "direction": "lower",
         "unit": "ms",
     },
     "cpu_render_encode_time_ms_median": {
         "aliases": {"cpu_ms", "cpu_time_ms", "cpu_render_ms", "cpu_encode_ms",
                     "cpu_render_encode_time_ms", "cpu_render_encode_time_ms_median"},
+        "direction": "lower",
+        "unit": "ms",
+    },
+    "cpu_render_encode_time_ms_p95": {
+        "aliases": {"cpu_render_encode_time_ms_p95", "cpu_p95_ms", "cpu_p95_milliseconds"},
+        "direction": "lower",
+        "unit": "ms",
+    },
+    "cpu_render_encode_time_ms_p99": {
+        "aliases": {"cpu_render_encode_time_ms_p99", "cpu_p99_ms", "cpu_p99_milliseconds"},
         "direction": "lower",
         "unit": "ms",
     },
@@ -140,7 +188,11 @@ def normalize_trial(trial_dir: Path) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "trial_dir": str(trial_dir),
         "exit_status": exit_status,
-        "complete": exit_status == 0,
+        # This compatibility path is deliberately fail-closed.  The old
+        # recursive extractor may discover useful diagnostics, but it cannot
+        # prove that frame/GPU/CPU p95 values belong to the same measured
+        # frame window.  Only normalize_unified_trial.py can do that.
+        "complete": False,
         "sources": source_files,
         "parse_errors": parse_errors,
         "metrics": {},
@@ -182,11 +234,136 @@ def read_gate(root: Path) -> tuple[bool, dict[str, Any]]:
     return gate.get("status") == "pass", gate
 
 
+def read_run_manifest(root: Path) -> tuple[bool, dict[str, Any], list[str]]:
+    """Validate the environment identity required for a performance verdict."""
+    path = root / "run-manifest.json"
+    if not path.is_file():
+        return False, {}, [f"{path} does not exist"]
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, {}, [f"run manifest is unreadable: {exc}"]
+    if not isinstance(manifest, dict):
+        return False, {}, ["run manifest root must be an object"]
+
+    errors: list[str] = []
+    environment = manifest.get("environment")
+    if not isinstance(environment, dict):
+        errors.append("run manifest environment object is missing")
+        environment = {}
+    for field in ("display", "power_state"):
+        value = environment.get(field)
+        if value is None or (
+                isinstance(value, str)
+                and value.strip().lower() in {"", "unrecorded", "must be recorded by local operator"}
+        ):
+            errors.append(f"environment.{field} is missing; display and power state must be recorded")
+
+    binaries = manifest.get("binaries")
+    if not isinstance(binaries, dict):
+        errors.append("run manifest binaries object is missing")
+        binaries = {}
+    for name in ("production_jar", "native_dylib"):
+        entry = binaries.get(name)
+        if not isinstance(entry, dict):
+            errors.append(f"binaries.{name} identity is missing")
+            continue
+        path_value = entry.get("path")
+        sha256 = entry.get("sha256")
+        if not isinstance(path_value, str) or not path_value.strip():
+            errors.append(f"binaries.{name}.path is missing")
+        if not isinstance(sha256, str) or len(sha256) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in sha256):
+            errors.append(f"binaries.{name}.sha256 is missing or not a SHA-256 digest")
+        if name == "production_jar" and isinstance(path_value, str) and "sources" in Path(path_value).name:
+            errors.append("binaries.production_jar points to a sources JAR, not the runtime production JAR")
+
+    git = manifest.get("git")
+    if not isinstance(git, dict) or not isinstance(git.get("head"), str) or not git.get("head"):
+        errors.append("git.head is missing from run manifest")
+    return not errors, manifest, errors
+
+
+def strict_metrics_payload(payload: Any) -> bool:
+    """Return whether a cached trial came from the frame-aligned normalizer."""
+    if not isinstance(payload, dict):
+        return False
+    if not isinstance(payload.get("schema_version"), int) or payload.get("schema_version") < 3:
+        return False
+    window = payload.get("sample_window")
+    return isinstance(window, dict) and window.get("available") is True
+
+
+def fail_closed_trial(payload: Any, reason: str) -> dict[str, Any]:
+    """Preserve diagnostics while preventing legacy metrics from pairing."""
+    result = dict(payload) if isinstance(payload, dict) else {}
+    errors = result.get("identity_errors")
+    if not isinstance(errors, list):
+        errors = []
+    errors.append(reason)
+    result["identity_errors"] = errors
+    result["complete"] = False
+    return result
+
+
+def trial_drawable(payload: dict[str, Any]) -> tuple[int, int] | None:
+    """Return the actual framebuffer identity emitted by one trial.
+
+    The display description in ``run-manifest.json`` identifies the panel, but
+    it does not prove the drawable used by a particular client launch.  macOS
+    can resize or switch backing scale between launches, so paired trials must
+    compare the authoritative native dimensions as well.
+    """
+    summary = payload.get("source_summary")
+    if not isinstance(summary, dict):
+        return None
+    width = summary.get("drawable_width")
+    height = summary.get("drawable_height")
+    if isinstance(width, bool) or isinstance(height, bool):
+        return None
+    if not isinstance(width, int) or not isinstance(height, int):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def append_trial_identity_error(payload: dict[str, Any], reason: str) -> None:
+    errors = payload.get("identity_errors")
+    if not isinstance(errors, list):
+        errors = []
+    if reason not in errors:
+        errors.append(reason)
+    payload["identity_errors"] = errors
+    payload["complete"] = False
+
+
 def load_trial(path: Path) -> dict[str, Any]:
     metrics_path = path / "metrics.json"
-    if not metrics_path.is_file():
-        return normalize_trial(path)
-    return json.loads(metrics_path.read_text(encoding="utf-8"))
+    # A trial may have a cached metrics.json written before the Gradle task
+    # finished copying its authoritative report.  Prefer the report whenever
+    # it exists so a stale/incomplete cache can never hide a complete,
+    # frame-aligned measurement.  This also makes re-analysis deterministic
+    # after an interrupted runner invocation.
+    has_native_report = any(path.rglob("native-fullscreen-baseline.json"))
+    if has_native_report and normalize_strict_trial is not None:
+        payload = normalize_strict_trial(path)
+    elif metrics_path.is_file():
+        try:
+            payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return fail_closed_trial({}, f"metrics.json is unreadable: {exc}")
+    else:
+        payload = (
+            normalize_strict_trial(path)
+            if has_native_report and normalize_strict_trial is not None
+            else normalize_trial(path)
+        )
+    if not strict_metrics_payload(payload):
+        return fail_closed_trial(
+            payload,
+            "cached trial is not a schema-3 frame-aligned normalization; performance evidence is incomplete",
+        )
+    return payload
 
 
 def paired_improvement(before: float, after: float, direction: str) -> tuple[float, float | None]:
@@ -202,12 +379,100 @@ def paired_improvement(before: float, after: float, direction: str) -> tuple[flo
 
 def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     correctness_passed, gate = read_gate(root)
+    manifest_ok, manifest, manifest_errors = read_run_manifest(root)
     blocks = sorted((root / "trials").glob("block-*"))
+    trial_cache: dict[Path, dict[str, Any]] = {}
+    block_status: list[dict[str, Any]] = []
+    for block in blocks:
+        baseline_path = block / "baseline"
+        candidate_path = block / "candidate"
+        baseline_trial = load_trial(baseline_path)
+        candidate_trial = load_trial(candidate_path)
+        trial_cache[baseline_path] = baseline_trial
+        trial_cache[candidate_path] = candidate_trial
+        block_status.append({
+            "block": block.name,
+            "baseline_complete": bool(baseline_trial.get("complete")),
+            "candidate_complete": bool(candidate_trial.get("complete")),
+            "complete_pair": bool(baseline_trial.get("complete")) and bool(candidate_trial.get("complete")),
+            "baseline_identity_errors": baseline_trial.get("identity_errors", []),
+            "candidate_identity_errors": candidate_trial.get("identity_errors", []),
+            "baseline_drawable": trial_drawable(baseline_trial),
+            "candidate_drawable": trial_drawable(candidate_trial),
+        })
+
+    # A panel identity is not enough to compare timings.  The actual drawable
+    # can change when WindowServer moves between logical/retina/fullscreen
+    # backing sizes.  Reject mismatched pairs and reject any later pair that
+    # changes the reference geometry; otherwise a resolution change can look
+    # like a rendering optimization.
+    reference_drawable: tuple[int, int] | None = None
+    geometry_pairs: list[dict[str, Any]] = []
+    for item in block_status:
+        block = next(block for block in blocks if block.name == item["block"])
+        baseline_trial = trial_cache[block / "baseline"]
+        candidate_trial = trial_cache[block / "candidate"]
+        baseline_drawable = item["baseline_drawable"]
+        candidate_drawable = item["candidate_drawable"]
+        geometry_pairs.append({
+            "block": item["block"],
+            "baseline": baseline_drawable,
+            "candidate": candidate_drawable,
+            "matched": baseline_drawable is not None and baseline_drawable == candidate_drawable,
+        })
+        if not baseline_trial.get("complete") or not candidate_trial.get("complete"):
+            continue
+        if baseline_drawable is None or candidate_drawable is None:
+            reason = "authoritative drawable geometry is missing or invalid"
+            append_trial_identity_error(baseline_trial, reason)
+            append_trial_identity_error(candidate_trial, reason)
+            continue
+        if baseline_drawable != candidate_drawable:
+            reason = (
+                "paired drawable geometry mismatch: "
+                f"baseline={baseline_drawable[0]}x{baseline_drawable[1]}, "
+                f"candidate={candidate_drawable[0]}x{candidate_drawable[1]}"
+            )
+            append_trial_identity_error(baseline_trial, reason)
+            append_trial_identity_error(candidate_trial, reason)
+            continue
+        if reference_drawable is None:
+            reference_drawable = baseline_drawable
+        elif baseline_drawable != reference_drawable:
+            reason = (
+                "paired drawable geometry differs from the first complete pair: "
+                f"reference={reference_drawable[0]}x{reference_drawable[1]}, "
+                f"observed={baseline_drawable[0]}x{baseline_drawable[1]}"
+            )
+            append_trial_identity_error(baseline_trial, reason)
+            append_trial_identity_error(candidate_trial, reason)
+    for item in block_status:
+        block = next(block for block in blocks if block.name == item["block"])
+        baseline_trial = trial_cache[block / "baseline"]
+        candidate_trial = trial_cache[block / "candidate"]
+        item["baseline_complete"] = bool(baseline_trial.get("complete"))
+        item["candidate_complete"] = bool(candidate_trial.get("complete"))
+        item["complete_pair"] = item["baseline_complete"] and item["candidate_complete"]
+        item["baseline_identity_errors"] = baseline_trial.get("identity_errors", [])
+        item["candidate_identity_errors"] = candidate_trial.get("identity_errors", [])
+    complete_pair_blocks = [item for item in block_status if item["complete_pair"]]
     comparison: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "root": str(root),
         "correctness_gate": gate,
+        "environment_identity": {
+            "available": manifest_ok,
+            "manifest": manifest,
+            "errors": manifest_errors,
+        },
         "block_count": len(blocks),
+        "complete_pair_block_count": len(complete_pair_blocks),
+        "block_status": block_status,
+        "drawable_identity": {
+            "reference": reference_drawable,
+            "pairs": geometry_pairs,
+            "rule": "all complete paired blocks must use one identical authoritative drawable width/height",
+        },
         "metrics": {},
     }
 
@@ -216,8 +481,8 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     for metric, spec in METRICS.items():
         pairs: list[dict[str, float | None]] = []
         for block in blocks:
-            baseline_trial = load_trial(block / "baseline")
-            candidate_trial = load_trial(block / "candidate")
+            baseline_trial = trial_cache[block / "baseline"]
+            candidate_trial = trial_cache[block / "candidate"]
             if not baseline_trial.get("complete") or not candidate_trial.get("complete"):
                 continue
             baseline = baseline_trial["metrics"].get(metric, {})
@@ -227,7 +492,7 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             before = float(baseline["median"])
             after = float(candidate["median"])
             raw, pct = paired_improvement(before, after, spec["direction"])
-            pairs.append({"before": before, "after": after, "raw_delta": raw,
+            pairs.append({"block": block.name, "before": before, "after": after, "raw_delta": raw,
                           "improvement_percent": pct})
 
         if not pairs:
@@ -293,12 +558,18 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     if not correctness_passed:
         state = "rejected-correctness-gate"
         reason = "correctness gate did not pass"
+    elif not manifest_ok:
+        state = "blocked-environment"
+        reason = "run-manifest environment or artifact identity is incomplete"
     elif mandatory_missing:
         state = "inconclusive-noise"
         reason = "mandatory structured performance metrics are missing"
-    elif len(blocks) < MIN_PAIRED_BLOCKS:
+    elif len(complete_pair_blocks) < MIN_PAIRED_BLOCKS:
         state = "inconclusive-noise"
-        reason = f"fewer than {MIN_PAIRED_BLOCKS} paired blocks"
+        reason = (
+            f"fewer than {MIN_PAIRED_BLOCKS} complete paired blocks "
+            f"({len(complete_pair_blocks)}/{len(blocks)} block directories contain both successful trials)"
+        )
     elif guardrail_regressions:
         state = "rejected-regression"
         reason = "one or more guardrail metrics regressed beyond the allowed limit"
@@ -314,9 +585,13 @@ def analyze(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "state": state,
         "reason": reason,
         "correctness_passed": correctness_passed,
+        "environment_identity_passed": manifest_ok,
+        "environment_identity_errors": manifest_errors,
         "any_stable_positive_metric": any_stable_positive,
         "missing_mandatory_metrics": mandatory_missing,
         "guardrail_regressions": guardrail_regressions,
+        "block_count": len(blocks),
+        "complete_pair_block_count": len(complete_pair_blocks),
         "minimum_paired_blocks": MIN_PAIRED_BLOCKS,
         "minimum_direction_consistency": MIN_DIRECTION_CONSISTENCY,
         "acceptance_note": (
@@ -366,7 +641,11 @@ def write_markdown(path: Path, comparison: dict[str, Any], decision: dict[str, A
         "",
         f"The decision requires at least {MIN_PAIRED_BLOCKS} paired blocks, "
         f"at least {MIN_DIRECTION_CONSISTENCY:.0%} positive blocks for one metric, "
-        "a passing correctness gate, mandatory structured FPS, and no guardrail regression.",
+        "a passing correctness gate, a complete environment/artifact identity, "
+        "mandatory structured FPS and p95 metrics, and no guardrail regression.",
+        "",
+        f"Complete paired blocks: {comparison.get('complete_pair_block_count', 0)} "
+        f"of {comparison.get('block_count', 0)}.",
         "",
     ])
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -380,6 +659,15 @@ def self_test() -> None:
         (root / "correctness" / "gate.json").write_text(
             json.dumps({"status": "pass"}), encoding="utf-8"
         )
+        digest = "a" * 64
+        (root / "run-manifest.json").write_text(json.dumps({
+            "environment": {"display": "self-test-display", "power_state": "self-test-power"},
+            "binaries": {
+                "production_jar": {"path": "build/libs/metallum.jar", "sha256": digest},
+                "native_dylib": {"path": "libmetallum.dylib", "sha256": digest},
+            },
+            "git": {"head": "self-test"},
+        }), encoding="utf-8")
         for block_number, baseline, candidate in (
             (1, 100.0, 110.0),
             (2, 101.0, 111.0),
@@ -390,12 +678,81 @@ def self_test() -> None:
                 trial = root / "trials" / f"block-{block_number:03d}" / profile
                 trial.mkdir(parents=True)
                 (trial / "exit-status.txt").write_text("0\n", encoding="utf-8")
-                (trial / "source.json").write_text(
-                    json.dumps({"fps": {"median": fps}, "gpu_frame_time_ms": 10.0}),
+                frame_milliseconds = 1_000.0 / fps
+                source_report = {
+                    "drawableWidth": 1708,
+                    "drawableHeight": 960,
+                    "measuredFrameIntervals": 3,
+                    "frameTimeStutterCount": 0,
+                    "nativeEncoderCountsPerMeasuredFrame": {
+                        "measuredFrames": 3,
+                        "renderPerFrame": 6.0 if profile == "baseline" else 5.0,
+                        "blitPerFrame": 2.0,
+                    },
+                    "performanceSampleWindow": {
+                        "schemaVersion": 1,
+                        "frameIdStart": 1,
+                        "frameIdEnd": 3,
+                        "frameCount": 3,
+                        "frameIntervals": [
+                            {"frameId": frame_id, "milliseconds": frame_milliseconds}
+                            for frame_id in (1, 2, 3)
+                        ],
+                        "cpuRenderEncode": [
+                            {"frameId": frame_id, "milliseconds": 8.0 if profile == "baseline" else 7.0}
+                            for frame_id in (1, 2, 3)
+                        ],
+                        "gpuFrameTimes": [
+                            {"frameId": frame_id, "milliseconds": 10.0 if profile == "baseline" else 9.0}
+                            for frame_id in (1, 2, 3)
+                        ],
+                        "gpuCommandBuffers": [
+                            {"frameId": frame_id, "submitIndex": frame_id, "milliseconds": 5.0}
+                            for frame_id in (1, 2, 3)
+                        ],
+                        "gpuCommandBufferCount": 3,
+                        "gpuFrameCount": 3,
+                    },
+                }
+                source_path = trial / "artifacts" / "validation" / "native-fullscreen-baseline.json"
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                source_path.write_text(
+                    json.dumps(source_report),
                     encoding="utf-8",
                 )
         _, decision = analyze(root)
         assert decision["state"] == "accepted-candidate", decision
+
+        # A pre-frame-ID metrics cache must not be trusted just because it
+        # claims complete=true.  The authoritative native report wins and is
+        # regenerated for the following assertions.
+        stale_metrics = root / "trials" / "block-001" / "baseline" / "metrics.json"
+        stale_metrics.write_text(json.dumps({"schema_version": 2, "complete": True}), encoding="utf-8")
+        _, stale_decision = analyze(root)
+        assert stale_decision["complete_pair_block_count"] == 4, stale_decision
+        assert stale_decision["state"] == "accepted-candidate", stale_decision
+        stale_metrics.unlink()
+
+        # Four block directories are not four paired observations when one
+        # arm failed.  The old analyzer could reach a guardrail verdict here
+        # because it counted directories instead of complete pairs.
+        failed_trial = root / "trials" / "block-004" / "candidate" / "exit-status.txt"
+        failed_trial.write_text("1\n", encoding="utf-8")
+        failed_trial.with_name("metrics.json").unlink()
+        _, incomplete_decision = analyze(root)
+        assert incomplete_decision["complete_pair_block_count"] == 3, incomplete_decision
+        assert incomplete_decision["state"] == "inconclusive-noise", incomplete_decision
+
+        # Environment identity is part of the paired claim.  A missing power
+        # state must block the verdict even when all trial files look healthy.
+        manifest = json.loads((root / "run-manifest.json").read_text(encoding="utf-8"))
+        manifest["environment"]["power_state"] = "must be recorded by local operator"
+        (root / "run-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        # Restore the failed arm so this assertion isolates the environment gate.
+        failed_trial.write_text("0\n", encoding="utf-8")
+        failed_trial.with_name("metrics.json").unlink()
+        _, environment_decision = analyze(root)
+        assert environment_decision["state"] == "blocked-environment", environment_decision
     print("self-test: PASS")
 
 

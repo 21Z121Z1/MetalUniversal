@@ -169,6 +169,18 @@ public final class RenderContractRuntime {
         }
     }
 
+    /** Updates the effective store actions after a deferred native pass is resolved. */
+    public static void updateAttachmentStoreActions(
+            final long passToken,
+            final Map<Integer, String> colorStoreActions,
+            final String depthStoreAction
+    ) {
+        RenderTraceRecorder current = recorder;
+        if (current != null && passToken >= 0L) {
+            current.updateAttachmentStoreActions(passToken, colorStoreActions, depthStoreAction);
+        }
+    }
+
     public static TraceIdentity traceIdentity(final long passToken) {
         RenderTraceRecorder current = recorder;
         return current == null || passToken < 0L ? null : current.traceIdentity(passToken);

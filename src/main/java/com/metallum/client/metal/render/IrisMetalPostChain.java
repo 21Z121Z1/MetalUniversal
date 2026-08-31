@@ -422,12 +422,13 @@ final class IrisMetalPostChain implements AutoCloseable {
         }
     }
 
-    private static final class PlannedCompute {
+    private static final class PlannedCompute implements IrisMetalComputeGroupingRuntime.AccessProvider {
         private final String token;
         private final PassInfo info;
         private final ComputeSource source;
         private final MetalIrisShaderCompiler.TranslatedStage translated;
         private final MetalIrisShaderCompiler.ComputeReflection reflection;
+        private final IrisMetalComputeGroupingRuntime.AccessSet groupingAccess;
         private @Nullable MetalComputePipeline pipeline;
 
         private PlannedCompute(
@@ -443,6 +444,12 @@ final class IrisMetalPostChain implements AutoCloseable {
             this.reflection = Objects.requireNonNull(
                     translated.computeReflection(), "compute reflection for " + source.getName()
             );
+            this.groupingAccess = IrisMetalComputeGroupingRuntime.fromReflection(this.reflection);
+        }
+
+        @Override
+        public IrisMetalComputeGroupingRuntime.AccessSet computeGroupingAccess() {
+            return this.groupingAccess;
         }
     }
 
@@ -1228,26 +1235,32 @@ final class IrisMetalPostChain implements AutoCloseable {
             final List<PlannedCompute> computes,
             final @Nullable List<String> executed
     ) {
-        if (computes.isEmpty()) {
-            return;
-        }
-        if (this.concurrentCompute) {
-            try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/compute")) {
-                for (PlannedCompute compute : computes) {
+        try {
+            if (computes.isEmpty()) {
+                return;
+            }
+            if (this.concurrentCompute) {
+                try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/compute")) {
+                    for (PlannedCompute compute : computes) {
+                        executeCompute(pass, compute, targets, resources, executed);
+                    }
+                }
+                return;
+            }
+
+            // Fixed Iris issues image/texture-fetch/SSBO barriers before every
+            // dispatch unless the pack explicitly opts into concurrent compute.
+            // An encoder boundary on the shared Metal fence is the conservative
+            // native equivalent for hazard-untracked resources.
+            for (PlannedCompute compute : computes) {
+                try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/compute")) {
                     executeCompute(pass, compute, targets, resources, executed);
                 }
             }
-            return;
-        }
-
-        // Fixed Iris issues image/texture-fetch/SSBO barriers before every
-        // dispatch unless the pack explicitly opts into concurrent compute.
-        // An encoder boundary on the shared Metal fence is the conservative
-        // native equivalent for hazard-untracked resources.
-        for (PlannedCompute compute : computes) {
-            try (MetalComputePass pass = device.commandEncoder().createComputePass("iris/compute")) {
-                executeCompute(pass, compute, targets, resources, executed);
-            }
+        } finally {
+            // A failed dispatch does not reach the mixin's normal-return hook.
+            // Do not let a partial group affect a later encoder acquisition.
+            IrisMetalComputeGroupingRuntime.abort();
         }
     }
 

@@ -77,6 +77,9 @@ public final class MetalFxManager {
     private final MetalDevice device;
     private MetalFxConfig config;
     private MetalFxConfig.Mode effectiveMode;
+    /** Render-thread-owned hysteretic scale controller; disabled by default. */
+    private MetalFxDynamicResolutionPolicy.Controller dynamicResolutionPolicy;
+    private MetalFxDynamicResolutionPolicy.Decision lastDynamicResolutionDecision;
     private long configRevision;
     // Hand depth provides exact coverage but not per-vertex motion. Camera-
     // locked zero motion is correct for the base pose; swing/bob/equip motion
@@ -343,6 +346,16 @@ public final class MetalFxManager {
     private MetalFxManager(final MetalDevice device) {
         this.device = device;
         this.config = MetalFxConfig.load();
+        this.dynamicResolutionPolicy = MetalFxDynamicResolutionPolicy.create(this.config.scale);
+        this.lastDynamicResolutionDecision = new MetalFxDynamicResolutionPolicy.Decision(
+                this.dynamicResolutionPolicy.enabled(),
+                this.dynamicResolutionPolicy.scale(),
+                this.dynamicResolutionPolicy.targetFrameNanos(),
+                false,
+                this.dynamicResolutionPolicy.enabled() ? "not-yet-sampled" : "feature-disabled",
+                0,
+                0
+        );
         this.configRevision = MetalFxConfig.runtimeRevision();
         applyMetalHud(this.config.metalHud, "startup");
         MetalNativeBridge.metallum_metalfx_set_reactive_tuning(
@@ -748,6 +761,46 @@ public final class MetalFxManager {
                 && !manager.runtimeDisabled;
     }
 
+    /** Structured admission/activation view for the optional dynamic scale controller. */
+    public static DynamicResolutionStatus dynamicResolutionStatus() {
+        MetalFxManager manager = active;
+        if (manager == null) {
+            return DynamicResolutionStatus.unavailable();
+        }
+        MetalFxDynamicResolutionPolicy.Decision decision = manager.lastDynamicResolutionDecision;
+        return new DynamicResolutionStatus(
+                decision.enabled(),
+                decision.scale(),
+                decision.targetFrameNanos(),
+                decision.changed(),
+                decision.reason(),
+                decision.overBudgetFrames(),
+                decision.underBudgetFrames()
+        );
+    }
+
+    public record DynamicResolutionStatus(
+            boolean enabled,
+            float scale,
+            long targetFrameNanos,
+            boolean changed,
+            String reason,
+            int overBudgetFrames,
+            int underBudgetFrames
+    ) {
+        private static DynamicResolutionStatus unavailable() {
+            return new DynamicResolutionStatus(
+                    false,
+                    1.0F,
+                    MetalFxDynamicResolutionPolicy.DEFAULT_TARGET_FRAME_NANOS,
+                    false,
+                    "manager-unavailable",
+                    0,
+                    0
+            );
+        }
+    }
+
     public static boolean usesCutoutReactiveTerrain() {
         MetalFxManager manager = active;
         return manager != null
@@ -820,7 +873,7 @@ public final class MetalFxManager {
             return width;
         }
         return effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled
-                ? width : MetalFxConfig.scaledDimension(width, config.scale);
+                ? width : MetalFxConfig.scaledDimension(width, renderScale());
     }
 
     private int sceneHeightInternal(final int height, final int width) {
@@ -828,12 +881,13 @@ public final class MetalFxManager {
             return height;
         }
         return effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled
-                ? height : MetalFxConfig.scaledDimension(height, config.scale);
+                ? height : MetalFxConfig.scaledDimension(height, renderScale());
     }
 
     private void beginFrameInternal() {
         reloadConfigIfRequested();
         recordFramePacingDiagnostics();
+        updateDynamicResolutionPolicy();
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
             this.sceneFrame = false;
             this.frameDepthTexture = null;
@@ -933,9 +987,53 @@ public final class MetalFxManager {
                 minecraft.getWindow().getRefreshRate(),
                 minecraft.level != null,
                 effectiveMode,
-                config.scale,
+                renderScale(),
                 frameGenerationEnabled || frameGenerationSuspended
         );
+    }
+
+    private float renderScale() {
+        if (dynamicResolutionPolicy != null
+                && dynamicResolutionPolicy.enabled()
+                && effectiveMode == MetalFxConfig.Mode.TEMPORAL
+                && !frameGenerationEnabled
+                && !frameGenerationSuspended
+                && !runtimeDisabled) {
+            return dynamicResolutionPolicy.scale();
+        }
+        return config.scale;
+    }
+
+    private void updateDynamicResolutionPolicy() {
+        if (dynamicResolutionPolicy == null || !dynamicResolutionPolicy.enabled()) {
+            return;
+        }
+        if (effectiveMode != MetalFxConfig.Mode.TEMPORAL
+                || frameGenerationEnabled
+                || frameGenerationSuspended
+                || runtimeDisabled) {
+            this.lastDynamicResolutionDecision = new MetalFxDynamicResolutionPolicy.Decision(
+                    true,
+                    dynamicResolutionPolicy.scale(),
+                    dynamicResolutionPolicy.targetFrameNanos(),
+                    false,
+                    "temporal-only-or-frame-generation-active",
+                    dynamicResolutionPolicy.overBudgetFrames(),
+                    dynamicResolutionPolicy.underBudgetFrames()
+            );
+            return;
+        }
+        MetalFxDynamicResolutionPolicy.Decision decision = dynamicResolutionPolicy.update(
+                MetalGpuTimingRecorder.latestGpuNanos()
+        );
+        this.lastDynamicResolutionDecision = decision;
+        if (decision.changed()) {
+            this.phaseCount = MetalFxConfig.phaseCount(renderScale());
+            // The next projection/target boundary observes the new dimensions
+            // and recreates every temporal attachment together. Resetting now
+            // prevents a history sample at the old scale from being consumed.
+            resetHistoryInternal("dynamic resolution scale changed");
+        }
     }
 
     private static double percentile(final double[] sortedValues, final double fraction) {
@@ -985,7 +1083,17 @@ public final class MetalFxManager {
         }
 
         this.effectiveMode = chooseMode(device, next);
-        this.phaseCount = MetalFxConfig.phaseCount(next.scale);
+        this.dynamicResolutionPolicy = MetalFxDynamicResolutionPolicy.create(next.scale);
+        this.lastDynamicResolutionDecision = new MetalFxDynamicResolutionPolicy.Decision(
+                this.dynamicResolutionPolicy.enabled(),
+                this.dynamicResolutionPolicy.scale(),
+                this.dynamicResolutionPolicy.targetFrameNanos(),
+                false,
+                this.dynamicResolutionPolicy.enabled() ? "settings-refresh" : "feature-disabled",
+                0,
+                0
+        );
+        this.phaseCount = MetalFxConfig.phaseCount(renderScale());
         boolean shaderSamplingChanged = nextSettings.requiresShaderRefreshComparedTo(previousSettings)
                 || previousEffectiveMode != this.effectiveMode;
         this.runtimeDisabled = false;
@@ -1421,7 +1529,7 @@ public final class MetalFxManager {
                 && cutoutReactivePipelineAvailable
                 && cutoutReactiveTexture != null
                 && reactiveTexture != null) {
-            int radius = MetalFxMath.cutoutReactiveRadius(config.scale, pixelJitter);
+            int radius = MetalFxMath.cutoutReactiveRadius(renderScale(), pixelJitter);
             boolean combined = encoder.encodeCutoutReactiveMask(
                     cutoutReactiveTexture,
                     reactiveTexture,
@@ -1725,7 +1833,7 @@ public final class MetalFxManager {
 
         Matrix4f submittedCurrent = new Matrix4f(currentViewProjection);
         Matrix4f submittedPrevious = new Matrix4f(previousViewProjection);
-        int submittedCutoutRadius = MetalFxMath.cutoutReactiveRadius(config.scale, pixelJitter);
+        int submittedCutoutRadius = MetalFxMath.cutoutReactiveRadius(renderScale(), pixelJitter);
         MetalEntityMotionCapture.Diagnostics producerDiagnostics =
                 MetalEntityMotionCapture.diagnostics();
         Path root = Path.of(System.getProperty(
@@ -3350,10 +3458,10 @@ public final class MetalFxManager {
         this.frameGenerationOutputWidth = targetFrameGenerationOutputWidth;
         this.frameGenerationOutputHeight = targetFrameGenerationOutputHeight;
         this.frameGenerationInputWidth = keepFrameGenerationResources
-                ? MetalFxConfig.scaledDimension(targetFrameGenerationOutputWidth, config.scale)
+                ? MetalFxConfig.scaledDimension(targetFrameGenerationOutputWidth, renderScale())
                 : targetRenderWidth;
         this.frameGenerationInputHeight = keepFrameGenerationResources
-                ? MetalFxConfig.scaledDimension(targetFrameGenerationOutputHeight, config.scale)
+                ? MetalFxConfig.scaledDimension(targetFrameGenerationOutputHeight, renderScale())
                 : targetRenderHeight;
         if (config.debug && dimensionsChanged && keepFrameGenerationResources) {
             Metallum.LOGGER.info(
