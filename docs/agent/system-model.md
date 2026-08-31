@@ -1,17 +1,17 @@
 # MetalUniversal agent system model
 
-This document is the conceptual control plane for continued development. It exists to minimize agent reconstruction cost: an agent should be able to discover the current authority, route a task to the right subsystem, change the smallest ownership boundary, and prove the result without reading the repository linearly.
+This document is the conceptual control plane for continued development. It exists to minimize reconstruction cost: an agent should discover current authority, understand the smallest relevant slice, predict the consequences of a diff, choose the cheapest sufficient proof, and resume interrupted work without reading the repository linearly.
 
-The repository is not a bag of renderer features. It is one system with two tightly coupled planes:
+MetalUniversal is not a bag of renderer features. It is one evidence-driven system with two coupled planes:
 
-- **data plane** — Minecraft/Iris/Sodium semantics are lowered into explicit render intent and executed by Metal;
-- **control plane** — agents observe repository/runtime state, choose a bounded change, run evidence-producing gates, and distill durable decisions.
+- **data plane** — Minecraft/Iris/Sodium semantics are lowered into explicit intent and executed by Metal;
+- **control plane** — agents observe exact state, route work, calculate impact/proof obligations, execute bounded changes, and distill durable knowledge.
 
-The control plane must never invent a second rendering truth. Source, executable contracts and structured runtime evidence remain authoritative.
+The control plane is never a second renderer truth. Source, executable contracts, exact identity and structured runtime evidence remain authoritative.
 
 ## 1. The abstraction tower
 
-Reason about the renderer from the top down and debug it from the first broken layer down. Every layer has a deliberately narrow contract with the layer below it.
+Reason from the top down and debug from the first broken layer down. Every layer has a narrow contract with the one below it.
 
 ```text
 L0  Operator intent / product contract
@@ -26,11 +26,11 @@ L2  Canonical semantic identity
 L3  Immutable render / terrain plans
     hazards, liveness, attachment policy, batching, admission reasons
         |
-L4  Backend execution policy
-    Metal 3/4 path selection, encoder reuse, ICB, residency, fallbacks
+L4  Java backend execution policy
+    Metal 3/4 selection, encoder reuse, ICB, residency, fallbacks
         |
-L5  Java/FFM ABI
-    exact descriptors, ownership, nullability, symbol/version contracts
+L5  Java / FFM ABI
+    descriptors, ownership, nullability, symbol/version contracts
         |
 L6  Swift / Metal execution
     MTL resources, encoders, command buffers, presentation
@@ -39,14 +39,15 @@ L7  Evidence plane
     structured traces, counters, readback, timings, first divergence
         |
 L8  Acceptance / promotion
-    correctness gate -> paired performance -> review -> promotion
+    correctness -> activation -> exact-head CI -> physical proof when needed
+    -> paired performance when claimed -> review -> promotion
 ```
 
-Do not skip a layer when diagnosing. A visual mismatch is first a semantic/evidence problem, not immediately a Swift problem. A native crash is first an ABI/lifetime problem, not an optimization problem. A performance regression is not actionable until correctness and activation are both proved.
+Do not skip layers when diagnosing. A visual mismatch is first a semantic/evidence problem, not immediately a Swift problem. A native crash is first an ABI/lifetime problem. A performance regression is not actionable until correctness and activation are proved.
 
 ## 2. One semantic address space
 
-Agents need stable names that survive refactors, backend changes and profiling runs. Use these identities in descending preference:
+Use identities that survive refactors and backend changes, in this order:
 
 1. semantic pass ID;
 2. generation-aware `ResourceIdentity`;
@@ -56,38 +57,37 @@ Agents need stable names that survive refactors, backend changes and profiling r
 
 Never use timestamps, native pointers, encoder ordinals, object addresses, log line numbers or shader-pack names as cross-run identity.
 
-This gives every claim an address. For example:
+Preferred debugging join path:
 
 ```text
 semantic pass
   -> resource generation
     -> hazard/liveness edge
       -> admitted backend transform
-        -> Java/FFM descriptor
-          -> native encoder work
-            -> structured evidence
+        -> Java execution record
+          -> FFM descriptor/symbol
+            -> Swift/Metal work
+              -> structured evidence
 ```
 
-That chain is the preferred debugging join path.
+Every important claim should be joinable along this path.
 
 ## 3. Authority model
 
-When information conflicts, use this order:
+When information conflicts:
 
-1. shipping source, tests, schemas, exact Git/binary identity;
-2. structured runtime evidence produced by that exact identity;
+1. shipping source, tests, schemas, generated manifests and exact Git/binary identity;
+2. structured runtime evidence from that exact identity;
 3. canonical design/acceptance documents named by `docs/agent/system-registry.json`;
-4. historical handoffs, retired plans, migration records and prose notes.
+4. handoffs, prompts, retired plans, migration records and historical prose.
 
-A newer date does not outrank executable truth. A historical document may explain why code exists but cannot prove that the current tree still behaves that way.
-
-`docs/agent/system-registry.json` is a **router**, not a fact database. It identifies authorities, component boundaries and verification entry points. Runtime state is generated from Git and evidence; it must not be copied into long-lived architecture prose.
+A recent date does not outrank executable truth. `docs/agent/system-registry.json` is a router/contract graph, not a runtime fact database. Volatile state is generated from Git/evidence and must not be copied into architecture prose.
 
 ## 4. Context-budget model
 
-An agent should expand context only when the current layer cannot answer the question.
+Expand context only when the current layer cannot answer the question.
 
-### Tier 0 — bootstrap capsule
+### Tier 0 — generated capsule
 
 Run:
 
@@ -95,176 +95,238 @@ Run:
 python3 scripts/agent/context.py --task "<short task description>"
 ```
 
-The capsule should answer, in a few hundred lines at most:
+The capsule should answer:
 
-- current branch / HEAD / dirty state;
-- relation to the canonical development branch when locally resolvable;
-- canonical authorities;
-- likely subsystem routes for the task;
-- exact verification entry points;
-- warnings about repository-policy drift.
+- current branch/HEAD/dirty state and diff base;
+- direct component ownership of the diff;
+- downstream impact closure and boundary contracts at risk;
+- canonical documents/local `AGENTS.md` to read now;
+- the cheapest sufficient proof ladder for the claim;
+- recoverable checkpoint status, if present;
+- repository-policy warnings.
+
+Use `--since <ref>` only when the task intentionally has a different comparison base. Use `--claim performance|presentation|platform` when the requested conclusion is stronger than what task wording makes obvious.
 
 ### Tier 1 — system contracts
 
-Read only:
-
-- `AGENTS.md`;
-- this document;
-- `docs/agent/unified-evaluation-loop.md` when rendering correctness/performance is involved.
+Read only root `AGENTS.md`, this document, and the unified evaluation contract when rendering correctness/performance is involved.
 
 ### Tier 2 — component slice
 
-Read the source roots and canonical docs returned for the routed component. Do not preload unrelated Iris, terrain, MetalFX, iOS and historical documents.
+Read the routed component's local `AGENTS.md`, source roots, nearest tests and canonical docs. Do not preload unrelated Iris, terrain, MetalFX, iOS or historical documents.
 
-### Tier 3 — evidence and history
+### Tier 3 — evidence/history
 
-Open raw traces, runtime artifacts, old handoffs and migration records only to resolve a concrete question that survived Tiers 0–2.
+Open raw traces, runtime artifacts, old handoffs, prompts and migration records only to resolve a concrete unresolved question.
 
-This is intentionally asymmetric: source navigation is cheap; broad historical reading is expensive and often misleading.
+Source navigation is cheap; broad chronological reading is expensive and commonly misleading.
 
 ## 5. System components and ownership
 
-The machine-readable component map lives in `docs/agent/system-registry.json`. The stable conceptual boundaries are:
+The machine-readable graph is `docs/agent/system-registry.json`. Stable conceptual components are:
 
 - **product.semantics** — Minecraft/Iris/Sodium observable meaning;
-- **render.plan** — semantic graph, hazards, liveness and optimization admission;
-- **render.execution** — Java Metal execution and resource lifecycle;
-- **native.abi** — Java FFM ↔ Swift ABI and ownership;
-- **terrain.scene** — terrain scheduling, visibility and GPU scene/ICB submission;
-- **validation.contract** — backend-neutral correctness oracle and first-divergence diagnosis;
-- **evaluation.control** — agent harness, evidence, statistics and CI authority;
-- **platform.mobile** — isolated iOS/Amethyst platform lineage sharing backend contracts.
+- **render.plan** — immutable semantic graph, hazards, liveness and admission;
+- **render.execution** — Java Metal command/resource execution;
+- **native.abi** — Java FFM ↔ native descriptor/symbol/ownership contract;
+- **native.execution** — Swift/Metal implementation below that ABI;
+- **terrain.scene** — generation-owned terrain scheduling, visibility and GPU scene/ICB submission;
+- **validation.contract** — backend-neutral oracle and first-divergence diagnosis;
+- **evaluation.control** — agent routing, evidence, statistics and CI authority;
+- **platform.mobile** — isolated iOS/Amethyst platform concerns sharing native/backend contracts.
 
-A change that crosses two components must name the ownership boundary it crosses. A change that crosses three or more should be split unless the interface itself is the subject of the task.
+A change that directly owns more than two components should be split unless the interface between those components is itself the task. Shared directories do not imply shared ownership: the registry uses more-specific path patterns and task semantics to route the diff.
 
-## 6. The agent control loop
+## 6. Impact graph and proof closure
 
-Use one closed loop for implementation work:
+A source edit has two different sets of consequences:
+
+- **direct ownership** — components whose contract/code is actually edited;
+- **impact closure** — downstream components whose assumptions or observable behavior may change.
+
+Do not make agents rediscover this graph from prose. Components declare `impact_targets`; named boundaries declare the contract and independent proofs required when a change can cross them.
+
+Examples:
+
+```text
+product.semantics -> render.plan -> render.execution -> validation.contract -> evaluation.control
+terrain.scene ---------------------> render.execution -> validation.contract
+native.abi -> native.execution -----------------------> validation.contract
+platform.mobile -> native.abi/native.execution
+```
+
+These arrows mean "a change here may invalidate assumptions/evidence there", not "the implementation must call through every node".
+
+The proof planner computes a **proof closure**, not a maximal test suite. Each proof profile has a rank, environment, command/authority route, dependencies and a precise statement of what it proves. Run in increasing rank and stop when an earlier proof falsifies the candidate.
+
+Canonical ladder:
+
+```text
+agent control
+  -> repository/static contracts
+    -> synthetic semantic oracle
+      -> focused GPU/native contracts
+        -> independent exact-head hosted CI
+          -> Minecraft conformance/E2E
+            -> physical presentation/device proof when the claim requires it
+              -> paired performance only when performance is claimed
+```
+
+A later proof cannot substitute for an earlier semantic obligation. Conversely, do not run a physical/performance gate merely because it exists when the change is control-plane-only.
+
+Important asymmetry: a changed validation oracle must independently prove itself with fixtures/self-tests before it is allowed to approve the same renderer candidate. A changed benchmark/analyzer likewise needs independent self-tests; otherwise the candidate and judge share one unverified failure mode.
+
+## 7. The agent control loop
+
+Use one closed loop:
 
 ```text
 OBSERVE -> ORIENT -> DECIDE -> ACT -> VERIFY -> DISTILL
 ```
 
-### Observe
+### OBSERVE
 
-Generate the context capsule, inspect exact Git state, and identify available execution environments. Do not infer environment capability from the host name.
+Generate the capsule, inspect exact Git state and discover environment capability. Do not infer GPU/presentation capability from a runner label.
 
-### Orient
+### ORIENT
 
-Map the task to one or two component IDs. Read their source roots, nearest tests and canonical contracts. Establish the first layer in the abstraction tower that could explain the issue.
+Map the task and diff to direct components, inspect impact closure/boundaries, and locate the first abstraction layer able to explain the problem.
 
-### Decide
+### DECIDE
 
-Write one falsifiable hypothesis and one acceptance boundary. Prefer the smallest change that can disprove the hypothesis quickly.
+Write one falsifiable hypothesis, one acceptance boundary and one rollback condition. Select the cheapest proof that can falsify it.
 
-### Act
+### ACT
 
-Change the narrowest complete ownership slice. Keep optimization admission fail-closed. Extend existing Java/FFM/Swift paths rather than introducing shadow control planes or duplicate native modules.
+Change the narrowest complete ownership slice. Admission remains fail-closed. Extend existing Java/FFM/Swift paths; do not add duplicate policy engines or native modules.
 
-### Verify
+### VERIFY
 
-Run the cheapest relevant gate first, then expand:
+Execute the generated proof ladder in order. On a semantic failure, diagnose the first divergent pass/resource/producer. Only broaden instrumentation when that focused evidence is insufficient.
 
-```text
-static/schema -> focused unit -> integration/build -> GPU/native -> Minecraft E2E -> paired performance
+### DISTILL
+
+Persist durable knowledge in the narrowest executable form:
+
+- invariant -> test or canonical contract;
+- long-lived interface decision -> ADR;
+- routing/proof rule -> registry/checker;
+- runtime result -> structured evidence;
+- uniquely useful rejected experiment -> exact SHA/evidence in retirement ledger;
+- transient investigation -> generated state only.
+
+## 8. Recoverable task state
+
+Git preserves code, but not enough of an interrupted agent's working state. The repository therefore supports a small **ephemeral checkpoint** under ignored `build/agent-state/current.json`.
+
+Create one after orientation when a task spans multiple edits/gates:
+
+```bash
+python3 scripts/agent/checkpoint.py init \
+  --task "<task>" \
+  --hypothesis "<falsifiable hypothesis>" \
+  --next-command "<next cheapest action>"
 ```
 
-Do not pay for later gates when an earlier gate already falsifies the candidate.
+Update it as evidence arrives:
 
-### Distill
+```bash
+python3 scripts/agent/checkpoint.py update \
+  --status verifying \
+  --check "static|pass|build/.../evidence.json" \
+  --next-command "<next command>"
+```
 
-Persist only knowledge that will remain useful after the branch disappears:
+The checkpoint records start/current SHA, direct/impacted components, boundary/proof IDs, completed checks, blockers and next command. `context.py` surfaces it automatically and warns when its branch/HEAD no longer matches.
 
-- stable contract/invariant -> canonical documentation or test;
-- non-obvious long-lived design choice -> ADR under `docs/agent/decisions/`;
-- reusable machine rule -> schema/registry/checker;
-- rejected experiment -> exact commit/evidence in the retired-branch backlog if still useful;
-- transient logs/screenshots -> generated evidence only, never canonical docs.
+This state is deliberately **not committed**. It is a handoff/cache, not canonical truth. If a cloud environment will disappear, preserve the checkpoint with the same mechanism used for generated evidence or summarize its stable conclusions into the PR/commit/tests/contracts. Do not turn task-state churn into repository history.
 
-This keeps accumulated knowledge executable and searchable instead of turning the repository into a chronological notebook.
+## 9. Evidence graph
 
-## 7. Evidence graph
-
-Every performance or correctness conclusion should be reconstructible as:
+Every correctness/performance decision must reconstruct as:
 
 ```text
 source SHA
  + binary/native identity
  + scenario identity
- + feature/admission activation
+ + activation/admission
  + correctness result
- + performance result (when relevant)
+ + performance result when claimed
  + artifact locations
  = decision
 ```
 
-The decision is invalid if one required edge is missing. In particular:
+The unified runner already emits `run-manifest.json` plus correctness/admission/trial artifacts and `decision.json`. Reuse those artifacts. Do not create a second metrics database simply to make them easier to find; index/link them instead.
 
-- compilation is not runtime activation;
-- activation is not correctness;
-- correctness is not performance improvement;
-- average FPS without paired blocks is not an optimization decision;
-- a screenshot without semantic-pass linkage is diagnostic evidence, not a root-cause proof.
+Invalid shortcuts:
 
-## 8. Plans are compiled intent, not alternate truth
+- compilation != runtime activation;
+- activation != correctness;
+- correctness != performance improvement;
+- one average FPS number != paired performance acceptance;
+- screenshot similarity without semantic-pass linkage != root-cause proof;
+- hosted native compilation != attended presentation/device proof.
 
-The preferred long-term architecture is to make performance transformations consume immutable, inspectable plans derived from semantics instead of discovering policy ad hoc inside native hot paths.
+## 10. Plans are compiled intent, not alternate truth
 
-A plan should contain only facts needed for execution/admission:
+Performance transformations should consume immutable, inspectable plans derived from semantics instead of discovering policy ad hoc inside native hot paths.
+
+A plan contains only execution/admission facts:
 
 - stable pass/resource identities;
 - access modes and hazard edges;
-- attachment compatibility and load/store intent;
-- resource liveness;
+- attachment compatibility/load-store intent;
+- liveness;
 - pipeline/layout identity;
 - batching/ICB eligibility;
-- explicit acceptance or rejection reason codes.
+- stable acceptance/rejection reason codes.
 
-The same plan should feed:
+The same plan should feed conservative execution, optimized execution, activation evidence, diagnosis and tests. This prevents the harness, Java renderer and Swift backend from re-deriving policy differently.
 
-1. conservative execution;
-2. optimized execution;
-3. structured activation evidence;
-4. diagnosis and tests.
+## 11. Local agent guides
 
-This prevents the agent harness, Java renderer and Swift backend from independently re-deriving the same policy with subtly different rules.
+High-risk ownership roots contain deliberately short scoped `AGENTS.md` files. They declare local invariants, not duplicate global policy. A scoped guide may tighten rules but must not redefine canonical branches, authority order, acceptance semantics or proof thresholds.
 
-## 9. Branches are work queues, not memory
+Current guides cover:
 
-The canonical development base is `integration/iris-metal-next`; `master` is the promoted stable tree. Task branches are bounded queues of work. Durable knowledge belongs in source/tests/contracts/ADRs, not in an ever-growing branch namespace.
+- Java Metal render execution;
+- render-contract validation;
+- terrain scene/lifecycle;
+- Swift/native execution;
+- agent harness/evidence plane.
 
-Before closing a task:
+If a subsystem grows large enough that an agent repeatedly needs the same local knowledge, add a scoped guide only when those rules are stable and local. Do not create one as a task diary.
 
-- land accepted work through the required gates, or record any uniquely useful unlanded SHA in the retirement ledger;
-- remove disposable branches after the human merge/retire decision;
-- do not create archive branches as documentation.
+## 12. Branches are work queues, not memory
 
-The context tool should warn about policy drift, but it must not delete branches automatically.
+`integration/iris-metal-next` is the continued-development base; `master` is promoted stable. Task branches are bounded work queues. Durable memory lives in source/tests/contracts/ADRs, not an ever-growing branch namespace.
 
-## 10. Documentation lifecycle
+The context/control checks may report branch-policy drift but must never delete unrelated branches automatically. After the human merge/retire decision, dispose of the task branch according to root `AGENTS.md`.
 
-Documentation has four classes:
+## 13. Documentation lifecycle
 
-- **canonical** — current system contracts and acceptance rules;
-- **component reference** — narrow, current domain explanation;
-- **ADR** — immutable reason for a long-lived architectural decision;
-- **historical/advisory** — dated handoffs, superseded plans, migration notes.
+Documentation classes:
 
-The index in `docs/README.md` and registry classification determine authority. Do not infer authority from filename, date or directory alone.
+- **canonical** — current contracts/acceptance;
+- **component reference** — narrow current explanation;
+- **ADR** — durable reason for a long-lived choice;
+- **historical/advisory** — handoffs, prompts, superseded plans, migration notes.
 
-When implementation invalidates a canonical statement, update the contract in the same change. When only historical context becomes stale, do not rewrite history; improve its classification or add a newer ADR/contract.
+Prompts are recipes, not authority. Historical docs are provenance, not state. When implementation invalidates canonical prose, update it in the same change. Do not rewrite old handoffs merely to make them look current.
 
-## 11. Design tests for agent-friendliness
+## 14. Design tests for agent-friendliness
 
 A repository-level design change is agent-friendly only if it improves at least one of these without weakening another:
 
-- **time-to-first-correct-file** — how quickly an agent reaches the right ownership slice;
-- **context amplification** — useful facts obtained per token/file opened;
-- **state recoverability** — ability to reconstruct current work from Git + structured evidence;
-- **proof locality** — distance between changed behavior and the test/evidence that proves it;
-- **semantic stability** — identities remain useful across backend/refactor changes;
-- **failure specificity** — first failing layer and reason code are explicit;
-- **knowledge compaction** — durable lessons become tests/contracts/ADRs rather than repeated prose;
+- **time-to-first-correct-file** — how quickly the correct ownership slice is reached;
+- **context amplification** — useful facts per token/file opened;
+- **impact visibility** — downstream/boundary consequences are explicit before editing;
+- **proof economy** — cheapest sufficient independent evidence is known in advance;
+- **state recoverability** — interrupted work resumes from Git + checkpoint + evidence;
+- **proof locality** — changed behavior and proving evidence are close;
+- **semantic stability** — identities survive backend/refactor changes;
+- **failure specificity** — first failing layer/reason is explicit;
+- **knowledge compaction** — lessons become tests/contracts/ADRs/checkers rather than prose duplication;
 - **branch/doc entropy** — obsolete work stops competing with current authority.
 
-Optimize the repository for these properties before adding more autonomous machinery.
+Optimize these properties before adding more autonomous machinery. The target is not maximum automation; it is minimum uncertainty per unit of agent attention and compute.
