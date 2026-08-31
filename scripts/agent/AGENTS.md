@@ -15,5 +15,6 @@ Local invariants:
 - Prefer indexes that link existing evidence over copying metrics into another truth store.
 - Proof `depends_on` describes logical obligation; `covers` describes artifacts emitted inside one executor. Never use `covers` to erase an independent-environment requirement.
 - Retain a cheap fail-fast preflight even when an expensive integrated executor technically covers it.
+- `run_iris_perf_cycle.sh` is a legacy reproduction lane tied to the superseded Iris performance protocol. New work uses `run_unified_eval_cycle.sh`; do not choose an executable merely because it still exists.
 
 When ownership, boundary or proof routing changes, update `docs/agent/system-registry.json` and add/adjust a representative `docs/agent/routing-fixtures.json` case. A routing change without a regression fixture should be exceptional.
