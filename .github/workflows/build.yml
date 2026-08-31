@@ -29,6 +29,8 @@ jobs:
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: validate gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
       - name: setup jdk
@@ -36,6 +38,15 @@ jobs:
         with:
           java-version: '25'
           distribution: 'temurin'
+      - name: validate cloud capability program contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/agent-evidence
+          python3 scripts/agent/verify_cloud_program.py \
+            --verify-remote-branches \
+            --expected-source-sha "$GITHUB_SHA" \
+            --output build/agent-evidence/cloud-program-contract.json
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
       - name: select latest xcode
