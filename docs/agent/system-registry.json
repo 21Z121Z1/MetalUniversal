@@ -54,7 +54,8 @@
     "docs/iris_on_metal_implementation_plan.md",
     "docs/iris_on_metal_architecture.md",
     "docs/iris-audit/experimental-performance-architecture.md",
-    "docs/iris-audit/advanced-optimization-runtime-handoff.md"
+    "docs/iris-audit/advanced-optimization-runtime-handoff.md",
+    "docs/agent/cloud-first-metal-program.json"
   ],
   "generated_evidence": {
     "never_commit": [

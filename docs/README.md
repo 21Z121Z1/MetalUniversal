@@ -41,6 +41,7 @@ The following are provenance, not current-state authority unless a canonical doc
 - dated acceptance/debug reports;
 - `agent/retired-branch-backlog.md`;
 - `agent/branch-migration-matrix.json`;
+- `agent/cloud-first-metal-program.json`;
 - `iris_on_metal_implementation_plan.md`;
 - `iris_on_metal_architecture.md`;
 - `iris-audit/experimental-performance-architecture.md`;
