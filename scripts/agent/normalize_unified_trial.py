@@ -17,13 +17,13 @@ from typing import Any
 
 SCHEMA_VERSION = 3
 PERFORMANCE_SAMPLE_SCHEMA_VERSION = 1
-# GPU completion callbacks can legally lag the render thread by a frame or
-# two when the client is asked to stop.  Keep the performance source strict:
-# only a common frame-ID window is usable, at least 95% of the frame interval
-# IDs must survive, and any missing IDs in the interior of that window remain
-# an error.  This admits an asynchronous prefix/suffix without allowing a
-# report to cherry-pick arbitrary frames.
-MIN_FRAME_ALIGNMENT_COVERAGE = 0.95
+# MetalUniversal currently supports a renderer pacing depth of two or three
+# frames.  A delayed GPU completion at shutdown may therefore omit only a
+# bounded prefix/suffix no larger than the runtime-reported frames-in-flight
+# depth.  There is deliberately no percentage-based escape hatch: interior
+# holes or a larger boundary loss are incomplete evidence regardless of how
+# long the trial ran.
+MAX_SUPPORTED_FRAMES_IN_FLIGHT = 3
 
 
 def finite_number(value: Any) -> float | None:
@@ -75,6 +75,23 @@ def nonnegative_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def gpu_completion_boundary_budget(report: dict[str, Any]) -> int:
+    """Return the runtime-proven asynchronous GPU completion depth.
+
+    Exact frame/CPU coverage never needs this allowance.  It is available only
+    when the authoritative report contains a valid presentation pacing
+    decision in the renderer-supported 1..3 range; otherwise a truncated GPU
+    window fails closed with a zero-frame budget.
+    """
+    pacing = report.get("presentationPacingPolicy")
+    if not isinstance(pacing, dict):
+        return 0
+    frames_in_flight = nonnegative_int(pacing.get("framesInFlight"))
+    if frames_in_flight is None or not 1 <= frames_in_flight <= MAX_SUPPORTED_FRAMES_IN_FLIGHT:
+        return 0
+    return frames_in_flight
 
 
 def percentile(values: list[float], quantile: float) -> float | None:
@@ -175,34 +192,65 @@ def validate_performance_sample_window(
     cpu_ids = {frame_id for frame_id, _ in cpu_samples}
     gpu_ids = {frame_id for frame_id, _ in gpu_frame_samples}
     command_ids = {frame_id for frame_id, _ in command_samples}
-    common_ids = frame_id_set & cpu_ids & gpu_ids & command_ids
-    aligned_frame_ids = [frame_id for frame_id in frame_ids if frame_id in common_ids]
-    dropped_frame_ids = [frame_id for frame_id in frame_ids if frame_id not in common_ids]
-    alignment_coverage = (
-        len(aligned_frame_ids) / len(frame_ids) if frame_ids else 0.0
-    )
-    if frame_ids and alignment_coverage < MIN_FRAME_ALIGNMENT_COVERAGE:
-        errors.append(
-            "frame-ID alignment coverage is below the minimum: "
-            f"aligned={len(aligned_frame_ids)}, raw={len(frame_ids)}, "
-            f"coverage={alignment_coverage:.4f}, minimum={MIN_FRAME_ALIGNMENT_COVERAGE:.4f}; "
-            f"cpuRenderEncode={len(cpu_ids)}, gpuFrameTimes={len(gpu_ids)}, "
-            f"gpuCommandBuffers={len(command_ids)}"
-        )
-    if aligned_frame_ids:
-        first_aligned = frame_ids.index(aligned_frame_ids[0])
-        last_aligned = frame_ids.index(aligned_frame_ids[-1])
-        interior_drops = [
-            frame_id for frame_id in frame_ids[first_aligned:last_aligned + 1]
-            if frame_id not in common_ids
-        ]
-        if interior_drops:
-            errors.append(
-                "frame-ID alignment has interior gaps; only an asynchronous prefix/suffix is allowed: "
-                f"dropped={interior_drops[:16]}"
-            )
 
-    # Restrict every source to the same common frame-ID window.  Command
+    # CPU timing is produced synchronously by the measured render frame and has
+    # no asynchronous completion excuse.  Require its frame identity to match
+    # frameIntervals exactly; the bounded tail rule below is GPU-only.
+    if cpu_ids != frame_id_set:
+        missing = sorted(frame_id_set - cpu_ids)
+        extra = sorted(cpu_ids - frame_id_set)
+        errors.append(
+            "cpuRenderEncode frame IDs must exactly match frameIntervals: "
+            f"missing={missing[:16]}, extra={extra[:16]}"
+        )
+
+    gpu_common_ids = frame_id_set & gpu_ids & command_ids
+    aligned_frame_ids = [frame_id for frame_id in frame_ids if frame_id in gpu_common_ids]
+    dropped_frame_ids = [frame_id for frame_id in frame_ids if frame_id not in gpu_common_ids]
+    alignment_coverage = len(aligned_frame_ids) / len(frame_ids) if frame_ids else 0.0
+    boundary_budget = gpu_completion_boundary_budget(report)
+    prefix_drops: list[int] = []
+    suffix_drops: list[int] = []
+    interior_drops: list[int] = []
+
+    if dropped_frame_ids:
+        if not aligned_frame_ids:
+            errors.append("GPU timing has no common measured frame-ID window")
+        else:
+            first_aligned = frame_ids.index(aligned_frame_ids[0])
+            last_aligned = frame_ids.index(aligned_frame_ids[-1])
+            prefix_drops = [
+                frame_id for frame_id in frame_ids[:first_aligned]
+                if frame_id not in gpu_common_ids
+            ]
+            suffix_drops = [
+                frame_id for frame_id in frame_ids[last_aligned + 1:]
+                if frame_id not in gpu_common_ids
+            ]
+            interior_drops = [
+                frame_id for frame_id in frame_ids[first_aligned:last_aligned + 1]
+                if frame_id not in gpu_common_ids
+            ]
+            if interior_drops:
+                errors.append(
+                    "frame-ID alignment has interior GPU gaps; only an asynchronous prefix/suffix is allowed: "
+                    f"dropped={interior_drops[:16]}"
+                )
+            boundary_drop_count = len(prefix_drops) + len(suffix_drops)
+            if boundary_drop_count > boundary_budget:
+                errors.append(
+                    "asynchronous GPU boundary drop exceeds runtime frames-in-flight budget: "
+                    f"dropped={boundary_drop_count}, budget={boundary_budget}, "
+                    f"prefix={prefix_drops[:16]}, suffix={suffix_drops[:16]}"
+                )
+            elif boundary_drop_count > 0 and boundary_budget == 0:
+                # Kept explicit even though the comparison above catches this;
+                # the diagnostic tells operators exactly which authority is missing.
+                errors.append(
+                    "truncated GPU sample window has no valid presentationPacingPolicy.framesInFlight evidence"
+                )
+
+    # Restrict every source to the same common GPU frame-ID window. Command
     # buffers may contain older frames and may contain multiple submissions
     # for one frame; both are valid only when their frame ID is in this set.
     aligned_set = set(aligned_frame_ids)
@@ -241,6 +289,9 @@ def validate_performance_sample_window(
         "raw_frame_ids": frame_ids,
         "dropped_frame_ids": dropped_frame_ids,
         "alignment_coverage": alignment_coverage,
+        "async_boundary_drop_budget": boundary_budget,
+        "async_prefix_dropped_frame_ids": prefix_drops,
+        "async_suffix_dropped_frame_ids": suffix_drops,
         "aligned_command_samples": aligned_command_samples,
         "frame_values": frame_values,
         "cpu_values": cpu_values,
@@ -432,6 +483,9 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             "frame_count": len(sample_window.get("frame_ids", [])),
             "alignment_coverage": sample_window.get("alignment_coverage", 0.0),
             "dropped_frame_ids": sample_window.get("dropped_frame_ids", []),
+            "async_boundary_drop_budget": sample_window.get("async_boundary_drop_budget", 0),
+            "async_prefix_dropped_frame_ids": sample_window.get("async_prefix_dropped_frame_ids", []),
+            "async_suffix_dropped_frame_ids": sample_window.get("async_suffix_dropped_frame_ids", []),
             "cpu_frame_count": len(cpu_values),
             "gpu_frame_count": len(gpu_values),
             "gpu_command_buffer_count": sample_window.get("gpu_command_buffer_count", 0),
@@ -521,13 +575,14 @@ def self_test() -> None:
         assert result["metrics"]["cpu_render_encode_time_ms_p95"]["median"] == 26.0
         assert result["metrics"]["native_encoder_count_per_frame_median"]["median"] == 8.0
 
-        # A report with a missing CPU frame must not be rescued by the legacy
-        # top-level p95 fields.  The frame-ID contract is the acceptance
-        # source, so the trial is incomplete until the sample window is fixed.
+        # A report with a missing CPU frame must never use the GPU completion
+        # allowance. CPU timing is synchronous and must exactly cover the
+        # frameIntervals identity set.
         invalid_trial = trial / "invalid-cpu-window"
         invalid_source = invalid_trial / "native-fullscreen-baseline.json"
         invalid_source.parent.mkdir(parents=True)
         invalid_report = json.loads(payload)
+        invalid_report["presentationPacingPolicy"] = {"framesInFlight": 3}
         invalid_report["performanceSampleWindow"]["cpuRenderEncode"] = (
             invalid_report["performanceSampleWindow"]["cpuRenderEncode"][:-1]
         )
@@ -535,7 +590,70 @@ def self_test() -> None:
         invalid_source.write_text(json.dumps(invalid_report), encoding="utf-8")
         invalid_result = normalize(invalid_trial)
         assert not invalid_result["complete"]
-        assert any("cpuRenderEncode" in error for error in invalid_result["identity_errors"])
+        assert any("cpuRenderEncode frame IDs" in error for error in invalid_result["identity_errors"])
+
+        # GPU completion may trail the measured render thread by no more than
+        # the runtime-observed frames-in-flight depth, and only at boundaries.
+        frame_ids = list(range(100, 108))
+        bounded_report = {
+            "presentationPacingPolicy": {"framesInFlight": 2},
+            "performanceSampleWindow": {
+                "schemaVersion": 1,
+                "frameIdStart": frame_ids[0],
+                "frameIdEnd": frame_ids[-1],
+                "frameCount": len(frame_ids),
+                "frameIntervals": [
+                    {"frameId": frame_id, "milliseconds": 16.0} for frame_id in frame_ids
+                ],
+                "cpuRenderEncode": [
+                    {"frameId": frame_id, "milliseconds": 5.0} for frame_id in frame_ids
+                ],
+                "gpuFrameTimes": [
+                    {"frameId": frame_id, "milliseconds": 8.0} for frame_id in frame_ids[:-2]
+                ],
+                "gpuCommandBuffers": [
+                    {"frameId": frame_id, "milliseconds": 8.0} for frame_id in frame_ids[:-2]
+                ],
+                "gpuCommandBufferCount": len(frame_ids) - 2,
+                "gpuFrameCount": len(frame_ids) - 2,
+            },
+        }
+        bounded_window, bounded_errors = validate_performance_sample_window(
+            bounded_report, len(frame_ids)
+        )
+        assert not bounded_errors
+        assert bounded_window["available"]
+        assert bounded_window["dropped_frame_ids"] == frame_ids[-2:]
+        assert bounded_window["async_boundary_drop_budget"] == 2
+
+        over_budget_report = json.loads(json.dumps(bounded_report))
+        over_budget_report["performanceSampleWindow"]["gpuFrameTimes"] = [
+            {"frameId": frame_id, "milliseconds": 8.0} for frame_id in frame_ids[:-3]
+        ]
+        over_budget_report["performanceSampleWindow"]["gpuCommandBuffers"] = [
+            {"frameId": frame_id, "milliseconds": 8.0} for frame_id in frame_ids[:-3]
+        ]
+        over_budget_report["performanceSampleWindow"]["gpuCommandBufferCount"] = len(frame_ids) - 3
+        over_budget_report["performanceSampleWindow"]["gpuFrameCount"] = len(frame_ids) - 3
+        _, over_budget_errors = validate_performance_sample_window(
+            over_budget_report, len(frame_ids)
+        )
+        assert any("frames-in-flight budget" in error for error in over_budget_errors)
+
+        interior_gap_report = json.loads(json.dumps(bounded_report))
+        interior_ids = [frame_id for frame_id in frame_ids if frame_id != 103]
+        interior_gap_report["performanceSampleWindow"]["gpuFrameTimes"] = [
+            {"frameId": frame_id, "milliseconds": 8.0} for frame_id in interior_ids
+        ]
+        interior_gap_report["performanceSampleWindow"]["gpuCommandBuffers"] = [
+            {"frameId": frame_id, "milliseconds": 8.0} for frame_id in interior_ids
+        ]
+        interior_gap_report["performanceSampleWindow"]["gpuCommandBufferCount"] = len(interior_ids)
+        interior_gap_report["performanceSampleWindow"]["gpuFrameCount"] = len(interior_ids)
+        _, interior_gap_errors = validate_performance_sample_window(
+            interior_gap_report, len(frame_ids)
+        )
+        assert any("interior GPU gaps" in error for error in interior_gap_errors)
     print("normalize_unified_trial self-test: PASS")
 
 

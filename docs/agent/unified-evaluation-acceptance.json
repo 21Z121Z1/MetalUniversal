@@ -62,7 +62,7 @@
     "authoritative_source_report": "native-fullscreen-baseline.json",
     "source_report_uniqueness": "Exactly one unique report payload is allowed per trial; byte-identical copies are permitted, non-identical copies reject the trial.",
     "sample_window_rule": "A metric is available only when its sample window matches measuredFrameIntervals; warmup and measured samples may not be mixed.",
-    "frame_alignment_rule": "Frame, CPU, and GPU performance samples must be emitted under performanceSampleWindow with exactly one frameId per measured frame; GPU command buffers may be many-to-one but must cover every frameId.",
+    "frame_alignment_rule": "Frame and CPU samples must cover exactly every measured frameId. GPU frame times and command-buffer completions may omit only a contiguous asynchronous prefix and/or suffix whose total size is no greater than presentationPacingPolicy.framesInFlight (validated in the renderer-supported range 1..3); interior gaps, missing pacing-depth evidence for a truncated window, or a larger boundary drop reject the trial. All metrics are recomputed only from the resulting common frame-ID window.",
     "environment_identity_rule": "A performance verdict is blocked unless run-manifest.json records display, power_state, git head, production JAR SHA-256, and native dylib SHA-256.",
     "structured_metrics_only": true,
     "log_regex_is_authoritative": false,
