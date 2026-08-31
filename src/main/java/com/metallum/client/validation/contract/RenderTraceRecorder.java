@@ -263,6 +263,20 @@ public final class RenderTraceRecorder implements AutoCloseable {
         }
     }
 
+    public synchronized void updateAttachmentStoreActions(
+            final long passToken,
+            final Map<Integer, String> colorStoreActions,
+            final String depthStoreAction
+    ) {
+        PassState pass = openPasses.get(passToken);
+        if (pass != null) {
+            pass.updateAttachmentStoreActions(colorStoreActions, depthStoreAction);
+            manifestFinalized = false;
+        } else {
+            markInvalidPassReference(passToken);
+        }
+    }
+
     public synchronized TraceIdentity traceIdentity(final long passToken) {
         PassState pass = openPasses.get(passToken);
         return pass == null ? null : pass.traceIdentity;
@@ -862,7 +876,7 @@ public final class RenderTraceRecorder implements AutoCloseable {
         private final String semanticPassId;
         private final PassType type;
         private final List<AttachmentBindingRecord> colorAttachments;
-        private final AttachmentBindingRecord depthAttachment;
+        private AttachmentBindingRecord depthAttachment;
         private final AttachmentBindingRecord stencilAttachment;
         private final ViewportRecord viewport;
         private ScissorRecord scissor;
@@ -895,7 +909,9 @@ public final class RenderTraceRecorder implements AutoCloseable {
             this.sequence = sequence;
             this.semanticPassId = semanticPassId;
             this.type = type;
-            this.colorAttachments = colorAttachments == null ? List.of() : List.copyOf(colorAttachments);
+            this.colorAttachments = colorAttachments == null
+                    ? new ArrayList<>()
+                    : new ArrayList<>(colorAttachments);
             this.depthAttachment = depthAttachment;
             this.stencilAttachment = stencilAttachment;
             this.viewport = viewport == null ? new ViewportRecord(0, 0, 0, 0) : viewport;
@@ -907,6 +923,38 @@ public final class RenderTraceRecorder implements AutoCloseable {
         }
 
         private boolean producerDetailsTruncated;
+
+        private void updateAttachmentStoreActions(
+                final Map<Integer, String> colorStoreActions,
+                final String depthStoreAction
+        ) {
+            if (colorStoreActions != null && !colorStoreActions.isEmpty()) {
+                for (int index = 0; index < colorAttachments.size(); index++) {
+                    AttachmentBindingRecord attachment = colorAttachments.get(index);
+                    String storeAction = colorStoreActions.get(attachment.slot());
+                    if (storeAction != null) {
+                        colorAttachments.set(index, new AttachmentBindingRecord(
+                                attachment.slot(),
+                                attachment.resource(),
+                                attachment.semantic(),
+                                attachment.loadAction(),
+                                storeAction,
+                                attachment.writable()
+                        ));
+                    }
+                }
+            }
+            if (depthAttachment != null && depthStoreAction != null) {
+                depthAttachment = new AttachmentBindingRecord(
+                        depthAttachment.slot(),
+                        depthAttachment.resource(),
+                        depthAttachment.semantic(),
+                        depthAttachment.loadAction(),
+                        depthStoreAction,
+                        depthAttachment.writable()
+                );
+            }
+        }
 
         private RenderPassRecord toRecord(
                 final boolean producerDetailsCaptured,
@@ -948,7 +996,7 @@ public final class RenderTraceRecorder implements AutoCloseable {
                     sequence,
                     semanticPassId,
                     type,
-                    colorAttachments,
+                    List.copyOf(colorAttachments),
                     depthAttachment,
                     stencilAttachment,
                     viewport,

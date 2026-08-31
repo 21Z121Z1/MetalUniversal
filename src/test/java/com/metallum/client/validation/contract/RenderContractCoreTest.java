@@ -119,6 +119,51 @@ final class RenderContractCoreTest {
     }
 
     @Test
+    void attachmentStoreResolutionUpdatesOnlyTheResolvedSlots() throws Exception {
+        Path output = Files.createTempDirectory("render-contract-attachment-actions-");
+        RenderTraceRecorder recorder = new RenderTraceRecorder(output, "attachment-actions", "test", 4, 8, 16);
+        recorder.beginFrame(1L);
+        ResourceIdentity color0 = recorder.identifyResource(
+                "color0", 1L, "metal-texture-1", "RGBA8_UNORM", 2, 2, 1, 0, 1, 3
+        );
+        ResourceIdentity color1 = recorder.identifyResource(
+                "color1", 2L, "metal-texture-2", "RGBA8_UNORM", 2, 2, 1, 0, 1, 3
+        );
+        ResourceIdentity depth = recorder.identifyResource(
+                "depth", 3L, "metal-texture-3", "DEPTH32_FLOAT", 2, 2, 1, 0, 1, 3
+        );
+        long token = recorder.beginPass(
+                "synthetic/attachment-actions", PassType.RENDER,
+                List.of(
+                        new AttachmentBindingRecord(0, color0, AttachmentSemantic.COLOR, "clear", "store", true),
+                        new AttachmentBindingRecord(1, color1, AttachmentSemantic.COLOR, "load", "unknown", true)
+                ),
+                new AttachmentBindingRecord(0, depth, AttachmentSemantic.DEPTH, "load", "unknown", true),
+                null,
+                new ViewportRecord(0, 0, 2, 2),
+                ScissorRecord.disabled(),
+                "pipeline", List.of(), Map.of()
+        );
+        recorder.updateAttachmentStoreActions(token, Map.of(1, "dontCare"), "store");
+        recorder.endPass(token);
+        recorder.close();
+
+        JsonObject pass = com.google.gson.JsonParser.parseString(
+                Files.readString(output.resolve("pass-manifest.json"))
+        ).getAsJsonObject().getAsJsonArray("passes").get(0).getAsJsonObject();
+        assertEquals("clear", pass.getAsJsonArray("colorAttachments").get(0)
+                .getAsJsonObject().get("loadAction").getAsString());
+        assertEquals("store", pass.getAsJsonArray("colorAttachments").get(0)
+                .getAsJsonObject().get("storeAction").getAsString());
+        assertEquals("load", pass.getAsJsonArray("colorAttachments").get(1)
+                .getAsJsonObject().get("loadAction").getAsString());
+        assertEquals("dontCare", pass.getAsJsonArray("colorAttachments").get(1)
+                .getAsJsonObject().get("storeAction").getAsString());
+        assertEquals("store", pass.getAsJsonObject("depthAttachment")
+                .get("storeAction").getAsString());
+    }
+
+    @Test
     void traceIdentityIsSharedByPassAndItsProducers() throws Exception {
         Path output = Files.createTempDirectory("render-contract-trace-identity-");
         RenderTraceRecorder recorder = new RenderTraceRecorder(output, "trace-test", "test", 2, 4, 8);
@@ -388,6 +433,30 @@ final class RenderContractCoreTest {
         assertEquals("iris/final", SemanticPassIdResolver.resolve("Iris final: final0"));
         assertEquals("iris/composite/3", SemanticPassIdResolver.resolve("Iris composite 3"));
         assertEquals("iris/shadow/2", SemanticPassIdResolver.resolve("iris shadowcomp 2"));
+        assertEquals("iris/shadow/0", SemanticPassIdResolver.resolve("Iris shadow_composite: shadowcomp"));
+        assertEquals("iris/deferred/0", SemanticPassIdResolver.resolve("Iris deferred: deferred"));
+        assertEquals("iris/deferred/1", SemanticPassIdResolver.resolve("Iris deferred: deferred1"));
+        assertEquals("iris/prepare/0", SemanticPassIdResolver.resolve("Iris prepare: prepare"));
+        assertEquals("iris/begin/0", SemanticPassIdResolver.resolve("Iris begin: begin"));
+        assertEquals("iris/color-space", SemanticPassIdResolver.resolve("Iris color space: DCI_P3"));
+        assertEquals("iris/gbuffers/terrain", SemanticPassIdResolver.resolve(
+                "iris/gbuffers/terrain | source=Terrain"
+        ));
+        assertEquals("minecraft/transparency/0", SemanticPassIdResolver.resolve(
+                "Post pass minecraft:transparency/0"
+        ));
+        assertEquals("minecraft/blur/5", SemanticPassIdResolver.resolve(
+                "Post pass minecraft:blur/5"
+        ));
+        assertEquals("minecraft/pipeline/item_cutout", SemanticPassIdResolver.resolve(
+                "Immediate draw with minecraft:pipeline/item_cutout"
+        ));
+        assertEquals("minecraft/texture-animation/textures/atlas/blocks.png", SemanticPassIdResolver.resolve(
+                "Animate minecraft:textures/atlas/blocks.png"
+        ));
+        assertEquals("minecraft/particles/solid", SemanticPassIdResolver.resolve("Particles - Solid"));
+        assertEquals("minecraft/gui/before-blur", SemanticPassIdResolver.resolve("GUI before blur"));
+        assertEquals("minecraft/blit-render-target", SemanticPassIdResolver.resolve("Blit render target"));
         assertEquals("metallum/object-motion", SemanticPassIdResolver.resolve(
                 "Metallum batched ordinary entity object motion"
         ));

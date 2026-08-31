@@ -213,6 +213,30 @@ final class IrisMetalCoreGbufferPipelinesTest {
     }
 
     @Test
+    void semanticPassIdsFollowIrisProgramFamilies() {
+        assertEquals(
+                "iris/gbuffers/terrain",
+                IrisMetalPipelineOverrides.semanticCorePassId(ShaderKey.SODIUM_TERRAIN_SOLID)
+        );
+        assertEquals(
+                "iris/gbuffers/terrain",
+                IrisMetalPipelineOverrides.semanticCorePassId(ShaderKey.TERRAIN_CUTOUT)
+        );
+        assertEquals(
+                "iris/gbuffers/skybasic",
+                IrisMetalPipelineOverrides.semanticCorePassId(ShaderKey.SKY_BASIC)
+        );
+        assertEquals(
+                "iris/shadow/terrain",
+                IrisMetalPipelineOverrides.semanticCorePassId(ShaderKey.SHADOW_SODIUM_TERRAIN_CUTOUT)
+        );
+        assertEquals(
+                "iris/shadow/entities",
+                IrisMetalPipelineOverrides.semanticCorePassId(ShaderKey.SHADOW_ENTITIES_CUTOUT)
+        );
+    }
+
+    @Test
     void vanillaPatchSemanticsComeFromShaderKey() {
         MetalIrisShaderCompiler.VanillaPatchSemantics basic =
                 MetalIrisShaderCompiler.vanillaPatchSemantics(ShaderKey.BASIC, false);

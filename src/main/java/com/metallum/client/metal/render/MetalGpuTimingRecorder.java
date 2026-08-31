@@ -22,6 +22,14 @@ public final class MetalGpuTimingRecorder {
     private static long renderEncoderFactoryCalls;
     private static long renderEncoderCacheHits;
     private static long latestGpuNanos;
+    /**
+     * The validation driver advances this identity before encoding each
+     * measured frame.  Command buffers complete asynchronously, so the value
+     * is copied into the in-flight submission rather than read at completion
+     * time.  A negative value means that the submission predates a measured
+     * performance window and must not be used for frame-aligned evidence.
+     */
+    private static volatile long currentFrameId = -1L;
 
     private MetalGpuTimingRecorder() {
     }
@@ -30,7 +38,15 @@ public final class MetalGpuTimingRecorder {
         return PASS_TIMING_ENABLED;
     }
 
-    static void record(final long submitIndex, final double start, final double end) {
+    public static void beginFrame(final long frameId) {
+        currentFrameId = frameId >= 0L ? frameId : -1L;
+    }
+
+    static long currentFrameId() {
+        return currentFrameId;
+    }
+
+    static void record(final long submitIndex, final long frameId, final double start, final double end) {
         // Keep the disabled production path outside the monitor. This method is
         // reached once per completed frame, and the previous synchronized
         // declaration acquired the class monitor even when timing was disabled.
@@ -39,7 +55,7 @@ public final class MetalGpuTimingRecorder {
             return;
         }
         synchronized (MetalGpuTimingRecorder.class) {
-            SAMPLES.add(new Sample(submitIndex, start, end));
+            SAMPLES.add(new Sample(submitIndex, frameId, start, end));
             latestGpuNanos = Math.max(1L, Math.round((end - start) * 1_000_000_000.0));
             if (SAMPLES.size() > CAPACITY) {
                 SAMPLES.subList(0, SAMPLES.size() - CAPACITY).clear();
@@ -53,6 +69,7 @@ public final class MetalGpuTimingRecorder {
         renderEncoderFactoryCalls = 0L;
         renderEncoderCacheHits = 0L;
         latestGpuNanos = 0L;
+        currentFrameId = -1L;
         if (PASS_TIMING_ENABLED) {
             MetalNativeBridge.metallum_gpu_encoder_timing_reset();
         }
@@ -126,7 +143,7 @@ public final class MetalGpuTimingRecorder {
         return List.copyOf(samples);
     }
 
-    public record Sample(long submitIndex, double gpuStartTime, double gpuEndTime) {
+    public record Sample(long submitIndex, long frameId, double gpuStartTime, double gpuEndTime) {
         public double milliseconds() {
             return (gpuEndTime - gpuStartTime) * 1_000.0;
         }

@@ -62,21 +62,28 @@
     "authoritative_source_report": "native-fullscreen-baseline.json",
     "source_report_uniqueness": "Exactly one unique report payload is allowed per trial; byte-identical copies are permitted, non-identical copies reject the trial.",
     "sample_window_rule": "A metric is available only when its sample window matches measuredFrameIntervals; warmup and measured samples may not be mixed.",
+    "frame_alignment_rule": "Frame, CPU, and GPU performance samples must be emitted under performanceSampleWindow with exactly one frameId per measured frame; GPU command buffers may be many-to-one but must cover every frameId.",
+    "environment_identity_rule": "A performance verdict is blocked unless run-manifest.json records display, power_state, git head, production JAR SHA-256, and native dylib SHA-256.",
     "structured_metrics_only": true,
     "log_regex_is_authoritative": false,
     "minimum_positive_block_fraction": 0.75
   },
   "target_metrics": [
     {"name": "fps_median", "direction": "higher", "mandatory": true},
+    {"name": "frame_time_ms_p95", "direction": "lower", "mandatory": true},
     {"name": "gpu_frame_time_ms_median", "direction": "lower"},
+    {"name": "gpu_frame_time_ms_p95", "direction": "lower", "mandatory": true},
     {"name": "cpu_render_encode_time_ms_median", "direction": "lower"},
+    {"name": "cpu_render_encode_time_ms_p95", "direction": "lower", "mandatory": true},
     {"name": "native_encoder_count_per_frame_median", "direction": "lower"},
     {"name": "render_pass_store_load_bytes_estimate_median", "direction": "lower"},
     {"name": "resident_render_resource_bytes", "direction": "lower"}
   ],
   "guardrails": [
     {"name": "gpu_frame_time_ms_median", "relative_regression_max": 0.02},
+    {"name": "gpu_frame_time_ms_p99", "relative_regression_max": 0.02},
     {"name": "cpu_render_encode_time_ms_median", "relative_regression_max": 0.02},
+    {"name": "cpu_render_encode_time_ms_p99", "relative_regression_max": 0.02},
     {"name": "peak_resident_memory_bytes", "relative_regression_max": 0.03},
     {"name": "frame_time_stutter_count", "relative_regression_max": 0.0},
     {"name": "validation_errors", "absolute_max": 0}

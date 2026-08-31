@@ -2,6 +2,7 @@ package com.metallum.client.validation;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
+import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -55,6 +56,15 @@ import java.util.UUID;
  */
 public final class BackendFrameComparisonClient {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.backend.compare.enabled");
+    /**
+     * Optional pass-level tracing for the same fixed-scene run.  The normal
+     * backend comparator remains final-target-only unless the caller also
+     * enables the render-contract switch; this keeps the diagnostic recorder
+     * out of ordinary A/B captures.
+     */
+    private static final boolean RENDER_CONTRACT_REQUESTED = Boolean.getBoolean(
+            "metallum.renderContract.enabled"
+    );
     private static final boolean AUTO_STOP = Boolean.parseBoolean(
             System.getProperty("metallum.backend.compare.auto-stop", "true")
     );
@@ -204,6 +214,7 @@ public final class BackendFrameComparisonClient {
     private static boolean sceneReady;
     private static boolean runtimeIdentityValidated;
     private static boolean runtimeIdentityValid = true;
+    private static boolean renderContractStarted;
     private static boolean sceneStartIrisResetAttempted;
     private static boolean sceneStartIrisResetCompleted;
     private static int sceneReadinessPolls;
@@ -227,6 +238,7 @@ public final class BackendFrameComparisonClient {
             }
             return;
         }
+        startRenderContractIfRequested();
         applyFixedClock(minecraft);
         applyFixedCamera(minecraft);
         applyFixedClientScene(minecraft);
@@ -287,6 +299,9 @@ public final class BackendFrameComparisonClient {
             );
         }
         levelFrame++;
+        if (renderContractStarted) {
+            RenderContractRuntime.beginFrame(levelFrame);
+        }
         if (!sessionWritten) {
             sessionWritten = true;
             writeSession("running", null);
@@ -314,10 +329,19 @@ public final class BackendFrameComparisonClient {
     }
 
     public static void afterFrame(final boolean renderLevel, final GameRenderer renderer) {
-        if (!ENABLED || !renderLevel || levelFrame < 0 || CAPTURE_FRAMES.isEmpty()) {
+        if (!ENABLED || !renderLevel || levelFrame < 0) {
+            return;
+        }
+        if (CAPTURE_FRAMES.isEmpty()) {
+            if (renderContractStarted) {
+                RenderContractRuntime.endFrame(levelFrame);
+            }
             return;
         }
         if (!CAPTURE_FRAMES.contains(levelFrame) || COMPLETED_FRAMES.contains(levelFrame)) {
+            if (renderContractStarted) {
+                RenderContractRuntime.endFrame(levelFrame);
+            }
             return;
         }
         if (RESIZE_REQUEST != null && levelFrame >= RESIZE_REQUEST.frame() && !resizeCompleted) {
@@ -358,6 +382,9 @@ public final class BackendFrameComparisonClient {
             }
         }
         capture(renderer, levelFrame);
+        if (renderContractStarted) {
+            RenderContractRuntime.endFrame(levelFrame);
+        }
     }
 
     /**
@@ -926,6 +953,25 @@ public final class BackendFrameComparisonClient {
 
     private static boolean sceneReadinessRequested() {
         return STABLE_SCENE_FRAMES > 0 || STABLE_SCENE_MILLIS > 0L;
+    }
+
+    /** Starts pass tracing only when the caller explicitly requested it. */
+    private static void startRenderContractIfRequested() {
+        if (!RENDER_CONTRACT_REQUESTED || renderContractStarted) {
+            return;
+        }
+        String runId = System.getProperty(
+                "metallum.renderContract.runId",
+                SCENARIO_ID.isBlank() ? "backend-compare" : SCENARIO_ID
+        );
+        RenderContractRuntime.start(ROOT, runId);
+        renderContractStarted = RenderContractRuntime.enabled();
+        if (renderContractStarted) {
+            Metallum.LOGGER.info(
+                    "[metallum-backend-compare] render-contract tracing enabled for {}",
+                    runId
+            );
+        }
     }
 
     private static void enableFlawlessFrames() {

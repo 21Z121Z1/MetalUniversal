@@ -27,6 +27,9 @@ public final class IrisMetalArgumentBindingRuntime {
     private static final LongAdder LAYOUTS = new LongAdder();
     private static final LongAdder UPDATES = new LongAdder();
     private static final LongAdder ENCODED = new LongAdder();
+    private static final LongAdder PATCH_SNAPSHOTS = new LongAdder();
+    private static final LongAdder PATCH_ENTRIES = new LongAdder();
+    private static final LongAdder PATCH_REJECTIONS = new LongAdder();
 
     private IrisMetalArgumentBindingRuntime() {
     }
@@ -105,9 +108,50 @@ public final class IrisMetalArgumentBindingRuntime {
     public static void markEncoded(final Object pass) {
         State state = state(pass);
         if (state != null && state.current().dirty()) {
+            recordPatch(state.current());
             state.current().markEncoded();
             ENCODED.increment();
         }
+    }
+
+    /**
+     * Returns the one dirty-entry batch that a negotiated argument-table
+     * bridge would execute for this pass.  The current renderer deliberately
+     * keeps native setters as the fail-closed fallback; no native state is
+     * mutated by this method.
+     */
+    public static IrisMetalArgumentTablePatch snapshotPatch(final Object pass) {
+        if (!enabled()) {
+            PATCH_REJECTIONS.increment();
+            return IrisMetalArgumentTablePatch.rejected("feature-disabled");
+        }
+        State state = state(pass);
+        if (state == null) {
+            PATCH_REJECTIONS.increment();
+            return IrisMetalArgumentTablePatch.rejected("pipeline-layout-unavailable");
+        }
+        IrisMetalArgumentTablePatch patch;
+        try {
+            patch = IrisMetalArgumentTablePatch.from(state.current());
+        } catch (RuntimeException failure) {
+            PATCH_REJECTIONS.increment();
+            return IrisMetalArgumentTablePatch.rejected("snapshot-invalid");
+        }
+        recordPatch(patch);
+        return patch;
+    }
+
+    private static void recordPatch(final IrisMetalArgumentSnapshot snapshot) {
+        try {
+            recordPatch(IrisMetalArgumentTablePatch.from(snapshot));
+        } catch (RuntimeException failure) {
+            PATCH_REJECTIONS.increment();
+        }
+    }
+
+    private static void recordPatch(final IrisMetalArgumentTablePatch patch) {
+        PATCH_SNAPSHOTS.increment();
+        PATCH_ENTRIES.add(patch.entries().size());
     }
 
     public static void advanceAfterSubmit() {
@@ -118,18 +162,27 @@ public final class IrisMetalArgumentBindingRuntime {
     }
 
     public static Stats stats() {
-        return new Stats(LAYOUTS.sum(), UPDATES.sum(), ENCODED.sum());
+        return new Stats(
+                LAYOUTS.sum(),
+                UPDATES.sum(),
+                ENCODED.sum(),
+                PATCH_SNAPSHOTS.sum(),
+                PATCH_ENTRIES.sum(),
+                PATCH_REJECTIONS.sum()
+        );
     }
 
     public static synchronized void resetStats() {
         LAYOUTS.reset();
         UPDATES.reset();
         ENCODED.reset();
+        PATCH_SNAPSHOTS.reset();
+        PATCH_ENTRIES.reset();
+        PATCH_REJECTIONS.reset();
     }
 
     private static boolean enabled() {
-        return IrisMetalOptimizationPlan.ENABLE_ARGUMENT_TABLES
-                || IrisMetalAdvancedOptimizationConfig.ARGUMENT_TABLES;
+        return IrisMetalOptimizationPlan.ENABLE_ARGUMENT_TABLES;
     }
 
     private static State state(final Object pass) {
@@ -214,7 +267,14 @@ public final class IrisMetalArgumentBindingRuntime {
         throw new NoSuchMethodException(name);
     }
 
-    public record Stats(long layouts, long updates, long encodedSnapshots) {
+    public record Stats(
+            long layouts,
+            long updates,
+            long encodedSnapshots,
+            long patchSnapshots,
+            long patchEntries,
+            long patchRejections
+    ) {
     }
 
     private record Slot(int index) {
