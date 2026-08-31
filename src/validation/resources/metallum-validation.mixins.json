@@ -11,7 +11,17 @@
     "iris.IrisOpenGlProgramUniformsTraceMixin",
     "iris.IrisFixedUniformSupplierTraceMixin",
     "iris.IrisCachedUniformUpdateTraceMixin",
-    "iris.IrisOpenGlFogRendererTraceMixin"
+    "iris.IrisOpenGlFogRendererTraceMixin",
+    "iris.IrisOpenGlCompositeRendererPassTraceMixin",
+    "iris.IrisOpenGlShadowCompositeRendererPassTraceMixin",
+    "iris.IrisOpenGlCompositePassTraceMixin",
+    "iris.IrisOpenGlShadowCompositePassTraceMixin",
+    "iris.IrisOpenGlCompositeDrawTraceMixin",
+    "iris.IrisOpenGlShadowCompositeDrawTraceMixin",
+    "iris.IrisOpenGlFinalPassTraceMixin",
+    "iris.IrisOpenGlTerrainPassTraceMixin",
+    "iris.IrisOpenGlCommandEncoderPassTraceMixin",
+    "iris.IrisOpenGlRenderPassTraceMixin"
   ],
   "injectors": {
     "defaultRequire": 1
