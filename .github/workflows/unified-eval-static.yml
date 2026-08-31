@@ -9,6 +9,7 @@ on:
     paths:
       - 'README.md'
       - 'AGENTS.md'
+      - 'docs/AGENTS.md'
       - 'docs/README.md'
       - 'docs/agent/**'
       - 'docs/render-contract-validation.md'
