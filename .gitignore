@@ -45,5 +45,11 @@ libs/
 # stray client rotated logs at repo root (runClient cwd artifacts)
 logs/
 
+# local agent/runtime artifacts
+.amethyst-agent/
+__pycache__/
+*.py[cod]
+/-
+
 # local Minecraft client/reference sources generated for agents
 .minecraft-reference/

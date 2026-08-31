@@ -28,10 +28,16 @@ python3 -m py_compile \
   scripts/agent/normalize_unified_trial.py \
   scripts/agent/check_unified_eval_admission.py
 bash -n scripts/agent/run_unified_eval_cycle.sh
+bash -n scripts/agent/run_unified_eval_cycle_impl.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_correctness.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_performance.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_matrix.sh
 bash -n scripts/agent/verify.sh
+
+# Parse/configure the task-scoped Gradle init script in the same Gradle version
+# used by the repository. It is a no-op for `help`; its fixed-drawable override
+# activates only when minecraftNativeRenderEfficiencyValidation is in the task graph.
+./gradlew --no-daemon -I scripts/agent/fixed_drawable.init.gradle help >/dev/null
 
 ./gradlew --no-daemon compileJava test \
   -x buildMacNative \
@@ -42,6 +48,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.terrain.PresentationPacingSnapshotTest \
   --tests com.metallum.client.terrain.PresentationPacingEvidenceAdapterTest \
   --tests com.metallum.mixin.MetallumMixinRegistrationTest \
+  --tests com.metallum.client.metal.render.IrisMetalArgumentTableAuthorityContractTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
 

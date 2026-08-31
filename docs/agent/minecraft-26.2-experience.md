@@ -38,7 +38,7 @@ run; “contract” refers to repository tests and native fixture coverage.
 | Metal backend | `metallum.validation.forceMetal` | off unless requested by validation/profile | macOS Metal device and arm64 LWJGL | none | ordinary backend selection / fail closed | real client: Metal backend initialized |
 | PSO archive | `metallum.opt.psoArchive` | true | Metal device | none | compile/cache miss path | contract + real client startup |
 | Binding tokens / compiled binding plan | `metallum.opt.bindingTokens`, `metallum.opt.compiledBindingPlan` | true | render-pass cache hooks | none | ordinary binding path | contract + Max-Stable runtime |
-| Deferred store/color store and blit batch | `metallum.opt.deferredStore`, `metallum.opt.deferredColorStore`, `metallum.opt.blitBatch` | true | Metal command encoder | none | ordinary encoder operations | contract + real client |
+| Deferred store/color store and blit batch | `metallum.opt.deferredStore`, `metallum.opt.deferredColorStore`, `metallum.opt.blitBatch` | `deferredStore`/`blitBatch`: true; `deferredColorStore`: false | Metal command encoder | none | ordinary encoder operations | contract + real client |
 | Encoder state shadow / render-state packet | `metallum.opt.encoderStateShadow`, `metallum.opt.renderStatePacket` | true | Metal render/compute encoder | none | direct state calls | contract + real client |
 | MSL disk cache | `metallum.opt.mslCache` | true | writable cache directory | none | compile from source | contract + real client |
 | Metal 4 compiler | `metallum.opt.metal4`, `metallum.opt.metal4Compiler` | false | Metal 4 API/SDK and device capability | Metal 3 fallback is the alternative | Metal 3 pipeline compiler | real client: `available=true compiler=true` |

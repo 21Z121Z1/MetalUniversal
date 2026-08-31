@@ -51,7 +51,9 @@ COMMON_FLAGS=(
     -Dmetallum.opt.bindingTokens=true
     -Dmetallum.opt.compiledBindingPlan=true
     -Dmetallum.opt.deferredStore=true
-    -Dmetallum.opt.deferredColorStore=true
+    # Deferred color stores remain an explicit experiment until the present
+    # boundary has a correctness proof for Iris shader-pack targets.
+    -Dmetallum.opt.deferredColorStore=false
     -Dmetallum.opt.blitBatch=true
     -Dmetallum.opt.encoderStateShadow=true
     -Dmetallum.opt.renderStatePacket=true

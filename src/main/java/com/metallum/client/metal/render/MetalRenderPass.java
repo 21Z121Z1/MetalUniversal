@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.validation.contract.CapturePoint;
 import com.metallum.client.validation.contract.ProducerType;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.metal.render.mtl.*;
@@ -55,6 +56,7 @@ final class MetalRenderPass implements RenderPassBackend {
     private boolean clearDepthEnabled;
     private final double clearDepthValue;
     private final long contractPassToken;
+    private boolean contractStoreActionsResolved;
     private final ScissorState scissorState = new ScissorState();
     private final GpuBufferSlice[] vertexBuffers = new GpuBufferSlice[MAX_VERTEX_BUFFERS];
     private final HashMap<String, GpuBufferSlice> uniforms = new HashMap<>();
@@ -977,9 +979,76 @@ final class MetalRenderPass implements RenderPassBackend {
 
     void finishContractPass() {
         if (contractPassToken >= 0L) {
+            if (!contractStoreActionsResolved) {
+                resolveContractStoreActions(null, null, false, false);
+            }
+            CapturePoint capturePoint = RenderContractRuntime.configuredAfterPassCapturePoint(contractPassToken);
+            if (capturePoint != null) {
+                MetalGpuTexture captureTexture = firstColorTextureForCapture();
+                if (captureTexture == null) {
+                    throw new IllegalStateException(
+                            "Configured render-pass capture has no Metal color attachment for "
+                                    + capturePoint.semanticPassId()
+                    );
+                }
+                commandEncoder.scheduleValidationTextureCapture(
+                        captureTexture,
+                        capturePoint,
+                        "render-pass/" + capturePoint.semanticPassId() + "/color0"
+                );
+            }
             commandEncoder.endContractTraceGroup();
             RenderContractRuntime.endPass(contractPassToken);
         }
+    }
+
+    void resolveContractStoreActions(
+            @Nullable final boolean[] deferredColorStores,
+            @Nullable final boolean[] killedColorStores,
+            final boolean deferredDepthStore,
+            final boolean killedDepthStore
+    ) {
+        if (contractPassToken < 0L || contractStoreActionsResolved) {
+            return;
+        }
+        Map<Integer, String> colorStoreActions = new HashMap<>();
+        for (int slot = 0; slot < colorTextures.length; slot++) {
+            if (colorTextures[slot] == null) {
+                continue;
+            }
+            boolean deferred = deferredColorStores != null
+                    && slot < deferredColorStores.length
+                    && deferredColorStores[slot];
+            boolean killed = deferred
+                    && killedColorStores != null
+                    && slot < killedColorStores.length
+                    && killedColorStores[slot];
+            colorStoreActions.put(slot, killed ? "dontCare" : "store");
+        }
+        String depthStoreAction = depthTexture == null
+                ? null
+                : deferredDepthStore && killedDepthStore ? "dontCare" : "store";
+        RenderContractRuntime.updateAttachmentStoreActions(
+                contractPassToken,
+                colorStoreActions,
+                depthStoreAction
+        );
+        contractStoreActionsResolved = true;
+    }
+
+    @Nullable
+    private MetalGpuTexture firstColorTextureForCapture() {
+        for (GpuTextureView colorTexture : colorTextures) {
+            if (colorTexture != null && colorTexture.texture() instanceof MetalGpuTexture texture) {
+                return texture;
+            }
+        }
+        return null;
+    }
+
+    /** The open render-contract identity used by opt-in diagnostic captures. */
+    long contractPassToken() {
+        return contractPassToken;
     }
 
     private void recordProducer(

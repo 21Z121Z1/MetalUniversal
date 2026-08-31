@@ -31,7 +31,7 @@ Use one lane at a time.
 -Dmetallum.iris.experimental.planDump=/absolute/path/iris-metal-plan.json
 ```
 
-The stable `metallum.iris.passFusion` alias is represented in `IrisMetalAdvancedOptimizationConfig`, but the runtime fusion gate currently still reads `metallum.iris.experimental.passFusion`. Use the effective switch shown above until the local agent folds all feature gates into one source of truth.
+All listed stable `metallum.iris.*` switches are resolved through `IrisMetalAdvancedOptimizationConfig`. An explicitly supplied stable value wins over the legacy `metallum.iris.experimental.*` alias, including an explicit `false`; when neither value is supplied, the lane keeps its documented default.
 
 ## 1. Render-pass fusion: real execution path
 
@@ -113,9 +113,9 @@ Execution behavior:
 
 Each logical compute pass still owns an independent contract trace and Java pass object.
 
-### Known exception-path condition
+### Exception-path condition
 
-A dispatch exception can bypass the post-chain `RETURN` cleanup. The next submit/render/compute boundary aborts the stale grouping state, and the normal backend boundary ends the encoder. Verify this under an intentionally failing compute binding before enabling the lane by default.
+`IrisMetalPostChain.executeComputeGroup` clears the grouping scope in a `finally` block, so a dispatch or resource-binding exception cannot leak a partial group into the next operation. The command-encoder submit/render/compute boundaries retain their fail-closed abort hooks as a second line of defense. Verify this under an intentionally failing compute binding before enabling the lane by default.
 
 ## 3. depthtex1/depthtex2 allocation pruning: real execution path
 
