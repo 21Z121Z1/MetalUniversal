@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
+NATIVE_ARGUMENT_TABLE_AUTHORITY = "native-metal4-argument-tables"
 
 
 def obj(value: Any) -> dict[str, Any]:
@@ -17,6 +18,14 @@ def obj(value: Any) -> dict[str, Any]:
 
 def positive(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def native_argument_tables(argument: dict[str, Any]) -> bool:
+    """Accept only execution evidence, never Java snapshot bookkeeping."""
+    return (
+        argument.get("executionAuthority") == NATIVE_ARGUMENT_TABLE_AUTHORITY
+        and argument.get("nativeMainRendererEngaged") is True
+    )
 
 
 def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
@@ -67,9 +76,12 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
             "requirement": "depthLivenessRuntime.prunedPairs > 0 or captureSkips > 0",
         },
         "argument-tables": {
-            "admitted": argument.get("enabled") is True and positive(argument.get("encodedSnapshots")),
+            "admitted": native_argument_tables(argument),
             "evidence": argument,
-            "requirement": "argumentBindingRuntime.enabled == true and encodedSnapshots > 0",
+            "requirement": (
+                "argumentBindingRuntime.executionAuthority == native-metal4-argument-tables "
+                "and nativeMainRendererEngaged == true; Java snapshot/patch counters are diagnostics only"
+            ),
         },
         "binding-tokens": {
             "admitted": (
@@ -136,7 +148,7 @@ def evaluate(metrics_path: Path, profile: str) -> tuple[dict[str, Any], int]:
 def self_test() -> None:
     with tempfile.TemporaryDirectory() as temp:
         path = Path(temp) / "metrics.json"
-        path.write_text(json.dumps({
+        payload = {
             "complete": True,
             "source_report_sha256": "abc",
             "measured_frames": 200,
@@ -144,11 +156,29 @@ def self_test() -> None:
                 "renderFusionRuntime": {"admissions": 0, "admissionCandidates": 1602},
                 "computeGroupingRuntime": {"admissions": 0, "deferredPassCloses": 0},
                 "depthLivenessRuntime": {"prunedPairs": 0, "captureSkips": 0},
-                "argumentBindingRuntime": {"enabled": True, "encodedSnapshots": 10},
+                "argumentBindingRuntime": {
+                    "enabled": True,
+                    "encodedSnapshots": 10,
+                    "patchSnapshots": 10,
+                    "executionAuthority": "java-patch-seam-native-not-negotiated",
+                    "nativeMainRendererEngaged": False,
+                },
             },
-        }), encoding="utf-8")
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
         rejected, code = evaluate(path, "pass-fusion")
         assert code == 3 and rejected["state"] == "rejected-no-admission"
+
+        # Snapshot/patch activity must never prove native argument-table use.
+        rejected_argument, code = evaluate(path, "argument-tables")
+        assert code == 3 and rejected_argument["state"] == "rejected-no-admission"
+
+        payload["admission"]["argumentBindingRuntime"] = {
+            "executionAuthority": NATIVE_ARGUMENT_TABLE_AUTHORITY,
+            "nativeMainRendererEngaged": True,
+            "snapshotDiagnosticsEnabled": False,
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
         admitted, code = evaluate(path, "argument-tables")
         assert code == 0 and admitted["state"] == "admitted"
     print("check_unified_eval_admission self-test: PASS")

@@ -48,6 +48,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.terrain.PresentationPacingSnapshotTest \
   --tests com.metallum.client.terrain.PresentationPacingEvidenceAdapterTest \
   --tests com.metallum.mixin.MetallumMixinRegistrationTest \
+  --tests com.metallum.client.metal.render.IrisMetalArgumentTableAuthorityContractTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
 

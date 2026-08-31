@@ -5,6 +5,19 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INIT_SOURCE="$ROOT/scripts/agent/fixed_drawable.init.gradle"
 IMPL="$ROOT/scripts/agent/run_unified_eval_cycle_impl.sh"
 
+# `argument-tables` is not an independently switchable unified-eval lane.
+# Metal 4 main rendering already owns the native MTL4ArgumentTable execution
+# path; the old Iris snapshot is diagnostics-only. Benchmarking the snapshot
+# would measure duplicated Java bookkeeping, not the native table authority.
+# Use the P1 physical baseline/candidate route, which changes only
+# metallum.opt.metal4MainRenderer while keeping Metal4 compiler/present/
+# residency and exact product bits identical.
+if [[ "${CANDIDATE_PROFILE:-all-safe-lanes}" == "argument-tables" \
+      || "${BASELINE_PROFILE:-baseline}" == "argument-tables" ]]; then
+  echo "argument-tables is not a standalone unified performance lane; use scripts/agent/run_metal4_main_p1_physical_performance.sh" >&2
+  exit 2
+fi
+
 # Keep Gradle's normal caches/toolchains. A uniquely named init script is
 # installed only for this invocation and removed on every wrapper exit. The
 # init script itself is task-graph scoped, so correctness and other Gradle

@@ -46,8 +46,8 @@
       "pass-fusion": "renderFusionRuntime.admissions > 0",
       "compute-grouping": "computeGroupingRuntime.admissions > 0 and deferredPassCloses > 0",
       "depth-liveness": "depthLivenessRuntime.prunedPairs > 0 or captureSkips > 0",
-      "argument-tables": "argumentBindingRuntime.enabled is true and encodedSnapshots > 0",
-      "all-safe-lanes": "at least one selected Iris lane proves runtime activation"
+      "argument-tables": "Only native Metal 4 main-renderer authority is admissible: executionAuthority must be native-metal4-argument-tables and nativeMainRendererEngaged must be true. Java snapshot/patch counters are diagnostic mirrors and never prove execution. Use the dedicated Metal4-main P1 physical performance route for the controlled A/B.",
+      "all-safe-lanes": "at least one selected Iris lane proves runtime activation; diagnostic argument snapshots cannot satisfy this rule"
     },
     "failure_state": "rejected-no-admission",
     "malformed_or_missing_evidence_state": "inconclusive-admission-evidence"
