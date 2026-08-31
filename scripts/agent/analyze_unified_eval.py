@@ -680,6 +680,8 @@ def self_test() -> None:
                 (trial / "exit-status.txt").write_text("0\n", encoding="utf-8")
                 frame_milliseconds = 1_000.0 / fps
                 source_report = {
+                    "drawableWidth": 1708,
+                    "drawableHeight": 960,
                     "measuredFrameIntervals": 3,
                     "frameTimeStutterCount": 0,
                     "nativeEncoderCountsPerMeasuredFrame": {
