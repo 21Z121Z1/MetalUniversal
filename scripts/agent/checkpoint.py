@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Maintain an ignored, machine-readable checkpoint for resumable agent work."""
+"""Maintain an ignored, exact-SHA-scoped checkpoint for resumable agent work."""
 
 from __future__ import annotations
 
@@ -67,6 +67,10 @@ def parse_check(value: str) -> dict[str, str]:
     return item
 
 
+def bind_checks_to_sha(checks: list[dict[str, str]], source_sha: str) -> list[dict[str, str]]:
+    return [{**item, "source_sha": source_sha, "recorded_utc": now()} for item in checks]
+
+
 def upsert_checks(existing: list[dict[str, str]], updates: list[dict[str, str]]) -> list[dict[str, str]]:
     by_name = {item["name"]: dict(item) for item in existing if item.get("name")}
     for item in updates:
@@ -75,6 +79,7 @@ def upsert_checks(existing: list[dict[str, str]], updates: list[dict[str, str]])
 
 
 def render_markdown(state: dict[str, Any]) -> str:
+    current_sha = state["git"]["current_sha"]
     lines = [
         "# MetalUniversal task checkpoint",
         "",
@@ -83,7 +88,7 @@ def render_markdown(state: dict[str, Any]) -> str:
         f"- claim: `{state['claim']}`",
         f"- branch: `{state['git']['branch']}`",
         f"- start SHA: `{state['git']['start_sha']}`",
-        f"- current SHA: `{state['git']['current_sha']}`",
+        f"- current SHA: `{current_sha}`",
         f"- updated: `{state['updated_utc']}`",
     ]
     if state.get("hypothesis"):
@@ -94,8 +99,12 @@ def render_markdown(state: dict[str, Any]) -> str:
     if state.get("completed_checks"):
         lines.extend(["", "## Checks"])
         for check in state["completed_checks"]:
+            check_sha = check.get("source_sha", "unbound")
+            validity = "current" if check_sha == current_sha else "stale"
             suffix = f" — {check['evidence']}" if check.get("evidence") else ""
-            lines.append(f"- `{check['status']}` {check['name']}{suffix}")
+            lines.append(
+                f"- `{check['status']}` `{validity}` {check['name']} @ `{check_sha[:12]}`{suffix}"
+            )
     if state.get("blockers"):
         lines.extend(["", "## Blockers"])
         lines.extend(f"- {item}" for item in state["blockers"])
@@ -152,6 +161,7 @@ def command_init(args: argparse.Namespace) -> int:
 
 def command_update(args: argparse.Namespace) -> int:
     state = load_state()
+    identity = git_identity()
     if args.status:
         state["status"] = args.status
     if args.hypothesis is not None:
@@ -163,8 +173,8 @@ def command_update(args: argparse.Namespace) -> int:
     if args.clear_blockers:
         state["blockers"] = []
     if args.check:
-        state["completed_checks"] = upsert_checks(state.get("completed_checks", []), args.check)
-    identity = git_identity()
+        bound = bind_checks_to_sha(args.check, identity["current_sha"])
+        state["completed_checks"] = upsert_checks(state.get("completed_checks", []), bound)
     state["git"]["current_sha"] = identity["current_sha"]
     state["git"]["branch"] = identity["branch"]
     state["updated_utc"] = now()
@@ -184,19 +194,19 @@ def command_show(args: argparse.Namespace) -> int:
 
 
 def self_test() -> int:
-    checks = upsert_checks(
-        [{"name": "static", "status": "pending"}],
+    checks = bind_checks_to_sha(
         [parse_check("static|pass|build/report.json"), parse_check("gpu|blocked")],
+        "a" * 40,
     )
-    assert checks == [
-        {"name": "gpu", "status": "blocked"},
-        {"name": "static", "status": "pass", "evidence": "build/report.json"},
-    ]
+    checks = upsert_checks([{"name": "static", "status": "pending"}], checks)
+    assert [item["name"] for item in checks] == ["gpu", "static"]
+    assert all(item["source_sha"] == "a" * 40 for item in checks)
+    assert checks[1]["status"] == "pass" and checks[1]["evidence"] == "build/report.json"
     state = {
         "task": "test",
         "status": "verifying",
         "claim": "correctness",
-        "git": {"branch": "branch", "start_sha": "a", "current_sha": "b"},
+        "git": {"branch": "branch", "start_sha": "a", "current_sha": "b" * 40},
         "updated_utc": now(),
         "direct_component_ids": ["validation.contract"],
         "completed_checks": checks,
@@ -204,7 +214,7 @@ def self_test() -> int:
         "next_command": "next",
     }
     rendered = render_markdown(state)
-    assert "validation.contract" in rendered and "build/report.json" in rendered
+    assert "validation.contract" in rendered and "build/report.json" in rendered and "stale" in rendered
     print("Agent checkpoint self-test: PASS")
     return 0
 
