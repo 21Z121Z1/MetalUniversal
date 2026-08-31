@@ -1,79 +1,112 @@
 # MetalUniversal
-> 本项目基于 [Metallum](https://github.com/kokodio/metallum) 开发，为原项目的 Fork 迭代版本，在保留原有 Metal 渲染后端能力的基础上，新增了对 iOS 平台的完整支持
 
-MetalUniversal 是一个基于 Apple Metal API 的 Minecraft 渲染后端模组（Fabric Mod），用于在 macOS 和 iOS 上替代 OpenGL/Vulkan 渲染路径，为 Apple Silicon 和 iOS 设备提供更高效的 GPU 渲染。
+MetalUniversal is an experimental Metal rendering backend for Minecraft Java on Apple platforms. It replaces the conventional graphics path with a Java/FFM/Swift Metal stack and is being developed toward exact Minecraft/Iris/Sodium semantic compatibility, correctness-gated Metal 3/4 optimization, terrain GPU submission and iOS support.
 
-本项目仍处于实验性阶段（PoC），性能与稳定性可能因系统和安装 Mod 而异。
+The stable branch is `master`; continued renderer development uses `integration/iris-metal-next`. Experimental optimizations remain fail-closed/default-off until their correctness and runtime activation are proved.
 
-## 架构
+## Agent entrypoint
 
-| 层级 | 实现 |
-|------|------|
-| 入口点 | `com.metaluniversal.MetalUniversal`（PreLaunch + ModInitializer） |
-| GPU 后端 | `MetalBackend` → `MetalDevice` → `MetalCommandEncoder` / `MetalRenderPass` |
-| 着色器编译器 | `MetalCrossShaderCompiler`（GLSL/SPIR-V → MSL，基于 SPIRV-Cross） |
-| 原生桥接 | `MetalNativeBridge`（Java Foreign Memory API ↔ Swift C 导出函数） |
-| 原生实现 | `MetalUniversalNative.swift`（Metal API 调用、CAMetalLayer 管理、MSL 内联着色器） |
-| 模组注入 | Mixin 注入 Minecraft `PreferredGraphicsApi` 和 Sodium 渲染后端选择 |
-
-## 兼容性
-
-- **macOS**：Apple Silicon（M1 或更新），通过 Native Bridge 直接加载 `libmetallum.dylib`
-- **iOS**：iOS 14.0 或更高版本，预编译 `libmetallum.dylib`（arm64）和 `libspvc.dylib`（带 MSL 后端）内置于 jar 中
-
-## 构建
-
-### 前置条件
-
-- macOS（Apple Silicon）
-- Xcode（含 iOS SDK，用于 iOS 目标）
-- Java 25
-- Swift 编译器（`swiftc`）
-
-### 构建命令
-
-
+This repository is designed to be driven by coding agents without requiring them to reread the entire project history. Start with:
 
 ```bash
-# 完整构建（macOS 原生 + iOS 原生 + iOS libspvc）
-./gradlew build
+python3 scripts/agent/context.py --task "<what you are trying to change>"
+```
 
-# 仅编译 macOS 原生 dylib
+Then follow `AGENTS.md`. The system model is `docs/agent/system-model.md`; the machine-readable knowledge router is `docs/agent/system-registry.json`.
+
+## Architecture
+
+```text
+Minecraft / Iris / Sodium semantics
+        |
+semantic pass + generation-aware resource identity
+        |
+immutable render / terrain plans
+        |
+Metal execution policy (Metal 3 / Metal 4 / ICB / residency)
+        |
+Java FFM ABI
+        |
+Swift / Metal
+        |
+structured correctness + performance evidence
+```
+
+Primary code ownership:
+
+| Area | Path |
+|---|---|
+| Metal renderer/resources | `src/main/java/com/metallum/client/metal/render/` |
+| Render-contract validation | `src/main/java/com/metallum/client/validation/` |
+| Terrain/runtime telemetry | `src/main/java/com/metallum/client/terrain/` |
+| Java FFM bridge | `src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java` |
+| Swift Metal implementation | `src/main/native/` |
+| Minecraft/Iris/Sodium mixins | `src/main/java/com/metallum/mixin/` |
+| Agent/evaluation harness | `scripts/agent/` |
+
+For architecture authority and historical-document classification, see `docs/README.md`.
+
+## Supported targets
+
+- macOS on Apple Silicon (M1 or newer), using the repository native bridge.
+- iOS arm64 through the isolated mobile/Amethyst platform line and packaged native libraries.
+
+Exact runtime compatibility remains dependent on the current Minecraft/Fabric/Sodium/Iris pins in the build. Treat README prose as orientation; source/build metadata is authoritative.
+
+## Build and verification
+
+Prerequisites for full native work include Java 25, Xcode/Swift and an Apple Silicon macOS environment. Hosted CI can prove a large static/native-compile subset but cannot replace attended physical Metal/presentation acceptance.
+
+Useful entry points:
+
+```bash
+# Agent/control-plane + headless static gates
+bash scripts/agent/verify_unified_eval.sh
+
+# Focused static compatibility
+bash scripts/agent/verify.sh static
+
+# Native/GPU-focused gate on a capable Apple host
+bash scripts/agent/verify.sh gpu
+
+# Build macOS native module
 ./gradlew buildMacNative
 
-# 仅编译 iOS 原生 dylib（需要 Xcode + iOS SDK）
+# Build iOS native libraries
 ./gradlew buildIOSNative
-
-# 仅编译 iOS libspvc（SPIRV-Cross MSL 后端，需要 Xcode + iOS SDK）
 ./gradlew buildIOSSpvc
 ```
 
-构建产物：
-- `src/main/resources/natives/macos/libmetallum.dylib` — macOS arm64, target 14.0
-- `src/main/resources/natives/ios/libmetallum.dylib` — iOS arm64, target 14.0
-- `src/main/resources/natives/ios/libspvc.dylib` — SPIRV-Cross C API（MSL 后端），iOS arm64
+Do not use plain `./gradlew build` as proof that the renderer works in Minecraft; runtime rendering, shader-pack correctness, presentation and performance have separate evidence gates.
 
-### CI/CD
+Generated native artifacts live under `src/main/resources/natives/` when built. Generated worlds, shader packs, screenshots, captures and agent evidence are not repository source and must not be committed.
 
-GitHub Actions 工作流（`.github/workflows/build.yml`）在 `macos-15` 上构建，推送带 `v*` tag 时自动发布到 Modrinth 和 GitHub Releases。
+## Runtime evaluation
 
-## iOS 使用说明
+Correctness and performance share one unified evaluation platform but use different instrumentation costs. The canonical workflow is documented in `docs/agent/unified-evaluation-loop.md`.
 
-1. 在IOS系统上安装Minecraft Java Edition启动器
-2. 将 Metallum jar 放入 Minecraft 实例的 `mods/` 目录
-3. 启动 Minecraft，在视频设置中将图形后端选择为 "Prefer Metal"重启游戏即可生效
-### 注意事项
+Example:
 
-- `libmetallum.dylib` 和 `libspvc.dylib` 由启动器在运行时加载，无需手动嵌入
-- 必须使用 Fabric Loader
-- 如遇渲染问题，先尝试禁用其他渲染相关模组
+```bash
+MODE=conformance WORLD="<world>" CANDIDATE_PROFILE=compute-grouping \
+  bash scripts/agent/run_unified_eval_cycle.sh
 
-## macOS 使用说明
+MODE=full WORLD="<world>" BLOCKS=4 CANDIDATE_PROFILE=compute-grouping \
+  bash scripts/agent/run_unified_eval_cycle.sh
+```
 
-1. 下载最新 Metallum jar 并放入 `mods/` 目录
-2. 启动 Minecraft，在视频设置中将图形后端选择为 "Prefer Metal"重启游戏即可生效
+Performance claims require passing correctness, activation proof and paired/interleaved trials. Structured reports are the acceptance authority.
 
+## Minecraft 26.2 source reference
 
-## 许可
+For tasks that require vanilla implementation details:
 
-MIT License — 详见 [LICENSE](LICENSE)
+```bash
+bash scripts/minecraft-reference.sh
+```
+
+This materializes `.minecraft-reference/26.2/sources/` locally from Mojang's client JAR. The generated tree is intentionally ignored and must not be committed.
+
+## License
+
+MIT License — see `LICENSE`.

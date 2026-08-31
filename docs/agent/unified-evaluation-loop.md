@@ -1,33 +1,54 @@
 # Unified render evaluation and autonomous optimization loop
 
-This is the canonical workflow for `integration/iris-metal-next`. Create bounded feature branches from that integration branch; do not continue development from superseded `agent/*`, `codex/*`, or pre-Iris feature branches. The workflow combines the render-contract framework with the Iris performance harness without collapsing correctness and measurement into one high-overhead run.
+This is the canonical correctness/performance workflow for the renderer. It is one execution loop inside the broader control plane described by `system-model.md`; task routing and current Git context come from `scripts/agent/context.py`, while acceptance thresholds come from `unified-evaluation-acceptance.json`.
 
-## Evaluation model
+The canonical continued-development base is `integration/iris-metal-next`. Create one bounded task branch from that base. Historical `agent/*`, `codex/*`, dated handoffs and retired feature branches are evidence/provenance only unless current source or the system registry explicitly routes to them.
 
-The repository has one evaluation platform and three suites:
+## 1. Evaluation model
+
+The repository has one evaluation platform and three suites with deliberately different instrumentation cost:
 
 ```text
-deterministic scenario + binary/environment identity
+deterministic scenario + source/binary/environment identity
         |
-        +-- conformance: logical pass trace, attachment readback, expectations
-        |       -> first divergent pass/resource/producer
+        +-- conformance
+        |     logical pass trace + attachment/readback expectations
+        |     -> first divergent semantic pass/resource/producer
         |
-        +-- performance: low-overhead counters and GPU/CPU timing
-        |       -> ABBA-paired baseline/candidate comparison
+        +-- performance
+        |     low-overhead counters + GPU/CPU timing
+        |     -> ABBA/interleaved paired baseline/candidate comparison
         |
-        +-- diagnostic: focused producer detail and readback
-                -> evidence for one known divergent pass
+        +-- diagnostic
+              focused producer detail + targeted readback
+              -> evidence for one already-localized divergence
 ```
 
-`RenderTraceRecorder` and its generation-aware `ResourceIdentity` are the canonical cross-backend identities. Iris construction-plan traces are oracle evidence; timestamps, native pointers, encoder ordinals, object addresses and shader-pack names are not stable join keys.
+`RenderTraceRecorder`, semantic pass IDs and generation-aware `ResourceIdentity` are the canonical cross-backend identities. Iris construction-plan traces are oracle evidence. Timestamps, native pointers, encoder ordinals, object addresses, shader-pack names and log line numbers are never stable join keys.
 
-Conformance and performance may use the same world, camera and profile, but they must not use the same instrumentation cost. Full producer details and broad GPU readback are disabled during performance trials. When conformance identifies a mismatch, rerun only the first divergent semantic pass in diagnostic mode.
+Conformance and performance may use the same world/camera/profile, but they must not use the same instrumentation cost. Broad readback and producer traces are disabled during performance trials. When conformance identifies a mismatch, rerun only the first divergent semantic pass in diagnostic mode.
 
-## Required environment
+## 2. Bootstrap and routing
 
-Use an attended Apple Silicon Mac with macOS 26, Xcode/Swift containing the Metal 4 and MetalFX Frame Interpolator SDK surfaces, Java 25, a usable WindowServer session, a fixed display mode and a stable power state. Hosted runners may run headless Java and schema tests, but they cannot replace local Metal 4, readback, presentation or graphical evidence.
+Before evaluating a candidate:
 
-Set and record:
+```bash
+python3 scripts/agent/context.py --task "<candidate or problem>"
+bash scripts/agent/doctor.sh
+bash scripts/agent/verify_unified_eval.sh
+```
+
+The context capsule establishes Git orientation and the source/docs/tests that own the task. `doctor.sh` establishes physical-host capability and writes an environment artifact. Static verification proves the harness/control plane itself before expensive client work begins.
+
+Do not start with old handoffs or a branch name copied from a historical plan. If current source and historical prose disagree, source/evidence wins and the canonical document must be fixed.
+
+## 3. Required physical environment
+
+Claims involving visible presentation, real-client shader-pack parity or stable GPU performance require an attended Apple Silicon Mac with the relevant macOS/Xcode/Metal SDK surfaces, Java 25, a usable WindowServer session, fixed display mode and stable power/thermal state.
+
+Hosted runners may prove Java/schema logic, Swift/Metal compilation and selected offscreen/native capability contracts. They do not replace physical presentation or stable-performance evidence.
+
+For comparable client trials record at minimum:
 
 ```bash
 export WORLD="<deterministic world>"
@@ -37,17 +58,11 @@ export METALLUM_EVAL_DISPLAY="<resolution, scale, refresh, HDR state>"
 export METALLUM_EVAL_POWER_STATE="<AC/battery and thermal preparation>"
 ```
 
-A run is not comparable when code/binary hashes, world, shader pack, options, resolution, render distance, display mode or power state differ.
+A run is not comparable when source/native hashes, world, shader pack/options, resolution/render distance, display mode or power state differ without an explicit experimental reason.
 
-## Entry points
+## 4. Entry points
 
-Validate the harness itself:
-
-```bash
-bash scripts/agent/verify_unified_eval.sh
-```
-
-Run correctness only:
+Correctness only:
 
 ```bash
 MODE=conformance WORLD="$WORLD" \
@@ -55,7 +70,7 @@ MODE=conformance WORLD="$WORLD" \
   bash scripts/agent/run_unified_eval_cycle.sh
 ```
 
-Run the complete correctness-gated ABBA experiment:
+Complete correctness-gated paired experiment:
 
 ```bash
 MODE=full WORLD="$WORLD" BLOCKS=4 \
@@ -63,7 +78,7 @@ MODE=full WORLD="$WORLD" BLOCKS=4 \
   bash scripts/agent/run_unified_eval_cycle.sh
 ```
 
-Diagnose the first divergence with expensive evidence:
+Targeted first-divergence diagnosis:
 
 ```bash
 MODE=diagnostic WORLD="$WORLD" \
@@ -71,11 +86,48 @@ MODE=diagnostic WORLD="$WORLD" \
   bash scripts/agent/run_unified_eval_cycle.sh
 ```
 
-The runner creates a unique directory below `build/agent-runs/`. It records source and binary identity, commands, exit status, correctness evidence, trial order, structured metrics, paired comparisons and the final decision. Generated evidence is never committed.
+The runner creates a unique directory below `build/agent-runs/`. It records source/binary identity, commands, exit status, correctness evidence, trial order, structured metrics, paired comparisons and decision. Generated evidence is never committed.
 
-## Performance protocol
+## 5. Candidate record
 
-Use at least four paired blocks. The default order is ABBA:
+Before changing renderer behavior, write one falsifiable record in the task/PR context:
+
+```text
+Observation:
+Owning component(s):
+First suspect abstraction layer:
+Hypothesis:
+Target behavior/metric:
+Semantic risk:
+Affected ownership/ABI boundary:
+Activation proof:
+Fastest falsification test:
+Rollback condition:
+```
+
+The point is not ceremony. It prevents an agent from drifting across unrelated layers when the first cheap test already identifies the failing assumption.
+
+## 6. Correctness gate
+
+A candidate must preserve every relevant observable semantic contract. Fail closed when the planner/runtime cannot prove safety.
+
+For optimization admission, emit machine-readable reasons for both acceptance and rejection. Hazard-based transforms must name:
+
+- semantic passes;
+- generation-aware resources;
+- access modes;
+- RAW/WAR/WAW or explicit-barrier edges;
+- attachment compatibility/liveness evidence where applicable.
+
+Safety cannot be inferred from pass labels or adjacency alone.
+
+Resource pruning must prove full-lifetime non-use across terrain, shadow, composite/final, copies/readback and temporal consumers. Argument-table/ABI migration must prove exact slot/layout compatibility. A correctly disabled optimization is preferable to an approximate enabled path.
+
+On failure, diagnose the first divergent pass/resource/producer. Do not begin by manually comparing arbitrary screenshots.
+
+## 7. Performance protocol
+
+Use at least four paired blocks. The default interleaving is ABBA-like across blocks:
 
 ```text
 block 1: baseline -> candidate
@@ -86,48 +138,76 @@ block 4: candidate -> baseline
 
 Aggregate frame samples inside each trial before comparing profiles. Compare baseline and candidate within the same block, then summarize paired deltas across blocks. Do not pool every frame from every run as independent observations.
 
-Structured JSON reports are authoritative. Log regex extraction may be used only to discover missing instrumentation. A metric absent from structured reports is `unavailable`; it is never inferred from prose. FPS is mandatory whenever the client performance run completed.
+Structured JSON reports are authoritative. Log regex extraction may discover missing instrumentation but is never acceptance evidence. A metric absent from structured reports is `unavailable`; it is never inferred from prose. FPS is mandatory whenever the client performance run completed.
 
-An optimization is accepted only when:
+A performance candidate is accepted only when:
 
-1. the complete correctness gate passes;
-2. at least four paired blocks exist;
-3. one target metric improves in at least 75% of paired blocks and its paired median improves;
-4. GPU time, CPU time, peak memory and stutter guardrails do not regress beyond the declared limits;
-5. the optimization proves it activated through counters or plan/admission evidence.
+1. complete correctness gates pass for baseline and candidate;
+2. the candidate has structured activation/admission proof;
+3. at least four paired blocks exist;
+4. at least one declared target metric improves in at least 75% of paired blocks and its paired median improves;
+5. GPU time, CPU time, peak memory and stutter guardrails stay within declared limits.
 
-A positive but unstable result is `inconclusive-noise`, not an accepted optimization.
+A positive but unstable result is `inconclusive-noise`, not accepted optimization. Zero delta is not improvement.
 
-## Autonomous agent loop
+## 8. Cheapest-proof-first verification ladder
 
-1. Run `doctor.sh`, `verify_unified_eval.sh`, and record the exact starting state.
-2. Establish a passing baseline conformance run before changing renderer code.
-3. Inspect structured metrics and select one measured bottleneck.
-4. Write one falsifiable experiment record:
+Pay for evidence progressively:
 
 ```text
-Observation:
-Hypothesis:
-Target metric:
-Semantic risk:
-Affected ownership/ABI boundary:
-Fastest falsification test:
-Rollback condition:
+schema/static
+  -> focused unit
+    -> integration/build
+      -> hosted native/offscreen capability
+        -> physical GPU/native
+          -> Minecraft E2E
+            -> paired performance
 ```
 
-5. Implement the smallest complete change. A planner, unused helper, unproven mixin, or counter without executable integration is incomplete.
-6. Add activation evidence, focused tests and fail-closed handling.
-7. Run focused tests, then conformance. If it fails, use the first-divergence report and diagnostic mode; do not inspect random screenshots first.
-8. Only after correctness passes, run the interleaved performance experiment.
-9. Keep the change only when `decision.json` is `accepted-candidate`. Revert rejected experiments; keep incomplete work disabled with a precise blocker.
-10. Review Java/FFM/Swift ABI alignment, Metal 3 and Metal 4 paths, resource recreate/close behavior, stale flags and generated files before handoff.
+Stop when a lower gate falsifies the candidate. Do not run expensive performance blocks to debug a compile error, ABI mismatch or semantic divergence.
 
-## Optimization admission evidence
+## 9. Evidence graph
 
-Hazard-based transformations must emit machine-readable reasons for both acceptance and rejection. A pass fusion or compute grouping decision must name the semantic passes, generation-aware resources, access modes and RAW/WAR/WAW or explicit-barrier edge involved. Safety cannot be inferred from a pass label.
+A final decision must be reconstructible from:
 
-Resource pruning must prove full-lifetime non-use across terrain, shadow, composite, final and temporal consumers. Argument-table or ABI migration must prove exact slot/layout compatibility. A disabled optimization with a correct blocker is preferable to an enabled approximation.
+```text
+source SHA
+ + native/binary identity
+ + environment identity
+ + scenario identity
+ + feature/admission activation
+ + correctness result
+ + paired performance result (when claimed)
+ + exact artifact paths
+ = decision
+```
 
-## Final report
+Missing required edges invalidate the claim. In particular, compilation is not activation; activation is not correctness; correctness is not performance improvement.
 
-The agent report must distinguish implemented/validated, implemented/unvalidated, rejected/reverted, inconclusive and environment-blocked work. Include the exact commands and artifact paths, first divergent pass when applicable, and a before/after table for every available metric. Do not claim runtime rendering or performance acceptance from compilation alone.
+## 10. Autonomous agent loop
+
+1. Generate context and record exact starting state.
+2. Establish the cheapest passing baseline relevant to the claim.
+3. Route to one or two component IDs and inspect source + nearest tests.
+4. Write the falsifiable candidate record.
+5. Implement the smallest complete change with explicit activation and fail-closed handling.
+6. Run focused tests, then conformance.
+7. If conformance fails, localize the first divergence and use diagnostic mode only there.
+8. After correctness passes, run interleaved performance trials if performance is claimed.
+9. Keep the change only when the structured decision supports it; revert correctness/guardrail failures and extend evidence for noise.
+10. Self-review ABI symmetry, Metal 3/4 paths, resource recreate/close behavior, mixin application, stale flags and generated files.
+11. Distill durable knowledge into tests/contracts/ADRs/checkers; keep transient evidence out of canonical docs.
+
+## 11. Final report
+
+The report must distinguish:
+
+- implemented + validated;
+- implemented + environment-blocked/unvalidated;
+- rejected/reverted;
+- inconclusive/noise;
+- pre-existing failures/policy drift.
+
+Include exact starting/ending commits, changed ownership boundaries, commands/exit status, correctness result, first divergence if any, activation proof, Metal validation status, CI status for the latest SHA, environment limits and artifact paths.
+
+For performance, report before, after, raw delta, direction-normalized improvement and paired block count for every available relevant metric. Mark absent metrics `unavailable` with the exact missing structured source.

@@ -3,11 +3,13 @@ name: Unified eval verification
 on:
   push:
     branches:
+      - master
       - integration/iris-metal-next
-      - agent/unified-render-eval-performance
   pull_request:
     paths:
+      - 'README.md'
       - 'AGENTS.md'
+      - 'docs/README.md'
       - 'docs/agent/**'
       - 'docs/render-contract-validation.md'
       - 'scripts/agent/**'
@@ -39,7 +41,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Verify schemas, analyzer and Java gates
+      - name: Verify agent control plane, schemas, analyzer and Java gates
         shell: bash
         run: bash scripts/agent/verify_unified_eval.sh
 
@@ -84,12 +86,12 @@ jobs:
       - name: State hosted-runner boundary
         shell: bash
         run: |
-          cat <<'EOF'
+          cat <<'BOUNDARY'
           macOS 26 hosted verification proves toolchain compatibility, Swift/MetalFX/Metal 4 compilation,
           Java-to-native build integration and exported-symbol presence. It does not prove attended
           WindowServer behavior, shader-pack visual parity, stable GPU performance or real-client Metal 4 use.
-          Those remain local Apple Silicon gates.
-          EOF
+          Those remain physical Apple Silicon gates.
+          BOUNDARY
       - uses: actions/upload-artifact@v4
         if: always()
         with:

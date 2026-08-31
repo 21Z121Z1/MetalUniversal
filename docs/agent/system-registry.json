@@ -1,0 +1,276 @@
+{
+  "schema_version": 1,
+  "purpose": "Machine-readable routing table for agents. It names authorities and component boundaries; it does not duplicate runtime state.",
+  "canonical": {
+    "stable_branch": "master",
+    "development_branch": "integration/iris-metal-next",
+    "history_anchor_branch": "research/modernization-backlog",
+    "max_persistent_branches": 5,
+    "platform_branches": [
+      "feature/ios-amethyst-runtime"
+    ]
+  },
+  "bootstrap": {
+    "entrypoint": "AGENTS.md",
+    "context_command": "python3 scripts/agent/context.py",
+    "system_model": "docs/agent/system-model.md",
+    "documentation_index": "docs/README.md",
+    "static_verification": "bash scripts/agent/verify_unified_eval.sh"
+  },
+  "authority_order": [
+    {
+      "rank": 1,
+      "kind": "executable_truth",
+      "description": "Shipping source, tests, schemas, generated manifests and exact Git identity."
+    },
+    {
+      "rank": 2,
+      "kind": "runtime_evidence",
+      "description": "Structured evidence produced by the exact source/binary under test."
+    },
+    {
+      "rank": 3,
+      "kind": "canonical_design",
+      "description": "Current contracts, architecture and acceptance documents named by this registry."
+    },
+    {
+      "rank": 4,
+      "kind": "historical_context",
+      "description": "Dated handoffs, retired plans and migration records; useful for provenance, never sufficient to assert current behavior."
+    }
+  ],
+  "canonical_documents": [
+    "AGENTS.md",
+    "docs/README.md",
+    "docs/agent/system-model.md",
+    "docs/agent/unified-evaluation-loop.md",
+    "docs/agent/unified-evaluation-acceptance.json",
+    "docs/render-contract-validation.md"
+  ],
+  "historical_or_advisory": [
+    "docs/handoffs/**",
+    "docs/agent/retired-branch-backlog.md",
+    "docs/agent/branch-migration-matrix.json",
+    "docs/iris_on_metal_implementation_plan.md",
+    "docs/iris_on_metal_architecture.md",
+    "docs/iris-audit/experimental-performance-architecture.md",
+    "docs/iris-audit/advanced-optimization-runtime-handoff.md"
+  ],
+  "generated_evidence": {
+    "never_commit": [
+      "build/agent-runs/**",
+      "build/agent-evidence/**",
+      ".minecraft-reference/**"
+    ],
+    "structured_reports_are_authoritative": true,
+    "log_regex_is_acceptance_authority": false
+  },
+  "components": [
+    {
+      "id": "product.semantics",
+      "summary": "Minecraft, Iris and Sodium observable rendering semantics and version-specific behavior.",
+      "keywords": [
+        "minecraft",
+        "iris",
+        "sodium",
+        "shader",
+        "bsl",
+        "semantic",
+        "pack",
+        "drawbuffers",
+        "shadow"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/mixin",
+        "src/main/java/com/metallum/client/metal/render"
+      ],
+      "canonical_docs": [
+        "docs/render-contract-validation.md",
+        "docs/agent/minecraft-reference.md"
+      ],
+      "verification": [
+        "bash scripts/agent/verify_unified_eval.sh"
+      ]
+    },
+    {
+      "id": "render.plan",
+      "summary": "Immutable render intent, semantic pass identity, hazard/liveness reasoning and optimization admission.",
+      "keywords": [
+        "plan",
+        "graph",
+        "hazard",
+        "liveness",
+        "fusion",
+        "compute",
+        "attachment",
+        "load",
+        "store",
+        "resource"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/client/validation",
+        "src/main/java/com/metallum/client/metal/render"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md",
+        "docs/agent/unified-evaluation-loop.md"
+      ],
+      "verification": [
+        "./gradlew --no-daemon renderContractSyntheticValidation",
+        "bash scripts/agent/verify_unified_eval.sh"
+      ]
+    },
+    {
+      "id": "render.execution",
+      "summary": "Metal renderer execution, command encoding, resource lifecycle and Metal 3/4 policy.",
+      "keywords": [
+        "metal",
+        "encoder",
+        "pipeline",
+        "texture",
+        "buffer",
+        "residency",
+        "icb",
+        "render",
+        "compute"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/client/metal/render",
+        "src/main/java/com/metallum/client/metal/render/mtl"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md"
+      ],
+      "verification": [
+        "bash scripts/agent/verify_unified_eval.sh",
+        "bash scripts/agent/verify.sh gpu"
+      ]
+    },
+    {
+      "id": "native.abi",
+      "summary": "Java FFM to Swift ABI, ownership, nullability and exported Metal entry points.",
+      "keywords": [
+        "ffm",
+        "swift",
+        "abi",
+        "native",
+        "cdecl",
+        "bridge",
+        "symbol",
+        "metal4"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java",
+        "src/main/native"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md"
+      ],
+      "verification": [
+        "bash scripts/agent/verify_unified_eval.sh"
+      ]
+    },
+    {
+      "id": "terrain.scene",
+      "summary": "Terrain scheduling, GPU scene/ICB submission, visibility and runtime telemetry.",
+      "keywords": [
+        "terrain",
+        "chunk",
+        "scene",
+        "icb",
+        "visibility",
+        "culling",
+        "geometry",
+        "arena"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/client/terrain"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md",
+        "docs/agent/presentation-pacing-evidence.md"
+      ],
+      "verification": [
+        "bash scripts/agent/verify_unified_eval.sh"
+      ]
+    },
+    {
+      "id": "validation.contract",
+      "summary": "Backend-neutral render contract, generation-aware resource identity, first-divergence diagnosis and acceptance.",
+      "keywords": [
+        "validation",
+        "contract",
+        "trace",
+        "divergence",
+        "oracle",
+        "readback",
+        "identity",
+        "correctness"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/client/validation",
+        "validation/render-contract"
+      ],
+      "canonical_docs": [
+        "docs/render-contract-validation.md",
+        "docs/agent/unified-evaluation-loop.md",
+        "docs/agent/unified-evaluation-acceptance.json"
+      ],
+      "verification": [
+        "./gradlew --no-daemon renderContractSyntheticValidation",
+        "bash scripts/agent/verify_unified_eval.sh"
+      ]
+    },
+    {
+      "id": "evaluation.control",
+      "summary": "Agent bootstrap, experiment orchestration, structured evidence, ABBA analysis and CI authority.",
+      "keywords": [
+        "agent",
+        "benchmark",
+        "abba",
+        "performance",
+        "evidence",
+        "ci",
+        "workflow",
+        "acceptance",
+        "profile"
+      ],
+      "source_roots": [
+        "scripts/agent",
+        ".github/workflows"
+      ],
+      "canonical_docs": [
+        "AGENTS.md",
+        "docs/agent/system-model.md",
+        "docs/agent/unified-evaluation-loop.md",
+        "docs/agent/unified-evaluation-acceptance.json"
+      ],
+      "verification": [
+        "python3 scripts/agent/context.py --self-test",
+        "python3 scripts/agent/verify_agent_control_plane.py",
+        "bash scripts/agent/verify_unified_eval.sh"
+      ]
+    },
+    {
+      "id": "platform.mobile",
+      "summary": "Isolated iOS/Amethyst platform lineage; share backend contracts but do not silently fold platform-specific behavior into the canonical macOS line.",
+      "keywords": [
+        "ios",
+        "iphoneos",
+        "amethyst",
+        "mobile",
+        "cametallayer"
+      ],
+      "source_roots": [
+        "src/main/native",
+        "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md"
+      ],
+      "verification": [
+        "./gradlew --no-daemon buildIOSNative buildIOSSpvc"
+      ]
+    }
+  ]
+}
