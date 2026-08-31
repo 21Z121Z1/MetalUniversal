@@ -12,6 +12,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = ROOT / "docs/agent/system-registry.json"
 ROUTING_FIXTURES = ROOT / "docs/agent/routing-fixtures.json"
+BRANCH_TOPOLOGY = ROOT / "scripts/agent/branch_topology.py"
+CI_SUBJECT = ROOT / "scripts/agent/record_ci_subject.py"
 
 
 def fail(message: str) -> None:
@@ -66,7 +68,9 @@ def validate_proof_graph(profiles: dict[str, dict[str, Any]]) -> None:
     for profile_id in profiles:
         visit(profile_id)
 
-    preflights = [profile_id for profile_id, profile in profiles.items() if profile.get("always_preflight")]
+    preflights = [
+        profile_id for profile_id, profile in profiles.items() if profile.get("always_preflight")
+    ]
     require(preflights, "proof graph must retain at least one cheap fail-fast preflight")
     for profile_id in preflights:
         require(
@@ -97,6 +101,42 @@ def validate_impact_graph(components: list[dict[str, Any]]) -> set[str]:
     return known
 
 
+def validate_ci_identity_contracts() -> None:
+    exact_expr = "github.event.pull_request.head.sha"
+    unified = (ROOT / ".github/workflows/unified-eval-static.yml").read_text(encoding="utf-8")
+    minecraft_ref = (ROOT / ".github/workflows/minecraft-reference.yml").read_text(encoding="utf-8")
+    metal_cap = (ROOT / ".github/workflows/metal-capabilities.yml").read_text(encoding="utf-8")
+    minecraft_e2e = (ROOT / ".github/workflows/minecraft-client-e2e.yml").read_text(encoding="utf-8")
+    build = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+
+    for name, text in (
+        ("unified-eval-static", unified),
+        ("minecraft-reference", minecraft_ref),
+        ("metal-capabilities", metal_cap),
+        ("minecraft-client-e2e", minecraft_e2e),
+    ):
+        require(exact_expr in text, f"{name} must derive the PR candidate-head SHA explicitly")
+
+    for name, text in (("unified-eval-static", unified), ("minecraft-reference", minecraft_ref)):
+        require("record_ci_subject.py" in text, f"{name} must record its tested CI subject")
+        require("candidate-head" in text, f"{name} must declare candidate-head proof")
+
+    require(
+        "METALLUM_SOURCE_SHA" in metal_cap and "ref: ${{ env.METALLUM_SOURCE_SHA }}" in metal_cap,
+        "metal-capabilities must checkout its declared candidate source SHA",
+    )
+    require(
+        "Checkout exact candidate SHA" in minecraft_e2e and "git rev-parse HEAD" in minecraft_e2e,
+        "minecraft-client-e2e must verify its exact candidate checkout",
+    )
+    require("record_ci_subject.py" in build, "build workflow must record its tested CI subject")
+    require("merge-result" in build, "PR build must declare merge-result proof")
+    require(
+        "github.event_name" in build and "pull_request" in build,
+        "build workflow must distinguish PR merge-result from push candidate-head",
+    )
+
+
 def main() -> int:
     try:
         registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
@@ -118,6 +158,15 @@ def main() -> int:
     )
     require_exists(bootstrap["routing_fixtures"])
 
+    for path in (
+        "scripts/agent/branch_topology.py",
+        "scripts/agent/record_ci_subject.py",
+        "docs/agent/branch-topology.md",
+        "docs/agent/ci-proof-identity.md",
+        "docs/agent/decisions/0003-branch-topology-and-ci-proof-subjects.md",
+    ):
+        require_exists(path)
+
     try:
         fixtures = json.loads(ROUTING_FIXTURES.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -134,6 +183,10 @@ def main() -> int:
     historical = set(registry.get("historical_or_advisory", []))
     overlap = historical.intersection(canonical_docs)
     require(not overlap, f"documents cannot be both canonical and historical: {sorted(overlap)}")
+    require(
+        "docs/agent/branch-migration-matrix.json" in historical,
+        "branch migration matrix must remain historical/advisory",
+    )
 
     profiles = registry.get("proof_profiles", {})
     require(bool(profiles), "proof_profiles must not be empty")
@@ -173,6 +226,8 @@ def main() -> int:
 
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     require("python3 scripts/agent/context.py" in agents, "AGENTS.md must route bootstrap through context.py")
+    require("python3 scripts/agent/branch_topology.py --refresh" in agents, "AGENTS.md must expose live branch topology")
+    require("ci-proof-identity.md" in agents, "AGENTS.md must expose CI proof-subject identity")
     require(development in agents and stable in agents, "AGENTS.md canonical branch names disagree with registry")
 
     doctor = (ROOT / "scripts/agent/doctor.sh").read_text(encoding="utf-8")
@@ -191,16 +246,15 @@ def main() -> int:
     ):
         require(marker in system_model, f"system model missing required control-plane marker: {marker}")
 
-    subprocess.run(
-        [sys.executable, str(ROOT / "scripts/agent/context.py"), "--self-test"],
-        cwd=ROOT,
-        check=True,
-    )
-    subprocess.run(
-        [sys.executable, str(ROOT / "scripts/agent/checkpoint.py"), "--self-test"],
-        cwd=ROOT,
-        check=True,
-    )
+    validate_ci_identity_contracts()
+
+    for script in (
+        ROOT / "scripts/agent/context.py",
+        ROOT / "scripts/agent/checkpoint.py",
+        BRANCH_TOPOLOGY,
+        CI_SUBJECT,
+    ):
+        subprocess.run([sys.executable, str(script), "--self-test"], cwd=ROOT, check=True)
 
     print("Agent control plane verification: PASS")
     return 0

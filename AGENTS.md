@@ -114,6 +114,8 @@ source SHA
 
 Compilation is not activation. Activation is not correctness. Correctness is not performance improvement. A screenshot without semantic linkage is diagnostic evidence. A PASS from another SHA is stale.
 
+For pull requests, **candidate-head** and **synthetic merge-result** are different proof subjects. A workflow may claim exact-head evidence only when it verifies the checked-out commit against the candidate head SHA. The general `build` PR job intentionally remains merge-result integration evidence. See `docs/agent/ci-proof-identity.md`.
+
 The unified runner already emits the canonical run manifest, correctness/admission/trial artifacts and `decision.json`; reuse those instead of copying metrics into another truth store.
 
 ## Environment truth
@@ -132,14 +134,22 @@ The generated `.minecraft-reference/26.2/sources/` tree is ignored and must not 
 
 Normally retain only `master`, `integration/iris-metal-next`, `feature/ios-amethyst-runtime`, and `research/modernization-backlog`, plus bounded active task work. After the human merge/retire decision, delete disposable task branches. Preserve uniquely useful unlanded work by exact SHA + retirement ledger/research anchor, not per-task archive branches.
 
+For any task that spans branches, do not reason from a flat branch-name list or the historical migration matrix. Compile live topology explicitly:
+
+```bash
+python3 scripts/agent/branch_topology.py --refresh
+```
+
+Reason from lineage tips and their nearest covered ancestors. Use ancestry **and tree identity**: a history anchor can be hundreds of commits ahead while tree-identical to canonical. Open PR state is intent metadata, not proof of unique code. `covered-ancestor` is a read-only retirement advisory, never permission to delete a branch. See `docs/agent/branch-topology.md`.
+
 Durable knowledge should compile into the narrowest form:
 
 - invariant -> test/canonical contract;
 - ownership or proof rule -> registry + routing fixture/checker;
-- long-lived interface reason -> ADR;
+- long-lived interface/lineage reason -> ADR;
 - runtime result -> exact-SHA structured evidence;
 - transient work -> ignored checkpoint.
 
 ## Final report
 
-Distinguish validated, environment-blocked/unvalidated, rejected/reverted, inconclusive/noise and pre-existing policy drift. Report starting/ending SHA, changed ownership/boundaries, actual gates and exit status, exact-head CI, correctness/activation evidence, remaining physical limits and residual risk. For performance, include before/after, raw and direction-normalized delta, and paired block count.
+Distinguish validated, environment-blocked/unvalidated, rejected/reverted, inconclusive/noise and pre-existing policy drift. Report starting/ending SHA, changed ownership/boundaries, actual gates and exit status, candidate-head CI identity, merge-result identity when promotion/integration is relevant, correctness/activation evidence, remaining physical limits and residual risk. For performance, include before/after, raw and direction-normalized delta, and paired block count.
