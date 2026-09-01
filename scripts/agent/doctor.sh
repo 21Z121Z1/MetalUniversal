@@ -4,6 +4,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+REGISTRY="$ROOT/docs/agent/system-registry.json"
+if [[ ! -f "$REGISTRY" ]]; then
+  echo "FAIL agent registry               missing docs/agent/system-registry.json" >&2
+  exit 1
+fi
+
+CANONICAL_BRANCH="$(python3 - "$REGISTRY" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as fh:
+    print(json.load(fh)['canonical']['development_branch'])
+PY
+)"
+
 RUN_ROOT="${METALLUM_AGENT_RUN_ROOT:-$ROOT/build/agent-runs}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${METALLUM_AGENT_DOCTOR_OUT:-$RUN_ROOT/doctor-$STAMP}"
@@ -57,9 +70,40 @@ status_porcelain="$(git status --porcelain=v1 2>/dev/null || true)"
 if [[ -n "$status_porcelain" ]]; then
   warn "working tree" "contains local changes; preserve or commit intentional work before baseline measurement"
 fi
-if [[ "$branch" != "feature/iris-metal-performance" ]]; then
-  warn "branch" "expected feature/iris-metal-performance, found ${branch:-detached}"
+
+canonical_ref=""
+for candidate in "$CANONICAL_BRANCH" "origin/$CANONICAL_BRANCH"; do
+  if git rev-parse --verify "$candidate" >/dev/null 2>&1; then
+    canonical_ref="$candidate"
+    break
+  fi
+done
+
+branch_relation="unresolved-canonical-ref"
+if [[ -n "$canonical_ref" ]]; then
+  canonical_sha="$(git rev-parse "$canonical_ref")"
+  if [[ "$head_sha" == "$canonical_sha" ]]; then
+    branch_relation="at-canonical"
+  elif git merge-base --is-ancestor "$canonical_sha" "$head_sha" >/dev/null 2>&1; then
+    branch_relation="descendant-of-canonical"
+  elif git merge-base --is-ancestor "$head_sha" "$canonical_sha" >/dev/null 2>&1; then
+    branch_relation="behind-canonical"
+  else
+    branch_relation="diverged-from-canonical"
+  fi
 fi
+
+case "$branch_relation" in
+  at-canonical|descendant-of-canonical)
+    check "branch lineage" 1 "${branch:-detached} ($branch_relation vs $CANONICAL_BRANCH)"
+    ;;
+  unresolved-canonical-ref)
+    warn "branch lineage" "cannot resolve $CANONICAL_BRANCH locally; context.py/GitHub inventory must establish lineage before implementation"
+    ;;
+  *)
+    warn "branch lineage" "${branch:-detached} is $branch_relation vs $CANONICAL_BRANCH; re-orient before baseline measurement"
+    ;;
+esac
 
 if [[ ! -d run/shaderpacks ]] || ! find run/shaderpacks -maxdepth 1 -type f \( -name '*.zip' -o -name '*.jar' \) -print -quit | grep -q .; then
   warn "shader-pack fixtures" "run/shaderpacks has no local pack archive; translation/client acceptance will be incomplete"
@@ -83,6 +127,11 @@ fi
 
 printf '%s\n' "$status_porcelain" > "$OUT/git-status.txt"
 
+export METALLUM_AGENT_CANONICAL_BRANCH="$CANONICAL_BRANCH"
+export METALLUM_AGENT_BRANCH_RELATION="$branch_relation"
+export METALLUM_AGENT_CANONICAL_REF="$canonical_ref"
+export METALLUM_AGENT_CONSOLE_LOCKED="$console_locked"
+
 python3 - "$OUT/environment.json" <<'PY'
 import json, os, platform, subprocess, sys
 
@@ -98,12 +147,16 @@ payload = {
     "branch": run("git", "branch", "--show-current"),
     "head": run("git", "rev-parse", "HEAD"),
     "git_status": run("git", "status", "--porcelain=v1"),
+    "canonical_branch": os.environ.get("METALLUM_AGENT_CANONICAL_BRANCH"),
+    "canonical_ref_used": os.environ.get("METALLUM_AGENT_CANONICAL_REF"),
+    "relation_to_canonical": os.environ.get("METALLUM_AGENT_BRANCH_RELATION"),
     "platform": platform.platform(),
     "machine": platform.machine(),
     "java": run("java", "-version"),
     "javac": run("javac", "-version"),
     "swiftc": run("swiftc", "--version"),
     "xcode": run("xcodebuild", "-version"),
+    "console_locked": os.environ.get("METALLUM_AGENT_CONSOLE_LOCKED"),
     "world": os.environ.get("WORLD"),
     "shader_pack": os.environ.get("SHADER_PACK"),
 }
@@ -113,6 +166,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as fh:
 PY
 
 printf '\nEnvironment artifact: %s\n' "$OUT/environment.json"
+printf 'Canonical development branch: %s\n' "$CANONICAL_BRANCH"
 printf 'Warnings: %d; failures: %d\n' "$warnings" "$failures"
 
 if (( failures > 0 )); then

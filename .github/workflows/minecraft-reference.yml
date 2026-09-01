@@ -5,21 +5,35 @@ on:
   pull_request:
     paths:
       - 'scripts/minecraft-reference.sh'
+      - 'scripts/agent/record_ci_subject.py'
       - '.github/workflows/minecraft-reference.yml'
       - '.gitignore'
       - 'AGENTS.md'
       - 'docs/agent/minecraft-reference.md'
+      - 'docs/agent/ci-proof-identity.md'
 
 permissions:
   contents: read
+
+env:
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   minecraft-reference:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout
+      - name: Checkout exact candidate SHA
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+
+      - name: Record candidate-head CI identity
+        shell: bash
+        run: >-
+          python3 scripts/agent/record_ci_subject.py
+          --proof-subject candidate-head
+          --output build/agent-evidence/ci-subject-minecraft-reference.json
 
       - name: Set up Java 25
         uses: actions/setup-java@v5
@@ -53,3 +67,12 @@ jobs:
       - name: Ensure Minecraft files stay untracked
         run: |
           test -z "$(git status --short --untracked-files=all -- .minecraft-reference)"
+
+      - name: Preserve proof identity
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-reference-identity-${{ github.run_attempt }}
+          path: build/agent-evidence/ci-subject-minecraft-reference.json
+          if-no-files-found: error
+          retention-days: 14

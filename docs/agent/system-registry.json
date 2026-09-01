@@ -1,0 +1,653 @@
+{
+  "schema_version": 3,
+  "purpose": "Machine-readable agent control graph. It routes authority, ownership, impact and proof; it does not duplicate renderer or runtime truth.",
+  "canonical": {
+    "stable_branch": "master",
+    "development_branch": "integration/iris-metal-next",
+    "history_anchor_branch": "research/modernization-backlog",
+    "max_persistent_branches": 5,
+    "platform_branches": [
+      "feature/ios-amethyst-runtime"
+    ]
+  },
+  "bootstrap": {
+    "entrypoint": "AGENTS.md",
+    "context_command": "python3 scripts/agent/context.py",
+    "checkpoint_command": "python3 scripts/agent/checkpoint.py",
+    "system_model": "docs/agent/system-model.md",
+    "documentation_index": "docs/README.md",
+    "routing_fixtures": "docs/agent/routing-fixtures.json",
+    "static_verification": "bash scripts/agent/verify_unified_eval.sh"
+  },
+  "authority_order": [
+    {
+      "rank": 1,
+      "kind": "executable_truth",
+      "description": "Shipping source, tests, schemas, generated manifests and exact Git identity."
+    },
+    {
+      "rank": 2,
+      "kind": "runtime_evidence",
+      "description": "Structured evidence produced by the exact source/binary under test."
+    },
+    {
+      "rank": 3,
+      "kind": "canonical_design",
+      "description": "Current contracts, architecture and acceptance documents named by this registry."
+    },
+    {
+      "rank": 4,
+      "kind": "historical_context",
+      "description": "Dated handoffs, retired plans, prompts and migration records; useful for provenance or recipes, never sufficient to assert current behavior."
+    }
+  ],
+  "canonical_documents": [
+    "AGENTS.md",
+    "docs/README.md",
+    "docs/agent/system-model.md",
+    "docs/agent/unified-evaluation-loop.md",
+    "docs/agent/unified-evaluation-acceptance.json",
+    "docs/render-contract-validation.md"
+  ],
+  "historical_or_advisory": [
+    "docs/handoffs/**",
+    "docs/agent/prompts/**",
+    "docs/agent/retired-branch-backlog.md",
+    "docs/agent/branch-migration-matrix.json",
+    "docs/iris_on_metal_implementation_plan.md",
+    "docs/iris_on_metal_architecture.md",
+    "docs/iris-audit/experimental-performance-architecture.md",
+    "docs/iris-audit/advanced-optimization-runtime-handoff.md",
+    "docs/agent/cloud-first-metal-program.json"
+  ],
+  "generated_evidence": {
+    "never_commit": [
+      "build/agent-runs/**",
+      "build/agent-evidence/**",
+      "build/agent-state/**",
+      ".minecraft-reference/**"
+    ],
+    "structured_reports_are_authoritative": true,
+    "log_regex_is_acceptance_authority": false,
+    "run_manifest": "build/agent-runs/*/run-manifest.json",
+    "decision": "build/agent-runs/*/decision.json"
+  },
+  "claim_proofs": {
+    "control": [],
+    "correctness": [],
+    "performance": [
+      "performance.paired"
+    ],
+    "platform": [
+      "mobile.device-e2e"
+    ],
+    "presentation": [
+      "physical.presentation"
+    ]
+  },
+  "proof_profiles": {
+    "agent.control": {
+      "rank": 0,
+      "cost_class": "tiny",
+      "environment": "any",
+      "command": "python3 scripts/agent/verify_agent_control_plane.py",
+      "depends_on": [],
+      "covers": [],
+      "proves": "control graph, routing fixtures, paths, proof DAG and bootstrap consistency"
+    },
+    "repo.static": {
+      "rank": 1,
+      "cost_class": "small",
+      "environment": "hosted-or-local",
+      "command": "bash scripts/agent/verify_unified_eval.sh",
+      "depends_on": [
+        "agent.control"
+      ],
+      "covers": [
+        "agent.control"
+      ],
+      "always_preflight": true,
+      "proves": "schemas, analyzers, focused Java contracts and current static harness consistency"
+    },
+    "render.synthetic": {
+      "rank": 2,
+      "cost_class": "small",
+      "environment": "hosted-or-local",
+      "command": "./gradlew --no-daemon renderContractSyntheticValidation",
+      "depends_on": [
+        "repo.static"
+      ],
+      "covers": [],
+      "proves": "backend-neutral render-contract fixtures and oracle behavior"
+    },
+    "render.gpu": {
+      "rank": 3,
+      "cost_class": "medium",
+      "environment": "supported-Metal-environment",
+      "command": "bash scripts/agent/verify.sh gpu",
+      "depends_on": [
+        "repo.static"
+      ],
+      "covers": [],
+      "proves": "focused Java/FFM/Swift GPU execution contracts where capability exists"
+    },
+    "ios.build": {
+      "rank": 3,
+      "cost_class": "medium",
+      "environment": "macOS-with-iOS-SDK",
+      "command": "./gradlew --no-daemon buildIOSNative buildIOSSpvc",
+      "depends_on": [
+        "repo.static"
+      ],
+      "covers": [],
+      "proves": "iOS native/toolchain and packaging compatibility only"
+    },
+    "hosted.exact-head": {
+      "rank": 4,
+      "cost_class": "medium",
+      "environment": "github-actions",
+      "command": "GitHub Actions on exact HEAD: Unified eval verification + metal-capabilities + Minecraft reference smoke",
+      "depends_on": [
+        "repo.static"
+      ],
+      "covers": [
+        "agent.control",
+        "repo.static"
+      ],
+      "proves": "independent exact-head CI, hosted macOS native compatibility and repository capability gates"
+    },
+    "minecraft.conformance": {
+      "rank": 5,
+      "cost_class": "large",
+      "environment": "attended-or-capable-Minecraft-runtime",
+      "command": "MODE=conformance WORLD=\"<world>\" CANDIDATE_PROFILE=\"<profile>\" bash scripts/agent/run_unified_eval_cycle.sh",
+      "depends_on": [
+        "render.synthetic",
+        "render.gpu"
+      ],
+      "covers": [
+        "agent.control",
+        "repo.static",
+        "render.synthetic",
+        "render.gpu"
+      ],
+      "proves": "real-client semantic/render-contract correctness for the selected scenario"
+    },
+    "minecraft.e2e": {
+      "rank": 6,
+      "cost_class": "large",
+      "environment": "github-actions-or-real-client-runtime",
+      "command": "GitHub Actions on exact HEAD: Minecraft 26.2 production client E2E",
+      "depends_on": [
+        "hosted.exact-head"
+      ],
+      "covers": [],
+      "proves": "production-client startup/runtime path on the exact candidate SHA"
+    },
+    "physical.presentation": {
+      "rank": 7,
+      "cost_class": "physical",
+      "environment": "attended-Apple-Silicon",
+      "command": "bash scripts/agent/run_metal4_main_p1_physical_correctness.sh",
+      "depends_on": [
+        "minecraft.conformance",
+        "minecraft.e2e"
+      ],
+      "covers": [],
+      "proves": "physical Metal/presentation correctness that hosted runners cannot establish"
+    },
+    "mobile.device-e2e": {
+      "rank": 7,
+      "cost_class": "physical",
+      "environment": "real-iOS-Amethyst-runtime",
+      "command": "real-device iOS/Amethyst startup -> swap/present -> Minecraft oracle",
+      "depends_on": [
+        "ios.build"
+      ],
+      "covers": [],
+      "proves": "real mobile runtime and presentation; build-only evidence is insufficient"
+    },
+    "performance.paired": {
+      "rank": 8,
+      "cost_class": "very-large",
+      "environment": "stable-attended-Apple-Silicon",
+      "command": "MODE=full WORLD=\"<world>\" BLOCKS=4 CANDIDATE_PROFILE=\"<profile>\" bash scripts/agent/run_unified_eval_cycle.sh",
+      "depends_on": [
+        "minecraft.conformance"
+      ],
+      "covers": [
+        "agent.control",
+        "repo.static",
+        "render.synthetic",
+        "render.gpu",
+        "minecraft.conformance"
+      ],
+      "proves": "correctness-gated interleaved paired performance acceptance"
+    }
+  },
+  "boundaries": [
+    {
+      "id": "semantics-plan",
+      "from": [
+        "product.semantics"
+      ],
+      "to": [
+        "render.plan"
+      ],
+      "required_proofs": [
+        "render.synthetic",
+        "minecraft.conformance"
+      ],
+      "contract": "observable game/Iris/Sodium meaning must lower to stable semantic/resource identities without approximation"
+    },
+    {
+      "id": "plan-execution",
+      "from": [
+        "render.plan",
+        "terrain.scene"
+      ],
+      "to": [
+        "render.execution"
+      ],
+      "required_proofs": [
+        "minecraft.conformance"
+      ],
+      "contract": "execution consumes admitted immutable intent; hot paths must not independently invent semantic policy"
+    },
+    {
+      "id": "java-native-abi",
+      "from": [
+        "render.execution",
+        "native.abi"
+      ],
+      "to": [
+        "native.execution"
+      ],
+      "required_proofs": [
+        "render.gpu",
+        "hosted.exact-head",
+        "minecraft.e2e"
+      ],
+      "contract": "Java descriptors/downcalls and Swift exports agree on layout, symbol, ownership, nullability and fallback behavior"
+    },
+    {
+      "id": "runtime-validation",
+      "from": [
+        "render.execution",
+        "native.abi",
+        "native.execution",
+        "terrain.scene"
+      ],
+      "to": [
+        "validation.contract"
+      ],
+      "required_proofs": [
+        "minecraft.conformance"
+      ],
+      "contract": "runtime evidence is joined back to semantic pass/resource identity rather than implementation-local addresses"
+    },
+    {
+      "id": "validation-evaluation",
+      "from": [
+        "validation.contract"
+      ],
+      "to": [
+        "evaluation.control"
+      ],
+      "required_proofs": [
+        "agent.control",
+        "render.synthetic"
+      ],
+      "contract": "a changed oracle/analyzer must independently prove itself before approving the same candidate"
+    },
+    {
+      "id": "mobile-native",
+      "from": [
+        "platform.mobile"
+      ],
+      "to": [
+        "native.abi",
+        "native.execution"
+      ],
+      "required_proofs": [
+        "ios.build",
+        "mobile.device-e2e"
+      ],
+      "contract": "platform-specific runtime behavior shares backend contracts without silently redefining the canonical macOS line"
+    }
+  ],
+  "components": [
+    {
+      "id": "product.semantics",
+      "summary": "Minecraft, Iris and Sodium observable rendering semantics and version-specific behavior.",
+      "keywords": [
+        "minecraft",
+        "iris",
+        "sodium",
+        "shader",
+        "bsl",
+        "semantic",
+        "pack",
+        "drawbuffers",
+        "shadow"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/mixin",
+        "src/main/java/com/metallum/client/metal/render"
+      ],
+      "owned_paths": [
+        "src/main/java/com/metallum/mixin/**"
+      ],
+      "canonical_docs": [
+        "docs/render-contract-validation.md",
+        "docs/agent/minecraft-reference.md"
+      ],
+      "agent_guide": "src/main/java/com/metallum/client/metal/render/AGENTS.md",
+      "impact_targets": [
+        "render.plan",
+        "terrain.scene",
+        "validation.contract"
+      ],
+      "required_proofs": [
+        "repo.static",
+        "render.synthetic",
+        "minecraft.conformance"
+      ]
+    },
+    {
+      "id": "render.plan",
+      "summary": "Immutable render intent, semantic pass identity, hazard/liveness reasoning and optimization admission.",
+      "keywords": [
+        "plan",
+        "graph",
+        "hazard",
+        "liveness",
+        "fusion",
+        "compute",
+        "attachment",
+        "load",
+        "store",
+        "resource",
+        "admission",
+        "lifetime"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/client/metal/render",
+        "src/main/java/com/metallum/client/validation"
+      ],
+      "owned_paths": [
+        "src/main/java/com/metallum/client/metal/render/*Plan*.java",
+        "src/main/java/com/metallum/client/metal/render/*Hazard*.java",
+        "src/main/java/com/metallum/client/metal/render/*Liveness*.java",
+        "src/main/java/com/metallum/client/metal/render/*LifetimeCompiler.java",
+        "src/main/java/com/metallum/client/metal/render/*Admission*.java",
+        "src/main/java/com/metallum/client/metal/render/IrisMetalAdvancedOptimizationConfig.java"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md",
+        "docs/agent/unified-evaluation-loop.md"
+      ],
+      "agent_guide": "src/main/java/com/metallum/client/metal/render/AGENTS.md",
+      "impact_targets": [
+        "render.execution",
+        "validation.contract"
+      ],
+      "required_proofs": [
+        "repo.static",
+        "render.synthetic",
+        "minecraft.conformance"
+      ]
+    },
+    {
+      "id": "render.execution",
+      "summary": "Java Metal command/resource execution, lifecycle and Metal 3/4 execution policy.",
+      "keywords": [
+        "metal",
+        "encoder",
+        "pipeline",
+        "texture",
+        "buffer",
+        "residency",
+        "icb",
+        "render",
+        "compute",
+        "runtime"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/client/metal/render",
+        "src/main/java/com/metallum/client/metal/render/mtl"
+      ],
+      "owned_paths": [
+        "src/main/java/com/metallum/client/metal/render/**"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md"
+      ],
+      "agent_guide": "src/main/java/com/metallum/client/metal/render/AGENTS.md",
+      "impact_targets": [
+        "validation.contract"
+      ],
+      "required_proofs": [
+        "repo.static",
+        "render.gpu",
+        "minecraft.conformance",
+        "minecraft.e2e"
+      ]
+    },
+    {
+      "id": "native.abi",
+      "summary": "Java FFM to Swift ABI, descriptor layout, ownership, nullability and exported-symbol contract.",
+      "keywords": [
+        "ffm",
+        "abi",
+        "bridge",
+        "downcall",
+        "symbol",
+        "cdecl",
+        "descriptor",
+        "nullability"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java"
+      ],
+      "owned_paths": [
+        "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md"
+      ],
+      "agent_guide": "src/main/java/com/metallum/client/metal/render/AGENTS.md",
+      "impact_targets": [
+        "native.execution",
+        "validation.contract"
+      ],
+      "required_proofs": [
+        "repo.static",
+        "render.gpu",
+        "hosted.exact-head",
+        "minecraft.e2e"
+      ]
+    },
+    {
+      "id": "native.execution",
+      "summary": "Swift/Metal resource, encoder, command-buffer and presentation implementation below the FFM ABI.",
+      "keywords": [
+        "swift",
+        "native",
+        "metal4",
+        "mtl",
+        "commandbuffer",
+        "present",
+        "cametallayer",
+        "metalfx"
+      ],
+      "source_roots": [
+        "src/main/native"
+      ],
+      "owned_paths": [
+        "src/main/native/**"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md"
+      ],
+      "agent_guide": "src/main/native/AGENTS.md",
+      "impact_targets": [
+        "validation.contract"
+      ],
+      "required_proofs": [
+        "repo.static",
+        "render.gpu",
+        "hosted.exact-head",
+        "minecraft.e2e"
+      ]
+    },
+    {
+      "id": "terrain.scene",
+      "summary": "Terrain generation ownership, scheduling, GPU scene/ICB submission, visibility and runtime telemetry.",
+      "keywords": [
+        "terrain",
+        "chunk",
+        "scene",
+        "icb",
+        "visibility",
+        "culling",
+        "geometry",
+        "arena"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/client/terrain"
+      ],
+      "owned_paths": [
+        "src/main/java/com/metallum/client/terrain/**"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md",
+        "docs/agent/presentation-pacing-evidence.md"
+      ],
+      "agent_guide": "src/main/java/com/metallum/client/terrain/AGENTS.md",
+      "impact_targets": [
+        "render.execution",
+        "validation.contract"
+      ],
+      "required_proofs": [
+        "repo.static",
+        "minecraft.conformance",
+        "minecraft.e2e"
+      ]
+    },
+    {
+      "id": "validation.contract",
+      "summary": "Backend-neutral render contract, generation-aware resource identity, first-divergence diagnosis and correctness oracle.",
+      "keywords": [
+        "validation",
+        "contract",
+        "trace",
+        "divergence",
+        "oracle",
+        "readback",
+        "identity",
+        "correctness"
+      ],
+      "source_roots": [
+        "src/main/java/com/metallum/client/validation",
+        "validation/render-contract"
+      ],
+      "owned_paths": [
+        "src/main/java/com/metallum/client/validation/**",
+        "validation/render-contract/**",
+        "docs/render-contract-validation.md"
+      ],
+      "canonical_docs": [
+        "docs/render-contract-validation.md",
+        "docs/agent/unified-evaluation-loop.md",
+        "docs/agent/unified-evaluation-acceptance.json"
+      ],
+      "agent_guide": "src/main/java/com/metallum/client/validation/AGENTS.md",
+      "impact_targets": [
+        "evaluation.control"
+      ],
+      "required_proofs": [
+        "repo.static",
+        "render.synthetic",
+        "minecraft.conformance"
+      ]
+    },
+    {
+      "id": "evaluation.control",
+      "summary": "Agent bootstrap, epistemic routing, impact/proof planning, experiment orchestration, structured evidence, statistics and CI authority.",
+      "keywords": [
+        "agent",
+        "benchmark",
+        "abba",
+        "performance",
+        "evidence",
+        "ci",
+        "workflow",
+        "acceptance",
+        "profile",
+        "context",
+        "checkpoint",
+        "routing",
+        "proof"
+      ],
+      "source_roots": [
+        "scripts/agent",
+        ".github/workflows"
+      ],
+      "owned_paths": [
+        "scripts/agent/**",
+        ".github/workflows/**",
+        "AGENTS.md",
+        "docs/README.md",
+        "docs/AGENTS.md",
+        "docs/agent/system-*.md",
+        "docs/agent/system-*.json",
+        "docs/agent/routing-fixtures.json",
+        "docs/agent/decisions/**"
+      ],
+      "canonical_docs": [
+        "AGENTS.md",
+        "docs/agent/system-model.md",
+        "docs/agent/unified-evaluation-loop.md",
+        "docs/agent/unified-evaluation-acceptance.json"
+      ],
+      "agent_guide": "scripts/agent/AGENTS.md",
+      "impact_targets": [],
+      "required_proofs": [
+        "agent.control",
+        "repo.static",
+        "hosted.exact-head"
+      ]
+    },
+    {
+      "id": "platform.mobile",
+      "summary": "Isolated iOS/Amethyst platform lineage; share backend contracts without silently redefining canonical macOS behavior.",
+      "keywords": [
+        "ios",
+        "iphoneos",
+        "amethyst",
+        "mobile",
+        "cametallayer"
+      ],
+      "source_roots": [
+        "src/main/native",
+        "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java"
+      ],
+      "owned_paths": [
+        "src/main/resources/natives/ios/**"
+      ],
+      "canonical_docs": [
+        "docs/agent/system-model.md"
+      ],
+      "agent_guide": "src/main/native/AGENTS.md",
+      "impact_targets": [
+        "native.abi",
+        "native.execution"
+      ],
+      "required_proofs": [
+        "ios.build",
+        "mobile.device-e2e"
+      ]
+    }
+  ]
+}

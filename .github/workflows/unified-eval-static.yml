@@ -3,11 +3,14 @@ name: Unified eval verification
 on:
   push:
     branches:
+      - master
       - integration/iris-metal-next
-      - agent/unified-render-eval-performance
   pull_request:
     paths:
+      - 'README.md'
       - 'AGENTS.md'
+      - 'docs/AGENTS.md'
+      - 'docs/README.md'
       - 'docs/agent/**'
       - 'docs/render-contract-validation.md'
       - 'scripts/agent/**'
@@ -24,6 +27,9 @@ on:
 permissions:
   contents: read
 
+env:
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 concurrency:
   group: unified-eval-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -34,22 +40,46 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - name: Record candidate-head CI identity
+        shell: bash
+        run: >-
+          python3 scripts/agent/record_ci_subject.py
+          --proof-subject candidate-head
+          --output build/agent-evidence/ci-subject-headless.json
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
-      - name: Verify schemas, analyzer and Java gates
+      - name: Verify agent control plane, schemas, analyzer and Java gates
         shell: bash
         run: bash scripts/agent/verify_unified_eval.sh
+      - name: Preserve headless proof identity
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unified-eval-headless-identity-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: build/agent-evidence/ci-subject-headless.json
 
   macos26-native:
     name: macOS 26 native compile
     runs-on: macos-26
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
+      - name: Record candidate-head CI identity
+        shell: bash
+        run: >-
+          python3 scripts/agent/record_ci_subject.py
+          --proof-subject candidate-head
+          --output build/agent-evidence/ci-subject-macos.json
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
@@ -84,12 +114,12 @@ jobs:
       - name: State hosted-runner boundary
         shell: bash
         run: |
-          cat <<'EOF'
+          cat <<'BOUNDARY'
           macOS 26 hosted verification proves toolchain compatibility, Swift/MetalFX/Metal 4 compilation,
-          Java-to-native build integration and exported-symbol presence. It does not prove attended
-          WindowServer behavior, shader-pack visual parity, stable GPU performance or real-client Metal 4 use.
-          Those remain local Apple Silicon gates.
-          EOF
+          Java-to-native build integration and exported-symbol presence for the exact candidate-head commit.
+          It does not prove attended WindowServer behavior, shader-pack visual parity, stable GPU performance
+          or real-client Metal 4 use. Those remain physical Apple Silicon gates.
+          BOUNDARY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -99,4 +129,5 @@ jobs:
           path: |
             src/main/resources/natives/macos/libmetallum.dylib
             build/metallum-native-symbols.txt
+            build/agent-evidence/ci-subject-macos.json
             build/reports/problems/
