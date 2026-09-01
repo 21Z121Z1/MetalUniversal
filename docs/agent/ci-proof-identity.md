@@ -53,6 +53,27 @@ The structured record includes:
 
 The command fails closed when the checked-out commit does not match the declared subject.
 
+## Proof producers are independent
+
+A proof-producing workflow owns only the evidence it directly executes. It must not turn itself into a distributed scheduler by polling sibling workflows, waiting for their conclusions, or rewriting their results into its own `PASS` state.
+
+This is both an epistemic rule and a resource rule:
+
+```text
+cheap/static proof producer ---------\
+hosted Metal exact-head producer -----+--> promotion/readiness composition
+Minecraft production E2E producer ----+
+merge-result integration producer ----/
+```
+
+Each producer emits typed, exact-subject evidence and terminates as soon as its own obligation is resolved. The promotion layer composes those independent conclusions. In GitHub, required checks and the agent's merge-readiness inspection are the normal composition surface; an expensive macOS GPU runner must not sleep while waiting for sibling workflows.
+
+A capability block is also a result, not a pass. If a hosted environment cannot execute the JVM -> FFM -> Swift GPU suite, the hosted evidence must say `environment-blocked`, record what executed, and name the stronger authority that still has to establish the runtime claim. Another workflow may later satisfy that obligation, but it does not retroactively make the blocked hosted execution become `pass`.
+
+For pull-request branches, an exact-head workflow should normally run once from the `pull_request` event. Running the same expensive job again from an `agent/**` push duplicates cost without creating a different proof subject. The canonical development branch may still run the same workflow on `push` so the post-merge commit is independently validated.
+
+See ADR `docs/agent/decisions/0004-independent-proof-producers-and-promotion-composition.md`.
+
 ## Promotion model
 
 Candidate proof and merge-result proof answer different questions:
@@ -77,6 +98,8 @@ merge-result gate conclusion
 ```
 
 Do not collapse them into one `source_sha` field.
+
+Promotion is the composition point. It may require several independently green candidate-head checks plus a merge-result check and, for stronger claims, physical/device evidence. No individual proof producer should claim overall promotion readiness merely because it can query the other jobs.
 
 ## Evidence ownership
 

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Compatibility entrypoint for the current hosted-Metal control contract.
 
-The historical cloud-first program and branch migration matrix are provenance only;
-this verifier derives current branch authority from system-registry.json.
+Historical cloud-program and branch-migration files are provenance only. Current
+branch authority comes from system-registry.json. The hosted Metal workflow is
+an independent proof producer: it must bind evidence to the exact candidate
+HEAD, report capability blocks honestly, and never wait for sibling workflows.
+Promotion composes independent checks outside the expensive proof producer.
 """
 
 from __future__ import annotations
@@ -95,7 +98,6 @@ def main() -> None:
         require(checked_out_sha == expected,
                 f"checkout/source SHA mismatch: checkout={checked_out_sha} expected={expected}")
 
-    # Preserve physical-acceptance boundaries independently of any retired stage/branch plan.
     require(p1["scope"]["default_enablement_allowed_before_acceptance"] is False,
             "P1 default enablement gate was weakened")
     require(p1["capability_policy"]["blocked_capability_is_stage_pass"] is False,
@@ -107,7 +109,6 @@ def main() -> None:
 
     remote: set[str] | None = None
     required_persistent = {stable, development, history_anchor, *platform_branches}
-    missing_required: list[str] = []
     if args.inspect_remote_branches:
         remote = live_remote_branches()
         missing_required = sorted(required_persistent - remote)
@@ -115,27 +116,48 @@ def main() -> None:
                 f"required persistent branches missing from GitHub: {missing_required}")
 
     require(WORKFLOW.is_file(), "missing Metal capability workflow")
-    workflow_text = WORKFLOW.read_text(encoding="utf-8").lower()
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    workflow_lower = workflow_text.lower()
     for forbidden in ("amethyst", "iphoneos", "iphonesimulator", "simctl", "buildiosnative", "buildiosspvc"):
-        require(forbidden not in workflow_text,
+        require(forbidden not in workflow_lower,
                 f"Mac-only workflow contains forbidden platform-specific token {forbidden!r}")
-    require("runs-on: macos-26" in workflow_text, "hosted Metal job must run on macos-26")
-    require("hostedmetalcapabilityprobe.swift" in workflow_text,
+    require("runs-on: macos-26" in workflow_lower, "hosted Metal job must run on macos-26")
+    require("hostedmetalcapabilityprobe.swift" in workflow_lower,
             "workflow does not compile the repository-owned hosted Metal probe")
     require(
-        "--verify-remote-branches" in workflow_text or "--inspect-remote-branches" in workflow_text,
+        "--verify-remote-branches" in workflow_lower or "--inspect-remote-branches" in workflow_lower,
         "hosted control job must inspect current remote branch policy",
     )
-    require("--expected-source-sha" in workflow_text,
+    require("--expected-source-sha" in workflow_lower,
             "hosted control job must bind evidence to the exact candidate SHA")
-    require("metallum_source_sha" in workflow_text,
+    require("metallum_source_sha" in workflow_lower,
             "workflow must carry an explicit exact candidate SHA identity")
-    require(workflow_text.count("-i .github/ci/hostedmetalgradle.init.gradle") >= 2,
+    require(workflow_lower.count("-i .github/ci/hostedmetalgradle.init.gradle") >= 2,
             "hosted Gradle policy must apply to compile and shipping GPU execution")
-    require("cloud_complete_final_physical_pending" in workflow_text,
-            "hosted lane must preserve the formal deferred-physical decision")
-    require("raise systemexit(failure_reason)" in workflow_text,
-            "hosted lane must fail closed when exact-head external gates are incomplete")
+
+    # Cost and epistemic invariants: task branches get one PR exact-head run;
+    # this expensive proof producer never polls or decides sibling proof status.
+    require("'agent/**'" not in workflow_text and '"agent/**"' not in workflow_text,
+            "expensive hosted Metal workflow must not duplicate PR work on agent-branch pushes")
+    for forbidden in ("time.sleep", "api.github.com/repos/", "required_external", "gh_token"):
+        require(forbidden not in workflow_lower,
+                f"hosted Metal proof producer must not compose sibling workflows ({forbidden!r})")
+    require("hosted_exact_head_proof_complete" in workflow_lower,
+            "hosted lane must emit its own exact-head proof completion state")
+    require("promotion_composition" in workflow_lower and "external-required-checks" in workflow_lower,
+            "hosted lane must delegate cross-workflow composition to the promotion plane")
+
+    # Capability blocks are typed evidence, never converted to a pass claim.
+    require("hosted-shipping-tests.json" in workflow_lower,
+            "hosted decision must consume measured shipping-test evidence")
+    require('shipping_status = "pass" if mode == "required" else "environment-blocked"' in workflow_lower,
+            "shipping GPU status must preserve environment-blocked state")
+    require('activation_status = (' in workflow_lower and '"environment-blocked"' in workflow_lower,
+            "activation evidence must preserve environment-blocked state")
+    require("hosted_shipping_tests_executed" in workflow_lower,
+            "activation evidence must report executed hosted shipping tests")
+    require("delegated_authority" in workflow_lower,
+            "capability-blocked hosted proof must name its delegated authority")
 
     require(HOSTED_GRADLE.is_file(), "missing hosted Gradle capability harness")
     hosted_gradle_text = HOSTED_GRADLE.read_text(encoding="utf-8").lower()
@@ -183,6 +205,9 @@ def main() -> None:
         ),
         "historical_branch_matrix_is_live_authority": False,
         "hosted_mac_only_task_policy": True,
+        "exact_head_proof_producer_is_independent": True,
+        "promotion_composition_is_external": True,
+        "environment_block_is_not_pass": True,
         "layerless_presentation_contract": True,
         "physical_acceptance_deferred_not_waived": True,
         "p1_physical_gate_preserved": True,
