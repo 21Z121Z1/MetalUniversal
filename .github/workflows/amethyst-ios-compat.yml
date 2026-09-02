@@ -47,6 +47,38 @@ jobs:
             BOOTJDK="$JAVA_HOME/bin" \
             LWJGL_MODULES_DIR="$GITHUB_WORKSPACE/lwjgl-modules"
 
+      - name: Verify deterministic GLFW input mode defaults
+        run: |
+          set -euo pipefail
+          MODULE_CP="$(find "$GITHUB_WORKSPACE/lwjgl-modules" -type f -name '*.jar' -print | sort | paste -sd: -)"
+          CLASSPATH="amethyst/JavaApp/build/lwjgl:$MODULE_CP"
+          cat > /tmp/GLFWInputModeDefaultsCheck.java <<'JAVA'
+          import org.lwjgl.glfw.GLFW;
+          import org.lwjgl.glfw.GLFWWindowProperties;
+
+          public final class GLFWInputModeDefaultsCheck {
+              private static void require(GLFWWindowProperties properties, int mode, int expected, String label) {
+                  Integer actual = properties.inputModes.get(mode);
+                  if (actual == null || actual.intValue() != expected) {
+                      throw new AssertionError(label + " default was " + actual + ", expected " + expected);
+                  }
+              }
+
+              public static void main(String[] args) {
+                  GLFWWindowProperties properties = new GLFWWindowProperties();
+                  require(properties, GLFW.GLFW_CURSOR, GLFW.GLFW_CURSOR_NORMAL, "cursor");
+                  require(properties, GLFW.GLFW_STICKY_KEYS, GLFW.GLFW_FALSE, "sticky keys");
+                  require(properties, GLFW.GLFW_STICKY_MOUSE_BUTTONS, GLFW.GLFW_FALSE, "sticky mouse buttons");
+                  require(properties, GLFW.GLFW_LOCK_KEY_MODS, GLFW.GLFW_FALSE, "lock key modifiers");
+                  require(properties, GLFW.GLFW_RAW_MOUSE_MOTION, GLFW.GLFW_FALSE, "raw mouse motion");
+                  require(properties, GLFW.GLFW_UNLIMITED_MOUSE_BUTTONS, GLFW.GLFW_FALSE, "unlimited mouse buttons");
+                  require(properties, GLFW.GLFW_IME, GLFW.GLFW_FALSE, "IME");
+              }
+          }
+          JAVA
+          "$JAVA_HOME/bin/javac" -cp "$CLASSPATH" /tmp/GLFWInputModeDefaultsCheck.java
+          "$JAVA_HOME/bin/java" -cp "$CLASSPATH:/tmp" GLFWInputModeDefaultsCheck
+
       - name: Verify Minecraft 26.x Java ABI surface
         run: |
           set -euo pipefail
