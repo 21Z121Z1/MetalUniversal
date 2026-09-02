@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/ios-amethyst-runtime
+      - task/ios-glfw-input-mode-proof-20260903
   workflow_dispatch:
 
 jobs:
@@ -17,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: 21Z121Z1/Amethyst-iOS
-          ref: feature/metallum-mc26-lwjgl-compat
+          ref: task/mc26-glfw-input-mode-defaults-20260903
           path: amethyst
 
       - name: Set up build JDK
