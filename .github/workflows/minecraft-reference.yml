@@ -6,6 +6,7 @@ on:
     paths:
       - 'scripts/minecraft-reference.sh'
       - 'scripts/agent/record_ci_subject.py'
+      - 'scripts/agent/extract_minecraft_motion_reference.py'
       - '.github/workflows/minecraft-reference.yml'
       - '.gitignore'
       - 'AGENTS.md'
@@ -42,7 +43,9 @@ jobs:
           java-version: '25'
 
       - name: Validate bootstrap syntax
-        run: bash -n scripts/minecraft-reference.sh
+        run: |
+          bash -n scripts/minecraft-reference.sh
+          python3 -m py_compile scripts/agent/extract_minecraft_motion_reference.py
 
       - name: Materialize Minecraft reference sources
         shell: bash
@@ -64,6 +67,25 @@ jobs:
           test "$printed" = "$PWD/.minecraft-reference/26.2/sources"
           echo "Verified $java_count decompiled Java files"
 
+      - name: Extract motion-reference evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/agent/extract_minecraft_motion_reference.py \
+            --source-root '.minecraft-reference/26.2/sources' \
+            --output 'build/agent-evidence/minecraft-motion-reference.json'
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('build/agent-evidence/minecraft-motion-reference.json')
+          data = json.loads(path.read_text(encoding='utf-8'))
+          required = ('game_renderer', 'camera_render_state', 'entity_dispatch', 'moving_block')
+          missing = [name for name in required if not data['queries'].get(name)]
+          if missing:
+              raise SystemExit(f"missing required motion evidence: {missing}")
+          print(f"Motion evidence covers {sum(len(v) for v in data['queries'].values())} source files")
+          PY
+
       - name: Ensure Minecraft files stay untracked
         run: |
           test -z "$(git status --short --untracked-files=all -- .minecraft-reference)"
@@ -74,5 +96,14 @@ jobs:
         with:
           name: minecraft-reference-identity-${{ github.run_attempt }}
           path: build/agent-evidence/ci-subject-minecraft-reference.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Preserve motion-reference evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-motion-reference-${{ github.run_attempt }}
+          path: build/agent-evidence/minecraft-motion-reference.json
           if-no-files-found: error
           retention-days: 14
