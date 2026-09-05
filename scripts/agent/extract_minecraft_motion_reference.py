@@ -54,9 +54,28 @@ QUERIES = (
     ),
     Query(
         "display_entity",
-        ("DisplayRenderer.java", "DisplayEntityRenderer.java", "DisplayEntityRenderState.java"),
-        ("DisplayEntityRenderState", "interpol", "transformation", "pose"),
+        (
+            "DisplayRenderer.java",
+            "DisplayEntityRenderer.java",
+            "DisplayEntityRenderState.java",
+            "Display.java",
+        ),
+        (
+            "DisplayEntityRenderState",
+            "interpol",
+            "transformation",
+            "billboardConstraints",
+            "transformXRot",
+            "transformYRot",
+            "pose",
+        ),
         ("DisplayEntityRenderState",),
+    ),
+    Query(
+        "transformation_math",
+        ("Transformation.java",),
+        ("class Transformation", "getMatrix", "translation", "leftRotation", "scale", "rightRotation"),
+        ("class Transformation",),
     ),
     Query(
         "first_person",
