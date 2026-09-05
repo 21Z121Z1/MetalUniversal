@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Iterable
 
 
-CONTEXT_LINES = 10
-MAX_SNIPPETS_PER_FILE = 8
+CONTEXT_LINES = 14
+MAX_SNIPPETS_PER_FILE = 10
 MAX_MATCHED_FILES_PER_QUERY = 8
 
 
@@ -34,7 +34,14 @@ QUERIES = (
     Query(
         "game_renderer",
         ("GameRenderer.java",),
-        ("renderLevel(", "ProjectionMatrixBuffer", "gameRenderState", "clearDepthTexture"),
+        (
+            "renderLevel(",
+            "renderItemInHand(",
+            "submitHandsWithItems(",
+            "ProjectionMatrixBuffer",
+            "gameRenderState",
+            "clearDepthTexture",
+        ),
     ),
     Query(
         "camera_render_state",
@@ -48,9 +55,25 @@ QUERIES = (
     ),
     Query(
         "moving_block",
-        ("MovingBlockFeatureRenderer.java", "MovingBlockRenderState.java"),
-        ("buildGroup(", "MovingBlockRenderState", "pose", "tesselateBlock"),
-        ("MovingBlockRenderState",),
+        (
+            "MovingBlockFeatureRenderer.java",
+            "MovingBlockRenderState.java",
+            "FallingBlockRenderer.java",
+            "FallingBlockRenderState.java",
+            "PistonHeadRenderer.java",
+            "PistonHeadRenderState.java",
+        ),
+        (
+            "buildGroup(",
+            "submitMovingBlock(",
+            "MovingBlockRenderState",
+            "xOffset",
+            "yOffset",
+            "zOffset",
+            "pose",
+            "tesselateBlock",
+        ),
+        ("MovingBlockRenderState", "submitMovingBlock("),
     ),
     Query(
         "display_entity",
@@ -79,21 +102,51 @@ QUERIES = (
     ),
     Query(
         "first_person",
-        ("ItemInHandRenderer.java", "ItemInHandRenderState.java", "HandRenderState.java"),
-        ("renderArm", "renderHandsWithItems", "swing", "equip", "PoseStack"),
-        ("renderHandsWithItems", "renderArmWithItem"),
+        (
+            "GameRenderer.java",
+            "ItemInHandRenderer.java",
+            "ItemInHandRenderState.java",
+            "HandRenderState.java",
+        ),
+        (
+            "renderItemInHand(",
+            "submitHandsWithItems(",
+            "renderHandsWithItems(",
+            "renderArm",
+            "swing",
+            "equip",
+            "PoseStack",
+        ),
+        ("submitHandsWithItems(", "renderHandsWithItems(", "renderArmWithItem"),
     ),
     Query(
         "living_model",
         ("LivingEntityRenderer.java", "LivingEntityRenderState.java", "EntityModel.java"),
-        ("setupAnim", "LivingEntityRenderState", "bodyRot", "PoseStack"),
+        ("submit(", "setupRotations(", "setupAnim", "LivingEntityRenderState", "bodyRot", "PoseStack"),
         ("setupAnim", "LivingEntityRenderState"),
     ),
     Query(
         "particles",
-        ("ParticleEngine.java", "Particle.java", "SingleQuadParticle.java"),
-        ("render(", "getRenderType", "xOld", "yOld", "zOld", "partial"),
-        ("xOld", "yOld", "zOld"),
+        (
+            "SubmitNodeStorage.java",
+            "SubmitNodeCollection.java",
+            "QuadParticleRenderState.java",
+            "ParticleEngine.java",
+            "Particle.java",
+            "SingleQuadParticle.java",
+        ),
+        (
+            "submitQuadParticleGroup(",
+            "submitParticleGroup(",
+            "QuadParticleRenderState",
+            "render(",
+            "getRenderType",
+            "xOld",
+            "yOld",
+            "zOld",
+            "partial",
+        ),
+        ("submitQuadParticleGroup(", "xOld", "yOld", "zOld"),
     ),
 )
 
@@ -214,7 +267,14 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    required = ("game_renderer", "camera_render_state", "entity_dispatch", "moving_block")
+    required = (
+        "game_renderer",
+        "camera_render_state",
+        "entity_dispatch",
+        "moving_block",
+        "first_person",
+        "particles",
+    )
     missing = [name for name in required if not query_payload.get(name)]
     if missing:
         raise SystemExit(f"required motion-reference queries produced no files: {', '.join(missing)}")
