@@ -50,3 +50,5 @@ jobs:
             src/test/java/com/metallum/client/metal/render/MetalFxMotionEligibilityTest.java
           git commit -m "fix(metalfx): fail closed on incomplete frame motion [motion-admission-applied]"
           git push origin HEAD:agent/metalfx-motion-coverage-26.2
+
+# Trigger after workflow exists on the branch.
