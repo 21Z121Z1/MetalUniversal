@@ -71,12 +71,12 @@ jobs:
             raise SystemExit(f'expected exactly one verified Minecraft 26.2 client jar, found {client_jars}')
           client_jar=client_jars[0]
           jar_sha1=hashlib.sha1(client_jar.read_bytes()).hexdigest()
-          shader_terms=('rendertype_entity_shadow','rendertype_leash','text.vsh','text_background')
+          shader_terms=('rendertype_entity_shadow','rendertype_leash','text.vsh','text.fsh','text_background')
           shaders=[]
           with zipfile.ZipFile(client_jar) as zf:
             for entry in sorted(zf.namelist()):
               lower=entry.lower()
-              if not lower.endswith('.vsh') or not any(term in lower for term in shader_terms):
+              if not (lower.endswith('.vsh') or lower.endswith('.fsh')) or not any(term in lower for term in shader_terms):
                 continue
               data=zf.read(entry)
               shaders.append({
@@ -84,7 +84,11 @@ jobs:
                 'sha256':hashlib.sha256(data).hexdigest(),
                 'text':data.decode('utf-8',errors='strict')
               })
-          required=('rendertype_entity_shadow','rendertype_leash','/text.vsh')
+          required=(
+            'rendertype_entity_shadow.vsh','rendertype_entity_shadow.fsh',
+            'rendertype_leash.vsh','rendertype_leash.fsh',
+            '/text.vsh','/text.fsh','text_background.vsh','text_background.fsh'
+          )
           missing=[term for term in required if not any(term in s['path'].lower() for s in shaders)]
           if missing:
             raise SystemExit(f'missing required shader resources from verified client jar: {missing}')
