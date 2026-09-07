@@ -10,25 +10,24 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): apply Flame shared exact motion v2'"
+    if: "github.event.head_commit.message == 'chore(agent): apply Flame shared exact motion v2b'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           ref: agent/metalfx-motion-coverage-26.2
-          fetch-depth: 5
+          fetch-depth: 6
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
-      - name: Guard Flame exact v2 transaction
+      - name: Guard Flame exact v2b transaction
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "7d407026bb7b85ac7c5322d44e64a9acc49a4ada"
-          test "$(git rev-parse HEAD^^^)" = "a96d89fe1eb5daf078f1cadf1be6debe92e63940"
-          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure Flame shared exact verification v2"
-          test "$(git log -1 --format=%s HEAD^^^)" = "chore(agent): supersede Flame shared exact v1"
+          test "$(git rev-parse HEAD^^)" = "7590a852ac097df721084adc30b66d121642d4d4"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): fix Flame v2 verification task ordering"
+          test "$(git hash-object .github/scripts/apply_flame_shared_exact_motion.py)" = "9b08e77d788b9c84fbf2dcfd89c51178dd1759f1"
       - name: Verify pinned Minecraft 26.2 Flame source contract
         shell: bash
         run: |
@@ -66,13 +65,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew compileJava test jar \
+          ./gradlew compileJava test \
             --tests 'com.metallum.client.metal.render.MetalSharedBatchMotionTest' \
             --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
             --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
             --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
             --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
             --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
           git diff --check
       - name: Verify Flame fail-closed wiring
         shell: bash
