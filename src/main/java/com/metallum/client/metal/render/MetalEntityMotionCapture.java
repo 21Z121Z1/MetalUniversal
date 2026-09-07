@@ -38,15 +38,7 @@ public final class MetalEntityMotionCapture {
             int executesTransferred,
             int executesConsumed,
             int motionDrawsEncoded,
-            // Subset of motionDrawsEncoded that came from the core/item family.
-            // Dropped items, item frames and held items are the only source, so a
-            // scene with dropped items in view and a zero here means the item
-            // motion path is not reaching the interpolator.
             int itemMotionDrawsEncoded,
-            // Subset of motionDrawsEncoded that came from the core/block family.
-            // Falling blocks and block entities are the only source, so a scene
-            // with a falling block in view and a zero here means the block motion
-            // path is not reaching the interpolator.
             int blockMotionDrawsEncoded,
             @Nullable String lastMotionDrawSkip,
             @Nullable String lastVertexShader
@@ -81,7 +73,7 @@ public final class MetalEntityMotionCapture {
 
     private record DrawCapture(
             Sample sample,
-            @Nullable MetalPreviousVertexHistory.DrawToken previousVertexToken
+            MetalPreviousVertexHistory.DrawToken previousVertexToken
     ) {
     }
 
@@ -155,12 +147,6 @@ public final class MetalEntityMotionCapture {
         }
     }
 
-    /**
-     * True only when this rendered state is backed by an observation from the immediately
-     * preceding successfully submitted source frame. A state with no sample, or only a current
-     * sample, is valid input for Temporal's validity/disocclusion path but not for frame
-     * interpolation, which does not consume those confidence masks.
-     */
     public static boolean hasPreviousState(final Object state) {
         Sample sample = enabled && state != null ? STATES.get(state) : null;
         return sample != null && sample.hasPrevious();
@@ -200,16 +186,10 @@ public final class MetalEntityMotionCapture {
         beginBuild(submit, false);
     }
 
-    /**
-     * {@code ItemFeatureRenderer.buildGroup} walks its submit list twice — main
-     * geometry first, then the enchantment foil — so the owning entity has to
-     * survive the first pass. {@link #beginFrame()} bounds the map instead.
-     */
     public static void beginItemBuild(final Object submit) {
         beginBuild(submit, true);
     }
 
-    /** Associates block-entity-owned moving geometry directly with its exact motion sample. */
     public static void attachMovingBlockState(final Object renderState, final Sample sample) {
         if (enabled && renderState != null && sample != null) {
             SUBMITS.put(renderState, sample);
@@ -238,12 +218,6 @@ public final class MetalEntityMotionCapture {
         }
     }
 
-    /**
-     * Wraps a one-pass feature-submit list so each element activates its owning motion sample
-     * before the renderer asks RenderTypeFeatureRenderer for a staged draw. This is needed by
-     * BlockModelFeatureRenderer, whose buildGroup method has no per-submit helper analogous to
-     * ItemFeatureRenderer.prepareSubmit. The wrapper preserves order and delegates storage.
-     */
     public static <T> List<T> activateBuildSampleOnAccess(final List<T> submits) {
         if (!enabled || submits == null || submits.isEmpty()) {
             return submits;
@@ -299,7 +273,6 @@ public final class MetalEntityMotionCapture {
         }
     }
 
-    /** Called immediately before Minecraft frees the CPU staging slices for this exact draw. */
     public static void captureVertexData(
             final StagedVertexBuffer.Draw draw,
             final VertexFormat format,
@@ -378,8 +351,6 @@ public final class MetalEntityMotionCapture {
                 case "core/item" -> itemMotionDrawsEncoded++;
                 case "core/block" -> blockMotionDrawsEncoded++;
                 default -> {
-                    // core/entity carries no subset counter of its own; it is
-                    // motionDrawsEncoded minus the two subsets.
                 }
             }
         }
