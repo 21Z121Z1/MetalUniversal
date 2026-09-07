@@ -8,7 +8,9 @@ import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.jspecify.annotations.Nullable;
 
+import java.util.AbstractList;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -240,6 +242,31 @@ public final class MetalEntityMotionCapture {
             MODEL_BUILD.set(sample);
             modelBuildsMatched++;
         }
+    }
+
+    /**
+     * Wraps a one-pass feature-submit list so each element activates its owning motion sample
+     * before the renderer asks RenderTypeFeatureRenderer for a staged draw. This is needed by
+     * BlockModelFeatureRenderer, whose buildGroup method has no per-submit helper analogous to
+     * ItemFeatureRenderer.prepareSubmit. The wrapper preserves order and delegates storage.
+     */
+    public static <T> List<T> activateBuildSampleOnAccess(final List<T> submits) {
+        if (!enabled || submits == null || submits.isEmpty()) {
+            return submits;
+        }
+        return new AbstractList<>() {
+            @Override
+            public T get(final int index) {
+                T submit = submits.get(index);
+                beginModelBuild(submit);
+                return submit;
+            }
+
+            @Override
+            public int size() {
+                return submits.size();
+            }
+        };
     }
 
     public static void endModelBuild() {

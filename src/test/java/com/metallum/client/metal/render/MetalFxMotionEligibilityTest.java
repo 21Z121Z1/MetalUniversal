@@ -56,6 +56,15 @@ final class MetalFxMotionEligibilityTest {
     }
 
     @Test
+    void buildSampleListPreservesOrderAndSize() {
+        MetalEntityMotionCapture.beginFrame();
+        java.util.List<String> source = java.util.List.of("a", "b", "c");
+        java.util.List<String> wrapped = MetalEntityMotionCapture.activateBuildSampleOnAccess(source);
+        assertEquals(source.size(), wrapped.size());
+        assertEquals(source, wrapped);
+    }
+
+    @Test
     void rejectionIsMonotonicWithinFrameAndResetsAtBoundary() {
         MetalFxMotionEligibility eligibility = new MetalFxMotionEligibility();
         assertTrue(eligibility.eligible());
