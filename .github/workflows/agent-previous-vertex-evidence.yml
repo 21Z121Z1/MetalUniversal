@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: github.event.head_commit.message == 'chore(agent): run previous-position replay patch'
+    if: "github.event.head_commit.message == 'chore(agent): run previous-position replay patch'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "ec402fd2601d9336731051c47499b033b2d3af2e"
+          test "$(git rev-parse HEAD^)" = "e179b1cbf44aa612503f084db3e2b5789b2ca3f4"
       - name: Apply exact previous-position replay
         shell: bash
         run: |
@@ -44,7 +44,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git show HEAD^:.github/workflows/agent-previous-vertex-evidence.yml > .github/workflows/agent-previous-vertex-evidence.yml
+          git show ec402fd2601d9336731051c47499b033b2d3af2e:.github/workflows/agent-previous-vertex-evidence.yml > .github/workflows/agent-previous-vertex-evidence.yml
           rm -f .github/workflows/agent-apply-previous-position-replay.yml
           rm -f .github/scripts/apply_previous_position_replay.py
           git config user.name 'github-actions[bot]'
