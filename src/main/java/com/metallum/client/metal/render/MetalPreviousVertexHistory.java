@@ -40,6 +40,12 @@ final class MetalPreviousVertexHistory {
     record DrawToken(DrawKey key, String pipelineKey) {
     }
 
+    record CameraPosition(double x, double y, double z) {
+        boolean finite() {
+            return Double.isFinite(x) && Double.isFinite(y) && Double.isFinite(z);
+        }
+    }
+
     record Signature(
             String pipelineKey,
             List<VertexFormatElement> elements,
@@ -72,6 +78,8 @@ final class MetalPreviousVertexHistory {
     private static final Map<DrawKey, Snapshot> PENDING = new HashMap<>();
     private static final Map<ObjectKey, Integer> PREVIOUS_DRAW_COUNTS = new HashMap<>();
     private static final Map<ObjectKey, Integer> CURRENT_DRAW_COUNTS = new HashMap<>();
+    private static @Nullable CameraPosition previousCamera;
+    private static @Nullable CameraPosition pendingCamera;
     private static boolean frameOpen;
 
     private MetalPreviousVertexHistory() {
@@ -80,7 +88,23 @@ final class MetalPreviousVertexHistory {
     static void beginFrame() {
         PENDING.clear();
         CURRENT_DRAW_COUNTS.clear();
+        pendingCamera = null;
         frameOpen = true;
+    }
+
+    static void observeCamera(final double x, final double y, final double z) {
+        CameraPosition camera = new CameraPosition(x, y, z);
+        if (frameOpen && camera.finite()) {
+            pendingCamera = camera;
+        }
+    }
+
+    static @Nullable CameraPosition previousCamera() {
+        return previousCamera;
+    }
+
+    static @Nullable CameraPosition currentCamera() {
+        return pendingCamera;
     }
 
     static @Nullable DrawToken reserveDraw(
@@ -180,14 +204,17 @@ final class MetalPreviousVertexHistory {
         }
         PREVIOUS_DRAW_COUNTS.clear();
         PREVIOUS_DRAW_COUNTS.putAll(CURRENT_DRAW_COUNTS);
+        previousCamera = pendingCamera;
         PENDING.clear();
         CURRENT_DRAW_COUNTS.clear();
+        pendingCamera = null;
         frameOpen = false;
     }
 
     static void discardFrame() {
         PENDING.clear();
         CURRENT_DRAW_COUNTS.clear();
+        pendingCamera = null;
         frameOpen = false;
     }
 
@@ -197,6 +224,8 @@ final class MetalPreviousVertexHistory {
         PREVIOUS_DRAW_COUNTS.clear();
         PENDING.clear();
         CURRENT_DRAW_COUNTS.clear();
+        previousCamera = null;
+        pendingCamera = null;
         frameOpen = wasOpen;
     }
 
