@@ -25,8 +25,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "23cff9023bd7fe36ce815e2990cca8c3a9697b99"
-          test "$(git log -1 --format=%s HEAD^)" = "fix(agent): correct living source guard"
+          test "$(git rev-parse HEAD^^)" = "557c3e4667ebf1d7e7c165f26a0fdbeb5ea4ca64"
+          test "$(git log -1 --format=%s HEAD^)" = "fix(agent): match exact living CFR transform text"
           test "$(git log -1 --format=%s HEAD)" = "chore(agent): apply living and first-person exact motion"
           test "$(git rev-parse HEAD^^:.github/scripts/apply_living_first_person_exact_motion.py)" = \
                "$(git rev-parse HEAD:.github/scripts/apply_living_first_person_exact_motion.py)"
@@ -54,7 +54,9 @@ jobs:
           for text in [
               'submitNodeCollector.submitModel(this.model, state, poseStack',
               '((Model)this.model).setupAnim(state);',
-              'this.setupRotations(state, poseStack, state.bodyRot, state.scale);',
+              'float scale = ((LivingEntityRenderState)state).scale;',
+              'poseStack.scale(scale, scale, scale);',
+              'this.setupRotations(state, poseStack, ((LivingEntityRenderState)state).bodyRot, scale);',
               'this.scale(state, poseStack);',
           ]:
               if text not in living:
@@ -72,10 +74,7 @@ jobs:
           submit_start = hand.find('private void submitArmWithItem(')
           if submit_start < 0:
               raise SystemExit('Minecraft 26.2 submitArmWithItem missing')
-          submit_end = hand.find('\n    public void tick()', submit_start)
-          if submit_end < 0:
-              submit_end = len(hand)
-          submit = hand[submit_start:submit_end]
+          submit = hand[submit_start:]
           for text in [
               'if (player.isScoping()) {',
               'poseStack.pushPose();',
@@ -125,7 +124,6 @@ jobs:
           grep -F 'MetalSyntheticExactMotion.commitSubmittedFrame();' src/main/java/com/metallum/client/metal/render/MetalMotionStateStore.java
           ! grep -F 'MetalFxManager.observeFirstPersonMotion();' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
           grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
-          # Shared translucent shadows and particles remain deliberately fail-closed in this transaction.
           grep -F 'observeUnresolvedSharedAuxiliaryMotion();' src/main/java/com/metallum/mixin/render/ShadowFeatureSubmitMetalFxMixin.java
           grep -F 'observeParticleMotion();' src/main/java/com/metallum/mixin/render/QuadParticleRenderStateMetalFxMixin.java
       - name: Commit verified runtime implementation
