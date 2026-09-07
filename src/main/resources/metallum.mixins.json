@@ -22,6 +22,7 @@
     "render.ItemFeatureRendererMetalFxMixin",
     "render.MovingBlockSubmitMetalFxMixin",
     "render.MovingBlockFeatureRendererMetalFxMixin",
+    "render.PistonHeadRendererMetalFxMixin",
     "render.RenderTypeFeatureGroupMetalFxMixin",
     "render.StagedVertexBufferMetalFxMixin",
     "render.PreparedFeatureFrameMetalFxMixin",

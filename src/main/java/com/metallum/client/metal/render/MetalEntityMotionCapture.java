@@ -202,6 +202,14 @@ public final class MetalEntityMotionCapture {
      * future caller may bracket each separately. {@link #beginFrame()} clears the
      * map every frame, so retaining cannot leak across frames.</p>
      */
+    /** Associates block-entity-owned moving geometry directly with its exact motion sample. */
+    public static void attachMovingBlockState(final Object renderState, final Sample sample) {
+        if (enabled && renderState != null && sample != null) {
+            SUBMITS.put(renderState, sample);
+            modelSubmitsCaptured++;
+        }
+    }
+
     public static boolean hasMovingBlockOwner(final Object renderState) {
         return enabled && renderState != null && SUBMITS.containsKey(renderState);
     }

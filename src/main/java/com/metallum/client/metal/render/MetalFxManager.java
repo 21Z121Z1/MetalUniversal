@@ -22,6 +22,9 @@ import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelTargetBundle;
 import net.minecraft.client.renderer.StagedVertexBuffer;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.blockentity.state.PistonHeadRenderState;
+import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.world.entity.Entity;
@@ -161,6 +164,7 @@ public final class MetalFxManager {
     private final MetalMotionStateStore motionStateStore = new MetalMotionStateStore();
     private final MetalFxMotionEligibility motionEligibility = new MetalFxMotionEligibility();
     private final Map<Entity, Long> entityGenerations = new IdentityHashMap<>();
+    private final Map<PistonMovingBlockEntity, PistonMotionGeneration> pistonGenerations = new IdentityHashMap<>();
     private long nextEntityGeneration = 1L;
     private int displayWidth;
     private int displayHeight;
@@ -503,6 +507,22 @@ public final class MetalFxManager {
             return;
         }
         manager.captureEntityMotionInternal(entity, state);
+    }
+
+    /**
+     * Captures the exact interpolated translation used by Minecraft 26.2's piston renderer.
+     * The moving block is keyed by the PistonMovingBlockEntity lifetime plus its exact BlockState
+     * variant, so the SHORT-head topology transition starts a fresh history instead of reusing
+     * vertices from a different model. The unshifted source-piston base receives an identity sample.
+     */
+    public static void capturePistonMotion(
+            final PistonMovingBlockEntity blockEntity,
+            final PistonHeadRenderState state
+    ) {
+        MetalFxManager manager = active;
+        if (manager != null && blockEntity != null && state != null) {
+            manager.capturePistonMotionInternal(blockEntity, state);
+        }
     }
 
     /** Marks a submitted entity whose complete previous geometry is not represented by the motion pass. */
@@ -1138,6 +1158,53 @@ public final class MetalFxManager {
         }
         frameNativeSceneTexture = null;
         uiTargetShaderWrite = false;
+    }
+
+    private void capturePistonMotionInternal(
+            final PistonMovingBlockEntity blockEntity,
+            final PistonHeadRenderState state
+    ) {
+        if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled || state.block == null) {
+            return;
+        }
+
+        BlockState blockState = state.block.blockState;
+        PistonMotionGeneration generationState = pistonGenerations.get(blockEntity);
+        // BlockState values are canonical immutable state-definition entries in vanilla. Identity is
+        // deliberately conservative here: even a semantically-equal replacement instance gets a fresh
+        // generation and therefore one real-only frame, never motion from uncertain topology.
+        if (generationState == null || generationState.blockState() != blockState) {
+            generationState = new PistonMotionGeneration(blockState, nextEntityGeneration++);
+            pistonGenerations.put(blockEntity, generationState);
+        }
+
+        long objectId = blockEntity.getBlockPos().asLong();
+        long generation = generationState.generation();
+        MetalMotionStateStore.ObjectKey key = new MetalMotionStateStore.ObjectKey(objectId, generation);
+        Matrix4f currentObject = MetalPistonMotion.offsetTransform(state.xOffset, state.yOffset, state.zOffset);
+        if (!motionStateStore.observeIfFrameOpen(key, currentObject)) {
+            return;
+        }
+        Matrix4f previousObject = motionStateStore.previous(key);
+        MetalEntityMotionCapture.attachMovingBlockState(
+                state.block,
+                new MetalEntityMotionCapture.Sample(objectId, generation, currentObject, previousObject)
+        );
+        if (previousObject == null) {
+            // First visibility, a skipped submitted frame, a reset, or a model/topology transition has
+            // no exact previous moving-block pose. Keep this source frame real and seed the next one.
+            motionEligibility.reject(MetalFxMotionEligibility.MOVING_BLOCK);
+        }
+
+        if (state.base != null) {
+            // PistonHeadRenderer submits the retraction base without x/y/zOffset. It is static world
+            // geometry, so identity object motion is exact; camera motion remains in the clip matrices.
+            Matrix4f identity = new Matrix4f();
+            MetalEntityMotionCapture.attachMovingBlockState(
+                    state.base,
+                    new MetalEntityMotionCapture.Sample(objectId, generation, identity, identity)
+            );
+        }
     }
 
     private void captureEntityMotionInternal(final Entity entity, final EntityRenderState state) {
@@ -3572,6 +3639,7 @@ public final class MetalFxManager {
         previousCameraProjectionValid = false;
         previousCameraPositionValid = false;
         entityGenerations.clear();
+        pistonGenerations.clear();
         phase = 0;
         motionInputsPrepared = false;
         motionStateStore.reset();
@@ -3687,6 +3755,7 @@ public final class MetalFxManager {
         device.waitForSubmittedGpuWork();
         motionStateStore.reset();
         entityGenerations.clear();
+        pistonGenerations.clear();
         MetalEntityMotionPipeline.clear();
         MetalCutoutReactivePipeline.clear();
         closeAuxiliaryTextures();
@@ -3776,6 +3845,9 @@ public final class MetalFxManager {
         if (config.debug) {
             Metallum.LOGGER.info("MetalFX frame generation paused while {}", reason);
         }
+    }
+
+    private record PistonMotionGeneration(BlockState blockState, long generation) {
     }
 
     record FrameGenerationInput(
