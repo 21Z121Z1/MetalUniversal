@@ -144,6 +144,17 @@ public final class MetalEntityMotionCapture {
         }
     }
 
+    /**
+     * True only when this rendered state is backed by an observation from the immediately
+     * preceding successfully submitted source frame. A state with no sample, or only a current
+     * sample, is valid input for Temporal's validity/disocclusion path but not for frame
+     * interpolation, which does not consume those confidence masks.
+     */
+    public static boolean hasPreviousState(final Object state) {
+        Sample sample = enabled && state != null ? STATES.get(state) : null;
+        return sample != null && sample.hasPrevious();
+    }
+
     public static void beginEntitySubmission(final Object state) {
         if (!enabled) {
             return;

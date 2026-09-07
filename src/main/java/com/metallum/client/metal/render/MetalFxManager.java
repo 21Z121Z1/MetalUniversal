@@ -528,8 +528,20 @@ public final class MetalFxManager {
     /** Marks a submitted entity whose complete previous geometry is not represented by the motion pass. */
     public static void observeFrameInterpolationEntity(final EntityRenderState state) {
         MetalFxManager manager = active;
-        if (manager != null && state != null) {
-            manager.motionEligibility.reject(MetalFxMotionEligibility.incompleteEntityReason(state));
+        if (manager == null || state == null) {
+            return;
+        }
+        int incompleteReason = MetalFxMotionEligibility.incompleteEntityReason(state);
+        if (incompleteReason != 0) {
+            manager.motionEligibility.reject(incompleteReason);
+            return;
+        }
+        if (!MetalEntityMotionCapture.hasPreviousState(state)) {
+            // The current pose can seed history and remains useful to MetalFX Temporal, but
+            // MTLFXFrameInterpolator cannot safely infer object motion without a source-frame
+            // predecessor. Never reinterpret objectCurrentToPrevious's Temporal identity fallback
+            // as complete interpolation motion.
+            manager.motionEligibility.reject(MetalFxMotionEligibility.MISSING_HISTORY);
         }
     }
 

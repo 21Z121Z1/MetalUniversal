@@ -6,6 +6,7 @@ import net.minecraft.client.renderer.entity.state.FallingBlockRenderState;
 import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
+import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -30,6 +31,28 @@ final class MetalFxMotionEligibilityTest {
                 MetalFxMotionEligibility.UNKNOWN_ENTITY,
                 MetalFxMotionEligibility.incompleteEntityReason(new EntityRenderState())
         );
+    }
+
+    @Test
+    void frameInterpolationRequiresARealPreviousState() {
+        Object state = new Object();
+        MetalEntityMotionCapture.beginFrame();
+        assertFalse(MetalEntityMotionCapture.hasPreviousState(state));
+
+        MetalEntityMotionCapture.attachState(
+                state,
+                new MetalEntityMotionCapture.Sample(1L, 1L, new Matrix4f(), null)
+        );
+        assertFalse(MetalEntityMotionCapture.hasPreviousState(state));
+
+        MetalEntityMotionCapture.attachState(
+                state,
+                new MetalEntityMotionCapture.Sample(1L, 1L, new Matrix4f(), new Matrix4f())
+        );
+        assertTrue(MetalEntityMotionCapture.hasPreviousState(state));
+
+        MetalEntityMotionCapture.beginFrame();
+        assertFalse(MetalEntityMotionCapture.hasPreviousState(state));
     }
 
     @Test
