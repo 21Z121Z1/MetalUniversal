@@ -1,0 +1,1 @@
+Supersede the first Flame shared-batch transaction before it can push: per-submit vertex-span continuity must be part of the batch membership signature, not only the aggregate staged draw manifest.

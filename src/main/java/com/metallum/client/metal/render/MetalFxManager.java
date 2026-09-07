@@ -22,6 +22,9 @@ import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelTargetBundle;
 import net.minecraft.client.renderer.StagedVertexBuffer;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.blockentity.state.PistonHeadRenderState;
+import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.world.entity.Entity;
@@ -152,6 +155,11 @@ public final class MetalFxManager {
     private boolean previousMatrixValid;
     private final Matrix4f previousViewProjection = new Matrix4f();
     private final Matrix4f currentViewProjection = new Matrix4f();
+    // ENTITY staged Position already contains the camera-relative root and CPU model pose.
+    // Keep Projection * viewRotation transactionally with the previous successful source frame
+    // so exact replay never rebuilds large world coordinates by adding the camera back.
+    private final Matrix4f previousCameraRelativeViewProjection = new Matrix4f();
+    private final Matrix4f currentCameraRelativeViewProjection = new Matrix4f();
     private final Matrix4f inverseCurrentViewProjection = new Matrix4f();
     private final Matrix4f viewMatrix = new Matrix4f();
     private final Matrix4f currentProjection = new Matrix4f();
@@ -159,7 +167,9 @@ public final class MetalFxManager {
     private final Vector2f pixelJitter = new Vector2f();
     private final Vector2f clipJitter = new Vector2f();
     private final MetalMotionStateStore motionStateStore = new MetalMotionStateStore();
+    private final MetalFxMotionEligibility motionEligibility = new MetalFxMotionEligibility();
     private final Map<Entity, Long> entityGenerations = new IdentityHashMap<>();
+    private final Map<PistonMovingBlockEntity, PistonMotionGeneration> pistonGenerations = new IdentityHashMap<>();
     private long nextEntityGeneration = 1L;
     private int displayWidth;
     private int displayHeight;
@@ -336,7 +346,20 @@ public final class MetalFxManager {
             PreparedRenderType prepared,
             StagedVertexBuffer.ExecuteInfo executeInfo,
             GpuBufferSlice dynamicTransforms,
-            GpuBufferSlice motionUniform
+            MetalEntityMotionCapture.Sample sample,
+            MetalPreviousVertexHistory.DrawToken previousVertexToken
+    ) {
+    }
+
+    private record PreparedObjectMotionReplay(
+            PreparedRenderType prepared,
+            StagedVertexBuffer.ExecuteInfo executeInfo,
+            GpuBufferSlice dynamicTransforms,
+            GpuBufferSlice motionUniform,
+            GpuBufferSlice currentVertexBuffer,
+            @Nullable GpuBufferSlice previousPositionBuffer,
+            MetalPreviousVertexHistory.@Nullable DrawToken exactPreviousVertexToken,
+            int replayBaseVertex
     ) {
     }
 
@@ -502,6 +525,81 @@ public final class MetalFxManager {
             return;
         }
         manager.captureEntityMotionInternal(entity, state);
+    }
+
+    /**
+     * Captures the exact interpolated translation used by Minecraft 26.2's piston renderer.
+     * The moving block is keyed by the PistonMovingBlockEntity lifetime plus its exact BlockState
+     * variant, so the SHORT-head topology transition starts a fresh history instead of reusing
+     * vertices from a different model. The unshifted source-piston base receives an identity sample.
+     */
+    public static void capturePistonMotion(
+            final PistonMovingBlockEntity blockEntity,
+            final PistonHeadRenderState state
+    ) {
+        MetalFxManager manager = active;
+        if (manager != null && blockEntity != null && state != null) {
+            manager.capturePistonMotionInternal(blockEntity, state);
+        }
+    }
+
+    /** Marks a submitted entity whose complete previous geometry is not represented by the motion pass. */
+    public static void observeFrameInterpolationEntity(final EntityRenderState state) {
+        MetalFxManager manager = active;
+        if (manager == null || state == null) {
+            return;
+        }
+        int incompleteReason = MetalFxMotionEligibility.incompleteEntityReason(state);
+        if (incompleteReason != 0) {
+            manager.motionEligibility.reject(incompleteReason);
+            return;
+        }
+        boolean requiresExactPreviousPositions =
+                state instanceof net.minecraft.client.renderer.entity.state.BoatRenderState
+                || (state instanceof net.minecraft.client.renderer.entity.state.DisplayEntityRenderState displayState
+                && MetalDisplayMotionSafety.requiresExactPreviousPositions(displayState));
+        if (requiresExactPreviousPositions) {
+            // TextDisplay background/text and Boat model/water-mask geometry are candidate families
+            // only. The whole per-object staged manifest must match the previous successfully
+            // submitted source frame and every draw must actually encode exact previous positions.
+            MetalEntityMotionCapture.requireExactState(state);
+        }
+        if (!MetalEntityMotionCapture.hasPreviousState(state)) {
+            // The current pose can seed history and remains useful to MetalFX Temporal, but
+            // MTLFXFrameInterpolator cannot safely infer object motion without a source-frame
+            // predecessor. Never reinterpret objectCurrentToPrevious's Temporal identity fallback
+            // as complete interpolation motion.
+            manager.motionEligibility.reject(MetalFxMotionEligibility.MISSING_HISTORY);
+        }
+    }
+
+    /** First-person geometry has no exact previous local pose yet; reject only frame interpolation. */
+    public static void observeFirstPersonMotion() {
+        MetalFxManager manager = active;
+        if (manager != null) manager.motionEligibility.reject(MetalFxMotionEligibility.FIRST_PERSON);
+    }
+
+    /** Quad particles store only the current extracted pose; reactive Temporal handling remains enabled. */
+    public static void observeParticleMotion() {
+        MetalFxManager manager = active;
+        if (manager != null) manager.motionEligibility.reject(MetalFxMotionEligibility.PARTICLE);
+    }
+
+    /** Moving blocks without an entity-owned staged replay (notably pistons) have no previous pose sidecar. */
+    public static void observeUnownedMovingBlockMotion() {
+        MetalFxManager manager = active;
+        if (manager != null) manager.motionEligibility.reject(MetalFxMotionEligibility.MOVING_BLOCK);
+    }
+
+    /**
+     * Shared feature batches (currently shadow/flame) allocate one staged builder before iterating
+     * entities. Until the entire batch has a transactional exact previous-position identity, any
+     * submitted batch is globally incomplete for frame interpolation, even when the parent entity
+     * itself is a rigid family. MetalFX Temporal remains unaffected.
+     */
+    public static void observeUnresolvedSharedAuxiliaryMotion() {
+        MetalFxManager manager = active;
+        if (manager != null) manager.motionEligibility.reject(MetalFxMotionEligibility.SHARED_AUXILIARY);
     }
 
     /**
@@ -833,6 +931,7 @@ public final class MetalFxManager {
 
     private void beginFrameInternal() {
         reloadConfigIfRequested();
+        motionEligibility.beginFrame();
         recordFramePacingDiagnostics();
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
             this.sceneFrame = false;
@@ -1112,6 +1211,53 @@ public final class MetalFxManager {
         uiTargetShaderWrite = false;
     }
 
+    private void capturePistonMotionInternal(
+            final PistonMovingBlockEntity blockEntity,
+            final PistonHeadRenderState state
+    ) {
+        if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled || state.block == null) {
+            return;
+        }
+
+        BlockState blockState = state.block.blockState;
+        PistonMotionGeneration generationState = pistonGenerations.get(blockEntity);
+        // BlockState values are canonical immutable state-definition entries in vanilla. Identity is
+        // deliberately conservative here: even a semantically-equal replacement instance gets a fresh
+        // generation and therefore one real-only frame, never motion from uncertain topology.
+        if (generationState == null || generationState.blockState() != blockState) {
+            generationState = new PistonMotionGeneration(blockState, nextEntityGeneration++);
+            pistonGenerations.put(blockEntity, generationState);
+        }
+
+        long objectId = blockEntity.getBlockPos().asLong();
+        long generation = generationState.generation();
+        MetalMotionStateStore.ObjectKey key = new MetalMotionStateStore.ObjectKey(objectId, generation);
+        Matrix4f currentObject = MetalPistonMotion.offsetTransform(state.xOffset, state.yOffset, state.zOffset);
+        if (!motionStateStore.observeIfFrameOpen(key, currentObject)) {
+            return;
+        }
+        Matrix4f previousObject = motionStateStore.previous(key);
+        MetalEntityMotionCapture.attachMovingBlockState(
+                state.block,
+                new MetalEntityMotionCapture.Sample(objectId, generation, currentObject, previousObject)
+        );
+        if (previousObject == null) {
+            // First visibility, a skipped submitted frame, a reset, or a model/topology transition has
+            // no exact previous moving-block pose. Keep this source frame real and seed the next one.
+            motionEligibility.reject(MetalFxMotionEligibility.MOVING_BLOCK);
+        }
+
+        if (state.base != null) {
+            // PistonHeadRenderer submits the retraction base without x/y/zOffset. It is static world
+            // geometry, so identity object motion is exact; camera motion remains in the clip matrices.
+            Matrix4f identity = new Matrix4f();
+            MetalEntityMotionCapture.attachMovingBlockState(
+                    state.base,
+                    new MetalEntityMotionCapture.Sample(objectId, generation, identity, identity)
+            );
+        }
+    }
+
     private void captureEntityMotionInternal(final Entity entity, final EntityRenderState state) {
         if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled) {
             return;
@@ -1144,6 +1290,9 @@ public final class MetalFxManager {
             final StagedVertexBuffer.ExecuteInfo executeInfo,
             final MetalEntityMotionCapture.Sample sample
     ) {
+        // Consume the sidecar with the ExecuteInfo lifetime even when this source frame fails closed.
+        MetalPreviousVertexHistory.DrawToken previousVertexToken =
+                MetalEntityMotionCapture.takePreviousVertexToken(executeInfo);
         if (!sceneFrame) {
             MetalEntityMotionCapture.recordMotionDrawSkip("scene-frame-inactive");
             return;
@@ -1164,37 +1313,21 @@ public final class MetalFxManager {
             MetalEntityMotionCapture.recordMotionDrawSkip("attachments-unavailable");
             return;
         }
-        if (!MetalEntityMotionPipeline.supports(prepared.pipeline())) {
+        boolean rootMotionSupported = MetalEntityMotionPipeline.supports(prepared.pipeline());
+        boolean exactMotionSupported = MetalEntityMotionPipeline.supportsPreviousPositions(prepared.pipeline());
+        if (!rootMotionSupported && !exactMotionSupported) {
             MetalEntityMotionCapture.recordMotionDrawSkip("pipeline-unsupported");
             return;
         }
-        Matrix4f currentUnjitteredFromRaster =
-                new Matrix4f(currentViewProjection).mul(inverseCurrentViewProjection);
-        Matrix4f previousFromRaster = new Matrix4f(previousViewProjection)
-                .mul(MetalEntityMotionCapture.objectCurrentToPrevious(sample))
-                .mul(inverseCurrentViewProjection);
-        if (!MetalFxMath.isFinite(currentUnjitteredFromRaster)
-                || !MetalFxMath.isFinite(previousFromRaster)) {
-            MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-transform");
-            return;
-        }
 
-        CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
-        GpuBufferSlice dynamicTransforms = prepared.dynamicTransforms();
-        GpuBufferSlice motionUniform;
-        try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
-                .allocateGpuMapped(128L, 256L, GpuBuffer.USAGE_UNIFORM)) {
-            ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
-            currentUnjitteredFromRaster.get(0, bytes);
-            previousFromRaster.get(64, bytes);
-            motionUniform = mapped.slice();
-        }
-
+        // Exact previous-position selection is intentionally deferred until flush. At that point all
+        // feature draws have registered, so objectManifestMatches cannot accept a transient prefix.
         objectMotionReplays.add(new ObjectMotionReplay(
                 prepared,
                 executeInfo,
-                dynamicTransforms,
-                motionUniform
+                prepared.dynamicTransforms(),
+                sample,
+                previousVertexToken
         ));
     }
 
@@ -1213,6 +1346,78 @@ public final class MetalFxManager {
         }
 
         CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
+        Matrix4f currentUnjitteredFromRaster =
+                new Matrix4f(currentViewProjection).mul(inverseCurrentViewProjection);
+        if (!MetalFxMath.isFinite(currentUnjitteredFromRaster)) {
+            replays.forEach(ignored -> MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-current-transform"));
+            return;
+        }
+
+        List<PreparedObjectMotionReplay> preparedReplays = new ArrayList<>(replays.size());
+        for (ObjectMotionReplay replay : replays) {
+            PreparedRenderType prepared = replay.prepared();
+            StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
+            boolean rootMotionSupported = MetalEntityMotionPipeline.supports(prepared.pipeline());
+            boolean exactMotionSupported = MetalEntityMotionPipeline.supportsPreviousPositions(prepared.pipeline());
+            MetalPreviousVertexReplay.Plan exactPlan = exactMotionSupported
+                    && MetalFxMath.isFinite(previousCameraRelativeViewProjection)
+                    ? MetalPreviousVertexReplay.plan(
+                            prepared.pipeline(), executeInfo, replay.previousVertexToken())
+                    : null;
+            boolean exactPreviousPositions = exactPlan != null;
+            if (!exactPreviousPositions && !rootMotionSupported) {
+                MetalEntityMotionCapture.recordMotionDrawSkip("exact-plan-unavailable");
+                continue;
+            }
+            Matrix4f previousFromRaster = exactPreviousPositions
+                    ? new Matrix4f(previousCameraRelativeViewProjection)
+                    : new Matrix4f(previousViewProjection)
+                            .mul(MetalEntityMotionCapture.objectCurrentToPrevious(replay.sample()))
+                            .mul(inverseCurrentViewProjection);
+            if (!MetalFxMath.isFinite(previousFromRaster)) {
+                MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-previous-transform");
+                continue;
+            }
+
+            GpuBufferSlice currentVertexBuffer = exactPreviousPositions
+                    ? exactPlan.currentVertexBuffer()
+                    : executeInfo.vertexBuffer().slice();
+            int replayBaseVertex = exactPreviousPositions
+                    ? exactPlan.replayBaseVertex()
+                    : executeInfo.baseVertex();
+            GpuBufferSlice previousPositionBuffer = null;
+            if (exactPreviousPositions) {
+                float[] previousPositions = exactPlan.previousPositions();
+                long previousByteCount = Math.multiplyExact((long) previousPositions.length, Float.BYTES);
+                try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                        .allocateGpuMapped(previousByteCount, 16L, GpuBuffer.USAGE_VERTEX)) {
+                    ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
+                    for (float value : previousPositions) {
+                        bytes.putFloat(value);
+                    }
+                    previousPositionBuffer = mapped.slice();
+                }
+            }
+
+            GpuBufferSlice motionUniform;
+            try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                    .allocateGpuMapped(128L, 256L, GpuBuffer.USAGE_UNIFORM)) {
+                ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
+                currentUnjitteredFromRaster.get(0, bytes);
+                previousFromRaster.get(64, bytes);
+                motionUniform = mapped.slice();
+            }
+            preparedReplays.add(new PreparedObjectMotionReplay(
+                    prepared,
+                    executeInfo,
+                    replay.dynamicTransforms(),
+                    motionUniform,
+                    currentVertexBuffer,
+                    previousPositionBuffer,
+                    exactPreviousPositions ? replay.previousVertexToken() : null,
+                    replayBaseVertex
+            ));
+        }
 
         RenderPassDescriptor descriptor = RenderPassDescriptor
                 .create(() -> "Metallum batched ordinary entity object motion");
@@ -1229,14 +1434,20 @@ public final class MetalFxManager {
                 .withDepthAttachment(depthView)
                 .withRenderArea(new RenderPass.RenderArea(0, 0, renderWidth, renderHeight));
         try (RenderPass pass = encoder.createRenderPass(descriptor)) {
-            for (ObjectMotionReplay replay : replays) {
+            for (PreparedObjectMotionReplay replay : preparedReplays) {
                 PreparedRenderType prepared = replay.prepared();
                 StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
-                pass.setPipeline(MetalEntityMotionPipeline.forSource(prepared.pipeline()));
+                boolean exactPreviousPositions = replay.previousPositionBuffer() != null;
+                pass.setPipeline(exactPreviousPositions
+                        ? MetalEntityMotionPipeline.forPreviousPositions(prepared.pipeline())
+                        : MetalEntityMotionPipeline.forSource(prepared.pipeline()));
                 RenderSystem.bindDefaultUniforms(pass);
                 pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
                 pass.setUniform("MetallumMotion", replay.motionUniform());
-                pass.setVertexBuffer(0, executeInfo.vertexBuffer().slice());
+                pass.setVertexBuffer(0, replay.currentVertexBuffer());
+                if (exactPreviousPositions) {
+                    pass.setVertexBuffer(1, replay.previousPositionBuffer());
+                }
                 for (PreparedRenderType.Texture texture : prepared.textures()) {
                     pass.bindTexture(texture.name(), texture.textureView(), texture.sampler());
                 }
@@ -1245,9 +1456,12 @@ public final class MetalFxManager {
                         executeInfo.indexCount(),
                         1,
                         executeInfo.firstIndex(),
-                        executeInfo.baseVertex(),
+                        replay.replayBaseVertex(),
                         0
                 );
+                if (exactPreviousPositions) {
+                    MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());
+                }
                 MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
             }
         }
@@ -1292,6 +1506,11 @@ public final class MetalFxManager {
         this.frameFarPlane = cameraState.depthFar > 0.0F && Float.isFinite(cameraState.depthFar)
                 ? cameraState.depthFar : 1000.0F;
         MetalFxMath.adjustPerspectiveAspect(this.currentProjection, displayAspect, renderAspect);
+        MetalFxMath.viewProjection(
+                this.currentCameraRelativeViewProjection,
+                this.currentProjection,
+                cameraState.viewRotationMatrix
+        );
         if (previousCameraProjectionValid
                 && (Math.abs(this.frameFieldOfView - previousFieldOfView) > FOV_SCENE_CUT_DEGREES
                 || Math.abs(this.frameFarPlane - previousFarPlane) > Math.max(1.0F, previousFarPlane * 0.01F))) {
@@ -1321,7 +1540,8 @@ public final class MetalFxManager {
                 cameraState.pos.z
         );
         MetalFxMath.viewProjection(this.currentViewProjection, this.currentProjection, this.viewMatrix);
-        if (!MetalFxMath.isFinite(this.currentViewProjection)) {
+        if (!MetalFxMath.isFinite(this.currentViewProjection)
+                || !MetalFxMath.isFinite(this.currentCameraRelativeViewProjection)) {
             if (!warnedInvalidFrame) {
                 Metallum.LOGGER.warn("MetalFX skipped a frame because the camera matrices were invalid");
                 warnedInvalidFrame = true;
@@ -1364,6 +1584,7 @@ public final class MetalFxManager {
             }
             if (!previousMatrixValid) {
                 previousViewProjection.set(currentViewProjection);
+                previousCameraRelativeViewProjection.set(currentCameraRelativeViewProjection);
                 previousMatrixValid = true;
                 historyReset = true;
             }
@@ -1649,11 +1870,14 @@ public final class MetalFxManager {
         this.frameUsesUpscaledTarget = true;
         if (historyTransactionEncoded) {
             Matrix4f submittedViewProjection = new Matrix4f(this.currentViewProjection);
+            Matrix4f submittedCameraRelativeViewProjection =
+                    new Matrix4f(this.currentCameraRelativeViewProjection);
             int submittedNextPhase = (phase + 1) % phaseCount;
             encoder.onCurrentSubmit(
                     () -> {
                         this.historyReset = false;
                         this.previousViewProjection.set(submittedViewProjection);
+                        this.previousCameraRelativeViewProjection.set(submittedCameraRelativeViewProjection);
                         this.previousMatrixValid = true;
                         this.motionStateStore.commitSubmittedFrame();
                         this.phase = submittedNextPhase;
@@ -3544,6 +3768,7 @@ public final class MetalFxManager {
         previousCameraProjectionValid = false;
         previousCameraPositionValid = false;
         entityGenerations.clear();
+        pistonGenerations.clear();
         phase = 0;
         motionInputsPrepared = false;
         motionStateStore.reset();
@@ -3659,6 +3884,7 @@ public final class MetalFxManager {
         device.waitForSubmittedGpuWork();
         motionStateStore.reset();
         entityGenerations.clear();
+        pistonGenerations.clear();
         MetalEntityMotionPipeline.clear();
         MetalCutoutReactivePipeline.clear();
         closeAuxiliaryTextures();
@@ -3693,6 +3919,20 @@ public final class MetalFxManager {
         // single-present path until VSync is on again.
         if (frameGenerationEnabled && immediatePresentMode) {
             suspendFrameGenerationInternal("the surface presents in immediate mode (VSync off)");
+        }
+        if (!motionEligibility.eligible()) {
+            // A real source frame containing geometry without exact previous-position motion must not
+            // enter MTLFXFrameInterpolator. Reset the next admitted pair so it cannot bridge across
+            // this skipped source frame; MetalFX Temporal still receives its reactive/history masks.
+            frameResetForPresent = true;
+            return null;
+        }
+        if (!MetalEntityMotionCapture.exactCoverageComplete()) {
+            // Class-level admission is not enough for deforming geometry. The required object must
+            // prove that every draw in the current manifest actually encoded an exact previous-
+            // position replay. A planned-but-not-encoded motion pass is deliberately insufficient.
+            frameResetForPresent = true;
+            return null;
         }
         if (!frameGenerationEnabled || runtimeDisabled || !frameUsesUpscaledTarget
                 || sceneOutputTarget == null || frameNativeSceneTexture == null || uiTarget == null
@@ -3741,6 +3981,9 @@ public final class MetalFxManager {
         if (config.debug) {
             Metallum.LOGGER.info("MetalFX frame generation paused while {}", reason);
         }
+    }
+
+    private record PistonMotionGeneration(BlockState blockState, long generation) {
     }
 
     record FrameGenerationInput(

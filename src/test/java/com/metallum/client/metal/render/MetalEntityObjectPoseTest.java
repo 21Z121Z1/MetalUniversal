@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import org.joml.Matrix4f;
+import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.junit.jupiter.api.Test;
 
@@ -46,6 +47,32 @@ final class MetalEntityObjectPoseTest {
         );
         Matrix4f identity = delta(frame, new Matrix4f(frame));
         assertTrue(identity.equals(new Matrix4f(), EPSILON), "expected identity, got " + identity);
+    }
+
+    @Test
+    void displayPoseMatchesVanillaTransformOrder() {
+        Quaternionf billboard = new Quaternionf().rotationY((float) (Math.PI / 2.0));
+        Matrix4f interpolatedTransformation = new Matrix4f().translation(1.0F, 0.0F, 0.0F);
+        Matrix4f display = MetalEntityObjectPose.display(
+                new Matrix4f(),
+                10.0,
+                20.0,
+                30.0,
+                billboard,
+                interpolatedTransformation
+        );
+
+        // DisplayRenderer.submit first receives the entity translation from the
+        // dispatcher, then applies billboard orientation, then the interpolated
+        // Transformation. A local +X translation is therefore rotated into -Z.
+        assertPoint(map(display, 0.0F, 0.0F, 0.0F), 10.0F, 20.0F, 29.0F);
+        assertPoint(map(display, 0.0F, 0.0F, 1.0F), 11.0F, 20.0F, 29.0F);
+    }
+
+    @Test
+    void displayCameraFacingAnglesMatchRendererHelpers() {
+        assertEquals(-35.0F, MetalEntityObjectPose.transformDisplayXRot(35.0F), EPSILON);
+        assertEquals(20.0F, MetalEntityObjectPose.transformDisplayYRot(200.0F), EPSILON);
     }
 
     @Test

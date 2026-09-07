@@ -1,0 +1,1 @@
+Re-run the guarded Flame shared exact-motion v2 patch with targeted tests and jar build as separate Gradle invocations.

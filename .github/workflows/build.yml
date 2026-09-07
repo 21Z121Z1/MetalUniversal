@@ -23,12 +23,23 @@ permissions:
 jobs:
   build:
     # Keep release artifacts tied to the current macOS 26 SDK and arm64 ABI.
-    # Hosted runners cannot serve as a visual or physical-GPU acceptance gate;
-    # build.gradle keeps those executions local while CI compiles their code.
+    # On pull_request this job intentionally tests GitHub's synthetic merge
+    # result; candidate-oriented workflows test the exact head separately.
     runs-on: macos-26
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
+      - name: Record CI proof subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          subject='candidate-head'
+          if [[ '${{ github.event_name }}' == 'pull_request' ]]; then
+            subject='merge-result'
+          fi
+          python3 scripts/agent/record_ci_subject.py \
+            --proof-subject "$subject" \
+            --output build/agent-evidence/ci-subject-build.json
       - name: validate gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
       - name: setup jdk
@@ -103,6 +114,13 @@ jobs:
             build/agent-evidence/
             hs_err_pid*.log
           if-no-files-found: ignore
+      - name: Preserve CI proof identity
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-ci-identity-${{ github.run_attempt }}
+          path: build/agent-evidence/ci-subject-build.json
+          if-no-files-found: error
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:
