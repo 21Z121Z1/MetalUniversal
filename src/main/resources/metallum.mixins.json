@@ -27,6 +27,7 @@
     "render.FlameFeatureSubmitMetalFxMixin",
     "render.FlameFeatureRendererMetalFxMixin",
     "render.ShadowFeatureSubmitMetalFxMixin",
+    "render.ShadowFeatureRendererMetalFxMixin",
     "render.LeashFeatureSubmitMetalFxMixin",
     "render.LeashFeatureRendererMetalFxMixin",
     "render.NameTagFeatureSubmitMetalFxMixin",

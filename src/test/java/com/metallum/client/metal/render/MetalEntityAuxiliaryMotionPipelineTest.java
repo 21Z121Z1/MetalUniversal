@@ -50,6 +50,17 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void entityShadowUsesExactPreviousPositionsDespiteTranslucentSource() {
+        RenderPipeline shadow = pipeline("core/rendertype_entity_shadow", DefaultVertexFormat.ENTITY);
+        assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(shadow));
+        assertTrue(MetalEntityMotionPipeline.isSplittableVertexShader(shadow));
+        assertFalse(MetalEntityMotionPipeline.supports(shadow));
+        RenderPipeline exact = MetalEntityMotionPipeline.forPreviousPositions(shadow);
+        assertEquals("core/entity_previous_motion", exact.getVertexShader().getPath());
+        assertEquals("core/shadow_previous_motion", exact.getFragmentShader().getPath());
+    }
+
+    @Test
     void waterMaskUsesPositionOnlyExactPreviousAbi() {
         RenderPipeline waterMask = pipeline("core/rendertype_water_mask", DefaultVertexFormat.POSITION);
         assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(waterMask));
@@ -70,6 +81,8 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
                 pipeline("core/text_background", DefaultVertexFormat.POSITION_COLOR)));
         assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(
                 pipeline("core/rendertype_water_mask", DefaultVertexFormat.ENTITY)));
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(
+                pipeline("core/rendertype_entity_shadow", DefaultVertexFormat.BLOCK)));
     }
 
     private static RenderPipeline pipeline(final String shader, final VertexFormat format, final String... defines) {

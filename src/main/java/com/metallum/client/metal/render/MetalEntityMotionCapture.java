@@ -7,7 +7,9 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.renderer.StagedVertexBuffer;
+import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.feature.FlameFeatureRenderer;
+import net.minecraft.client.renderer.feature.ShadowFeatureRenderer;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.jspecify.annotations.Nullable;
@@ -79,9 +81,11 @@ public final class MetalEntityMotionCapture {
     }
 
     private static final ThreadLocal<Sample> ENTITY_SUBMISSION = new ThreadLocal<>();
+    private static final ThreadLocal<Object> ENTITY_SUBMISSION_STATE = new ThreadLocal<>();
     private static final ThreadLocal<Sample> MODEL_BUILD = new ThreadLocal<>();
     private static final Map<Object, Sample> STATES = new IdentityHashMap<>();
     private static final Map<Object, Sample> SUBMITS = new IdentityHashMap<>();
+    private static final Map<Object, EntityRenderState> SHADOW_SUBMIT_STATES = new IdentityHashMap<>();
     private static final Map<StagedVertexBuffer.Draw, DrawCapture> DRAWS = new IdentityHashMap<>();
     private static final Map<StagedVertexBuffer.ExecuteInfo, Sample> EXECUTES = new IdentityHashMap<>();
     private static final Map<StagedVertexBuffer.ExecuteInfo, MetalPreviousVertexHistory.DrawToken> EXECUTE_VERTEX_TOKENS =
@@ -125,9 +129,11 @@ public final class MetalEntityMotionCapture {
 
     private static void clearFrameState() {
         ENTITY_SUBMISSION.remove();
+        ENTITY_SUBMISSION_STATE.remove();
         MODEL_BUILD.remove();
         STATES.clear();
         SUBMITS.clear();
+        SHADOW_SUBMIT_STATES.clear();
         DRAWS.clear();
         EXECUTES.clear();
         EXECUTE_VERTEX_TOKENS.clear();
@@ -185,8 +191,10 @@ public final class MetalEntityMotionCapture {
         Sample sample = STATES.get(state);
         if (sample == null) {
             ENTITY_SUBMISSION.remove();
+            ENTITY_SUBMISSION_STATE.remove();
         } else {
             ENTITY_SUBMISSION.set(sample);
+            ENTITY_SUBMISSION_STATE.set(state);
             entitySubmissionsMatched++;
         }
     }
@@ -194,6 +202,7 @@ public final class MetalEntityMotionCapture {
     public static void endEntitySubmission() {
         if (enabled) {
             ENTITY_SUBMISSION.remove();
+            ENTITY_SUBMISSION_STATE.remove();
         }
     }
 
@@ -206,6 +215,59 @@ public final class MetalEntityMotionCapture {
             SUBMITS.put(submit, sample);
             modelSubmitsCaptured++;
         }
+    }
+
+    /** Captures one entity-shadow submit while its real dispatcher owner is still active. */
+    public static void captureShadowSubmit(final ShadowFeatureRenderer.Submit submit) {
+        if (!enabled || submit == null) {
+            return;
+        }
+        Sample sample = ENTITY_SUBMISSION.get();
+        Object state = ENTITY_SUBMISSION_STATE.get();
+        if (sample != null && state instanceof EntityRenderState entityState) {
+            SUBMITS.put(submit, sample);
+            SHADOW_SUBMIT_STATES.put(submit, entityState);
+            modelSubmitsCaptured++;
+        }
+    }
+
+    /**
+     * Activates one synthetic exact owner for Minecraft 26.2's complete shared shadow builder.
+     * Every submit is paired with the real entity lifetime and the exact ordered terrain pieces
+     * that generate its four-vertex quads.
+     */
+    public static void beginSharedShadowBuild(final List<ShadowFeatureRenderer.Submit> submits) {
+        if (!enabled) {
+            return;
+        }
+        MODEL_BUILD.remove();
+        if (submits == null || submits.isEmpty()) {
+            return;
+        }
+
+        java.util.ArrayList<MetalShadowBatchMotion.Member> members = new java.util.ArrayList<>(submits.size());
+        for (ShadowFeatureRenderer.Submit submit : submits) {
+            Sample owner = submit == null ? null : SUBMITS.remove(submit);
+            EntityRenderState state = submit == null ? null : SHADOW_SUBMIT_STATES.remove(submit);
+            MetalShadowBatchMotion.Member member =
+                    owner == null || state == null || submit == null
+                            ? null
+                            : MetalShadowBatchMotion.member(owner, state, submit);
+            if (member == null) {
+                MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();
+                return;
+            }
+            members.add(member);
+        }
+
+        Sample batch = MetalShadowBatchMotion.beginShadowBatch(members);
+        if (batch == null) {
+            MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();
+            return;
+        }
+        MODEL_BUILD.set(batch);
+        MetalExactMotionCoverage.require(batch);
+        modelBuildsMatched++;
     }
 
     /**

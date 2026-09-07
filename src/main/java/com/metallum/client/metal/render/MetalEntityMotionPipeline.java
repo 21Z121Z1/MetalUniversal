@@ -65,6 +65,7 @@ final class MetalEntityMotionPipeline {
 
     private enum PreviousFamily {
         ENTITY("core/entity_previous_motion", "core/entity_motion", "entity_previous_motion/"),
+        SHADOW("core/entity_previous_motion", "core/shadow_previous_motion", "shadow_previous_motion/"),
         LEASH("core/leash_previous_motion", "core/leash_previous_motion", "leash_previous_motion/"),
         TEXT("core/text_previous_motion", "core/text_previous_motion", "text_previous_motion/"),
         TEXT_BACKGROUND("core/text_background_previous_motion", "core/text_background_previous_motion", "text_background_previous_motion/"),
@@ -151,6 +152,10 @@ final class MetalEntityMotionPipeline {
                 && DefaultVertexFormat.ENTITY.equals(format)
                 && supports(source)) {
             return PreviousFamily.ENTITY;
+        }
+        if (shader.equals("core/rendertype_entity_shadow")
+                && DefaultVertexFormat.ENTITY.equals(format)) {
+            return PreviousFamily.SHADOW;
         }
         if (shader.equals("core/rendertype_leash")
                 && DefaultVertexFormat.POSITION_COLOR_LIGHTMAP.equals(format)) {
