@@ -19,7 +19,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Extract source-grounded staged-vertex and Blaze3D APIs
+      - name: Extract source-grounded staged-vertex, entity auxiliary, and Blaze3D APIs
         shell: bash
         run: |
           set -euo pipefail
@@ -37,6 +37,13 @@ jobs:
             'TransientMemory.java': ('allocateGpuMapped','allocateGpu','uploadGpu','uploadStaging','interface TransientMemory'),
             'RenderPipeline.java': ('withVertexBinding','vertexFormat','VertexFormat','Builder'),
             'RenderPass.java': ('setVertexBuffer','drawIndexed','setPipeline'),
+            'EntityRenderDispatcher.java': ('submitFlame(','submitShadow(','submitNameTag(','submitLeash(','renderer.submit('),
+            'SubmitNodeCollection.java': ('submitShadow(','submitNameTag(','submitFlame(','submitLeash(','submitModel('),
+            'ShadowFeatureRenderer.java': ('class ShadowFeatureRenderer','prepare','render','VertexConsumer','RenderType','ShadowPiece'),
+            'LeashFeatureRenderer.java': ('class LeashFeatureRenderer','prepare','render','VertexConsumer','RenderType','LeashState'),
+            'FlameFeatureRenderer.java': ('class FlameFeatureRenderer','prepare','render','VertexConsumer','RenderType','EntityRenderState'),
+            'NameTagFeatureRenderer.java': ('class NameTagFeatureRenderer','prepare','render','VertexConsumer','RenderType','Submit'),
+            'TextFeatureRenderer.java': ('class TextFeatureRenderer','prepare','render','VertexConsumer','RenderType','Submit'),
           }
           out=[]
           for name, needles in specs.items():
