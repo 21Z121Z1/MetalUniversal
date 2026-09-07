@@ -25,8 +25,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "557c3e4667ebf1d7e7c165f26a0fdbeb5ea4ca64"
-          test "$(git log -1 --format=%s HEAD^)" = "fix(agent): match exact living CFR transform text"
+          test "$(git rev-parse HEAD^^)" = "0425e28fb95877577cb528e8d3301a937fdd4869"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): retarget living exact transaction after anchor normalization"
           test "$(git log -1 --format=%s HEAD)" = "chore(agent): apply living and first-person exact motion"
           test "$(git rev-parse HEAD^^:.github/scripts/apply_living_first_person_exact_motion.py)" = \
                "$(git rev-parse HEAD:.github/scripts/apply_living_first_person_exact_motion.py)"
