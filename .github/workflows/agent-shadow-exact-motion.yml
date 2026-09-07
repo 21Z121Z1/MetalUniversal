@@ -1,0 +1,153 @@
+name: Agent exact shared shadow motion
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.event.head_commit.message == 'chore(agent): apply exact shared shadow motion'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 8
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Guard shadow transaction ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^^)" = "97fd66d32758d944b7014c23c524bebc929fce83"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure exact shared shadow verification"
+          test "$(git log -1 --format=%s HEAD)" = "chore(agent): apply exact shared shadow motion"
+          test "$(git rev-parse HEAD^^:.github/scripts/apply_shadow_exact_motion.py)" = \
+               "$(git rev-parse HEAD:.github/scripts/apply_shadow_exact_motion.py)"
+      - name: Verify pinned Minecraft 26.2 shadow source contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/feature/ShadowFeatureRenderer.java" -o /tmp/ShadowFeatureRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/entity/EntityRenderer.java" -o /tmp/EntityRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/entity/EntityRenderDispatcher.java" -o /tmp/EntityRenderDispatcher.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/SubmitNodeCollection.java" -o /tmp/SubmitNodeCollection.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/RenderPipelines.java" -o /tmp/RenderPipelines.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/entity/state/EntityRenderState.java" -o /tmp/EntityRenderState.java
+          python3 - <<'PY'
+          from pathlib import Path
+
+          shadow = Path('/tmp/ShadowFeatureRenderer.java').read_text()
+          renderer = Path('/tmp/EntityRenderer.java').read_text()
+          dispatcher = Path('/tmp/EntityRenderDispatcher.java').read_text()
+          collection = Path('/tmp/SubmitNodeCollection.java').read_text()
+          pipelines = Path('/tmp/RenderPipelines.java').read_text()
+          state = Path('/tmp/EntityRenderState.java').read_text()
+
+          for text in [
+              'VertexConsumer builder = this.getVertexBuilder(SHADOW_RENDER_TYPE);',
+              'for (Submit submit : submits) {',
+              'for (EntityRenderState.ShadowPiece piece : submit.pieces()) {',
+              'AABB aabb = piece.shapeBelow().bounds();',
+              'Vector3f position = pose.transformPosition(x, y, z, new Vector3f());',
+              'buffer.addVertex(position.x(), position.y(), position.z(), color, u, v, OverlayTexture.NO_OVERLAY, 0xF000F0, 0.0f, 1.0f, 0.0f);',
+          ]:
+              if text not in shadow:
+                  raise SystemExit(f'Minecraft 26.2 shadow builder contract missing: {text}')
+          if shadow.count('ShadowFeatureRenderer.shadowVertex(submit.pose(), builder') != 4:
+              raise SystemExit('Minecraft 26.2 shadow piece no longer emits exactly four vertices')
+
+          for text in [
+              'float relativeX = (float)((double)pos.getX() - ((EntityRenderState)state).x);',
+              'float relativeY = (float)((double)pos.getY() - ((EntityRenderState)state).y);',
+              'float relativeZ = (float)((double)pos.getZ() - ((EntityRenderState)state).z);',
+              'new EntityRenderState.ShadowPiece(relativeX, relativeY, relativeZ, belowShape, alpha)',
+          ]:
+              if text not in renderer:
+                  raise SystemExit(f'Minecraft 26.2 shadow BlockPos identity contract missing: {text}')
+
+          if 'public record ShadowPiece(float relativeX, float relativeY, float relativeZ, VoxelShape shapeBelow, float alpha)' not in state:
+              raise SystemExit('Minecraft 26.2 ShadowPiece record layout changed')
+          if 'submitNodeCollector.submitShadow(poseStack, renderState.shadowRadius, renderState.shadowPieces);' not in dispatcher:
+              raise SystemExit('Minecraft 26.2 dispatcher shadow ownership timing changed')
+          for text in [
+              'PoseStack.Pose pose = poseStack.last();',
+              'new ShadowFeatureRenderer.Submit((Matrix4fc)new Matrix4f((Matrix4fc)pose.pose()), radius, pieces)',
+          ]:
+              if text not in collection:
+                  raise SystemExit(f'Minecraft 26.2 shadow submit construction changed: {text}')
+
+          line = next((line for line in pipelines.splitlines()
+                       if 'public static final RenderPipeline ENTITY_SHADOW =' in line), None)
+          if line is None:
+              raise SystemExit('Minecraft 26.2 ENTITY_SHADOW pipeline missing')
+          for text in [
+              'withVertexShader("core/rendertype_entity_shadow")',
+              'withFragmentShader("core/rendertype_entity_shadow")',
+              'withVertexBinding(0, DefaultVertexFormat.ENTITY)',
+              'withPrimitiveTopology(PrimitiveTopology.QUADS)',
+              'withColorTargetState(new ColorTargetState(BlendFunction.TRANSLUCENT))',
+          ]:
+              if text not in line:
+                  raise SystemExit(f'Minecraft 26.2 ENTITY_SHADOW ABI changed: {text}')
+          print('Pinned Minecraft 26.2 exact shared shadow source contract: PASS')
+          PY
+      - name: Apply exact shared shadow motion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_shadow_exact_motion.py
+          git diff --check
+      - name: Compile and test exact shadow contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalShadowBatchMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalSharedBatchMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalSyntheticExactMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
+          git diff --check
+      - name: Verify exact shadow and remaining particle fail-closed wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'MetalShadowBatchMotion.beginFrame();' src/main/java/com/metallum/client/metal/render/MetalMotionStateStore.java
+          grep -F 'captureShadowSubmit' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+          grep -F 'beginSharedShadowBuild' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+          grep -F 'MetalEntityMotionCapture.captureShadowSubmit' src/main/java/com/metallum/mixin/render/ShadowFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.beginSharedShadowBuild(submits);' src/main/java/com/metallum/mixin/render/ShadowFeatureRendererMetalFxMixin.java
+          grep -F '"render.ShadowFeatureRendererMetalFxMixin"' src/main/resources/metallum.mixins.json
+          grep -F 'SHADOW("core/entity_previous_motion", "core/shadow_previous_motion"' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
+          test -f src/main/resources/assets/metallum/shaders/core/shadow_previous_motion.fsh
+          ! grep -F 'rejectCurrentExactAuxiliary("shadow-shared-staged-draw")' src/main/java/com/metallum/mixin/render/ShadowFeatureSubmitMetalFxMixin.java
+          ! grep -F 'observeUnresolvedSharedAuxiliaryMotion();' src/main/java/com/metallum/mixin/render/ShadowFeatureSubmitMetalFxMixin.java
+          # Particle identity/batching is deliberately the final unresolved dynamic family.
+          grep -F 'observeParticleMotion();' src/main/java/com/metallum/mixin/render/QuadParticleRenderStateMetalFxMixin.java
+      - name: Commit verified exact shared shadow implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/java src/main/resources src/test/java
+          git diff --cached --check
+          git commit -m 'feat(metalfx): add exact shared shadow motion'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2
