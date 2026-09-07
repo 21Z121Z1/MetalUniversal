@@ -554,6 +554,13 @@ public final class MetalFxManager {
             manager.motionEligibility.reject(incompleteReason);
             return;
         }
+        if (state instanceof net.minecraft.client.renderer.entity.state.DisplayEntityRenderState displayState
+                && MetalDisplayMotionSafety.requiresExactPreviousPositions(displayState)) {
+            // TextDisplay submits both TextFeature and CustomGeometry (background) draws. Class-level
+            // admission is therefore only a candidate; the whole per-object staged manifest must
+            // match and every draw must actually encode exact previous positions before interpolation.
+            MetalEntityMotionCapture.requireExactState(state);
+        }
         if (!MetalEntityMotionCapture.hasPreviousState(state)) {
             // The current pose can seed history and remains useful to MetalFX Temporal, but
             // MTLFXFrameInterpolator cannot safely infer object motion without a source-frame

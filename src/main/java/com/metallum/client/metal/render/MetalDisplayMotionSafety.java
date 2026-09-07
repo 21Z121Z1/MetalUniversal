@@ -5,10 +5,12 @@ import net.minecraft.client.renderer.entity.state.BlockDisplayEntityRenderState;
 import net.minecraft.client.renderer.entity.state.DisplayEntityRenderState;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.entity.state.ItemDisplayEntityRenderState;
+import net.minecraft.client.renderer.entity.state.TextDisplayEntityRenderState;
 import net.minecraft.world.entity.Display;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.network.chat.Component;
 
 import java.util.List;
 import java.util.Map;
@@ -31,8 +33,9 @@ import java.util.WeakHashMap;
  *       render state is not animated.</li>
  * </ul>
  *
- * <p>Special renderers and text never enter the ordinary staged replay, so they
- * remain fail-closed.</p>
+ * <p>Special block/item renderers remain fail-closed. Text displays are admitted only when
+ * their text/layout identity is continuous and the exact staged-position transaction proves every
+ * text/background draw against the previous successfully submitted source frame.</p>
  */
 public final class MetalDisplayMotionSafety {
     private static final Map<Entity, Object> LAST_GEOMETRY = new WeakHashMap<>();
@@ -48,6 +51,10 @@ public final class MetalDisplayMotionSafety {
         }
         if (entity instanceof Display.ItemDisplay display && state instanceof ItemDisplayEntityRenderState itemState) {
             captureItem(display, itemState);
+            return;
+        }
+        if (entity instanceof Display.TextDisplay display && state instanceof TextDisplayEntityRenderState textState) {
+            captureText(display, textState);
         }
     }
 
@@ -67,7 +74,17 @@ public final class MetalDisplayMotionSafety {
             MetalItemModelIdentityAccess access = (MetalItemModelIdentityAccess) (Object) itemState.item;
             return !itemState.item.isAnimated() && !access.metallum$hasSpecialLayer();
         }
+        if (state instanceof TextDisplayEntityRenderState textState) {
+            return textState.cachedInfo != null;
+        }
         return false;
+    }
+
+    /** Text displays have no safe root-only fallback: every submitted glyph/background draw is exact. */
+    static boolean requiresExactPreviousPositions(final DisplayEntityRenderState state) {
+        return state instanceof TextDisplayEntityRenderState textState
+                && textState.hasSubState()
+                && textState.cachedInfo != null;
     }
 
     static ItemGeometry itemGeometry(final ItemDisplayContext context, final List<Object> identity) {
@@ -116,6 +133,30 @@ public final class MetalDisplayMotionSafety {
         CURRENT_CONTINUITY.put(state, Objects.equals(previous, current));
     }
 
+    private static void captureText(final Display.TextDisplay display, final TextDisplayEntityRenderState state) {
+        Display.TextDisplay.TextRenderState renderState = state.textRenderState;
+        if (renderState == null || state.cachedInfo == null) {
+            LAST_GEOMETRY.remove(display);
+            CURRENT_CONTINUITY.put(state, false);
+            return;
+        }
+        TextGeometry current = textGeometry(renderState.text(), renderState.lineWidth(), renderState.flags());
+        Object previous = LAST_GEOMETRY.put(display, current);
+        CURRENT_CONTINUITY.put(state, Objects.equals(previous, current));
+    }
+
+    static TextGeometry textGeometry(final Component text, final int lineWidth, final byte flags) {
+        return new TextGeometry(text, lineWidth, flags);
+    }
+
     record ItemGeometry(ItemDisplayContext displayContext, List<Object> modelIdentity) {
+    }
+
+    /**
+     * Geometry identity only. Text opacity and background-color interpolators intentionally do not
+     * participate: they change shading, while zero/nonzero background topology changes are caught by
+     * the exact whole-object draw manifest itself.
+     */
+    record TextGeometry(Component text, int lineWidth, byte flags) {
     }
 }
