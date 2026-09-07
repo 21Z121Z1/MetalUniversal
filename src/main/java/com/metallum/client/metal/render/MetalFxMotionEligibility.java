@@ -1,5 +1,7 @@
 package com.metallum.client.metal.render;
 
+import net.fabricmc.api.EnvType;
+import net.fabricmc.api.Environment;
 import net.minecraft.client.renderer.entity.state.ArrowRenderState;
 import net.minecraft.client.renderer.entity.state.BoatRenderState;
 import net.minecraft.client.renderer.entity.state.DisplayEntityRenderState;
@@ -10,20 +12,22 @@ import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
 
 /**
- * Per-source-frame admission control for MTLFXFrameInterpolator.
+ * Per-render-frame admission state for Metal frame interpolation.
  *
- * <p>Temporal upscaling can tolerate pixels that deliberately fall back to
- * camera-only motion plus disocclusion/reactive masks. Frame interpolation
- * cannot: a real source frame containing visible geometry with no exact
- * previous-position representation must not enter the interpolator pair.</p>
+ * <p>MetalFX Temporal has pixel-level reactive/history rejection, while
+ * MTLFXFrameInterpolator consumes the finished color/depth/motion source frame.
+ * If any submitted primitive lacks an exact previous-position motion producer,
+ * the whole source frame is kept real and the next interpolated pair is reset.
+ * Rejection is monotonic only within the current frame.</p>
  */
+@Environment(EnvType.CLIENT)
 final class MetalFxMotionEligibility {
-    static final int NON_RIGID_ENTITY = 1 << 0;
-    static final int DISPLAY_ENTITY = 1 << 1;
-    static final int UNKNOWN_ENTITY = 1 << 2;
-    static final int FIRST_PERSON = 1 << 3;
-    static final int PARTICLE = 1 << 4;
-    static final int MOVING_BLOCK = 1 << 5;
+    static final int NON_RIGID_ENTITY = 1;
+    static final int UNKNOWN_ENTITY = 1 << 1;
+    static final int FIRST_PERSON = 1 << 2;
+    static final int PARTICLE = 1 << 3;
+    static final int MOVING_BLOCK = 1 << 4;
+    static final int DISPLAY_ENTITY = 1 << 5;
     static final int MISSING_HISTORY = 1 << 6;
 
     private int rejectedReasons;
@@ -33,7 +37,7 @@ final class MetalFxMotionEligibility {
     }
 
     void reject(final int reason) {
-        rejectedReasons |= reason;
+        if (reason != 0) rejectedReasons |= reason;
     }
 
     boolean eligible() {
@@ -44,10 +48,15 @@ final class MetalFxMotionEligibility {
         return rejectedReasons;
     }
 
+    /**
+     * Whitelist only renderer families whose current staged geometry has an exact previous-source
+     * representation. Rigid families use MetalEntityObjectPose; ordinary display block/item
+     * geometry additionally proves local-topology continuity in MetalDisplayMotionSafety.
+     *
+     * <p>Living entities change ModelPart vertices through setupAnim and boats animate child
+     * geometry (paddles), so they remain fail-closed until previous local vertices are supplied.</p>
+     */
     static int incompleteEntityReason(final EntityRenderState state) {
-        if (state instanceof DisplayEntityRenderState displayState) {
-            return MetalDisplayMotionSafety.isFrameInterpolationSafe(displayState) ? 0 : DISPLAY_ENTITY;
-        }
         if (state instanceof LivingEntityRenderState || state instanceof BoatRenderState) {
             return NON_RIGID_ENTITY;
         }
@@ -56,6 +65,9 @@ final class MetalFxMotionEligibility {
                 || state instanceof ArrowRenderState
                 || state instanceof FallingBlockRenderState) {
             return 0;
+        }
+        if (state instanceof DisplayEntityRenderState displayState) {
+            return MetalDisplayMotionSafety.isFrameInterpolationSafe(displayState) ? 0 : DISPLAY_ENTITY;
         }
         return UNKNOWN_ENTITY;
     }
