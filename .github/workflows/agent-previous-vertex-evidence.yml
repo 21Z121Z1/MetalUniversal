@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): run exact motion coverage patch'"
+    if: "github.event.head_commit.message == 'chore(agent): retry exact motion coverage patch'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -25,7 +25,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "891a1f0c4035c75c61d166362035197d267546eb"
+          test "$(git rev-parse HEAD^)" = "ecfa53ac7d6e0149668448ef6b6fe0151fd421db"
+      - name: Repair the one stale replay anchor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/scripts/apply_exact_motion_coverage.py')
+          text = p.read_text()
+          old = '''    """        return new Plan(currentVertexBuffer, previousPositions, 0);\\n""",
+              """        MetalEntityMotionCapture.recordExactReplayPlanned(token);\\n        return new Plan(currentVertexBuffer, previousPositions, 0);\\n"""
+          '''
+          new = '''    """        return new Plan(\\n                executeInfo.vertexBuffer().slice(byteOffset, byteLength),\\n                0,\\n                previousPositions\\n        );\\n""",
+              """        MetalEntityMotionCapture.recordExactReplayPlanned(token);\\n        return new Plan(\\n                executeInfo.vertexBuffer().slice(byteOffset, byteLength),\\n                0,\\n                previousPositions\\n        );\\n"""
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f'stale replay patch anchor count={text.count(old)}')
+          p.write_text(text.replace(old, new, 1))
+          PY
       - name: Apply exact coverage transaction
         shell: bash
         run: |
