@@ -1,4 +1,4 @@
-name: Agent Flame shared exact motion v2
+name: Agent Boat exact staged motion
 
 on:
   push:
@@ -10,95 +10,122 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): apply Flame shared exact motion v2c'"
+    if: "github.event.head_commit.message == 'chore(agent): apply Boat exact staged motion'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           ref: agent/metalfx-motion-coverage-26.2
-          fetch-depth: 6
+          fetch-depth: 8
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
-      - name: Guard Flame exact v2c transaction
+      - name: Guard Boat exact transaction
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "d8270d1253376e7d06d5c72e4566a586086b8f90"
-          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): fix Flame v2 nested nullable compile guard"
-          test "$(git hash-object .github/scripts/apply_flame_shared_exact_motion.py)" = "9b08e77d788b9c84fbf2dcfd89c51178dd1759f1"
-      - name: Verify pinned Minecraft 26.2 Flame source contract
+          test "$(git rev-parse HEAD^^^)" = "c0e7adac584f43d8e64dd2041d9a12863fdf70d8"
+          test "$(git log -1 --format=%s HEAD^^)" = "chore(agent): add Boat exact motion patch"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure Boat exact motion verification"
+          test "$(git hash-object .github/scripts/apply_boat_exact_motion.py)" = "496aee56662b439252af945e15fcb48fab75553c"
+      - name: Verify pinned Minecraft 26.2 Boat source contract
         shell: bash
         run: |
           set -euo pipefail
-          URL='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262/net/minecraft/client/renderer/feature/FlameFeatureRenderer.java'
-          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$URL" -o /tmp/FlameFeatureRenderer.java
+          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$BASE/net/minecraft/client/renderer/entity/AbstractBoatRenderer.java" -o /tmp/AbstractBoatRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$BASE/net/minecraft/client/renderer/entity/BoatRenderer.java" -o /tmp/BoatRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$BASE/net/minecraft/client/model/object/boat/AbstractBoatModel.java" -o /tmp/AbstractBoatModel.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$BASE/net/minecraft/client/renderer/RenderPipelines.java" -o /tmp/RenderPipelines.java
           python3 - <<'PY'
           from pathlib import Path
-          import re
-          s = Path('/tmp/FlameFeatureRenderer.java').read_text()
-          required = [
-              r'protected\s+void\s+buildGroup\s*\(FeatureFrameContext\s+context,\s*List<Submit>\s+submits\)',
-              r'VertexConsumer\s+builder\s*=\s*this\.getVertexBuilder\(RenderTypes\.entityCutoutCull\(TextureAtlas\.LOCATION_BLOCKS\)\)',
-              r'for\s*\(Submit\s+submit\s*:\s*submits\)',
-              r'float\s+s\s*=\s*state\.boundingBoxWidth\s*\*\s*1\.4f',
-              r'float\s+h\s*=\s*state\.boundingBoxHeight\s*/\s*s',
-              r'while\s*\(h\s*>\s*0\.0f\)',
-              r'h\s*-=\s*0\.45f',
+
+          abstract = Path('/tmp/AbstractBoatRenderer.java').read_text()
+          boat = Path('/tmp/BoatRenderer.java').read_text()
+          model = Path('/tmp/AbstractBoatModel.java').read_text()
+          pipelines = Path('/tmp/RenderPipelines.java').read_text()
+
+          required_abstract = [
+              'submitNodeCollector.submitModel(this.model(), state, poseStack',
+              'this.submitTypeAdditions(state, poseStack, submitNodeCollector, state.lightCoords);',
+              'state.rowingTimeLeft = entity.getRowingTime(0, partialTicks);',
+              'state.rowingTimeRight = entity.getRowingTime(1, partialTicks);',
           ]
-          for pattern in required:
-              if not re.search(pattern, s):
-                  raise SystemExit(f'Minecraft 26.2 Flame source contract missing: {pattern}')
-          if s.count('FlameFeatureRenderer.fireVertex(') != 4:
-              raise SystemExit('Minecraft 26.2 Flame loop no longer emits exactly four vertices per layer')
-          print('Pinned Minecraft 26.2 Flame source contract: PASS')
+          for text in required_abstract:
+              if text not in abstract:
+                  raise SystemExit(f'Minecraft 26.2 AbstractBoatRenderer contract missing: {text}')
+
+          required_boat = [
+              'RenderTypes.waterMask()',
+              'if (!state.isUnderWater)',
+              'submitNodeCollector.submitModel(this.waterPatchModel, Unit.INSTANCE, poseStack',
+          ]
+          for text in required_boat:
+              if text not in boat:
+                  raise SystemExit(f'Minecraft 26.2 BoatRenderer contract missing: {text}')
+
+          required_model = [
+              'AbstractBoatModel.animatePaddle(state.rowingTimeLeft, 0, this.leftPaddle);',
+              'AbstractBoatModel.animatePaddle(state.rowingTimeRight, 1, this.rightPaddle);',
+          ]
+          for text in required_model:
+              if text not in model:
+                  raise SystemExit(f'Minecraft 26.2 Boat model contract missing: {text}')
+
+          water_line = next((line for line in pipelines.splitlines()
+                             if 'public static final RenderPipeline WATER_MASK =' in line), None)
+          if water_line is None:
+              raise SystemExit('Minecraft 26.2 WATER_MASK pipeline missing')
+          for text in [
+              'withVertexShader("core/rendertype_water_mask")',
+              'withFragmentShader("core/rendertype_water_mask")',
+              'withVertexBinding(0, DefaultVertexFormat.POSITION)',
+              'withPrimitiveTopology(PrimitiveTopology.QUADS)',
+          ]:
+              if text not in water_line:
+                  raise SystemExit(f'Minecraft 26.2 WATER_MASK ABI changed: {text}')
+          print('Pinned Minecraft 26.2 Boat + water-mask source contract: PASS')
           PY
-      - name: Apply Flame shared exact motion v2
+      - name: Apply Boat exact staged motion
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_flame_shared_exact_motion.py
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('src/main/java/com/metallum/client/metal/render/MetalSharedBatchMotion.java')
-          s = p.read_text()
-          old = 'static @Nullable MetalEntityMotionCapture.Sample beginFlameBatch'
-          new = 'static MetalEntityMotionCapture.Sample beginFlameBatch'
-          if s.count(old) != 1:
-              raise SystemExit(f'expected one nested nullable signature, found {s.count(old)}')
-          p.write_text(s.replace(old, new, 1))
-          PY
+          python3 .github/scripts/apply_boat_exact_motion.py
           git diff --check
-      - name: Compile and test Flame exact contracts
+      - name: Compile and test Boat exact contracts
         shell: bash
         run: |
           set -euo pipefail
           ./gradlew compileJava test \
-            --tests 'com.metallum.client.metal.render.MetalSharedBatchMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
             --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
             --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
-            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
-            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityObjectPoseTest' \
             --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
           ./gradlew jar
           git diff --check
-      - name: Verify Flame fail-closed wiring
+      - name: Verify Boat exact fail-closed wiring
         shell: bash
         run: |
           set -euo pipefail
-          grep -F 'MetalEntityMotionCapture.captureModelSubmit(this);' src/main/java/com/metallum/mixin/render/FlameFeatureSubmitMetalFxMixin.java
-          grep -F 'MetalExactMotionCoverage.require(batch);' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
-          grep -F 'render.FlameFeatureRendererMetalFxMixin' src/main/resources/metallum.mixins.json
-          ! grep -F 'observeUnresolvedSharedAuxiliaryMotion();' src/main/java/com/metallum/mixin/render/FlameFeatureSubmitMetalFxMixin.java
+          grep -F 'state instanceof BoatRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'state instanceof net.minecraft.client.renderer.entity.state.BoatRenderState' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -F 'shader.equals("core/rendertype_water_mask")' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
+          grep -F 'DefaultVertexFormat.POSITION.equals(format)' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
+          test -f src/main/resources/assets/metallum/shaders/core/position_previous_motion.vsh
+          test -f src/main/resources/assets/metallum/shaders/core/position_previous_motion.fsh
+          # Shadow and particles are deliberately still unresolved and must keep their whole-frame guards.
           grep -F 'observeUnresolvedSharedAuxiliaryMotion();' src/main/java/com/metallum/mixin/render/ShadowFeatureSubmitMetalFxMixin.java
-      - name: Commit verified Flame exact implementation
+          grep -F 'observeParticleMotion();' src/main/java/com/metallum/mixin/render/QuadParticleRenderStateMetalFxMixin.java
+      - name: Commit verified Boat exact implementation
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/main/java src/main/resources/metallum.mixins.json src/test/java
+          git add src/main/java src/main/resources/assets/metallum/shaders/core src/test/java
           git diff --cached --check
-          git commit -m 'feat(metalfx): add exact shared Flame motion coverage'
+          git commit -m 'feat(metalfx): add exact Boat staged motion coverage'
           git push origin HEAD:agent/metalfx-motion-coverage-26.2
