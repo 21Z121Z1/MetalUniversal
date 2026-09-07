@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): verify exact leash and text motion'"
+    if: "github.event.head_commit.message == 'chore(agent): retry exact leash and text motion'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -25,12 +25,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "2d41595dd37c92b33891a511cd572aa53ed6afbd"
+          test "$(git rev-parse HEAD^)" = "cb901b91c51cce4401bc2d0f24e5cdffdc2c7614"
       - name: Apply exact leash and text motion
         shell: bash
         run: |
           set -euo pipefail
           python3 .github/scripts/apply_exact_auxiliary_motion.py
+          # The first run proved compileJava green and exposed only an invalid minimal test fixture:
+          # RenderPipeline.Builder requires primitive topology before build(). Repair the fixture,
+          # not the production implementation, then rerun the same ABI assertions.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/test/java/com/metallum/client/metal/render/MetalEntityAuxiliaryMotionPipelineTest.java')
+          text = p.read_text()
+          old_import = 'import com.mojang.blaze3d.pipeline.RenderPipeline;\n'
+          new_import = 'import com.mojang.blaze3d.PrimitiveTopology;\nimport com.mojang.blaze3d.pipeline.RenderPipeline;\n'
+          if text.count(old_import) != 1:
+              raise SystemExit('test import anchor drift')
+          text = text.replace(old_import, new_import, 1)
+          old_builder = '                .withFragmentShader(shaderId)\n                .withVertexBinding(0, format);\n'
+          new_builder = '                .withFragmentShader(shaderId)\n                .withPrimitiveTopology(PrimitiveTopology.QUADS)\n                .withVertexBinding(0, format);\n'
+          if text.count(old_builder) != 1:
+              raise SystemExit('test builder anchor drift')
+          p.write_text(text.replace(old_builder, new_builder, 1))
+          PY
           git diff --check
       - name: Compile and test exact auxiliary contracts
         shell: bash
