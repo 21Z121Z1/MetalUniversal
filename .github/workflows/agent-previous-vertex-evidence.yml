@@ -1,4 +1,4 @@
-name: Agent display geometry-generation evidence
+name: Agent previous-vertex API evidence
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Extract source-grounded display generation semantics
+      - name: Extract source-grounded staged-vertex and Blaze3D APIs
         shell: bash
         run: |
           set -euo pipefail
@@ -29,31 +29,37 @@ jobs:
           import hashlib, json, sys
           root=Path(sys.argv[1])
           specs={
-            'Display.java': ('class BlockDisplay','class ItemDisplay','BlockRenderState','ItemRenderState','blockRenderState','itemRenderState','updateRenderSubState','createFreshRenderState'),
-            'BlockModelRenderState.java': ('specialRenderer','setupSpecialModel','setupModel','isEmpty'),
-            'BlockModelResolver.java': ('update(','BlockDisplayContext','random','scratchRandomSource','modelParts','getSeed'),
-            'BlockDisplayContext.java': ('class BlockDisplayContext','create(','seed','random'),
-            'ItemStackRenderState.java': ('activeLayerCount','specialRenderer','setupSpecialModel','appendModelIdentityElement','isAnimated','animated','submit('),
-            'ItemModelResolver.java': ('updateForNonLiving','setAnimated','appendModelIdentityElement','update(','ItemDisplayContext'),
+            'StagedVertexBuffer.java': ('vertexBufferSlices','uploadDrawsToBuffers','freeVertexData','getExecuteInfo','vertexBufferSize','vertexCount','record ExecuteInfo','class Draw'),
+            'VertexFormat.java': ('class VertexFormat','builder(','addAttribute','padding','getVertexSize','binding','Builder'),
+            'DefaultVertexFormat.java': ('POSITION','POSITION_COLOR_TEX_LIGHTMAP','ENTITY','BLOCK','addAttribute'),
+            'GpuBuffer.java': ('USAGE_VERTEX','USAGE_UNIFORM','class GpuBuffer','interface Usage'),
+            'TransientMemory.java': ('allocateGpuMapped','allocateGpu','interface TransientMemory'),
+            'RenderPipeline.java': ('withVertexBinding','vertexFormat','VertexFormat','Builder'),
+            'RenderPass.java': ('setVertexBuffer','drawIndexed','setPipeline'),
           }
           out=[]
           for name, needles in specs.items():
-            path=next(root.rglob(name))
+            matches=list(root.rglob(name))
+            if not matches:
+              out.append({'name':name,'missing':True})
+              continue
+            # Prefer the canonical package path when duplicate source stubs exist.
+            path=sorted(matches, key=lambda p:(0 if ('com/mojang/' in p.as_posix() or 'net/minecraft/' in p.as_posix()) else 1, len(p.as_posix())))[0]
             lines=path.read_text(errors='replace').splitlines()
             hits=[i for i,l in enumerate(lines) if any(n in l for n in needles)]
             windows=[]
             for i in hits:
-              a=max(0,i-28); b=min(len(lines),i+45)
+              a=max(0,i-24); b=min(len(lines),i+38)
               if windows and a <= windows[-1][1]+1: windows[-1]=(windows[-1][0],max(windows[-1][1],b))
               else: windows.append((a,b))
             out.append({'path':path.relative_to(root).as_posix(),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'snippets':[{'start_line':a+1,'end_line':b,'text':'\n'.join(f'{j+1:05d}: {lines[j]}' for j in range(a,b))} for a,b in windows]})
-          target=Path('build/agent-evidence/display-generation.json')
+          target=Path('build/agent-evidence/previous-vertex-api.json')
           target.parent.mkdir(parents=True,exist_ok=True)
           target.write_text(json.dumps({'files':out},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: display-generation-source
-          path: build/agent-evidence/display-generation.json
+          name: previous-vertex-api-source
+          path: build/agent-evidence/previous-vertex-api.json
           retention-days: 7
           if-no-files-found: error
