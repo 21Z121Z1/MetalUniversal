@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalEntityMotionCapture;
+import com.metallum.client.metal.render.MetalFxManager;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.feature.ShadowFeatureRenderer;
 import org.joml.Matrix4fc;
@@ -20,6 +21,7 @@ public abstract class ShadowFeatureSubmitMetalFxMixin {
             final List<EntityRenderState.ShadowPiece> pieces,
             final CallbackInfo ci
     ) {
+        MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();
         MetalEntityMotionCapture.rejectCurrentExactAuxiliary("shadow-shared-staged-draw");
     }
 }

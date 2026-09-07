@@ -29,6 +29,7 @@ final class MetalFxMotionEligibility {
     static final int MOVING_BLOCK = 1 << 4;
     static final int DISPLAY_ENTITY = 1 << 5;
     static final int MISSING_HISTORY = 1 << 6;
+    static final int SHARED_AUXILIARY = 1 << 7;
 
     private int rejectedReasons;
 

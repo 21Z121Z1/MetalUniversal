@@ -589,6 +589,17 @@ public final class MetalFxManager {
     }
 
     /**
+     * Shared feature batches (currently shadow/flame) allocate one staged builder before iterating
+     * entities. Until the entire batch has a transactional exact previous-position identity, any
+     * submitted batch is globally incomplete for frame interpolation, even when the parent entity
+     * itself is a rigid family. MetalFX Temporal remains unaffected.
+     */
+    public static void observeUnresolvedSharedAuxiliaryMotion() {
+        MetalFxManager manager = active;
+        if (manager != null) manager.motionEligibility.reject(MetalFxMotionEligibility.SHARED_AUXILIARY);
+    }
+
+    /**
      * Replays the exact staged entity geometry into the object-motion and
      * validity MRT attachments. This is a second geometry pass sharing the
      * scene depth; it does not infer coverage from a bounding box.

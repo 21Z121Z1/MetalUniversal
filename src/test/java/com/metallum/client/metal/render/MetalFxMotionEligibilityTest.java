@@ -81,4 +81,13 @@ final class MetalFxMotionEligibilityTest {
         assertTrue(eligibility.eligible());
         assertEquals(0, eligibility.rejectedReasons());
     }
+
+    @Test
+    void unresolvedSharedAuxiliaryIsAWholeFrameRejectionReason() {
+        MetalFxMotionEligibility eligibility = new MetalFxMotionEligibility();
+        eligibility.beginFrame();
+        eligibility.reject(MetalFxMotionEligibility.SHARED_AUXILIARY);
+        assertFalse(eligibility.eligible());
+        assertEquals(MetalFxMotionEligibility.SHARED_AUXILIARY, eligibility.rejectedReasons());
+    }
 }
