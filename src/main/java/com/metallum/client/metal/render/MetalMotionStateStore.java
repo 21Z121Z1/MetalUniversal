@@ -32,6 +32,7 @@ final class MetalMotionStateStore {
         pending.clear();
         frameOpen = true;
         MetalPreviousVertexHistory.beginFrame();
+        MetalSharedBatchMotion.beginFrame();
     }
 
     void observe(final ObjectKey key, final Matrix4fc currentTransform) {
@@ -77,12 +78,14 @@ final class MetalMotionStateStore {
         }
         pending.clear();
         MetalPreviousVertexHistory.commitSubmittedFrame();
+        MetalSharedBatchMotion.commitSubmittedFrame();
         frameOpen = false;
     }
 
     void discardFrame() {
         pending.clear();
         MetalPreviousVertexHistory.discardFrame();
+        MetalSharedBatchMotion.discardFrame();
         frameOpen = false;
     }
 
@@ -91,6 +94,7 @@ final class MetalMotionStateStore {
         previous.clear();
         pending.clear();
         MetalPreviousVertexHistory.reset();
+        MetalSharedBatchMotion.reset();
         frameOpen = wasOpen;
     }
 

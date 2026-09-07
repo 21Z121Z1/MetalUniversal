@@ -1,7 +1,6 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalEntityMotionCapture;
-import com.metallum.client.metal.render.MetalFxManager;
 import com.mojang.blaze3d.vertex.PoseStack;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.feature.FlameFeatureRenderer;
@@ -20,7 +19,8 @@ public abstract class FlameFeatureSubmitMetalFxMixin {
             final Quaternionf rotation,
             final CallbackInfo ci
     ) {
-        MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();
-        MetalEntityMotionCapture.rejectCurrentExactAuxiliary("flame-shared-staged-draw");
+        // This constructor runs inside the parent entity submission. Preserve that exact
+        // lifetime until FlameFeatureRenderer builds its one shared staged draw.
+        MetalEntityMotionCapture.captureModelSubmit(this);
     }
 }

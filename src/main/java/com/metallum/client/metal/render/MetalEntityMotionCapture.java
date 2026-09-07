@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.renderer.StagedVertexBuffer;
+import net.minecraft.client.renderer.feature.FlameFeatureRenderer;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.jspecify.annotations.Nullable;
@@ -205,6 +206,52 @@ public final class MetalEntityMotionCapture {
             SUBMITS.put(submit, sample);
             modelSubmitsCaptured++;
         }
+    }
+
+    /**
+     * Activates one synthetic exact owner for Minecraft 26.2's complete Flame shared builder.
+     * Every Submit must resolve to the positive-lifetime owner captured at entity submission.
+     * Per-member emitted vertex spans prevent equal-and-opposite topology changes from preserving
+     * an unsafe aggregate ordinal mapping.
+     */
+    public static void beginSharedFlameBuild(final List<FlameFeatureRenderer.Submit> submits) {
+        if (!enabled) {
+            return;
+        }
+        MODEL_BUILD.remove();
+        if (submits == null || submits.isEmpty()) {
+            return;
+        }
+
+        java.util.ArrayList<MetalSharedBatchMotion.Member> members = new java.util.ArrayList<>(submits.size());
+        for (FlameFeatureRenderer.Submit submit : submits) {
+            Sample owner = submit == null ? null : SUBMITS.remove(submit);
+            int vertexSpan = submit == null
+                    ? -1
+                    : MetalSharedBatchMotion.flameVertexSpan(
+                            submit.entityRenderState().boundingBoxWidth,
+                            submit.entityRenderState().boundingBoxHeight
+                    );
+            if (owner == null || owner.generation() <= 0L || vertexSpan <= 0) {
+                MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();
+                return;
+            }
+            members.add(new MetalSharedBatchMotion.Member(
+                    owner.objectId(), owner.generation(), vertexSpan
+            ));
+        }
+
+        Sample batch = MetalSharedBatchMotion.beginFlameBatch(members);
+        if (batch == null) {
+            MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();
+            return;
+        }
+        MODEL_BUILD.set(batch);
+        // First sight, membership/order changes and per-member span changes have no matching exact
+        // history. Marking the synthetic owner exact-required guarantees root-motion fallback can
+        // never make such a source frame eligible for MTLFXFrameInterpolator.
+        MetalExactMotionCoverage.require(batch);
+        modelBuildsMatched++;
     }
 
     public static void beginModelBuild(final Object submit) {
