@@ -24,7 +24,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class ItemInHandRendererMetalFxMixin {
     @Inject(
             method = "submitArmWithItem",
-            at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/vertex/PoseStack;pushPose()V")
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lcom/mojang/blaze3d/vertex/PoseStack;pushPose()V"
+            )
     )
     private void metallum$observeFirstPersonGeometry(
             final AbstractClientPlayer player,
