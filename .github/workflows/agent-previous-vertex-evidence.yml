@@ -1,4 +1,4 @@
-name: Agent Boat exact staged motion
+name: Agent living and first-person exact motion
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): apply Boat exact staged motion'"
+    if: "github.event.head_commit.message == 'chore(agent): apply living and first-person exact motion'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -21,111 +21,120 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Guard Boat exact transaction
+      - name: Guard exact transaction ancestry
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^^)" = "c0e7adac584f43d8e64dd2041d9a12863fdf70d8"
-          test "$(git log -1 --format=%s HEAD^^)" = "chore(agent): add Boat exact motion patch"
-          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure Boat exact motion verification"
-          test "$(git hash-object .github/scripts/apply_boat_exact_motion.py)" = "496aee56662b439252af945e15fcb48fab75553c"
-      - name: Verify pinned Minecraft 26.2 Boat source contract
+          test "$(git rev-parse HEAD^^^)" = "124f6203aeb44b48721a4eef88842b2dee4e479e"
+          test "$(git log -1 --format=%s HEAD^^)" = "chore(agent): add living and first-person exact motion patch"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure living and first-person exact motion verification"
+          test "$(git log -1 --format=%s HEAD)" = "chore(agent): apply living and first-person exact motion"
+          test "$(git rev-parse HEAD^^:.github/scripts/apply_living_first_person_exact_motion.py)" = \
+               "$(git rev-parse HEAD:.github/scripts/apply_living_first_person_exact_motion.py)"
+      - name: Verify pinned Minecraft 26.2 source contracts
         shell: bash
         run: |
           set -euo pipefail
           BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
-          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$BASE/net/minecraft/client/renderer/entity/AbstractBoatRenderer.java" -o /tmp/AbstractBoatRenderer.java
-          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$BASE/net/minecraft/client/renderer/entity/BoatRenderer.java" -o /tmp/BoatRenderer.java
-          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$BASE/net/minecraft/client/model/object/boat/AbstractBoatModel.java" -o /tmp/AbstractBoatModel.java
-          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$BASE/net/minecraft/client/renderer/RenderPipelines.java" -o /tmp/RenderPipelines.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/entity/LivingEntityRenderer.java" -o /tmp/LivingEntityRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/feature/ModelFeatureRenderer.java" -o /tmp/ModelFeatureRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/ItemInHandRenderer.java" -o /tmp/ItemInHandRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/RenderPipelines.java" -o /tmp/RenderPipelines.java
           python3 - <<'PY'
           from pathlib import Path
 
-          abstract = Path('/tmp/AbstractBoatRenderer.java').read_text()
-          boat = Path('/tmp/BoatRenderer.java').read_text()
-          model = Path('/tmp/AbstractBoatModel.java').read_text()
+          living = Path('/tmp/LivingEntityRenderer.java').read_text()
+          model_feature = Path('/tmp/ModelFeatureRenderer.java').read_text()
+          hand = Path('/tmp/ItemInHandRenderer.java').read_text()
           pipelines = Path('/tmp/RenderPipelines.java').read_text()
 
-          required_abstract = [
-              'submitNodeCollector.submitModel(this.model(), state, poseStack',
-              'this.submitTypeAdditions(state, poseStack, submitNodeCollector, state.lightCoords);',
-              'state.rowingTimeLeft = entity.getRowingTime(0, partialTicks);',
-              'state.rowingTimeRight = entity.getRowingTime(1, partialTicks);',
-          ]
-          for text in required_abstract:
-              if text not in abstract:
-                  raise SystemExit(f'Minecraft 26.2 AbstractBoatRenderer contract missing: {text}')
-
-          required_boat = [
-              'RenderTypes.waterMask()',
-              'if (!state.isUnderWater)',
-              'submitNodeCollector.submitModel(this.waterPatchModel, Unit.INSTANCE, poseStack',
-          ]
-          for text in required_boat:
-              if text not in boat:
-                  raise SystemExit(f'Minecraft 26.2 BoatRenderer contract missing: {text}')
-
-          required_model = [
-              'AbstractBoatModel.animatePaddle(state.rowingTimeLeft, 0, this.leftPaddle);',
-              'AbstractBoatModel.animatePaddle(state.rowingTimeRight, 1, this.rightPaddle);',
-          ]
-          for text in required_model:
-              if text not in model:
-                  raise SystemExit(f'Minecraft 26.2 Boat model contract missing: {text}')
-
-          water_line = next((line for line in pipelines.splitlines()
-                             if 'public static final RenderPipeline WATER_MASK =' in line), None)
-          if water_line is None:
-              raise SystemExit('Minecraft 26.2 WATER_MASK pipeline missing')
           for text in [
-              'withVertexShader("core/rendertype_water_mask")',
-              'withFragmentShader("core/rendertype_water_mask")',
-              'withVertexBinding(0, DefaultVertexFormat.POSITION)',
-              'withPrimitiveTopology(PrimitiveTopology.QUADS)',
+              'submitNodeCollector.submitModel(this.model, state, poseStack',
+              'this.model.setupAnim(state);',
+              'this.setupRotations(state, poseStack, state.bodyRot, state.scale);',
+              'this.scale(state, poseStack);',
           ]:
-              if text not in water_line:
-                  raise SystemExit(f'Minecraft 26.2 WATER_MASK ABI changed: {text}')
-          print('Pinned Minecraft 26.2 Boat + water-mask source contract: PASS')
+              if text not in living:
+                  raise SystemExit(f'Minecraft 26.2 living staged-motion contract missing: {text}')
+
+          for text in [
+              'model.setupAnim(state);',
+              'this.getVertexBuilder(renderType)',
+          ]:
+              if text not in model_feature:
+                  raise SystemExit(f'Minecraft 26.2 ModelFeatureRenderer contract missing: {text}')
+
+          submit_start = hand.find('private void submitArmWithItem(')
+          if submit_start < 0:
+              raise SystemExit('Minecraft 26.2 submitArmWithItem missing')
+          submit_end = hand.find('\n    public void tick()', submit_start)
+          if submit_end < 0:
+              submit_end = len(hand)
+          submit = hand[submit_start:submit_end]
+          for text in [
+              'if (player.isScoping()) {',
+              'poseStack.pushPose();',
+              'this.renderPlayerArm(',
+              'this.renderItem(',
+          ]:
+              if text not in submit:
+                  raise SystemExit(f'Minecraft 26.2 first-person contract missing: {text}')
+          if submit.find('if (player.isScoping()) {') > submit.find('poseStack.pushPose();'):
+              raise SystemExit('Minecraft 26.2 first-person scoping/pushPose order changed')
+
+          for text in [
+              'withVertexShader("core/entity")',
+              'withVertexBinding(0, DefaultVertexFormat.ENTITY)',
+              'withVertexShader("core/item")',
+          ]:
+              if text not in pipelines:
+                  raise SystemExit(f'Minecraft 26.2 entity/item ABI changed: {text}')
+          print('Pinned Minecraft 26.2 living + first-person source contracts: PASS')
           PY
-      - name: Apply Boat exact staged motion
+      - name: Apply living and first-person exact staged motion
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_boat_exact_motion.py
+          python3 .github/scripts/apply_living_first_person_exact_motion.py
           git diff --check
-      - name: Compile and test Boat exact contracts
+      - name: Compile and test exact motion contracts
         shell: bash
         run: |
           set -euo pipefail
           ./gradlew compileJava test \
             --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
-            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
+            --tests 'com.metallum.client.metal.render.MetalSyntheticExactMotionTest' \
             --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
             --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
-            --tests 'com.metallum.client.metal.render.MetalEntityObjectPoseTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
             --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
           ./gradlew jar
           git diff --check
-      - name: Verify Boat exact fail-closed wiring
+      - name: Verify exact/fail-closed wiring
         shell: bash
         run: |
           set -euo pipefail
-          grep -F 'state instanceof BoatRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
-          grep -F 'state instanceof net.minecraft.client.renderer.entity.state.BoatRenderState' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
-          grep -F 'shader.equals("core/rendertype_water_mask")' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
-          grep -F 'DefaultVertexFormat.POSITION.equals(format)' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
-          test -f src/main/resources/assets/metallum/shaders/core/position_previous_motion.vsh
-          test -f src/main/resources/assets/metallum/shaders/core/position_previous_motion.fsh
-          # Shadow and particles are deliberately still unresolved and must keep their whole-frame guards.
+          grep -F 'state instanceof LivingEntityRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'MetalEntityMotionCapture.requireExactState(state);' src/main/java/com/metallum/mixin/render/EntityRenderDispatcherMetalFxMixin.java
+          grep -F 'MetalSyntheticExactMotion.beginFirstPerson(hand);' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
+          grep -F 'MetalSyntheticExactMotion.commitSubmittedFrame();' src/main/java/com/metallum/client/metal/render/MetalMotionStateStore.java
+          ! grep -F 'MetalFxManager.observeFirstPersonMotion();' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
+          # Unsupported staged pipelines still reject exact-required objects rather than falling back.
+          grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+          # Shared translucent shadows and particles remain deliberately fail-closed in this transaction.
           grep -F 'observeUnresolvedSharedAuxiliaryMotion();' src/main/java/com/metallum/mixin/render/ShadowFeatureSubmitMetalFxMixin.java
           grep -F 'observeParticleMotion();' src/main/java/com/metallum/mixin/render/QuadParticleRenderStateMetalFxMixin.java
-      - name: Commit verified Boat exact implementation
+      - name: Commit verified runtime implementation
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/main/java src/main/resources/assets/metallum/shaders/core src/test/java
+          git add src/main/java src/test/java
           git diff --cached --check
-          git commit -m 'feat(metalfx): add exact Boat staged motion coverage'
+          git commit -m 'feat(metalfx): add living and first-person exact staged motion'
           git push origin HEAD:agent/metalfx-motion-coverage-26.2
