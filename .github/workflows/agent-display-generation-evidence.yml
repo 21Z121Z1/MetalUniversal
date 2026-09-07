@@ -31,7 +31,10 @@ jobs:
           specs={
             'Display.java': ('class BlockDisplay','class ItemDisplay','BlockRenderState','ItemRenderState','blockRenderState','itemRenderState','updateRenderSubState','createFreshRenderState'),
             'BlockModelRenderState.java': ('specialRenderer','setupSpecialModel','setupModel','isEmpty'),
+            'BlockModelResolver.java': ('update(','BlockDisplayContext','random','scratchRandomSource','modelParts','getSeed'),
+            'BlockDisplayContext.java': ('class BlockDisplayContext','create(','seed','random'),
             'ItemStackRenderState.java': ('activeLayerCount','specialRenderer','setupSpecialModel','appendModelIdentityElement','isAnimated','animated','submit('),
+            'ItemModelResolver.java': ('updateForNonLiving','setAnimated','appendModelIdentityElement','update(','ItemDisplayContext'),
           }
           out=[]
           for name, needles in specs.items():
