@@ -2,7 +2,7 @@
 """Extract narrow, hash-anchored Minecraft motion-source evidence for agents.
 
 The Minecraft reference tree is generated locally by minecraft-reference.sh and
-must remain untracked.  This script deliberately emits only small, line-numbered
+must remain untracked. This script deliberately emits only small, line-numbered
 source excerpts around motion-critical symbols plus whole-file SHA-256 hashes;
 it never copies the decompiled source tree into the repository or artifact.
 """
@@ -18,8 +18,8 @@ from typing import Iterable
 
 
 CONTEXT_LINES = 14
-MAX_SNIPPETS_PER_FILE = 10
-MAX_MATCHED_FILES_PER_QUERY = 8
+MAX_SNIPPETS_PER_FILE = 12
+MAX_MATCHED_FILES_PER_QUERY = 10
 
 
 @dataclass(frozen=True)
@@ -60,20 +60,43 @@ QUERIES = (
             "MovingBlockRenderState.java",
             "FallingBlockRenderer.java",
             "FallingBlockRenderState.java",
-            "PistonHeadRenderer.java",
-            "PistonHeadRenderState.java",
         ),
         (
             "buildGroup(",
             "submitMovingBlock(",
             "MovingBlockRenderState",
-            "xOffset",
-            "yOffset",
-            "zOffset",
             "pose",
             "tesselateBlock",
         ),
         ("MovingBlockRenderState", "submitMovingBlock("),
+    ),
+    Query(
+        "piston_motion",
+        (
+            "PistonHeadRenderer.java",
+            "PistonHeadRenderState.java",
+            "PistonMovingBlockEntity.java",
+            "PistonBaseBlock.java",
+        ),
+        (
+            "extractRenderState(",
+            "submit(",
+            "xOffset",
+            "yOffset",
+            "zOffset",
+            "getXOff(",
+            "getYOff(",
+            "getZOff(",
+            "getProgress(",
+            "progress",
+            "progressO",
+            "isExtending",
+            "getMovementDirection(",
+            "getMovedState(",
+            "getBlockPos(",
+            "translate(",
+        ),
+        ("class PistonMovingBlockEntity", "getXOff(", "PistonHeadRenderState"),
     ),
     Query(
         "display_entity",
@@ -91,8 +114,33 @@ QUERIES = (
             "transformXRot",
             "transformYRot",
             "pose",
+            "submit(",
         ),
         ("DisplayEntityRenderState",),
+    ),
+    Query(
+        "display_features",
+        (
+            "BlockDisplayRenderer.java",
+            "ItemDisplayRenderer.java",
+            "TextDisplayRenderer.java",
+            "BlockDisplayEntityRenderState.java",
+            "ItemDisplayEntityRenderState.java",
+            "TextDisplayEntityRenderState.java",
+        ),
+        (
+            "submit(",
+            "submitModel(",
+            "submitItem(",
+            "submitText(",
+            "SubmitNodeCollector",
+            "PoseStack",
+            "renderState",
+            "blockState",
+            "item",
+            "text",
+        ),
+        ("extends DisplayRenderer", "DisplayEntityRenderState"),
     ),
     Query(
         "transformation_math",
@@ -112,18 +160,58 @@ QUERIES = (
             "renderItemInHand(",
             "submitHandsWithItems(",
             "renderHandsWithItems(",
+            "submitArmWithItem(",
             "renderArm",
             "swing",
             "equip",
             "PoseStack",
+            "applyItemArmTransform",
+            "applyItemArmAttackTransform",
         ),
-        ("submitHandsWithItems(", "renderHandsWithItems(", "renderArmWithItem"),
+        ("submitHandsWithItems(", "renderHandsWithItems(", "submitArmWithItem("),
     ),
     Query(
         "living_model",
-        ("LivingEntityRenderer.java", "LivingEntityRenderState.java", "EntityModel.java"),
-        ("submit(", "setupRotations(", "setupAnim", "LivingEntityRenderState", "bodyRot", "PoseStack"),
-        ("setupAnim", "LivingEntityRenderState"),
+        (
+            "LivingEntityRenderer.java",
+            "LivingEntityRenderState.java",
+            "EntityModel.java",
+            "ModelPart.java",
+            "HumanoidModel.java",
+        ),
+        (
+            "submit(",
+            "setupRotations(",
+            "setupAnim",
+            "resetPose",
+            "LivingEntityRenderState",
+            "bodyRot",
+            "PoseStack",
+            "translateAndRotate(",
+            "visit(",
+            "getAllParts(",
+        ),
+        ("setupAnim", "translateAndRotate(", "LivingEntityRenderState"),
+    ),
+    Query(
+        "boat_animation",
+        (
+            "AbstractBoatRenderer.java",
+            "BoatRenderer.java",
+            "BoatRenderState.java",
+            "BoatModel.java",
+        ),
+        (
+            "submit(",
+            "setupAnim",
+            "paddle",
+            "rowingTime",
+            "hurtTime",
+            "damageTime",
+            "bubbleAngle",
+            "PoseStack",
+        ),
+        ("BoatRenderState", "rowingTime", "paddle"),
     ),
     Query(
         "particles",
@@ -140,11 +228,18 @@ QUERIES = (
             "submitParticleGroup(",
             "QuadParticleRenderState",
             "render(",
+            "extract(",
             "getRenderType",
             "xOld",
             "yOld",
             "zOld",
+            "xo",
+            "yo",
+            "zo",
             "partial",
+            "lerp",
+            "rotation",
+            "scale",
         ),
         ("submitQuadParticleGroup(", "xOld", "yOld", "zOld"),
     ),
@@ -272,7 +367,10 @@ def main() -> int:
         "camera_render_state",
         "entity_dispatch",
         "moving_block",
+        "piston_motion",
+        "display_entity",
         "first_person",
+        "living_model",
         "particles",
     )
     missing = [name for name in required if not query_payload.get(name)]
