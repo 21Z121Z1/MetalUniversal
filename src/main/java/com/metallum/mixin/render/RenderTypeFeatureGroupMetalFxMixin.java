@@ -62,7 +62,7 @@ public abstract class RenderTypeFeatureGroupMetalFxMixin {
         );
         this.draws.add(draw);
         this.drawRenderTypes.add(renderType.prepare());
-        MetalEntityMotionCapture.attachDraw(draw);
+        MetalEntityMotionCapture.attachDraw(draw, renderType.pipeline());
         cir.setReturnValue(draw);
     }
 }

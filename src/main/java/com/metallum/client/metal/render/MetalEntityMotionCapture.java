@@ -1,6 +1,9 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.vertex.ByteBufferBuilder;
+import com.mojang.blaze3d.vertex.VertexFormat;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.renderer.StagedVertexBuffer;
@@ -76,11 +79,17 @@ public final class MetalEntityMotionCapture {
         }
     }
 
+    private record DrawCapture(
+            Sample sample,
+            @Nullable MetalPreviousVertexHistory.DrawToken previousVertexToken
+    ) {
+    }
+
     private static final ThreadLocal<Sample> ENTITY_SUBMISSION = new ThreadLocal<>();
     private static final ThreadLocal<Sample> MODEL_BUILD = new ThreadLocal<>();
     private static final Map<Object, Sample> STATES = new IdentityHashMap<>();
     private static final Map<Object, Sample> SUBMITS = new IdentityHashMap<>();
-    private static final Map<StagedVertexBuffer.Draw, Sample> DRAWS = new IdentityHashMap<>();
+    private static final Map<StagedVertexBuffer.Draw, DrawCapture> DRAWS = new IdentityHashMap<>();
     private static final Map<StagedVertexBuffer.ExecuteInfo, Sample> EXECUTES = new IdentityHashMap<>();
     private static int statesAttached;
     private static int entitySubmissionsMatched;
@@ -200,21 +209,6 @@ public final class MetalEntityMotionCapture {
         beginBuild(submit, true);
     }
 
-    /**
-     * Moving blocks are keyed by their {@code MovingBlockRenderState} rather than
-     * by the submit record.
-     *
-     * <p>{@code MovingBlockFeatureRenderer.buildGroup} inlines its per-submit work
-     * in the loop body, so the submit itself is only a local there. The render
-     * state is reachable at both ends — it is a constructor argument of the submit
-     * and the level argument of the {@code tesselateBlock} call — and one falling
-     * block owns one render state, so it identifies the same thing.</p>
-     *
-     * <p>The owner is retained rather than consumed, because a single block model
-     * can tesselate into the solid, cutout and translucent render types and a
-     * future caller may bracket each separately. {@link #beginFrame()} clears the
-     * map every frame, so retaining cannot leak across frames.</p>
-     */
     /** Associates block-entity-owned moving geometry directly with its exact motion sample. */
     public static void attachMovingBlockState(final Object renderState, final Sample sample) {
         if (enabled && renderState != null && sample != null) {
@@ -291,14 +285,42 @@ public final class MetalEntityMotionCapture {
         return matched;
     }
 
-    public static void attachDraw(final StagedVertexBuffer.Draw draw) {
+    public static void attachDraw(final StagedVertexBuffer.Draw draw, final RenderPipeline pipeline) {
         if (!enabled) {
             return;
         }
         Sample sample = MODEL_BUILD.get();
-        if (draw != null && sample != null) {
-            DRAWS.put(draw, sample);
+        if (draw != null && sample != null && pipeline != null) {
+            DRAWS.put(draw, new DrawCapture(
+                    sample,
+                    MetalPreviousVertexHistory.reserveDraw(sample, pipeline)
+            ));
             drawsAttached++;
+        }
+    }
+
+    /** Called immediately before Minecraft frees the CPU staging slices for this exact draw. */
+    public static void captureVertexData(
+            final StagedVertexBuffer.Draw draw,
+            final VertexFormat format,
+            final PrimitiveTopology topology,
+            final List<ByteBufferBuilder.Result> slices,
+            final int vertexCount,
+            final int indexCount
+    ) {
+        if (!enabled || draw == null) {
+            return;
+        }
+        DrawCapture capture = DRAWS.get(draw);
+        if (capture != null) {
+            MetalPreviousVertexHistory.capture(
+                    capture.previousVertexToken(),
+                    format,
+                    topology,
+                    slices,
+                    vertexCount,
+                    indexCount
+            );
         }
     }
 
@@ -309,9 +331,9 @@ public final class MetalEntityMotionCapture {
         if (!enabled) {
             return;
         }
-        Sample sample = DRAWS.remove(draw);
-        if (sample != null && executeInfo != null) {
-            EXECUTES.put(executeInfo, sample);
+        DrawCapture capture = DRAWS.remove(draw);
+        if (capture != null && executeInfo != null) {
+            EXECUTES.put(executeInfo, capture.sample());
             executesTransferred++;
         }
     }

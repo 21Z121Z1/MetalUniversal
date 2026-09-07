@@ -30,6 +30,7 @@
     "render.PistonHeadRendererMetalFxMixin",
     "render.RenderTypeFeatureGroupMetalFxMixin",
     "render.StagedVertexBufferMetalFxMixin",
+    "render.StagedVertexDrawMetalFxMixin",
     "render.PreparedFeatureFrameMetalFxMixin",
     "render.PreparedRenderTypeMetalFxMixin",
     "render.LevelRendererMetalFxMixin",
