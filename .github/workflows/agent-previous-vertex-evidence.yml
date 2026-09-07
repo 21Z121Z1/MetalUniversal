@@ -1,4 +1,4 @@
-name: Agent shared auxiliary motion admission
+name: Agent Flame shared exact motion
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): apply shared auxiliary admission guard'"
+    if: "github.event.head_commit.message == 'chore(agent): apply Flame shared exact motion'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -21,36 +21,50 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Guard shared auxiliary transaction
+      - name: Guard Flame exact transaction
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "d0f200aebc09d8b635f2895ca43e5c762eaa417a"
-          test "$(git rev-parse HEAD^^^)" = "54f1d8c5a6b9ebc842d51b1e88fc77ea2f680bed"
-          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure shared auxiliary admission verification"
-      - name: Apply shared auxiliary fail-closed admission
+          test "$(git rev-parse HEAD^^)" = "71afbebad18a074581cd9d767fb033ceb413481d"
+          test "$(git rev-parse HEAD^^^)" = "4e31e89d5f9d4b8a2b2a5a58edc749c9b8e5f99f" || \
+            test "$(git log -1 --format=%s HEAD^^^)" = "fix(metalfx): fail closed on unresolved shared motion batches"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure Flame shared exact verification"
+      - name: Verify Minecraft 26.2 Flame shared-builder source contract
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_shared_auxiliary_admission.py
+          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
+          FLAME="$(find "$SRC" -type f -path '*/net/minecraft/client/renderer/feature/FlameFeatureRenderer.java' -print -quit)"
+          test -n "$FLAME"
+          grep -F 'protected void buildGroup(FeatureFrameContext context, List<Submit> submits)' "$FLAME"
+          grep -F 'VertexConsumer builder = this.getVertexBuilder(RenderTypes.entityCutoutCull(TextureAtlas.LOCATION_BLOCKS));' "$FLAME"
+          grep -F 'for (Submit submit : submits)' "$FLAME"
+          grep -F 'this.prepare(submit, builder, fire1, fire2);' "$FLAME"
+      - name: Apply Flame shared exact motion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_flame_shared_exact_motion.py
           git diff --check
-      - name: Compile and test admission contracts
+      - name: Compile and test Flame exact contracts
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew compileJava test \
-            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+          ./gradlew compileJava test jar \
+            --tests 'com.metallum.client.metal.render.MetalSharedBatchMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
             --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
-            --tests 'com.metallum.client.metal.render.MetalTextDisplayExactCoverageTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
             --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
           git diff --check
-      - name: Commit verified shared auxiliary admission
+      - name: Commit verified Flame exact implementation
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/main/java src/test/java
+          git add src/main/java src/main/resources/metallum.mixins.json src/test/java
           git diff --cached --check
-          git commit -m 'fix(metalfx): fail closed on unresolved shared motion batches'
+          git commit -m 'feat(metalfx): add exact shared Flame motion coverage'
           git push origin HEAD:agent/metalfx-motion-coverage-26.2
