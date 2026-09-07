@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): apply Flame shared exact motion v2b'"
+    if: "github.event.head_commit.message == 'chore(agent): apply Flame shared exact motion v2c'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -21,12 +21,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Guard Flame exact v2b transaction
+      - name: Guard Flame exact v2c transaction
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "7590a852ac097df721084adc30b66d121642d4d4"
-          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): fix Flame v2 verification task ordering"
+          test "$(git rev-parse HEAD^^)" = "d8270d1253376e7d06d5c72e4566a586086b8f90"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): fix Flame v2 nested nullable compile guard"
           test "$(git hash-object .github/scripts/apply_flame_shared_exact_motion.py)" = "9b08e77d788b9c84fbf2dcfd89c51178dd1759f1"
       - name: Verify pinned Minecraft 26.2 Flame source contract
         shell: bash
@@ -50,9 +50,8 @@ jobs:
           for pattern in required:
               if not re.search(pattern, s):
                   raise SystemExit(f'Minecraft 26.2 Flame source contract missing: {pattern}')
-          calls = s.count('FlameFeatureRenderer.fireVertex(')
-          if calls != 4:
-              raise SystemExit(f'expected exactly 4 fireVertex calls per loop body, source has {calls}')
+          if s.count('FlameFeatureRenderer.fireVertex(') != 4:
+              raise SystemExit('Minecraft 26.2 Flame loop no longer emits exactly four vertices per layer')
           print('Pinned Minecraft 26.2 Flame source contract: PASS')
           PY
       - name: Apply Flame shared exact motion v2
@@ -60,6 +59,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/apply_flame_shared_exact_motion.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/main/java/com/metallum/client/metal/render/MetalSharedBatchMotion.java')
+          s = p.read_text()
+          old = 'static @Nullable MetalEntityMotionCapture.Sample beginFlameBatch'
+          new = 'static MetalEntityMotionCapture.Sample beginFlameBatch'
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one nested nullable signature, found {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
           git diff --check
       - name: Compile and test Flame exact contracts
         shell: bash
