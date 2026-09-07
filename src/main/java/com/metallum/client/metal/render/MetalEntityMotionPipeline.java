@@ -6,6 +6,8 @@ import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.shaders.UniformType;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import com.mojang.blaze3d.vertex.VertexFormat;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.resources.Identifier;
@@ -61,6 +63,11 @@ final class MetalEntityMotionPipeline {
         }
     }
 
+    private static final Identifier ENTITY_PREVIOUS_VERTEX_SHADER =
+            Identifier.fromNamespaceAndPath("metallum", "core/entity_previous_motion");
+    private static final VertexFormat PREVIOUS_POSITION_FORMAT = VertexFormat.builder(0)
+            .addAttribute("PreviousPosition", GpuFormat.RGB32_FLOAT)
+            .build();
     private static final BindGroupLayout RESOURCES = BindGroupLayout.builder()
             .withUniform("MetallumMotion", UniformType.UNIFORM_BUFFER)
             .build();
@@ -69,6 +76,7 @@ final class MetalEntityMotionPipeline {
     private static final ColorTargetState VALIDITY_TARGET =
             new ColorTargetState(Optional.empty(), GpuFormat.R8_UNORM, ColorTargetState.WRITE_RED);
     private static final Map<RenderPipeline, RenderPipeline> CACHE = new IdentityHashMap<>();
+    private static final Map<RenderPipeline, RenderPipeline> PREVIOUS_POSITION_CACHE = new IdentityHashMap<>();
 
     private MetalEntityMotionPipeline() {
     }
@@ -105,26 +113,67 @@ final class MetalEntityMotionPipeline {
                 && !source.getShaderDefines().flags().contains("DISSOLVE");
     }
 
+    /**
+     * True only for the vanilla ENTITY ABI whose CPU-staged Position contains the exact
+     * entity/model PoseStack result. The second compact stream is deliberately not attached to
+     * BLOCK or an unknown/custom vertex ABI; those keep the proven root-transform replay.
+     */
+    static boolean supportsPreviousPositions(final RenderPipeline source) {
+        if (familyOf(source) != Family.ENTITY || !supports(source)) {
+            return false;
+        }
+        VertexFormat[] bindings = source.getVertexFormatBindings();
+        return bindings.length > 0
+                && DefaultVertexFormat.ENTITY.equals(bindings[0])
+                && (bindings.length < 2 || bindings[1] == null);
+    }
+
+    static VertexFormat previousPositionFormat() {
+        return PREVIOUS_POSITION_FORMAT;
+    }
+
     static RenderPipeline forSource(final RenderPipeline source) {
         return CACHE.computeIfAbsent(source, MetalEntityMotionPipeline::build);
     }
 
+    static RenderPipeline forPreviousPositions(final RenderPipeline source) {
+        if (!supportsPreviousPositions(source)) {
+            throw new IllegalArgumentException("Source pipeline has no exact previous-position motion ABI: " + source.getLocation());
+        }
+        return PREVIOUS_POSITION_CACHE.computeIfAbsent(source, MetalEntityMotionPipeline::buildPreviousPositions);
+    }
+
     static void clear() {
         CACHE.clear();
+        PREVIOUS_POSITION_CACHE.clear();
     }
 
     private static RenderPipeline build(final RenderPipeline source) {
+        return buildVariant(source, false);
+    }
+
+    private static RenderPipeline buildPreviousPositions(final RenderPipeline source) {
+        return buildVariant(source, true);
+    }
+
+    private static RenderPipeline buildVariant(final RenderPipeline source, final boolean previousPositions) {
         Family family = familyOf(source);
         if (family == null) {
             throw new IllegalArgumentException(
                     "No motion family replays " + source.getLocation() + " (" + source.getVertexShader() + ")");
         }
+        if (previousPositions && family != Family.ENTITY) {
+            throw new IllegalArgumentException("Previous-position replay is not defined for " + family);
+        }
         String sourceName = source.getLocation().toString()
                 .replace(':', '/')
                 .replaceAll("[^a-zA-Z0-9_./-]", "_");
         RenderPipeline.Builder builder = RenderPipeline.builder()
-                .withLocation(Identifier.fromNamespaceAndPath("metallum", family.locationPrefix() + sourceName))
-                .withVertexShader(family.shader())
+                .withLocation(Identifier.fromNamespaceAndPath(
+                        "metallum",
+                        (previousPositions ? "entity_previous_motion/" : family.locationPrefix()) + sourceName
+                ))
+                .withVertexShader(previousPositions ? ENTITY_PREVIOUS_VERTEX_SHADER : family.shader())
                 .withFragmentShader(family.shader())
                 .withCull(source.isCull())
                 .withPolygonMode(source.getPolygonMode())
@@ -138,6 +187,9 @@ final class MetalEntityMotionPipeline {
             if (source.getVertexFormatBinding(slot) != null) {
                 builder.withVertexBinding(slot, source.getVertexFormatBinding(slot));
             }
+        }
+        if (previousPositions) {
+            builder.withVertexBinding(1, PREVIOUS_POSITION_FORMAT);
         }
         source.getShaderDefines().flags().forEach(builder::withShaderDefine);
         source.getShaderDefines().values().forEach((name, value) -> {
