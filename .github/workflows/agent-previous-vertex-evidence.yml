@@ -1,4 +1,4 @@
-name: Agent previous-vertex API evidence
+name: Agent exact motion coverage patch
 
 on:
   push:
@@ -6,100 +6,48 @@ on:
       - agent/metalfx-motion-coverage-26.2
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  extract:
+  apply:
+    if: "github.event.head_commit.message == 'chore(agent): run exact motion coverage patch'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 2
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
-      - name: Extract source-grounded staged-vertex, auxiliary pipeline, and shader APIs
+      - name: Guard exact patch parent
         shell: bash
         run: |
           set -euo pipefail
-          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
-          python3 - "$SRC" <<'PY'
-          from pathlib import Path
-          import hashlib, json, sys, zipfile
-          root=Path(sys.argv[1])
-          specs={
-            'StagedVertexBuffer.java': ('vertexBufferSlices','uploadDrawsToBuffers','freeVertexData','getExecuteInfo','vertexBufferSize','vertexCount','record ExecuteInfo','class Draw'),
-            'VertexFormat.java': ('class VertexFormat','builder(','addAttribute','padding','getVertexSize','binding','Builder'),
-            'DefaultVertexFormat.java': ('POSITION','POSITION_COLOR_TEX_LIGHTMAP','ENTITY','BLOCK','POSITION_COLOR_LIGHTMAP','POSITION_TEX_LIGHTMAP_COLOR','addAttribute'),
-            'GpuBuffer.java': ('USAGE_VERTEX','USAGE_UNIFORM','class GpuBuffer','interface Usage'),
-            'GpuBufferSlice.java': ('record GpuBufferSlice','class MappedView','MappedView','data()','slice()','buffer()','offset()','length()'),
-            'TransientMemory.java': ('allocateGpuMapped','allocateGpu','uploadGpu','uploadStaging','interface TransientMemory'),
-            'RenderPipeline.java': ('withVertexBinding','vertexFormat','VertexFormat','Builder'),
-            'RenderPass.java': ('setVertexBuffer','drawIndexed','setPipeline'),
-            'RenderTypes.java': ('entityShadow(','leash()','entityCutoutCull(','text(','textSeeThrough(','textPolygonOffset('),
-            'RenderPipelines.java': ('ENTITY_SHADOW','LEASH','ENTITY_CUTOUT','TEXT','TEXT_SEE_THROUGH','TEXT_POLYGON_OFFSET','ENTITY_SNIPPET','WORLD_TEXT_SNIPPET','withVertexShader','withVertexFormat'),
-            'EntityRenderDispatcher.java': ('submitFlame(','submitShadow(','renderer.submit('),
-            'EntityRenderer.java': ('submitNameTag(','submitLeash(','leashStates','nameTagAttachment'),
-            'SubmitNodeCollection.java': ('submitShadow(','submitNameTag(','submitFlame(','submitLeash(','submitModel('),
-            'ShadowFeatureRenderer.java': ('class ShadowFeatureRenderer','prepare','getVertexBuilder','SHADOW_RENDER_TYPE','ShadowPiece'),
-            'LeashFeatureRenderer.java': ('class LeashFeatureRenderer','prepare','getVertexBuilder','RenderTypes.leash','LeashState'),
-            'FlameFeatureRenderer.java': ('class FlameFeatureRenderer','prepare','getVertexBuilder','entityCutoutCull','EntityRenderState'),
-            'NameTagFeatureRenderer.java': ('class NameTagFeatureRenderer','prepare','getVertexBuilder','renderType(','Submit'),
-            'TextFeatureRenderer.java': ('class TextFeatureRenderer','prepare','getVertexBuilder','renderType(','Submit'),
-          }
-          out=[]
-          for name, needles in specs.items():
-            matches=list(root.rglob(name))
-            if not matches:
-              out.append({'name':name,'missing':True})
-              continue
-            path=sorted(matches, key=lambda p:(0 if ('com/mojang/' in p.as_posix() or 'net/minecraft/' in p.as_posix()) else 1, len(p.as_posix())))[0]
-            lines=path.read_text(errors='replace').splitlines()
-            hits=[i for i,l in enumerate(lines) if any(n in l for n in needles)]
-            windows=[]
-            for i in hits:
-              a=max(0,i-28); b=min(len(lines),i+46)
-              if windows and a <= windows[-1][1]+1: windows[-1]=(windows[-1][0],max(windows[-1][1],b))
-              else: windows.append((a,b))
-            out.append({'path':path.relative_to(root).as_posix(),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'snippets':[{'start_line':a+1,'end_line':b,'text':'\n'.join(f'{j+1:05d}: {lines[j]}' for j in range(a,b))} for a,b in windows]})
-
-          reference_root=root.parent.parent
-          cache=reference_root/'.cache'
-          client_jars=sorted(cache.glob('minecraft-26.2-*.jar'))
-          if len(client_jars) != 1:
-            raise SystemExit(f'expected exactly one verified Minecraft 26.2 client jar, found {client_jars}')
-          client_jar=client_jars[0]
-          jar_sha1=hashlib.sha1(client_jar.read_bytes()).hexdigest()
-          shader_terms=('rendertype_entity_shadow','rendertype_leash','text.vsh','text.fsh','text_background')
-          shaders=[]
-          with zipfile.ZipFile(client_jar) as zf:
-            for entry in sorted(zf.namelist()):
-              lower=entry.lower()
-              if not (lower.endswith('.vsh') or lower.endswith('.fsh')) or not any(term in lower for term in shader_terms):
-                continue
-              data=zf.read(entry)
-              shaders.append({
-                'path':entry,
-                'sha256':hashlib.sha256(data).hexdigest(),
-                'text':data.decode('utf-8',errors='strict')
-              })
-          required=(
-            'rendertype_entity_shadow.vsh','rendertype_entity_shadow.fsh',
-            'rendertype_leash.vsh','rendertype_leash.fsh',
-            '/text.vsh','/text.fsh','text_background.vsh','text_background.fsh'
-          )
-          missing=[term for term in required if not any(term in s['path'].lower() for s in shaders)]
-          if missing:
-            raise SystemExit(f'missing required shader resources from verified client jar: {missing}')
-
-          target=Path('build/agent-evidence/previous-vertex-api.json')
-          target.parent.mkdir(parents=True,exist_ok=True)
-          target.write_text(json.dumps({'client_jar':client_jar.name,'client_jar_sha1':jar_sha1,'files':out,'shaders':shaders},indent=2))
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: previous-vertex-api-source
-          path: build/agent-evidence/previous-vertex-api.json
-          retention-days: 7
-          if-no-files-found: error
+          test "$(git rev-parse HEAD^)" = "891a1f0c4035c75c61d166362035197d267546eb"
+      - name: Apply exact coverage transaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_exact_motion_coverage.py
+          git diff --check
+      - name: Compile and test exact motion contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          git diff --check
+      - name: Commit verified implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/java src/main/resources/metallum.mixins.json src/test/java
+          git diff --cached --check
+          git commit -m 'feat(metalfx): gate deforming entities on exact draw coverage'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2
