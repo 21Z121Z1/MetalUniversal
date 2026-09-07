@@ -1,0 +1,67 @@
+name: Agent MetalFX ordinary block-display capture
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[block-display-capture-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Apply ordinary block-display capture
+        run: python3 .github/scripts/apply_metalfx_block_display_capture.py
+
+      - name: Verify source contract against Minecraft 26.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          block = next(root.rglob('BlockModelFeatureRenderer.java')).read_text()
+          submit = next(root.rglob('SubmitNodeCollection.java')).read_text()
+          required = [
+              'for (BlockModelFeatureRenderer.Submit submit : submits)',
+              'VertexConsumer buffer = this.getVertexBuilder(submit.renderType())',
+              'new BlockModelFeatureRenderer.Submit(',
+          ]
+          missing = [needle for needle in required if needle not in block + '\n' + submit]
+          if missing:
+              raise SystemExit('Minecraft 26.2 block-model source contract changed: ' + repr(missing))
+          print('Minecraft 26.2 ordinary block-model source contract: PASS')
+          PY
+
+      - name: Verify Java and MetalFX contracts
+        run: |
+          chmod +x ./gradlew
+          ./gradlew compileJava test \
+            --tests com.metallum.client.metal.render.MetalFxMotionEligibilityTest \
+            --tests com.metallum.client.metal.render.MetalPistonMotionTest \
+            --tests com.metallum.client.metal.render.FrameSynthesisContractTest
+          git diff --check
+
+      - name: Commit verified patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(metalfx): capture ordinary block display motion [block-display-capture-applied]"
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2
