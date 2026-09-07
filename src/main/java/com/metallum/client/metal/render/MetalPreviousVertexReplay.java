@@ -34,7 +34,7 @@ final class MetalPreviousVertexReplay {
     static @Nullable Plan plan(
             final RenderPipeline source,
             final StagedVertexBuffer.ExecuteInfo executeInfo,
-            final @Nullable MetalPreviousVertexHistory.DrawToken token
+            final MetalPreviousVertexHistory.DrawToken token
     ) {
         if (!MetalEntityMotionPipeline.supportsPreviousPositions(source) || executeInfo == null) {
             return null;
