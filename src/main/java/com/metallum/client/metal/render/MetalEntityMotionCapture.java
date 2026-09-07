@@ -277,9 +277,15 @@ public final class MetalEntityMotionCapture {
             return false;
         }
         lastVertexShader = pipeline.getVertexShader().toString();
+        boolean rootSupported = MetalEntityMotionPipeline.supports(pipeline);
+        boolean exactSupported = MetalEntityMotionPipeline.supportsPreviousPositions(pipeline);
         boolean matched = MetalEntityMotionPipeline.isSplittableVertexShader(pipeline);
-        if (MetalExactMotionCoverage.required(sample)
-                && !MetalEntityMotionPipeline.supportsPreviousPositions(pipeline)) {
+        if (exactSupported && !rootSupported) {
+            // Exact-only auxiliary families (leash/world text) must prove a complete previous
+            // staged manifest even for otherwise rigid entity classes. They have no safe root fallback.
+            MetalExactMotionCoverage.require(sample);
+        }
+        if (MetalExactMotionCoverage.required(sample) && !exactSupported) {
             MetalExactMotionCoverage.fail(
                     sample,
                     "unsupported-exact-pipeline:" + pipeline.getVertexShader()

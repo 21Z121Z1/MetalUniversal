@@ -63,8 +63,22 @@ final class MetalEntityMotionPipeline {
         }
     }
 
-    private static final Identifier ENTITY_PREVIOUS_VERTEX_SHADER =
-            Identifier.fromNamespaceAndPath("metallum", "core/entity_previous_motion");
+    private enum PreviousFamily {
+        ENTITY("core/entity_previous_motion", "core/entity_motion", "entity_previous_motion/"),
+        LEASH("core/leash_previous_motion", "core/leash_previous_motion", "leash_previous_motion/"),
+        TEXT("core/text_previous_motion", "core/text_previous_motion", "text_previous_motion/"),
+        TEXT_BACKGROUND("core/text_background_previous_motion", "core/text_background_previous_motion", "text_background_previous_motion/");
+
+        private final Identifier vertexShader;
+        private final Identifier fragmentShader;
+        private final String locationPrefix;
+
+        PreviousFamily(final String vertexPath, final String fragmentPath, final String locationPrefix) {
+            this.vertexShader = Identifier.fromNamespaceAndPath("metallum", vertexPath);
+            this.fragmentShader = Identifier.fromNamespaceAndPath("metallum", fragmentPath);
+            this.locationPrefix = locationPrefix;
+        }
+    }
     private static final VertexFormat PREVIOUS_POSITION_FORMAT = VertexFormat.builder(0)
             .addAttribute("PreviousPosition", GpuFormat.RGB32_FLOAT)
             .build();
@@ -100,11 +114,11 @@ final class MetalEntityMotionPipeline {
     }
 
     static boolean isSplittableVertexShader(final RenderPipeline source) {
-        return familyOf(source) != null;
+        return familyOf(source) != null || previousFamilyOf(source) != null;
     }
 
     static boolean supports(final RenderPipeline source) {
-        if (!isSplittableVertexShader(source)) {
+        if (familyOf(source) == null) {
             return false;
         }
         ColorTargetState sourceTarget = source.getColorTargetState();
@@ -114,18 +128,48 @@ final class MetalEntityMotionPipeline {
     }
 
     /**
-     * True only for the vanilla ENTITY ABI whose CPU-staged Position contains the exact
-     * entity/model PoseStack result. The second compact stream is deliberately not attached to
-     * BLOCK or an unknown/custom vertex ABI; those keep the proven root-transform replay.
+     * Exact staged-position replay ABIs proven against the Minecraft 26.2 client shaders.
+     * Root-transform support is intentionally independent: leash and world text are exact-only
+     * families and must never fall back to a closest-looking root motion shader.
      */
     static boolean supportsPreviousPositions(final RenderPipeline source) {
-        if (familyOf(source) != Family.ENTITY || !supports(source)) {
-            return false;
+        return previousFamilyOf(source) != null;
+    }
+
+    private static @Nullable PreviousFamily previousFamilyOf(final RenderPipeline source) {
+        if (source == null) {
+            return null;
         }
         VertexFormat[] bindings = source.getVertexFormatBindings();
-        return bindings.length > 0
-                && DefaultVertexFormat.ENTITY.equals(bindings[0])
-                && (bindings.length < 2 || bindings[1] == null);
+        if (bindings.length == 0 || bindings[0] == null || (bindings.length >= 2 && bindings[1] != null)) {
+            return null;
+        }
+        VertexFormat format = bindings[0];
+        String shader = source.getVertexShader().getPath();
+        if ((shader.equals("core/entity") || shader.equals("core/item"))
+                && DefaultVertexFormat.ENTITY.equals(format)
+                && supports(source)) {
+            return PreviousFamily.ENTITY;
+        }
+        if (shader.equals("core/rendertype_leash")
+                && DefaultVertexFormat.POSITION_COLOR_LIGHTMAP.equals(format)) {
+            return PreviousFamily.LEASH;
+        }
+        if (shader.equals("core/text") && !source.getShaderDefines().flags().contains("IS_GUI")) {
+            boolean seeThrough = source.getShaderDefines().flags().contains("IS_SEE_THROUGH");
+            VertexFormat expected = seeThrough
+                    ? DefaultVertexFormat.POSITION_TEX_COLOR
+                    : DefaultVertexFormat.POSITION_TEX_LIGHTMAP_COLOR;
+            return expected.equals(format) ? PreviousFamily.TEXT : null;
+        }
+        if (shader.equals("core/text_background")) {
+            boolean seeThrough = source.getShaderDefines().flags().contains("IS_SEE_THROUGH");
+            VertexFormat expected = seeThrough
+                    ? DefaultVertexFormat.POSITION_COLOR
+                    : DefaultVertexFormat.POSITION_COLOR_LIGHTMAP;
+            return expected.equals(format) ? PreviousFamily.TEXT_BACKGROUND : null;
+        }
+        return null;
     }
 
     static VertexFormat previousPositionFormat() {
@@ -153,17 +197,38 @@ final class MetalEntityMotionPipeline {
     }
 
     private static RenderPipeline buildPreviousPositions(final RenderPipeline source) {
-        return buildVariant(source, true);
+        PreviousFamily previousFamily = previousFamilyOf(source);
+        if (previousFamily == null) {
+            throw new IllegalArgumentException(
+                    "Source pipeline has no exact previous-position family: " + source.getLocation());
+        }
+        return buildVariant(source, null, previousFamily);
     }
 
     private static RenderPipeline buildVariant(final RenderPipeline source, final boolean previousPositions) {
         Family family = familyOf(source);
         if (family == null) {
             throw new IllegalArgumentException(
-                    "No motion family replays " + source.getLocation() + " (" + source.getVertexShader() + ")");
+                    "No root motion family replays " + source.getLocation() + " (" + source.getVertexShader() + ")");
         }
-        if (previousPositions && family != Family.ENTITY) {
-            throw new IllegalArgumentException("Previous-position replay is not defined for " + family);
+        if (previousPositions) {
+            PreviousFamily previousFamily = previousFamilyOf(source);
+            if (previousFamily == null) {
+                throw new IllegalArgumentException("Previous-position replay is not defined for " + source.getLocation());
+            }
+            return buildVariant(source, family, previousFamily);
+        }
+        return buildVariant(source, family, null);
+    }
+
+    private static RenderPipeline buildVariant(
+            final RenderPipeline source,
+            final @Nullable Family family,
+            final @Nullable PreviousFamily previousFamily
+    ) {
+        boolean previousPositions = previousFamily != null;
+        if (!previousPositions && family == null) {
+            throw new IllegalArgumentException("Missing root motion family for " + source.getLocation());
         }
         String sourceName = source.getLocation().toString()
                 .replace(':', '/')
@@ -171,10 +236,10 @@ final class MetalEntityMotionPipeline {
         RenderPipeline.Builder builder = RenderPipeline.builder()
                 .withLocation(Identifier.fromNamespaceAndPath(
                         "metallum",
-                        (previousPositions ? "entity_previous_motion/" : family.locationPrefix()) + sourceName
+                        (previousPositions ? previousFamily.locationPrefix : family.locationPrefix()) + sourceName
                 ))
-                .withVertexShader(previousPositions ? ENTITY_PREVIOUS_VERTEX_SHADER : family.shader())
-                .withFragmentShader(family.shader())
+                .withVertexShader(previousPositions ? previousFamily.vertexShader : family.shader())
+                .withFragmentShader(previousPositions ? previousFamily.fragmentShader : family.shader())
                 .withCull(source.isCull())
                 .withPolygonMode(source.getPolygonMode())
                 .withPrimitiveTopology(source.getPrimitiveTopology())

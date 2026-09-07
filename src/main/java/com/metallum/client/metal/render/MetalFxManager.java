@@ -1292,7 +1292,9 @@ public final class MetalFxManager {
             MetalEntityMotionCapture.recordMotionDrawSkip("attachments-unavailable");
             return;
         }
-        if (!MetalEntityMotionPipeline.supports(prepared.pipeline())) {
+        boolean rootMotionSupported = MetalEntityMotionPipeline.supports(prepared.pipeline());
+        boolean exactMotionSupported = MetalEntityMotionPipeline.supportsPreviousPositions(prepared.pipeline());
+        if (!rootMotionSupported && !exactMotionSupported) {
             MetalEntityMotionCapture.recordMotionDrawSkip("pipeline-unsupported");
             return;
         }
@@ -1334,11 +1336,18 @@ public final class MetalFxManager {
         for (ObjectMotionReplay replay : replays) {
             PreparedRenderType prepared = replay.prepared();
             StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
-            MetalPreviousVertexReplay.Plan exactPlan = MetalFxMath.isFinite(previousCameraRelativeViewProjection)
+            boolean rootMotionSupported = MetalEntityMotionPipeline.supports(prepared.pipeline());
+            boolean exactMotionSupported = MetalEntityMotionPipeline.supportsPreviousPositions(prepared.pipeline());
+            MetalPreviousVertexReplay.Plan exactPlan = exactMotionSupported
+                    && MetalFxMath.isFinite(previousCameraRelativeViewProjection)
                     ? MetalPreviousVertexReplay.plan(
                             prepared.pipeline(), executeInfo, replay.previousVertexToken())
                     : null;
             boolean exactPreviousPositions = exactPlan != null;
+            if (!exactPreviousPositions && !rootMotionSupported) {
+                MetalEntityMotionCapture.recordMotionDrawSkip("exact-plan-unavailable");
+                continue;
+            }
             Matrix4f previousFromRaster = exactPreviousPositions
                     ? new Matrix4f(previousCameraRelativeViewProjection)
                     : new Matrix4f(previousViewProjection)
