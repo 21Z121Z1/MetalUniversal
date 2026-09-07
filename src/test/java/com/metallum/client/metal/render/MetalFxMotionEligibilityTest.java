@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import net.minecraft.client.renderer.entity.state.ArrowRenderState;
+import net.minecraft.client.renderer.entity.state.BoatRenderState;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.entity.state.FallingBlockRenderState;
 import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
@@ -19,6 +20,11 @@ final class MetalFxMotionEligibilityTest {
         assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(new ItemEntityRenderState()));
         assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(new MinecartRenderState()));
         assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(new ArrowRenderState()));
+    }
+
+    @Test
+    void boatIsAnExactStagedGeometryCandidate() {
+        assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(new BoatRenderState()));
     }
 
     @Test

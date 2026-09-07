@@ -67,7 +67,8 @@ final class MetalEntityMotionPipeline {
         ENTITY("core/entity_previous_motion", "core/entity_motion", "entity_previous_motion/"),
         LEASH("core/leash_previous_motion", "core/leash_previous_motion", "leash_previous_motion/"),
         TEXT("core/text_previous_motion", "core/text_previous_motion", "text_previous_motion/"),
-        TEXT_BACKGROUND("core/text_background_previous_motion", "core/text_background_previous_motion", "text_background_previous_motion/");
+        TEXT_BACKGROUND("core/text_background_previous_motion", "core/text_background_previous_motion", "text_background_previous_motion/"),
+        WATER_MASK("core/position_previous_motion", "core/position_previous_motion", "position_previous_motion/");
 
         private final Identifier vertexShader;
         private final Identifier fragmentShader;
@@ -168,6 +169,10 @@ final class MetalEntityMotionPipeline {
                     ? DefaultVertexFormat.POSITION_COLOR
                     : DefaultVertexFormat.POSITION_COLOR_LIGHTMAP;
             return expected.equals(format) ? PreviousFamily.TEXT_BACKGROUND : null;
+        }
+        if (shader.equals("core/rendertype_water_mask")
+                && DefaultVertexFormat.POSITION.equals(format)) {
+            return PreviousFamily.WATER_MASK;
         }
         return null;
     }

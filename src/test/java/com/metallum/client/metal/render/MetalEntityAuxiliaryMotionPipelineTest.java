@@ -50,6 +50,17 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
     }
 
     @Test
+    void waterMaskUsesPositionOnlyExactPreviousAbi() {
+        RenderPipeline waterMask = pipeline("core/rendertype_water_mask", DefaultVertexFormat.POSITION);
+        assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(waterMask));
+        assertTrue(MetalEntityMotionPipeline.isSplittableVertexShader(waterMask));
+        assertFalse(MetalEntityMotionPipeline.supports(waterMask));
+        RenderPipeline exact = MetalEntityMotionPipeline.forPreviousPositions(waterMask);
+        assertEquals("core/position_previous_motion", exact.getVertexShader().getPath());
+        assertEquals("core/position_previous_motion", exact.getFragmentShader().getPath());
+    }
+
+    @Test
     void wrongLayoutsRemainFailClosed() {
         assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(
                 pipeline("core/rendertype_leash", DefaultVertexFormat.ENTITY)));
@@ -57,6 +68,8 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
                 pipeline("core/text", DefaultVertexFormat.POSITION_TEX_COLOR)));
         assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(
                 pipeline("core/text_background", DefaultVertexFormat.POSITION_COLOR)));
+        assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(
+                pipeline("core/rendertype_water_mask", DefaultVertexFormat.ENTITY)));
     }
 
     private static RenderPipeline pipeline(final String shader, final VertexFormat format, final String... defines) {
