@@ -19,26 +19,26 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Extract source-grounded staged-vertex, entity auxiliary, and Blaze3D APIs
+      - name: Extract source-grounded staged-vertex, auxiliary pipeline, and shader APIs
         shell: bash
         run: |
           set -euo pipefail
           SRC="$(bash scripts/minecraft-reference.sh --print-path)"
           python3 - "$SRC" <<'PY'
           from pathlib import Path
-          import hashlib, json, sys
+          import hashlib, json, sys, zipfile
           root=Path(sys.argv[1])
           specs={
             'StagedVertexBuffer.java': ('vertexBufferSlices','uploadDrawsToBuffers','freeVertexData','getExecuteInfo','vertexBufferSize','vertexCount','record ExecuteInfo','class Draw'),
             'VertexFormat.java': ('class VertexFormat','builder(','addAttribute','padding','getVertexSize','binding','Builder'),
-            'DefaultVertexFormat.java': ('POSITION','POSITION_COLOR_TEX_LIGHTMAP','ENTITY','BLOCK','POSITION_COLOR_LIGHTMAP','POSITION_COLOR_TEX_LIGHTMAP','addAttribute'),
+            'DefaultVertexFormat.java': ('POSITION','POSITION_COLOR_TEX_LIGHTMAP','ENTITY','BLOCK','POSITION_COLOR_LIGHTMAP','POSITION_TEX_LIGHTMAP_COLOR','addAttribute'),
             'GpuBuffer.java': ('USAGE_VERTEX','USAGE_UNIFORM','class GpuBuffer','interface Usage'),
             'GpuBufferSlice.java': ('record GpuBufferSlice','class MappedView','MappedView','data()','slice()','buffer()','offset()','length()'),
             'TransientMemory.java': ('allocateGpuMapped','allocateGpu','uploadGpu','uploadStaging','interface TransientMemory'),
             'RenderPipeline.java': ('withVertexBinding','vertexFormat','VertexFormat','Builder'),
             'RenderPass.java': ('setVertexBuffer','drawIndexed','setPipeline'),
             'RenderTypes.java': ('entityShadow(','leash()','entityCutoutCull(','text(','textSeeThrough(','textPolygonOffset('),
-            'RenderPipelines.java': ('ENTITY_SHADOW','LEASH','ENTITY_CUTOUT','TEXT','TEXT_SEE_THROUGH','TEXT_POLYGON_OFFSET','withVertexShader','withVertexFormat'),
+            'RenderPipelines.java': ('ENTITY_SHADOW','LEASH','ENTITY_CUTOUT','TEXT','TEXT_SEE_THROUGH','TEXT_POLYGON_OFFSET','ENTITY_SNIPPET','WORLD_TEXT_SNIPPET','withVertexShader','withVertexFormat'),
             'EntityRenderDispatcher.java': ('submitFlame(','submitShadow(','renderer.submit('),
             'EntityRenderer.java': ('submitNameTag(','submitLeash(','leashStates','nameTagAttachment'),
             'SubmitNodeCollection.java': ('submitShadow(','submitNameTag(','submitFlame(','submitLeash(','submitModel('),
@@ -63,9 +63,35 @@ jobs:
               if windows and a <= windows[-1][1]+1: windows[-1]=(windows[-1][0],max(windows[-1][1],b))
               else: windows.append((a,b))
             out.append({'path':path.relative_to(root).as_posix(),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'snippets':[{'start_line':a+1,'end_line':b,'text':'\n'.join(f'{j+1:05d}: {lines[j]}' for j in range(a,b))} for a,b in windows]})
+
+          reference_root=root.parent.parent
+          cache=reference_root/'.cache'
+          client_jars=sorted(cache.glob('minecraft-26.2-*.jar'))
+          if len(client_jars) != 1:
+            raise SystemExit(f'expected exactly one verified Minecraft 26.2 client jar, found {client_jars}')
+          client_jar=client_jars[0]
+          jar_sha1=hashlib.sha1(client_jar.read_bytes()).hexdigest()
+          shader_terms=('rendertype_entity_shadow','rendertype_leash','text.vsh','text_background')
+          shaders=[]
+          with zipfile.ZipFile(client_jar) as zf:
+            for entry in sorted(zf.namelist()):
+              lower=entry.lower()
+              if not lower.endswith('.vsh') or not any(term in lower for term in shader_terms):
+                continue
+              data=zf.read(entry)
+              shaders.append({
+                'path':entry,
+                'sha256':hashlib.sha256(data).hexdigest(),
+                'text':data.decode('utf-8',errors='strict')
+              })
+          required=('rendertype_entity_shadow','rendertype_leash','/text.vsh')
+          missing=[term for term in required if not any(term in s['path'].lower() for s in shaders)]
+          if missing:
+            raise SystemExit(f'missing required shader resources from verified client jar: {missing}')
+
           target=Path('build/agent-evidence/previous-vertex-api.json')
           target.parent.mkdir(parents=True,exist_ok=True)
-          target.write_text(json.dumps({'files':out},indent=2))
+          target.write_text(json.dumps({'client_jar':client_jar.name,'client_jar_sha1':jar_sha1,'files':out,'shaders':shaders},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
