@@ -33,7 +33,8 @@ jobs:
             'VertexFormat.java': ('class VertexFormat','builder(','addAttribute','padding','getVertexSize','binding','Builder'),
             'DefaultVertexFormat.java': ('POSITION','POSITION_COLOR_TEX_LIGHTMAP','ENTITY','BLOCK','addAttribute'),
             'GpuBuffer.java': ('USAGE_VERTEX','USAGE_UNIFORM','class GpuBuffer','interface Usage'),
-            'TransientMemory.java': ('allocateGpuMapped','allocateGpu','interface TransientMemory'),
+            'GpuBufferSlice.java': ('record GpuBufferSlice','class MappedView','MappedView','data()','slice()','buffer()','offset()','length()'),
+            'TransientMemory.java': ('allocateGpuMapped','allocateGpu','uploadGpu','uploadStaging','interface TransientMemory'),
             'RenderPipeline.java': ('withVertexBinding','vertexFormat','VertexFormat','Builder'),
             'RenderPass.java': ('setVertexBuffer','drawIndexed','setPipeline'),
           }
@@ -43,7 +44,6 @@ jobs:
             if not matches:
               out.append({'name':name,'missing':True})
               continue
-            # Prefer the canonical package path when duplicate source stubs exist.
             path=sorted(matches, key=lambda p:(0 if ('com/mojang/' in p.as_posix() or 'net/minecraft/' in p.as_posix()) else 1, len(p.as_posix())))[0]
             lines=path.read_text(errors='replace').splitlines()
             hits=[i for i,l in enumerate(lines) if any(n in l for n in needles)]
