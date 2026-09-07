@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "444f1ec78fc5192287d367f496967ffef1714343"
+          test "$(git rev-parse HEAD^)" = "4eb5b6a0f68bc7cef639ceb46c8c2affebcce8a7"
       - name: Apply source-grounded previous-position replay
         shell: bash
         run: |
@@ -135,8 +135,6 @@ jobs:
             final StagedVertexBuffer.ExecuteInfo executeInfo,
             final MetalEntityMotionCapture.Sample sample
     ) {
-        // Consume the sidecar even on a fail-closed frame so ExecuteInfo identities cannot leak
-        // into a later staged-buffer lifetime.
         MetalPreviousVertexHistory.DrawToken previousVertexToken =
                 MetalEntityMotionCapture.takePreviousVertexToken(executeInfo);
         if (!sceneFrame) {
@@ -195,9 +193,6 @@ jobs:
             long sourceSize = executeInfo.vertexBuffer().size();
             if (sourceStride <= 0 || byteOffset < 0L || byteLength <= 0L
                     || byteOffset > sourceSize || byteLength > sourceSize - byteOffset) {
-                // The exact stream cannot be paired with the current draw. Falling back to the
-                // proven rigid replay is safe for currently admitted families; non-rigid frame
-                // interpolation remains rejected until exact-path coverage is promoted below.
                 exactPreviousPositions = false;
                 previousPositions = null;
                 previousFromRaster = new Matrix4f(previousViewProjection)
@@ -254,7 +249,6 @@ jobs:
           start = manager.index('    private void flushEntityMotionReplaysInternal(')
           end = manager.index('    private Matrix4f prepareSceneProjectionInternal(', start)
           old_flush = manager[start:end]
-          # Preserve the existing attachment/descriptor setup and replace only the per-replay draw body.
           old_loop = '''            for (ObjectMotionReplay replay : replays) {
                 PreparedRenderType prepared = replay.prepared();
                 StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
@@ -307,16 +301,12 @@ jobs:
 '''
           if old_flush.count(old_loop) != 1:
               raise SystemExit(f'flush replay loop: expected exactly one anchor, found {old_flush.count(old_loop)}')
-          new_flush = old_flush.replace(old_loop, new_loop, 1)
-          manager = manager[:start] + new_flush + manager[end:]
+          manager = manager[:start] + old_flush.replace(old_loop, new_loop, 1) + manager[end:]
 
           manager = replace_once(
               manager,
               '        MetalFxMath.adjustPerspectiveAspect(this.currentProjection, displayAspect, renderAspect);\n',
               '        MetalFxMath.adjustPerspectiveAspect(this.currentProjection, displayAspect, renderAspect);\n'
-              '        // Entity staged Position is already relative to the camera translation supplied\n'
-              '        // by LevelRenderer/EntityRenderDispatcher. Keep only projection + view rotation\n'
-              '        // for exact previous-vertex replay; this avoids far-world float cancellation.\n'
               '        MetalFxMath.viewProjection(\n'
               '                this.currentCameraRelativeViewProjection,\n'
               '                this.currentProjection,\n'
