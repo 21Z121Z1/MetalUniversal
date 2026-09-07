@@ -54,13 +54,17 @@ final class MetalFxMotionEligibility {
      * representation. Rigid families use MetalEntityObjectPose; ordinary display block/item
      * geometry additionally proves local-topology continuity in MetalDisplayMotionSafety.
      *
-     * <p>Living entities still remain fail-closed. Boat paddles also deform in setupAnim, but
-     * Boat model submits are now admitted only as exact staged-previous-position objects; their
-     * water-mask depth patch has a separately verified POSITION-only exact ABI.</p>
+     * <p>Living entities and Boat paddles deform through CPU-side model animation. They are
+     * admitted only as exact staged-previous-position candidates: every submitted draw must match
+     * the previous successfully submitted source frame before interpolation is allowed. Boat's
+     * optional water-mask depth patch has a separately verified POSITION-only exact ABI.</p>
      */
     static int incompleteEntityReason(final EntityRenderState state) {
         if (state instanceof LivingEntityRenderState) {
-            return NON_RIGID_ENTITY;
+            // Candidate only. EntityRenderDispatcherMetalFxMixin marks the whole object
+            // exact-required, so setupAnim/model-layer deformation can never fall back to a
+            // rigid root approximation.
+            return 0;
         }
         if (state instanceof BoatRenderState) {
             // Candidate only. MetalFxManager marks the whole object exact-required, so paddle

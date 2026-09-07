@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.world.entity.Entity;
 import org.spongepowered.asm.mixin.Mixin;
@@ -42,6 +43,9 @@ public abstract class EntityRenderDispatcherMetalFxMixin {
         // Admission is tied to actual submission rather than extraction, so culled entities do not
         // unnecessarily suppress interpolation for the frame.
         MetalFxManager.observeFrameInterpolationEntity(state);
+        if (state instanceof LivingEntityRenderState) {
+            MetalEntityMotionCapture.requireExactState(state);
+        }
         MetalEntityMotionCapture.beginEntitySubmission(state);
     }
 

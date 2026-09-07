@@ -28,11 +28,12 @@ final class MetalFxMotionEligibilityTest {
     }
 
     @Test
-    void nonRigidAndUnknownFamiliesFailClosed() {
-        assertEquals(
-                MetalFxMotionEligibility.NON_RIGID_ENTITY,
-                MetalFxMotionEligibility.incompleteEntityReason(new LivingEntityRenderState())
-        );
+    void livingEntityIsAnExactStagedGeometryCandidate() {
+        assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(new LivingEntityRenderState()));
+    }
+
+    @Test
+    void unknownEntityFamiliesStillFailClosed() {
         assertEquals(
                 MetalFxMotionEligibility.UNKNOWN_ENTITY,
                 MetalFxMotionEligibility.incompleteEntityReason(new EntityRenderState())

@@ -1,6 +1,6 @@
 package com.metallum.mixin.render;
 
-import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.MetalSyntheticExactMotion;
 import com.mojang.blaze3d.vertex.PoseStack;
 import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.renderer.ItemInHandRenderer;
@@ -13,12 +13,12 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Frame-interpolation admission for first-person geometry.
+ * Exact staged-motion ownership for first-person geometry.
  *
  * Minecraft 26.2 computes swing, bob, equip/use transforms inside submitArmWithItem from current
- * interpolated player/item state. Until a previous local pose is carried through the staged
- * geometry path, zero object motion is only an approximation. Hook the first pushPose inside the
- * non-scoping branch so a scoped call that submits nothing does not reject the frame.
+ * interpolated player/item state. Hook the first pushPose after the scoping early-return and bind
+ * every resulting staged model/item draw to a transactional synthetic hand owner. Unsupported
+ * pipelines or changed manifests still fail closed through MetalExactMotionCoverage.
  */
 @Mixin(ItemInHandRenderer.class)
 public abstract class ItemInHandRendererMetalFxMixin {
@@ -26,7 +26,8 @@ public abstract class ItemInHandRendererMetalFxMixin {
             method = "submitArmWithItem",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/mojang/blaze3d/vertex/PoseStack;pushPose()V"
+                    target = "Lcom/mojang/blaze3d/vertex/PoseStack;pushPose()V",
+                    ordinal = 0
             )
     )
     private void metallum$observeFirstPersonGeometry(
@@ -42,6 +43,23 @@ public abstract class ItemInHandRendererMetalFxMixin {
             final int lightCoords,
             final CallbackInfo ci
     ) {
-        MetalFxManager.observeFirstPersonMotion();
+        MetalSyntheticExactMotion.beginFirstPerson(hand);
+    }
+
+    @Inject(method = "submitArmWithItem", at = @At("RETURN"))
+    private void metallum$endFirstPersonGeometry(
+            final AbstractClientPlayer player,
+            final float frameInterp,
+            final float xRot,
+            final InteractionHand hand,
+            final float attack,
+            final ItemStack itemStack,
+            final float inverseArmHeight,
+            final PoseStack poseStack,
+            final SubmitNodeCollector submitNodeCollector,
+            final int lightCoords,
+            final CallbackInfo ci
+    ) {
+        MetalSyntheticExactMotion.endFirstPerson();
     }
 }
