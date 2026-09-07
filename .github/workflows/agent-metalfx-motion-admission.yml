@@ -39,16 +39,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            src/main/java/com/metallum/client/metal/render/MetalFxManager.java \
-            src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java \
-            src/main/java/com/metallum/mixin/render/EntityRenderDispatcherMetalFxMixin.java \
-            src/main/java/com/metallum/mixin/render/MovingBlockFeatureRendererMetalFxMixin.java \
-            src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java \
-            src/main/java/com/metallum/mixin/render/ParticleEngineMetalFxMixin.java \
-            src/main/resources/metallum.mixins.json \
-            src/test/java/com/metallum/client/metal/render/MetalFxMotionEligibilityTest.java
+          git add -A
           git commit -m "fix(metalfx): fail closed on incomplete frame motion [motion-admission-applied]"
           git push origin HEAD:agent/metalfx-motion-coverage-26.2
-
-# Trigger after workflow exists on the branch.
