@@ -59,7 +59,6 @@ final class MetalPreviousVertexReplay {
                 || byteOffset > sourceSize || byteLength > sourceSize - byteOffset) {
             return null;
         }
-        MetalEntityMotionCapture.recordExactReplayPlanned(token);
         return new Plan(
                 executeInfo.vertexBuffer().slice(byteOffset, byteLength),
                 0,

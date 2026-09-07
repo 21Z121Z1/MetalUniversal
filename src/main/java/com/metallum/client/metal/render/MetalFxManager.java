@@ -358,6 +358,7 @@ public final class MetalFxManager {
             GpuBufferSlice motionUniform,
             GpuBufferSlice currentVertexBuffer,
             @Nullable GpuBufferSlice previousPositionBuffer,
+            MetalPreviousVertexHistory.@Nullable DrawToken exactPreviousVertexToken,
             int replayBaseVertex
     ) {
     }
@@ -1383,6 +1384,7 @@ public final class MetalFxManager {
                     motionUniform,
                     currentVertexBuffer,
                     previousPositionBuffer,
+                    exactPreviousPositions ? replay.previousVertexToken() : null,
                     replayBaseVertex
             ));
         }
@@ -1427,6 +1429,9 @@ public final class MetalFxManager {
                         replay.replayBaseVertex(),
                         0
                 );
+                if (exactPreviousPositions) {
+                    MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());
+                }
                 MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
             }
         }
@@ -3889,6 +3894,13 @@ public final class MetalFxManager {
             // A real source frame containing geometry without exact previous-position motion must not
             // enter MTLFXFrameInterpolator. Reset the next admitted pair so it cannot bridge across
             // this skipped source frame; MetalFX Temporal still receives its reactive/history masks.
+            frameResetForPresent = true;
+            return null;
+        }
+        if (!MetalEntityMotionCapture.exactCoverageComplete()) {
+            // Class-level admission is not enough for deforming geometry. The required object must
+            // prove that every draw in the current manifest actually encoded an exact previous-
+            // position replay. A planned-but-not-encoded motion pass is deliberately insufficient.
             frameResetForPresent = true;
             return null;
         }

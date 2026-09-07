@@ -42,14 +42,14 @@ final class MetalExactMotionCoverageTest {
         MetalPreviousVertexHistory.stageSnapshot(previous, signature, new float[] {0.0F, 0.0F, 0.0F});
         MetalPreviousVertexHistory.commitSubmittedFrame();
 
-        // Current frame has a matching manifest but is incomplete until its exact replay is planned.
+        // Current frame has a matching manifest but is incomplete until its exact replay is encoded.
         MetalPreviousVertexHistory.beginFrame();
         MetalExactMotionCoverage.beginFrame();
         MetalExactMotionCoverage.require(sample);
         MetalPreviousVertexHistory.DrawToken current = MetalPreviousVertexHistory.reserveDraw(sample, pipeline);
         MetalPreviousVertexHistory.stageSnapshot(current, signature, new float[] {1.0F, 0.0F, 0.0F});
         assertFalse(MetalExactMotionCoverage.complete());
-        MetalExactMotionCoverage.recordExactPlan(current);
+        MetalExactMotionCoverage.recordExactEncoded(current);
         assertTrue(MetalExactMotionCoverage.complete());
     }
 

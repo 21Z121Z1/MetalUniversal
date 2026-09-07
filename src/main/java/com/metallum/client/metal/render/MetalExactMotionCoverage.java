@@ -58,7 +58,7 @@ final class MetalExactMotionCoverage {
         }
     }
 
-    static void recordExactPlan(final MetalPreviousVertexHistory.DrawToken token) {
+    static void recordExactEncoded(final MetalPreviousVertexHistory.DrawToken token) {
         if (token == null) {
             return;
         }

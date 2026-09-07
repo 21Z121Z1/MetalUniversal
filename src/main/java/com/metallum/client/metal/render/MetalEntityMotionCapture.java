@@ -405,9 +405,9 @@ public final class MetalEntityMotionCapture {
         }
     }
 
-    static void recordExactReplayPlanned(final MetalPreviousVertexHistory.DrawToken token) {
+    static void recordExactReplayEncoded(final MetalPreviousVertexHistory.DrawToken token) {
         if (enabled) {
-            MetalExactMotionCoverage.recordExactPlan(token);
+            MetalExactMotionCoverage.recordExactEncoded(token);
         }
     }
 
