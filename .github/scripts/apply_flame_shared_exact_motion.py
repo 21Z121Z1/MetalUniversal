@@ -4,8 +4,9 @@ from pathlib import Path
 def replace_once(path: str, old: str, new: str) -> None:
     file = Path(path)
     text = file.read_text()
-    if text.count(old) != 1:
-        raise SystemExit(f"expected exactly one anchor in {path!r}, found {text.count(old)}")
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"expected exactly one anchor in {path!r}, found {count}")
     file.write_text(text.replace(old, new, 1))
 
 
@@ -21,19 +22,23 @@ import java.util.List;
 
 /**
  * Transactional identity for entity-owned geometry which Minecraft deliberately stages as one
- * shared draw. The shared batch uses negative generations, while ordinary entity/piston lifetimes
- * are allocated from MetalFxManager's positive nextEntityGeneration domain.
+ * shared draw.
  *
- * <p>The membership signature is committed only with a successfully submitted source frame.
- * Geometry topology is deliberately not duplicated here: MetalPreviousVertexHistory already
- * compares the actual staged pipeline/format/topology/vertex/index manifest byte-for-byte at the
- * draw boundary. This class only proves that vertex ordinal N still belongs to the same ordered
- * entity lifetime before that exact staged-position history may be reused.</p>
+ * <p>Ordinary entity/piston lifetime generations are positive. Shared batches use negative
+ * generations, giving their DrawKey namespace an explicit domain separator even if a synthetic
+ * object id ever numerically equals a real object id.</p>
+ *
+ * <p>The ordered member signature includes each parent's exact per-submit vertex span. Aggregate
+ * staged vertex counts are not sufficient: two adjacent entities can grow/shrink by equal amounts,
+ * preserving the total while moving the boundary between their vertices. The span makes such a
+ * redistribution a new generation. MetalPreviousVertexHistory independently verifies the actual
+ * complete staged pipeline/format/topology/vertex/index manifest.</p>
  */
 final class MetalSharedBatchMotion {
-    static final long FLAME_OBJECT_ID = 0x4D46584C414D45L; // "MFXLAME"; generation is the domain separator.
+    static final long FLAME_OBJECT_ID = 0x4D46584C414D45L; // ASCII "MFXLAME".
+    private static final int MAX_FLAME_LAYERS = 65_536;
 
-    record Member(long objectId, long generation) {
+    record Member(long objectId, long generation, int vertexSpan) {
     }
 
     private record Signature(List<Member> members) {
@@ -60,12 +65,40 @@ final class MetalSharedBatchMotion {
         frameOpen = true;
     }
 
+    /**
+     * Mirrors Minecraft 26.2 FlameFeatureRenderer.prepare only for the number of emitted vertices.
+     * The pinned source guard verifies width*1.4, height/scale, h-=0.45 and four fireVertex calls
+     * per loop iteration before this implementation may be committed by CI.
+     */
+    static int flameVertexSpan(final float boundingBoxWidth, final float boundingBoxHeight) {
+        if (!Float.isFinite(boundingBoxWidth) || !Float.isFinite(boundingBoxHeight)
+                || boundingBoxWidth <= 0.0F || boundingBoxHeight <= 0.0F) {
+            return -1;
+        }
+        float scale = boundingBoxWidth * 1.4F;
+        if (!Float.isFinite(scale) || scale <= 0.0F) {
+            return -1;
+        }
+        float height = boundingBoxHeight / scale;
+        if (!Float.isFinite(height) || height <= 0.0F) {
+            return -1;
+        }
+        int layers = 0;
+        while (height > 0.0F) {
+            if (++layers > MAX_FLAME_LAYERS) {
+                return -1;
+            }
+            height -= 0.45F;
+        }
+        return layers * 4;
+    }
+
     static @Nullable MetalEntityMotionCapture.Sample beginFlameBatch(final List<Member> members) {
         if (!frameOpen || flameBatchOpened || members == null || members.isEmpty()) {
             return null;
         }
         for (Member member : members) {
-            if (member == null || member.generation() <= 0L) {
+            if (member == null || member.generation() <= 0L || member.vertexSpan() <= 0) {
                 return null;
             }
         }
@@ -94,7 +127,7 @@ final class MetalSharedBatchMotion {
             return;
         }
         // A successfully submitted source frame with no flame batch breaks continuity. Returning
-        // flame geometry must seed a fresh batch generation instead of reaching across the gap.
+        // flame geometry must seed a fresh generation rather than bridge across the missing frame.
         previousFlameSignature = pendingFlameSignature;
         previousFlameGeneration = pendingFlameSignature == null ? 0L : pendingFlameGeneration;
         pendingFlameSignature = null;
@@ -158,7 +191,7 @@ replace_once(
 replace_once(
     "src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java",
     '''    public static void beginModelBuild(final Object submit) {\n        beginBuild(submit, false);\n    }\n''',
-    '''    /**\n     * Activates one synthetic exact owner for Minecraft 26.2's complete Flame shared builder.\n     * Every Submit must still resolve to the exact entity lifetime captured during submission;\n     * otherwise the whole source frame stays real. The actual staged draw manifest provides the\n     * topology/vertex-count proof, so this method never duplicates FlameFeatureRenderer.prepare.\n     */\n    public static void beginSharedFlameBuild(final List<FlameFeatureRenderer.Submit> submits) {\n        if (!enabled) {\n            return;\n        }\n        MODEL_BUILD.remove();\n        if (submits == null || submits.isEmpty()) {\n            return;\n        }\n\n        java.util.ArrayList<MetalSharedBatchMotion.Member> members = new java.util.ArrayList<>(submits.size());\n        for (FlameFeatureRenderer.Submit submit : submits) {\n            Sample owner = submit == null ? null : SUBMITS.remove(submit);\n            if (owner == null || owner.generation() <= 0L) {\n                MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();\n                return;\n            }\n            members.add(new MetalSharedBatchMotion.Member(owner.objectId(), owner.generation()));\n        }\n\n        Sample batch = MetalSharedBatchMotion.beginFlameBatch(members);\n        if (batch == null) {\n            MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();\n            return;\n        }\n        MODEL_BUILD.set(batch);\n        MetalExactMotionCoverage.require(batch);\n        modelBuildsMatched++;\n    }\n\n    public static void beginModelBuild(final Object submit) {\n        beginBuild(submit, false);\n    }\n'''
+    '''    /**\n     * Activates one synthetic exact owner for Minecraft 26.2's complete Flame shared builder.\n     * Every Submit must resolve to the positive-lifetime owner captured at entity submission.\n     * Per-member emitted vertex spans prevent equal-and-opposite topology changes from preserving\n     * an unsafe aggregate ordinal mapping.\n     */\n    public static void beginSharedFlameBuild(final List<FlameFeatureRenderer.Submit> submits) {\n        if (!enabled) {\n            return;\n        }\n        MODEL_BUILD.remove();\n        if (submits == null || submits.isEmpty()) {\n            return;\n        }\n\n        java.util.ArrayList<MetalSharedBatchMotion.Member> members = new java.util.ArrayList<>(submits.size());\n        for (FlameFeatureRenderer.Submit submit : submits) {\n            Sample owner = submit == null ? null : SUBMITS.remove(submit);\n            int vertexSpan = submit == null\n                    ? -1\n                    : MetalSharedBatchMotion.flameVertexSpan(\n                            submit.entityRenderState().boundingBoxWidth,\n                            submit.entityRenderState().boundingBoxHeight\n                    );\n            if (owner == null || owner.generation() <= 0L || vertexSpan <= 0) {\n                MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();\n                return;\n            }\n            members.add(new MetalSharedBatchMotion.Member(\n                    owner.objectId(), owner.generation(), vertexSpan\n            ));\n        }\n\n        Sample batch = MetalSharedBatchMotion.beginFlameBatch(members);\n        if (batch == null) {\n            MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();\n            return;\n        }\n        MODEL_BUILD.set(batch);\n        // First sight, membership/order changes and per-member span changes have no matching exact\n        // history. Marking the synthetic owner exact-required guarantees root-motion fallback can\n        // never make such a source frame eligible for MTLFXFrameInterpolator.\n        MetalExactMotionCoverage.require(batch);\n        modelBuildsMatched++;\n    }\n\n    public static void beginModelBuild(final Object submit) {\n        beginBuild(submit, false);\n    }\n'''
 )
 
 replace_once(
@@ -169,7 +202,7 @@ replace_once(
 replace_once(
     "src/main/java/com/metallum/mixin/render/FlameFeatureSubmitMetalFxMixin.java",
     '''        MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();\n        MetalEntityMotionCapture.rejectCurrentExactAuxiliary("flame-shared-staged-draw");\n''',
-    '''        // The constructor still runs inside the owning entity submission. Keep that lifetime\n        // association until FlameFeatureRenderer builds the one shared staged draw. Admission is\n        // decided there, after the complete ordered membership is known.\n        MetalEntityMotionCapture.captureModelSubmit(this);\n'''
+    '''        // This constructor runs inside the parent entity submission. Preserve that exact\n        // lifetime until FlameFeatureRenderer builds its one shared staged draw.\n        MetalEntityMotionCapture.captureModelSubmit(this);\n'''
 )
 
 flame_mixin = Path("src/main/java/com/metallum/mixin/render/FlameFeatureRendererMetalFxMixin.java")
@@ -229,8 +262,10 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class MetalSharedBatchMotionTest {
-    private static final MetalSharedBatchMotion.Member A = new MetalSharedBatchMotion.Member(10L, 1L);
-    private static final MetalSharedBatchMotion.Member B = new MetalSharedBatchMotion.Member(20L, 2L);
+    private static final MetalSharedBatchMotion.Member A4 = new MetalSharedBatchMotion.Member(10L, 1L, 4);
+    private static final MetalSharedBatchMotion.Member A8 = new MetalSharedBatchMotion.Member(10L, 1L, 8);
+    private static final MetalSharedBatchMotion.Member B4 = new MetalSharedBatchMotion.Member(20L, 2L, 4);
+    private static final MetalSharedBatchMotion.Member B8 = new MetalSharedBatchMotion.Member(20L, 2L, 8);
 
     @AfterEach
     void reset() {
@@ -238,30 +273,55 @@ class MetalSharedBatchMotionTest {
     }
 
     @Test
-    void sameSubmittedMembershipReusesExactNegativeGeneration() {
+    void flameSpanMatchesPinnedMinecraftLoopSemantics() {
+        // width 1 => scale 1.4. Height 1.4 starts at h=1 and emits 3 layers: 1,.55,.10.
+        assertEquals(12, MetalSharedBatchMotion.flameVertexSpan(1.0F, 1.4F));
+        assertEquals(4, MetalSharedBatchMotion.flameVertexSpan(1.0F, 0.1F));
+        assertEquals(-1, MetalSharedBatchMotion.flameVertexSpan(0.0F, 1.0F));
+        assertEquals(-1, MetalSharedBatchMotion.flameVertexSpan(Float.NaN, 1.0F));
+        assertEquals(-1, MetalSharedBatchMotion.flameVertexSpan(1.0F, Float.POSITIVE_INFINITY));
+    }
+
+    @Test
+    void sameSubmittedMembershipAndSpansReuseExactNegativeGeneration() {
         MetalSharedBatchMotion.beginFrame();
-        MetalEntityMotionCapture.Sample first = MetalSharedBatchMotion.beginFlameBatch(List.of(A, B));
+        MetalEntityMotionCapture.Sample first = MetalSharedBatchMotion.beginFlameBatch(List.of(A4, B8));
         assertNotNull(first);
         assertTrue(first.generation() < 0L);
         assertFalse(first.hasPrevious());
         MetalSharedBatchMotion.commitSubmittedFrame();
 
         MetalSharedBatchMotion.beginFrame();
-        MetalEntityMotionCapture.Sample second = MetalSharedBatchMotion.beginFlameBatch(List.of(A, B));
+        MetalEntityMotionCapture.Sample second = MetalSharedBatchMotion.beginFlameBatch(List.of(A4, B8));
         assertNotNull(second);
         assertEquals(first.generation(), second.generation());
         assertTrue(second.hasPrevious());
     }
 
     @Test
+    void equalTotalButRedistributedMemberSpansInvalidateOrdinalContinuity() {
+        MetalSharedBatchMotion.beginFrame();
+        MetalEntityMotionCapture.Sample first = MetalSharedBatchMotion.beginFlameBatch(List.of(A4, B8));
+        assertNotNull(first);
+        MetalSharedBatchMotion.commitSubmittedFrame();
+
+        // Both frames have 12 aggregate vertices; the entity boundary moves from 4 to 8.
+        MetalSharedBatchMotion.beginFrame();
+        MetalEntityMotionCapture.Sample redistributed = MetalSharedBatchMotion.beginFlameBatch(List.of(A8, B4));
+        assertNotNull(redistributed);
+        assertNotEquals(first.generation(), redistributed.generation());
+        assertFalse(redistributed.hasPrevious());
+    }
+
+    @Test
     void reorderedOrReplacedMembershipAllocatesFreshGeneration() {
         MetalSharedBatchMotion.beginFrame();
-        MetalEntityMotionCapture.Sample first = MetalSharedBatchMotion.beginFlameBatch(List.of(A, B));
+        MetalEntityMotionCapture.Sample first = MetalSharedBatchMotion.beginFlameBatch(List.of(A4, B8));
         assertNotNull(first);
         MetalSharedBatchMotion.commitSubmittedFrame();
 
         MetalSharedBatchMotion.beginFrame();
-        MetalEntityMotionCapture.Sample reordered = MetalSharedBatchMotion.beginFlameBatch(List.of(B, A));
+        MetalEntityMotionCapture.Sample reordered = MetalSharedBatchMotion.beginFlameBatch(List.of(B8, A4));
         assertNotNull(reordered);
         assertNotEquals(first.generation(), reordered.generation());
         assertFalse(reordered.hasPrevious());
@@ -270,17 +330,16 @@ class MetalSharedBatchMotionTest {
     @Test
     void discardedFrameCannotAdvanceSubmittedMembership() {
         MetalSharedBatchMotion.beginFrame();
-        MetalEntityMotionCapture.Sample first = MetalSharedBatchMotion.beginFlameBatch(List.of(A));
+        MetalEntityMotionCapture.Sample first = MetalSharedBatchMotion.beginFlameBatch(List.of(A4));
         assertNotNull(first);
         MetalSharedBatchMotion.commitSubmittedFrame();
 
         MetalSharedBatchMotion.beginFrame();
-        MetalEntityMotionCapture.Sample transientBatch = MetalSharedBatchMotion.beginFlameBatch(List.of(B));
-        assertNotNull(transientBatch);
+        assertNotNull(MetalSharedBatchMotion.beginFlameBatch(List.of(B4)));
         MetalSharedBatchMotion.discardFrame();
 
         MetalSharedBatchMotion.beginFrame();
-        MetalEntityMotionCapture.Sample recovered = MetalSharedBatchMotion.beginFlameBatch(List.of(A));
+        MetalEntityMotionCapture.Sample recovered = MetalSharedBatchMotion.beginFlameBatch(List.of(A4));
         assertNotNull(recovered);
         assertEquals(first.generation(), recovered.generation());
         assertTrue(recovered.hasPrevious());
@@ -289,7 +348,7 @@ class MetalSharedBatchMotionTest {
     @Test
     void successfulFrameWithoutFlameBreaksContinuity() {
         MetalSharedBatchMotion.beginFrame();
-        MetalEntityMotionCapture.Sample first = MetalSharedBatchMotion.beginFlameBatch(List.of(A));
+        MetalEntityMotionCapture.Sample first = MetalSharedBatchMotion.beginFlameBatch(List.of(A4));
         assertNotNull(first);
         MetalSharedBatchMotion.commitSubmittedFrame();
 
@@ -297,27 +356,28 @@ class MetalSharedBatchMotionTest {
         MetalSharedBatchMotion.commitSubmittedFrame();
 
         MetalSharedBatchMotion.beginFrame();
-        MetalEntityMotionCapture.Sample returned = MetalSharedBatchMotion.beginFlameBatch(List.of(A));
+        MetalEntityMotionCapture.Sample returned = MetalSharedBatchMotion.beginFlameBatch(List.of(A4));
         assertNotNull(returned);
         assertNotEquals(first.generation(), returned.generation());
         assertFalse(returned.hasPrevious());
     }
 
     @Test
-    void aSecondSharedFlameBatchInOneFrameFailsClosed() {
+    void secondSharedFlameBatchOrInvalidMemberFailsClosed() {
         MetalSharedBatchMotion.beginFrame();
-        assertNotNull(MetalSharedBatchMotion.beginFlameBatch(List.of(A)));
-        assertNull(MetalSharedBatchMotion.beginFlameBatch(List.of(A)));
-    }
+        assertNotNull(MetalSharedBatchMotion.beginFlameBatch(List.of(A4)));
+        assertNull(MetalSharedBatchMotion.beginFlameBatch(List.of(A4)));
 
-    @Test
-    void invalidParentGenerationCannotEnterSyntheticDomain() {
+        MetalSharedBatchMotion.reset();
         MetalSharedBatchMotion.beginFrame();
         assertNull(MetalSharedBatchMotion.beginFlameBatch(List.of(
-                new MetalSharedBatchMotion.Member(10L, -1L)
+                new MetalSharedBatchMotion.Member(10L, -1L, 4)
+        )));
+        assertNull(MetalSharedBatchMotion.beginFlameBatch(List.of(
+                new MetalSharedBatchMotion.Member(10L, 1L, 0)
         )));
     }
 }
 ''')
 
-print("Flame shared exact-motion patch prepared")
+print("Flame shared exact-motion v2 patch prepared")
