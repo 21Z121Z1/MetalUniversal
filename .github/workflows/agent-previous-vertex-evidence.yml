@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "46a7058d461182980cfbbd56b91b3b535c8c9c64"
+          test "$(git rev-parse HEAD^)" = "90492ca2f4a061cbf29d9026668e695906f4112f"
       - name: Apply exact previous-position replay
         shell: bash
         run: |
@@ -49,84 +49,15 @@ jobs:
             --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
             --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
           git diff --check
-      - name: Commit verified implementation and restore evidence workflow
+      - name: Commit verified implementation
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          Path('.github/workflows/agent-previous-vertex-evidence.yml').write_text('''name: Agent previous-vertex API evidence
-
-on:
-  push:
-    branches:
-      - agent/metalfx-motion-coverage-26.2
-
-permissions:
-  contents: read
-
-jobs:
-  extract:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: agent/metalfx-motion-coverage-26.2
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '25'
-      - name: Extract source-grounded staged-vertex and Blaze3D APIs
-        shell: bash
-        run: |
-          set -euo pipefail
-          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
-          python3 - "$SRC" <<'PY2'
-          from pathlib import Path
-          import hashlib, json, sys
-          root=Path(sys.argv[1])
-          specs={
-            'StagedVertexBuffer.java': ('vertexBufferSlices','uploadDrawsToBuffers','freeVertexData','getExecuteInfo','vertexBufferSize','vertexCount','record ExecuteInfo','class Draw'),
-            'VertexFormat.java': ('class VertexFormat','builder(','addAttribute','padding','getVertexSize','binding','Builder'),
-            'DefaultVertexFormat.java': ('POSITION','POSITION_COLOR_TEX_LIGHTMAP','ENTITY','BLOCK','addAttribute'),
-            'GpuBuffer.java': ('USAGE_VERTEX','USAGE_UNIFORM','class GpuBuffer','interface Usage'),
-            'GpuBufferSlice.java': ('record GpuBufferSlice','class MappedView','MappedView','data()','slice()','buffer()','offset()','length()'),
-            'TransientMemory.java': ('allocateGpuMapped','allocateGpu','uploadGpu','uploadStaging','interface TransientMemory'),
-            'RenderPipeline.java': ('withVertexBinding','vertexFormat','VertexFormat','Builder'),
-            'RenderPass.java': ('setVertexBuffer','drawIndexed','setPipeline'),
-          }
-          out=[]
-          for name, needles in specs.items():
-            matches=list(root.rglob(name))
-            if not matches:
-              out.append({'name':name,'missing':True})
-              continue
-            path=sorted(matches, key=lambda p:(0 if ('com/mojang/' in p.as_posix() or 'net/minecraft/' in p.as_posix()) else 1, len(p.as_posix())))[0]
-            lines=path.read_text(errors='replace').splitlines()
-            hits=[i for i,l in enumerate(lines) if any(n in l for n in needles)]
-            windows=[]
-            for i in hits:
-              a=max(0,i-24); b=min(len(lines),i+38)
-              if windows and a <= windows[-1][1]+1: windows[-1]=(windows[-1][0],max(windows[-1][1],b))
-              else: windows.append((a,b))
-            out.append({'path':path.relative_to(root).as_posix(),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'snippets':[{'start_line':a+1,'end_line':b,'text':'\\n'.join(f'{j+1:05d}: {lines[j]}' for j in range(a,b))} for a,b in windows]})
-          target=Path('build/agent-evidence/previous-vertex-api.json')
-          target.parent.mkdir(parents=True,exist_ok=True)
-          target.write_text(json.dumps({'files':out},indent=2))
-          PY2
-      - uses: actions/upload-artifact@v4
-        with:
-          name: previous-vertex-api-source
-          path: build/agent-evidence/previous-vertex-api.json
-          retention-days: 7
-          if-no-files-found: error
-''')
-          PY
-          rm -f .github/workflows/agent-apply-previous-position-replay.yml
-          rm -f .github/scripts/apply_previous_position_replay.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java \
+                  src/main/java/com/metallum/client/metal/render/MetalFxManager.java \
+                  src/test/java/com/metallum/client/metal/render/MetalPreviousVertexHistoryTest.java
           git diff --cached --check
           git commit -m 'feat(metalfx): replay exact previous staged vertices'
           git push origin HEAD:agent/metalfx-motion-coverage-26.2
