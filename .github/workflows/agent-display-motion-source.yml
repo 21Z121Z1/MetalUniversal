@@ -42,32 +42,42 @@ jobs:
           wanted = [
               'BlockModelRenderState.java',
               'ItemStackRenderState.java',
-              'ModelFeatureRenderer.java',
-              'ItemFeatureRenderer.java',
               'SubmitNodeCollector.java',
               'SubmitNodeStorage.java',
+              'SubmitNodeCollection.java',
+              'ModelFeatureRenderer.java',
+              'ItemFeatureRenderer.java',
+              'BlockModelFeatureRenderer.java',
+              'BlockFeatureRenderer.java',
+              'SpecialModelRenderer.java',
           ]
           needles = (
               'void submit(', ' submit(', 'new ModelFeatureRenderer.Submit',
-              'new ItemFeatureRenderer.Submit', 'submitModel(', 'submitItem(',
-              'submitText(', 'submitCustomGeometry(', 'submitSprite(',
-              'ModelFeatureRenderer.Submit', 'ItemFeatureRenderer.Submit',
-              'RenderType', 'PoseStack', 'Text', 'Font',
+              'new ItemFeatureRenderer.Submit', 'new Block', 'submitModel(',
+              'submitBlockModel(', 'submitItem(', 'submitText(',
+              'submitCustomGeometry(', 'submitSprite(', 'featureType()',
+              'FeatureRendererType', 'ModelFeatureRenderer.Submit',
+              'ItemFeatureRenderer.Submit', 'RenderType', 'PoseStack',
+              'SpecialModelRenderer', 'customGeometry',
           )
           out = {'files': []}
+          seen = set()
           for name in wanted:
               matches = sorted(root.rglob(name))
               for path in matches:
+                  if path in seen:
+                      continue
+                  seen.add(path)
                   lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
                   hits = [i for i, line in enumerate(lines) if any(n in line for n in needles)]
                   windows = []
                   for hit in hits:
-                      start=max(0,hit-18); end=min(len(lines),hit+19)
+                      start=max(0,hit-22); end=min(len(lines),hit+23)
                       if windows and start <= windows[-1][1]+1:
                           windows[-1]=(windows[-1][0],max(windows[-1][1],end))
                       else:
                           windows.append((start,end))
-                      if len(windows)>=16: break
+                      if len(windows)>=20: break
                   snippets=[]
                   for start,end in windows:
                       snippets.append({
