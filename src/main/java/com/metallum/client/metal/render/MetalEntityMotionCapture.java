@@ -202,6 +202,10 @@ public final class MetalEntityMotionCapture {
      * future caller may bracket each separately. {@link #beginFrame()} clears the
      * map every frame, so retaining cannot leak across frames.</p>
      */
+    public static boolean hasMovingBlockOwner(final Object renderState) {
+        return enabled && renderState != null && SUBMITS.containsKey(renderState);
+    }
+
     public static void beginMovingBlockBuild(final Object renderState) {
         beginBuild(renderState, true);
     }

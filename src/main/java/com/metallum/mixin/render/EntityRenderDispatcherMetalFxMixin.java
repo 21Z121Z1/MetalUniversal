@@ -36,6 +36,9 @@ public abstract class EntityRenderDispatcherMetalFxMixin {
             final SubmitNodeCollector collector,
             final CallbackInfo ci
     ) {
+        // Admission is tied to actual submission rather than extraction, so culled entities do not
+        // unnecessarily suppress interpolation for the frame.
+        MetalFxManager.observeFrameInterpolationEntity(state);
         MetalEntityMotionCapture.beginEntitySubmission(state);
     }
 

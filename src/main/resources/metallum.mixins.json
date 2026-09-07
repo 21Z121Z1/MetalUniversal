@@ -14,6 +14,8 @@
     "render.GameRendererMetalFxMixin",
     "render.GameRenderStateMetalFxMixin",
     "render.EntityRenderDispatcherMetalFxMixin",
+    "render.ItemInHandRendererMetalFxMixin",
+    "render.QuadParticleRenderStateMetalFxMixin",
     "render.ModelFeatureSubmitMetalFxMixin",
     "render.ModelFeatureRendererMetalFxMixin",
     "render.ItemFeatureSubmitMetalFxMixin",

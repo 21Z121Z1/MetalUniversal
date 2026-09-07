@@ -159,6 +159,7 @@ public final class MetalFxManager {
     private final Vector2f pixelJitter = new Vector2f();
     private final Vector2f clipJitter = new Vector2f();
     private final MetalMotionStateStore motionStateStore = new MetalMotionStateStore();
+    private final MetalFxMotionEligibility motionEligibility = new MetalFxMotionEligibility();
     private final Map<Entity, Long> entityGenerations = new IdentityHashMap<>();
     private long nextEntityGeneration = 1L;
     private int displayWidth;
@@ -504,6 +505,32 @@ public final class MetalFxManager {
         manager.captureEntityMotionInternal(entity, state);
     }
 
+    /** Marks a submitted entity whose complete previous geometry is not represented by the motion pass. */
+    public static void observeFrameInterpolationEntity(final EntityRenderState state) {
+        MetalFxManager manager = active;
+        if (manager != null && state != null) {
+            manager.motionEligibility.reject(MetalFxMotionEligibility.incompleteEntityReason(state));
+        }
+    }
+
+    /** First-person geometry has no exact previous local pose yet; reject only frame interpolation. */
+    public static void observeFirstPersonMotion() {
+        MetalFxManager manager = active;
+        if (manager != null) manager.motionEligibility.reject(MetalFxMotionEligibility.FIRST_PERSON);
+    }
+
+    /** Quad particles store only the current extracted pose; reactive Temporal handling remains enabled. */
+    public static void observeParticleMotion() {
+        MetalFxManager manager = active;
+        if (manager != null) manager.motionEligibility.reject(MetalFxMotionEligibility.PARTICLE);
+    }
+
+    /** Moving blocks without an entity-owned staged replay (notably pistons) have no previous pose sidecar. */
+    public static void observeUnownedMovingBlockMotion() {
+        MetalFxManager manager = active;
+        if (manager != null) manager.motionEligibility.reject(MetalFxMotionEligibility.MOVING_BLOCK);
+    }
+
     /**
      * Replays the exact staged entity geometry into the object-motion and
      * validity MRT attachments. This is a second geometry pass sharing the
@@ -833,6 +860,7 @@ public final class MetalFxManager {
 
     private void beginFrameInternal() {
         reloadConfigIfRequested();
+        motionEligibility.beginFrame();
         recordFramePacingDiagnostics();
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
             this.sceneFrame = false;
@@ -3693,6 +3721,13 @@ public final class MetalFxManager {
         // single-present path until VSync is on again.
         if (frameGenerationEnabled && immediatePresentMode) {
             suspendFrameGenerationInternal("the surface presents in immediate mode (VSync off)");
+        }
+        if (!motionEligibility.eligible()) {
+            // A real source frame containing geometry without exact previous-position motion must not
+            // enter MTLFXFrameInterpolator. Reset the next admitted pair so it cannot bridge across
+            // this skipped source frame; MetalFX Temporal still receives its reactive/history masks.
+            frameResetForPresent = true;
+            return null;
         }
         if (!frameGenerationEnabled || runtimeDisabled || !frameUsesUpscaledTarget
                 || sceneOutputTarget == null || frameNativeSceneTexture == null || uiTarget == null

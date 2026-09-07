@@ -6,6 +6,7 @@ import net.minecraft.client.renderer.entity.state.ArrowRenderState;
 import net.minecraft.client.renderer.entity.state.BoatRenderState;
 import net.minecraft.client.renderer.entity.state.DisplayEntityRenderState;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.entity.state.FallingBlockRenderState;
 import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
@@ -13,18 +14,11 @@ import net.minecraft.client.renderer.entity.state.MinecartRenderState;
 /**
  * Per-render-frame admission state for Metal frame interpolation.
  *
- * <p>MetalFX Temporal can suppress history for individual pixels, but
- * {@code MTLFXFrameInterpolator} consumes the finished motion texture without
- * the project's reactive/confidence masks. A rendered primitive whose exact
- * previous geometry is unavailable therefore makes the current source-frame
- * pair unsafe for interpolation. This tracker is deliberately monotonic inside
- * a frame: once one such primitive is observed, that frame can only be
- * presented as a real frame.</p>
- *
- * <p>The tracker is reset by the same {@link MetalFxManager#beginFrame()} owner
- * that resets object-motion observations, so the rejection cannot leak across
- * frame transactions and does not require stopping/restarting the native
- * presenter.</p>
+ * <p>MetalFX Temporal has pixel-level reactive/history rejection, while
+ * MTLFXFrameInterpolator consumes the finished color/depth/motion source frame.
+ * If any submitted primitive lacks an exact previous-position motion producer,
+ * the whole source frame is kept real and the next interpolated pair is reset.
+ * Rejection is monotonic only within the current frame.</p>
  */
 @Environment(EnvType.CLIENT)
 final class MetalFxMotionEligibility {
@@ -33,6 +27,7 @@ final class MetalFxMotionEligibility {
     static final int FIRST_PERSON = 1 << 2;
     static final int PARTICLE = 1 << 3;
     static final int MOVING_BLOCK = 1 << 4;
+    static final int DISPLAY_ENTITY = 1 << 5;
 
     private int rejectedReasons;
 
@@ -41,10 +36,7 @@ final class MetalFxMotionEligibility {
     }
 
     void reject(final int reason) {
-        if (reason == 0) {
-            return;
-        }
-        rejectedReasons |= reason;
+        if (reason != 0) rejectedReasons |= reason;
     }
 
     boolean eligible() {
@@ -56,22 +48,29 @@ final class MetalFxMotionEligibility {
     }
 
     /**
-     * Returns zero only for renderer families whose root object transform is
-     * currently reconstructed from Minecraft 26.2 source semantics. A living
-     * renderer is rejected even though its root translation/body yaw is known:
-     * {@code EntityModel.setupAnim} changes child-part vertices independently,
-     * so a root matrix is not complete frame-interpolation motion.
+     * Whitelist only renderer families whose current staged geometry is rigid and whose complete
+     * changing root transform is reconstructed by MetalEntityObjectPose.
+     *
+     * <p>Living entities change ModelPart vertices through setupAnim. Boats also animate child
+     * geometry (paddles), and display block/text paths are not all associated with the current
+     * model/item staged-replay carrier. They therefore remain fail-closed for frame interpolation
+     * until previous local vertices are supplied, rather than receiving plausible-but-wrong root
+     * vectors.</p>
      */
     static int incompleteEntityReason(final EntityRenderState state) {
-        if (state instanceof LivingEntityRenderState) {
+        if (state instanceof LivingEntityRenderState || state instanceof BoatRenderState) {
             return NON_RIGID_ENTITY;
         }
-        if (state instanceof DisplayEntityRenderState
-                || state instanceof ItemEntityRenderState
+        if (state instanceof ItemEntityRenderState
                 || state instanceof MinecartRenderState
-                || state instanceof BoatRenderState
-                || state instanceof ArrowRenderState) {
+                || state instanceof ArrowRenderState
+                || state instanceof FallingBlockRenderState) {
             return 0;
+        }
+        // Item display may be captured by ItemFeature, but block/text submit through different
+        // feature families. Treat the family uniformly until all subtypes have exact replay.
+        if (state instanceof DisplayEntityRenderState) {
+            return DISPLAY_ENTITY;
         }
         return UNKNOWN_ENTITY;
     }
