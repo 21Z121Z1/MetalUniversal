@@ -1,4 +1,4 @@
-name: Agent exact motion coverage admission fix
+name: Agent exact auxiliary motion patch
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): retry encoded exact motion admission fix'"
+    if: "github.event.head_commit.message == 'chore(agent): verify exact leash and text motion'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -21,88 +21,34 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Guard exact-coverage parent
+      - name: Guard exact auxiliary parent
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "c460d08f339d2993e9bbaca30b7250842e44485c"
-      - name: Move proof to actual encode and wire admission
+          test "$(git rev-parse HEAD^)" = "2d41595dd37c92b33891a511cd572aa53ed6afbd"
+      - name: Apply exact leash and text motion
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          def replace_once(path, old, new):
-              p = Path(path)
-              text = p.read_text()
-              if text.count(old) != 1:
-                  raise SystemExit(f'{path}: anchor count={text.count(old)} for {old[:100]!r}')
-              p.write_text(text.replace(old, new, 1))
-
-          replace_once(
-              'src/main/java/com/metallum/client/metal/render/MetalPreviousVertexReplay.java',
-              '        MetalEntityMotionCapture.recordExactReplayPlanned(token);\n        return new Plan(\n',
-              '        return new Plan(\n'
-          )
-          replace_once(
-              'src/main/java/com/metallum/client/metal/render/MetalExactMotionCoverage.java',
-              '    static void recordExactPlan(final MetalPreviousVertexHistory.DrawToken token) {\n',
-              '    static void recordExactEncoded(final MetalPreviousVertexHistory.DrawToken token) {\n'
-          )
-          replace_once(
-              'src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java',
-              '    static void recordExactReplayPlanned(final MetalPreviousVertexHistory.DrawToken token) {\n        if (enabled) {\n            MetalExactMotionCoverage.recordExactPlan(token);\n        }\n    }\n',
-              '    static void recordExactReplayEncoded(final MetalPreviousVertexHistory.DrawToken token) {\n        if (enabled) {\n            MetalExactMotionCoverage.recordExactEncoded(token);\n        }\n    }\n'
-          )
-          replace_once(
-              'src/main/java/com/metallum/client/metal/render/MetalFxManager.java',
-              '            GpuBufferSlice currentVertexBuffer,\n            @Nullable GpuBufferSlice previousPositionBuffer,\n            int replayBaseVertex\n',
-              '            GpuBufferSlice currentVertexBuffer,\n            @Nullable GpuBufferSlice previousPositionBuffer,\n            MetalPreviousVertexHistory.@Nullable DrawToken exactPreviousVertexToken,\n            int replayBaseVertex\n'
-          )
-          replace_once(
-              'src/main/java/com/metallum/client/metal/render/MetalFxManager.java',
-              '                    currentVertexBuffer,\n                    previousPositionBuffer,\n                    replayBaseVertex\n',
-              '                    currentVertexBuffer,\n                    previousPositionBuffer,\n                    exactPreviousPositions ? replay.previousVertexToken() : null,\n                    replayBaseVertex\n'
-          )
-          replace_once(
-              'src/main/java/com/metallum/client/metal/render/MetalFxManager.java',
-              '                );\n                MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());\n',
-              '                );\n                if (exactPreviousPositions) {\n                    MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());\n                }\n                MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());\n'
-          )
-          replace_once(
-              'src/main/java/com/metallum/client/metal/render/MetalFxManager.java',
-              '        if (!motionEligibility.eligible()) {\n            // A real source frame containing geometry without exact previous-position motion must not\n            // enter MTLFXFrameInterpolator. Reset the next admitted pair so it cannot bridge across\n            // this skipped source frame; MetalFX Temporal still receives its reactive/history masks.\n            frameResetForPresent = true;\n            return null;\n        }\n        if (!frameGenerationEnabled || runtimeDisabled || !frameUsesUpscaledTarget\n',
-              '        if (!motionEligibility.eligible()) {\n            // A real source frame containing geometry without exact previous-position motion must not\n            // enter MTLFXFrameInterpolator. Reset the next admitted pair so it cannot bridge across\n            // this skipped source frame; MetalFX Temporal still receives its reactive/history masks.\n            frameResetForPresent = true;\n            return null;\n        }\n        if (!MetalEntityMotionCapture.exactCoverageComplete()) {\n            // Class-level admission is not enough for deforming geometry. The required object must\n            // prove that every draw in the current manifest actually encoded an exact previous-\n            // position replay. A planned-but-not-encoded motion pass is deliberately insufficient.\n            frameResetForPresent = true;\n            return null;\n        }\n        if (!frameGenerationEnabled || runtimeDisabled || !frameUsesUpscaledTarget\n'
-          )
-          replace_once(
-              'src/test/java/com/metallum/client/metal/render/MetalExactMotionCoverageTest.java',
-              '        // Current frame has a matching manifest but is incomplete until its exact replay is planned.\n',
-              '        // Current frame has a matching manifest but is incomplete until its exact replay is encoded.\n'
-          )
-          replace_once(
-              'src/test/java/com/metallum/client/metal/render/MetalExactMotionCoverageTest.java',
-              '        MetalExactMotionCoverage.recordExactPlan(current);\n',
-              '        MetalExactMotionCoverage.recordExactEncoded(current);\n'
-          )
-          PY
+          python3 .github/scripts/apply_exact_auxiliary_motion.py
           git diff --check
-      - name: Compile and test exact motion contracts
+      - name: Compile and test exact auxiliary contracts
         shell: bash
         run: |
           set -euo pipefail
           ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
             --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
             --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
             --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
           git diff --check
-      - name: Commit verified admission fix
+      - name: Commit verified exact auxiliary implementation
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/main/java src/test/java
+          git add src/main/java src/main/resources/assets/metallum/shaders src/test/java
           git diff --cached --check
-          git commit -m 'fix(metalfx): require encoded exact motion before interpolation'
+          git commit -m 'feat(metalfx): add exact leash and world text motion'
           git push origin HEAD:agent/metalfx-motion-coverage-26.2
