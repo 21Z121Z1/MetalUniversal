@@ -121,48 +121,83 @@ final class MetalCrossShaderCompiler {
         }
     }
 
-    static MetalCompiledRenderPipeline compile(final MetalDevice device, final RenderPipeline pipeline, final ShaderSource shaderSource) {
+    record CacheLookup(
+            @Nullable MetalMslDiskCache diskCache,
+            @Nullable String cacheKey,
+            MetalMslDiskCache.@Nullable Entry cached,
+            float sampleLodBias
+    ) {
+    }
+
+    /**
+     * Performs only stable-source preparation, cache-key hashing and disk JSON
+     * lookup. It deliberately does not create Metal functions/PSOs and does not
+     * mutate hit/miss telemetry until a locked compile actually consumes it.
+     */
+    static CacheLookup tryLoadCacheLookup(
+            final RenderPipeline pipeline, final ShaderSource shaderSource
+    ) {
         float sampleLodBias = MetalFxManager.shaderSampleLodBias();
+        MetalMslDiskCache diskCache = MetalMslDiskCache.instance();
+        if (diskCache == null) {
+            return new CacheLookup(null, null, null, sampleLodBias);
+        }
+        String rawVertex = shaderSource.get(pipeline.getVertexShader(), ShaderType.VERTEX);
+        String rawFragment = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);
+        if (rawVertex == null || rawFragment == null) {
+            return new CacheLookup(diskCache, null, null, sampleLodBias);
+        }
+        String cacheKey = MetalMslDiskCache.key(
+                MetalDevice.prepareShaderSource(rawVertex, pipeline.getShaderDefines()),
+                MetalDevice.prepareShaderSource(rawFragment, pipeline.getShaderDefines()),
+                // explicitFragmentOutputLocations parses the raw comment-carrying text.
+                rawFragment,
+                vertexFormatSignature(pipeline),
+                bindGroupSignature(pipeline),
+                Integer.toHexString(Float.floatToIntBits(sampleLodBias)),
+                MetalMslDiskCache.CACHE_SALT
+        );
+        return new CacheLookup(diskCache, cacheKey, diskCache.load(cacheKey), sampleLodBias);
+    }
+
+    static MetalCompiledRenderPipeline compile(
+            final MetalDevice device, final RenderPipeline pipeline, final ShaderSource shaderSource
+    ) {
+        return compile(device, pipeline, shaderSource, null);
+    }
+
+    static MetalCompiledRenderPipeline compile(
+            final MetalDevice device,
+            final RenderPipeline pipeline,
+            final ShaderSource shaderSource,
+            @Nullable final CacheLookup preloadedLookup
+    ) {
         try {
-            // S8: disk-cache the translated five-tuple. The raw sources are
-            // fetched again inside getOrCompileShader on a miss; that double
-            // fetch is string work in the microsecond range and cheaper than
-            // threading prepared sources through the vanilla-shaped chain.
-            MetalMslDiskCache diskCache = MetalMslDiskCache.instance();
-            String cacheKey = null;
-            if (diskCache != null) {
-                String rawVertex = shaderSource.get(pipeline.getVertexShader(), ShaderType.VERTEX);
-                String rawFragment = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);
-                if (rawVertex != null && rawFragment != null) {
-                    cacheKey = MetalMslDiskCache.key(
-                            MetalDevice.prepareShaderSource(rawVertex, pipeline.getShaderDefines()),
-                            MetalDevice.prepareShaderSource(rawFragment, pipeline.getShaderDefines()),
-                            // explicitFragmentOutputLocations parses the raw
-                            // (comment-carrying) text, not the prepared one.
-                            rawFragment,
-                            vertexFormatSignature(pipeline),
-                            bindGroupSignature(pipeline),
-                            Integer.toHexString(Float.floatToIntBits(sampleLodBias)),
-                            MetalMslDiskCache.CACHE_SALT
-                    );
-                    MetalMslDiskCache.Entry cached = diskCache.load(cacheKey);
-                    if (cached != null) {
-                        MetalMslDiskCache.recordHit();
-                        if (device.isDebuggingEnabled()) {
-                            Metallum.LOGGER.info("[metallum] MSL cache hit for {}", pipeline.getLocation());
-                        }
-                        return new MetalCompiledRenderPipeline(
-                                device,
-                                pipeline,
-                                cached.vertexMsl(),
-                                cached.fragmentMsl(),
-                                cached.vertexEntryPoint(),
-                                cached.fragmentEntryPoint(),
-                                cached.resources(),
-                                cached.genericVertexInputs()
-                        );
-                    }
+            CacheLookup lookup = preloadedLookup;
+            float currentLodBias = MetalFxManager.shaderSampleLodBias();
+            if (lookup == null
+                    || Float.floatToIntBits(lookup.sampleLodBias()) != Float.floatToIntBits(currentLodBias)) {
+                lookup = tryLoadCacheLookup(pipeline, shaderSource);
+            }
+            float sampleLodBias = lookup.sampleLodBias();
+            MetalMslDiskCache diskCache = lookup.diskCache();
+            String cacheKey = lookup.cacheKey();
+            MetalMslDiskCache.Entry cached = lookup.cached();
+            if (cached != null) {
+                MetalMslDiskCache.recordHit();
+                if (device.isDebuggingEnabled()) {
+                    Metallum.LOGGER.info("[metallum] MSL cache hit for {}", pipeline.getLocation());
                 }
+                return new MetalCompiledRenderPipeline(
+                        device,
+                        pipeline,
+                        cached.vertexMsl(),
+                        cached.fragmentMsl(),
+                        cached.vertexEntryPoint(),
+                        cached.fragmentEntryPoint(),
+                        cached.resources(),
+                        cached.genericVertexInputs()
+                );
             }
             long translateStart = System.nanoTime();
             IntermediaryShaderModule vertexSpirv = device.getOrCompileShader(pipeline.getVertexShader(), ShaderType.VERTEX, pipeline.getShaderDefines(), shaderSource);
@@ -230,7 +265,7 @@ final class MetalCrossShaderCompiler {
                     layoutEntries, storageResources, vertexMsl, fragmentMsl
             );
             MetalMslDiskCache.recordMiss(System.nanoTime() - translateStart);
-            if (cacheKey != null) {
+            if (cacheKey != null && diskCache != null) {
                 diskCache.store(cacheKey, new MetalMslDiskCache.Entry(
                         vertexMsl.source(), fragmentMslSource, vertexEntryPoint, fragmentEntryPoint,
                         resources, genericVertexInputs
