@@ -1,4 +1,4 @@
-name: Agent exact auxiliary motion patch
+name: Agent exact text display motion patch
 
 on:
   push:
@@ -10,63 +10,50 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): retry exact leash and text motion'"
+    if: "github.event.head_commit.message == 'chore(agent): apply exact text display motion'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           ref: agent/metalfx-motion-coverage-26.2
-          fetch-depth: 2
+          fetch-depth: 3
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
-      - name: Guard exact auxiliary parent
+      - name: Guard exact text display transaction
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "cb901b91c51cce4401bc2d0f24e5cdffdc2c7614"
-      - name: Apply exact leash and text motion
+          test "$(git rev-parse HEAD^^)" = "06f3de49b1cfc9602f3eb99d6e7f4160193617a1"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure text display exact verification"
+      - name: Apply exact text display ownership and continuity
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_exact_auxiliary_motion.py
-          # The first run proved compileJava green and exposed only an invalid minimal test fixture:
-          # RenderPipeline.Builder requires primitive topology before build(). Repair the fixture,
-          # not the production implementation, then rerun the same ABI assertions.
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('src/test/java/com/metallum/client/metal/render/MetalEntityAuxiliaryMotionPipelineTest.java')
-          text = p.read_text()
-          old_import = 'import com.mojang.blaze3d.pipeline.RenderPipeline;\n'
-          new_import = 'import com.mojang.blaze3d.PrimitiveTopology;\nimport com.mojang.blaze3d.pipeline.RenderPipeline;\n'
-          if text.count(old_import) != 1:
-              raise SystemExit('test import anchor drift')
-          text = text.replace(old_import, new_import, 1)
-          old_builder = '                .withFragmentShader(shaderId)\n                .withVertexBinding(0, format);\n'
-          new_builder = '                .withFragmentShader(shaderId)\n                .withPrimitiveTopology(PrimitiveTopology.QUADS)\n                .withVertexBinding(0, format);\n'
-          if text.count(old_builder) != 1:
-              raise SystemExit('test builder anchor drift')
-          p.write_text(text.replace(old_builder, new_builder, 1))
-          PY
+          python3 .github/scripts/apply_text_display_exact_motion.py
           git diff --check
-      - name: Compile and test exact auxiliary contracts
+      - name: Compile and test text display motion contracts
         shell: bash
         run: |
           set -euo pipefail
           ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalTextDisplayMotionSafetyTest' \
+            --tests 'com.metallum.client.metal.render.MetalTextDisplayExactCoverageTest' \
+            --tests 'com.metallum.client.metal.render.MetalDisplayMotionSafetyTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
             --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
             --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
             --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
             --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
           git diff --check
-      - name: Commit verified exact auxiliary implementation
+      - name: Commit verified text display implementation
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/main/java src/main/resources/assets/metallum/shaders src/test/java
+          git add src/main/java src/main/resources/metallum.mixins.json src/test/java
           git diff --cached --check
-          git commit -m 'feat(metalfx): add exact leash and world text motion'
+          git commit -m 'feat(metalfx): add exact text display motion coverage'
           git push origin HEAD:agent/metalfx-motion-coverage-26.2
