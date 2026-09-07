@@ -25,11 +25,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "0425e28fb95877577cb528e8d3301a937fdd4869"
-          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): retarget living exact transaction after anchor normalization"
+          test "$(git rev-parse HEAD^^)" = "6194ba94bf2e8c487341582d90be76e18ebb2b64"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): rerun living exact after nullable fix"
           test "$(git log -1 --format=%s HEAD)" = "chore(agent): apply living and first-person exact motion"
           test "$(git rev-parse HEAD^^:.github/scripts/apply_living_first_person_exact_motion.py)" = \
                "$(git rev-parse HEAD:.github/scripts/apply_living_first_person_exact_motion.py)"
+          test "$(git rev-parse HEAD^^:.github/scripts/fix_living_first_person_nullable.py)" = \
+               "$(git rev-parse HEAD:.github/scripts/fix_living_first_person_nullable.py)"
       - name: Verify pinned Minecraft 26.2 source contracts
         shell: bash
         run: |
@@ -100,6 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/apply_living_first_person_exact_motion.py
+          python3 .github/scripts/fix_living_first_person_nullable.py
           git diff --check
       - name: Compile and test exact motion contracts
         shell: bash
@@ -122,6 +125,7 @@ jobs:
           grep -F 'MetalEntityMotionCapture.requireExactState(state);' src/main/java/com/metallum/mixin/render/EntityRenderDispatcherMetalFxMixin.java
           grep -F 'MetalSyntheticExactMotion.beginFirstPerson(hand);' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
           grep -F 'MetalSyntheticExactMotion.commitSubmittedFrame();' src/main/java/com/metallum/client/metal/render/MetalMotionStateStore.java
+          grep -F 'MetalEntityMotionCapture.@Nullable Sample beginFirstPerson' src/main/java/com/metallum/client/metal/render/MetalSyntheticExactMotion.java
           ! grep -F 'MetalFxManager.observeFirstPersonMotion();' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
           grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
           grep -F 'observeUnresolvedSharedAuxiliaryMotion();' src/main/java/com/metallum/mixin/render/ShadowFeatureSubmitMetalFxMixin.java
