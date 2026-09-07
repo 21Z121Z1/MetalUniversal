@@ -1,0 +1,389 @@
+name: Agent apply previous-position replay
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'chore(agent): apply guarded previous-position replay'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Guard expected parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "444f1ec78fc5192287d367f496967ffef1714343"
+      - name: Apply source-grounded previous-position replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one anchor, found {count}')
+              return text.replace(old, new, 1)
+
+          capture_path = Path('src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java')
+          capture = capture_path.read_text()
+          capture = replace_once(
+              capture,
+              '    private static final Map<StagedVertexBuffer.ExecuteInfo, Sample> EXECUTES = new IdentityHashMap<>();\n',
+              '    private static final Map<StagedVertexBuffer.ExecuteInfo, Sample> EXECUTES = new IdentityHashMap<>();\n'
+              '    private static final Map<StagedVertexBuffer.ExecuteInfo, MetalPreviousVertexHistory.DrawToken> EXECUTE_VERTEX_TOKENS =\n'
+              '            new IdentityHashMap<>();\n',
+              'execute token map'
+          )
+          capture = replace_once(
+              capture,
+              '        EXECUTES.clear();\n        statesAttached = 0;\n',
+              '        EXECUTES.clear();\n        EXECUTE_VERTEX_TOKENS.clear();\n        statesAttached = 0;\n',
+              'clear execute tokens'
+          )
+          capture = replace_once(
+              capture,
+              '        if (capture != null && executeInfo != null) {\n'
+              '            EXECUTES.put(executeInfo, capture.sample());\n'
+              '            executesTransferred++;\n'
+              '        }\n',
+              '        if (capture != null && executeInfo != null) {\n'
+              '            EXECUTES.put(executeInfo, capture.sample());\n'
+              '            if (capture.previousVertexToken() != null) {\n'
+              '                EXECUTE_VERTEX_TOKENS.put(executeInfo, capture.previousVertexToken());\n'
+              '            }\n'
+              '            executesTransferred++;\n'
+              '        }\n',
+              'transfer execute token'
+          )
+          needle = '''    public static Sample takeExecute(final StagedVertexBuffer.ExecuteInfo executeInfo) {
+        if (!enabled) {
+            return null;
+        }
+        Sample sample = EXECUTES.remove(executeInfo);
+        if (sample != null) {
+            executesConsumed++;
+        }
+        return sample;
+    }
+'''
+          replacement = needle + '''
+    /** Consumes the previous-vertex identity paired with the exact ExecuteInfo. */
+    static MetalPreviousVertexHistory.DrawToken takePreviousVertexToken(
+            final StagedVertexBuffer.ExecuteInfo executeInfo
+    ) {
+        return enabled && executeInfo != null ? EXECUTE_VERTEX_TOKENS.remove(executeInfo) : null;
+    }
+'''
+          capture = replace_once(capture, needle, replacement, 'take previous vertex token')
+          capture_path.write_text(capture)
+
+          manager_path = Path('src/main/java/com/metallum/client/metal/render/MetalFxManager.java')
+          manager = manager_path.read_text()
+          manager = replace_once(
+              manager,
+              '    private final Matrix4f previousViewProjection = new Matrix4f();\n'
+              '    private final Matrix4f currentViewProjection = new Matrix4f();\n',
+              '    private final Matrix4f previousViewProjection = new Matrix4f();\n'
+              '    private final Matrix4f currentViewProjection = new Matrix4f();\n'
+              '    // Exact staged ENTITY positions are camera-relative. Keep the previous successful\n'
+              '    // Projection * viewRotation in the same source-frame transaction so their replay\n'
+              '    // never has to reconstruct large world coordinates by adding the camera back.\n'
+              '    private final Matrix4f previousCameraRelativeViewProjection = new Matrix4f();\n'
+              '    private final Matrix4f currentCameraRelativeViewProjection = new Matrix4f();\n',
+              'camera-relative vp fields'
+          )
+          old_record = '''    private record ObjectMotionReplay(
+            PreparedRenderType prepared,
+            StagedVertexBuffer.ExecuteInfo executeInfo,
+            GpuBufferSlice dynamicTransforms,
+            GpuBufferSlice motionUniform
+    ) {
+    }
+'''
+          new_record = '''    private record ObjectMotionReplay(
+            PreparedRenderType prepared,
+            StagedVertexBuffer.ExecuteInfo executeInfo,
+            GpuBufferSlice dynamicTransforms,
+            GpuBufferSlice motionUniform,
+            GpuBufferSlice currentVertexBuffer,
+            @Nullable GpuBufferSlice previousPositionBuffer,
+            int replayBaseVertex
+    ) {
+    }
+'''
+          manager = replace_once(manager, old_record, new_record, 'object motion replay record')
+
+          start = manager.index('    private void drawEntityMotionInternal(\n')
+          end = manager.index('    private void flushEntityMotionReplaysInternal(', start)
+          new_draw = '''    private void drawEntityMotionInternal(
+            final PreparedRenderType prepared,
+            final StagedVertexBuffer.ExecuteInfo executeInfo,
+            final MetalEntityMotionCapture.Sample sample
+    ) {
+        // Consume the sidecar even on a fail-closed frame so ExecuteInfo identities cannot leak
+        // into a later staged-buffer lifetime.
+        MetalPreviousVertexHistory.DrawToken previousVertexToken =
+                MetalEntityMotionCapture.takePreviousVertexToken(executeInfo);
+        if (!sceneFrame) {
+            MetalEntityMotionCapture.recordMotionDrawSkip("scene-frame-inactive");
+            return;
+        }
+        if (!motionInputsPrepared) {
+            MetalEntityMotionCapture.recordMotionDrawSkip("motion-inputs-unprepared");
+            return;
+        }
+        if (historyReset) {
+            MetalEntityMotionCapture.recordMotionDrawSkip("history-reset");
+            return;
+        }
+        if (!sample.hasPrevious()) {
+            MetalEntityMotionCapture.recordMotionDrawSkip("no-previous-object-state");
+            return;
+        }
+        if (objectMotionView == null || objectValidityView == null) {
+            MetalEntityMotionCapture.recordMotionDrawSkip("attachments-unavailable");
+            return;
+        }
+        RenderPipeline sourcePipeline = prepared.pipeline();
+        if (!MetalEntityMotionPipeline.supports(sourcePipeline)) {
+            MetalEntityMotionCapture.recordMotionDrawSkip("pipeline-unsupported");
+            return;
+        }
+
+        Matrix4f currentUnjitteredFromRaster =
+                new Matrix4f(currentViewProjection).mul(inverseCurrentViewProjection);
+        float[] previousPositions = MetalEntityMotionPipeline.supportsPreviousPositions(sourcePipeline)
+                ? MetalPreviousVertexHistory.matchedPreviousPositions(previousVertexToken)
+                : null;
+        boolean exactPreviousPositions = previousPositions != null
+                && previousPositions.length >= 3
+                && previousPositions.length % 3 == 0
+                && MetalFxMath.isFinite(previousCameraRelativeViewProjection);
+        Matrix4f previousFromRaster = exactPreviousPositions
+                ? new Matrix4f(previousCameraRelativeViewProjection)
+                : new Matrix4f(previousViewProjection)
+                        .mul(MetalEntityMotionCapture.objectCurrentToPrevious(sample))
+                        .mul(inverseCurrentViewProjection);
+        if (!MetalFxMath.isFinite(currentUnjitteredFromRaster)
+                || !MetalFxMath.isFinite(previousFromRaster)) {
+            MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-transform");
+            return;
+        }
+
+        GpuBufferSlice currentVertexBuffer = executeInfo.vertexBuffer().slice();
+        int replayBaseVertex = executeInfo.baseVertex();
+        if (exactPreviousPositions) {
+            int sourceStride = sourcePipeline.getVertexFormatBinding(0).getVertexSize();
+            long vertexCount = previousPositions.length / 3L;
+            long byteOffset = (long) executeInfo.baseVertex() * sourceStride;
+            long byteLength = vertexCount * sourceStride;
+            long sourceSize = executeInfo.vertexBuffer().size();
+            if (sourceStride <= 0 || byteOffset < 0L || byteLength <= 0L
+                    || byteOffset > sourceSize || byteLength > sourceSize - byteOffset) {
+                // The exact stream cannot be paired with the current draw. Falling back to the
+                // proven rigid replay is safe for currently admitted families; non-rigid frame
+                // interpolation remains rejected until exact-path coverage is promoted below.
+                exactPreviousPositions = false;
+                previousPositions = null;
+                previousFromRaster = new Matrix4f(previousViewProjection)
+                        .mul(MetalEntityMotionCapture.objectCurrentToPrevious(sample))
+                        .mul(inverseCurrentViewProjection);
+                if (!MetalFxMath.isFinite(previousFromRaster)) {
+                    MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-fallback-transform");
+                    return;
+                }
+            } else {
+                currentVertexBuffer = executeInfo.vertexBuffer().slice(byteOffset, byteLength);
+                replayBaseVertex = 0;
+            }
+        }
+
+        CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
+        GpuBufferSlice previousPositionBuffer = null;
+        if (exactPreviousPositions) {
+            long previousByteCount = (long) previousPositions.length * Float.BYTES;
+            try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                    .allocateGpuMapped(previousByteCount, 16L, GpuBuffer.USAGE_VERTEX)) {
+                ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
+                for (float value : previousPositions) {
+                    bytes.putFloat(value);
+                }
+                previousPositionBuffer = mapped.slice();
+            }
+        }
+
+        GpuBufferSlice dynamicTransforms = prepared.dynamicTransforms();
+        GpuBufferSlice motionUniform;
+        try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                .allocateGpuMapped(128L, 256L, GpuBuffer.USAGE_UNIFORM)) {
+            ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
+            currentUnjitteredFromRaster.get(0, bytes);
+            previousFromRaster.get(64, bytes);
+            motionUniform = mapped.slice();
+        }
+
+        objectMotionReplays.add(new ObjectMotionReplay(
+                prepared,
+                executeInfo,
+                dynamicTransforms,
+                motionUniform,
+                currentVertexBuffer,
+                previousPositionBuffer,
+                replayBaseVertex
+        ));
+    }
+
+'''
+          manager = manager[:start] + new_draw + manager[end:]
+
+          start = manager.index('    private void flushEntityMotionReplaysInternal(')
+          end = manager.index('    private Matrix4f prepareSceneProjectionInternal(', start)
+          old_flush = manager[start:end]
+          # Preserve the existing attachment/descriptor setup and replace only the per-replay draw body.
+          old_loop = '''            for (ObjectMotionReplay replay : replays) {
+                PreparedRenderType prepared = replay.prepared();
+                StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
+                pass.setPipeline(MetalEntityMotionPipeline.forSource(prepared.pipeline()));
+                RenderSystem.bindDefaultUniforms(pass);
+                pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
+                pass.setUniform("MetallumMotion", replay.motionUniform());
+                pass.setVertexBuffer(0, executeInfo.vertexBuffer().slice());
+                for (PreparedRenderType.Texture texture : prepared.textures()) {
+                    pass.bindTexture(texture.name(), texture.textureView(), texture.sampler());
+                }
+                pass.setIndexBuffer(executeInfo.indexBuffer(), executeInfo.indexType());
+                pass.drawIndexed(
+                        executeInfo.indexCount(),
+                        1,
+                        executeInfo.firstIndex(),
+                        executeInfo.baseVertex(),
+                        0
+                );
+                MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
+            }
+'''
+          new_loop = '''            for (ObjectMotionReplay replay : replays) {
+                PreparedRenderType prepared = replay.prepared();
+                StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
+                boolean exactPreviousPositions = replay.previousPositionBuffer() != null;
+                pass.setPipeline(exactPreviousPositions
+                        ? MetalEntityMotionPipeline.forPreviousPositions(prepared.pipeline())
+                        : MetalEntityMotionPipeline.forSource(prepared.pipeline()));
+                RenderSystem.bindDefaultUniforms(pass);
+                pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
+                pass.setUniform("MetallumMotion", replay.motionUniform());
+                pass.setVertexBuffer(0, replay.currentVertexBuffer());
+                if (exactPreviousPositions) {
+                    pass.setVertexBuffer(1, replay.previousPositionBuffer());
+                }
+                for (PreparedRenderType.Texture texture : prepared.textures()) {
+                    pass.bindTexture(texture.name(), texture.textureView(), texture.sampler());
+                }
+                pass.setIndexBuffer(executeInfo.indexBuffer(), executeInfo.indexType());
+                pass.drawIndexed(
+                        executeInfo.indexCount(),
+                        1,
+                        executeInfo.firstIndex(),
+                        replay.replayBaseVertex(),
+                        0
+                );
+                MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
+            }
+'''
+          if old_flush.count(old_loop) != 1:
+              raise SystemExit(f'flush replay loop: expected exactly one anchor, found {old_flush.count(old_loop)}')
+          new_flush = old_flush.replace(old_loop, new_loop, 1)
+          manager = manager[:start] + new_flush + manager[end:]
+
+          manager = replace_once(
+              manager,
+              '        MetalFxMath.adjustPerspectiveAspect(this.currentProjection, displayAspect, renderAspect);\n',
+              '        MetalFxMath.adjustPerspectiveAspect(this.currentProjection, displayAspect, renderAspect);\n'
+              '        // Entity staged Position is already relative to the camera translation supplied\n'
+              '        // by LevelRenderer/EntityRenderDispatcher. Keep only projection + view rotation\n'
+              '        // for exact previous-vertex replay; this avoids far-world float cancellation.\n'
+              '        MetalFxMath.viewProjection(\n'
+              '                this.currentCameraRelativeViewProjection,\n'
+              '                this.currentProjection,\n'
+              '                cameraState.viewRotationMatrix\n'
+              '        );\n',
+              'current camera-relative vp'
+          )
+          manager = replace_once(
+              manager,
+              '        if (!MetalFxMath.isFinite(this.currentViewProjection)) {\n',
+              '        if (!MetalFxMath.isFinite(this.currentViewProjection)\n'
+              '                || !MetalFxMath.isFinite(this.currentCameraRelativeViewProjection)) {\n',
+              'camera matrix validation'
+          )
+          manager = replace_once(
+              manager,
+              '            Matrix4f submittedViewProjection = new Matrix4f(this.currentViewProjection);\n'
+              '            int submittedNextPhase = (phase + 1) % phaseCount;\n',
+              '            Matrix4f submittedViewProjection = new Matrix4f(this.currentViewProjection);\n'
+              '            Matrix4f submittedCameraRelativeViewProjection =\n'
+              '                    new Matrix4f(this.currentCameraRelativeViewProjection);\n'
+              '            int submittedNextPhase = (phase + 1) % phaseCount;\n',
+              'submit relative vp snapshot'
+          )
+          manager = replace_once(
+              manager,
+              '                        this.previousViewProjection.set(submittedViewProjection);\n'
+              '                        this.previousMatrixValid = true;\n',
+              '                        this.previousViewProjection.set(submittedViewProjection);\n'
+              '                        this.previousCameraRelativeViewProjection.set(submittedCameraRelativeViewProjection);\n'
+              '                        this.previousMatrixValid = true;\n',
+              'commit relative vp'
+          )
+          manager_path.write_text(manager)
+
+          test_path = Path('src/test/java/com/metallum/client/metal/render/MetalPreviousVertexHistoryTest.java')
+          test = test_path.read_text()
+          anchor = '''    @Test
+    void historyAdvancesOnlyOnSuccessfulCommit() {
+'''
+          addition = '''    @Test
+    void compactPreviousPositionBindingMatchesTheShaderAbi() {
+        VertexFormat format = MetalEntityMotionPipeline.previousPositionFormat();
+        assertTrue(format.getStepRate() == 0);
+        assertTrue(format.getVertexSize() == 12);
+        assertTrue(format.getElement("PreviousPosition") != null);
+        assertTrue(format.getElement("PreviousPosition").format() == GpuFormat.RGB32_FLOAT);
+    }
+
+'''
+          test = replace_once(test, anchor, addition + anchor, 'previous position binding test')
+          test_path.write_text(test)
+          PY
+      - name: Verify Java and motion tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          git diff --check
+      - name: Commit implementation and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/agent-apply-previous-position-replay.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'feat(metalfx): replay exact previous staged vertices'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2
