@@ -155,6 +155,11 @@ public final class MetalFxManager {
     private boolean previousMatrixValid;
     private final Matrix4f previousViewProjection = new Matrix4f();
     private final Matrix4f currentViewProjection = new Matrix4f();
+    // ENTITY staged Position already contains the camera-relative root and CPU model pose.
+    // Keep Projection * viewRotation transactionally with the previous successful source frame
+    // so exact replay never rebuilds large world coordinates by adding the camera back.
+    private final Matrix4f previousCameraRelativeViewProjection = new Matrix4f();
+    private final Matrix4f currentCameraRelativeViewProjection = new Matrix4f();
     private final Matrix4f inverseCurrentViewProjection = new Matrix4f();
     private final Matrix4f viewMatrix = new Matrix4f();
     private final Matrix4f currentProjection = new Matrix4f();
@@ -341,7 +346,19 @@ public final class MetalFxManager {
             PreparedRenderType prepared,
             StagedVertexBuffer.ExecuteInfo executeInfo,
             GpuBufferSlice dynamicTransforms,
-            GpuBufferSlice motionUniform
+            MetalEntityMotionCapture.Sample sample,
+            MetalPreviousVertexHistory.DrawToken previousVertexToken
+    ) {
+    }
+
+    private record PreparedObjectMotionReplay(
+            PreparedRenderType prepared,
+            StagedVertexBuffer.ExecuteInfo executeInfo,
+            GpuBufferSlice dynamicTransforms,
+            GpuBufferSlice motionUniform,
+            GpuBufferSlice currentVertexBuffer,
+            @Nullable GpuBufferSlice previousPositionBuffer,
+            int replayBaseVertex
     ) {
     }
 
@@ -1251,6 +1268,9 @@ public final class MetalFxManager {
             final StagedVertexBuffer.ExecuteInfo executeInfo,
             final MetalEntityMotionCapture.Sample sample
     ) {
+        // Consume the sidecar with the ExecuteInfo lifetime even when this source frame fails closed.
+        MetalPreviousVertexHistory.DrawToken previousVertexToken =
+                MetalEntityMotionCapture.takePreviousVertexToken(executeInfo);
         if (!sceneFrame) {
             MetalEntityMotionCapture.recordMotionDrawSkip("scene-frame-inactive");
             return;
@@ -1275,33 +1295,15 @@ public final class MetalFxManager {
             MetalEntityMotionCapture.recordMotionDrawSkip("pipeline-unsupported");
             return;
         }
-        Matrix4f currentUnjitteredFromRaster =
-                new Matrix4f(currentViewProjection).mul(inverseCurrentViewProjection);
-        Matrix4f previousFromRaster = new Matrix4f(previousViewProjection)
-                .mul(MetalEntityMotionCapture.objectCurrentToPrevious(sample))
-                .mul(inverseCurrentViewProjection);
-        if (!MetalFxMath.isFinite(currentUnjitteredFromRaster)
-                || !MetalFxMath.isFinite(previousFromRaster)) {
-            MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-transform");
-            return;
-        }
 
-        CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
-        GpuBufferSlice dynamicTransforms = prepared.dynamicTransforms();
-        GpuBufferSlice motionUniform;
-        try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
-                .allocateGpuMapped(128L, 256L, GpuBuffer.USAGE_UNIFORM)) {
-            ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
-            currentUnjitteredFromRaster.get(0, bytes);
-            previousFromRaster.get(64, bytes);
-            motionUniform = mapped.slice();
-        }
-
+        // Exact previous-position selection is intentionally deferred until flush. At that point all
+        // feature draws have registered, so objectManifestMatches cannot accept a transient prefix.
         objectMotionReplays.add(new ObjectMotionReplay(
                 prepared,
                 executeInfo,
-                dynamicTransforms,
-                motionUniform
+                prepared.dynamicTransforms(),
+                sample,
+                previousVertexToken
         ));
     }
 
@@ -1320,6 +1322,70 @@ public final class MetalFxManager {
         }
 
         CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
+        Matrix4f currentUnjitteredFromRaster =
+                new Matrix4f(currentViewProjection).mul(inverseCurrentViewProjection);
+        if (!MetalFxMath.isFinite(currentUnjitteredFromRaster)) {
+            replays.forEach(ignored -> MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-current-transform"));
+            return;
+        }
+
+        List<PreparedObjectMotionReplay> preparedReplays = new ArrayList<>(replays.size());
+        for (ObjectMotionReplay replay : replays) {
+            PreparedRenderType prepared = replay.prepared();
+            StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
+            MetalPreviousVertexReplay.Plan exactPlan = MetalFxMath.isFinite(previousCameraRelativeViewProjection)
+                    ? MetalPreviousVertexReplay.plan(
+                            prepared.pipeline(), executeInfo, replay.previousVertexToken())
+                    : null;
+            boolean exactPreviousPositions = exactPlan != null;
+            Matrix4f previousFromRaster = exactPreviousPositions
+                    ? new Matrix4f(previousCameraRelativeViewProjection)
+                    : new Matrix4f(previousViewProjection)
+                            .mul(MetalEntityMotionCapture.objectCurrentToPrevious(replay.sample()))
+                            .mul(inverseCurrentViewProjection);
+            if (!MetalFxMath.isFinite(previousFromRaster)) {
+                MetalEntityMotionCapture.recordMotionDrawSkip("non-finite-previous-transform");
+                continue;
+            }
+
+            GpuBufferSlice currentVertexBuffer = exactPreviousPositions
+                    ? exactPlan.currentVertexBuffer()
+                    : executeInfo.vertexBuffer().slice();
+            int replayBaseVertex = exactPreviousPositions
+                    ? exactPlan.replayBaseVertex()
+                    : executeInfo.baseVertex();
+            GpuBufferSlice previousPositionBuffer = null;
+            if (exactPreviousPositions) {
+                float[] previousPositions = exactPlan.previousPositions();
+                long previousByteCount = Math.multiplyExact((long) previousPositions.length, Float.BYTES);
+                try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                        .allocateGpuMapped(previousByteCount, 16L, GpuBuffer.USAGE_VERTEX)) {
+                    ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
+                    for (float value : previousPositions) {
+                        bytes.putFloat(value);
+                    }
+                    previousPositionBuffer = mapped.slice();
+                }
+            }
+
+            GpuBufferSlice motionUniform;
+            try (GpuBufferSlice.MappedView mapped = encoder.transientMemory()
+                    .allocateGpuMapped(128L, 256L, GpuBuffer.USAGE_UNIFORM)) {
+                ByteBuffer bytes = mapped.data().order(ByteOrder.nativeOrder());
+                currentUnjitteredFromRaster.get(0, bytes);
+                previousFromRaster.get(64, bytes);
+                motionUniform = mapped.slice();
+            }
+            preparedReplays.add(new PreparedObjectMotionReplay(
+                    prepared,
+                    executeInfo,
+                    replay.dynamicTransforms(),
+                    motionUniform,
+                    currentVertexBuffer,
+                    previousPositionBuffer,
+                    replayBaseVertex
+            ));
+        }
 
         RenderPassDescriptor descriptor = RenderPassDescriptor
                 .create(() -> "Metallum batched ordinary entity object motion");
@@ -1336,14 +1402,20 @@ public final class MetalFxManager {
                 .withDepthAttachment(depthView)
                 .withRenderArea(new RenderPass.RenderArea(0, 0, renderWidth, renderHeight));
         try (RenderPass pass = encoder.createRenderPass(descriptor)) {
-            for (ObjectMotionReplay replay : replays) {
+            for (PreparedObjectMotionReplay replay : preparedReplays) {
                 PreparedRenderType prepared = replay.prepared();
                 StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
-                pass.setPipeline(MetalEntityMotionPipeline.forSource(prepared.pipeline()));
+                boolean exactPreviousPositions = replay.previousPositionBuffer() != null;
+                pass.setPipeline(exactPreviousPositions
+                        ? MetalEntityMotionPipeline.forPreviousPositions(prepared.pipeline())
+                        : MetalEntityMotionPipeline.forSource(prepared.pipeline()));
                 RenderSystem.bindDefaultUniforms(pass);
                 pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
                 pass.setUniform("MetallumMotion", replay.motionUniform());
-                pass.setVertexBuffer(0, executeInfo.vertexBuffer().slice());
+                pass.setVertexBuffer(0, replay.currentVertexBuffer());
+                if (exactPreviousPositions) {
+                    pass.setVertexBuffer(1, replay.previousPositionBuffer());
+                }
                 for (PreparedRenderType.Texture texture : prepared.textures()) {
                     pass.bindTexture(texture.name(), texture.textureView(), texture.sampler());
                 }
@@ -1352,7 +1424,7 @@ public final class MetalFxManager {
                         executeInfo.indexCount(),
                         1,
                         executeInfo.firstIndex(),
-                        executeInfo.baseVertex(),
+                        replay.replayBaseVertex(),
                         0
                 );
                 MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
@@ -1399,6 +1471,11 @@ public final class MetalFxManager {
         this.frameFarPlane = cameraState.depthFar > 0.0F && Float.isFinite(cameraState.depthFar)
                 ? cameraState.depthFar : 1000.0F;
         MetalFxMath.adjustPerspectiveAspect(this.currentProjection, displayAspect, renderAspect);
+        MetalFxMath.viewProjection(
+                this.currentCameraRelativeViewProjection,
+                this.currentProjection,
+                cameraState.viewRotationMatrix
+        );
         if (previousCameraProjectionValid
                 && (Math.abs(this.frameFieldOfView - previousFieldOfView) > FOV_SCENE_CUT_DEGREES
                 || Math.abs(this.frameFarPlane - previousFarPlane) > Math.max(1.0F, previousFarPlane * 0.01F))) {
@@ -1428,7 +1505,8 @@ public final class MetalFxManager {
                 cameraState.pos.z
         );
         MetalFxMath.viewProjection(this.currentViewProjection, this.currentProjection, this.viewMatrix);
-        if (!MetalFxMath.isFinite(this.currentViewProjection)) {
+        if (!MetalFxMath.isFinite(this.currentViewProjection)
+                || !MetalFxMath.isFinite(this.currentCameraRelativeViewProjection)) {
             if (!warnedInvalidFrame) {
                 Metallum.LOGGER.warn("MetalFX skipped a frame because the camera matrices were invalid");
                 warnedInvalidFrame = true;
@@ -1471,6 +1549,7 @@ public final class MetalFxManager {
             }
             if (!previousMatrixValid) {
                 previousViewProjection.set(currentViewProjection);
+                previousCameraRelativeViewProjection.set(currentCameraRelativeViewProjection);
                 previousMatrixValid = true;
                 historyReset = true;
             }
@@ -1756,11 +1835,14 @@ public final class MetalFxManager {
         this.frameUsesUpscaledTarget = true;
         if (historyTransactionEncoded) {
             Matrix4f submittedViewProjection = new Matrix4f(this.currentViewProjection);
+            Matrix4f submittedCameraRelativeViewProjection =
+                    new Matrix4f(this.currentCameraRelativeViewProjection);
             int submittedNextPhase = (phase + 1) % phaseCount;
             encoder.onCurrentSubmit(
                     () -> {
                         this.historyReset = false;
                         this.previousViewProjection.set(submittedViewProjection);
+                        this.previousCameraRelativeViewProjection.set(submittedCameraRelativeViewProjection);
                         this.previousMatrixValid = true;
                         this.motionStateStore.commitSubmittedFrame();
                         this.phase = submittedNextPhase;

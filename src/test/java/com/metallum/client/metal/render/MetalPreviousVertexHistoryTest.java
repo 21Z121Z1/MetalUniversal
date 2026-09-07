@@ -54,6 +54,15 @@ final class MetalPreviousVertexHistoryTest {
     }
 
     @Test
+    void compactPreviousPositionBindingMatchesConfirmedMinecraftAbi() {
+        VertexFormat format = MetalEntityMotionPipeline.previousPositionFormat();
+        assertTrue(format.getStepRate() == 0);
+        assertTrue(format.getVertexSize() == 12);
+        assertTrue(format.getElements().size() == 1);
+        assertTrue(format.contains("PreviousPosition"));
+    }
+
+    @Test
     void historyAdvancesOnlyOnSuccessfulCommit() {
         RenderPipeline pipeline = pipeline("previous_vertex_transaction");
         MetalEntityMotionCapture.Sample sample = new MetalEntityMotionCapture.Sample(

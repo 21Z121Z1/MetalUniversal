@@ -83,6 +83,8 @@ public final class MetalEntityMotionCapture {
     private static final Map<Object, Sample> SUBMITS = new IdentityHashMap<>();
     private static final Map<StagedVertexBuffer.Draw, DrawCapture> DRAWS = new IdentityHashMap<>();
     private static final Map<StagedVertexBuffer.ExecuteInfo, Sample> EXECUTES = new IdentityHashMap<>();
+    private static final Map<StagedVertexBuffer.ExecuteInfo, MetalPreviousVertexHistory.DrawToken> EXECUTE_VERTEX_TOKENS =
+            new IdentityHashMap<>();
     private static int statesAttached;
     private static int entitySubmissionsMatched;
     private static int modelSubmitsCaptured;
@@ -125,6 +127,7 @@ public final class MetalEntityMotionCapture {
         SUBMITS.clear();
         DRAWS.clear();
         EXECUTES.clear();
+        EXECUTE_VERTEX_TOKENS.clear();
         statesAttached = 0;
         entitySubmissionsMatched = 0;
         modelSubmitsCaptured = 0;
@@ -307,6 +310,9 @@ public final class MetalEntityMotionCapture {
         DrawCapture capture = DRAWS.remove(draw);
         if (capture != null && executeInfo != null) {
             EXECUTES.put(executeInfo, capture.sample());
+            if (capture.previousVertexToken() != null) {
+                EXECUTE_VERTEX_TOKENS.put(executeInfo, capture.previousVertexToken());
+            }
             executesTransferred++;
         }
     }
@@ -321,6 +327,13 @@ public final class MetalEntityMotionCapture {
             executesConsumed++;
         }
         return sample;
+    }
+
+    /** Consumes the staged previous-position identity paired with this exact ExecuteInfo. */
+    static MetalPreviousVertexHistory.DrawToken takePreviousVertexToken(
+            final StagedVertexBuffer.ExecuteInfo executeInfo
+    ) {
+        return enabled && executeInfo != null ? EXECUTE_VERTEX_TOKENS.remove(executeInfo) : null;
     }
 
     public static Diagnostics diagnostics() {
