@@ -1,5 +1,6 @@
 package com.metallum.mixin.render;
 
+import com.metallum.client.metal.render.MetalDisplayMotionSafety;
 import com.metallum.client.metal.render.MetalEntityMotionCapture;
 import com.metallum.client.metal.render.MetalFxManager;
 import com.mojang.blaze3d.vertex.PoseStack;
@@ -22,7 +23,9 @@ public abstract class EntityRenderDispatcherMetalFxMixin {
             final float partialTick,
             final CallbackInfoReturnable<EntityRenderState> cir
     ) {
-        MetalFxManager.captureEntityMotion(entity, cir.getReturnValue());
+        EntityRenderState state = cir.getReturnValue();
+        MetalDisplayMotionSafety.capture(entity, state);
+        MetalFxManager.captureEntityMotion(entity, state);
     }
 
     @Inject(method = "submit", at = @At("HEAD"))
