@@ -106,6 +106,7 @@ public final class MetalEntityMotionCapture {
         enabled = value;
         if (!value) {
             clearFrameState();
+            MetalExactMotionCoverage.reset();
         }
     }
 
@@ -118,6 +119,7 @@ public final class MetalEntityMotionCapture {
             return;
         }
         clearFrameState();
+        MetalExactMotionCoverage.beginFrame();
     }
 
     private static void clearFrameState() {
@@ -153,6 +155,26 @@ public final class MetalEntityMotionCapture {
     public static boolean hasPreviousState(final Object state) {
         Sample sample = enabled && state != null ? STATES.get(state) : null;
         return sample != null && sample.hasPrevious();
+    }
+
+    /** Marks the actual submitted entity object as requiring exact staged previous positions. */
+    public static void requireExactState(final Object state) {
+        Sample sample = enabled && state != null ? STATES.get(state) : null;
+        if (sample != null) {
+            MetalExactMotionCoverage.require(sample);
+        }
+    }
+
+    /** Marks auxiliary geometry which cannot yet be isolated into an exact per-owner staged draw. */
+    public static void rejectCurrentExactAuxiliary(final String reason) {
+        if (enabled) {
+            MetalExactMotionCoverage.fail(ENTITY_SUBMISSION.get(), reason);
+        }
+    }
+
+    /** Final source-frame proof consumed by frame-interpolator admission. */
+    public static boolean exactCoverageComplete() {
+        return !enabled || MetalExactMotionCoverage.complete();
     }
 
     public static void beginEntitySubmission(final Object state) {
@@ -256,6 +278,13 @@ public final class MetalEntityMotionCapture {
         }
         lastVertexShader = pipeline.getVertexShader().toString();
         boolean matched = MetalEntityMotionPipeline.isSplittableVertexShader(pipeline);
+        if (MetalExactMotionCoverage.required(sample)
+                && !MetalEntityMotionPipeline.supportsPreviousPositions(pipeline)) {
+            MetalExactMotionCoverage.fail(
+                    sample,
+                    "unsupported-exact-pipeline:" + pipeline.getVertexShader()
+            );
+        }
         if (matched) {
             splitChecksMatched++;
         }
@@ -373,6 +402,12 @@ public final class MetalEntityMotionCapture {
     static void recordMotionDrawSkip(final String reason) {
         if (enabled) {
             lastMotionDrawSkip = reason;
+        }
+    }
+
+    static void recordExactReplayPlanned(final MetalPreviousVertexHistory.DrawToken token) {
+        if (enabled) {
+            MetalExactMotionCoverage.recordExactPlan(token);
         }
     }
 

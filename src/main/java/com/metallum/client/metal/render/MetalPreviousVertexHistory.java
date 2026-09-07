@@ -178,6 +178,11 @@ final class MetalPreviousVertexHistory {
         return previous.positions();
     }
 
+    static int matchingManifestDrawCount(final long objectId, final long generation) {
+        ObjectKey object = new ObjectKey(objectId, generation);
+        return objectManifestMatches(object) ? CURRENT_DRAW_COUNTS.getOrDefault(object, 0) : -1;
+    }
+
     static boolean objectManifestMatches(final ObjectKey object) {
         int currentCount = CURRENT_DRAW_COUNTS.getOrDefault(object, 0);
         if (currentCount <= 0 || currentCount != PREVIOUS_DRAW_COUNTS.getOrDefault(object, -1)) {
