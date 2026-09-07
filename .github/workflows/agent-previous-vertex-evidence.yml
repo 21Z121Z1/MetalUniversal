@@ -25,12 +25,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "e179b1cbf44aa612503f084db3e2b5789b2ca3f4"
+          test "$(git rev-parse HEAD^)" = "c7befc2755839becf32e73acb8cf77d23d44efac"
       - name: Apply exact previous-position replay
         shell: bash
         run: |
           set -euo pipefail
           python3 .github/scripts/apply_previous_position_replay.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/main/java/com/metallum/client/metal/render/MetalFxManager.java')
+          text = path.read_text()
+          old = '@Nullable MetalPreviousVertexHistory.DrawToken previousVertexToken'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one generated nullable nested type, found {text.count(old)}')
+          path.write_text(text.replace(old, 'MetalPreviousVertexHistory.DrawToken previousVertexToken', 1))
+          PY
           git diff --check
       - name: Compile and test motion contracts
         shell: bash
