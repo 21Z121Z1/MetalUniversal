@@ -1,0 +1,56 @@
+name: Agent display geometry-generation evidence
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Extract source-grounded display generation semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import hashlib, json, sys
+          root=Path(sys.argv[1])
+          specs={
+            'Display.java': ('class BlockDisplay','class ItemDisplay','BlockRenderState','ItemRenderState','blockRenderState','itemRenderState','updateRenderSubState','createFreshRenderState'),
+            'BlockModelRenderState.java': ('specialRenderer','setupSpecialModel','setupModel','isEmpty'),
+            'ItemStackRenderState.java': ('activeLayerCount','specialRenderer','setupSpecialModel','appendModelIdentityElement','isAnimated','animated','submit('),
+          }
+          out=[]
+          for name, needles in specs.items():
+            path=next(root.rglob(name))
+            lines=path.read_text(errors='replace').splitlines()
+            hits=[i for i,l in enumerate(lines) if any(n in l for n in needles)]
+            windows=[]
+            for i in hits:
+              a=max(0,i-28); b=min(len(lines),i+45)
+              if windows and a <= windows[-1][1]+1: windows[-1]=(windows[-1][0],max(windows[-1][1],b))
+              else: windows.append((a,b))
+            out.append({'path':path.relative_to(root).as_posix(),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'snippets':[{'start_line':a+1,'end_line':b,'text':'\n'.join(f'{j+1:05d}: {lines[j]}' for j in range(a,b))} for a,b in windows]})
+          target=Path('build/agent-evidence/display-generation.json')
+          target.parent.mkdir(parents=True,exist_ok=True)
+          target.write_text(json.dumps({'files':out},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: display-generation-source
+          path: build/agent-evidence/display-generation.json
+          retention-days: 7
+          if-no-files-found: error
