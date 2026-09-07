@@ -25,9 +25,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^^)" = "124f6203aeb44b48721a4eef88842b2dee4e479e"
-          test "$(git log -1 --format=%s HEAD^^)" = "chore(agent): add living and first-person exact motion patch"
-          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure living and first-person exact motion verification"
+          test "$(git rev-parse HEAD^^)" = "23cff9023bd7fe36ce815e2990cca8c3a9697b99"
+          test "$(git log -1 --format=%s HEAD^)" = "fix(agent): correct living source guard"
           test "$(git log -1 --format=%s HEAD)" = "chore(agent): apply living and first-person exact motion"
           test "$(git rev-parse HEAD^^:.github/scripts/apply_living_first_person_exact_motion.py)" = \
                "$(git rev-parse HEAD:.github/scripts/apply_living_first_person_exact_motion.py)"
@@ -54,7 +53,7 @@ jobs:
 
           for text in [
               'submitNodeCollector.submitModel(this.model, state, poseStack',
-              'this.model.setupAnim(state);',
+              '((Model)this.model).setupAnim(state);',
               'this.setupRotations(state, poseStack, state.bodyRot, state.scale);',
               'this.scale(state, poseStack);',
           ]:
@@ -62,8 +61,10 @@ jobs:
                   raise SystemExit(f'Minecraft 26.2 living staged-motion contract missing: {text}')
 
           for text in [
-              'model.setupAnim(state);',
-              'this.getVertexBuilder(renderType)',
+              'VertexConsumer buffer = this.getVertexBuilder(submit.renderType());',
+              'Model<S> model = submit.model();',
+              'model.setupAnim(submit.state());',
+              'model.renderToBuffer(this.poseStack, buffer,',
           ]:
               if text not in model_feature:
                   raise SystemExit(f'Minecraft 26.2 ModelFeatureRenderer contract missing: {text}')
@@ -123,7 +124,6 @@ jobs:
           grep -F 'MetalSyntheticExactMotion.beginFirstPerson(hand);' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
           grep -F 'MetalSyntheticExactMotion.commitSubmittedFrame();' src/main/java/com/metallum/client/metal/render/MetalMotionStateStore.java
           ! grep -F 'MetalFxManager.observeFirstPersonMotion();' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
-          # Unsupported staged pipelines still reject exact-required objects rather than falling back.
           grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
           # Shared translucent shadows and particles remain deliberately fail-closed in this transaction.
           grep -F 'observeUnresolvedSharedAuxiliaryMotion();' src/main/java/com/metallum/mixin/render/ShadowFeatureSubmitMetalFxMixin.java
