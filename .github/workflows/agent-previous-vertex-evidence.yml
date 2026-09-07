@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): verify exact coverage at encoded draw boundary'"
+    if: "github.event.head_commit.message == 'chore(agent): retry encoded exact motion admission fix'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "f1a41621d922b4f0c5fdc4b734a11432ff55662b"
+          test "$(git rev-parse HEAD^)" = "c460d08f339d2993e9bbaca30b7250842e44485c"
       - name: Move proof to actual encode and wire admission
         shell: bash
         run: |
@@ -58,7 +58,7 @@ jobs:
           replace_once(
               'src/main/java/com/metallum/client/metal/render/MetalFxManager.java',
               '            GpuBufferSlice currentVertexBuffer,\n            @Nullable GpuBufferSlice previousPositionBuffer,\n            int replayBaseVertex\n',
-              '            GpuBufferSlice currentVertexBuffer,\n            @Nullable GpuBufferSlice previousPositionBuffer,\n            @Nullable MetalPreviousVertexHistory.DrawToken exactPreviousVertexToken,\n            int replayBaseVertex\n'
+              '            GpuBufferSlice currentVertexBuffer,\n            @Nullable GpuBufferSlice previousPositionBuffer,\n            MetalPreviousVertexHistory.@Nullable DrawToken exactPreviousVertexToken,\n            int replayBaseVertex\n'
           )
           replace_once(
               'src/main/java/com/metallum/client/metal/render/MetalFxManager.java',
