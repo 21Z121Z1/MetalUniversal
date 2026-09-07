@@ -1,4 +1,4 @@
-name: Agent Flame shared exact motion
+name: Agent Flame shared exact motion v2
 
 on:
   push:
@@ -10,37 +10,53 @@ permissions:
 
 jobs:
   apply:
-    if: "github.event.head_commit.message == 'chore(agent): apply Flame shared exact motion'"
+    if: "github.event.head_commit.message == 'chore(agent): apply Flame shared exact motion v2'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           ref: agent/metalfx-motion-coverage-26.2
-          fetch-depth: 4
+          fetch-depth: 5
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
-      - name: Guard Flame exact transaction
+      - name: Guard Flame exact v2 transaction
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "71afbebad18a074581cd9d767fb033ceb413481d"
-          test "$(git rev-parse HEAD^^^)" = "4e31e89d5f9d4b8a2b2a5a58edc749c9b8e5f99f" || \
-            test "$(git log -1 --format=%s HEAD^^^)" = "fix(metalfx): fail closed on unresolved shared motion batches"
-          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure Flame shared exact verification"
-      - name: Verify Minecraft 26.2 Flame shared-builder source contract
+          test "$(git rev-parse HEAD^^)" = "7d407026bb7b85ac7c5322d44e64a9acc49a4ada"
+          test "$(git rev-parse HEAD^^^)" = "a96d89fe1eb5daf078f1cadf1be6debe92e63940"
+          test "$(git log -1 --format=%s HEAD^)" = "chore(agent): configure Flame shared exact verification v2"
+          test "$(git log -1 --format=%s HEAD^^^)" = "chore(agent): supersede Flame shared exact v1"
+      - name: Verify pinned Minecraft 26.2 Flame source contract
         shell: bash
         run: |
           set -euo pipefail
-          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
-          FLAME="$(find "$SRC" -type f -path '*/net/minecraft/client/renderer/feature/FlameFeatureRenderer.java' -print -quit)"
-          test -n "$FLAME"
-          grep -F 'protected void buildGroup(FeatureFrameContext context, List<Submit> submits)' "$FLAME"
-          grep -F 'VertexConsumer builder = this.getVertexBuilder(RenderTypes.entityCutoutCull(TextureAtlas.LOCATION_BLOCKS));' "$FLAME"
-          grep -F 'for (Submit submit : submits)' "$FLAME"
-          grep -F 'this.prepare(submit, builder, fire1, fire2);' "$FLAME"
-      - name: Apply Flame shared exact motion
+          URL='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262/net/minecraft/client/renderer/feature/FlameFeatureRenderer.java'
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$URL" -o /tmp/FlameFeatureRenderer.java
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s = Path('/tmp/FlameFeatureRenderer.java').read_text()
+          required = [
+              r'protected\s+void\s+buildGroup\s*\(FeatureFrameContext\s+context,\s*List<Submit>\s+submits\)',
+              r'VertexConsumer\s+builder\s*=\s*this\.getVertexBuilder\(RenderTypes\.entityCutoutCull\(TextureAtlas\.LOCATION_BLOCKS\)\)',
+              r'for\s*\(Submit\s+submit\s*:\s*submits\)',
+              r'float\s+s\s*=\s*state\.boundingBoxWidth\s*\*\s*1\.4f',
+              r'float\s+h\s*=\s*state\.boundingBoxHeight\s*/\s*s',
+              r'while\s*\(h\s*>\s*0\.0f\)',
+              r'h\s*-=\s*0\.45f',
+          ]
+          for pattern in required:
+              if not re.search(pattern, s):
+                  raise SystemExit(f'Minecraft 26.2 Flame source contract missing: {pattern}')
+          calls = s.count('FlameFeatureRenderer.fireVertex(')
+          if calls != 4:
+              raise SystemExit(f'expected exactly 4 fireVertex calls per loop body, source has {calls}')
+          print('Pinned Minecraft 26.2 Flame source contract: PASS')
+          PY
+      - name: Apply Flame shared exact motion v2
         shell: bash
         run: |
           set -euo pipefail
@@ -58,6 +74,15 @@ jobs:
             --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
             --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
           git diff --check
+      - name: Verify Flame fail-closed wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit(this);' src/main/java/com/metallum/mixin/render/FlameFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalExactMotionCoverage.require(batch);' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+          grep -F 'render.FlameFeatureRendererMetalFxMixin' src/main/resources/metallum.mixins.json
+          ! grep -F 'observeUnresolvedSharedAuxiliaryMotion();' src/main/java/com/metallum/mixin/render/FlameFeatureSubmitMetalFxMixin.java
+          grep -F 'observeUnresolvedSharedAuxiliaryMotion();' src/main/java/com/metallum/mixin/render/ShadowFeatureSubmitMetalFxMixin.java
       - name: Commit verified Flame exact implementation
         shell: bash
         run: |
