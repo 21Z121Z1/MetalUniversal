@@ -1,0 +1,223 @@
+name: Agent exact quad-particle motion
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.event.head_commit.message == 'chore(agent): apply exact quad-particle motion'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 16
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Guard exact particle transaction ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git log -1 --format=%s HEAD)" = "chore(agent): apply exact quad-particle motion"
+          test "$(git rev-parse 11b536264f47edaf28ca07df1fbce578e0e30fe9:.github/scripts/apply_particle_exact_motion.py)" = \
+               "$(git rev-parse HEAD:.github/scripts/apply_particle_exact_motion.py)"
+
+      - name: Verify pinned Minecraft 26.2 particle Java contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/particle/QuadParticleGroup.java" -o /tmp/QuadParticleGroup.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/particle/SingleQuadParticle.java" -o /tmp/SingleQuadParticle.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/state/level/QuadParticleRenderState.java" -o /tmp/QuadParticleRenderState.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/feature/QuadParticleFeatureRenderer.java" -o /tmp/QuadParticleFeatureRenderer.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/RenderPipelines.java" -o /tmp/RenderPipelines.java
+          curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            "$BASE/net/minecraft/client/renderer/StagedVertexBuffer.java" -o /tmp/StagedVertexBuffer.java
+          python3 - <<'PY'
+          from pathlib import Path
+
+          sources = {p.stem: p.read_text() for p in Path('/tmp').glob('*.java')}
+          checks = {
+              'QuadParticleGroup': [
+                  'for (SingleQuadParticle particle : this.particles)',
+                  'if (!frustum.pointInFrustum(particle.x, particle.y, particle.z)) continue;',
+                  'particle.extract(this.particleTypeRenderState, camera, partialTickTime);',
+              ],
+              'SingleQuadParticle': [
+                  'public void extract(QuadParticleRenderState particleTypeRenderState, Camera camera, float partialTickTime)',
+                  'this.extractRotatedQuad(particleTypeRenderState, camera, rotation, partialTickTime);',
+                  'particleTypeRenderState.add(this.getLayer(), x, y, z, rotation.x, rotation.y, rotation.z, rotation.w, this.getQuadSize(partialTickTime)',
+                  'public record Layer(boolean translucent, Identifier textureAtlasLocation, RenderPipeline pipeline)',
+              ],
+              'QuadParticleRenderState': [
+                  'this.particles.computeIfAbsent(layer, ignored -> new Storage()).add(',
+                  '++this.particleCount;',
+                  'storage.forEachParticle(',
+                  'this.renderVertex(builder, rotation, x, y, z, 1.0f, -1.0f, scale, u1, v1, color, lightCoords);',
+                  'this.renderVertex(builder, rotation, x, y, z, -1.0f, -1.0f, scale, u0, v1, color, lightCoords);',
+                  'submitNodeCollector.submitQuadParticleGroup(this);',
+              ],
+              'QuadParticleFeatureRenderer': [
+                  'IdentityHashMap<SingleQuadParticle.Layer, StagedVertexBuffer.Draw> drawByLayer',
+                  'for (SingleQuadParticle.Layer layer2 : particles.layers())',
+                  'stagedVertexBuffer.appendDraw(DefaultVertexFormat.PARTICLE, PrimitiveTopology.QUADS, null)',
+                  'particles.buildLayer(layer2, stagedVertexBuffer.getVertexBuilder(draw));',
+                  'this.groups.add(new PreparedGroup(drawByLayer, translucent));',
+                  'for (Map.Entry<SingleQuadParticle.Layer, StagedVertexBuffer.Draw> entry : layers.entrySet())',
+                  'renderPass.setPipeline(entry.getKey().pipeline());',
+                  'renderPass.bindTexture("Sampler0", texture.getTextureView(), texture.getSampler());',
+              ],
+              'RenderPipelines': [
+                  'PARTICLE_SNIPPET',
+                  'withVertexShader("core/particle")',
+                  'withFragmentShader("core/particle")',
+                  'withVertexBinding(0, DefaultVertexFormat.PARTICLE)',
+                  'withPrimitiveTopology(PrimitiveTopology.QUADS)',
+                  'public static final RenderPipeline OPAQUE_PARTICLE',
+                  'public static final RenderPipeline TRANSLUCENT_PARTICLE',
+              ],
+              'StagedVertexBuffer': [
+                  'public Draw appendDraw(VertexFormat format, PrimitiveTopology primitiveTopology, @Nullable VertexSorting quadSorting)',
+                  'Draw draw = new Draw(format, primitiveTopology, quadSorting);',
+                  'public @Nullable ExecuteInfo getExecuteInfo(Draw draw)',
+              ],
+          }
+          for name, needles in checks.items():
+              text = sources[name]
+              for needle in needles:
+                  if needle not in text:
+                      raise SystemExit(f'Minecraft 26.2 {name} contract missing: {needle}')
+          print('Pinned Minecraft 26.2 quad-particle Java contracts: PASS')
+          PY
+
+      - name: Verify official Minecraft 26.2 particle shader contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import io
+          import json
+          import urllib.request
+          import zipfile
+
+          def download(url):
+              last = None
+              for _ in range(5):
+                  try:
+                      with urllib.request.urlopen(url, timeout=30) as response:
+                          return response.read()
+                  except Exception as exc:
+                      last = exc
+              raise last
+
+          manifest_bytes = download('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json')
+          manifest = json.loads(manifest_bytes)
+          version = next((v for v in manifest['versions'] if v['id'] == '26.2'), None)
+          if version is None:
+              raise SystemExit('Minecraft 26.2 missing from Mojang version manifest')
+          metadata_bytes = download(version['url'])
+          if hashlib.sha1(metadata_bytes).hexdigest() != version['sha1']:
+              raise SystemExit('Minecraft 26.2 metadata SHA-1 mismatch')
+          metadata = json.loads(metadata_bytes)
+          client = metadata['downloads']['client']
+          jar_bytes = download(client['url'])
+          if hashlib.sha1(jar_bytes).hexdigest() != client['sha1']:
+              raise SystemExit('Minecraft 26.2 client SHA-1 mismatch')
+          if client.get('size') and len(jar_bytes) != client['size']:
+              raise SystemExit('Minecraft 26.2 client size mismatch')
+
+          with zipfile.ZipFile(io.BytesIO(jar_bytes)) as jar:
+              vsh = jar.read('assets/minecraft/shaders/core/particle.vsh').decode('utf-8')
+              fsh = jar.read('assets/minecraft/shaders/core/particle.fsh').decode('utf-8')
+
+          for needle in [
+              'vec4(Position, 1.0)',
+              'ProjMat',
+              'ModelViewMat',
+              'UV0',
+              'Color',
+              'UV2',
+          ]:
+              if needle not in vsh:
+                  raise SystemExit(f'Official 26.2 particle.vsh contract missing: {needle}')
+          if 'ProjMat * ModelViewMat * vec4(Position, 1.0)' not in vsh.replace('\n', ' '):
+              compact = ' '.join(vsh.split())
+              if 'ProjMat * ModelViewMat * vec4(Position, 1.0)' not in compact:
+                  raise SystemExit('Official 26.2 particle.vsh clip transform changed')
+          compact_fsh = ' '.join(fsh.split())
+          for needle in [
+              'texture(Sampler0, texCoord0)',
+              'vertexColor',
+              'ColorModulator',
+              'color.a < 0.1',
+              'discard',
+          ]:
+              if needle not in compact_fsh:
+                  raise SystemExit(f'Official 26.2 particle.fsh coverage contract missing: {needle}')
+          print('Official Mojang Minecraft 26.2 particle shader contract: PASS')
+          PY
+
+      - name: Apply exact quad-particle staged motion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_particle_exact_motion.py
+          git diff --check
+
+      - name: Compile and test exact particle contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalParticleBatchMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+            --tests 'com.metallum.client.metal.render.MetalSharedBatchMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalShadowBatchMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalSyntheticExactMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionTelemetryTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
+          git diff --check
+
+      - name: Verify exact particle and fail-closed wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'render.SingleQuadParticleMetalFxIdentityMixin' src/main/resources/metallum.mixins.json
+          grep -F 'render.QuadParticleGroupMetalFxMixin' src/main/resources/metallum.mixins.json
+          grep -F 'render.QuadParticleFeatureRendererMetalFxMixin' src/main/resources/metallum.mixins.json
+          grep -F 'PARTICLE("core/particle_previous_motion"' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
+          grep -F 'MetalParticleBatchMotion.recordParticleAdd' src/main/java/com/metallum/mixin/render/QuadParticleRenderStateMetalFxMixin.java
+          grep -F 'MetalParticleBatchMotion.beginFeatureGroup' src/main/java/com/metallum/mixin/render/QuadParticleFeatureRendererMetalFxMixin.java
+          grep -F 'MetalParticleBatchMotion.attachDrawIfActive' src/main/java/com/metallum/mixin/render/StagedVertexBufferMetalFxMixin.java
+          grep -F 'MetalFxManager.observeParticleMotion();' src/main/java/com/metallum/client/metal/render/MetalParticleBatchMotion.java
+          ! grep -F 'MetalFxManager.observeParticleMotion();' src/main/java/com/metallum/mixin/render/QuadParticleRenderStateMetalFxMixin.java
+
+      - name: Commit verified exact quad-particle implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/java src/main/resources src/test/java
+          git diff --cached --check
+          git commit -m 'feat(metalfx): add exact quad-particle staged motion'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2
