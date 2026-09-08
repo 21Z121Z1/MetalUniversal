@@ -1,0 +1,1 @@
+Retry the Fishing Hook exact-line transaction with corrected carrier guard and an unambiguous eligibility patch anchor. Commit runtime only if all proof gates pass.
