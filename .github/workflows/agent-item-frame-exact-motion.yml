@@ -1,0 +1,159 @@
+name: Agent exact item-frame motion
+
+on:
+  push:
+    branches: [agent/metalfx-motion-coverage-26.2]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.event.head_commit.message == 'chore(agent): verify exact item-frame motion'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Resolve canonical context
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin integration/iris-metal-next:refs/remotes/origin/integration/iris-metal-next
+          python3 scripts/agent/context.py \
+            --task 'MetalFX exact previous-position motion for item frames including maps' \
+            --claim correctness
+
+      - name: Verify pinned Minecraft 26.2 item-frame contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
+          for rel in \
+            net/minecraft/client/renderer/entity/ItemFrameRenderer.java \
+            net/minecraft/client/renderer/entity/state/ItemFrameRenderState.java \
+            net/minecraft/client/renderer/MapRenderer.java \
+            net/minecraft/client/renderer/block/BlockModelRenderState.java \
+            net/minecraft/client/renderer/RenderPipelines.java; do
+            curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+              "$BASE/$rel" -o "/tmp/$(basename "$rel")"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          frame=Path('/tmp/ItemFrameRenderer.java').read_text()
+          state=Path('/tmp/ItemFrameRenderState.java').read_text()
+          maps=Path('/tmp/MapRenderer.java').read_text()
+          block=Path('/tmp/BlockModelRenderState.java').read_text()
+          pipes=Path('/tmp/RenderPipelines.java').read_text()
+          checks=[
+            (frame, 'extends EntityRenderer<T, ItemFrameRenderState>'),
+            (frame, 'state.frameModel.submitWithZOffset(poseStack, submitNodeCollector'),
+            (frame, 'this.mapRenderer.render(state.mapRenderState, poseStack, submitNodeCollector, true, lightCoords);'),
+            (frame, 'state.item.submit(poseStack, submitNodeCollector, lightVal'),
+            (state, 'public final BlockModelRenderState frameModel = new BlockModelRenderState();'),
+            (state, 'public final ItemStackRenderState item = new ItemStackRenderState();'),
+            (state, 'public @Nullable MapId mapId;'),
+            (maps, 'submitNodeCollector.submitCustomGeometry(poseStack, RenderTypes.text(mapRenderState.texture)'),
+            (maps, 'submitNodeCollector.submitCustomGeometry(poseStack, RenderTypes.text(atlasSprite.atlasLocation())'),
+            (maps, 'submitNodeCollector.order(1).submitText('),
+            (block, 'public void submitWithZOffset('),
+            (pipes, 'public static final RenderPipeline ENTITY_SOLID_Z_OFFSET_FORWARD ='),
+            (pipes, 'withVertexShader("core/entity").withFragmentShader("core/entity")'),
+            (pipes, 'private static final RenderPipeline.Snippet ITEM_SNIPPET'),
+            (pipes, 'withVertexShader("core/item").withFragmentShader("core/item")'),
+            (pipes, 'private static final RenderPipeline.Snippet WORLD_TEXT_SNIPPET'),
+          ]
+          for text,needle in checks:
+              if needle not in text:
+                  raise SystemExit(f'Minecraft 26.2 item-frame contract changed: {needle}')
+          print('Pinned Minecraft 26.2 item-frame/map contracts: PASS')
+          PY
+
+      - name: Verify every item-frame submit family has an exact owner carrier
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit' src/main/java/com/metallum/mixin/render/BlockModelFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.activateBuildSampleOnAccess(submits)' src/main/java/com/metallum/mixin/render/BlockModelFeatureRendererMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit' src/main/java/com/metallum/mixin/render/ItemFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.activateBuildSampleOnAccess(submits)' src/main/java/com/metallum/mixin/render/ItemFeatureRendererMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit' src/main/java/com/metallum/mixin/render/CustomFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.beginModelBuild(pose)' src/main/java/com/metallum/mixin/render/CustomFeatureRendererMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit' src/main/java/com/metallum/mixin/render/TextFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.activateBuildSampleOnAccess(submits)' src/main/java/com/metallum/mixin/render/TextFeatureRendererMetalFxMixin.java
+          grep -F 'shader.equals("core/item")' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
+          grep -F 'shader.equals("core/text")' src/main/java/com/metallum/client/metal/render/MetalEntityMotionPipeline.java
+          grep -F 'matchingDraws <= 0' src/main/java/com/metallum/client/metal/render/MetalExactMotionCoverage.java
+          grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+
+      - name: Apply item-frame exact admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace_once(path,old,new):
+              p=Path(path); s=p.read_text(); n=s.count(old)
+              if n != 1: raise SystemExit(f'{path}: expected one anchor, found {n}: {old[:140]!r}')
+              p.write_text(s.replace(old,new,1))
+
+          p='src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java'
+          replace_once(p,
+            'import net.minecraft.client.renderer.entity.state.ItemClusterRenderState;\nimport net.minecraft.client.renderer.entity.state.ItemEntityRenderState;\n',
+            'import net.minecraft.client.renderer.entity.state.ItemClusterRenderState;\nimport net.minecraft.client.renderer.entity.state.ItemEntityRenderState;\nimport net.minecraft.client.renderer.entity.state.ItemFrameRenderState;\n')
+          replace_once(p,
+            '                || state instanceof ItemClusterRenderState\n                || state instanceof ThrownTridentRenderState\n',
+            '                || state instanceof ItemClusterRenderState\n                || state instanceof ItemFrameRenderState\n                || state instanceof ThrownTridentRenderState\n')
+          replace_once(p,
+            '        if (state instanceof TntRenderState || state instanceof MinecartTntRenderState) {\n',
+            '''        if (state instanceof ItemFrameRenderState) {\n            // Frame BlockModel, ordinary item, map custom quads and map labels all have staged\n            // owner carriers. The whole frame remains exact-required, so glint/special/unknown\n            // item passes or any changed map/text manifest reject interpolation rather than\n            // silently falling back to the frame root transform.\n            return 0;\n        }\n        if (state instanceof TntRenderState || state instanceof MinecartTntRenderState) {\n''')
+
+          t='src/test/java/com/metallum/client/metal/render/MetalFxMotionEligibilityTest.java'
+          replace_once(t,
+            'import net.minecraft.client.renderer.entity.state.ItemClusterRenderState;\nimport net.minecraft.client.renderer.entity.state.ItemEntityRenderState;\n',
+            'import net.minecraft.client.renderer.entity.state.ItemClusterRenderState;\nimport net.minecraft.client.renderer.entity.state.ItemEntityRenderState;\nimport net.minecraft.client.renderer.entity.state.ItemFrameRenderState;\n')
+          replace_once(t,
+            '    @Test\n    void tntAndTntMinecartAreExactInsteadOfRigidCandidates() {\n',
+            '''    @Test\n    void itemFrameIsWholeObjectExactCandidate() {\n        ItemFrameRenderState frame = new ItemFrameRenderState();\n        assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(frame));\n        assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(frame));\n    }\n\n    @Test\n    void tntAndTntMinecartAreExactInsteadOfRigidCandidates() {\n''')
+          PY
+          git diff --check
+
+      - name: Compile targeted contracts and jar
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionTelemetryTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
+          git diff --check
+
+      - name: Verify whole-object fail-closed wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'state instanceof ItemFrameRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'MetalFxMotionEligibility.requiresExactPreviousPositions(state)' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -F 'matchingDraws <= 0' src/main/java/com/metallum/client/metal/render/MetalExactMotionCoverage.java
+          grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+
+      - name: Commit verified runtime files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/java src/test/java
+          git diff --cached --check
+          git commit -m 'feat(metalfx): add exact item-frame motion vectors'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2
