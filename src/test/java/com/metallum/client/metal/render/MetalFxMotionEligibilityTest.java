@@ -8,6 +8,7 @@ import net.minecraft.client.renderer.entity.state.FallingBlockRenderState;
 import net.minecraft.client.renderer.entity.state.FireworkRocketRenderState;
 import net.minecraft.client.renderer.entity.state.ItemClusterRenderState;
 import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
+import net.minecraft.client.renderer.entity.state.ItemFrameRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LlamaSpitRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
@@ -58,6 +59,13 @@ final class MetalFxMotionEligibilityTest {
             assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(candidate));
             assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(candidate));
         }
+    }
+
+    @Test
+    void itemFrameIsWholeObjectExactCandidate() {
+        ItemFrameRenderState frame = new ItemFrameRenderState();
+        assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(frame));
+        assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(frame));
     }
 
     @Test

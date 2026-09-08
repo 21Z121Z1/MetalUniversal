@@ -11,6 +11,7 @@ import net.minecraft.client.renderer.entity.state.FallingBlockRenderState;
 import net.minecraft.client.renderer.entity.state.FireworkRocketRenderState;
 import net.minecraft.client.renderer.entity.state.ItemClusterRenderState;
 import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
+import net.minecraft.client.renderer.entity.state.ItemFrameRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LlamaSpitRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
@@ -82,6 +83,7 @@ final class MetalFxMotionEligibility {
                 || state instanceof WitherSkullRenderState
                 || state instanceof LlamaSpitRenderState
                 || state instanceof EvokerFangsRenderState
+                || state instanceof ItemFrameRenderState
                 || state instanceof TntRenderState
                 || state instanceof MinecartTntRenderState
                 || state instanceof PaintingRenderState
@@ -102,6 +104,13 @@ final class MetalFxMotionEligibility {
         if (state instanceof BoatRenderState) {
             // Candidate only. MetalFxManager marks the whole object exact-required, so paddle
             // deformation and the optional water-mask draw must both match staged history.
+            return 0;
+        }
+        if (state instanceof ItemFrameRenderState) {
+            // Frame BlockModel, ordinary item, map custom quads and map labels all carry the
+            // submitting frame owner into staged history. Keep the whole object exact-required:
+            // foil/special/unknown item passes or changed map/text manifests reject interpolation
+            // instead of falling back to the frame root transform.
             return 0;
         }
         if (state instanceof TntRenderState || state instanceof MinecartTntRenderState) {
