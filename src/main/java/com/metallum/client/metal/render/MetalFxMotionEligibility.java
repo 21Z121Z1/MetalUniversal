@@ -14,9 +14,13 @@ import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LlamaSpitRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
+import net.minecraft.client.renderer.entity.state.PaintingRenderState;
 import net.minecraft.client.renderer.entity.state.ThrownItemRenderState;
 import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;
 import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EntityTypeIds;
 
 /**
  * Per-render-frame admission state for Metal frame interpolation.
@@ -75,7 +79,9 @@ final class MetalFxMotionEligibility {
                 || state instanceof ThrownTridentRenderState
                 || state instanceof WitherSkullRenderState
                 || state instanceof LlamaSpitRenderState
-                || state instanceof EvokerFangsRenderState) {
+                || state instanceof EvokerFangsRenderState
+                || state instanceof PaintingRenderState
+                || isExactGenericEntityType(state)) {
             return true;
         }
         return state instanceof DisplayEntityRenderState displayState
@@ -92,6 +98,18 @@ final class MetalFxMotionEligibility {
         if (state instanceof BoatRenderState) {
             // Candidate only. MetalFxManager marks the whole object exact-required, so paddle
             // deformation and the optional water-mask draw must both match staged history.
+            return 0;
+        }
+        if (state instanceof PaintingRenderState) {
+            // Painting emits pose-transformed ENTITY custom geometry through the existing exact
+            // custom-geometry carrier. Variant/size/topology changes are guarded by the complete
+            // staged manifest before history can be consumed.
+            return 0;
+        }
+        if (isExactGenericEntityType(state)) {
+            // Dragon fireballs use ENTITY cutout custom geometry; leash knots use the ordinary
+            // ModelFeature path. Do not admit all EntityRenderState users: WindCharge shares this
+            // Java state class but uses its own breeze-wind pipeline and remains fail-closed.
             return 0;
         }
         if (state instanceof ThrownItemRenderState
@@ -116,5 +134,16 @@ final class MetalFxMotionEligibility {
             return MetalDisplayMotionSafety.isFrameInterpolationSafe(displayState) ? 0 : DISPLAY_ENTITY;
         }
         return UNKNOWN_ENTITY;
+    }
+
+    private static boolean isExactGenericEntityType(final EntityRenderState state) {
+        return state != null
+                && state.entityType != null
+                && isExactGenericEntityTypeKey(state.entityType.builtInRegistryHolder().key());
+    }
+
+    static boolean isExactGenericEntityTypeKey(final ResourceKey<EntityType<?>> key) {
+        return EntityTypeIds.DRAGON_FIREBALL.equals(key)
+                || EntityTypeIds.LEASH_KNOT.equals(key);
     }
 }

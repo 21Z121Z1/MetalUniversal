@@ -11,9 +11,11 @@ import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LlamaSpitRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
+import net.minecraft.client.renderer.entity.state.PaintingRenderState;
 import net.minecraft.client.renderer.entity.state.ThrownItemRenderState;
 import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;
 import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;
+import net.minecraft.world.entity.EntityTypeIds;
 import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
 
@@ -54,6 +56,20 @@ final class MetalFxMotionEligibilityTest {
             assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(candidate));
             assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(candidate));
         }
+    }
+
+    @Test
+    void paintingIsAnExactCustomGeometryCandidate() {
+        PaintingRenderState painting = new PaintingRenderState();
+        assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(painting));
+        assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(painting));
+    }
+
+    @Test
+    void genericStateAdmissionUsesRegistryKeysWithoutBootstrappingEntityTypes() {
+        assertTrue(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.DRAGON_FIREBALL));
+        assertTrue(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.LEASH_KNOT));
+        assertFalse(MetalFxMotionEligibility.isExactGenericEntityTypeKey(EntityTypeIds.WIND_CHARGE));
     }
 
     @Test
