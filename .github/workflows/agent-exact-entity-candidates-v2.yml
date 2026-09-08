@@ -1,0 +1,158 @@
+name: Agent exact entity candidate expansion v2
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.event.head_commit.message == 'chore(agent): apply exact entity candidates v2'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 24
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Verify pinned Minecraft 26.2 renderer contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
+          for rel in \
+            net/minecraft/client/renderer/entity/DragonFireballRenderer.java \
+            net/minecraft/client/renderer/entity/LeashKnotRenderer.java \
+            net/minecraft/client/renderer/entity/WindChargeRenderer.java \
+            net/minecraft/client/renderer/entity/PaintingRenderer.java \
+            net/minecraft/client/renderer/entity/EntityRenderers.java \
+            net/minecraft/client/renderer/rendertype/RenderTypes.java \
+            net/minecraft/client/renderer/entity/state/EntityRenderState.java; do
+            curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+              "$BASE/$rel" -o "/tmp/$(basename "$rel")"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          dragon = Path('/tmp/DragonFireballRenderer.java').read_text()
+          knot = Path('/tmp/LeashKnotRenderer.java').read_text()
+          wind = Path('/tmp/WindChargeRenderer.java').read_text()
+          painting = Path('/tmp/PaintingRenderer.java').read_text()
+          registrations = Path('/tmp/EntityRenderers.java').read_text()
+          render_types = Path('/tmp/RenderTypes.java').read_text()
+          state = Path('/tmp/EntityRenderState.java').read_text()
+
+          checks = [
+              (dragon, 'extends EntityRenderer<DragonFireball, EntityRenderState>'),
+              (dragon, 'RenderTypes.entityCutout(TEXTURE_LOCATION)'),
+              (dragon, 'submitNodeCollector.submitCustomGeometry(poseStack, RENDER_TYPE'),
+              (knot, 'extends EntityRenderer<LeashFenceKnotEntity, EntityRenderState>'),
+              (knot, 'submitNodeCollector.submitModel(this.model, state, poseStack, KNOT_LOCATION'),
+              (wind, 'extends EntityRenderer<AbstractWindCharge, EntityRenderState>'),
+              (wind, 'RenderTypes.breezeWind('),
+              (painting, 'extends EntityRenderer<Painting, PaintingRenderState>'),
+              (painting, 'submitNodeCollector.submitCustomGeometry(poseStack, renderType'),
+              (painting, 'RenderTypes.entitySolidZOffsetForward(backSprite.atlasLocation())'),
+              (registrations, 'EntityRenderers.register(EntityTypes.DRAGON_FIREBALL, DragonFireballRenderer::new);'),
+              (registrations, 'EntityRenderers.register(EntityTypes.LEASH_KNOT, LeashKnotRenderer::new);'),
+              (render_types, 'RenderPipelines.ENTITY_SOLID_Z_OFFSET_FORWARD'),
+              (state, 'public EntityType<?> entityType;'),
+          ]
+          for text, needle in checks:
+              if needle not in text:
+                  raise SystemExit(f'Minecraft 26.2 v2 entity contract changed: {needle}')
+          print('Pinned Minecraft 26.2 exact entity-candidate v2 contracts: PASS')
+          PY
+
+      - name: Verify existing custom/model exact carriers
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit(pose);' src/main/java/com/metallum/mixin/render/CustomFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.beginModelBuild(pose);' src/main/java/com/metallum/mixin/render/CustomFeatureRendererMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit' src/main/java/com/metallum/mixin/render/ModelFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.beginModelBuild' src/main/java/com/metallum/mixin/render/ModelFeatureRendererMetalFxMixin.java
+
+      - name: Apply exact generic-state and painting admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p=Path(path); text=p.read_text(); count=text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one anchor, found {count}: {old[:140]!r}')
+              p.write_text(text.replace(old,new,1))
+
+          path='src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java'
+          replace_once(path,
+              '''import net.minecraft.client.renderer.entity.state.MinecartRenderState;\nimport net.minecraft.client.renderer.entity.state.ThrownItemRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.MinecartRenderState;\nimport net.minecraft.client.renderer.entity.state.PaintingRenderState;\nimport net.minecraft.client.renderer.entity.state.ThrownItemRenderState;\n''')
+          replace_once(path,
+              '''import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;\n\n/**\n''',
+              '''import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;\nimport net.minecraft.world.entity.EntityTypes;\n\n/**\n''')
+          replace_once(path,
+              '''                || state instanceof EvokerFangsRenderState) {\n            return true;\n        }\n''',
+              '''                || state instanceof EvokerFangsRenderState\n                || state instanceof PaintingRenderState\n                || isExactGenericEntityType(state)) {\n            return true;\n        }\n''')
+          replace_once(path,
+              '''        if (state instanceof ThrownItemRenderState\n''',
+              '''        if (state instanceof PaintingRenderState) {\n            // Painting emits pose-transformed ENTITY custom geometry through the existing exact\n            // custom-geometry carrier. Variant/size/topology changes are guarded by the complete\n            // staged manifest before history can be consumed.\n            return 0;\n        }\n        if (isExactGenericEntityType(state)) {\n            // Dragon fireballs use ENTITY cutout custom geometry; leash knots use the ordinary\n            // ModelFeature path. Do not admit all EntityRenderState users: WindCharge shares this\n            // Java state class but uses its own breeze-wind pipeline and remains fail-closed.\n            return 0;\n        }\n        if (state instanceof ThrownItemRenderState\n''')
+          replace_once(path,
+              '''        return UNKNOWN_ENTITY;\n    }\n}\n''',
+              '''        return UNKNOWN_ENTITY;\n    }\n\n    private static boolean isExactGenericEntityType(final EntityRenderState state) {\n        return state != null\n                && (state.entityType == EntityTypes.DRAGON_FIREBALL\n                || state.entityType == EntityTypes.LEASH_KNOT);\n    }\n}\n''')
+
+          test='src/test/java/com/metallum/client/metal/render/MetalFxMotionEligibilityTest.java'
+          replace_once(test,
+              '''import net.minecraft.client.renderer.entity.state.MinecartRenderState;\nimport net.minecraft.client.renderer.entity.state.ThrownItemRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.MinecartRenderState;\nimport net.minecraft.client.renderer.entity.state.PaintingRenderState;\nimport net.minecraft.client.renderer.entity.state.ThrownItemRenderState;\n''')
+          replace_once(test,
+              '''import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;\nimport net.minecraft.world.entity.EntityTypes;\n''')
+          replace_once(test,
+              '''    @Test\n    void unknownEntityFamiliesStillFailClosed() {\n''',
+              '''    @Test\n    void paintingAndSelectedGenericStateRenderersAreExactCandidates() {\n        PaintingRenderState painting = new PaintingRenderState();\n        assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(painting));\n        assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(painting));\n\n        EntityRenderState dragonFireball = new EntityRenderState();\n        dragonFireball.entityType = EntityTypes.DRAGON_FIREBALL;\n        assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(dragonFireball));\n        assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(dragonFireball));\n\n        EntityRenderState leashKnot = new EntityRenderState();\n        leashKnot.entityType = EntityTypes.LEASH_KNOT;\n        assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(leashKnot));\n        assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(leashKnot));\n    }\n\n    @Test\n    void genericStateDoesNotAccidentallyAdmitWindCharge() {\n        EntityRenderState windCharge = new EntityRenderState();\n        windCharge.entityType = EntityTypes.WIND_CHARGE;\n        assertEquals(MetalFxMotionEligibility.UNKNOWN_ENTITY,\n                MetalFxMotionEligibility.incompleteEntityReason(windCharge));\n        assertFalse(MetalFxMotionEligibility.requiresExactPreviousPositions(windCharge));\n    }\n\n    @Test\n    void unknownEntityFamiliesStillFailClosed() {\n''')
+          PY
+          git diff --check
+
+      - name: Compile and test v2 exact candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionTelemetryTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
+          git diff --check
+
+      - name: Verify precise generic-state fail-closed wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'state.entityType == EntityTypes.DRAGON_FIREBALL' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'state.entityType == EntityTypes.LEASH_KNOT' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          ! grep -F 'EntityTypes.WIND_CHARGE' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'state instanceof PaintingRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'matchingDraws <= 0' src/main/java/com/metallum/client/metal/render/MetalExactMotionCoverage.java
+
+      - name: Commit verified runtime implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/java src/test/java
+          git diff --cached --check
+          git commit -m 'feat(metalfx): admit exact painting and selected generic entities'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2
