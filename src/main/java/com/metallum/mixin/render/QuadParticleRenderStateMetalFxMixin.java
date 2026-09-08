@@ -1,10 +1,12 @@
 package com.metallum.mixin.render;
 
-import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.MetalParticleBatchMotion;
+import net.minecraft.client.particle.SingleQuadParticle;
 import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.QuadParticleRenderState;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -18,6 +20,31 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(QuadParticleRenderState.class)
 public abstract class QuadParticleRenderStateMetalFxMixin {
+    @Shadow
+    private int particleCount;
+
+    @Inject(method = "add", at = @At("HEAD"))
+    private void metallum$captureParticleAdd(
+            final SingleQuadParticle.Layer layer,
+            final float x,
+            final float y,
+            final float z,
+            final float xRot,
+            final float yRot,
+            final float zRot,
+            final float wRot,
+            final float scale,
+            final float u0,
+            final float u1,
+            final float v0,
+            final float v1,
+            final int color,
+            final int lightCoords,
+            final CallbackInfo ci
+    ) {
+        MetalParticleBatchMotion.recordParticleAdd((QuadParticleRenderState) (Object) this, layer);
+    }
+
     @Inject(
             method = "submit",
             at = @At(
@@ -30,6 +57,9 @@ public abstract class QuadParticleRenderStateMetalFxMixin {
             final CameraRenderState camera,
             final CallbackInfo ci
     ) {
-        MetalFxManager.observeParticleMotion();
+        MetalParticleBatchMotion.observeSubmittedState(
+                (QuadParticleRenderState) (Object) this,
+                particleCount
+        );
     }
 }

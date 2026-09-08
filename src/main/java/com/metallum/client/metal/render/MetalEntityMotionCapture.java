@@ -179,6 +179,13 @@ public final class MetalEntityMotionCapture {
         }
     }
 
+    /** Explicit fail-closed hook for synthetic exact owners such as particle feature groups. */
+    public static void failExactSample(final Sample sample, final String reason) {
+        if (enabled && sample != null) {
+            MetalExactMotionCoverage.fail(sample, reason);
+        }
+    }
+
     /** Final source-frame proof consumed by frame-interpolator admission. */
     public static boolean exactCoverageComplete() {
         return !enabled || MetalExactMotionCoverage.complete();
@@ -375,6 +382,20 @@ public final class MetalEntityMotionCapture {
         if (enabled) {
             MODEL_BUILD.remove();
         }
+    }
+
+    /** Opens an exact staged build which has no ordinary entity/model submit owner. */
+    public static void beginParticleBatchBuild(final Sample sample) {
+        if (!enabled) {
+            return;
+        }
+        MODEL_BUILD.remove();
+        if (sample == null) {
+            return;
+        }
+        MODEL_BUILD.set(sample);
+        MetalExactMotionCoverage.require(sample);
+        modelBuildsMatched++;
     }
 
     public static boolean shouldSplitEntityDraw(final RenderPipeline pipeline) {
