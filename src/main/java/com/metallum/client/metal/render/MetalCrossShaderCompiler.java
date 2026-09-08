@@ -142,8 +142,15 @@ final class MetalCrossShaderCompiler {
         if (diskCache == null) {
             return new CacheLookup(null, null, null, sampleLodBias);
         }
-        String rawVertex = shaderSource.get(pipeline.getVertexShader(), ShaderType.VERTEX);
-        String rawFragment = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);
+        // ShaderSource is a Minecraft functional interface with no concurrency contract.
+        // Some real callers close over ResourceProvider and open readers from get(); keep only
+        // hashing/disk JSON lookup parallel while serializing source acquisition per source object.
+        final String rawVertex;
+        final String rawFragment;
+        synchronized (shaderSource) {
+            rawVertex = shaderSource.get(pipeline.getVertexShader(), ShaderType.VERTEX);
+            rawFragment = shaderSource.get(pipeline.getFragmentShader(), ShaderType.FRAGMENT);
+        }
         if (rawVertex == null || rawFragment == null) {
             return new CacheLookup(diskCache, null, null, sampleLodBias);
         }

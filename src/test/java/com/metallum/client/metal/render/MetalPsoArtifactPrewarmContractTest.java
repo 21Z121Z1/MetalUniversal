@@ -18,6 +18,10 @@ final class MetalPsoArtifactPrewarmContractTest {
         ));
         String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
 
+        assertTrue(compiler.contains("synchronized (shaderSource)"));
+        assertTrue(compiler.contains("rawVertex = shaderSource.get"));
+        assertTrue(compiler.contains("rawFragment = shaderSource.get"));
+
         int lookup = device.indexOf("MetalCrossShaderCompiler.tryLoadCacheLookup(pipeline, effectiveSource)");
         int submitCompile = device.indexOf("this.submitPrewarmTask(() ->");
         int lockedCompile = device.indexOf("synchronized (COMPILE_CHAIN_LOCK)", submitCompile);
