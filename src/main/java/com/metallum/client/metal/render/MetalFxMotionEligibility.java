@@ -14,9 +14,11 @@ import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LlamaSpitRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
+import net.minecraft.client.renderer.entity.state.MinecartTntRenderState;
 import net.minecraft.client.renderer.entity.state.PaintingRenderState;
 import net.minecraft.client.renderer.entity.state.ThrownItemRenderState;
 import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;
+import net.minecraft.client.renderer.entity.state.TntRenderState;
 import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.entity.EntityType;
@@ -80,6 +82,8 @@ final class MetalFxMotionEligibility {
                 || state instanceof WitherSkullRenderState
                 || state instanceof LlamaSpitRenderState
                 || state instanceof EvokerFangsRenderState
+                || state instanceof TntRenderState
+                || state instanceof MinecartTntRenderState
                 || state instanceof PaintingRenderState
                 || isExactGenericEntityType(state)) {
             return true;
@@ -98,6 +102,13 @@ final class MetalFxMotionEligibility {
         if (state instanceof BoatRenderState) {
             // Candidate only. MetalFxManager marks the whole object exact-required, so paddle
             // deformation and the optional water-mask draw must both match staged history.
+            return 0;
+        }
+        if (state instanceof TntRenderState || state instanceof MinecartTntRenderState) {
+            // Fuse swell deforms the rendered block. MinecartTntRenderState is also a
+            // MinecartRenderState, so it must be exact-required before rigid minecart admission.
+            // Cart ModelFeature and TNT BlockModelFeature draws both use staged carriers; any
+            // unsupported material or manifest mismatch keeps interpolation fail-closed.
             return 0;
         }
         if (state instanceof PaintingRenderState) {

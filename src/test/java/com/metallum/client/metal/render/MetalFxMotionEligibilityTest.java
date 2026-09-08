@@ -11,9 +11,11 @@ import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LlamaSpitRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
+import net.minecraft.client.renderer.entity.state.MinecartTntRenderState;
 import net.minecraft.client.renderer.entity.state.PaintingRenderState;
 import net.minecraft.client.renderer.entity.state.ThrownItemRenderState;
 import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;
+import net.minecraft.client.renderer.entity.state.TntRenderState;
 import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;
 import net.minecraft.world.entity.EntityTypeIds;
 import org.joml.Matrix4f;
@@ -52,6 +54,15 @@ final class MetalFxMotionEligibilityTest {
                 new LlamaSpitRenderState(),
                 new EvokerFangsRenderState()
         };
+        for (EntityRenderState candidate : candidates) {
+            assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(candidate));
+            assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(candidate));
+        }
+    }
+
+    @Test
+    void tntAndTntMinecartAreExactInsteadOfRigidCandidates() {
+        EntityRenderState[] candidates = {new TntRenderState(), new MinecartTntRenderState()};
         for (EntityRenderState candidate : candidates) {
             assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(candidate));
             assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(candidate));
