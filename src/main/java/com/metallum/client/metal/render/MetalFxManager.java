@@ -556,13 +556,11 @@ public final class MetalFxManager {
             return;
         }
         boolean requiresExactPreviousPositions =
-                state instanceof net.minecraft.client.renderer.entity.state.BoatRenderState
-                || (state instanceof net.minecraft.client.renderer.entity.state.DisplayEntityRenderState displayState
-                && MetalDisplayMotionSafety.requiresExactPreviousPositions(displayState));
+                MetalFxMotionEligibility.requiresExactPreviousPositions(state);
         if (requiresExactPreviousPositions) {
-            // TextDisplay background/text and Boat model/water-mask geometry are candidate families
-            // only. The whole per-object staged manifest must match the previous successfully
-            // submitted source frame and every draw must actually encode exact previous positions.
+            // Deforming/model/item exact candidates, TextDisplay background/text, and Boat
+            // model/water-mask geometry are admitted only when the whole per-object staged manifest
+            // matches the previous submitted source frame and every required draw encodes exact motion.
             MetalEntityMotionCapture.requireExactState(state);
         }
         if (!MetalEntityMotionCapture.hasPreviousState(state)) {

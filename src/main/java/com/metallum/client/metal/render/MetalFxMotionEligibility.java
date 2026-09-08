@@ -6,10 +6,17 @@ import net.minecraft.client.renderer.entity.state.ArrowRenderState;
 import net.minecraft.client.renderer.entity.state.BoatRenderState;
 import net.minecraft.client.renderer.entity.state.DisplayEntityRenderState;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.entity.state.EvokerFangsRenderState;
 import net.minecraft.client.renderer.entity.state.FallingBlockRenderState;
+import net.minecraft.client.renderer.entity.state.FireworkRocketRenderState;
+import net.minecraft.client.renderer.entity.state.ItemClusterRenderState;
 import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
+import net.minecraft.client.renderer.entity.state.LlamaSpitRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
+import net.minecraft.client.renderer.entity.state.ThrownItemRenderState;
+import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;
+import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;
 
 /**
  * Per-render-frame admission state for Metal frame interpolation.
@@ -59,6 +66,22 @@ final class MetalFxMotionEligibility {
      * the previous successfully submitted source frame before interpolation is allowed. Boat's
      * optional water-mask depth patch has a separately verified POSITION-only exact ABI.</p>
      */
+    static boolean requiresExactPreviousPositions(final EntityRenderState state) {
+        if (state instanceof LivingEntityRenderState
+                || state instanceof BoatRenderState
+                || state instanceof ThrownItemRenderState
+                || state instanceof FireworkRocketRenderState
+                || state instanceof ItemClusterRenderState
+                || state instanceof ThrownTridentRenderState
+                || state instanceof WitherSkullRenderState
+                || state instanceof LlamaSpitRenderState
+                || state instanceof EvokerFangsRenderState) {
+            return true;
+        }
+        return state instanceof DisplayEntityRenderState displayState
+                && MetalDisplayMotionSafety.requiresExactPreviousPositions(displayState);
+    }
+
     static int incompleteEntityReason(final EntityRenderState state) {
         if (state instanceof LivingEntityRenderState) {
             // Candidate only. EntityRenderDispatcherMetalFxMixin marks the whole object
@@ -69,6 +92,18 @@ final class MetalFxMotionEligibility {
         if (state instanceof BoatRenderState) {
             // Candidate only. MetalFxManager marks the whole object exact-required, so paddle
             // deformation and the optional water-mask draw must both match staged history.
+            return 0;
+        }
+        if (state instanceof ThrownItemRenderState
+                || state instanceof FireworkRocketRenderState
+                || state instanceof ItemClusterRenderState
+                || state instanceof ThrownTridentRenderState
+                || state instanceof WitherSkullRenderState
+                || state instanceof LlamaSpitRenderState
+                || state instanceof EvokerFangsRenderState) {
+            // Candidate only. These renderers feed Item/Model staged builders already tracked by
+            // MetalPreviousVertexHistory. Any unsupported material/overlay or manifest change
+            // leaves exact coverage incomplete and rejects frame interpolation.
             return 0;
         }
         if (state instanceof ItemEntityRenderState

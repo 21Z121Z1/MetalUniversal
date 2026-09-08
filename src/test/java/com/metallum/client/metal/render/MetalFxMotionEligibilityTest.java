@@ -3,10 +3,17 @@ package com.metallum.client.metal.render;
 import net.minecraft.client.renderer.entity.state.ArrowRenderState;
 import net.minecraft.client.renderer.entity.state.BoatRenderState;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.entity.state.EvokerFangsRenderState;
 import net.minecraft.client.renderer.entity.state.FallingBlockRenderState;
+import net.minecraft.client.renderer.entity.state.FireworkRocketRenderState;
+import net.minecraft.client.renderer.entity.state.ItemClusterRenderState;
 import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
+import net.minecraft.client.renderer.entity.state.LlamaSpitRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
+import net.minecraft.client.renderer.entity.state.ThrownItemRenderState;
+import net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;
+import net.minecraft.client.renderer.entity.state.WitherSkullRenderState;
 import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
 
@@ -30,6 +37,23 @@ final class MetalFxMotionEligibilityTest {
     @Test
     void livingEntityIsAnExactStagedGeometryCandidate() {
         assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(new LivingEntityRenderState()));
+    }
+
+    @Test
+    void stagedItemAndModelProjectileFamiliesAreExactCandidates() {
+        EntityRenderState[] candidates = {
+                new ThrownItemRenderState(),
+                new FireworkRocketRenderState(),
+                new ItemClusterRenderState(),
+                new ThrownTridentRenderState(),
+                new WitherSkullRenderState(),
+                new LlamaSpitRenderState(),
+                new EvokerFangsRenderState()
+        };
+        for (EntityRenderState candidate : candidates) {
+            assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(candidate));
+            assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(candidate));
+        }
     }
 
     @Test
