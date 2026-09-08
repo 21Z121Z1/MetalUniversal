@@ -477,6 +477,17 @@ also records `frameGenerationFramesQueued` and
 requests Frame Generation it fails unless at least one source frame reached the
 native presenter and the feature remained enabled through completion.
 
+For low-overhead motion-producer evidence, set
+`-Dmetallum.metalfx.motionTelemetry=true` (the existing
+`-Dmetallum.hotpath.telemetry=true` switch also enables it). The resulting
+`metalfxMotionTelemetry` object in `run-state.json` reports a canonical
+`RenderContractRuntime.currentFrameId()` sampling window, source-frame
+admission/rejection counts and reasons, exact history vertex/byte accounting,
+motion replay draws, and the distinct input, native-encode, command-buffer
+submit, and successful-completion stages. Java cannot observe CAMetalDisplayLink
+scanout, so `presented` remains explicitly unavailable and must be checked in
+the native `METALLUM_METALFX_PRESENT_DIAGNOSTICS_PATH` timeline instead.
+
 On the Apple M1 Pro the repaired gate-open run recovered from both startup and
 GUI-transition size churn, completed 16/16 GPU readbacks, queued 255 source
 frames, and ended with Frame Generation enabled. This is connectivity and

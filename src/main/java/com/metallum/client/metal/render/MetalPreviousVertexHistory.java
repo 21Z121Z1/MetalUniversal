@@ -128,6 +128,8 @@ final class MetalPreviousVertexHistory {
             final int vertexCount,
             final int indexCount
     ) {
+        final boolean measure = MetalFxMotionTelemetry.enabled();
+        final long cpuStartNanos = measure ? System.nanoTime() : 0L;
         if (!frameOpen || token == null || format == null || topology == null
                 || slices == null || slices.isEmpty() || vertexCount <= 0 || indexCount <= 0) {
             return;
@@ -137,7 +139,8 @@ final class MetalPreviousVertexHistory {
             if (slice == null) {
                 return;
             }
-            buffers.add(slice.byteBuffer());
+            ByteBuffer buffer = slice.byteBuffer();
+            buffers.add(buffer);
         }
         float[] positions = extractPositions(format, buffers, vertexCount);
         if (positions == null) {
@@ -152,6 +155,15 @@ final class MetalPreviousVertexHistory {
                 indexCount
         );
         stageSnapshot(token, signature, positions);
+        if (measure) {
+            long positionBytes = Math.multiplyExact((long) vertexCount, 3L * Float.BYTES);
+            MetalFxMotionTelemetry.recordHistoryCapture(
+                    vertexCount,
+                    positionBytes,
+                    positionBytes,
+                    System.nanoTime() - cpuStartNanos
+            );
+        }
     }
 
     static void stageSnapshot(

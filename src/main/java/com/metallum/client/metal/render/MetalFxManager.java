@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -765,6 +766,19 @@ public final class MetalFxManager {
         }
     }
 
+    static void recordFrameGenerationQueued(final long frameId) {
+        recordFrameGenerationQueued();
+        MetalFxMotionTelemetry.recordEncoded(frameId);
+    }
+
+    static void recordFrameGenerationSubmitted(final long frameId) {
+        MetalFxMotionTelemetry.recordSubmitted(frameId);
+    }
+
+    static void recordFrameGenerationCompleted(final long frameId, final boolean success) {
+        MetalFxMotionTelemetry.recordCompleted(frameId, success);
+    }
+
     public static int frameGenerationFramesQueued() {
         MetalFxManager manager = active;
         return manager == null ? 0 : manager.frameGenerationFramesQueued;
@@ -931,6 +945,7 @@ public final class MetalFxManager {
 
     private void beginFrameInternal() {
         reloadConfigIfRequested();
+        MetalFxMotionTelemetry.beginFrame();
         motionEligibility.beginFrame();
         recordFramePacingDiagnostics();
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
@@ -1397,6 +1412,7 @@ public final class MetalFxManager {
                     }
                     previousPositionBuffer = mapped.slice();
                 }
+                MetalFxMotionTelemetry.recordGpuUpload(previousByteCount);
             }
 
             GpuBufferSlice motionUniform;
@@ -1407,6 +1423,7 @@ public final class MetalFxManager {
                 previousFromRaster.get(64, bytes);
                 motionUniform = mapped.slice();
             }
+            MetalFxMotionTelemetry.recordGpuUpload(128L);
             preparedReplays.add(new PreparedObjectMotionReplay(
                     prepared,
                     executeInfo,
@@ -3920,7 +3937,17 @@ public final class MetalFxManager {
         if (frameGenerationEnabled && immediatePresentMode) {
             suspendFrameGenerationInternal("the surface presents in immediate mode (VSync off)");
         }
+        final long frameId = RenderContractRuntime.currentFrameId();
+        final boolean telemetryCandidate = frameGenerationEnabled && !runtimeDisabled;
         if (!motionEligibility.eligible()) {
+            if (telemetryCandidate) {
+                MetalFxMotionTelemetry.recordSourceFrame(
+                        frameId,
+                        false,
+                        motionEligibility.rejectedReasons(),
+                        null
+                );
+            }
             // A real source frame containing geometry without exact previous-position motion must not
             // enter MTLFXFrameInterpolator. Reset the next admitted pair so it cannot bridge across
             // this skipped source frame; MetalFX Temporal still receives its reactive/history masks.
@@ -3928,6 +3955,14 @@ public final class MetalFxManager {
             return null;
         }
         if (!MetalEntityMotionCapture.exactCoverageComplete()) {
+            if (telemetryCandidate) {
+                MetalFxMotionTelemetry.recordSourceFrame(
+                        frameId,
+                        false,
+                        0,
+                        MetalExactMotionCoverage.firstFailureReason()
+                );
+            }
             // Class-level admission is not enough for deforming geometry. The required object must
             // prove that every draw in the current manifest actually encoded an exact previous-
             // position replay. A planned-but-not-encoded motion pass is deliberately insufficient.
@@ -3938,11 +3973,31 @@ public final class MetalFxManager {
                 || sceneOutputTarget == null || frameNativeSceneTexture == null || uiTarget == null
                 || uiTarget.getColorTexture() != presentedUiTexture
                 || frameDepthTexture == null || motionTexture == null || !motionInputsPrepared) {
+            if (telemetryCandidate) {
+                MetalFxMotionTelemetry.recordSourceFrame(
+                        frameId,
+                        false,
+                        0,
+                        "frameGenerationInputUnavailable"
+                );
+            }
             return null;
         }
         GpuTexture sceneTexture = sceneOutputTarget.getColorTexture();
         if (!(sceneTexture instanceof MetalGpuTexture sceneColor)) {
+            if (telemetryCandidate) {
+                MetalFxMotionTelemetry.recordSourceFrame(
+                        frameId,
+                        false,
+                        0,
+                        "sceneColorUnavailable"
+                );
+            }
             return null;
+        }
+        if (telemetryCandidate) {
+            MetalFxMotionTelemetry.recordSourceFrame(frameId, true, 0, null);
+            MetalFxMotionTelemetry.recordRequested(frameId);
         }
         return new FrameGenerationInput(
                 sceneColor,
@@ -3959,7 +4014,8 @@ public final class MetalFxManager {
                 frameFarPlane,
                 displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
                 sceneFrameDeltaSeconds,
-                frameResetForPresent
+                frameResetForPresent,
+                frameId
         );
     }
 
@@ -4001,7 +4057,8 @@ public final class MetalFxManager {
             float farPlane,
             float aspectRatio,
             float deltaSeconds,
-            boolean reset
+            boolean reset,
+            long frameId
     ) {
     }
 

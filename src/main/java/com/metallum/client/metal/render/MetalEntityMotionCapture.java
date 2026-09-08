@@ -503,6 +503,7 @@ public final class MetalEntityMotionCapture {
             return;
         }
         motionDrawsEncoded++;
+        MetalFxMotionTelemetry.recordMotionReplayDraw();
         if (source != null) {
             switch (source.getVertexShader().getPath()) {
                 case "core/item" -> itemMotionDrawsEncoded++;

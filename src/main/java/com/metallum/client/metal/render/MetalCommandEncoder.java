@@ -87,6 +87,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MTLCommandBuffer commandBuffer;
     @Nullable
     private MTLCommandEncoder currentEncoder;
+    private boolean frameGenerationEncodeInCurrentCommandBuffer;
+    private long frameGenerationFrameId;
     private MemorySegment[] renderColorAttachments = new MemorySegment[0];
     private MetalGpuTexture[] renderColorTextures = new MetalGpuTexture[0];
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
@@ -478,13 +480,27 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         List<SubmitCallback> callbacks = List.copyOf(currentSubmitCallbacks);
         currentSubmitCallbacks.clear();
+        boolean frameGenerationSubmit = frameGenerationEncodeInCurrentCommandBuffer;
+        long submittedFrameId = frameGenerationFrameId;
         commandBuffer.commitWithSignal(completedSemaphore);
         for (SubmitCallback callback : callbacks) {
             callback.committed.run();
         }
 
-        inFlight[slot] = new InFlight(currentSubmitIndex, commandBuffer, completedSemaphore, callbacks);
+        if (frameGenerationSubmit) {
+            MetalFxManager.recordFrameGenerationSubmitted(submittedFrameId);
+        }
+        inFlight[slot] = new InFlight(
+                currentSubmitIndex,
+                commandBuffer,
+                completedSemaphore,
+                callbacks,
+                frameGenerationSubmit,
+                submittedFrameId
+        );
         commandBuffer = null;
+        frameGenerationEncodeInCurrentCommandBuffer = false;
+        frameGenerationFrameId = 0L;
         currentSubmitIndex++;
 
         transientMemory.rotate();
@@ -1089,7 +1105,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     fence
             );
             if (queued) {
-                MetalFxManager.recordFrameGenerationQueued();
+                frameGenerationEncodeInCurrentCommandBuffer = true;
+                frameGenerationFrameId = frameInput.frameId();
+                MetalFxManager.recordFrameGenerationQueued(frameInput.frameId());
                 return;
             }
             MetalFxManager.disableFrameGeneration("native frame generation encode failed");
@@ -1923,18 +1941,24 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         private final MTLCommandBuffer buffer;
         private final MemorySegment completedSemaphore;
         private final List<SubmitCallback> callbacks;
+        private final boolean frameGenerationSubmit;
+        private final long frameGenerationFrameId;
         private boolean completionHandled;
 
         private InFlight(
                 final long index,
                 final MTLCommandBuffer buffer,
                 final MemorySegment completedSemaphore,
-                final List<SubmitCallback> callbacks
+                final List<SubmitCallback> callbacks,
+                final boolean frameGenerationSubmit,
+                final long frameGenerationFrameId
         ) {
             this.index = index;
             this.buffer = buffer;
             this.completedSemaphore = completedSemaphore;
             this.callbacks = callbacks;
+            this.frameGenerationSubmit = frameGenerationSubmit;
+            this.frameGenerationFrameId = frameGenerationFrameId;
         }
 
         private void complete() {
@@ -1943,7 +1967,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             }
             completionHandled = true;
             MetalGpuTimingRecorder.record(index, buffer.gpuStartTime(), buffer.gpuEndTime());
-            if (!buffer.completedSuccessfully()) {
+            boolean success = buffer.completedSuccessfully();
+            if (frameGenerationSubmit) {
+                MetalFxManager.recordFrameGenerationCompleted(frameGenerationFrameId, success);
+            }
+            if (!success) {
                 for (SubmitCallback callback : callbacks) {
                     callback.failed.run();
                 }
