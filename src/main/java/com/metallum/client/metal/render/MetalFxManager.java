@@ -3956,8 +3956,7 @@ public final class MetalFxManager {
         MetalNativeBridge.metallum_metalfx_shutdown();
     }
 
-    @Nullable
-    private FrameSynthesisContract.FrameGenerationAdmission frameSynthesisAdmission(
+    private FrameSynthesisContract.@Nullable FrameGenerationAdmission frameSynthesisAdmission(
             final long frameId
     ) {
         if (frameId <= 0L) {
