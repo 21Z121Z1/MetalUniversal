@@ -63,7 +63,7 @@ public final class MetalEntityMotionCapture {
             }
         }
 
-        Sample(
+        public Sample(
                 final long objectId,
                 final long generation,
                 final Matrix4f currentObject,
