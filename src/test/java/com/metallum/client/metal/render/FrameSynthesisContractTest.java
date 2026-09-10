@@ -103,6 +103,36 @@ final class FrameSynthesisContractTest {
     }
 
     @Test
+    void observedBlockEntityWithoutExactReplayIsNotAbsent() {
+        List<FrameSynthesisContract.ProducerReceipt> receipts = completeCoverage(
+                REAL_MOTION,
+                REAL_MOTION
+        );
+        receipts.set(
+                FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES.ordinal(),
+                new FrameSynthesisContract.ProducerReceipt(
+                        FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES,
+                        REACTIVE_ONLY,
+                        1
+                )
+        );
+        FrameSynthesisContract.ProducerCoverageSet observed =
+                new FrameSynthesisContract.ProducerCoverageSet(receipts);
+        assertTrue(observed.temporalEligible());
+        assertFalse(observed.frameGenerationEligible());
+
+        receipts.set(
+                FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES.ordinal(),
+                new FrameSynthesisContract.ProducerReceipt(
+                        FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES,
+                        UNSUPPORTED,
+                        1
+                )
+        );
+        assertFalse(new FrameSynthesisContract.ProducerCoverageSet(receipts).temporalEligible());
+    }
+
+    @Test
     void observedFirstPersonReactiveCoverageRejectsFrameGeneration() {
         List<FrameSynthesisContract.ProducerReceipt> receipts = completeCoverage(
                 REAL_MOTION,
