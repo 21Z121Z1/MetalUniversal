@@ -611,9 +611,19 @@ public final class MetalFxManager {
             // as complete interpolation motion.
             manager.motionEligibility.reject(MetalFxMotionEligibility.MISSING_HISTORY);
         } else {
-            manager.markExactProducerCandidate(
-                    FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT
-            );
+            MetalEntityMotionCapture.Sample sample =
+                    MetalEntityMotionCapture.sampleForState(state);
+            if (sample == null) {
+                manager.observeUnsupportedProducer(
+                        FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT,
+                        "entity-motion-owner-unavailable"
+                );
+            } else {
+                manager.markExactProducerCandidate(
+                        FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT,
+                        sample
+                );
+            }
         }
     }
 
@@ -1479,9 +1489,19 @@ public final class MetalFxManager {
                     FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES, 1
             );
             if (pistonExactCandidates.contains(piston)) {
-                markExactProducerCandidate(
-                        FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES
-                );
+                MetalEntityMotionCapture.Sample sample =
+                        MetalEntityMotionCapture.sampleForSubmit(piston.block);
+                if (sample == null) {
+                    observeUnsupportedProducer(
+                            FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES,
+                            "piston-motion-owner-unavailable"
+                    );
+                } else {
+                    markExactProducerCandidate(
+                            FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES,
+                            sample
+                    );
+                }
             }
             return;
         }
@@ -1527,34 +1547,42 @@ public final class MetalFxManager {
     }
 
     private void markExactProducerCandidate(
-            final FrameSynthesisContract.ProducerDomain domain
+            final FrameSynthesisContract.ProducerDomain domain,
+            final MetalEntityMotionCapture.Sample sample
     ) {
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
                 && !runtimeDisabled
                 && sourceFrameStamp != null
                 && !sourceFrameStampInvalidated
                 && frameSynthesisReceipts.matches(sourceFrameStamp)) {
-            frameSynthesisReceipts.markExactCandidate(domain);
-        }
-    }
-
-    static void markExactParticleProducerCandidate() {
-        MetalFxManager manager = active;
-        if (manager != null) {
-            manager.markExactProducerCandidate(
-                    FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER
+            frameSynthesisReceipts.markExactCandidate(
+                    domain, sample.objectId(), sample.generation()
             );
         }
     }
 
-    static void recordExactMotionEncoded(
-            final FrameSynthesisContract.ProducerDomain domain
+    static void markExactParticleProducerCandidate(
+            final MetalEntityMotionCapture.Sample sample
     ) {
         MetalFxManager manager = active;
-        if (manager != null && manager.sourceFrameStamp != null
+        if (manager != null && sample != null) {
+            manager.markExactProducerCandidate(
+                    FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER,
+                    sample
+            );
+        }
+    }
+
+    static void recordMotionProducerEncoded(
+            final MetalEntityMotionCapture.Sample sample
+    ) {
+        MetalFxManager manager = active;
+        if (manager != null && sample != null && manager.sourceFrameStamp != null
                 && !manager.sourceFrameStampInvalidated
                 && manager.frameSynthesisReceipts.matches(manager.sourceFrameStamp)) {
-            manager.frameSynthesisReceipts.recordExactEncoded(domain);
+            manager.frameSynthesisReceipts.recordMotionEncoded(
+                    sample.domain(), sample.objectId(), sample.generation()
+            );
         }
     }
 
@@ -1763,8 +1791,8 @@ public final class MetalFxManager {
                 );
                 if (exactPreviousPositions) {
                     MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());
-                    recordExactMotionEncoded(replay.sample().domain());
                 }
+                recordMotionProducerEncoded(replay.sample());
                 MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
             }
         }

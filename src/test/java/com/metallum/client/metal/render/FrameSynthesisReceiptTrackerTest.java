@@ -48,12 +48,31 @@ final class FrameSynthesisReceiptTrackerTest {
         tracker.beginFrame(new FrameSynthesisContract.FrameStamp(13L, 4L));
         tracker.observe(BLOCK_ENTITIES, 1);
         tracker.markExactCandidate(BLOCK_ENTITIES);
-        tracker.recordExactEncoded(BLOCK_ENTITIES);
+        tracker.recordMotionEncoded(BLOCK_ENTITIES);
         assertReceipt(
                 tracker.finalizeFrame(new FrameSynthesisContract.FrameStamp(13L, 4L)).coverage(),
                 BLOCK_ENTITIES,
                 REAL_MOTION,
                 1
+        );
+    }
+
+    @Test
+    void oneOwnerCannotSatisfyAnotherOwnersCandidate() {
+        FrameSynthesisReceiptTracker tracker = new FrameSynthesisReceiptTracker();
+        FrameSynthesisContract.FrameStamp stamp =
+                new FrameSynthesisContract.FrameStamp(19L, 4L);
+        tracker.beginFrame(stamp);
+        tracker.observe(BLOCK_ENTITIES, 2);
+        tracker.markExactCandidate(BLOCK_ENTITIES, 101L, 1L);
+        tracker.markExactCandidate(BLOCK_ENTITIES, 102L, 1L);
+        tracker.recordMotionEncoded(BLOCK_ENTITIES, 101L, 1L);
+        tracker.recordMotionEncoded(BLOCK_ENTITIES, 101L, 1L);
+        assertReceipt(
+                tracker.finalizeFrame(stamp).coverage(),
+                BLOCK_ENTITIES,
+                REACTIVE_ONLY,
+                2
         );
     }
 

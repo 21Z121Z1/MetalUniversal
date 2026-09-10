@@ -183,6 +183,11 @@ public final class MetalEntityMotionCapture {
         return sample != null && sample.hasPrevious();
     }
 
+    @Nullable
+    public static Sample sampleForState(final Object state) {
+        return enabled && state != null ? STATES.get(state) : null;
+    }
+
     /** Marks the actual submitted entity object as requiring exact staged previous positions. */
     public static void requireExactState(final Object state) {
         Sample sample = enabled && state != null ? STATES.get(state) : null;
@@ -364,6 +369,11 @@ public final class MetalEntityMotionCapture {
 
     public static boolean hasMovingBlockOwner(final Object renderState) {
         return enabled && renderState != null && SUBMITS.containsKey(renderState);
+    }
+
+    @Nullable
+    public static Sample sampleForSubmit(final Object submit) {
+        return enabled && submit != null ? SUBMITS.get(submit) : null;
     }
 
     public static void beginMovingBlockBuild(final Object renderState) {

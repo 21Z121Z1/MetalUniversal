@@ -17,10 +17,15 @@ import java.util.Objects;
  * transaction.</p>
  */
 final class FrameSynthesisReceiptTracker {
+    private record OwnerKey(long objectId, long generation) {
+    }
+
     private static final class MutableReceipt {
         int observedSamples;
-        int exactCandidates;
-        int exactEncoded;
+        int anonymousExactCandidates;
+        int anonymousMotionEncoded;
+        final java.util.Set<OwnerKey> exactCandidates = new java.util.HashSet<>();
+        final java.util.Set<OwnerKey> motionEncoded = new java.util.HashSet<>();
         boolean unsupported;
         String unsupportedReason;
 
@@ -91,18 +96,34 @@ final class FrameSynthesisReceiptTracker {
 
     void markExactCandidate(final FrameSynthesisContract.ProducerDomain domain) {
         MutableReceipt receipt = mutable(domain);
-        if (receipt.exactCandidates == Integer.MAX_VALUE) {
+        if (receipt.anonymousExactCandidates == Integer.MAX_VALUE) {
             throw new IllegalStateException("Exact producer candidate count overflow");
         }
-        receipt.exactCandidates++;
+        receipt.anonymousExactCandidates++;
     }
 
-    void recordExactEncoded(final FrameSynthesisContract.ProducerDomain domain) {
+    void recordMotionEncoded(final FrameSynthesisContract.ProducerDomain domain) {
         MutableReceipt receipt = mutable(domain);
-        if (receipt.exactEncoded == Integer.MAX_VALUE) {
-            throw new IllegalStateException("Exact producer encode count overflow");
+        if (receipt.anonymousMotionEncoded == Integer.MAX_VALUE) {
+            throw new IllegalStateException("Producer encode count overflow");
         }
-        receipt.exactEncoded++;
+        receipt.anonymousMotionEncoded++;
+    }
+
+    void markExactCandidate(
+            final FrameSynthesisContract.ProducerDomain domain,
+            final long objectId,
+            final long generation
+    ) {
+        mutable(domain).exactCandidates.add(new OwnerKey(objectId, generation));
+    }
+
+    void recordMotionEncoded(
+            final FrameSynthesisContract.ProducerDomain domain,
+            final long objectId,
+            final long generation
+    ) {
+        mutable(domain).motionEncoded.add(new OwnerKey(objectId, generation));
     }
 
     void invalidateForHistoryDiscontinuity() {
@@ -136,8 +157,7 @@ final class FrameSynthesisReceiptTracker {
                 coverage = FrameSynthesisContract.ProducerCoverage.UNSUPPORTED;
             } else if (receipt.observedSamples == 0) {
                 coverage = FrameSynthesisContract.ProducerCoverage.NOT_PRESENT;
-            } else if (receipt.exactCandidates > 0
-                    && receipt.exactEncoded >= receipt.exactCandidates) {
+            } else if (hasExactCoverage(receipt)) {
                 coverage = FrameSynthesisContract.ProducerCoverage.REAL_MOTION;
             } else {
                 coverage = FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY;
@@ -151,6 +171,15 @@ final class FrameSynthesisReceiptTracker {
                 new FrameSynthesisContract.ProducerCoverageSet(result)
         );
         return finalized;
+    }
+
+    private static boolean hasExactCoverage(final MutableReceipt receipt) {
+        return receipt.anonymousExactCandidates == 0
+                ? !receipt.exactCandidates.isEmpty()
+                && receipt.motionEncoded.containsAll(receipt.exactCandidates)
+                : receipt.anonymousMotionEncoded >= receipt.anonymousExactCandidates
+                && (receipt.exactCandidates.isEmpty()
+                || receipt.motionEncoded.containsAll(receipt.exactCandidates));
     }
 
     void commitSubmittedFrame() {

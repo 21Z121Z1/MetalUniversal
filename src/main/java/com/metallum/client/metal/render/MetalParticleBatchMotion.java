@@ -311,7 +311,7 @@ public final class MetalParticleBatchMotion {
         }
         activeGroup = new ActiveGroup(sample, pendingIndex, plans);
         if (sample.hasPrevious()) {
-            MetalFxManager.markExactParticleProducerCandidate();
+            MetalFxManager.markExactParticleProducerCandidate(sample);
         }
         MetalEntityMotionCapture.beginParticleBatchBuild(sample);
     }
