@@ -4022,7 +4022,8 @@ public final class MetalFxManager {
                     new FrameSynthesisContract.FrameStamp(frameId, historyEpoch),
                     coverage,
                     camera,
-                    frameResetForPresent
+                    frameResetForPresent,
+                    FrameSynthesisContract.ColorEncodingEvidence.UNPROVEN_RGBA8_UNORM_SRGB_VIEW
             );
         } catch (IllegalArgumentException ignored) {
             return null;
