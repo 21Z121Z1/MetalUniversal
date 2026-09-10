@@ -8,6 +8,7 @@ import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerCo
 import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerCoverage.UNSUPPORTED;
 import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES;
 import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerDomain.MODDED_RENDERERS;
+import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER;
 import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerDomain.TRANSPARENCY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -54,6 +55,25 @@ final class FrameSynthesisReceiptTrackerTest {
                 BLOCK_ENTITIES,
                 REAL_MOTION,
                 1
+        );
+    }
+
+    @Test
+    void reactiveWeatherPreventsExactParticleBatchFromOverclaimingCoverage() {
+        FrameSynthesisReceiptTracker tracker = new FrameSynthesisReceiptTracker();
+        FrameSynthesisContract.FrameStamp stamp =
+                new FrameSynthesisContract.FrameStamp(20L, 4L);
+        tracker.beginFrame(stamp);
+        tracker.observe(PARTICLES_WEATHER, 4);
+        tracker.markExactCandidate(PARTICLES_WEATHER, 301L, -1L);
+        tracker.recordMotionEncoded(PARTICLES_WEATHER, 301L, -1L);
+        tracker.observeReactive(PARTICLES_WEATHER, 2);
+
+        assertReceipt(
+                tracker.finalizeFrame(stamp).coverage(),
+                PARTICLES_WEATHER,
+                REACTIVE_ONLY,
+                6
         );
     }
 

@@ -29,6 +29,6 @@ public abstract class CloudRendererMetalFxMixin {
             final float partialTicks,
             final CallbackInfo ci
     ) {
-        MetalFxManager.observeParticlesWeather(1);
+        MetalFxManager.observeReactiveParticlesWeather(1);
     }
 }

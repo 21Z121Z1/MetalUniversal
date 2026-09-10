@@ -21,6 +21,6 @@ public abstract class WeatherEffectRendererMetalFxMixin {
         int samples = renderState == null
                 ? 0
                 : renderState.rainColumns.size() + renderState.snowColumns.size();
-        MetalFxManager.observeParticlesWeather(samples);
+        MetalFxManager.observeReactiveParticlesWeather(samples);
     }
 }

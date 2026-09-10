@@ -27,6 +27,7 @@ final class FrameSynthesisReceiptTracker {
         final java.util.Set<OwnerKey> exactCandidates = new java.util.HashSet<>();
         final java.util.Set<OwnerKey> motionEncoded = new java.util.HashSet<>();
         boolean unsupported;
+        boolean reactiveOnly;
         String unsupportedReason;
 
         void observe(final int samples) {
@@ -40,6 +41,13 @@ final class FrameSynthesisReceiptTracker {
             unsupported = true;
             if (unsupportedReason == null && reason != null && !reason.isBlank()) {
                 unsupportedReason = reason;
+            }
+        }
+
+        void observeReactive(final int samples) {
+            observe(samples);
+            if (samples > 0) {
+                reactiveOnly = true;
             }
         }
     }
@@ -92,6 +100,13 @@ final class FrameSynthesisReceiptTracker {
         MutableReceipt receipt = mutable(domain);
         receipt.observe(samples);
         receipt.markUnsupported(reason);
+    }
+
+    void observeReactive(
+            final FrameSynthesisContract.ProducerDomain domain,
+            final int samples
+    ) {
+        mutable(domain).observeReactive(samples);
     }
 
     void markExactCandidate(final FrameSynthesisContract.ProducerDomain domain) {
@@ -174,6 +189,9 @@ final class FrameSynthesisReceiptTracker {
     }
 
     private static boolean hasExactCoverage(final MutableReceipt receipt) {
+        if (receipt.reactiveOnly) {
+            return false;
+        }
         return receipt.anonymousExactCandidates == 0
                 ? !receipt.exactCandidates.isEmpty()
                 && receipt.motionEncoded.containsAll(receipt.exactCandidates)

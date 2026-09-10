@@ -679,6 +679,22 @@ public final class MetalFxManager {
         }
     }
 
+    /** Records weather/cloud source activity whose previous vertices are not captured exactly. */
+    public static void observeReactiveParticlesWeather(final int samples) {
+        MetalFxManager manager = active;
+        if (manager != null && samples > 0
+                && manager.effectiveMode == MetalFxConfig.Mode.TEMPORAL
+                && !manager.runtimeDisabled
+                && manager.sourceFrameStamp != null
+                && !manager.sourceFrameStampInvalidated
+                && manager.frameSynthesisReceipts.matches(manager.sourceFrameStamp)) {
+            manager.frameSynthesisReceipts.observeReactive(
+                    FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER,
+                    samples
+            );
+        }
+    }
+
     /** Unowned custom geometry has no generic previous-vertex contract and is unsupported. */
     public static void observeModdedRenderer(final int samples) {
         MetalFxManager manager = active;
