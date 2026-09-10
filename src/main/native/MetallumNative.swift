@@ -1780,6 +1780,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var fusedPresentPipeline: MTLRenderPipelineState
     private var motionResamplePipeline: MTLRenderPipelineState
     private var depthResamplePipeline: MTLRenderPipelineState
+    // Depth and motion must be selected from the same source texel when
+    // bounded-input resampling is needed. This combined MRT pipeline applies
+    // the reversed-Z max-depth tie-break and writes that texel's motion.
+    private var motionDepthResamplePipeline: MTLRenderPipelineState
     private var depthResampleState: MTLDepthStencilState
     private var copySampler: MTLSamplerState
     private var inputResampleSampler: MTLSamplerState
@@ -1877,6 +1881,11 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                   device: device,
                   depthFormat: depth.pixelFormat
               ),
+              let motionDepthResamplePipeline = buildMotionDepthResamplePipeline(
+                  device: device,
+                  motionFormat: motion.pixelFormat,
+                  depthFormat: depth.pixelFormat
+              ),
               let depthResampleState = buildDepthResampleState(device: device),
               let copySampler = buildPresentSampler(device: device, filter: .linear),
               let inputResampleSampler = buildPresentSampler(device: device, filter: .nearest),
@@ -1899,6 +1908,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.fusedPresentPipeline = fusedPresentPipeline
         self.motionResamplePipeline = motionResamplePipeline
         self.depthResamplePipeline = depthResamplePipeline
+        self.motionDepthResamplePipeline = motionDepthResamplePipeline
         self.depthResampleState = depthResampleState
         self.copySampler = copySampler
         self.inputResampleSampler = inputResampleSampler
@@ -1936,7 +1946,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                        copyPipeline,
                        fusedPresentPipeline,
                        motionResamplePipeline,
-                       depthResamplePipeline
+                       depthResamplePipeline,
+                       motionDepthResamplePipeline
                    ]
                ),
                let interpolator = Self.makeMetal4FrameInterpolator(
@@ -2334,7 +2345,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             uiColor: textureSet.uiOverlay[0],
             depth: textureSet.depth[0],
             motion: textureSet.motion[0]
-        ), let newCopyPipeline = buildPresentPipeline(device: device, colorFormat: layer.pixelFormat),
+        ), let newMotionDepthResamplePipeline = buildMotionDepthResamplePipeline(
+               device: device,
+               motionFormat: motion.pixelFormat,
+               depthFormat: depth.pixelFormat
+           ),
+           let newCopyPipeline = buildPresentPipeline(device: device, colorFormat: layer.pixelFormat),
            let newFusedPresentPipeline = buildFusedPresentPipeline(
                device: device,
                colorFormat: layer.pixelFormat
@@ -2374,6 +2390,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
         self.copyPipeline = newCopyPipeline
         self.fusedPresentPipeline = newFusedPresentPipeline
+        self.motionDepthResamplePipeline = newMotionDepthResamplePipeline
         metal4Path?.adopt(
             textures: textureSet.scene
                 + textureSet.nativeScene
@@ -2385,7 +2402,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                 newCopyPipeline,
                 newFusedPresentPipeline,
                 motionResamplePipeline,
-                depthResamplePipeline
+                depthResamplePipeline,
+                newMotionDepthResamplePipeline
             ]
         )
         self.copyFormat = layer.pixelFormat
@@ -2403,18 +2421,24 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         destinationDepth: MTLTexture,
         destinationMotion: MTLTexture
     ) -> Bool {
-        let motionPass = MTLRenderPassDescriptor()
-        motionPass.colorAttachments[0].texture = destinationMotion
-        motionPass.colorAttachments[0].loadAction = .dontCare
-        motionPass.colorAttachments[0].storeAction = .store
-        guard let motionEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: motionPass) else {
+        // One render pass owns both outputs. The fragment shader chooses the
+        // nearest source texel by reversed-Z max depth, then reads motion from
+        // that exact texel, so depth/motion cannot disagree at an edge.
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = destinationMotion
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        pass.depthAttachment.texture = destinationDepth
+        pass.depthAttachment.loadAction = .dontCare
+        pass.depthAttachment.storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             return false
         }
-        motionEncoder.label = "Frame Generation Motion Downsample"
-        motionEncoder.setRenderPipelineState(motionResamplePipeline)
-        motionEncoder.setFragmentTexture(sourceMotion, index: 0)
-        motionEncoder.setFragmentSamplerState(inputResampleSampler, index: 0)
-        motionEncoder.setViewport(MTLViewport(
+        encoder.label = "Frame Generation Reversed-Z Depth/Motion Downsample"
+        encoder.setRenderPipelineState(motionDepthResamplePipeline)
+        encoder.setFragmentTexture(sourceDepth, index: 0)
+        encoder.setFragmentTexture(sourceMotion, index: 1)
+        encoder.setViewport(MTLViewport(
             originX: 0.0,
             originY: 0.0,
             width: Double(destinationMotion.width),
@@ -2422,30 +2446,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             znear: 0.0,
             zfar: 1.0
         ))
-        motionEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        motionEncoder.endEncoding()
-
-        let depthPass = MTLRenderPassDescriptor()
-        depthPass.depthAttachment.texture = destinationDepth
-        depthPass.depthAttachment.loadAction = .dontCare
-        depthPass.depthAttachment.storeAction = .store
-        guard let depthEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: depthPass) else {
-            return false
-        }
-        depthEncoder.label = "Frame Generation Reversed-Z Depth Downsample"
-        depthEncoder.setRenderPipelineState(depthResamplePipeline)
-        depthEncoder.setDepthStencilState(depthResampleState)
-        depthEncoder.setFragmentTexture(sourceDepth, index: 0)
-        depthEncoder.setViewport(MTLViewport(
-            originX: 0.0,
-            originY: 0.0,
-            width: Double(destinationDepth.width),
-            height: Double(destinationDepth.height),
-            znear: 0.0,
-            zfar: 1.0
-        ))
-        depthEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        depthEncoder.endEncoding()
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
         return true
     }
 
@@ -2457,62 +2459,38 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         destinationDepth: MTLTexture,
         destinationMotion: MTLTexture
     ) -> Bool {
-        let motionTables = lease.owner.argumentTables(at: lease.slotIndex)
-
-        let motionPass = MTL4RenderPassDescriptor()
-        motionPass.colorAttachments[0].texture = destinationMotion
-        motionPass.colorAttachments[0].loadAction = .dontCare
-        motionPass.colorAttachments[0].storeAction = .store
-        motionPass.renderTargetWidth = destinationMotion.width
-        motionPass.renderTargetHeight = destinationMotion.height
-        guard let motionEncoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: motionPass) else {
+        // Keep Metal 4 equivalent to the Metal 3 bounded-input contract: one
+        // pass selects by reversed-Z max depth and takes motion from that texel.
+        let pass = MTL4RenderPassDescriptor()
+        pass.colorAttachments[0].texture = destinationMotion
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        pass.depthAttachment.texture = destinationDepth
+        pass.depthAttachment.loadAction = .dontCare
+        pass.depthAttachment.storeAction = .store
+        pass.renderTargetWidth = destinationMotion.width
+        pass.renderTargetHeight = destinationMotion.height
+        guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             return false
         }
-        motionEncoder.label = "Frame Generation Motion Downsample (Metal 4)"
-        motionEncoder.barrier(
+        encoder.label = "Frame Generation Reversed-Z Depth/Motion Downsample (Metal 4)"
+        encoder.barrier(
             afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
             beforeStages: .fragment,
             visibilityOptions: .device
         )
-        motionTables.1.setTexture(sourceMotion.gpuResourceID, index: 0)
-        motionTables.1.setSamplerState(inputResampleSampler.gpuResourceID, index: 0)
-        motionEncoder.setArgumentTable(motionTables.1, stages: .fragment)
-        motionEncoder.setRenderPipelineState(motionResamplePipeline)
-        motionEncoder.setViewport(MTLViewport(
+        let tables = lease.owner.argumentTables(at: lease.slotIndex)
+        tables.1.setTexture(sourceDepth.gpuResourceID, index: 0)
+        tables.1.setTexture(sourceMotion.gpuResourceID, index: 1)
+        encoder.setArgumentTable(tables.1, stages: .fragment)
+        encoder.setRenderPipelineState(motionDepthResamplePipeline)
+        encoder.setViewport(MTLViewport(
             originX: 0, originY: 0,
             width: Double(destinationMotion.width), height: Double(destinationMotion.height),
             znear: 0, zfar: 1
         ))
-        motionEncoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
-        motionEncoder.endEncoding()
-
-        let depthPass = MTL4RenderPassDescriptor()
-        depthPass.depthAttachment.texture = destinationDepth
-        depthPass.depthAttachment.loadAction = .dontCare
-        depthPass.depthAttachment.storeAction = .store
-        depthPass.renderTargetWidth = destinationDepth.width
-        depthPass.renderTargetHeight = destinationDepth.height
-        guard let depthEncoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: depthPass) else {
-            return false
-        }
-        let depthTables = lease.owner.argumentTables(at: lease.slotIndex)
-        depthEncoder.label = "Frame Generation Reversed-Z Depth Downsample (Metal 4)"
-        depthEncoder.barrier(
-            afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
-            beforeStages: .fragment,
-            visibilityOptions: .device
-        )
-        depthTables.1.setTexture(sourceDepth.gpuResourceID, index: 0)
-        depthEncoder.setArgumentTable(depthTables.1, stages: .fragment)
-        depthEncoder.setRenderPipelineState(depthResamplePipeline)
-        depthEncoder.setDepthStencilState(depthResampleState)
-        depthEncoder.setViewport(MTLViewport(
-            originX: 0, originY: 0,
-            width: Double(destinationDepth.width), height: Double(destinationDepth.height),
-            znear: 0, zfar: 1
-        ))
-        depthEncoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
-        depthEncoder.endEncoding()
+        encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
         return true
     }
 
@@ -4096,6 +4074,43 @@ private func fullscreenMslSource(flipY: Bool) -> String {
       return out;
     }
 
+    struct MotionDepthResampleOut {
+      float4 motion [[color(0)]];
+      float depth [[depth(any)]];
+    };
+
+    fragment MotionDepthResampleOut metallum_motion_depth_resample_fs(
+      PresentVertexOut in [[stage_in]],
+      depth2d<float, access::read> sourceDepth [[texture(0)]],
+      texture2d<float, access::read> sourceMotion [[texture(1)]]
+    ) {
+      uint2 size = uint2(sourceDepth.get_width(), sourceDepth.get_height());
+      float2 sourcePosition = in.uv * float2(size) - 0.5;
+      uint2 base = uint2(clamp(floor(sourcePosition), float2(0.0), float2(size - 1)));
+      uint2 next = min(base + 1, size - 1);
+      uint2 candidates[4] = {
+        base,
+        uint2(next.x, base.y),
+        uint2(base.x, next.y),
+        next
+      };
+      // Strictly greater preserves the stable base->x->y->diagonal tie order.
+      float selectedDepth = sourceDepth.read(candidates[0]);
+      uint selectedIndex = 0;
+      for (uint index = 1; index < 4; index++) {
+        float candidateDepth = sourceDepth.read(candidates[index]);
+        if (isfinite(candidateDepth)
+            && (!isfinite(selectedDepth) || candidateDepth > selectedDepth)) {
+          selectedDepth = candidateDepth;
+          selectedIndex = index;
+        }
+      }
+      MotionDepthResampleOut out;
+      out.depth = selectedDepth;
+      out.motion = sourceMotion.read(candidates[selectedIndex]);
+      return out;
+    }
+
     fragment float4 metallum_present_composite_fs(
       PresentVertexOut in [[stage_in]],
       texture2d<float> scene [[texture(0)]],
@@ -4315,6 +4330,30 @@ private func buildPresentPipeline(
         return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create present render pipeline: %@", String(describing: error))
+        return nil
+    }
+}
+
+private func buildMotionDepthResamplePipeline(
+    device: MTLDevice,
+    motionFormat: MTLPixelFormat,
+    depthFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    do {
+        let library = try device.makeLibrary(source: presentMslSource(), options: nil)
+        guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
+              let fragmentFunction = library.makeFunction(name: "metallum_motion_depth_resample_fs") else {
+            return nil
+        }
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertexFunction
+        descriptor.fragmentFunction = fragmentFunction
+        descriptor.colorAttachments[0].pixelFormat = motionFormat
+        descriptor.colorAttachments[0].isBlendingEnabled = false
+        descriptor.depthAttachmentPixelFormat = depthFormat
+        return try device.makeRenderPipelineState(descriptor: descriptor)
+    } catch {
+        NSLog("[metallum] Failed to create depth/motion resample pipeline: %@", String(describing: error))
         return nil
     }
 }
