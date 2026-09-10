@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY;
+import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerCoverage.NOT_PRESENT;
 import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerCoverage.REAL_MOTION;
 import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerCoverage.UNSUPPORTED;
 import static com.metallum.client.metal.render.FrameSynthesisContract.ProducerDomain.CAMERA_DEPTH;
@@ -60,6 +61,28 @@ final class FrameSynthesisContractTest {
                 );
         assertFalse(coverage.temporalEligible());
         assertFalse(coverage.frameGenerationEligible());
+    }
+
+    @Test
+    void dynamicCoverageDistinguishesEmptyExactAndObservedMissing() {
+        FrameSynthesisContract.ProducerCoverageSet empty =
+                new FrameSynthesisContract.ProducerCoverageSet(
+                        completeCoverage(REAL_MOTION, NOT_PRESENT)
+                );
+        assertTrue(empty.frameGenerationEligible());
+
+        FrameSynthesisContract.ProducerCoverageSet exact =
+                new FrameSynthesisContract.ProducerCoverageSet(
+                        completeCoverage(REAL_MOTION, REAL_MOTION)
+                );
+        assertTrue(exact.frameGenerationEligible());
+
+        FrameSynthesisContract.ProducerCoverageSet observedButMissing =
+                new FrameSynthesisContract.ProducerCoverageSet(
+                        completeCoverage(REAL_MOTION, REACTIVE_ONLY, 1)
+                );
+        assertTrue(observedButMissing.temporalEligible());
+        assertFalse(observedButMissing.frameGenerationEligible());
     }
 
     @Test
@@ -212,6 +235,14 @@ final class FrameSynthesisContractTest {
             final FrameSynthesisContract.ProducerCoverage cameraCoverage,
             final FrameSynthesisContract.ProducerCoverage dynamicCoverage
     ) {
+        return completeCoverage(cameraCoverage, dynamicCoverage, 0);
+    }
+
+    private static List<FrameSynthesisContract.ProducerReceipt> completeCoverage(
+            final FrameSynthesisContract.ProducerCoverage cameraCoverage,
+            final FrameSynthesisContract.ProducerCoverage dynamicCoverage,
+            final int dynamicSamples
+    ) {
         List<FrameSynthesisContract.ProducerReceipt> receipts = new ArrayList<>();
         for (FrameSynthesisContract.ProducerDomain domain
                 : FrameSynthesisContract.ProducerDomain.values()) {
@@ -220,7 +251,9 @@ final class FrameSynthesisContractTest {
                 case DYNAMIC_CONTENT -> dynamicCoverage;
                 default -> REACTIVE_ONLY;
             };
-            int samples = coverage == REAL_MOTION ? 1 : 0;
+            int samples = domain == FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT
+                    ? dynamicSamples
+                    : coverage == REAL_MOTION ? 1 : 0;
             receipts.add(new FrameSynthesisContract.ProducerReceipt(domain, coverage, samples));
         }
         return receipts;

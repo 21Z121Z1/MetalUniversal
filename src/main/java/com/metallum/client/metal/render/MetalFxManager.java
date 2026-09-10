@@ -3989,7 +3989,14 @@ public final class MetalFxManager {
             return null;
         }
 
-        int dynamicSamples = MetalEntityMotionCapture.diagnostics().motionDrawsEncoded();
+        MetalEntityMotionCapture.Diagnostics dynamicDiagnostics =
+                MetalEntityMotionCapture.diagnostics();
+        int dynamicSamples = dynamicDiagnostics.motionDrawsEncoded();
+        boolean dynamicObserved = dynamicDiagnostics.statesAttached() > 0
+                || dynamicDiagnostics.entitySubmissionsMatched() > 0
+                || dynamicDiagnostics.drawsAttached() > 0
+                || dynamicDiagnostics.executesTransferred() > 0
+                || dynamicDiagnostics.executesConsumed() > 0;
         FrameSynthesisContract.ProducerCoverage cameraCoverage =
                 motionInputsPrepared && frameDepthTexture != null
                         ? FrameSynthesisContract.ProducerCoverage.REAL_MOTION
@@ -3998,7 +4005,9 @@ public final class MetalFxManager {
         FrameSynthesisContract.ProducerCoverage dynamicCoverage =
                 dynamicSamples > 0 && MetalEntityMotionCapture.exactCoverageComplete()
                         ? FrameSynthesisContract.ProducerCoverage.REAL_MOTION
-                        : FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY;
+                        : dynamicObserved
+                        ? FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY
+                        : FrameSynthesisContract.ProducerCoverage.NOT_PRESENT;
         int firstPersonSamples = firstPersonMotionObserved ? 1 : 0;
 
         FrameSynthesisContract.ProducerCoverageSet coverage =

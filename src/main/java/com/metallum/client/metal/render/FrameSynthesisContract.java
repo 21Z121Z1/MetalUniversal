@@ -34,6 +34,11 @@ final class FrameSynthesisContract {
     enum ProducerCoverage {
         REAL_MOTION,
         REACTIVE_ONLY,
+        /**
+         * The domain was not observed in this source frame. This is different
+         * from a present producer whose exact motion was not encoded.
+         */
+        NOT_PRESENT,
         UNSUPPORTED
     }
 
@@ -101,14 +106,20 @@ final class FrameSynthesisContract {
                     return false;
                 }
             }
-            EnumSet<ProducerDomain> realMotion = EnumSet.noneOf(ProducerDomain.class);
+            boolean cameraMotion = false;
+            boolean dynamicContentSafe = false;
             for (ProducerReceipt receipt : receipts) {
-                if (receipt.coverage() == ProducerCoverage.REAL_MOTION) {
-                    realMotion.add(receipt.domain());
+                if (receipt.domain() == ProducerDomain.CAMERA_DEPTH
+                        && receipt.coverage() == ProducerCoverage.REAL_MOTION) {
+                    cameraMotion = true;
+                }
+                if (receipt.domain() == ProducerDomain.DYNAMIC_CONTENT
+                        && (receipt.coverage() == ProducerCoverage.REAL_MOTION
+                        || receipt.coverage() == ProducerCoverage.NOT_PRESENT)) {
+                    dynamicContentSafe = true;
                 }
             }
-            return realMotion.contains(ProducerDomain.CAMERA_DEPTH)
-                    && realMotion.contains(ProducerDomain.DYNAMIC_CONTENT);
+            return cameraMotion && dynamicContentSafe;
         }
     }
 
