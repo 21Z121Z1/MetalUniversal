@@ -1499,7 +1499,8 @@ public final class MetalFxManager {
                 && !runtimeDisabled
                 && samples > 0
                 && sourceFrameStamp != null
-                && !sourceFrameStampInvalidated) {
+                && !sourceFrameStampInvalidated
+                && frameSynthesisReceipts.matches(sourceFrameStamp)) {
             frameSynthesisReceipts.observe(domain, samples);
         }
     }
@@ -1519,7 +1520,8 @@ public final class MetalFxManager {
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
                 && !runtimeDisabled
                 && sourceFrameStamp != null
-                && !sourceFrameStampInvalidated) {
+                && !sourceFrameStampInvalidated
+                && frameSynthesisReceipts.matches(sourceFrameStamp)) {
             frameSynthesisReceipts.observeUnsupported(domain, samples, reason);
         }
     }
@@ -1530,7 +1532,8 @@ public final class MetalFxManager {
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
                 && !runtimeDisabled
                 && sourceFrameStamp != null
-                && !sourceFrameStampInvalidated) {
+                && !sourceFrameStampInvalidated
+                && frameSynthesisReceipts.matches(sourceFrameStamp)) {
             frameSynthesisReceipts.markExactCandidate(domain);
         }
     }
@@ -1549,7 +1552,8 @@ public final class MetalFxManager {
     ) {
         MetalFxManager manager = active;
         if (manager != null && manager.sourceFrameStamp != null
-                && !manager.sourceFrameStampInvalidated) {
+                && !manager.sourceFrameStampInvalidated
+                && manager.frameSynthesisReceipts.matches(manager.sourceFrameStamp)) {
             manager.frameSynthesisReceipts.recordExactEncoded(domain);
         }
     }
