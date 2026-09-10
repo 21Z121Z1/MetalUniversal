@@ -1,5 +1,15 @@
 import Foundation
 
+private func assertScalerLinkStatusContract() {
+    precondition(MetalFxFrameInterpolatorScalerLinkStatus.unavailable.rawValue == 0)
+    precondition(MetalFxFrameInterpolatorScalerLinkStatus.metal3Linked.isLinked)
+    precondition(MetalFxFrameInterpolatorScalerLinkStatus.metal4Linked.isLinked)
+    precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal3Standalone.isLinked)
+    precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal3LinkRejected.isLinked)
+    precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal4Standalone.isLinked)
+    precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal4LinkRejected.isLinked)
+}
+
 private enum TestFailure: Error, CustomStringConvertible {
     case assertion(String)
 
@@ -303,6 +313,7 @@ private func testPresentedTimeZeroFails() throws {
 private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
+            ("native scaler-link status", assertScalerLinkStatusContract),
             ("bounded-input depth/motion pairing", testBoundedInputUsesDepthWinnerMotion),
             ("display-aware source admission", testAdmissionTracksDisplayActivity),
             ("generated then real", testGeneratedThenReal),

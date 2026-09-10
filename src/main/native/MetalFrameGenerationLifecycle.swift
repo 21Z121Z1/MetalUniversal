@@ -27,6 +27,23 @@ enum MetalFxBoundedInputOracle {
     }
 }
 
+
+/// Telemetry state for the scaler passed to a FrameInterpolator descriptor.
+/// A linked state is only reported after the factory accepted descriptor.scaler.
+enum MetalFxFrameInterpolatorScalerLinkStatus: Int32, Equatable {
+    case unavailable = 0
+    case metal3Linked = 1
+    case metal4Linked = 2
+    case metal3Standalone = 3
+    case metal3LinkRejected = 4
+    case metal4Standalone = 5
+    case metal4LinkRejected = 6
+
+    var isLinked: Bool {
+        self == .metal3Linked || self == .metal4Linked
+    }
+}
+
 enum MetalFrameGenerationAdmissionDecision: Equatable {
     case wait(until: CFTimeInterval)
     case supersede

@@ -283,6 +283,11 @@ public final class MetalNativeBridge {
                             INT, ValueLayout.ADDRESS
                     )
             );
+            metalfxFrameGenerationScalerLinkStatus = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_frame_generation_scaler_link_status",
+                    FunctionDescriptor.of(INT)
+            );
 
             MTLDeviceMaxMemoryAllocationSize = downcall(lookup, "metallum_MTLDevice_maxMemoryAllocationSize", FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
             MTLDeviceMakeCommandQueue = downcall(lookup, "metallum_MTLDevice_makeCommandQueue", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -1230,6 +1235,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle metalfxReleaseScalers;
     private static final MethodHandle metalfxStopFrameGeneration;
     private static final MethodHandle metalfxFrameGenerationEncode;
+    @Nullable
+    private static final MethodHandle metalfxFrameGenerationScalerLinkStatus;
     private static final MethodHandle iosFindSurfaceView; // null on macOS
     private static final MethodHandle iosGetViewMetalLayer; // null on macOS
 
@@ -1743,6 +1750,22 @@ public final class MetalNativeBridge {
             ) != 0;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metalfx_frame_generation_encode", throwable);
+        }
+    }
+
+    /**
+     * Returns native FrameInterpolator scaler-link telemetry. 1/2 mean the
+     * active Metal 3/Metal 4 interpolator accepted descriptor.scaler;
+     * standalone/rejected states remain distinct non-linked values.
+     */
+    public static int metallum_metalfx_frame_generation_scaler_link_status() {
+        if (metalfxFrameGenerationScalerLinkStatus == null) {
+            return 0;
+        }
+        try {
+            return (int) metalfxFrameGenerationScalerLinkStatus.invokeExact();
+        } catch (Throwable ignored) {
+            return 0;
         }
     }
 

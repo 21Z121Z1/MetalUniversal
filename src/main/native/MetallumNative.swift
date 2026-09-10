@@ -1796,6 +1796,16 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     // the Metal 3 one lets the Metal 3 branch stay untouched, at the cost of a
     // second set of MetalFX internal resources on an experimental path.
     private var metal4Interpolator: (any MTL4FXFrameInterpolator)?
+    private var metal3ScalerLinkStatus: MetalFxFrameInterpolatorScalerLinkStatus
+    private var metal4ScalerLinkStatus = MetalFxFrameInterpolatorScalerLinkStatus.unavailable
+
+    /// Status of the interpolator currently selected by the presenter.
+    var activeScalerLinkStatus: MetalFxFrameInterpolatorScalerLinkStatus {
+        if metal4Path != nil, metal4Interpolator != nil {
+            return metal4ScalerLinkStatus
+        }
+        return metal3ScalerLinkStatus
+    }
 
     private var sceneBuffers: [MTLTexture] = []
     private var nativeSceneBuffers: [MTLTexture] = []
@@ -1879,7 +1889,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
               ),
               let depthResampleState = buildDepthResampleState(device: device),
               let copySampler = buildPresentSampler(device: device, filter: .linear),
-              let frameInterpolator = Self.makeFrameInterpolator(
+              let frameInterpolatorCreation = Self.makeFrameInterpolator(
                   device: device,
                   sceneColor: sceneColor,
                   uiColor: uiColor,
@@ -1893,7 +1903,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.layer = layer
         self.presentQueue = presentQueue
         self.readyEvent = readyEvent
-        self.frameInterpolator = frameInterpolator
+        self.frameInterpolator = frameInterpolatorCreation.interpolator
+        self.metal3ScalerLinkStatus = frameInterpolatorCreation.linkStatus
         self.copyPipeline = copyPipeline
         self.fusedPresentPipeline = fusedPresentPipeline
         self.motionDepthResamplePipeline = motionDepthResamplePipeline
@@ -1935,7 +1946,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                        motionDepthResamplePipeline
                    ]
                ),
-               let interpolator = Self.makeMetal4FrameInterpolator(
+               let interpolatorCreation = Self.makeMetal4FrameInterpolator(
                    device: device,
                    sceneColor: sceneColor,
                    uiColor: uiColor,
@@ -1943,7 +1954,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                    motion: motion
                ) {
                 self.metal4Path = path
-                self.metal4Interpolator = interpolator
+                self.metal4Interpolator = interpolatorCreation.interpolator
+                self.metal4ScalerLinkStatus = interpolatorCreation.linkStatus
                 NSLog("[metallum] frame generation present path: Metal 4")
             } else {
                 NSLog("[metallum] Metal 4 present path unavailable; using Metal 3")
@@ -1966,7 +1978,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         ) else {
             return nil
         }
-        guard let workInterpolator = Self.makeFrameInterpolator(
+        guard let workInterpolatorCreation = Self.makeFrameInterpolator(
             device: device,
             sceneColor: sceneBuffers[0],
             uiColor: uiOverlayBuffers[0],
@@ -1975,16 +1987,20 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         ) else {
             return nil
         }
-        self.frameInterpolator = workInterpolator
+        self.frameInterpolator = workInterpolatorCreation.interpolator
+        self.metal3ScalerLinkStatus = workInterpolatorCreation.linkStatus
         if metal4Path != nil {
-            self.metal4Interpolator = Self.makeMetal4FrameInterpolator(
+            if let metal4InterpolatorCreation = Self.makeMetal4FrameInterpolator(
                 device: device,
                 sceneColor: sceneBuffers[0],
                 uiColor: uiOverlayBuffers[0],
                 depth: depthBuffers[0],
                 motion: motionBuffers[0]
-            )
-            if metal4Interpolator == nil {
+            ) {
+                self.metal4Interpolator = metal4InterpolatorCreation.interpolator
+                self.metal4ScalerLinkStatus = metal4InterpolatorCreation.linkStatus
+            } else {
+                self.metal4ScalerLinkStatus = .unavailable
                 self.metal4Path = nil
             }
         }
@@ -2027,7 +2043,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         uiColor: MTLTexture,
         depth: MTLTexture,
         motion: MTLTexture
-    ) -> (any MTLFXFrameInterpolator)? {
+    ) -> (interpolator: any MTLFXFrameInterpolator, linkStatus: MetalFxFrameInterpolatorScalerLinkStatus)? {
         let descriptor = MTLFXFrameInterpolatorDescriptor()
         descriptor.colorTextureFormat = sceneColor.pixelFormat
         descriptor.outputTextureFormat = sceneColor.pixelFormat
@@ -2051,11 +2067,19 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         ) {
             descriptor.scaler = linked
             if let interpolator = descriptor.makeFrameInterpolator(device: device) {
-                return interpolator
+                return (interpolator, .metal3Linked)
             }
+            NSLog("[metallum] Metal 3 FrameInterpolator rejected linked Temporal scaler; using standalone")
             descriptor.scaler = nil
+            guard let interpolator = descriptor.makeFrameInterpolator(device: device) else {
+                return nil
+            }
+            return (interpolator, .metal3LinkRejected)
         }
-        return descriptor.makeFrameInterpolator(device: device)
+        guard let interpolator = descriptor.makeFrameInterpolator(device: device) else {
+            return nil
+        }
+        return (interpolator, .metal3Standalone)
     }
 
     /// MTL4 twin of makeFrameInterpolator. The descriptor fields are identical —
@@ -2072,7 +2096,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         uiColor: MTLTexture,
         depth: MTLTexture,
         motion: MTLTexture
-    ) -> (any MTL4FXFrameInterpolator)? {
+    ) -> (interpolator: any MTL4FXFrameInterpolator, linkStatus: MetalFxFrameInterpolatorScalerLinkStatus)? {
         guard let compiler = NativeState.metal4Compiler(device) else {
             return nil
         }
@@ -2092,11 +2116,19 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         ) {
             descriptor.scaler = linked
             if let interpolator = descriptor.makeFrameInterpolator(device: device, compiler: compiler) {
-                return interpolator
+                return (interpolator, .metal4Linked)
             }
+            NSLog("[metallum] Metal 4 FrameInterpolator rejected linked Metal 3 Temporal scaler; using standalone")
             descriptor.scaler = nil
+            guard let interpolator = descriptor.makeFrameInterpolator(device: device, compiler: compiler) else {
+                return nil
+            }
+            return (interpolator, .metal4LinkRejected)
         }
-        return descriptor.makeFrameInterpolator(device: device, compiler: compiler)
+        guard let interpolator = descriptor.makeFrameInterpolator(device: device, compiler: compiler) else {
+            return nil
+        }
+        return (interpolator, .metal4Standalone)
     }
 
     private func makeTexture(
@@ -2324,7 +2356,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             depthHeight: inputHeight,
             motionWidth: inputWidth,
             motionHeight: inputHeight
-        ), let newInterpolator = Self.makeFrameInterpolator(
+        ), let newInterpolatorCreation = Self.makeFrameInterpolator(
             device: device,
             sceneColor: textureSet.scene[0],
             uiColor: textureSet.uiOverlay[0],
@@ -2352,24 +2384,27 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             depthFormat: depth.pixelFormat,
             motionFormat: motion.pixelFormat
         )
-        self.frameInterpolator = newInterpolator
+        self.frameInterpolator = newInterpolatorCreation.interpolator
+        self.metal3ScalerLinkStatus = newInterpolatorCreation.linkStatus
         // The MTL4 interpolator is format-bound the same way, so a resize has to
         // rebuild it too. Failing here disables the Metal 4 present path for the
         // rest of the session rather than failing the resize: the Metal 3 branch
         // is always a valid fallback, and metal4Path is what present() dispatches
         // on, so both must be cleared together.
         if metal4Path != nil {
-            if let rebuilt = Self.makeMetal4FrameInterpolator(
+            if let rebuiltCreation = Self.makeMetal4FrameInterpolator(
                 device: device,
                 sceneColor: textureSet.scene[0],
                 uiColor: textureSet.uiOverlay[0],
                 depth: textureSet.depth[0],
                 motion: textureSet.motion[0]
             ) {
-                self.metal4Interpolator = rebuilt
+                self.metal4Interpolator = rebuiltCreation.interpolator
+                self.metal4ScalerLinkStatus = rebuiltCreation.linkStatus
             } else {
-                NSLog("[metallum] Metal 4 interpolator rebuild failed after resize; reverting to Metal 3 present")
+                NSLog("[metallum] Metal 4 interpolator rebuild failed after resize; reverting to Metal 3 present (scaler link unavailable)")
                 self.metal4Interpolator = nil
+                self.metal4ScalerLinkStatus = .unavailable
                 self.metal4Path = nil
             }
         }
@@ -7371,6 +7406,16 @@ public func metallum_metalfx_release_scalers() {
     NativeState.metalFxPreviousDepthValid.removeAll()
     NativeState.metalFxHistoryLock.unlock()
     #endif
+}
+
+@_cdecl("metallum_metalfx_frame_generation_scaler_link_status")
+public func metallumMetalFxFrameGenerationScalerLinkStatus() -> Int32 {
+    #if os(macOS) && canImport(MetalFX)
+    if #available(macOS 26.0, *) {
+        return NativeState.frameGenerationPresenter?.activeScalerLinkStatus.rawValue ?? 0
+    }
+    #endif
+    return 0
 }
 
 @_cdecl("metallum_metalfx_shutdown")

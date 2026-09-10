@@ -214,6 +214,7 @@ public final class MetalFxManager {
     private long temporalScalerEncodeCount;
     private boolean temporalScalerEncodeThisFrame;
     private boolean frameGenerationTemporalScalerLinkObserved;
+    private int frameGenerationTemporalScalerLinkStatus;
     private boolean frameGenerationEncodeObserved;
     // True when this source frame submitted first-person geometry. The current
     // hand path has no trusted previous local vertices for swing/bob/equip, so
@@ -777,6 +778,15 @@ public final class MetalFxManager {
         if (manager != null) {
             manager.frameGenerationFramesQueued++;
             manager.frameGenerationEncodeObserved = true;
+            // The native presenter is created by the encode call above. Read
+            // its post-factory status now; a Java-side Temporal encode alone
+            // cannot prove descriptor.scaler was accepted.
+            manager.frameGenerationTemporalScalerLinkStatus =
+                    MetalNativeBridge.metallum_metalfx_frame_generation_scaler_link_status();
+            manager.frameGenerationTemporalScalerLinkObserved =
+                    manager.temporalScalerEncodeThisFrame
+                            && (manager.frameGenerationTemporalScalerLinkStatus == 1
+                            || manager.frameGenerationTemporalScalerLinkStatus == 2);
         }
     }
 
@@ -816,6 +826,22 @@ public final class MetalFxManager {
     public static boolean frameGenerationTemporalScalerLinked() {
         MetalFxManager manager = active;
         return manager != null && manager.frameGenerationTemporalScalerLinkObserved;
+    }
+
+    public static String frameGenerationTemporalScalerLinkStatus() {
+        MetalFxManager manager = active;
+        if (manager == null) {
+            return "unavailable";
+        }
+        return switch (manager.frameGenerationTemporalScalerLinkStatus) {
+            case 1 -> "metal3-linked";
+            case 2 -> "metal4-linked";
+            case 3 -> "metal3-standalone";
+            case 4 -> "metal3-link-rejected";
+            case 5 -> "metal4-standalone";
+            case 6 -> "metal4-link-rejected";
+            default -> "unavailable";
+        };
     }
 
     public static void addTransparencyReactivePass(final FrameGraphBuilder frame, final LevelTargetBundle targets) {
@@ -4133,12 +4159,6 @@ public final class MetalFxManager {
             // fail-closed until the texture-view/composition contract is proven.
             frameResetForPresent = true;
             return null;
-        }
-        if (temporalScalerEncodeThisFrame) {
-            // This receipt ties the source frame admitted to the presenter to the
-            // Temporal encode that produced its scene target. A historical scaler
-            // encode is insufficient evidence for a new FrameGen source.
-            frameGenerationTemporalScalerLinkObserved = true;
         }
         if (telemetryCandidate) {
             MetalFxMotionTelemetry.recordSourceFrame(frameId, true, 0, null);
