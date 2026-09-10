@@ -52,11 +52,30 @@ public final class MetalEntityMotionCapture {
             long objectId,
             long generation,
             Matrix4f currentObject,
-            @Nullable Matrix4f previousObject
+            @Nullable Matrix4f previousObject,
+            FrameSynthesisContract.ProducerDomain domain
     ) {
         public Sample {
             currentObject = new Matrix4f(currentObject);
             previousObject = previousObject == null ? null : new Matrix4f(previousObject);
+            if (domain == null) {
+                throw new NullPointerException("domain");
+            }
+        }
+
+        Sample(
+                final long objectId,
+                final long generation,
+                final Matrix4f currentObject,
+                @Nullable final Matrix4f previousObject
+        ) {
+            this(
+                    objectId,
+                    generation,
+                    currentObject,
+                    previousObject,
+                    FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT
+            );
         }
 
         @Override
@@ -325,6 +344,11 @@ public final class MetalEntityMotionCapture {
 
     public static void beginModelBuild(final Object submit) {
         beginBuild(submit, false);
+    }
+
+    /** Returns whether a custom submit still resolves to a real entity owner before its build. */
+    public static boolean hasModelSubmitOwner(final Object submit) {
+        return enabled && submit != null && SUBMITS.containsKey(submit);
     }
 
     public static void beginItemBuild(final Object submit) {

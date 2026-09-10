@@ -74,7 +74,8 @@ public final class MetalSyntheticExactMotion {
                 objectId,
                 generation,
                 identity,
-                hasPrevious ? identity : null
+                hasPrevious ? identity : null,
+                FrameSynthesisContract.ProducerDomain.FIRST_PERSON
         );
         MetalEntityMotionCapture.attachState(state, sample);
         MetalEntityMotionCapture.requireExactState(state);

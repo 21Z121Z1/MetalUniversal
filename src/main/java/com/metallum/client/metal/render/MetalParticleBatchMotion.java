@@ -200,6 +200,7 @@ public final class MetalParticleBatchMotion {
         if (!frameOpen || state == null || particleCount <= 0) {
             return;
         }
+        MetalFxManager.observeParticlesWeather(particleCount);
         int captured = capturedCount(state);
         if (INVALID_STATES.contains(state) || captured != particleCount) {
             INVALID_STATES.add(state);
@@ -309,6 +310,9 @@ public final class MetalParticleBatchMotion {
             return;
         }
         activeGroup = new ActiveGroup(sample, pendingIndex, plans);
+        if (sample.hasPrevious()) {
+            MetalFxManager.markExactParticleProducerCandidate();
+        }
         MetalEntityMotionCapture.beginParticleBatchBuild(sample);
     }
 
@@ -333,7 +337,8 @@ public final class MetalParticleBatchMotion {
                 particleObjectId(ordinal),
                 generation,
                 identity,
-                hasPrevious ? identity : null
+                hasPrevious ? identity : null,
+                FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER
         );
     }
 

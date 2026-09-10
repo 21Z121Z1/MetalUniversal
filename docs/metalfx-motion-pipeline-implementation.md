@@ -60,6 +60,34 @@ Validity is independent from the vector:
 - invalid, non-finite or implausible object motion is rejected and does not
   override the camera fallback.
 
+### Frame-local producer receipts
+
+Frame Generation admission now consumes a receipt transaction opened for the
+same finalized source-frame stamp `(frameId, historyEpoch)`. The transaction is
+fed at Minecraft 26.2 source boundaries, not by target allocation or stale
+diagnostic counters:
+
+- `BlockEntityRenderDispatcher.submit` observes every block-entity state. The
+  piston moving-block state can become `REAL_MOTION` only when its staged
+  previous geometry is encoded; other block-entity families are
+  `UNSUPPORTED`.
+- Actual particle-state submissions and weather columns contribute
+  `PARTICLES_WEATHER` activity. Exact particle batch identity is promoted to
+  real coverage only after its previous staged draw is encoded.
+- Translucent feature groups contribute activity only while
+  `PreparedFrame.executeTranslucent` is running. Custom geometry with no
+  entity owner is observed as `UNSUPPORTED` because no generic previous-vertex
+  producer exists; owner-bound custom draws continue through the exact staged
+  path and fail closed if that path cannot prove them.
+- A domain with no source observation is `NOT_PRESENT`; observed activity whose
+  exact replay is not proven is `REACTIVE_ONLY`. Neither state is inferred
+  from an allocated target.
+
+Receipt mutation is discarded for a failed encode, and committed only from
+the successful temporal command-buffer callback. Any history reset invalidates
+the open stamp, so a receipt cannot be finalized against a different source
+frame or a post-reset texture set.
+
 ## Connected ordinary-entity producer
 
 The first vertical slice is connected to the Minecraft 26.2 ordinary entity
@@ -176,14 +204,14 @@ transforms and compared numerically. The artifact is
 | Ordinary entities | real current/previous transform, motion + validity MRT | automated client GPU readback |
 | Ordinary entity feature renderers | captured by the staged entity path where they use the connected buffers | source + integration coverage; not exhaustive per feature |
 | Vehicles and dropped items | may traverse ordinary entity rendering, but no dedicated acceptance cases | incomplete |
-| Block entities | camera fallback/reactive only | not implemented |
+| Block entities | piston staged state can report exact motion; observed non-piston state is unsupported and fails closed | source + unit contract; no hosted GPU receipt |
 | First-person hand/item | world depth is preserved before hand; no reliable hand motion producer | not implemented |
 | Vanilla/Sodium static terrain | camera-from-depth fallback | automated camera-motion readback |
 | CPU/vertex-animated content | conservative rejection only | not implemented |
 | Cutout foliage | exact post-discard MRT coverage, jitter/scale-bounded dilation, max-merged reactive mask; no animation motion | automated client GPU readback (frames 74/82) |
-| Particles/weather/clouds | graded source-target reactive policy | reactive only |
-| Water/glass/translucency | reactive/history rejection where source targets exist | reactive only |
-| Mod/custom shader paths | fail closed unless they satisfy the indexed backend contract | compatibility only |
+| Particles/weather/clouds | source-frame column/particle/draw activity; exact particle batch only after previous staged encode, otherwise reactive | source + unit contract; no hosted GPU receipt |
+| Water/glass/translucency | actual translucent feature activity is reactive; unsupported custom geometry fails closed | source + unit contract; no hosted GPU receipt |
+| Mod/custom shader paths | unowned custom geometry is unsupported; owner-bound custom draws require the exact staged producer | fail-closed source behavior |
 
 The missing rows are engineering gaps, not environment limitations. For this
 reason `OBJECT_MOTION_PRODUCER_CONNECTED` remains `false`.

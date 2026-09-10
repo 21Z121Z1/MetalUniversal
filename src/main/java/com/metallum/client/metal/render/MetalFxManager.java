@@ -24,6 +24,7 @@ import net.minecraft.client.renderer.LevelTargetBundle;
 import net.minecraft.client.renderer.StagedVertexBuffer;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.blockentity.state.PistonHeadRenderState;
+import net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState;
 import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
@@ -174,6 +175,8 @@ public final class MetalFxManager {
     private final Vector2f pixelJitter = new Vector2f();
     private final Vector2f clipJitter = new Vector2f();
     private final MetalMotionStateStore motionStateStore = new MetalMotionStateStore();
+    private final FrameSynthesisReceiptTracker frameSynthesisReceipts =
+            new FrameSynthesisReceiptTracker();
     private final MetalFxMotionEligibility motionEligibility = new MetalFxMotionEligibility();
     private final Map<Entity, Long> entityGenerations = new IdentityHashMap<>();
     private final Map<PistonMovingBlockEntity, PistonMotionGeneration> pistonGenerations = new IdentityHashMap<>();
@@ -228,6 +231,13 @@ public final class MetalFxManager {
     // still consume its reactive/history inputs.
     private boolean firstPersonMotionObserved;
     private long historyEpoch = 1L;
+    private long sourceFrameSequence;
+    @Nullable
+    private FrameSynthesisContract.FrameStamp sourceFrameStamp;
+    private boolean sourceFrameStampInvalidated;
+    private final Set<PistonHeadRenderState> pistonExactCandidates =
+            java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    private boolean transparencyPhase;
     private boolean reactiveMaskPrepared;
     private boolean cutoutReactivePassObserved;
     private boolean cutoutReactivePrepared;
@@ -568,9 +578,24 @@ public final class MetalFxManager {
         }
         int incompleteReason = MetalFxMotionEligibility.incompleteEntityReason(state);
         if (incompleteReason != 0) {
+            if ((incompleteReason & MetalFxMotionEligibility.UNKNOWN_ENTITY) != 0) {
+                manager.observeUnsupportedProducer(
+                        FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT,
+                        "unknown-entity-render-state"
+                );
+            } else {
+                manager.observeProducer(
+                        FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT,
+                        1
+                );
+            }
             manager.motionEligibility.reject(incompleteReason);
             return;
         }
+        manager.observeProducer(
+                FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT,
+                1
+        );
         boolean requiresExactPreviousPositions =
                 MetalFxMotionEligibility.requiresExactPreviousPositions(state);
         if (requiresExactPreviousPositions) {
@@ -585,6 +610,74 @@ public final class MetalFxManager {
             // predecessor. Never reinterpret objectCurrentToPrevious's Temporal identity fallback
             // as complete interpolation motion.
             manager.motionEligibility.reject(MetalFxMotionEligibility.MISSING_HISTORY);
+        } else {
+            manager.markExactProducerCandidate(
+                    FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT
+            );
+        }
+    }
+
+    /**
+     * Observes one real block-entity state at the Minecraft dispatcher submit
+     * boundary.  The piston state is the only block-entity family with a
+     * source-faithful staged motion producer in 26.2; all other states remain
+     * explicitly unsupported rather than being mislabeled as absent.
+     */
+    public static void observeBlockEntity(final BlockEntityRenderState state) {
+        MetalFxManager manager = active;
+        if (manager == null || state == null) {
+            return;
+        }
+        manager.observeBlockEntityInternal(state);
+    }
+
+    /** Marks the beginning of the real FeatureRenderDispatcher translucent phase. */
+    public static void beginTransparencyPhase() {
+        MetalFxManager manager = active;
+        if (manager != null) {
+            manager.transparencyPhase = true;
+        }
+    }
+
+    /** Closes the real FeatureRenderDispatcher translucent phase. */
+    public static void endTransparencyPhase() {
+        MetalFxManager manager = active;
+        if (manager != null) {
+            manager.transparencyPhase = false;
+        }
+    }
+
+    /** Records actual feature-group submissions made during the translucent phase. */
+    public static void observeTransparencyActivity(final int samples) {
+        MetalFxManager manager = active;
+        if (manager != null && manager.transparencyPhase && samples > 0) {
+            manager.observeProducer(
+                    FrameSynthesisContract.ProducerDomain.TRANSPARENCY,
+                    samples
+            );
+        }
+    }
+
+    /** Records actual particle/weather source activity, not target allocation. */
+    public static void observeParticlesWeather(final int samples) {
+        MetalFxManager manager = active;
+        if (manager != null && samples > 0) {
+            manager.observeProducer(
+                    FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER,
+                    samples
+            );
+        }
+    }
+
+    /** Unowned custom geometry has no generic previous-vertex contract and is unsupported. */
+    public static void observeModdedRenderer(final int samples) {
+        MetalFxManager manager = active;
+        if (manager != null && samples > 0) {
+            manager.observeUnsupportedProducer(
+                    FrameSynthesisContract.ProducerDomain.MODDED_RENDERERS,
+                    samples,
+                    "custom-geometry-previous-vertex-producer-unavailable"
+            );
         }
     }
 
@@ -597,6 +690,10 @@ public final class MetalFxManager {
         MetalFxManager manager = active;
         if (manager != null) {
             manager.firstPersonMotionObserved = true;
+            manager.observeProducer(
+                    FrameSynthesisContract.ProducerDomain.FIRST_PERSON,
+                    1
+            );
             manager.motionEligibility.reject(MetalFxMotionEligibility.FIRST_PERSON);
         }
     }
@@ -1012,6 +1109,15 @@ public final class MetalFxManager {
 
     private void beginFrameInternal() {
         reloadConfigIfRequested();
+        // A receipt transaction belongs to one source frame only.  A frame that
+        // never reached a successful temporal submission must not leak its
+        // observations into the next frame (especially after a resize or mode
+        // transition).
+        frameSynthesisReceipts.discardFrame();
+        sourceFrameStamp = null;
+        sourceFrameStampInvalidated = false;
+        pistonExactCandidates.clear();
+        transparencyPhase = false;
         MetalFxMotionTelemetry.beginFrame();
         motionEligibility.beginFrame();
         this.firstPersonMotionObserved = false;
@@ -1321,9 +1427,18 @@ public final class MetalFxManager {
             return;
         }
         Matrix4f previousObject = motionStateStore.previous(key);
+        if (previousObject != null) {
+            pistonExactCandidates.add(state);
+        }
         MetalEntityMotionCapture.attachMovingBlockState(
                 state.block,
-                new MetalEntityMotionCapture.Sample(objectId, generation, currentObject, previousObject)
+                new MetalEntityMotionCapture.Sample(
+                        objectId,
+                        generation,
+                        currentObject,
+                        previousObject,
+                        FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES
+                )
         );
         if (previousObject == null) {
             // First visibility, a skipped submitted frame, a reset, or a model/topology transition has
@@ -1337,8 +1452,105 @@ public final class MetalFxManager {
             Matrix4f identity = new Matrix4f();
             MetalEntityMotionCapture.attachMovingBlockState(
                     state.base,
-                    new MetalEntityMotionCapture.Sample(objectId, generation, identity, identity)
+                    new MetalEntityMotionCapture.Sample(
+                            objectId,
+                            generation,
+                            identity,
+                            identity,
+                            FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES
+                    )
             );
+        }
+    }
+
+    private void observeBlockEntityInternal(final BlockEntityRenderState state) {
+        if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled) {
+            return;
+        }
+        if (state instanceof PistonHeadRenderState piston) {
+            // PistonHeadRenderer.submit is a no-op when extraction could not
+            // produce a moved block (air, unloaded level, or an out-of-range
+            // state).  The dispatcher boundary alone is therefore not source
+            // activity; leave this domain NOT_PRESENT for that frame.
+            if (piston.block == null) {
+                return;
+            }
+            observeProducer(
+                    FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES, 1
+            );
+            if (pistonExactCandidates.contains(piston)) {
+                markExactProducerCandidate(
+                        FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES
+                );
+            }
+            return;
+        }
+        observeUnsupportedProducer(
+                FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES,
+                "block-entity-renderer-has-no-previous-transform-contract"
+        );
+    }
+
+    private void observeProducer(
+            final FrameSynthesisContract.ProducerDomain domain,
+            final int samples
+    ) {
+        if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
+                && !runtimeDisabled
+                && samples > 0
+                && sourceFrameStamp != null
+                && !sourceFrameStampInvalidated) {
+            frameSynthesisReceipts.observe(domain, samples);
+        }
+    }
+
+    private void observeUnsupportedProducer(
+            final FrameSynthesisContract.ProducerDomain domain,
+            final String reason
+    ) {
+        observeUnsupportedProducer(domain, 1, reason);
+    }
+
+    private void observeUnsupportedProducer(
+            final FrameSynthesisContract.ProducerDomain domain,
+            final int samples,
+            final String reason
+    ) {
+        if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
+                && !runtimeDisabled
+                && sourceFrameStamp != null
+                && !sourceFrameStampInvalidated) {
+            frameSynthesisReceipts.observeUnsupported(domain, samples, reason);
+        }
+    }
+
+    private void markExactProducerCandidate(
+            final FrameSynthesisContract.ProducerDomain domain
+    ) {
+        if (effectiveMode == MetalFxConfig.Mode.TEMPORAL
+                && !runtimeDisabled
+                && sourceFrameStamp != null
+                && !sourceFrameStampInvalidated) {
+            frameSynthesisReceipts.markExactCandidate(domain);
+        }
+    }
+
+    static void markExactParticleProducerCandidate() {
+        MetalFxManager manager = active;
+        if (manager != null) {
+            manager.markExactProducerCandidate(
+                    FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER
+            );
+        }
+    }
+
+    static void recordExactMotionEncoded(
+            final FrameSynthesisContract.ProducerDomain domain
+    ) {
+        MetalFxManager manager = active;
+        if (manager != null && manager.sourceFrameStamp != null
+                && !manager.sourceFrameStampInvalidated) {
+            manager.frameSynthesisReceipts.recordExactEncoded(domain);
         }
     }
 
@@ -1547,6 +1759,7 @@ public final class MetalFxManager {
                 );
                 if (exactPreviousPositions) {
                     MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());
+                    recordExactMotionEncoded(replay.sample().domain());
                 }
                 MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
             }
@@ -1685,6 +1898,7 @@ public final class MetalFxManager {
                 Metallum.LOGGER.warn("MetalFX temporal frame will fail closed: motion input initialization failed");
             }
         }
+        bindSourceFrameStamp();
         return projectionMatrix;
     }
 
@@ -1886,6 +2100,7 @@ public final class MetalFxManager {
         boolean scalerOutputAccepted = scalerEncodedThisFrame && encoded;
         if (!encoded) {
             this.motionStateStore.discardFrame();
+            this.frameSynthesisReceipts.discardFrame();
             if (frameGenerationEnabled) {
                 // A resize can settle between projection preparation and GUI
                 // composition. The old-size scene cannot be interpolated, but
@@ -1949,6 +2164,7 @@ public final class MetalFxManager {
                 );
                 if (!copied) {
                     this.motionStateStore.discardFrame();
+                    this.frameSynthesisReceipts.discardFrame();
                     disableForSession(renderer, "paused frame-generation scene composition failed");
                     return;
                 }
@@ -1968,15 +2184,18 @@ public final class MetalFxManager {
                         this.previousCameraRelativeViewProjection.set(submittedCameraRelativeViewProjection);
                         this.previousMatrixValid = true;
                         this.motionStateStore.commitSubmittedFrame();
+                        this.frameSynthesisReceipts.commitSubmittedFrame();
                         this.phase = submittedNextPhase;
                     },
                     () -> {
                         this.motionStateStore.discardFrame();
+                        this.frameSynthesisReceipts.discardFrame();
                         resetHistoryInternal("Metal command buffer failed after temporal encode");
                     }
             );
         } else {
             this.motionStateStore.discardFrame();
+            this.frameSynthesisReceipts.discardFrame();
         }
     }
 
@@ -3850,7 +4069,39 @@ public final class MetalFxManager {
         return true;
     }
 
+    /** Opens the source-frame receipt transaction after camera/history gates have settled. */
+    private void bindSourceFrameStamp() {
+        if (effectiveMode != MetalFxConfig.Mode.TEMPORAL
+                || runtimeDisabled
+                || !sceneFrame
+                || sourceFrameStamp != null) {
+            return;
+        }
+        long contractFrameId = RenderContractRuntime.currentFrameId();
+        long frameId;
+        if (contractFrameId > 0L) {
+            sourceFrameSequence = Math.max(sourceFrameSequence, contractFrameId);
+            frameId = contractFrameId;
+        } else {
+            frameId = sourceFrameSequence == Long.MAX_VALUE ? 1L : sourceFrameSequence + 1L;
+            sourceFrameSequence = frameId;
+        }
+        if (frameId <= 0L) {
+            // The contract rejects zero/negative ids.  This is practically
+            // unreachable, but keeping the fallback explicit preserves the
+            // fail-closed invariant across a long-running counter wrap.
+            sourceFrameSequence = 1L;
+            frameId = sourceFrameSequence;
+        }
+        sourceFrameStamp = new FrameSynthesisContract.FrameStamp(frameId, historyEpoch);
+        frameSynthesisReceipts.beginFrame(sourceFrameStamp);
+    }
+
     private void resetHistoryInternal(final String reason) {
+        if (sourceFrameStamp != null) {
+            sourceFrameStampInvalidated = true;
+            frameSynthesisReceipts.invalidateForHistoryDiscontinuity();
+        }
         historyReset = true;
         // Frame stamps must never cross a reset/resize/world transition. Keep
         // the epoch positive even after a very long-lived client wraps long.
@@ -3974,6 +4225,10 @@ public final class MetalFxManager {
         // evict an allocation still referenced by submitted GPU work.
         device.waitForSubmittedGpuWork();
         motionStateStore.reset();
+        frameSynthesisReceipts.reset();
+        sourceFrameStamp = null;
+        sourceFrameStampInvalidated = false;
+        pistonExactCandidates.clear();
         entityGenerations.clear();
         pistonGenerations.clear();
         MetalEntityMotionPipeline.clear();
@@ -4000,61 +4255,41 @@ public final class MetalFxManager {
         if (frameId <= 0L) {
             return null;
         }
+        FrameSynthesisContract.FrameStamp stamp = sourceFrameStamp;
+        if (stamp == null || sourceFrameStampInvalidated || stamp.frameId() != frameId
+                || !frameSynthesisReceipts.matches(stamp)) {
+            return null;
+        }
 
-        MetalEntityMotionCapture.Diagnostics dynamicDiagnostics =
-                MetalEntityMotionCapture.diagnostics();
-        int dynamicSamples = dynamicDiagnostics.motionDrawsEncoded();
-        boolean dynamicObserved = dynamicDiagnostics.statesAttached() > 0
-                || dynamicDiagnostics.entitySubmissionsMatched() > 0
-                || dynamicDiagnostics.drawsAttached() > 0
-                || dynamicDiagnostics.executesTransferred() > 0
-                || dynamicDiagnostics.executesConsumed() > 0;
+        // The camera receipt is owned by this manager because the camera
+        // motion texture and preserved depth are produced by its source-frame
+        // transaction. Every world/auxiliary domain comes from the tracker;
+        // diagnostics counters alone cannot distinguish a stale draw from an
+        // observation in this finalized source frame.
         FrameSynthesisContract.ProducerCoverage cameraCoverage =
                 motionInputsPrepared && frameDepthTexture != null
                         ? FrameSynthesisContract.ProducerCoverage.REAL_MOTION
                         : FrameSynthesisContract.ProducerCoverage.UNSUPPORTED;
         int cameraSamples = cameraCoverage == FrameSynthesisContract.ProducerCoverage.REAL_MOTION ? 1 : 0;
-        FrameSynthesisContract.ProducerCoverage dynamicCoverage =
-                dynamicSamples > 0 && MetalEntityMotionCapture.exactCoverageComplete()
-                        ? FrameSynthesisContract.ProducerCoverage.REAL_MOTION
-                        : dynamicObserved
-                        ? FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY
-                        : FrameSynthesisContract.ProducerCoverage.NOT_PRESENT;
-        int firstPersonSamples = firstPersonMotionObserved ? 1 : 0;
-
-        FrameSynthesisContract.ProducerCoverageSet coverage =
-                new FrameSynthesisContract.ProducerCoverageSet(List.of(
-                        new FrameSynthesisContract.ProducerReceipt(
-                                FrameSynthesisContract.ProducerDomain.CAMERA_DEPTH,
-                                cameraCoverage,
-                                cameraSamples
-                        ),
-                        new FrameSynthesisContract.ProducerReceipt(
-                                FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT,
-                                dynamicCoverage,
-                                dynamicSamples
-                        ),
-                        new FrameSynthesisContract.ProducerReceipt(
-                                FrameSynthesisContract.ProducerDomain.FIRST_PERSON,
-                                FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
-                                firstPersonSamples
-                        ),
-                        new FrameSynthesisContract.ProducerReceipt(
-                                FrameSynthesisContract.ProducerDomain.TRANSPARENCY,
-                                FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
-                                0
-                        ),
-                        new FrameSynthesisContract.ProducerReceipt(
-                                FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER,
-                                FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
-                                0
-                        ),
-                        new FrameSynthesisContract.ProducerReceipt(
-                                FrameSynthesisContract.ProducerDomain.MODDED_RENDERERS,
-                                FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
-                                0
-                        )
+        FrameSynthesisReceiptTracker.Finalized finalized;
+        try {
+            finalized = frameSynthesisReceipts.finalizeFrame(stamp);
+        } catch (IllegalStateException ignored) {
+            return null;
+        }
+        ArrayList<FrameSynthesisContract.ProducerReceipt> receipts =
+                new ArrayList<>(finalized.coverage().receipts().size());
+        for (FrameSynthesisContract.ProducerReceipt receipt : finalized.coverage().receipts()) {
+            if (receipt.domain() == FrameSynthesisContract.ProducerDomain.CAMERA_DEPTH) {
+                receipts.add(new FrameSynthesisContract.ProducerReceipt(
+                        receipt.domain(), cameraCoverage, cameraSamples
                 ));
+            } else {
+                receipts.add(receipt);
+            }
+        }
+        FrameSynthesisContract.ProducerCoverageSet coverage =
+                new FrameSynthesisContract.ProducerCoverageSet(receipts);
         try {
             FrameSynthesisContract.CameraFrameInput camera =
                     new FrameSynthesisContract.CameraFrameInput(
@@ -4066,7 +4301,7 @@ public final class MetalFxManager {
                                     ? sceneFrameDeltaSeconds : 1.0F / 60.0F
                     );
             return new FrameSynthesisContract.FrameGenerationAdmission(
-                    new FrameSynthesisContract.FrameStamp(frameId, historyEpoch),
+                    stamp,
                     coverage,
                     camera,
                     frameResetForPresent,
@@ -4096,7 +4331,36 @@ public final class MetalFxManager {
         if (frameGenerationEnabled && immediatePresentMode) {
             suspendFrameGenerationInternal("the surface presents in immediate mode (VSync off)");
         }
-        final long frameId = RenderContractRuntime.currentFrameId();
+        FrameSynthesisContract.FrameStamp sourceStamp = sourceFrameStamp;
+        if (sourceStamp == null || sourceFrameStampInvalidated) {
+            frameResetForPresent = true;
+            if (frameGenerationEnabled && !runtimeDisabled) {
+                MetalFxMotionTelemetry.recordSourceFrame(
+                        RenderContractRuntime.currentFrameId(),
+                        false,
+                        0,
+                        "sourceFrameStampUnavailable"
+                );
+            }
+            return null;
+        }
+        long runtimeFrameId = RenderContractRuntime.currentFrameId();
+        if (runtimeFrameId > 0L && runtimeFrameId != sourceStamp.frameId()) {
+            frameResetForPresent = true;
+            if (frameGenerationEnabled && !runtimeDisabled) {
+                MetalFxMotionTelemetry.recordSourceFrame(
+                        runtimeFrameId,
+                        false,
+                        0,
+                        "sourceFrameFrameIdDiscontinuity"
+                );
+            }
+            return null;
+        }
+        // Use the stamp captured after projection/history gates settled.  A
+        // runtime frame id that changed between extraction and presentation is
+        // intentionally rejected by frameSynthesisAdmission below.
+        final long frameId = sourceStamp.frameId();
         final boolean telemetryCandidate = frameGenerationEnabled && !runtimeDisabled;
         if (!motionEligibility.eligible()) {
             if (telemetryCandidate) {

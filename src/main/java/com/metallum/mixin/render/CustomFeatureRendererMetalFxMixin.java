@@ -9,10 +9,31 @@ import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.feature.CustomFeatureRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+import java.util.List;
 
 /** Activates the exact owner only for the custom-geometry callback that emits this submit's vertices. */
 @Mixin(CustomFeatureRenderer.class)
 public abstract class CustomFeatureRendererMetalFxMixin {
+    @Inject(method = "buildGroup", at = @At("HEAD"))
+    private void metallum$observeCustomGeometry(
+            final net.minecraft.client.renderer.feature.FeatureFrameContext context,
+            final List<CustomFeatureRenderer.Submit> submits,
+            final CallbackInfo ci
+    ) {
+        int unowned = 0;
+        if (submits != null) {
+            for (CustomFeatureRenderer.Submit submit : submits) {
+                if (submit == null || !MetalEntityMotionCapture.hasModelSubmitOwner(submit.pose())) {
+                    unowned++;
+                }
+            }
+        }
+        MetalFxManager.observeModdedRenderer(unowned);
+    }
+
     @WrapOperation(
             method = "buildGroup",
             at = @At(
