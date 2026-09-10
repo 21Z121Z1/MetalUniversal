@@ -8,118 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  probe:
-    if: "github.event.head_commit.message == 'chore(agent): probe fishing-hook line ABI'"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: agent/metalfx-motion-coverage-26.2
-          fetch-depth: 0
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '25'
-
-      - name: Establish canonical context
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin integration/iris-metal-next:refs/remotes/origin/integration/iris-metal-next
-          python3 scripts/agent/context.py --task 'Probe Minecraft 26.2 Fishing Hook line motion ABI' --claim correctness
-
-      - name: Fetch hash-anchored Minecraft 26.2 client and inspect line shader
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import hashlib, json, pathlib, urllib.request, zipfile
-
-          version='26.2'
-          root=pathlib.Path('/tmp/mc-line-probe')
-          root.mkdir(parents=True, exist_ok=True)
-
-          def fetch(url, path):
-              req=urllib.request.Request(url, headers={'User-Agent':'MetalUniversal-agent-line-abi-probe'})
-              with urllib.request.urlopen(req, timeout=60) as r, path.open('wb') as f:
-                  while True:
-                      b=r.read(1024*1024)
-                      if not b: break
-                      f.write(b)
-
-          def sha1(path):
-              h=hashlib.sha1()
-              with path.open('rb') as f:
-                  for b in iter(lambda:f.read(1024*1024), b''): h.update(b)
-              return h.hexdigest()
-
-          manifest_path=root/'manifest.json'
-          fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json', manifest_path)
-          manifest=json.loads(manifest_path.read_text())
-          meta=next((x for x in manifest['versions'] if x['id']==version), None)
-          if meta is None: raise SystemExit('26.2 missing from Mojang manifest')
-
-          version_path=root/'version.json'
-          fetch(meta['url'], version_path)
-          if sha1(version_path) != meta['sha1']:
-              raise SystemExit('version metadata SHA-1 mismatch')
-          version_json=json.loads(version_path.read_text())
-          client=version_json['downloads']['client']
-
-          jar=root/'client.jar'
-          fetch(client['url'], jar)
-          if sha1(jar) != client['sha1']:
-              raise SystemExit('client SHA-1 mismatch')
-          if client.get('size') and jar.stat().st_size != client['size']:
-              raise SystemExit('client size mismatch')
-
-          candidates=[
-              'assets/minecraft/shaders/core/rendertype_lines.vsh',
-              'assets/minecraft/shaders/core/rendertype_lines.fsh',
-              'assets/minecraft/shaders/include/dynamictransforms.glsl',
-              'assets/minecraft/shaders/include/projection.glsl',
-          ]
-          with zipfile.ZipFile(jar) as z:
-              names=set(z.namelist())
-              print('minecraft_version=', version)
-              print('version_metadata_sha1=', meta['sha1'])
-              print('client_sha1=', client['sha1'])
-              print('client_size=', client.get('size'))
-              for name in candidates:
-                  if name not in names:
-                      print('MISSING', name)
-                      continue
-                  data=z.read(name).decode('utf-8')
-                  print(f'===== BEGIN {name} =====')
-                  print(data)
-                  print(f'===== END {name} =====')
-          PY
-
-      - name: Reprove Fishing Hook renderer and line pipeline contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
-          curl --fail --location --retry 5 --silent --show-error "$BASE/net/minecraft/client/renderer/entity/FishingHookRenderer.java" -o /tmp/FishingHookRenderer.java
-          curl --fail --location --retry 5 --silent --show-error "$BASE/net/minecraft/client/renderer/RenderPipelines.java" -o /tmp/RenderPipelines.java
-          python3 - <<'PY'
-          from pathlib import Path
-          hook=Path('/tmp/FishingHookRenderer.java').read_text()
-          pipes=Path('/tmp/RenderPipelines.java').read_text()
-          for text, needle in [
-              (hook,'submitNodeCollector.submitCustomGeometry(poseStack, RENDER_TYPE'),
-              (hook,'submitNodeCollector.submitCustomGeometry(poseStack, RenderTypes.lines()'),
-              (hook,'for (int i = 0; i < 16; ++i)'),
-              (hook,'.setNormal(stringPose, nx /= length, ny /= length, nz /= length).setLineWidth(width)'),
-              (pipes,'withVertexShader("core/rendertype_lines").withFragmentShader("core/rendertype_lines")'),
-              (pipes,'withVertexBinding(0, DefaultVertexFormat.POSITION_COLOR_NORMAL_LINE_WIDTH)'),
-              (pipes,'withPrimitiveTopology(PrimitiveTopology.LINES)'),
-          ]:
-              if needle not in text:
-                  raise SystemExit(f'26.2 Fishing Hook/line contract changed: {needle}')
-          print('Pinned Minecraft 26.2 Fishing Hook line contracts: PASS')
-          PY
-
   semantic_contracts:
     if: "github.event.head_commit.message == 'chore(agent): run registered MetalFX semantic patch'"
     permissions:
@@ -149,7 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_metalfx_semantic_contracts_20260910_v2.py
+          python3 .github/scripts/apply_metalfx_semantic_contracts_20260911.py
           git diff --check
 
       - name: Verify fail-closed production gates remain closed
@@ -160,7 +48,7 @@ jobs:
           grep -F 'UNPROVEN_RGBA8_UNORM_SRGB_VIEW' src/main/java/com/metallum/client/metal/render/FrameSynthesisContract.java
           grep -F 'MetalSyntheticExactMotion.beginFirstPerson(hand, itemStack);' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
           ! grep -F 'MetalSyntheticExactMotion.beginFirstPerson(hand);' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
-          test "$(grep -c 'descriptor.isAutoExposureEnabled = true' src/main/native/MetallumNative.swift)" -eq 4
+          test "$(grep -c 'descriptor.isAutoExposureEnabled = true' src/main/native/MetallumNative.swift)" -eq 2
           ! grep -F 'descriptor.isAutoExposureEnabled = false' src/main/native/MetallumNative.swift
 
       - name: Compile and test semantic-contract increment
