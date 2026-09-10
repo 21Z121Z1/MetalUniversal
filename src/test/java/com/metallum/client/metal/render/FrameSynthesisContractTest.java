@@ -255,7 +255,11 @@ final class FrameSynthesisContractTest {
             final FrameSynthesisContract.ProducerCoverage cameraCoverage,
             final FrameSynthesisContract.ProducerCoverage dynamicCoverage
     ) {
-        return completeCoverage(cameraCoverage, dynamicCoverage, 0);
+        return completeCoverage(
+                cameraCoverage,
+                dynamicCoverage,
+                dynamicCoverage == REAL_MOTION ? 1 : 0
+        );
     }
 
     private static List<FrameSynthesisContract.ProducerReceipt> completeCoverage(
