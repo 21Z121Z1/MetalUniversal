@@ -1,0 +1,1 @@
+Run the registered semantic-contract patch job from the existing fishing-hook ABI workflow. This trigger only exists to execute the bounded Temporal exposure + first-person lifetime increment on PR #67.
