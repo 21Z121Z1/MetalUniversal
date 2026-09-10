@@ -1780,15 +1780,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var frameInterpolator: any MTLFXFrameInterpolator
     private var copyPipeline: MTLRenderPipelineState
     private var fusedPresentPipeline: MTLRenderPipelineState
-    private var motionResamplePipeline: MTLRenderPipelineState
-    private var depthResamplePipeline: MTLRenderPipelineState
     // Depth and motion must be selected from the same source texel when
     // bounded-input resampling is needed. This combined MRT pipeline applies
     // the reversed-Z max-depth tie-break and writes that texel's motion.
     private var motionDepthResamplePipeline: MTLRenderPipelineState
     private var depthResampleState: MTLDepthStencilState
     private var copySampler: MTLSamplerState
-    private var inputResampleSampler: MTLSamplerState
     private var copyFormat: MTLPixelFormat
     // Metal 4 present path (spec M4), non-nil only when metallum.opt.metal4Present
     // and the capability gate both hold and construction succeeded. Nil means
@@ -1875,14 +1872,6 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                   device: device,
                   colorFormat: layer.pixelFormat
               ),
-              let motionResamplePipeline = buildPresentPipeline(
-                  device: device,
-                  colorFormat: motion.pixelFormat
-              ),
-              let depthResamplePipeline = buildDepthResamplePipeline(
-                  device: device,
-                  depthFormat: depth.pixelFormat
-              ),
               let motionDepthResamplePipeline = buildMotionDepthResamplePipeline(
                   device: device,
                   motionFormat: motion.pixelFormat,
@@ -1890,7 +1879,6 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
               ),
               let depthResampleState = buildDepthResampleState(device: device),
               let copySampler = buildPresentSampler(device: device, filter: .linear),
-              let inputResampleSampler = buildPresentSampler(device: device, filter: .nearest),
               let frameInterpolator = Self.makeFrameInterpolator(
                   device: device,
                   sceneColor: sceneColor,
@@ -1908,12 +1896,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.frameInterpolator = frameInterpolator
         self.copyPipeline = copyPipeline
         self.fusedPresentPipeline = fusedPresentPipeline
-        self.motionResamplePipeline = motionResamplePipeline
-        self.depthResamplePipeline = depthResamplePipeline
         self.motionDepthResamplePipeline = motionDepthResamplePipeline
         self.depthResampleState = depthResampleState
         self.copySampler = copySampler
-        self.inputResampleSampler = inputResampleSampler
         self.copyFormat = layer.pixelFormat
         self.outputWidth = sceneColor.width
         self.outputHeight = sceneColor.height
@@ -1947,8 +1932,6 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                    pipelines: [
                        copyPipeline,
                        fusedPresentPipeline,
-                       motionResamplePipeline,
-                       depthResamplePipeline,
                        motionDepthResamplePipeline
                    ]
                ),
@@ -2403,8 +2386,6 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             pipelines: [
                 newCopyPipeline,
                 newFusedPresentPipeline,
-                motionResamplePipeline,
-                depthResamplePipeline,
                 newMotionDepthResamplePipeline
             ]
         )
@@ -2438,6 +2419,9 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         }
         encoder.label = "Frame Generation Reversed-Z Depth/Motion Downsample"
         encoder.setRenderPipelineState(motionDepthResamplePipeline)
+        // The MRT fragment writes depth(any); bind the write-enabled state
+        // explicitly because the encoder's default is not a contract.
+        encoder.setDepthStencilState(depthResampleState)
         encoder.setFragmentTexture(sourceDepth, index: 0)
         encoder.setFragmentTexture(sourceMotion, index: 1)
         encoder.setViewport(MTLViewport(
@@ -2486,6 +2470,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         tables.1.setTexture(sourceMotion.gpuResourceID, index: 1)
         encoder.setArgumentTable(tables.1, stages: .fragment)
         encoder.setRenderPipelineState(motionDepthResamplePipeline)
+        // Keep Metal 4's depth(any) attachment contract identical to Metal 3.
+        encoder.setDepthStencilState(depthResampleState)
         encoder.setViewport(MTLViewport(
             originX: 0, originY: 0,
             width: Double(destinationMotion.width), height: Double(destinationMotion.height),
@@ -4059,27 +4045,6 @@ private func fullscreenMslSource(flipY: Bool) -> String {
       return tex.sample(smp, in.uv);
     }
 
-    struct DepthResampleOut {
-      float depth [[depth(any)]];
-    };
-
-    fragment DepthResampleOut metallum_depth_resample_fs(
-      PresentVertexOut in [[stage_in]],
-      depth2d<float, access::read> tex [[texture(0)]]
-    ) {
-      uint2 size = uint2(tex.get_width(), tex.get_height());
-      float2 sourcePosition = in.uv * float2(size) - 0.5;
-      uint2 base = uint2(clamp(floor(sourcePosition), float2(0.0), float2(size - 1)));
-      uint2 next = min(base + 1, size - 1);
-      DepthResampleOut out;
-      // Reversed Z: retain the nearest covered surface in the source footprint.
-      out.depth = max(
-        max(tex.read(base), tex.read(uint2(next.x, base.y))),
-        max(tex.read(uint2(base.x, next.y)), tex.read(next))
-      );
-      return out;
-    }
-
     struct MotionDepthResampleOut {
       float4 motion [[color(0)]];
       float depth [[depth(any)]];
@@ -4360,27 +4325,6 @@ private func buildMotionDepthResamplePipeline(
         return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
         NSLog("[metallum] Failed to create depth/motion resample pipeline: %@", String(describing: error))
-        return nil
-    }
-}
-
-private func buildDepthResamplePipeline(
-    device: MTLDevice,
-    depthFormat: MTLPixelFormat
-) -> MTLRenderPipelineState? {
-    do {
-        let library = try device.makeLibrary(source: presentMslSource(), options: nil)
-        guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
-              let fragmentFunction = library.makeFunction(name: "metallum_depth_resample_fs") else {
-            return nil
-        }
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = vertexFunction
-        descriptor.fragmentFunction = fragmentFunction
-        descriptor.depthAttachmentPixelFormat = depthFormat
-        return try device.makeRenderPipelineState(descriptor: descriptor)
-    } catch {
-        NSLog("[metallum] Failed to create depth-resample pipeline: %@", String(describing: error))
         return nil
     }
 }

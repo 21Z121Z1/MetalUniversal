@@ -468,6 +468,35 @@ tasks.register("compileMetalFrameGenerationLifecycleTest", Exec) {
 		"src/test/native/MetalFrameGenerationLifecycleTest.swift"
 }
 
+tasks.register("metalFrameGenerationResampleContractTest") {
+	group = "verification"
+	description = "Checks paired depth/motion resampling binds an explicit depth-write state on Metal 3 and Metal 4."
+	inputs.file("src/main/native/MetallumNative.swift")
+	doLast {
+		def source = file("src/main/native/MetallumNative.swift").getText("UTF-8")
+		def metal3Start = source.indexOf("private func encodeResampledFrameGenerationInputs(")
+		def metal4Start = source.indexOf("@available(macOS 26.0, *)\n    private func encodeResampledFrameGenerationInputsMetal4(")
+		if (metal3Start < 0 || metal4Start < 0 || metal4Start <= metal3Start) {
+			throw new GradleException("Paired resample encoder bodies are missing")
+		}
+		def metal3Body = source.substring(metal3Start, metal4Start)
+		def metal4Body = source.substring(metal4Start)
+		def binding = "setDepthStencilState(depthResampleState)"
+		if (metal3Body.count(binding) != 1 || metal4Body.count(binding) != 1) {
+			throw new GradleException(
+					"Metal 3 and Metal 4 paired resample passes must each bind depthResampleState exactly once"
+			)
+		}
+		["motionResamplePipeline", "depthResamplePipeline", "inputResampleSampler",
+		 "buildDepthResamplePipeline", "metallum_depth_resample_fs"].each { deadSymbol ->
+			if (source.contains(deadSymbol)) {
+				throw new GradleException("Dead independent resample symbol remains: " + deadSymbol)
+			}
+		}
+		logger.lifecycle("MetalFX paired depth/motion resample contract: PASS")
+	}
+}
+
 tasks.register("metalFrameGenerationLifecycleTest", Exec) {
 	onlyIf {
 		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
@@ -864,6 +893,7 @@ tasks.register("metalIrisShaderTranslationTest", Test) {
 }
 
 tasks.named("check") {
+	dependsOn "metalFrameGenerationResampleContractTest"
 	dependsOn "verifyIsolatedClientProfiles"
 	dependsOn "metalFrameGenerationLifecycleTest"
 	dependsOn "metalMrtBackendIntegrationTest"
