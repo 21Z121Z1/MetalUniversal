@@ -2225,8 +2225,15 @@ public final class MetalFxManager {
             Matrix4f submittedCameraRelativeViewProjection =
                     new Matrix4f(this.currentCameraRelativeViewProjection);
             int submittedNextPhase = (phase + 1) % phaseCount;
+            FrameSynthesisContract.FrameStamp submittedSourceStamp = sourceFrameStamp;
             encoder.onCurrentSubmit(
                     () -> {
+                        // Completion callbacks can be delayed until an in-flight slot is
+                        // reclaimed. Never let an old command buffer commit/discard the
+                        // receipt transaction opened for a newer source frame.
+                        if (this.sourceFrameStamp != submittedSourceStamp) {
+                            return;
+                        }
                         this.historyReset = false;
                         this.previousViewProjection.set(submittedViewProjection);
                         this.previousCameraRelativeViewProjection.set(submittedCameraRelativeViewProjection);
@@ -2244,6 +2251,9 @@ public final class MetalFxManager {
                         this.phase = submittedNextPhase;
                     },
                     () -> {
+                        if (this.sourceFrameStamp != submittedSourceStamp) {
+                            return;
+                        }
                         this.motionStateStore.discardFrame();
                         this.frameSynthesisReceipts.discardFrame();
                         resetHistoryInternal("Metal command buffer failed after temporal encode");
