@@ -111,6 +111,60 @@ final class FrameSynthesisContractTest {
     }
 
     @Test
+    void unprovenColorEncodingKeepsFrameGenerationClosed() {
+        FrameSynthesisContract.ProducerCoverageSet coverage =
+                new FrameSynthesisContract.ProducerCoverageSet(List.of(
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.CAMERA_DEPTH,
+                                FrameSynthesisContract.ProducerCoverage.REAL_MOTION,
+                                1
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT,
+                                FrameSynthesisContract.ProducerCoverage.REAL_MOTION,
+                                1
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.FIRST_PERSON,
+                                FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
+                                0
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.TRANSPARENCY,
+                                FrameSynthesisContract.ProducerCoverage.REAL_MOTION,
+                                1
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER,
+                                FrameSynthesisContract.ProducerCoverage.REAL_MOTION,
+                                1
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.MODDED_RENDERERS,
+                                FrameSynthesisContract.ProducerCoverage.REAL_MOTION,
+                                1
+                        )
+                ));
+        FrameSynthesisContract.FrameGenerationAdmission admission =
+                new FrameSynthesisContract.FrameGenerationAdmission(
+                        new FrameSynthesisContract.FrameStamp(1L, 1L),
+                        coverage,
+                        new FrameSynthesisContract.CameraFrameInput(
+                                70.0F,
+                                0.05F,
+                                1_000.0F,
+                                16.0F / 9.0F,
+                                1.0F / 60.0F
+                        ),
+                        false
+                );
+
+        assertTrue(coverage.frameGenerationEligible());
+        assertFalse(admission.colorContractProven());
+        assertFalse(admission.frameGenerationEligible());
+    }
+
+    @Test
     void realMotionReceiptRequiresSamples() {
         assertThrows(
                 IllegalArgumentException.class,

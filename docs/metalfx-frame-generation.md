@@ -21,6 +21,12 @@ passes the source frame's jitter and camera values. A matrix ABI can only be
 added in a separately availability-gated macOS 27 path after the SDK header and
 column-major `simd_float4x4` semantics are verified.
 
+The current color contract is also fail-closed: production FrameGen
+admission records RGBA8_UNORM storage with an unproven sRGB/linear view and
+rejects it. It will not infer linear Temporal input, post-tonemap FrameGen
+input, or premultiplied UI composition from a storage enum alone. Those
+semantics require an explicit texture-view contract before opening the gate.
+
 The current path treats jitter as a pixel-space offset in the range required by
 the shader contract and uses the same jitter for Temporal and FrameInterpolator
 for that source frame. History resets and source-frame stamps prevent a

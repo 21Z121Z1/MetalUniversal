@@ -4118,6 +4118,21 @@ public final class MetalFxManager {
             frameResetForPresent = true;
             return null;
         }
+        if (!admission.frameGenerationEligible()) {
+            if (telemetryCandidate) {
+                MetalFxMotionTelemetry.recordSourceFrame(
+                        frameId,
+                        false,
+                        0,
+                        "colorEncodingContractUnproven:RGBA8_UNORM_sRGB_view"
+                );
+            }
+            // RGBA8_UNORM storage alone does not establish whether the attached
+            // view decodes sRGB or preserves linear values. Keep FrameGen
+            // fail-closed until the texture-view/composition contract is proven.
+            frameResetForPresent = true;
+            return null;
+        }
         if (temporalScalerEncodeThisFrame) {
             // This receipt ties the source frame admitted to the presenter to the
             // Temporal encode that produced its scene target. A historical scaler

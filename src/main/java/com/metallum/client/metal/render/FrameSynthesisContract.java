@@ -133,6 +133,26 @@ final class FrameSynthesisContract {
         }
     }
 
+    /**
+     * Evidence for the transfer function and composition contract consumed by
+     * Frame Generation. RGBA8_UNORM storage does not prove whether the bound
+     * view applies sRGB decoding or preserves linear values.
+     */
+    enum ColorEncodingEvidence {
+        UNPROVEN_RGBA8_UNORM_SRGB_VIEW(false),
+        LINEAR_TEMPORAL_POST_TONEMAP_FG_PREMULTIPLIED_UI(true);
+
+        private final boolean provenForFrameGeneration;
+
+        ColorEncodingEvidence(boolean provenForFrameGeneration) {
+            this.provenForFrameGeneration = provenForFrameGeneration;
+        }
+
+        boolean provenForFrameGeneration() {
+            return provenForFrameGeneration;
+        }
+    }
+
     record FinalizedMotionFrame(
             FrameStamp stamp,
             MetalGpuTexture depth,
@@ -184,25 +204,55 @@ final class FrameSynthesisContract {
     /**
      * Pure admission decision before texture-view roles are attached.
      *
-     * <p>Color transfer function and consumer-view format are deliberately not
-     * represented here. The current backend cannot yet prove the sRGB view
-     * semantics required by Frame Generation, so that contract belongs in a
-     * separate texture-view change rather than being approximated as base
-     * {@code RGBA8_UNORM} storage.</p>
+     * <p>Color transfer evidence is explicit. The current backend records
+     * {@code RGBA8_UNORM} storage with an unproven sRGB/linear view, so the
+     * Frame Generation gate remains closed until a texture-view contract proves
+     * the transfer function and composition order.</p>
      */
     record FrameGenerationAdmission(
             FrameStamp stamp,
             ProducerCoverageSet producerCoverage,
             CameraFrameInput camera,
-            boolean reset
+            boolean reset,
+            ColorEncodingEvidence colorEncoding
     ) {
         FrameGenerationAdmission {
             Objects.requireNonNull(stamp, "stamp");
             Objects.requireNonNull(producerCoverage, "producerCoverage");
             Objects.requireNonNull(camera, "camera");
+            Objects.requireNonNull(colorEncoding, "colorEncoding");
             if (!producerCoverage.frameGenerationEligible()) {
                 throw new IllegalArgumentException("Producer coverage is incomplete for Frame Generation");
             }
+        }
+
+        /**
+         * Compatibility constructor for pure coverage tests. Production callers
+         * must select the explicit color evidence when the texture-view contract
+         * becomes proven.
+         */
+        FrameGenerationAdmission(
+                FrameStamp stamp,
+                ProducerCoverageSet producerCoverage,
+                CameraFrameInput camera,
+                boolean reset
+        ) {
+            this(
+                    stamp,
+                    producerCoverage,
+                    camera,
+                    reset,
+                    ColorEncodingEvidence.UNPROVEN_RGBA8_UNORM_SRGB_VIEW
+            );
+        }
+
+        boolean frameGenerationEligible() {
+            return producerCoverage.frameGenerationEligible()
+                    && colorEncoding.provenForFrameGeneration();
+        }
+
+        boolean colorContractProven() {
+            return colorEncoding.provenForFrameGeneration();
         }
     }
 
