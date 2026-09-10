@@ -1026,12 +1026,13 @@ tasks.register("minecraftNativeFrameGenerationValidation") {
 	}
 }
 
-// Combined acceptance keeps the production Temporal scaler and FrameGen source
-// admission on one run. It is deliberately separate from the native-direct
-// performance task: nativeDirectFrameGeneration is explicitly forbidden here.
+// Combined diagnostics keep the production Temporal scaler and FrameGen source
+// admission on one run while explicitly recording the unproven color assumption.
+// This is not production acceptance evidence and is separate from the
+// native-direct performance task: nativeDirectFrameGeneration is forbidden here.
 tasks.register("minecraftMetalFxCombinedValidation") {
 	group = "verification"
-	description = "Accepts the production Temporal + FrameGen path with jitter, scaler-link, and presenter evidence."
+	description = "Runs diagnostic Temporal + FrameGen evidence with an explicitly unproven color contract."
 	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
 		dependsOn "runClient"
 	} else {
@@ -1211,6 +1212,9 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 			// Pin the contract explicitly so an inherited JVM property cannot turn
 			// this run into the native-direct benchmark.
 			systemProperty "metallum.metalfx.nativeDirectFrameGeneration", "false"
+			// This is a diagnostic-only color assumption. Production never sets
+			// this property, and its output is marked diagnostic/unproven.
+			systemProperty "metallum.validation.combinedFrameGeneration", "true"
 		}
 		if (nativeFrameGenerationValidationRequested) {
 			systemProperty "metallum.metalfx.nativeDirectFrameGeneration", "true"
@@ -1353,11 +1357,14 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 						: []
 				def temporalEncodes = runState.temporalScalerEncodeCount
 				def result = [
-						status: "measured",
+						status: "diagnostic/unproven",
+						productionAcceptance: false,
 						nativeDirectFrameGeneration: System.getProperty(
 								"metallum.metalfx.nativeDirectFrameGeneration", "false").toBoolean(),
+						colorEncodingContract: runState.frameGenerationColorContract,
 						temporalScalerEncodeCount: temporalEncodes,
 						frameGenerationTemporalScalerLinked: runState.frameGenerationTemporalScalerLinked,
+						frameGenerationTemporalScalerLinkStatus: runState.frameGenerationTemporalScalerLinkStatus,
 						generatedPresentSubmissions: generatedSubmissions,
 						realPresentSubmissions: realSubmissions,
 						nonzeroJitterRecords: jitteredRecords.size(),
@@ -1367,11 +1374,17 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				def failures = []
 				if (runState.status != "passed") failures << "run status=${runState.status}"
 				if (result.nativeDirectFrameGeneration) failures << "nativeDirectFrameGeneration must be false"
+				if (result.colorEncodingContract != "diagnostic/unproven") {
+					failures << "combined run did not record diagnostic/unproven color contract"
+				}
 				if (!(temporalEncodes instanceof Number) || temporalEncodes <= 0) {
 					failures << "Temporal scaler encoded ${temporalEncodes ?: 0} frames"
 				}
 				if (runState.frameGenerationTemporalScalerLinked != true) {
 					failures << "FrameGen source was not linked to a same-frame Temporal encode"
+				}
+				if (!(result.frameGenerationTemporalScalerLinkStatus in ["metal3-linked", "metal4-linked"])) {
+					failures << "native scaler link status=${result.frameGenerationTemporalScalerLinkStatus}"
 				}
 				if (!(runState.frameGenerationFramesQueued instanceof Number)
 						|| runState.frameGenerationFramesQueued <= 0) {
@@ -1384,15 +1397,17 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 					failures << "presenter submissions generated=${generatedSubmissions}, real=${realSubmissions}"
 				}
 				if (jitteredRecords.isEmpty()) failures << "timeline recorded only zero jitter"
-				result.status = failures.isEmpty() ? "passed" : "failed"
+				result.status = failures.isEmpty() ? "diagnostic/unproven" : "failed"
 				file("${validationOutputDir}/combined-frame-generation.json").setText(
 						new groovy.json.JsonBuilder(result).toPrettyString() + "\n", "UTF-8")
 				if (!failures.isEmpty()) {
 					throw new GradleException(
-							"Combined Temporal + FrameGen acceptance failed: " + failures.join("; "))
+							"Combined Temporal + FrameGen diagnostic evidence failed: " + failures.join("; "))
 				}
 				logger.lifecycle(
-						"Combined Temporal + FrameGen acceptance PASS: Temporal encodes=${temporalEncodes}, "
+						"Combined Temporal + FrameGen DIAGNOSTIC ONLY (unproven color): "
+							+ "Temporal encodes=${temporalEncodes}, "
+							+ "native link=${result.frameGenerationTemporalScalerLinkStatus}, "
 							+ "generated/real submissions=${generatedSubmissions}/${realSubmissions}, "
 							+ "nonzero jitter records=${jitteredRecords.size()}")
 				return
