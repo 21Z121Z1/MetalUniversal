@@ -45,6 +45,7 @@ final class FrameSynthesisContract {
     enum ProducerDomain {
         CAMERA_DEPTH,
         DYNAMIC_CONTENT,
+        BLOCK_ENTITIES,
         FIRST_PERSON,
         TRANSPARENCY,
         PARTICLES_WEATHER,
@@ -108,6 +109,7 @@ final class FrameSynthesisContract {
             }
             boolean cameraMotion = false;
             boolean dynamicContentSafe = false;
+            boolean blockEntitiesSafe = false;
             for (ProducerReceipt receipt : receipts) {
                 if (receipt.domain() == ProducerDomain.CAMERA_DEPTH
                         && receipt.coverage() == ProducerCoverage.REAL_MOTION) {
@@ -118,8 +120,13 @@ final class FrameSynthesisContract {
                         || receipt.coverage() == ProducerCoverage.NOT_PRESENT)) {
                     dynamicContentSafe = true;
                 }
+                if (receipt.domain() == ProducerDomain.BLOCK_ENTITIES
+                        && (receipt.coverage() == ProducerCoverage.REAL_MOTION
+                        || receipt.coverage() == ProducerCoverage.NOT_PRESENT)) {
+                    blockEntitiesSafe = true;
+                }
             }
-            return cameraMotion && dynamicContentSafe;
+            return cameraMotion && dynamicContentSafe && blockEntitiesSafe;
         }
     }
 

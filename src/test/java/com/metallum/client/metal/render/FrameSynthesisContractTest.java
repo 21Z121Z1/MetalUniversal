@@ -148,6 +148,11 @@ final class FrameSynthesisContractTest {
                                 1
                         ),
                         new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES,
+                                FrameSynthesisContract.ProducerCoverage.NOT_PRESENT,
+                                0
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
                                 FrameSynthesisContract.ProducerDomain.FIRST_PERSON,
                                 FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
                                 0
@@ -273,7 +278,7 @@ final class FrameSynthesisContractTest {
             FrameSynthesisContract.ProducerCoverage coverage = switch (domain) {
                 case CAMERA_DEPTH -> cameraCoverage;
                 case DYNAMIC_CONTENT -> dynamicCoverage;
-                default -> REACTIVE_ONLY;
+                default -> NOT_PRESENT;
             };
             int samples = domain == FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT
                     ? dynamicSamples
