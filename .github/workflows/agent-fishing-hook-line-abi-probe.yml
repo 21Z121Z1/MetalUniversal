@@ -149,7 +149,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_metalfx_semantic_contracts_20260910.py
+          python3 .github/scripts/apply_metalfx_semantic_contracts_20260910_v2.py
           git diff --check
 
       - name: Verify fail-closed production gates remain closed
