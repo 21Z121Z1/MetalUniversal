@@ -80,6 +80,37 @@ final class FrameSynthesisContractTest {
     }
 
     @Test
+    void observedFirstPersonReactiveCoverageRejectsFrameGeneration() {
+        List<FrameSynthesisContract.ProducerReceipt> receipts = completeCoverage(
+                REAL_MOTION,
+                REAL_MOTION
+        );
+        receipts.set(
+                FrameSynthesisContract.ProducerDomain.FIRST_PERSON.ordinal(),
+                new FrameSynthesisContract.ProducerReceipt(
+                        FrameSynthesisContract.ProducerDomain.FIRST_PERSON,
+                        REACTIVE_ONLY,
+                        1
+                )
+        );
+        FrameSynthesisContract.ProducerCoverageSet coverage =
+                new FrameSynthesisContract.ProducerCoverageSet(receipts);
+        assertTrue(coverage.temporalEligible());
+        assertFalse(coverage.frameGenerationEligible());
+
+        receipts.set(
+                FrameSynthesisContract.ProducerDomain.FIRST_PERSON.ordinal(),
+                new FrameSynthesisContract.ProducerReceipt(
+                        FrameSynthesisContract.ProducerDomain.FIRST_PERSON,
+                        REAL_MOTION,
+                        1
+                )
+        );
+        assertTrue(new FrameSynthesisContract.ProducerCoverageSet(receipts)
+                .frameGenerationEligible());
+    }
+
+    @Test
     void realMotionReceiptRequiresSamples() {
         assertThrows(
                 IllegalArgumentException.class,
