@@ -4392,7 +4392,7 @@ public final class MetalFxManager {
                         runtimeFrameId,
                         false,
                         0,
-                        "sourceFrameFrameIdDiscontinuity"
+                        "sourceFrameIdDiscontinuity"
                 );
             }
             return null;
