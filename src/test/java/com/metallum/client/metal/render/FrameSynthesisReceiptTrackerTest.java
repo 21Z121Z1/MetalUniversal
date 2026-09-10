@@ -59,6 +59,22 @@ final class FrameSynthesisReceiptTrackerTest {
     }
 
     @Test
+    void candidateEventCannotBeMisclassifiedAsAbsent() {
+        FrameSynthesisReceiptTracker tracker = new FrameSynthesisReceiptTracker();
+        FrameSynthesisContract.FrameStamp stamp =
+                new FrameSynthesisContract.FrameStamp(21L, 4L);
+        tracker.beginFrame(stamp);
+        tracker.markExactCandidate(BLOCK_ENTITIES, 401L, 1L);
+
+        assertReceipt(
+                tracker.finalizeFrame(stamp).coverage(),
+                BLOCK_ENTITIES,
+                REACTIVE_ONLY,
+                1
+        );
+    }
+
+    @Test
     void reactiveWeatherPreventsExactParticleBatchFromOverclaimingCoverage() {
         FrameSynthesisReceiptTracker tracker = new FrameSynthesisReceiptTracker();
         FrameSynthesisContract.FrameStamp stamp =

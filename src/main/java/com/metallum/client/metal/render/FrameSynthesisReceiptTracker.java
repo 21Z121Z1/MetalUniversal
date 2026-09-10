@@ -37,6 +37,12 @@ final class FrameSynthesisReceiptTracker {
             observedSamples = Math.addExact(observedSamples, samples);
         }
 
+        void ensureObserved() {
+            if (observedSamples == 0) {
+                observedSamples = 1;
+            }
+        }
+
         void markUnsupported(final String reason) {
             unsupported = true;
             if (unsupportedReason == null && reason != null && !reason.isBlank()) {
@@ -111,6 +117,7 @@ final class FrameSynthesisReceiptTracker {
 
     void markExactCandidate(final FrameSynthesisContract.ProducerDomain domain) {
         MutableReceipt receipt = mutable(domain);
+        receipt.ensureObserved();
         if (receipt.anonymousExactCandidates == Integer.MAX_VALUE) {
             throw new IllegalStateException("Exact producer candidate count overflow");
         }
@@ -119,6 +126,7 @@ final class FrameSynthesisReceiptTracker {
 
     void recordMotionEncoded(final FrameSynthesisContract.ProducerDomain domain) {
         MutableReceipt receipt = mutable(domain);
+        receipt.ensureObserved();
         if (receipt.anonymousMotionEncoded == Integer.MAX_VALUE) {
             throw new IllegalStateException("Producer encode count overflow");
         }
@@ -130,7 +138,9 @@ final class FrameSynthesisReceiptTracker {
             final long objectId,
             final long generation
     ) {
-        mutable(domain).exactCandidates.add(new OwnerKey(objectId, generation));
+        MutableReceipt receipt = mutable(domain);
+        receipt.ensureObserved();
+        receipt.exactCandidates.add(new OwnerKey(objectId, generation));
     }
 
     void recordMotionEncoded(
@@ -138,7 +148,9 @@ final class FrameSynthesisReceiptTracker {
             final long objectId,
             final long generation
     ) {
-        mutable(domain).motionEncoded.add(new OwnerKey(objectId, generation));
+        MutableReceipt receipt = mutable(domain);
+        receipt.ensureObserved();
+        receipt.motionEncoded.add(new OwnerKey(objectId, generation));
     }
 
     void invalidateForHistoryDiscontinuity() {
