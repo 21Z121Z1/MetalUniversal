@@ -47,6 +47,10 @@ public final class MetalSyntheticExactMotion {
      * @return the sample used for the hand, or {@code null} when no safe transaction can be opened
      */
     public static MetalEntityMotionCapture.@Nullable Sample beginFirstPerson(final InteractionHand hand) {
+        // The current renderer does not prove previous vertices for the complete
+        // swing/bob/equip pose. Keep Frame Generation fail-closed even if this
+        // synthetic owner is invoked inside a future frame transaction.
+        MetalFxManager.observeFirstPersonMotion();
         if (!frameOpen || hand == null || Boolean.TRUE.equals(FIRST_PERSON_ACTIVE.get())) {
             // Nested/unframed ownership would make capture attribution ambiguous. Keep the legacy
             // whole-frame rejection for this impossible/changed-source-contract case.

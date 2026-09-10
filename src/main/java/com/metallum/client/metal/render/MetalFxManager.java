@@ -212,6 +212,12 @@ public final class MetalFxManager {
     private boolean loggedFirstSuccessfulFrame;
     private boolean metalFxScalerEncodeObserved;
     private boolean frameGenerationEncodeObserved;
+    // True when this source frame submitted first-person geometry. The current
+    // hand path has no trusted previous local vertices for swing/bob/equip, so
+    // this observation is a hard Frame Generation admission veto. Temporal can
+    // still consume its reactive/history inputs.
+    private boolean firstPersonMotionObserved;
+    private long historyEpoch = 1L;
     private boolean reactiveMaskPrepared;
     private boolean cutoutReactivePassObserved;
     private boolean cutoutReactivePrepared;
@@ -572,10 +578,17 @@ public final class MetalFxManager {
         }
     }
 
-    /** First-person geometry has no exact previous local pose yet; reject only frame interpolation. */
+    /**
+     * Records first-person geometry for this source frame. Its swing/bob/equip
+     * pose has no trusted previous local-vertex stream yet, so this is a
+     * deliberate Frame Generation veto; Temporal remains enabled.
+     */
     public static void observeFirstPersonMotion() {
         MetalFxManager manager = active;
-        if (manager != null) manager.motionEligibility.reject(MetalFxMotionEligibility.FIRST_PERSON);
+        if (manager != null) {
+            manager.firstPersonMotionObserved = true;
+            manager.motionEligibility.reject(MetalFxMotionEligibility.FIRST_PERSON);
+        }
     }
 
     /** Quad particles store only the current extracted pose; reactive Temporal handling remains enabled. */
@@ -945,6 +958,7 @@ public final class MetalFxManager {
         reloadConfigIfRequested();
         MetalFxMotionTelemetry.beginFrame();
         motionEligibility.beginFrame();
+        this.firstPersonMotionObserved = false;
         recordFramePacingDiagnostics();
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
             this.sceneFrame = false;
@@ -3779,6 +3793,9 @@ public final class MetalFxManager {
 
     private void resetHistoryInternal(final String reason) {
         historyReset = true;
+        // Frame stamps must never cross a reset/resize/world transition. Keep
+        // the epoch positive even after a very long-lived client wraps long.
+        historyEpoch = historyEpoch == Long.MAX_VALUE ? 1L : historyEpoch + 1L;
         previousMatrixValid = false;
         previousCameraProjectionValid = false;
         previousCameraPositionValid = false;
@@ -3919,6 +3936,80 @@ public final class MetalFxManager {
     }
 
     @Nullable
+    private FrameSynthesisContract.FrameGenerationAdmission frameSynthesisAdmission(
+            final long frameId
+    ) {
+        if (frameId <= 0L) {
+            return null;
+        }
+
+        int dynamicSamples = MetalEntityMotionCapture.diagnostics().motionDrawsEncoded();
+        FrameSynthesisContract.ProducerCoverage cameraCoverage =
+                motionInputsPrepared && frameDepthTexture != null
+                        ? FrameSynthesisContract.ProducerCoverage.REAL_MOTION
+                        : FrameSynthesisContract.ProducerCoverage.UNSUPPORTED;
+        int cameraSamples = cameraCoverage == FrameSynthesisContract.ProducerCoverage.REAL_MOTION ? 1 : 0;
+        FrameSynthesisContract.ProducerCoverage dynamicCoverage =
+                dynamicSamples > 0 && MetalEntityMotionCapture.exactCoverageComplete()
+                        ? FrameSynthesisContract.ProducerCoverage.REAL_MOTION
+                        : FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY;
+        int firstPersonSamples = firstPersonMotionObserved ? 1 : 0;
+
+        FrameSynthesisContract.ProducerCoverageSet coverage =
+                new FrameSynthesisContract.ProducerCoverageSet(List.of(
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.CAMERA_DEPTH,
+                                cameraCoverage,
+                                cameraSamples
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT,
+                                dynamicCoverage,
+                                dynamicSamples
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.FIRST_PERSON,
+                                FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
+                                firstPersonSamples
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.TRANSPARENCY,
+                                FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
+                                0
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.PARTICLES_WEATHER,
+                                FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
+                                0
+                        ),
+                        new FrameSynthesisContract.ProducerReceipt(
+                                FrameSynthesisContract.ProducerDomain.MODDED_RENDERERS,
+                                FrameSynthesisContract.ProducerCoverage.REACTIVE_ONLY,
+                                0
+                        )
+                ));
+        try {
+            FrameSynthesisContract.CameraFrameInput camera =
+                    new FrameSynthesisContract.CameraFrameInput(
+                            frameFieldOfView,
+                            0.05F,
+                            frameFarPlane,
+                            displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
+                            sceneFrameDeltaSeconds > 0.0F && Float.isFinite(sceneFrameDeltaSeconds)
+                                    ? sceneFrameDeltaSeconds : 1.0F / 60.0F
+                    );
+            return new FrameSynthesisContract.FrameGenerationAdmission(
+                    new FrameSynthesisContract.FrameStamp(frameId, historyEpoch),
+                    coverage,
+                    camera,
+                    frameResetForPresent
+            );
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
+    @Nullable
     private FrameGenerationInput frameGenerationInputInternal(final MetalGpuTexture presentedUiTexture) {
         // Do not let an experimental interpolated frame race a Minecraft screen
         // or overlay. A screen can change every frame while the presenter still
@@ -3993,6 +4084,20 @@ public final class MetalFxManager {
             }
             return null;
         }
+        FrameSynthesisContract.FrameGenerationAdmission admission =
+                frameSynthesisAdmission(frameId);
+        if (admission == null) {
+            if (telemetryCandidate) {
+                MetalFxMotionTelemetry.recordSourceFrame(
+                        frameId,
+                        false,
+                        0,
+                        "frameSynthesisAdmissionRejected"
+                );
+            }
+            frameResetForPresent = true;
+            return null;
+        }
         if (telemetryCandidate) {
             MetalFxMotionTelemetry.recordSourceFrame(frameId, true, 0, null);
             MetalFxMotionTelemetry.recordRequested(frameId);
@@ -4013,7 +4118,8 @@ public final class MetalFxManager {
                 displayHeight > 0 ? (float) displayWidth / displayHeight : 1.0F,
                 sceneFrameDeltaSeconds,
                 frameResetForPresent,
-                frameId
+                frameId,
+                admission
         );
     }
 
@@ -4056,7 +4162,8 @@ public final class MetalFxManager {
             float aspectRatio,
             float deltaSeconds,
             boolean reset,
-            long frameId
+            long frameId,
+            FrameSynthesisContract.FrameGenerationAdmission admission
     ) {
     }
 
