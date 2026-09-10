@@ -3,6 +3,7 @@ package com.metallum.mixin.render;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.metallum.client.metal.render.MetalEntityMotionCapture;
+import com.metallum.client.metal.render.MetalFxManager;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import net.minecraft.client.renderer.SubmitNodeCollector;
