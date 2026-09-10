@@ -89,6 +89,18 @@ final class FrameSynthesisContract {
             if (!temporalEligible()) {
                 return false;
             }
+            // A reactive-only receipt is sufficient for Temporal, but it is not a
+            // safe substitute for first-person swing/bob/equip motion. When the
+            // hand producer was observed in this source frame, interpolation
+            // requires a real previous-vertex sample; otherwise reject the
+            // entire source frame rather than relying on a reactive mask.
+            for (ProducerReceipt receipt : receipts) {
+                if (receipt.domain() == ProducerDomain.FIRST_PERSON
+                        && receipt.samples() > 0
+                        && receipt.coverage() != ProducerCoverage.REAL_MOTION) {
+                    return false;
+                }
+            }
             EnumSet<ProducerDomain> realMotion = EnumSet.noneOf(ProducerDomain.class);
             for (ProducerReceipt receipt : receipts) {
                 if (receipt.coverage() == ProducerCoverage.REAL_MOTION) {
