@@ -1729,6 +1729,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let frameGenerationHeight: Int
         let nativeWidth: Int
         let nativeHeight: Int
+        let jitterX: Float
+        let jitterY: Float
         var sourceGpuStartTime: CFTimeInterval
         var sourceGpuEndTime: CFTimeInterval
         var gpuStartTime: CFTimeInterval
@@ -3684,6 +3686,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameGenerationHeight: sourceFrame?.frameGenerationHeight ?? 0,
             nativeWidth: sourceFrame?.nativeWidth ?? 0,
             nativeHeight: sourceFrame?.nativeHeight ?? 0,
+            jitterX: sourceFrame?.jitterX ?? 0.0,
+            jitterY: sourceFrame?.jitterY ?? 0.0,
             sourceGpuStartTime: sourceTiming?.start ?? 0.0,
             sourceGpuEndTime: sourceTiming?.end ?? 0.0,
             gpuStartTime: 0.0,
@@ -3743,6 +3747,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                     "frameGenerationHeight": diagnostic.frameGenerationHeight,
                     "nativeWidth": diagnostic.nativeWidth,
                     "nativeHeight": diagnostic.nativeHeight,
+                    "jitterX": diagnostic.jitterX,
+                    "jitterY": diagnostic.jitterY,
                     "sourceGpuStartTime": diagnostic.sourceGpuStartTime,
                     "sourceGpuEndTime": diagnostic.sourceGpuEndTime,
                     "gpuStartTime": diagnostic.gpuStartTime,

@@ -198,6 +198,8 @@ tasks.withType(JavaExec).configureEach {
 						|| it.endsWith(":minecraftNativeRenderEfficiencyValidation")
 					|| it == "minecraftNativeFrameGenerationValidation"
 					|| it.endsWith(":minecraftNativeFrameGenerationValidation")
+					|| it == "minecraftMetalFxCombinedValidation"
+					|| it.endsWith(":minecraftMetalFxCombinedValidation")
 		}
 		if (!dedicatedValidation && validationWorld != null && !validationWorld.isBlank()) {
 			args "--quickPlaySingleplayer", validationWorld
@@ -994,6 +996,23 @@ tasks.register("minecraftNativeFrameGenerationValidation") {
 	}
 }
 
+// Combined acceptance keeps the production Temporal scaler and FrameGen source
+// admission on one run. It is deliberately separate from the native-direct
+// performance task: nativeDirectFrameGeneration is explicitly forbidden here.
+tasks.register("minecraftMetalFxCombinedValidation") {
+	group = "verification"
+	description = "Accepts the production Temporal + FrameGen path with jitter, scaler-link, and presenter evidence."
+	if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		dependsOn "runClient"
+	} else {
+		doLast {
+			logger.lifecycle(
+					"minecraftMetalFxCombinedValidation SKIPPED: environment-blocked; macOS Metal and an attended display are required"
+			)
+		}
+	}
+}
+
 def lockedBackpressureValidationRequested = gradle.startParameter.taskNames.any {
 	it == "minecraftMetalFxLockedBackpressureValidation"
 			|| it.endsWith(":minecraftMetalFxLockedBackpressureValidation")
@@ -1034,12 +1053,17 @@ def nativeRenderEfficiencyValidationRequested = gradle.startParameter.taskNames.
 }
 nativeFullscreenBaselineRequested = nativeFullscreenBaselineRequested
 		|| nativeRenderEfficiencyValidationRequested
+def combinedFrameGenerationValidationRequested = gradle.startParameter.taskNames.any {
+	it == "minecraftMetalFxCombinedValidation"
+			|| it.endsWith(":minecraftMetalFxCombinedValidation")
+}
 def nativeFrameGenerationValidationRequested = gradle.startParameter.taskNames.any {
 	it == "minecraftNativeFrameGenerationValidation"
 			|| it.endsWith(":minecraftNativeFrameGenerationValidation")
 }
 if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
-		|| nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested) {
+		|| nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested
+		|| combinedFrameGenerationValidationRequested) {
 	def requestedValidationOutput = System.getProperty("metallum.validation.output")
 	def renderContractTempOutput = null
 	if (renderContractMinecraftValidationRequested && !renderContractPersistRequested
@@ -1053,7 +1077,9 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 					: renderContractMinecraftDiagnoseRequested
 					? file("${buildDir}/render-contract/minecraft-diagnose-current")
 					: file("${buildDir}/metal-validation/"
-			+ (nativeFrameGenerationValidationRequested
+			+ (combinedFrameGenerationValidationRequested
+					? "minecraft-combined-framegen-current"
+					: nativeFrameGenerationValidationRequested
 					? "minecraft-native-framegen-current"
 					: nativeRenderEfficiencyValidationRequested
 					? "minecraft-native-render-efficiency-current"
@@ -1063,12 +1089,16 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 					? "minecraft-client-locked-backpressure-current"
 					: "minecraft-client-current")))
 			: file(requestedValidationOutput)
-	def requestedFrameGeneration = nativeFrameGenerationValidationRequested
+	def requestedFrameGeneration = combinedFrameGenerationValidationRequested
+			? "true"
+			: nativeFrameGenerationValidationRequested
 			? "true"
 			: lockedBackpressureValidationRequested
 			? "true"
 			: System.getProperty("metallum.metalfx.frameGeneration", "false")
-	def requestedObjectMotionProducer = nativeFrameGenerationValidationRequested
+	def requestedObjectMotionProducer = combinedFrameGenerationValidationRequested
+			? "true"
+			: nativeFrameGenerationValidationRequested
 			? "true"
 			: lockedBackpressureValidationRequested
 			? "true"
@@ -1141,6 +1171,17 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				systemProperty "metallum.opt.metal4MainRenderer", System.getProperty(
 						"metallum.opt.metal4MainRenderer", "false")
 			}
+		if (combinedFrameGenerationValidationRequested) {
+			def requestedNativeDirect = System.getProperty(
+					"metallum.metalfx.nativeDirectFrameGeneration", "false")
+			if (requestedNativeDirect.toBoolean()) {
+				throw new GradleException(
+						"Combined Temporal + FrameGen acceptance forbids nativeDirectFrameGeneration=true")
+			}
+			// Pin the contract explicitly so an inherited JVM property cannot turn
+			// this run into the native-direct benchmark.
+			systemProperty "metallum.metalfx.nativeDirectFrameGeneration", "false"
+		}
 		if (nativeFrameGenerationValidationRequested) {
 			systemProperty "metallum.metalfx.nativeDirectFrameGeneration", "true"
 			systemProperty "metallum.opt.metal4", "true"
@@ -1173,6 +1214,12 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				nativeFullscreenBaselineRequested || nativeFrameGenerationValidationRequested
 						? "true"
 						: System.getProperty("metallum.validation.preserveFullscreen", "false")
+		if (combinedFrameGenerationValidationRequested) {
+			// Keep the timeline structured even when MetalFX motion telemetry is
+			// disabled for ordinary play; the combined gate consumes native
+			// generated/real submission records directly.
+			systemProperty "metallum.metalfx.motionTelemetry", "true"
+		}
 		if (requestedFrameGeneration.toBoolean()) {
 			environment "METALLUM_METALFX_PRESENT_DIAGNOSTICS_PATH",
 					file("${validationOutputDir}/frame-generation-timeline.json").absolutePath
@@ -1247,6 +1294,77 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 						baseline.frameIntervalP50Milliseconds, baseline.frameIntervalP95Milliseconds,
 						baseline.gpuP50Milliseconds, baseline.gpuP95Milliseconds,
 						baseline.stable60Fps))
+				return
+			}
+			if (combinedFrameGenerationValidationRequested) {
+				def runStateFile = file("${validationOutputDir}/run-state.json")
+				def timelineFile = file("${validationOutputDir}/frame-generation-timeline.json")
+				if (!runStateFile.isFile() || !timelineFile.isFile()) {
+					throw new GradleException(
+							"Combined Temporal + FrameGen artifacts missing: runState=${runStateFile.isFile()}, timeline=${timelineFile.isFile()}"
+					)
+				}
+				def parser = new groovy.json.JsonSlurper()
+				def runState = parser.parseText(runStateFile.getText("UTF-8"))
+				def timeline = parser.parseText(timelineFile.getText("UTF-8"))
+				def generatedSubmissions = timeline instanceof List
+						? timeline.count { it.frameKind == "generated" && it.outcome == "presented" }
+						: 0
+				def realSubmissions = timeline instanceof List
+						? timeline.count { it.frameKind == "real" && it.outcome == "presented" }
+						: 0
+				def jitteredRecords = timeline instanceof List
+						? timeline.findAll {
+								((it.jitterX instanceof Number && Double.isFinite(it.jitterX as double)
+										&& Math.abs(it.jitterX as double) > 1.0e-6d)
+									|| (it.jitterY instanceof Number && Double.isFinite(it.jitterY as double)
+										&& Math.abs(it.jitterY as double) > 1.0e-6d))
+							}
+						: []
+				def temporalEncodes = runState.temporalScalerEncodeCount
+				def result = [
+						status: "measured",
+						nativeDirectFrameGeneration: System.getProperty(
+								"metallum.metalfx.nativeDirectFrameGeneration", "false").toBoolean(),
+						temporalScalerEncodeCount: temporalEncodes,
+						frameGenerationTemporalScalerLinked: runState.frameGenerationTemporalScalerLinked,
+						generatedPresentSubmissions: generatedSubmissions,
+						realPresentSubmissions: realSubmissions,
+						nonzeroJitterRecords: jitteredRecords.size(),
+						frameGenerationFramesQueued: runState.frameGenerationFramesQueued,
+						frameGenerationEnabledAtCompletion: runState.frameGenerationEnabledAtCompletion
+				]
+				def failures = []
+				if (runState.status != "passed") failures << "run status=${runState.status}"
+				if (result.nativeDirectFrameGeneration) failures << "nativeDirectFrameGeneration must be false"
+				if (!(temporalEncodes instanceof Number) || temporalEncodes <= 0) {
+					failures << "Temporal scaler encoded ${temporalEncodes ?: 0} frames"
+				}
+				if (runState.frameGenerationTemporalScalerLinked != true) {
+					failures << "FrameGen source was not linked to a same-frame Temporal encode"
+				}
+				if (!(runState.frameGenerationFramesQueued instanceof Number)
+						|| runState.frameGenerationFramesQueued <= 0) {
+					failures << "FrameGen queued no source frames"
+				}
+				if (runState.frameGenerationEnabledAtCompletion != true) {
+					failures << "FrameGen was disabled before completion"
+				}
+				if (generatedSubmissions <= 0 || realSubmissions <= 0) {
+					failures << "presenter submissions generated=${generatedSubmissions}, real=${realSubmissions}"
+				}
+				if (jitteredRecords.isEmpty()) failures << "timeline recorded only zero jitter"
+				result.status = failures.isEmpty() ? "passed" : "failed"
+				file("${validationOutputDir}/combined-frame-generation.json").setText(
+						new groovy.json.JsonBuilder(result).toPrettyString() + "\n", "UTF-8")
+				if (!failures.isEmpty()) {
+					throw new GradleException(
+							"Combined Temporal + FrameGen acceptance failed: " + failures.join("; "))
+				}
+				logger.lifecycle(
+						"Combined Temporal + FrameGen acceptance PASS: Temporal encodes=${temporalEncodes}, "
+							+ "generated/real submissions=${generatedSubmissions}/${realSubmissions}, "
+							+ "nonzero jitter records=${jitteredRecords.size()}")
 				return
 			}
 			if (nativeFrameGenerationValidationRequested) {

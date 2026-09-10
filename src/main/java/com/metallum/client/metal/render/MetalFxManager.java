@@ -211,6 +211,9 @@ public final class MetalFxManager {
     private double previousCameraZ;
     private boolean loggedFirstSuccessfulFrame;
     private boolean metalFxScalerEncodeObserved;
+    private long temporalScalerEncodeCount;
+    private boolean temporalScalerEncodeThisFrame;
+    private boolean frameGenerationTemporalScalerLinkObserved;
     private boolean frameGenerationEncodeObserved;
     // True when this source frame submitted first-person geometry. The current
     // hand path has no trusted previous local vertices for swing/bob/equip, so
@@ -800,6 +803,21 @@ public final class MetalFxManager {
         return manager != null && manager.frameGenerationEnabled && !manager.runtimeDisabled;
     }
 
+    /** Number of successful Temporal scaler outputs observed in this manager session. */
+    public static long temporalScalerEncodeCount() {
+        MetalFxManager manager = active;
+        return manager == null ? 0L : manager.temporalScalerEncodeCount;
+    }
+
+    /**
+     * Whether at least one FrameGen source was admitted from the same frame as a
+     * successful Temporal scaler output.
+     */
+    public static boolean frameGenerationTemporalScalerLinked() {
+        MetalFxManager manager = active;
+        return manager != null && manager.frameGenerationTemporalScalerLinkObserved;
+    }
+
     public static void addTransparencyReactivePass(final FrameGraphBuilder frame, final LevelTargetBundle targets) {
         MetalFxManager manager = active;
         if (manager != null) {
@@ -959,6 +977,7 @@ public final class MetalFxManager {
         MetalFxMotionTelemetry.beginFrame();
         motionEligibility.beginFrame();
         this.firstPersonMotionObserved = false;
+        this.temporalScalerEncodeThisFrame = false;
         recordFramePacingDiagnostics();
         if (effectiveMode == MetalFxConfig.Mode.OFF || runtimeDisabled) {
             this.sceneFrame = false;
@@ -1871,6 +1890,8 @@ public final class MetalFxManager {
 
         if (scalerOutputAccepted) {
             this.metalFxScalerEncodeObserved = true;
+            this.temporalScalerEncodeCount++;
+            this.temporalScalerEncodeThisFrame = true;
         }
 
         if (frameGenerationEnabled) {
@@ -4097,6 +4118,12 @@ public final class MetalFxManager {
             }
             frameResetForPresent = true;
             return null;
+        }
+        if (temporalScalerEncodeThisFrame) {
+            // This receipt ties the source frame admitted to the presenter to the
+            // Temporal encode that produced its scene target. A historical scaler
+            // encode is insufficient evidence for a new FrameGen source.
+            frameGenerationTemporalScalerLinkObserved = true;
         }
         if (telemetryCandidate) {
             MetalFxMotionTelemetry.recordSourceFrame(frameId, true, 0, null);
