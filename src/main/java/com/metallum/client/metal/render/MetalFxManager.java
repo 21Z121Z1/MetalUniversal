@@ -232,8 +232,7 @@ public final class MetalFxManager {
     private boolean firstPersonMotionObserved;
     private long historyEpoch = 1L;
     private long sourceFrameSequence;
-    @Nullable
-    private FrameSynthesisContract.FrameStamp sourceFrameStamp;
+    private FrameSynthesisContract.@Nullable FrameStamp sourceFrameStamp;
     private boolean sourceFrameStampInvalidated;
     private final Set<PistonHeadRenderState> pistonExactCandidates =
             java.util.Collections.newSetFromMap(new IdentityHashMap<>());
@@ -382,6 +381,7 @@ public final class MetalFxManager {
             PreparedRenderType prepared,
             StagedVertexBuffer.ExecuteInfo executeInfo,
             GpuBufferSlice dynamicTransforms,
+            MetalEntityMotionCapture.Sample sample,
             GpuBufferSlice motionUniform,
             GpuBufferSlice currentVertexBuffer,
             @Nullable GpuBufferSlice previousPositionBuffer,
@@ -1757,6 +1757,7 @@ public final class MetalFxManager {
                     prepared,
                     executeInfo,
                     replay.dynamicTransforms(),
+                    replay.sample(),
                     motionUniform,
                     currentVertexBuffer,
                     previousPositionBuffer,
