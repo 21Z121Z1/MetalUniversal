@@ -117,6 +117,10 @@ final class FrameSynthesisReceiptTrackerTest {
         assertEquals(next, finalized.stamp());
         assertEquals(finalized, tracker.finalizeFrame(next));
         tracker.commitSubmittedFrame();
+        assertThrows(
+                IllegalStateException.class,
+                () -> tracker.observe(TRANSPARENCY, 1)
+        );
         tracker.beginFrame(new FrameSynthesisContract.FrameStamp(16L, 9L));
     }
 
