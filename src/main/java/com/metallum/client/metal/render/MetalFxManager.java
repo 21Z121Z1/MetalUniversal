@@ -2184,7 +2184,15 @@ public final class MetalFxManager {
                         this.previousCameraRelativeViewProjection.set(submittedCameraRelativeViewProjection);
                         this.previousMatrixValid = true;
                         this.motionStateStore.commitSubmittedFrame();
-                        this.frameSynthesisReceipts.commitSubmittedFrame();
+                        if (this.sourceFrameStampInvalidated) {
+                            // The source render can still seed Temporal history
+                            // after a mid-frame reset, but its receipt belongs to
+                            // the pre-reset stamp and must never be committed as
+                            // authoritative Frame Generation evidence.
+                            this.frameSynthesisReceipts.discardFrame();
+                        } else {
+                            this.frameSynthesisReceipts.commitSubmittedFrame();
+                        }
                         this.phase = submittedNextPhase;
                     },
                     () -> {
