@@ -69,6 +69,12 @@ public final class MetalFxManager {
             Boolean.getBoolean("metallum.metalfx.objectMotionProducer");
     private static final boolean NATIVE_DIRECT_FRAME_GENERATION =
             Boolean.getBoolean("metallum.metalfx.nativeDirectFrameGeneration");
+    // Only the dedicated combined validation run may use the current
+    // unproven RGBA8 view as a diagnostic assumption. Production callers stay
+    // on FrameGenerationAdmission.frameGenerationEligible() fail-closed.
+    private static final boolean COMBINED_DIAGNOSTIC_COLOR_ASSUMPTION =
+            Boolean.getBoolean("metallum.validation.enabled")
+                    && Boolean.getBoolean("metallum.validation.combinedFrameGeneration");
     private static final Vector4f UI_CLEAR = new Vector4f(0.0F);
     private static MetalFxManager active;
     // CAMetalDisplayLink is a vsync-on-only present loop, and every pacing
@@ -826,6 +832,12 @@ public final class MetalFxManager {
     public static boolean frameGenerationTemporalScalerLinked() {
         MetalFxManager manager = active;
         return manager != null && manager.frameGenerationTemporalScalerLinkObserved;
+    }
+
+    public static String frameGenerationColorContract() {
+        return COMBINED_DIAGNOSTIC_COLOR_ASSUMPTION
+                ? "diagnostic/unproven"
+                : "unproven";
     }
 
     public static String frameGenerationTemporalScalerLinkStatus() {
@@ -4058,7 +4070,9 @@ public final class MetalFxManager {
                     coverage,
                     camera,
                     frameResetForPresent,
-                    FrameSynthesisContract.ColorEncodingEvidence.UNPROVEN_RGBA8_UNORM_SRGB_VIEW
+                    COMBINED_DIAGNOSTIC_COLOR_ASSUMPTION
+                            ? FrameSynthesisContract.ColorEncodingEvidence.DIAGNOSTIC_UNPROVEN_RGBA8_UNORM_SRGB_VIEW
+                            : FrameSynthesisContract.ColorEncodingEvidence.UNPROVEN_RGBA8_UNORM_SRGB_VIEW
             );
         } catch (IllegalArgumentException ignored) {
             return null;
@@ -4154,7 +4168,7 @@ public final class MetalFxManager {
             frameResetForPresent = true;
             return null;
         }
-        if (!admission.frameGenerationEligible()) {
+        if (!admission.frameGenerationEligible(COMBINED_DIAGNOSTIC_COLOR_ASSUMPTION)) {
             if (telemetryCandidate) {
                 MetalFxMotionTelemetry.recordSourceFrame(
                         frameId,

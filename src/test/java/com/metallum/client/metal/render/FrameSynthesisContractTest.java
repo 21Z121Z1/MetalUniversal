@@ -185,6 +185,26 @@ final class FrameSynthesisContractTest {
         assertTrue(coverage.frameGenerationEligible());
         assertFalse(admission.colorContractProven());
         assertFalse(admission.frameGenerationEligible());
+        assertFalse(admission.diagnosticColorAssumption());
+
+        FrameSynthesisContract.FrameGenerationAdmission diagnostic =
+                new FrameSynthesisContract.FrameGenerationAdmission(
+                        new FrameSynthesisContract.FrameStamp(2L, 1L),
+                        coverage,
+                        new FrameSynthesisContract.CameraFrameInput(
+                                70.0F,
+                                0.05F,
+                                1_000.0F,
+                                16.0F / 9.0F,
+                                1.0F / 60.0F
+                        ),
+                        false,
+                        FrameSynthesisContract.ColorEncodingEvidence
+                                .DIAGNOSTIC_UNPROVEN_RGBA8_UNORM_SRGB_VIEW
+                );
+        assertTrue(diagnostic.diagnosticColorAssumption());
+        assertFalse(diagnostic.frameGenerationEligible());
+        assertTrue(diagnostic.frameGenerationEligible(true));
     }
 
     @Test

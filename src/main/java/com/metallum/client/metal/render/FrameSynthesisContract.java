@@ -150,17 +150,27 @@ final class FrameSynthesisContract {
      * view applies sRGB decoding or preserves linear values.
      */
     enum ColorEncodingEvidence {
-        UNPROVEN_RGBA8_UNORM_SRGB_VIEW(false),
-        LINEAR_TEMPORAL_POST_TONEMAP_FG_PREMULTIPLIED_UI(true);
+        UNPROVEN_RGBA8_UNORM_SRGB_VIEW(false, false),
+        DIAGNOSTIC_UNPROVEN_RGBA8_UNORM_SRGB_VIEW(false, true),
+        LINEAR_TEMPORAL_POST_TONEMAP_FG_PREMULTIPLIED_UI(true, false);
 
         private final boolean provenForFrameGeneration;
+        private final boolean diagnosticAssumption;
 
-        ColorEncodingEvidence(boolean provenForFrameGeneration) {
+        ColorEncodingEvidence(
+                boolean provenForFrameGeneration,
+                boolean diagnosticAssumption
+        ) {
             this.provenForFrameGeneration = provenForFrameGeneration;
+            this.diagnosticAssumption = diagnosticAssumption;
         }
 
         boolean provenForFrameGeneration() {
             return provenForFrameGeneration;
+        }
+
+        boolean diagnosticAssumption() {
+            return diagnosticAssumption;
         }
     }
 
@@ -258,12 +268,26 @@ final class FrameSynthesisContract {
         }
 
         boolean frameGenerationEligible() {
+            return frameGenerationEligible(false);
+        }
+
+        /**
+         * Diagnostic combined validation may assume the unproven RGBA8 view,
+         * but the flag is intentionally explicit and production callers use the
+         * no-argument fail-closed form above.
+         */
+        boolean frameGenerationEligible(boolean allowDiagnosticColorAssumption) {
             return producerCoverage.frameGenerationEligible()
-                    && colorEncoding.provenForFrameGeneration();
+                    && (colorEncoding.provenForFrameGeneration()
+                    || allowDiagnosticColorAssumption && colorEncoding.diagnosticAssumption());
         }
 
         boolean colorContractProven() {
             return colorEncoding.provenForFrameGeneration();
+        }
+
+        boolean diagnosticColorAssumption() {
+            return colorEncoding.diagnosticAssumption();
         }
     }
 
