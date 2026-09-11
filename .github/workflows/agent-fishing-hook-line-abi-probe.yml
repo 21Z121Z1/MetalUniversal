@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  semantic_contracts:
-    if: "github.event.head_commit.message == 'chore(agent): run registered MetalFX semantic patch'"
+  first_person_exact_validity:
+    if: "github.event.head_commit.message == 'chore(agent): run first-person exact validity patch'"
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -23,41 +23,37 @@ jobs:
           distribution: temurin
           java-version: '25'
 
-      - name: Reprove Minecraft 26.2 ItemStack lifetime identity
+      - name: Apply bounded first-person validity patch
         shell: bash
         run: |
           set -euo pipefail
-          URL='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262/net/minecraft/world/item/ItemStack.java'
-          curl --fail --location --retry 5 --retry-all-errors --silent --show-error "$URL" -o /tmp/ItemStack.java
-          grep -F 'public static boolean matches(ItemStack a, ItemStack b)' /tmp/ItemStack.java
-          grep -F 'if (a.getCount() != b.getCount())' /tmp/ItemStack.java
-          grep -F 'return ItemStack.isSameItemSameComponents(a, b);' /tmp/ItemStack.java
-
-      - name: Apply bounded semantic patch
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/apply_metalfx_semantic_contracts_20260911_v2.py
+          python3 .github/scripts/apply_hand_exact_validity_20260911_v2.py
           git diff --check
 
-      - name: Verify fail-closed production gates remain closed
+      - name: Verify fail-closed contracts and versioned native ABI
         shell: bash
         run: |
           set -euo pipefail
           grep -F 'private static final boolean OBJECT_MOTION_PRODUCER_CONNECTED = false;' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
           grep -F 'UNPROVEN_RGBA8_UNORM_SRGB_VIEW' src/main/java/com/metallum/client/metal/render/FrameSynthesisContract.java
-          grep -F 'MetalSyntheticExactMotion.beginFirstPerson(hand, itemStack);' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
-          ! grep -F 'MetalSyntheticExactMotion.beginFirstPerson(hand);' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
+          grep -F 'motionEligibility.reject(MetalFxMotionEligibility.FIRST_PERSON);' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -F 'MetalFX First-Person Exact Motion Validity R8' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -F '@_cdecl("metallum_metalfx_encode_v2")' src/main/native/MetallumNative.swift
+          grep -F '@_cdecl("metallum_metalfx_encode_v3")' src/main/native/MetallumNative.swift
+          grep -F '@_cdecl("metallum_metalfx_encode_hand_overlay")' src/main/native/MetallumNative.swift
+          grep -F '@_cdecl("metallum_metalfx_encode_hand_overlay_v2")' src/main/native/MetallumNative.swift
+          grep -F 'handExactValidityTexture [[texture(9)]]' src/main/native/MetallumNative.swift
+          grep -F 'float handValid = handExactValidityTexture.read(pixel).r;' src/main/native/MetallumNative.swift
           test "$(grep -c 'descriptor.isAutoExposureEnabled = true' src/main/native/MetallumNative.swift)" -eq 2
           ! grep -F 'descriptor.isAutoExposureEnabled = false' src/main/native/MetallumNative.swift
 
-      - name: Compile and test semantic-contract increment
+      - name: Compile and test first-person validity increment
         shell: bash
         run: |
           set -euo pipefail
           ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalFxFirstPersonValidityContractTest' \
             --tests 'com.metallum.client.metal.render.MetalSyntheticExactMotionTest' \
-            --tests 'com.metallum.client.metal.render.MetalFxTemporalExposureContractTest' \
             --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
             --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
             --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
@@ -73,9 +69,10 @@ jobs:
           git add src/main/native/MetallumNative.swift \
                   src/main/java/com/metallum/client/metal/render/MetalSyntheticExactMotion.java \
                   src/main/java/com/metallum/client/metal/render/MetalFxManager.java \
-                  src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java \
-                  src/test/java/com/metallum/client/metal/render/MetalSyntheticExactMotionTest.java \
-                  src/test/java/com/metallum/client/metal/render/MetalFxTemporalExposureContractTest.java
+                  src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java \
+                  src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java \
+                  src/test/java/com/metallum/client/metal/render/MetalFxFirstPersonValidityContractTest.java
           git diff --cached --check
-          git commit -m 'feat(metalfx): close exposure and first-person lifetime contracts'
+          git diff --cached --quiet && { echo 'bounded patch produced no product diff'; exit 1; }
+          git commit -m 'feat(metalfx): add first-person exact motion validity'
           git push origin HEAD:agent/metalfx-motion-coverage-26.2
