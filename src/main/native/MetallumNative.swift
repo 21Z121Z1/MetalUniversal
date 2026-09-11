@@ -6426,7 +6426,7 @@ private func metal4MetalFxEncodeV2(
         descriptor.inputHeight = colorTexture.height
         descriptor.outputWidth = outputTexture.width
         descriptor.outputHeight = outputTexture.height
-        descriptor.isAutoExposureEnabled = false
+        descriptor.isAutoExposureEnabled = true
         descriptor.requiresSynchronousInitialization = true
         if #available(macOS 14.4, *) {
             descriptor.isReactiveMaskTextureEnabled = true
@@ -6722,7 +6722,7 @@ private func metal3MetalFxEncodeV2(
                 descriptor.inputHeight = colorTexture.height
                 descriptor.outputWidth = outputTexture.width
                 descriptor.outputHeight = outputTexture.height
-                descriptor.isAutoExposureEnabled = false
+                descriptor.isAutoExposureEnabled = true
                 descriptor.requiresSynchronousInitialization = true
                 if #available(macOS 14.4, *) {
                     descriptor.isReactiveMaskTextureEnabled = true
