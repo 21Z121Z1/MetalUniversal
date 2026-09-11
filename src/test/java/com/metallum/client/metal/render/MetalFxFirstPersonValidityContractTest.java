@@ -17,6 +17,8 @@ final class MetalFxFirstPersonValidityContractTest {
                 "src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java"));
         String bridge = Files.readString(Path.of(
                 "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java"));
+        String synthetic = Files.readString(Path.of(
+                "src/main/java/com/metallum/client/metal/render/MetalSyntheticExactMotion.java"));
         String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
 
         assertTrue(manager.contains("MetalFX First-Person Exact Motion Validity R8"));
@@ -24,6 +26,13 @@ final class MetalFxFirstPersonValidityContractTest {
         assertTrue(manager.contains(".withColorAttachment(handExactValidityView)"));
         assertTrue(manager.contains("private static final boolean OBJECT_MOTION_PRODUCER_CONNECTED = false;"));
         assertTrue(manager.contains("motionEligibility.reject(MetalFxMotionEligibility.FIRST_PERSON);"));
+
+        assertTrue(synthetic.contains("if (sample.hasPrevious()) {"));
+        assertTrue(synthetic.contains("MetalFxManager.markExactFirstPersonProducerCandidate(sample);"));
+        assertTrue(synthetic.contains(
+                "First appearance, successful absence followed by reappearance, or an ItemStack"));
+        assertFalse(synthetic.contains(
+                "MetalFxManager.observeFirstPersonMotion();\n        if (!frameOpen"));
 
         assertTrue(encoder.contains("metallum_metalfx_encode_v3_available()"));
         assertTrue(bridge.contains("metallum_metalfx_encode_v3"));
