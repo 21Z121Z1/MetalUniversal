@@ -23,16 +23,19 @@ permissions:
 jobs:
   agent_color_contract:
     if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.ref == 'agent/metalfx-motion-coverage-26.2'
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.ref == 'agent/metalfx-motion-coverage-26.2') ||
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/agent/metalfx-motion-coverage-26.2' &&
+       github.event.head_commit.message == 'chore(agent): trigger color-contract executor')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: checkout exact PR head
+      - name: checkout exact candidate head
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 16
       - name: setup jdk
         uses: actions/setup-java@v5
