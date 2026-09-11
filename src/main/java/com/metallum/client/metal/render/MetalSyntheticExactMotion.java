@@ -65,10 +65,9 @@ public final class MetalSyntheticExactMotion {
             final InteractionHand hand,
             final ItemStack itemStack
     ) {
-        // Keep Frame Generation fail-closed until the native compositor has a first-person-specific
-        // exact-motion validity plane. The exact history built here is a prerequisite, not evidence
-        // that the final MetalFX motion texture is already safe for moving hand pixels.
-        MetalFxManager.observeFirstPersonMotion();
+        // The native merge has a dedicated first-person validity plane. A hand with committed
+        // previous staged vertices can therefore contribute exact motion without the old blanket
+        // Frame Generation veto. Contract failures and history breaks below remain fail-closed.
         if (!frameOpen || hand == null || itemStack == null || Boolean.TRUE.equals(FIRST_PERSON_ACTIVE.get())) {
             MetalFxManager.observeFirstPersonMotion();
             return null;
@@ -122,7 +121,15 @@ public final class MetalSyntheticExactMotion {
         );
         MetalEntityMotionCapture.attachState(state, sample);
         MetalEntityMotionCapture.requireExactState(state);
-        MetalFxManager.markExactFirstPersonProducerCandidate(sample);
+        if (sample.hasPrevious()) {
+            MetalFxManager.markExactFirstPersonProducerCandidate(sample);
+        } else {
+            // First appearance, successful absence followed by reappearance, or an ItemStack
+            // lifetime transition has no trustworthy previous geometry. Reject exactly this
+            // generated-frame pair; a successfully submitted source frame establishes the next
+            // history generation transactionally.
+            MetalFxManager.observeFirstPersonMotion();
+        }
         MetalEntityMotionCapture.beginEntitySubmission(state);
         FIRST_PERSON_ACTIVE.set(Boolean.TRUE);
         return sample;
