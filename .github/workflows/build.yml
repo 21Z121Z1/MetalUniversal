@@ -21,66 +21,6 @@ permissions:
   contents: read
 
 jobs:
-  agent_color_contract:
-    if: >-
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.ref == 'agent/metalfx-motion-coverage-26.2') ||
-      (github.event_name == 'push' &&
-       github.ref == 'refs/heads/agent/metalfx-motion-coverage-26.2' &&
-       github.event.head_commit.message == 'chore(agent): trigger color-contract executor')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: checkout exact candidate head
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 16
-      - name: setup jdk
-        uses: actions/setup-java@v5
-        with:
-          java-version: '25'
-          distribution: 'temurin'
-      - name: apply bounded color-contract patch when needed
-        id: patch
-        shell: bash
-        run: |
-          set -euo pipefail
-          if grep -Fq 'FrameGenerationColorContract.currentRenderer(' src/main/java/com/metallum/client/metal/render/MetalFxManager.java; then
-            echo 'changed=false' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          python3 .github/scripts/apply_metalfx_color_contract_20260911.py
-          git diff --check
-          grep -F 'private static final boolean OBJECT_MOTION_PRODUCER_CONNECTED = false;' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
-          grep -F 'FrameGenerationColorContract.currentRenderer(' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
-          echo 'changed=true' >> "$GITHUB_OUTPUT"
-      - name: compile and test color/first-person contracts
-        if: steps.patch.outputs.changed == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x ./gradlew
-          ./gradlew compileJava test \
-            --tests 'com.metallum.client.metal.render.FrameGenerationColorContractTest' \
-            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest' \
-            --tests 'com.metallum.client.metal.render.MetalFxFirstPersonValidityContractTest' \
-            --tests 'com.metallum.client.metal.render.MetalSyntheticExactMotionTest'
-          ./gradlew jar
-          git diff --check
-      - name: commit verified manager wiring
-        if: steps.patch.outputs.changed == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/main/java/com/metallum/client/metal/render/MetalFxManager.java
-          git diff --cached --check
-          git commit -m 'refactor(metalfx): route color admission through staged evidence'
-          git push origin HEAD:agent/metalfx-motion-coverage-26.2
-
   build:
     # Keep release artifacts tied to the current macOS 26 SDK and arm64 ABI.
     # On pull_request this job intentionally tests GitHub's synthetic merge
