@@ -225,10 +225,11 @@ public final class MetalFxManager {
     private boolean frameGenerationTemporalScalerLinkObserved;
     private int frameGenerationTemporalScalerLinkStatus;
     private boolean frameGenerationEncodeObserved;
-    // True when this source frame submitted first-person geometry. The current
-    // hand path has no trusted previous local vertices for swing/bob/equip, so
-    // this observation is a hard Frame Generation admission veto. Temporal can
-    // still consume its reactive/history inputs.
+    // True only when this source frame observed first-person geometry without a
+    // trustworthy exact previous-vertex replay (history break, renderer contract
+    // failure, or unsupported submission). Continuous hand/equip/bob/swing motion
+    // with committed staged history uses the dedicated first-person validity plane
+    // and does not set this fallback veto.
     private boolean firstPersonMotionObserved;
     private long historyEpoch = 1L;
     private long sourceFrameSequence;
@@ -712,9 +713,10 @@ public final class MetalFxManager {
     }
 
     /**
-     * Records first-person geometry for this source frame. Its swing/bob/equip
-     * pose has no trusted previous local-vertex stream yet, so this is a
-     * deliberate Frame Generation veto; Temporal remains enabled.
+     * Records a first-person fallback/history break for this source frame. Exact
+     * staged first-person replay does not call this method once it has committed
+     * previous geometry; only an unproven hand submission vetoes Frame Generation.
+     * Temporal remains enabled so its reactive/history safeguards can still run.
      */
     public static void observeFirstPersonMotion() {
         MetalFxManager manager = active;
@@ -4448,9 +4450,11 @@ public final class MetalFxManager {
                     coverage,
                     camera,
                     frameResetForPresent,
-                    COMBINED_DIAGNOSTIC_COLOR_ASSUMPTION
-                            ? FrameSynthesisContract.ColorEncodingEvidence.DIAGNOSTIC_UNPROVEN_RGBA8_UNORM_SRGB_VIEW
-                            : FrameSynthesisContract.ColorEncodingEvidence.UNPROVEN_RGBA8_UNORM_SRGB_VIEW
+                    FrameGenerationColorContract.currentRenderer(
+                            usesNativeDirectFrameGeneration()
+                                    ? FrameGenerationColorContract.SourcePath.NATIVE_DIRECT
+                                    : FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT
+                    ).admissionEvidence(COMBINED_DIAGNOSTIC_COLOR_ASSUMPTION)
             );
         } catch (IllegalArgumentException ignored) {
             return null;
