@@ -43,7 +43,7 @@ public abstract class ItemInHandRendererMetalFxMixin {
             final int lightCoords,
             final CallbackInfo ci
     ) {
-        MetalSyntheticExactMotion.beginFirstPerson(hand);
+        MetalSyntheticExactMotion.beginFirstPerson(hand, itemStack);
     }
 
     @Inject(method = "submitArmWithItem", at = @At("RETURN"))
