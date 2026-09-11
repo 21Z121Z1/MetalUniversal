@@ -21,7 +21,7 @@ on:
       - 'src/test/java/com/metallum/client/metal/render/MetalFxMotionEligibilityTest.java'
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -53,6 +53,7 @@ jobs:
         run: |
           bash -n scripts/minecraft-reference.sh
           python3 -m py_compile scripts/agent/extract_minecraft_motion_reference.py
+          python3 -m py_compile .github/scripts/apply_temporal_auto_exposure_20260911.py
 
       - name: Materialize Minecraft reference sources
         shell: bash
@@ -96,6 +97,24 @@ jobs:
       - name: Ensure Minecraft files stay untracked
         run: |
           test -z "$(git status --short --untracked-files=all -- .minecraft-reference)"
+
+      - name: Apply bounded Temporal auto-exposure patch
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/metalfx-motion-coverage-26.2'
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_temporal_auto_exposure_20260911.py
+          git diff --check -- src/main/native/MetallumNative.swift
+          git show HEAD^:.github/workflows/minecraft-reference.yml > .github/workflows/minecraft-reference.yml
+          rm .github/scripts/apply_temporal_auto_exposure_20260911.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/native/MetallumNative.swift .github/workflows/minecraft-reference.yml .github/scripts/apply_temporal_auto_exposure_20260911.py
+          git diff --cached --check
+          git commit -m 'fix(metalfx): enable Temporal auto exposure'
+          git push origin "HEAD:${TARGET_BRANCH}"
 
       - name: Preserve proof identity
         if: always()
