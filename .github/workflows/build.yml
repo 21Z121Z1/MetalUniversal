@@ -186,3 +186,72 @@ jobs:
           name: ${{ github.ref_name }}
           generate_release_notes: true
           files: release-artifacts/*
+
+  first_person_exact_validity:
+    if: "github.event_name == 'push' && github.event.head_commit.message == 'chore(agent): run first-person validity via build'"
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 32
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Apply bounded first-person validity patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_hand_exact_validity_20260911_v2.py
+          git diff --check
+
+      - name: Verify fail-closed contracts and versioned native ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'private static final boolean OBJECT_MOTION_PRODUCER_CONNECTED = false;' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -F 'UNPROVEN_RGBA8_UNORM_SRGB_VIEW' src/main/java/com/metallum/client/metal/render/FrameSynthesisContract.java
+          grep -F 'motionEligibility.reject(MetalFxMotionEligibility.FIRST_PERSON);' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -F 'MetalFX First-Person Exact Motion Validity R8' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -F '@_cdecl("metallum_metalfx_encode_v2")' src/main/native/MetallumNative.swift
+          grep -F '@_cdecl("metallum_metalfx_encode_v3")' src/main/native/MetallumNative.swift
+          grep -F '@_cdecl("metallum_metalfx_encode_hand_overlay")' src/main/native/MetallumNative.swift
+          grep -F '@_cdecl("metallum_metalfx_encode_hand_overlay_v2")' src/main/native/MetallumNative.swift
+          grep -F 'handExactValidityTexture [[texture(9)]]' src/main/native/MetallumNative.swift
+          grep -F 'float handValid = handExactValidityTexture.read(pixel).r;' src/main/native/MetallumNative.swift
+          test "$(grep -c 'descriptor.isAutoExposureEnabled = true' src/main/native/MetallumNative.swift)" -eq 2
+          ! grep -F 'descriptor.isAutoExposureEnabled = false' src/main/native/MetallumNative.swift
+
+      - name: Compile and test first-person validity increment
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalFxFirstPersonValidityContractTest' \
+            --tests 'com.metallum.client.metal.render.MetalSyntheticExactMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
+          git diff --check
+
+      - name: Commit verified implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/native/MetallumNative.swift \
+                  src/main/java/com/metallum/client/metal/render/MetalSyntheticExactMotion.java \
+                  src/main/java/com/metallum/client/metal/render/MetalFxManager.java \
+                  src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java \
+                  src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java \
+                  src/test/java/com/metallum/client/metal/render/MetalFxFirstPersonValidityContractTest.java
+          git diff --cached --check
+          git diff --cached --quiet && { echo 'bounded patch produced no product diff'; exit 1; }
+          git commit -m 'feat(metalfx): add first-person exact motion validity'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2
