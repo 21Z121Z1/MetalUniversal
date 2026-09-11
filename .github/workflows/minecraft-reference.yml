@@ -106,16 +106,19 @@ jobs:
           TARGET_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_temporal_auto_exposure_20260911.py
-          git diff --check -- src/main/native/MetallumNative.swift
-          git show HEAD^:.github/workflows/minecraft-reference.yml > .github/workflows/minecraft-reference.yml
-          rm .github/scripts/apply_temporal_auto_exposure_20260911.py
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/main/native/MetallumNative.swift .github/workflows/minecraft-reference.yml .github/scripts/apply_temporal_auto_exposure_20260911.py
-          git diff --cached --check
-          git commit -m 'fix(metalfx): enable Temporal auto exposure'
-          git push origin "HEAD:${TARGET_BRANCH}"
+          if grep -q 'descriptor.isAutoExposureEnabled = false' src/main/native/MetallumNative.swift; then
+            python3 .github/scripts/apply_temporal_auto_exposure_20260911.py
+            git diff --check -- src/main/native/MetallumNative.swift
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add src/main/native/MetallumNative.swift
+            git diff --cached --check
+            git commit -m 'fix(metalfx): enable Temporal auto exposure'
+            git push origin "HEAD:${TARGET_BRANCH}"
+          else
+            test "$(grep -c 'descriptor.isAutoExposureEnabled = true' src/main/native/MetallumNative.swift)" -eq 2
+            echo 'Temporal auto exposure already applied; no product commit required.'
+          fi
 
       - name: Preserve proof identity
         if: always()
