@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   semantic_contracts:
-    if: "github.event.head_commit.message == 'chore(agent): execute MetalFX semantic contracts v3'"
+    if: "github.event.head_commit.message == 'chore(agent): execute MetalFX semantic contracts v4'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -49,13 +49,18 @@ jobs:
           grep -Fq 'UNPROVEN_RGBA8_UNORM_SRGB_VIEW' src/main/java/com/metallum/client/metal/render/FrameSynthesisContract.java
           grep -Fq 'MetalSyntheticExactMotion.beginFirstPerson(hand, itemStack);' src/main/java/com/metallum/mixin/render/ItemInHandRendererMetalFxMixin.java
 
-      - name: Compile and run focused semantic tests
+      - name: Compile product Java and JAR
         shell: bash
         run: |
           set -euo pipefail
           chmod +x gradlew
-          ./gradlew --no-daemon \
-            compileJava compileTestJava test jar \
+          ./gradlew --no-daemon compileJava compileTestJava jar
+
+      - name: Run focused semantic tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon test \
             --tests 'com.metallum.client.metal.render.MetalSyntheticExactMotionTest' \
             --tests 'com.metallum.client.metal.render.MetalFxTemporalExposureContractTest' \
             --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
