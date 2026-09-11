@@ -122,6 +122,7 @@ public final class MetalSyntheticExactMotion {
         );
         MetalEntityMotionCapture.attachState(state, sample);
         MetalEntityMotionCapture.requireExactState(state);
+        MetalFxManager.markExactFirstPersonProducerCandidate(sample);
         MetalEntityMotionCapture.beginEntitySubmission(state);
         FIRST_PERSON_ACTIVE.set(Boolean.TRUE);
         return sample;
@@ -140,13 +141,13 @@ public final class MetalSyntheticExactMotion {
             return;
         }
         if (pendingMainHand) {
-            previousMainHandStack = pendingMainHandStack == null ? null : pendingMainHandStack.copy();
+            previousMainHandStack = pendingMainHandStack;
             committedMainHandGeneration = pendingMainHandGeneration;
         } else {
             previousMainHandStack = null;
         }
         if (pendingOffHand) {
-            previousOffHandStack = pendingOffHandStack == null ? null : pendingOffHandStack.copy();
+            previousOffHandStack = pendingOffHandStack;
             committedOffHandGeneration = pendingOffHandGeneration;
         } else {
             previousOffHandStack = null;

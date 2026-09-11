@@ -4699,6 +4699,7 @@ private func handOverlayMslSource() -> String {
       texture2d<half, access::write> objectMotionTexture [[texture(1)]],
       texture2d<half, access::write> objectValidityTexture [[texture(2)]],
       texture2d<half, access::read_write> reactiveTexture [[texture(3)]],
+      texture2d<float, access::read> handExactValidityTexture [[texture(4)]],
       constant HandOverlayUniforms& u [[buffer(0)]],
       uint2 pixel [[thread_position_in_grid]]) {
       if (pixel.x >= u.width || pixel.y >= u.height) return;
@@ -4713,7 +4714,13 @@ private func handOverlayMslSource() -> String {
       float depth = handDepthTexture.read(pixel).r;
       if (!(isfinite(depth) && depth > 0.0000001)) return;
 
-      objectMotionTexture.write(half4(half(0.0)), pixel);
+      float handExactValid = u.reserved > 0.5 ? handExactValidityTexture.read(pixel).r : 0.0;
+      if (!(isfinite(handExactValid) && handExactValid > 0.5)) {
+        objectMotionTexture.write(half4(half(0.0)), pixel);
+      }
+      // Legacy merge has no hand-depth branch. Force it to select the shared
+      // object-motion field at hand pixels; V2 keeps exact motion when the
+      // dedicated mask proves ownership and otherwise writes the safe zero fallback.
       objectValidityTexture.write(
         half4(half(1.0), half(0.0), half(0.0), half(0.0)),
         pixel
@@ -5238,6 +5245,7 @@ private func motionFusedV2MslSource() -> String {
       texture2d<half, access::write> cameraDiagnosticTexture [[texture(6)]],
       texture2d<half, access::write> disocclusionDiagnosticTexture [[texture(7)]],
       texture2d<float, access::read> handDepthTexture [[texture(8)]],
+      texture2d<float, access::read> handExactValidityTexture [[texture(9)]],
       constant FusedMotionUniforms& u [[buffer(0)]],
       uint2 pixel [[thread_position_in_grid]]) {
       uint width = uint(u.viewport.x);
@@ -5335,10 +5343,28 @@ private func motionFusedV2MslSource() -> String {
       if (u.options.z != 0u) {
         float handDepth = handDepthTexture.read(pixel).r;
         if (isfinite(handDepth) && handDepth > 0.0000001) {
-          // The hand target is cleared immediately before first-person
-          // rendering. Covered pixels are camera-locked, so zero motion is the
-          // exact camera component; swing/bob remains protected by reactivity.
-          selected = float2(0.0);
+          // Hand pixels have their own ownership proof. A world entity directly
+          // behind the hand may set objectValidityTexture at the same pixel, so
+          // that plane is intentionally ignored here. Exact first-person motion
+          // is consumed only when the dedicated mask says the shared RG16F value
+          // was produced by this hand replay; otherwise zero remains the safe
+          // camera-locked fallback.
+          bool exactHand = false;
+          if (u.options.w != 0u) {
+            float handValid = handExactValidityTexture.read(pixel).r;
+            if (isfinite(handValid) && handValid > 0.5) {
+              float2 handMotion = float2(objectMotionTexture.read(pixel).rg);
+              if (all(isfinite(handMotion)) && all(abs(handMotion) <= float2(32.0))) {
+                selected = handMotion;
+                exactHand = true;
+              } else {
+                reactive = 1.0;
+              }
+            }
+          }
+          if (!exactHand) {
+            selected = float2(0.0);
+          }
           reactive = max(reactive, quantizeUnorm8(u.params.z));
         }
       }
@@ -5791,6 +5817,7 @@ private func metal3MetalFxEncodeHandOverlay(
     _ handDepthTexture: MTLTexture,
     _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture,
+    _ handExactValidityTexture: MTLTexture?,
     _ reactiveTexture: MTLTexture,
     _ inputWidth: Int32,
     _ inputHeight: Int32,
@@ -5806,6 +5833,9 @@ private func metal3MetalFxEncodeHandOverlay(
               objectMotionTexture.height == Int(inputHeight),
               objectValidityTexture.width == Int(inputWidth),
               objectValidityTexture.height == Int(inputHeight),
+              handExactValidityTexture == nil || (handExactValidityTexture?.width == Int(inputWidth)
+                  && handExactValidityTexture?.height == Int(inputHeight)
+                  && handExactValidityTexture?.pixelFormat == .r8Unorm),
               reactiveTexture.width == Int(inputWidth),
               reactiveTexture.height == Int(inputHeight),
               objectMotionTexture.pixelFormat == .rg16Float,
@@ -5828,7 +5858,7 @@ private func metal3MetalFxEncodeHandOverlay(
             width: UInt32(inputWidth),
             height: UInt32(inputHeight),
             reactiveBoost: reactiveBoost,
-            reserved: 0.0
+            reserved: handExactValidityTexture != nil ? 1.0 : 0.0
         )
         encoder.setComputePipelineState(pipeline)
         encoder.setBytes(
@@ -5840,6 +5870,7 @@ private func metal3MetalFxEncodeHandOverlay(
         encoder.setTexture(objectMotionTexture, index: 1)
         encoder.setTexture(objectValidityTexture, index: 2)
         encoder.setTexture(reactiveTexture, index: 3)
+        encoder.setTexture(handExactValidityTexture, index: 4)
         let threadWidth = max(1, min(pipeline.threadExecutionWidth, 64))
         let threadHeight = max(
             1,
@@ -5881,12 +5912,12 @@ public func metallum_metalfx_encode_hand_overlay(
     )
 }
 
-@_cdecl("metallum_metalfx_encode_hand_overlay")
-public func metallumMetalFxEncodeHandOverlayEntry(
+private func metalFxEncodeHandOverlayEntryImpl(
     _ commandBufferPointer: UnsafeMutableRawPointer,
     _ handDepthTexture: MTLTexture,
     _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture,
+    _ handExactValidityTexture: MTLTexture?,
     _ reactiveTexture: MTLTexture,
     _ inputWidth: Int32,
     _ inputHeight: Int32,
@@ -5899,26 +5930,68 @@ public func metallumMetalFxEncodeHandOverlayEntry(
        handDepthTexture.width == Int(inputWidth), handDepthTexture.height == Int(inputHeight),
        objectMotionTexture.width == Int(inputWidth), objectMotionTexture.height == Int(inputHeight),
        objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
+       handExactValidityTexture == nil || (handExactValidityTexture?.width == Int(inputWidth)
+           && handExactValidityTexture?.height == Int(inputHeight)
+           && handExactValidityTexture?.pixelFormat == .r8Unorm),
        reactiveTexture.width == Int(inputWidth), reactiveTexture.height == Int(inputHeight),
        objectMotionTexture.pixelFormat == .rg16Float,
        objectValidityTexture.pixelFormat == .r8Unorm, reactiveTexture.pixelFormat == .r8Unorm,
        let pipeline = ensureHandOverlayPipeline(handDepthTexture.device) {
         let uniforms = HandOverlayUniforms(
             width: UInt32(inputWidth), height: UInt32(inputHeight),
-            reactiveBoost: reactiveBoost, reserved: 0
+            reactiveBoost: reactiveBoost, reserved: handExactValidityTexture != nil ? 1.0 : 0.0
         )
         return encodeMetal4Compute(
             lease: lease, label: "MetalFX Hand Overlay Motion (Metal 4)",
             pipeline: pipeline, uniforms: uniforms,
             textures: [(0, handDepthTexture), (1, objectMotionTexture),
-                       (2, objectValidityTexture), (3, reactiveTexture)],
+                       (2, objectValidityTexture), (3, reactiveTexture),
+                       (4, handExactValidityTexture)],
             width: Int(inputWidth), height: Int(inputHeight)
         ) ? 1 : 0
     }
     #endif
     return metal3MetalFxEncodeHandOverlay(
         metal3CommandBuffer(commandBufferPointer), handDepthTexture, objectMotionTexture,
-        objectValidityTexture, reactiveTexture, inputWidth, inputHeight, reactiveBoost, fence
+        objectValidityTexture, handExactValidityTexture, reactiveTexture,
+        inputWidth, inputHeight, reactiveBoost, fence
+    )
+}
+
+@_cdecl("metallum_metalfx_encode_hand_overlay")
+public func metallumMetalFxEncodeHandOverlayEntry(
+    _ commandBufferPointer: UnsafeMutableRawPointer,
+    _ handDepthTexture: MTLTexture,
+    _ objectMotionTexture: MTLTexture,
+    _ objectValidityTexture: MTLTexture,
+    _ reactiveTexture: MTLTexture,
+    _ inputWidth: Int32,
+    _ inputHeight: Int32,
+    _ reactiveBoost: Float,
+    _ fence: MTLFence?
+) -> Int32 {
+    metalFxEncodeHandOverlayEntryImpl(
+        commandBufferPointer, handDepthTexture, objectMotionTexture, objectValidityTexture,
+        nil, reactiveTexture, inputWidth, inputHeight, reactiveBoost, fence
+    )
+}
+
+@_cdecl("metallum_metalfx_encode_hand_overlay_v2")
+public func metallumMetalFxEncodeHandOverlayV2Entry(
+    _ commandBufferPointer: UnsafeMutableRawPointer,
+    _ handDepthTexture: MTLTexture,
+    _ objectMotionTexture: MTLTexture,
+    _ objectValidityTexture: MTLTexture,
+    _ handExactValidityTexture: MTLTexture,
+    _ reactiveTexture: MTLTexture,
+    _ inputWidth: Int32,
+    _ inputHeight: Int32,
+    _ reactiveBoost: Float,
+    _ fence: MTLFence?
+) -> Int32 {
+    metalFxEncodeHandOverlayEntryImpl(
+        commandBufferPointer, handDepthTexture, objectMotionTexture, objectValidityTexture,
+        handExactValidityTexture, reactiveTexture, inputWidth, inputHeight, reactiveBoost, fence
     )
 }
 
@@ -6346,6 +6419,7 @@ public func metallumMetalFxEncodeEntry(
 private func metal4MetalFxEncodeV2(
     lease: Metal4MainCommandBufferLease, device: MTLDevice,
     colorTexture: MTLTexture, depthTexture: MTLTexture, handDepthTexture: MTLTexture?,
+    handExactValidityTexture: MTLTexture?,
     cameraMotionTexture: MTLTexture, objectMotionTexture: MTLTexture,
     objectValidityTexture: MTLTexture, disocclusionTexture: MTLTexture,
     motionTexture: MTLTexture, reactiveTexture: MTLTexture, outputTexture: MTLTexture,
@@ -6361,6 +6435,9 @@ private func metal4MetalFxEncodeV2(
           depthTexture.width == Int(inputWidth), depthTexture.height == Int(inputHeight),
           handDepthTexture == nil || (handDepthTexture?.width == Int(inputWidth)
               && handDepthTexture?.height == Int(inputHeight)),
+          handExactValidityTexture == nil || (handExactValidityTexture?.width == Int(inputWidth)
+              && handExactValidityTexture?.height == Int(inputHeight)
+              && handExactValidityTexture?.pixelFormat == .r8Unorm),
           cameraMotionTexture.width == Int(inputWidth), cameraMotionTexture.height == Int(inputHeight),
           objectMotionTexture.width == Int(inputWidth), objectMotionTexture.height == Int(inputHeight),
           objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
@@ -6540,7 +6617,8 @@ private func metal4MetalFxEncodeV2(
                          previousDepthIsValid ? 1 : 0, depthReversed != 0 ? 1 : 0),
             options: SIMD4(NativeState.mergeDepthDilation > 0.5 ? 1 : 0,
                            emitMotionDiagnostics != 0 ? 1 : 0,
-                           handDepthTexture != nil ? 1 : 0, 0),
+                           handDepthTexture != nil ? 1 : 0,
+                           handExactValidityTexture != nil ? 1 : 0),
             params: SIMD4(NativeState.reactiveTuning.z,
                           NativeState.disocclusionReactiveCap, handReactiveBoost, 0)
         )
@@ -6551,7 +6629,7 @@ private func metal4MetalFxEncodeV2(
                        (2, objectValidityTexture), (3, previousDepthTexture),
                        (4, motionTexture), (5, reactiveTexture),
                        (6, cameraMotionTexture), (7, disocclusionTexture),
-                       (8, handDepthTexture)],
+                       (8, handDepthTexture), (9, handExactValidityTexture)],
             width: Int(inputWidth), height: Int(inputHeight),
             producerBarrierBeforeStages: [.vertex, .fragment, .dispatch, .blit]
         ) else { return 0 }
@@ -6624,6 +6702,7 @@ private func metal3MetalFxEncodeV2(
     _ colorTexture: MTLTexture,
     _ depthTexture: MTLTexture,
     _ handDepthTexture: MTLTexture?,
+    _ handExactValidityTexture: MTLTexture?,
     _ cameraMotionTexture: MTLTexture,
     _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture,
@@ -6653,6 +6732,9 @@ private func metal3MetalFxEncodeV2(
                   depthTexture.width == Int(inputWidth), depthTexture.height == Int(inputHeight),
                   handDepthTexture == nil || (handDepthTexture?.width == Int(inputWidth)
                       && handDepthTexture?.height == Int(inputHeight)),
+                  handExactValidityTexture == nil || (handExactValidityTexture?.width == Int(inputWidth)
+                      && handExactValidityTexture?.height == Int(inputHeight)
+                      && handExactValidityTexture?.pixelFormat == .r8Unorm),
                   cameraMotionTexture.width == Int(inputWidth), cameraMotionTexture.height == Int(inputHeight),
                   objectMotionTexture.width == Int(inputWidth), objectMotionTexture.height == Int(inputHeight),
                   objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
@@ -6878,7 +6960,7 @@ private func metal3MetalFxEncodeV2(
                         NativeState.mergeDepthDilation > 0.5 ? 1 : 0,
                         emitMotionDiagnostics != 0 ? 1 : 0,
                         handDepthTexture != nil ? 1 : 0,
-                        0
+                        handExactValidityTexture != nil ? 1 : 0
                     ),
                     params: SIMD4<Float>(
                         NativeState.reactiveTuning.z,
@@ -6902,6 +6984,7 @@ private func metal3MetalFxEncodeV2(
                 fusedEncoder.setTexture(cameraMotionTexture, index: 6)
                 fusedEncoder.setTexture(disocclusionTexture, index: 7)
                 fusedEncoder.setTexture(handDepthTexture, index: 8)
+                fusedEncoder.setTexture(handExactValidityTexture, index: 9)
                 let fusedWidth = max(1, min(pipelines.fused.threadExecutionWidth, 64))
                 let fusedHeight = max(1, min(8, pipelines.fused.maxTotalThreadsPerThreadgroup / fusedWidth))
                 fusedEncoder.dispatchThreads(
@@ -6991,10 +7074,10 @@ public func metallum_metalfx_encode_v2(
     )
 }
 
-@_cdecl("metallum_metalfx_encode_v2")
-public func metallumMetalFxEncodeV2Entry(
+private func metalFxEncodeV2EntryImpl(
     _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
     _ colorTexture: MTLTexture, _ depthTexture: MTLTexture, _ handDepthTexture: MTLTexture?,
+    _ handExactValidityTexture: MTLTexture?,
     _ cameraMotionTexture: MTLTexture, _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture, _ disocclusionTexture: MTLTexture,
     _ motionTexture: MTLTexture, _ reactiveTexture: MTLTexture, _ outputTexture: MTLTexture,
@@ -7010,10 +7093,10 @@ public func metallumMetalFxEncodeV2Entry(
        let lease = metal4MainLease(commandBufferPointer) {
         return metal4MetalFxEncodeV2(
             lease: lease, device: device, colorTexture: colorTexture, depthTexture: depthTexture,
-            handDepthTexture: handDepthTexture, cameraMotionTexture: cameraMotionTexture,
-            objectMotionTexture: objectMotionTexture, objectValidityTexture: objectValidityTexture,
-            disocclusionTexture: disocclusionTexture, motionTexture: motionTexture,
-            reactiveTexture: reactiveTexture, outputTexture: outputTexture,
+            handDepthTexture: handDepthTexture, handExactValidityTexture: handExactValidityTexture,
+            cameraMotionTexture: cameraMotionTexture, objectMotionTexture: objectMotionTexture,
+            objectValidityTexture: objectValidityTexture, disocclusionTexture: disocclusionTexture,
+            motionTexture: motionTexture, reactiveTexture: reactiveTexture, outputTexture: outputTexture,
             currentViewProjection: currentViewProjection,
             inverseCurrentViewProjection: inverseCurrentViewProjection,
             previousViewProjection: previousViewProjection, fence: fence,
@@ -7026,10 +7109,59 @@ public func metallumMetalFxEncodeV2Entry(
     #endif
     return metal3MetalFxEncodeV2(
         metal3CommandBuffer(commandBufferPointer), device, colorTexture, depthTexture, handDepthTexture,
+        handExactValidityTexture, cameraMotionTexture, objectMotionTexture, objectValidityTexture,
+        disocclusionTexture, motionTexture, reactiveTexture, outputTexture, currentViewProjection,
+        inverseCurrentViewProjection, previousViewProjection, fence, jitterX, jitterY,
+        handReactiveBoost, inputWidth, inputHeight, reset, depthReversed,
+        preserveReactiveMask, emitMotionDiagnostics
+    )
+}
+
+@_cdecl("metallum_metalfx_encode_v2")
+public func metallumMetalFxEncodeV2Entry(
+    _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
+    _ colorTexture: MTLTexture, _ depthTexture: MTLTexture, _ handDepthTexture: MTLTexture?,
+    _ cameraMotionTexture: MTLTexture, _ objectMotionTexture: MTLTexture,
+    _ objectValidityTexture: MTLTexture, _ disocclusionTexture: MTLTexture,
+    _ motionTexture: MTLTexture, _ reactiveTexture: MTLTexture, _ outputTexture: MTLTexture,
+    _ currentViewProjection: UnsafePointer<Float>?,
+    _ inverseCurrentViewProjection: UnsafePointer<Float>?,
+    _ previousViewProjection: UnsafePointer<Float>?, _ fence: MTLFence?,
+    _ jitterX: Float, _ jitterY: Float, _ handReactiveBoost: Float,
+    _ inputWidth: Int32, _ inputHeight: Int32, _ reset: Int32, _ depthReversed: Int32,
+    _ preserveReactiveMask: Int32, _ emitMotionDiagnostics: Int32
+) -> Int32 {
+    metalFxEncodeV2EntryImpl(
+        commandBufferPointer, device, colorTexture, depthTexture, handDepthTexture, nil,
         cameraMotionTexture, objectMotionTexture, objectValidityTexture, disocclusionTexture,
         motionTexture, reactiveTexture, outputTexture, currentViewProjection,
         inverseCurrentViewProjection, previousViewProjection, fence, jitterX, jitterY,
         handReactiveBoost, inputWidth, inputHeight, reset, depthReversed,
+        preserveReactiveMask, emitMotionDiagnostics
+    )
+}
+
+@_cdecl("metallum_metalfx_encode_v3")
+public func metallumMetalFxEncodeV3Entry(
+    _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
+    _ colorTexture: MTLTexture, _ depthTexture: MTLTexture, _ handDepthTexture: MTLTexture?,
+    _ handExactValidityTexture: MTLTexture,
+    _ cameraMotionTexture: MTLTexture, _ objectMotionTexture: MTLTexture,
+    _ objectValidityTexture: MTLTexture, _ disocclusionTexture: MTLTexture,
+    _ motionTexture: MTLTexture, _ reactiveTexture: MTLTexture, _ outputTexture: MTLTexture,
+    _ currentViewProjection: UnsafePointer<Float>?,
+    _ inverseCurrentViewProjection: UnsafePointer<Float>?,
+    _ previousViewProjection: UnsafePointer<Float>?, _ fence: MTLFence?,
+    _ jitterX: Float, _ jitterY: Float, _ handReactiveBoost: Float,
+    _ inputWidth: Int32, _ inputHeight: Int32, _ reset: Int32, _ depthReversed: Int32,
+    _ preserveReactiveMask: Int32, _ emitMotionDiagnostics: Int32
+) -> Int32 {
+    metalFxEncodeV2EntryImpl(
+        commandBufferPointer, device, colorTexture, depthTexture, handDepthTexture,
+        handExactValidityTexture, cameraMotionTexture, objectMotionTexture, objectValidityTexture,
+        disocclusionTexture, motionTexture, reactiveTexture, outputTexture,
+        currentViewProjection, inverseCurrentViewProjection, previousViewProjection, fence,
+        jitterX, jitterY, handReactiveBoost, inputWidth, inputHeight, reset, depthReversed,
         preserveReactiveMask, emitMotionDiagnostics
     )
 }

@@ -243,12 +243,38 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS
                     )
             );
+            metalfxEncodeHandOverlayV2 = optionalDowncall(
+                    lookup,
+                    "metallum_metalfx_encode_hand_overlay_v2",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            FLOAT,
+                            ValueLayout.ADDRESS
+                    )
+            );
             metalfxEncodeV2 = optionalDowncall(lookup, "metallum_metalfx_encode_v2", FunctionDescriptor.of(
                     INT,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                    FLOAT, FLOAT, FLOAT, INT, INT, INT, INT, INT, INT
+            ));
+            metalfxEncodeV3 = optionalDowncall(lookup, "metallum_metalfx_encode_v3", FunctionDescriptor.of(
+                    INT,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
                     FLOAT, FLOAT, FLOAT, INT, INT, INT, INT, INT, INT
             ));
             metalfxEncode = downcallWithoutCritical(lookup, "metallum_metalfx_encode", FunctionDescriptor.of(
@@ -1227,7 +1253,11 @@ public final class MetalNativeBridge {
     @Nullable
     private static final MethodHandle metalfxEncodeHandOverlay;
     @Nullable
+    private static final MethodHandle metalfxEncodeHandOverlayV2;
+    @Nullable
     private static final MethodHandle metalfxEncodeV2;
+    @Nullable
+    private static final MethodHandle metalfxEncodeV3;
     private static final MethodHandle metalfxEncode;
     private static final MethodHandle metalfxTransparencyMask;
     private static final MethodHandle metalfxCopy;
@@ -1572,6 +1602,10 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static boolean metallum_metalfx_encode_hand_overlay_v2_available() {
+        return metalfxEncodeHandOverlayV2 != null;
+    }
+
     public static boolean metallum_metalfx_encode_hand_overlay(
             final MemorySegment commandBuffer,
             final MemorySegment handDepth,
@@ -1600,6 +1634,40 @@ public final class MetalNativeBridge {
             ) != 0;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metalfx_encode_hand_overlay", throwable);
+        }
+    }
+
+
+    public static boolean metallum_metalfx_encode_hand_overlay_v2(
+            final MemorySegment commandBuffer,
+            final MemorySegment handDepth,
+            final MemorySegment objectMotion,
+            final MemorySegment objectValidity,
+            final MemorySegment handExactValidity,
+            final MemorySegment reactive,
+            final int inputWidth,
+            final int inputHeight,
+            final float reactiveBoost,
+            final MemorySegment fence
+    ) {
+        if (metalfxEncodeHandOverlayV2 == null) {
+            return false;
+        }
+        try {
+            return (int) metalfxEncodeHandOverlayV2.invokeExact(
+                    segment(commandBuffer),
+                    segment(handDepth),
+                    segment(objectMotion),
+                    segment(objectValidity),
+                    segment(handExactValidity),
+                    segment(reactive),
+                    inputWidth,
+                    inputHeight,
+                    reactiveBoost,
+                    segment(fence)
+            ) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_encode_hand_overlay_v2", throwable);
         }
     }
 
@@ -1669,6 +1737,10 @@ public final class MetalNativeBridge {
      * when its validity attachment is non-zero. The old symbol above remains
      * available for older dylibs and for the spatial/camera fallback path.
      */
+    public static boolean metallum_metalfx_encode_v3_available() {
+        return metalfxEncodeV3 != null;
+    }
+
     public static boolean metallum_metalfx_encode_v2(
             final MemorySegment commandBuffer,
             final MemorySegment device,
@@ -1715,6 +1787,57 @@ public final class MetalNativeBridge {
             ) != 0;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metalfx_encode_v2", throwable);
+        }
+    }
+
+
+    public static boolean metallum_metalfx_encode_v3(
+            final MemorySegment commandBuffer,
+            final MemorySegment device,
+            final MemorySegment color,
+            final MemorySegment depth,
+            @Nullable final MemorySegment handDepth,
+            final MemorySegment handExactValidity,
+            final MemorySegment cameraMotion,
+            final MemorySegment objectMotion,
+            final MemorySegment objectValidity,
+            final MemorySegment disocclusion,
+            final MemorySegment motion,
+            final MemorySegment reactive,
+            final MemorySegment output,
+            @Nullable final float[] currentViewProjection,
+            @Nullable final float[] inverseCurrentViewProjection,
+            @Nullable final float[] previousViewProjection,
+            final float jitterX,
+            final float jitterY,
+            final float handReactiveBoost,
+            final int inputWidth,
+            final int inputHeight,
+            final boolean reset,
+            final boolean depthReversed,
+            final boolean preserveReactiveMask,
+            final boolean emitMotionDiagnostics,
+            final MemorySegment fence
+    ) {
+        if (metalfxEncodeV3 == null) {
+            return false;
+        }
+        try {
+            MetalFxMatrixScratch scratch = METALFX_MATRIX_SCRATCH.get();
+            MemorySegment current = scratch.copy(currentViewProjection, scratch.current);
+            MemorySegment inverse = scratch.copy(inverseCurrentViewProjection, scratch.inverse);
+            MemorySegment previous = scratch.copy(previousViewProjection, scratch.previous);
+            return (int) metalfxEncodeV3.invokeExact(
+                    segment(commandBuffer), segment(device), segment(color), segment(depth),
+                    segment(handDepth), segment(handExactValidity), segment(cameraMotion),
+                    segment(objectMotion), segment(objectValidity), segment(disocclusion),
+                    segment(motion), segment(reactive), segment(output), current, inverse, previous,
+                    segment(fence), jitterX, jitterY, handReactiveBoost, inputWidth, inputHeight,
+                    reset ? 1 : 0, depthReversed ? 1 : 0, preserveReactiveMask ? 1 : 0,
+                    emitMotionDiagnostics ? 1 : 0
+            ) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_metalfx_encode_v3", throwable);
         }
     }
 

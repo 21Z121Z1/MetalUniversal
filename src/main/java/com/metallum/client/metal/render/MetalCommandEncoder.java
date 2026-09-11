@@ -1189,6 +1189,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final MetalGpuTexture color,
             final MetalGpuTexture depth,
             @Nullable final MetalGpuTexture handDepth,
+            final MetalGpuTexture handExactValidity,
             final float handReactiveBoost,
             final MetalGpuTexture cameraMotion,
             final MetalGpuTexture objectMotion,
@@ -1211,6 +1212,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         flushPendingClear(color);
         flushPendingClear(depth);
         if (handDepth != null) flushPendingClear(handDepth);
+        flushPendingClear(handExactValidity);
         flushPendingClear(cameraMotion);
         flushPendingClear(objectMotion);
         flushPendingClear(objectValidity);
@@ -1226,6 +1228,36 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         motion.markContentsDirty();
         reactive.markContentsDirty();
         output.markContentsDirty();
+        if (MetalNativeBridge.metallum_metalfx_encode_v3_available()) {
+            return MetalNativeBridge.metallum_metalfx_encode_v3(
+                    commandBuffer().nativeHandle(),
+                    device.metalDeviceHandle(),
+                    color.nativeHandle(),
+                    depth.nativeHandle(),
+                    handDepth == null ? MemorySegment.NULL : handDepth.nativeHandle(),
+                    handExactValidity.nativeHandle(),
+                    cameraMotion.nativeHandle(),
+                    objectMotion.nativeHandle(),
+                    objectValidity.nativeHandle(),
+                    disocclusion.nativeHandle(),
+                    motion.nativeHandle(),
+                    reactive.nativeHandle(),
+                    output.nativeHandle(),
+                    currentViewProjection.get(currentViewProjectionBuffer),
+                    inverseCurrentViewProjection.get(inverseViewProjectionBuffer),
+                    previousViewProjection.get(previousViewProjectionBuffer),
+                    pixelJitter.x,
+                    pixelJitter.y,
+                    handReactiveBoost,
+                    inputWidth,
+                    inputHeight,
+                    reset,
+                    depthReversed,
+                    preserveReactiveMask,
+                    emitMotionDiagnostics,
+                    fence
+            );
+        }
         return MetalNativeBridge.metallum_metalfx_encode_v2(
                 commandBuffer().nativeHandle(),
                 device.metalDeviceHandle(),
@@ -1316,6 +1348,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final MetalGpuTexture handDepth,
             final MetalGpuTexture objectMotion,
             final MetalGpuTexture objectValidity,
+            final MetalGpuTexture handExactValidity,
             final MetalGpuTexture reactive,
             final int inputWidth,
             final int inputHeight,
@@ -1324,12 +1357,27 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         flushPendingClear(handDepth);
         flushPendingClear(objectMotion);
         flushPendingClear(objectValidity);
+        flushPendingClear(handExactValidity);
         flushPendingClear(reactive);
         submitRenderPass();
         endEncoder();
         objectMotion.markContentsDirty();
         objectValidity.markContentsDirty();
         reactive.markContentsDirty();
+        if (MetalNativeBridge.metallum_metalfx_encode_hand_overlay_v2_available()) {
+            return MetalNativeBridge.metallum_metalfx_encode_hand_overlay_v2(
+                    commandBuffer().nativeHandle(),
+                    handDepth.nativeHandle(),
+                    objectMotion.nativeHandle(),
+                    objectValidity.nativeHandle(),
+                    handExactValidity.nativeHandle(),
+                    reactive.nativeHandle(),
+                    inputWidth,
+                    inputHeight,
+                    reactiveBoost,
+                    fence
+            );
+        }
         return MetalNativeBridge.metallum_metalfx_encode_hand_overlay(
                 commandBuffer().nativeHandle(),
                 handDepth.nativeHandle(),

@@ -350,9 +350,13 @@ public final class MetalFxManager {
     @Nullable
     private MetalGpuTexture objectValidityTexture;
     @Nullable
+    private MetalGpuTexture handExactValidityTexture;
+    @Nullable
     private GpuTextureView objectMotionView;
     @Nullable
     private GpuTextureView objectValidityView;
+    @Nullable
+    private GpuTextureView handExactValidityView;
     @Nullable
     private MetalGpuTexture disocclusionTexture;
     @Nullable
@@ -1577,6 +1581,18 @@ public final class MetalFxManager {
         }
     }
 
+    static void markExactFirstPersonProducerCandidate(
+            final MetalEntityMotionCapture.Sample sample
+    ) {
+        MetalFxManager manager = active;
+        if (manager != null && sample != null && sample.hasPrevious()) {
+            manager.markExactProducerCandidate(
+                    FrameSynthesisContract.ProducerDomain.FIRST_PERSON,
+                    sample
+            );
+        }
+    }
+
     static void markExactParticleProducerCandidate(
             final MetalEntityMotionCapture.Sample sample
     ) {
@@ -1653,7 +1669,7 @@ public final class MetalFxManager {
             MetalEntityMotionCapture.recordMotionDrawSkip("no-previous-object-state");
             return;
         }
-        if (objectMotionView == null || objectValidityView == null) {
+        if (objectMotionView == null || objectValidityView == null || handExactValidityView == null) {
             MetalEntityMotionCapture.recordMotionDrawSkip("attachments-unavailable");
             return;
         }
@@ -1684,7 +1700,8 @@ public final class MetalFxManager {
 
         RenderTarget mainTarget = renderer.mainRenderTarget();
         GpuTextureView depthView = mainTarget.getDepthTextureView();
-        if (depthView == null || objectMotionView == null || objectValidityView == null) {
+        if (depthView == null || objectMotionView == null || objectValidityView == null
+                || handExactValidityView == null) {
             replays.forEach(ignored -> MetalEntityMotionCapture.recordMotionDrawSkip("flush-attachments-unavailable"));
             return;
         }
@@ -1766,54 +1783,89 @@ public final class MetalFxManager {
             ));
         }
 
-        RenderPassDescriptor descriptor = RenderPassDescriptor
-                .create(() -> "Metallum batched ordinary entity object motion");
+        List<PreparedObjectMotionReplay> worldReplays = new ArrayList<>(preparedReplays.size());
+        List<PreparedObjectMotionReplay> firstPersonReplays = new ArrayList<>(2);
+        for (PreparedObjectMotionReplay replay : preparedReplays) {
+            if (replay.sample().domain() == FrameSynthesisContract.ProducerDomain.FIRST_PERSON) {
+                firstPersonReplays.add(replay);
+            } else {
+                worldReplays.add(replay);
+            }
+        }
+
+        // World validity and first-person validity are deliberately different namespaces.
+        // A world entity can be directly behind the hand at the same pixel; reusing its
+        // validity bit would make the hand consume unrelated world motion. Always run the
+        // world pass (even with no draws) so object motion/validity are deterministically
+        // cleared for this source frame, then append first-person exact motion into the
+        // shared RG16F motion field while writing a dedicated R8 validity plane.
+        RenderPassDescriptor worldDescriptor = RenderPassDescriptor
+                .create(() -> "Metallum batched world object motion");
         if (objectMotionInputsCleared) {
-            descriptor = descriptor
+            worldDescriptor = worldDescriptor
                     .withColorAttachment(objectMotionView)
                     .withColorAttachment(objectValidityView);
         } else {
-            descriptor = descriptor
+            worldDescriptor = worldDescriptor
                     .withColorAttachment(objectMotionView, Optional.of(UI_CLEAR))
                     .withColorAttachment(objectValidityView, Optional.of(UI_CLEAR));
         }
-        descriptor = descriptor
+        worldDescriptor = worldDescriptor
                 .withDepthAttachment(depthView)
                 .withRenderArea(new RenderPass.RenderArea(0, 0, renderWidth, renderHeight));
-        try (RenderPass pass = encoder.createRenderPass(descriptor)) {
-            for (PreparedObjectMotionReplay replay : preparedReplays) {
-                PreparedRenderType prepared = replay.prepared();
-                StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
-                boolean exactPreviousPositions = replay.previousPositionBuffer() != null;
-                pass.setPipeline(exactPreviousPositions
-                        ? MetalEntityMotionPipeline.forPreviousPositions(prepared.pipeline())
-                        : MetalEntityMotionPipeline.forSource(prepared.pipeline()));
-                RenderSystem.bindDefaultUniforms(pass);
-                pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
-                pass.setUniform("MetallumMotion", replay.motionUniform());
-                pass.setVertexBuffer(0, replay.currentVertexBuffer());
-                if (exactPreviousPositions) {
-                    pass.setVertexBuffer(1, replay.previousPositionBuffer());
-                }
-                for (PreparedRenderType.Texture texture : prepared.textures()) {
-                    pass.bindTexture(texture.name(), texture.textureView(), texture.sampler());
-                }
-                pass.setIndexBuffer(executeInfo.indexBuffer(), executeInfo.indexType());
-                pass.drawIndexed(
-                        executeInfo.indexCount(),
-                        1,
-                        executeInfo.firstIndex(),
-                        replay.replayBaseVertex(),
-                        0
-                );
-                if (exactPreviousPositions) {
-                    MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());
-                }
-                recordMotionProducerEncoded(replay.sample());
-                MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
-            }
+        try (RenderPass pass = encoder.createRenderPass(worldDescriptor)) {
+            encodePreparedMotionReplays(pass, worldReplays);
         }
         objectMotionInputsCleared = true;
+
+        if (!firstPersonReplays.isEmpty()) {
+            RenderPassDescriptor handDescriptor = RenderPassDescriptor
+                    .create(() -> "Metallum batched first-person exact motion")
+                    .withColorAttachment(objectMotionView)
+                    .withColorAttachment(handExactValidityView)
+                    .withDepthAttachment(depthView)
+                    .withRenderArea(new RenderPass.RenderArea(0, 0, renderWidth, renderHeight));
+            try (RenderPass pass = encoder.createRenderPass(handDescriptor)) {
+                encodePreparedMotionReplays(pass, firstPersonReplays);
+            }
+        }
+    }
+
+    private void encodePreparedMotionReplays(
+            final RenderPass pass,
+            final List<PreparedObjectMotionReplay> replays
+    ) {
+        for (PreparedObjectMotionReplay replay : replays) {
+            PreparedRenderType prepared = replay.prepared();
+            StagedVertexBuffer.ExecuteInfo executeInfo = replay.executeInfo();
+            boolean exactPreviousPositions = replay.previousPositionBuffer() != null;
+            pass.setPipeline(exactPreviousPositions
+                    ? MetalEntityMotionPipeline.forPreviousPositions(prepared.pipeline())
+                    : MetalEntityMotionPipeline.forSource(prepared.pipeline()));
+            RenderSystem.bindDefaultUniforms(pass);
+            pass.setUniform("DynamicTransforms", replay.dynamicTransforms());
+            pass.setUniform("MetallumMotion", replay.motionUniform());
+            pass.setVertexBuffer(0, replay.currentVertexBuffer());
+            if (exactPreviousPositions) {
+                pass.setVertexBuffer(1, replay.previousPositionBuffer());
+            }
+            for (PreparedRenderType.Texture texture : prepared.textures()) {
+                pass.bindTexture(texture.name(), texture.textureView(), texture.sampler());
+            }
+            pass.setIndexBuffer(executeInfo.indexBuffer(), executeInfo.indexType());
+            pass.drawIndexed(
+                    executeInfo.indexCount(),
+                    1,
+                    executeInfo.firstIndex(),
+                    replay.replayBaseVertex(),
+                    0
+            );
+            if (exactPreviousPositions) {
+                MetalEntityMotionCapture.recordExactReplayEncoded(replay.exactPreviousVertexToken());
+            }
+            recordMotionProducerEncoded(replay.sample());
+            MetalEntityMotionCapture.recordMotionDrawEncoded(prepared.pipeline());
+        }
     }
 
     private Matrix4f prepareSceneProjectionInternal(
@@ -2017,7 +2069,7 @@ public final class MetalFxManager {
         if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && sceneFrame
                 && handOverlayPipelineAvailable && motionInputsPrepared
                 && objectMotionTexture != null && objectValidityTexture != null
-                && reactiveTexture != null
+                && handExactValidityTexture != null && reactiveTexture != null
                 && renderer.mainRenderTarget().getDepthTexture() instanceof MetalGpuTexture candidateHandDepth
                 && candidateHandDepth.getWidth(0) == renderWidth
                 && candidateHandDepth.getHeight(0) == renderHeight) {
@@ -2036,6 +2088,7 @@ public final class MetalFxManager {
                         handDepth,
                         objectMotionTexture,
                         objectValidityTexture,
+                        handExactValidityTexture,
                         reactiveTexture,
                         renderWidth,
                         renderHeight,
@@ -2073,12 +2126,14 @@ public final class MetalFxManager {
                 encoded = true;
             } else if (effectiveMode == MetalFxConfig.Mode.TEMPORAL && depth != null && motionInputsPrepared
                     && cameraMotionTexture != null && objectMotionTexture != null
-                    && objectValidityTexture != null && disocclusionTexture != null
+                    && objectValidityTexture != null && handExactValidityTexture != null
+                    && disocclusionTexture != null
                     && motionTexture != null && reactiveTexture != null) {
                 encoded = encoder.encodeMetalFxV2(
                         color,
                         depth,
                         handDepth,
+                        handExactValidityTexture,
                         HAND_OVERLAY_REACTIVE_BOOST,
                         cameraMotionTexture,
                         objectMotionTexture,
@@ -4054,6 +4109,8 @@ public final class MetalFxManager {
                 && objectMotionTexture.getHeight(0) == renderHeight
                 && objectValidityTexture != null && objectValidityTexture.getWidth(0) == renderWidth
                 && objectValidityTexture.getHeight(0) == renderHeight
+                && handExactValidityTexture != null && handExactValidityTexture.getWidth(0) == renderWidth
+                && handExactValidityTexture.getHeight(0) == renderHeight
                 && disocclusionTexture != null && disocclusionTexture.getWidth(0) == renderWidth
                 && disocclusionTexture.getHeight(0) == renderHeight
                 && reactiveTexture != null && reactiveTexture.getWidth(0) == renderWidth
@@ -4083,8 +4140,18 @@ public final class MetalFxManager {
         objectValidityTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
                 "MetalFX Object Motion Validity R8", objectUsage, GpuFormat.R8_UNORM, renderWidth, renderHeight, 1, 1
         );
+        handExactValidityTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
+                "MetalFX First-Person Exact Motion Validity R8",
+                objectUsage,
+                GpuFormat.R8_UNORM,
+                renderWidth,
+                renderHeight,
+                1,
+                1
+        );
         objectMotionView = RenderSystem.getDevice().createTextureView(objectMotionTexture);
         objectValidityView = RenderSystem.getDevice().createTextureView(objectValidityTexture);
+        handExactValidityView = RenderSystem.getDevice().createTextureView(handExactValidityTexture);
         disocclusionTexture = (MetalGpuTexture) RenderSystem.getDevice().createTexture(
                 "MetalFX Disocclusion R8", usage, GpuFormat.R8_UNORM, renderWidth, renderHeight, 1, 1
         );
@@ -4122,7 +4189,7 @@ public final class MetalFxManager {
     }
 
     private boolean prepareMotionInputs() {
-        if (objectMotionTexture == null || objectValidityTexture == null
+        if (objectMotionTexture == null || objectValidityTexture == null || handExactValidityTexture == null
                 || reactiveTexture == null || cutoutReactiveTexture == null
                 || renderWidth <= 0 || renderHeight <= 0) {
             return false;
@@ -4133,6 +4200,10 @@ public final class MetalFxManager {
         // transparent-target mask without a read/write race.
         device.commandEncoder().clearColorTexture(reactiveTexture, UI_CLEAR);
         device.commandEncoder().clearColorTexture(cutoutReactiveTexture, UI_CLEAR);
+        // This clear is consumed either by the first-person replay render pass or by
+        // the later Temporal encode. It prevents a hand that disappears for one
+        // submitted source frame from inheriting exact validity from an older frame.
+        device.commandEncoder().clearColorTexture(handExactValidityTexture, UI_CLEAR);
         return true;
     }
 
@@ -4247,14 +4318,17 @@ public final class MetalFxManager {
     private void closeAuxiliaryTextures() {
         if (objectMotionView != null) objectMotionView.close();
         if (objectValidityView != null) objectValidityView.close();
+        if (handExactValidityView != null) handExactValidityView.close();
         if (cutoutReactiveView != null) cutoutReactiveView.close();
         objectMotionView = null;
         objectValidityView = null;
+        handExactValidityView = null;
         cutoutReactiveView = null;
         if (motionTexture != null) motionTexture.close();
         if (cameraMotionTexture != null) cameraMotionTexture.close();
         if (objectMotionTexture != null) objectMotionTexture.close();
         if (objectValidityTexture != null) objectValidityTexture.close();
+        if (handExactValidityTexture != null) handExactValidityTexture.close();
         if (disocclusionTexture != null) disocclusionTexture.close();
         if (reactiveTexture != null) reactiveTexture.close();
         if (cutoutReactiveTexture != null) cutoutReactiveTexture.close();
@@ -4263,6 +4337,7 @@ public final class MetalFxManager {
         cameraMotionTexture = null;
         objectMotionTexture = null;
         objectValidityTexture = null;
+        handExactValidityTexture = null;
         disocclusionTexture = null;
         reactiveTexture = null;
         cutoutReactiveTexture = null;
@@ -4279,6 +4354,7 @@ public final class MetalFxManager {
                 + (cameraMotionTexture == null ? 0 : 1)
                 + (objectMotionTexture == null ? 0 : 1)
                 + (objectValidityTexture == null ? 0 : 1)
+                + (handExactValidityTexture == null ? 0 : 1)
                 + (disocclusionTexture == null ? 0 : 1)
                 + (reactiveTexture == null ? 0 : 1)
                 + (cutoutReactiveTexture == null ? 0 : 1)
