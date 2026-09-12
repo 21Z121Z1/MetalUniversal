@@ -15,6 +15,8 @@ import org.joml.Matrix4fc;
 import org.jspecify.annotations.Nullable;
 
 import java.util.AbstractList;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -99,8 +101,13 @@ public final class MetalEntityMotionCapture {
     ) {
     }
 
+    private record SubmissionFrame(@Nullable Sample sample, @Nullable Object state) {
+    }
+
     private static final ThreadLocal<Sample> ENTITY_SUBMISSION = new ThreadLocal<>();
     private static final ThreadLocal<Object> ENTITY_SUBMISSION_STATE = new ThreadLocal<>();
+    private static final ThreadLocal<Deque<SubmissionFrame>> ENTITY_SUBMISSION_STACK =
+            ThreadLocal.withInitial(ArrayDeque::new);
     private static final ThreadLocal<Sample> MODEL_BUILD = new ThreadLocal<>();
     private static final Map<Object, Sample> STATES = new IdentityHashMap<>();
     private static final Map<Object, Sample> SUBMITS = new IdentityHashMap<>();
@@ -149,6 +156,7 @@ public final class MetalEntityMotionCapture {
     private static void clearFrameState() {
         ENTITY_SUBMISSION.remove();
         ENTITY_SUBMISSION_STATE.remove();
+        ENTITY_SUBMISSION_STACK.remove();
         MODEL_BUILD.remove();
         STATES.clear();
         SUBMITS.clear();
@@ -219,8 +227,12 @@ public final class MetalEntityMotionCapture {
         if (!enabled) {
             return;
         }
+        Deque<SubmissionFrame> stack = ENTITY_SUBMISSION_STACK.get();
+        stack.push(new SubmissionFrame(ENTITY_SUBMISSION.get(), ENTITY_SUBMISSION_STATE.get()));
         Sample sample = STATES.get(state);
         if (sample == null) {
+            // Clear rather than inherit: unsupported/nonnative nested submissions must never
+            // accidentally capture their staged geometry under the outer entity owner.
             ENTITY_SUBMISSION.remove();
             ENTITY_SUBMISSION_STATE.remove();
         } else {
@@ -231,9 +243,30 @@ public final class MetalEntityMotionCapture {
     }
 
     public static void endEntitySubmission() {
-        if (enabled) {
+        if (!enabled) {
+            return;
+        }
+        Deque<SubmissionFrame> stack = ENTITY_SUBMISSION_STACK.get();
+        if (stack.isEmpty()) {
+            // Defensive fail-closed recovery for an unmatched end call.
             ENTITY_SUBMISSION.remove();
             ENTITY_SUBMISSION_STATE.remove();
+            ENTITY_SUBMISSION_STACK.remove();
+            return;
+        }
+        SubmissionFrame previous = stack.pop();
+        if (previous.sample() == null) {
+            ENTITY_SUBMISSION.remove();
+        } else {
+            ENTITY_SUBMISSION.set(previous.sample());
+        }
+        if (previous.state() == null) {
+            ENTITY_SUBMISSION_STATE.remove();
+        } else {
+            ENTITY_SUBMISSION_STATE.set(previous.state());
+        }
+        if (stack.isEmpty()) {
+            ENTITY_SUBMISSION_STACK.remove();
         }
     }
 

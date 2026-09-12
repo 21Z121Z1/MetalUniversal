@@ -27,6 +27,25 @@ final class MetalExactMotionCoverageTest {
     }
 
     @Test
+    void firstRequiredFrameWithoutPreviousManifestFailsClosed() {
+        RenderPipeline pipeline = pipeline("exact_first_frame");
+        MetalEntityMotionCapture.Sample sample = new MetalEntityMotionCapture.Sample(13L, 2L, new Matrix4f(), new Matrix4f());
+        VertexFormat format = pipeline.getVertexFormatBinding(0);
+        MetalPreviousVertexHistory.Signature signature = new MetalPreviousVertexHistory.Signature(
+                pipeline.getLocation().toString(), format.getElements(), format.getVertexSize(),
+                PrimitiveTopology.TRIANGLES, 1, 3
+        );
+
+        MetalPreviousVertexHistory.beginFrame();
+        MetalExactMotionCoverage.beginFrame();
+        MetalExactMotionCoverage.require(sample);
+        MetalPreviousVertexHistory.DrawToken current = MetalPreviousVertexHistory.reserveDraw(sample, pipeline);
+        MetalPreviousVertexHistory.stageSnapshot(current, signature, new float[] {1.0F, 0.0F, 0.0F});
+
+        assertFalse(MetalExactMotionCoverage.complete());
+    }
+
+    @Test
     void requiredObjectNeedsWholeManifestAndEveryExactPlan() {
         RenderPipeline pipeline = pipeline("exact_coverage");
         MetalEntityMotionCapture.Sample sample = new MetalEntityMotionCapture.Sample(17L, 4L, new Matrix4f(), null);

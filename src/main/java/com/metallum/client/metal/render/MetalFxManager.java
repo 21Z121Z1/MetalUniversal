@@ -25,6 +25,7 @@ import net.minecraft.client.renderer.StagedVertexBuffer;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.blockentity.state.PistonHeadRenderState;
 import net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
@@ -179,6 +180,7 @@ public final class MetalFxManager {
             new FrameSynthesisReceiptTracker();
     private final MetalFxMotionEligibility motionEligibility = new MetalFxMotionEligibility();
     private final Map<Entity, Long> entityGenerations = new IdentityHashMap<>();
+    private final Map<BlockEntity, Long> blockEntityGenerations = new IdentityHashMap<>();
     private final Map<PistonMovingBlockEntity, PistonMotionGeneration> pistonGenerations = new IdentityHashMap<>();
     private long nextEntityGeneration = 1L;
     private int displayWidth;
@@ -235,6 +237,10 @@ public final class MetalFxManager {
     private long sourceFrameSequence;
     private FrameSynthesisContract.@Nullable FrameStamp sourceFrameStamp;
     private boolean sourceFrameStampInvalidated;
+    // Sticky for the whole source frame. An Iris generation can be selected and retired between
+    // beginFrame and presentation; once any unproven override can have affected color geometry,
+    // that source frame must never enter MTLFXFrameInterpolator.
+    private boolean irisMotionSemanticsUnprovenThisFrame;
     private final Set<PistonHeadRenderState> pistonExactCandidates =
             java.util.Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean transparencyPhase;
@@ -632,18 +638,66 @@ public final class MetalFxManager {
         }
     }
 
+    /** Captures the real block-entity object lifetime onto its extracted render state. */
+    public static void captureBlockEntityMotion(
+            final BlockEntity blockEntity,
+            final BlockEntityRenderState state
+    ) {
+        MetalFxManager manager = active;
+        if (manager != null && blockEntity != null && state != null) {
+            manager.captureBlockEntityMotionInternal(blockEntity, state);
+        }
+    }
+
     /**
-     * Observes one real block-entity state at the Minecraft dispatcher submit
-     * boundary.  The piston state is the only block-entity family with a
-     * source-faithful staged motion producer in 26.2; all other states remain
-     * explicitly unsupported rather than being mislabeled as absent.
+     * Opens the exact lexical submit owner. Unsupported states deliberately open an empty capture
+     * scope so nested block-entity rendering cannot inherit an outer entity owner.
      */
-    public static void observeBlockEntity(final BlockEntityRenderState state) {
+    public static void beginBlockEntitySubmission(final BlockEntityRenderState state) {
+        MetalEntityMotionCapture.beginEntitySubmission(state);
         MetalFxManager manager = active;
         if (manager == null || state == null) {
             return;
         }
         manager.observeBlockEntityInternal(state);
+        if (manager.effectiveMode != MetalFxConfig.Mode.TEMPORAL
+                || manager.runtimeDisabled
+                || !MetalBlockEntityExactMotion.supports(state)) {
+            return;
+        }
+        MetalEntityMotionCapture.Sample sample = MetalEntityMotionCapture.sampleForState(state);
+        if (sample == null) {
+            manager.observeUnsupportedProducer(
+                    FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES,
+                    "audited-block-entity-lifetime-owner-unavailable"
+            );
+            return;
+        }
+        MetalEntityMotionCapture.requireExactState(state);
+        manager.markExactProducerCandidate(
+                FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES,
+                sample
+        );
+    }
+
+    public static void endBlockEntitySubmission() {
+        MetalEntityMotionCapture.endEntitySubmission();
+    }
+
+    /** Compatibility observation hook for diagnostics that do not execute the dispatcher redirect. */
+    public static void observeBlockEntity(final BlockEntityRenderState state) {
+        MetalFxManager manager = active;
+        if (manager != null && state != null) {
+            manager.observeBlockEntityInternal(state);
+        }
+    }
+
+    /** Called by Iris generation selection; the veto remains set even if that generation retires later this frame. */
+    static void observeIrisMotionSemanticsUnproven() {
+        MetalFxManager manager = active;
+        if (manager != null) {
+            manager.irisMotionSemanticsUnprovenThisFrame = true;
+        }
     }
 
     /** Marks the beginning of the real FeatureRenderDispatcher translucent phase. */
@@ -1148,6 +1202,8 @@ public final class MetalFxManager {
         frameSynthesisReceipts.discardFrame();
         sourceFrameStamp = null;
         sourceFrameStampInvalidated = false;
+        irisMotionSemanticsUnprovenThisFrame =
+                !IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven();
         pistonExactCandidates.clear();
         transparencyPhase = false;
         MetalFxMotionTelemetry.beginFrame();
@@ -1495,6 +1551,30 @@ public final class MetalFxManager {
         }
     }
 
+    private void captureBlockEntityMotionInternal(
+            final BlockEntity blockEntity,
+            final BlockEntityRenderState state
+    ) {
+        if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled
+                || !MetalBlockEntityExactMotion.supports(state)) {
+            return;
+        }
+        long generation = blockEntityGenerations.computeIfAbsent(
+                blockEntity, ignored -> nextEntityGeneration++
+        );
+        Matrix4f identity = new Matrix4f();
+        MetalEntityMotionCapture.attachState(
+                state,
+                new MetalEntityMotionCapture.Sample(
+                        MetalBlockEntityExactMotion.objectId(blockEntity.getBlockPos().asLong()),
+                        generation,
+                        identity,
+                        identity,
+                        FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES
+                )
+        );
+    }
+
     private void observeBlockEntityInternal(final BlockEntityRenderState state) {
         if (effectiveMode != MetalFxConfig.Mode.TEMPORAL || runtimeDisabled) {
             return;
@@ -1525,6 +1605,12 @@ public final class MetalFxManager {
                     );
                 }
             }
+            return;
+        }
+        if (MetalBlockEntityExactMotion.supports(state)) {
+            observeProducer(
+                    FrameSynthesisContract.ProducerDomain.BLOCK_ENTITIES, 1
+            );
             return;
         }
         observeUnsupportedProducer(
@@ -4235,6 +4321,13 @@ public final class MetalFxManager {
         }
         sourceFrameStamp = new FrameSynthesisContract.FrameStamp(frameId, historyEpoch);
         frameSynthesisReceipts.beginFrame(sourceFrameStamp);
+        if (irisMotionSemanticsUnprovenThisFrame) {
+            frameSynthesisReceipts.observeUnsupported(
+                    FrameSynthesisContract.ProducerDomain.MODDED_RENDERERS,
+                    1,
+                    "iris-active-pipeline-motion-semantics-unproven"
+            );
+        }
     }
 
     private void resetHistoryInternal(final String reason) {
@@ -4250,6 +4343,7 @@ public final class MetalFxManager {
         previousCameraProjectionValid = false;
         previousCameraPositionValid = false;
         entityGenerations.clear();
+        blockEntityGenerations.clear();
         pistonGenerations.clear();
         phase = 0;
         motionInputsPrepared = false;
@@ -4375,6 +4469,7 @@ public final class MetalFxManager {
         sourceFrameStampInvalidated = false;
         pistonExactCandidates.clear();
         entityGenerations.clear();
+        blockEntityGenerations.clear();
         pistonGenerations.clear();
         MetalEntityMotionPipeline.clear();
         MetalCutoutReactivePipeline.clear();
@@ -4521,6 +4616,20 @@ public final class MetalFxManager {
             // A real source frame containing geometry without exact previous-position motion must not
             // enter MTLFXFrameInterpolator. Reset the next admitted pair so it cannot bridge across
             // this skipped source frame; MetalFX Temporal still receives its reactive/history masks.
+            frameResetForPresent = true;
+            return null;
+        }
+        if (irisMotionSemanticsUnprovenThisFrame
+                || !IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven()) {
+            irisMotionSemanticsUnprovenThisFrame = true;
+            if (telemetryCandidate) {
+                MetalFxMotionTelemetry.recordSourceFrame(
+                        frameId,
+                        false,
+                        0,
+                        "iris-active-pipeline-motion-semantics-unproven"
+                );
+            }
             frameResetForPresent = true;
             return null;
         }

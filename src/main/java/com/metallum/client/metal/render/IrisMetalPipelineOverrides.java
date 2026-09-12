@@ -417,6 +417,9 @@ public final class IrisMetalPipelineOverrides {
             return;
         }
         active = instance;
+        // Selection can occur after MetalFX beginFrame. Make the mismatch sticky in the current
+        // source frame so a same-frame retirement cannot make that frame look vanilla again.
+        MetalFxManager.observeIrisMotionSemanticsUnproven();
         IrisMetalPackLifecycle.onSemanticPipelineSelected(instance.generation());
         IrisMetalPassTrace.activate(instance.programSet, instance.generation());
     }
@@ -606,6 +609,14 @@ public final class IrisMetalPipelineOverrides {
     public static int activeGenerationForDiagnostics() {
         Instance instance = active;
         return instance == null ? -1 : instance.generation();
+    }
+
+    /**
+     * Frame Interpolator motion replay is proven only for vanilla clip/vertex semantics today.
+     * Any active Iris generation may replace vertex position, clipping or alpha/discard behavior.
+     */
+    static boolean frameGenerationMotionSemanticsProven() {
+        return active == null;
     }
 
     /**
