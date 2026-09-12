@@ -28,6 +28,7 @@ final class FrameGenerationColorContractTest {
                 evidence.admissionEvidence(true)
         );
         assertTrue(evidence.missingProofs().containsAll(List.of(
+                "temporal-input-linearization",
                 "post-temporal-tone-map",
                 "frame-interpolation-transfer",
                 "ui-premultiplied-alpha",
@@ -53,6 +54,7 @@ final class FrameGenerationColorContractTest {
                 FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT,
                 GpuFormat.RGBA8_UNORM,
                 GpuFormat.RGBA8_UNORM,
+                FrameGenerationColorContract.SceneEncoding.DISPLAY_REFERRED_SRGB,
                 FrameGenerationColorContract.TemporalEncoding.LINEAR,
                 FrameGenerationColorContract.ToneMapPlacement.UNPROVEN,
                 FrameGenerationColorContract.FrameInterpolationEncoding.UNPROVEN,
@@ -73,6 +75,7 @@ final class FrameGenerationColorContractTest {
                 FrameGenerationColorContract.SourcePath.TEMPORAL_OUTPUT,
                 GpuFormat.RGBA8_UNORM,
                 GpuFormat.RGBA8_UNORM,
+                FrameGenerationColorContract.SceneEncoding.LINEAR,
                 FrameGenerationColorContract.TemporalEncoding.LINEAR,
                 FrameGenerationColorContract.ToneMapPlacement
                         .AFTER_TEMPORAL_BEFORE_FRAME_INTERPOLATION,

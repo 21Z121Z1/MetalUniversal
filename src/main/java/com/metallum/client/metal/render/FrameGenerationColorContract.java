@@ -31,6 +31,13 @@ final class FrameGenerationColorContract {
         UNPROVEN
     }
 
+    /** Numeric meaning of the renderer's scene texture before MetalFX consumes it. */
+    enum SceneEncoding {
+        LINEAR,
+        DISPLAY_REFERRED_SRGB,
+        UNPROVEN
+    }
+
     enum ToneMapPlacement {
         AFTER_TEMPORAL_BEFORE_FRAME_INTERPOLATION,
         BEFORE_NATIVE_DIRECT_FRAME_INTERPOLATION,
@@ -57,6 +64,7 @@ final class FrameGenerationColorContract {
             SourcePath sourcePath,
             GpuFormat sceneStorage,
             GpuFormat uiStorage,
+            SceneEncoding sceneEncoding,
             TemporalEncoding temporalEncoding,
             ToneMapPlacement toneMapPlacement,
             FrameInterpolationEncoding frameInterpolationEncoding,
@@ -67,6 +75,7 @@ final class FrameGenerationColorContract {
             Objects.requireNonNull(sourcePath, "sourcePath");
             Objects.requireNonNull(sceneStorage, "sceneStorage");
             Objects.requireNonNull(uiStorage, "uiStorage");
+            Objects.requireNonNull(sceneEncoding, "sceneEncoding");
             Objects.requireNonNull(temporalEncoding, "temporalEncoding");
             Objects.requireNonNull(toneMapPlacement, "toneMapPlacement");
             Objects.requireNonNull(frameInterpolationEncoding, "frameInterpolationEncoding");
@@ -79,10 +88,12 @@ final class FrameGenerationColorContract {
                 return false;
             }
             boolean temporalStageProven = switch (sourcePath) {
-                case TEMPORAL_OUTPUT -> temporalEncoding == TemporalEncoding.LINEAR
+                case TEMPORAL_OUTPUT -> sceneEncoding == SceneEncoding.LINEAR
+                        && temporalEncoding == TemporalEncoding.LINEAR
                         && toneMapPlacement
                         == ToneMapPlacement.AFTER_TEMPORAL_BEFORE_FRAME_INTERPOLATION;
-                case NATIVE_DIRECT -> temporalEncoding == TemporalEncoding.NOT_APPLICABLE
+                case NATIVE_DIRECT -> sceneEncoding == SceneEncoding.DISPLAY_REFERRED_SRGB
+                        && temporalEncoding == TemporalEncoding.NOT_APPLICABLE
                         && toneMapPlacement
                         == ToneMapPlacement.BEFORE_NATIVE_DIRECT_FRAME_INTERPOLATION;
             };
@@ -116,6 +127,9 @@ final class FrameGenerationColorContract {
                 missing.add("ui-storage");
             }
             if (sourcePath == SourcePath.TEMPORAL_OUTPUT) {
+                if (sceneEncoding != SceneEncoding.LINEAR) {
+                    missing.add("temporal-input-linearization");
+                }
                 if (temporalEncoding != TemporalEncoding.LINEAR) {
                     missing.add("temporal-linear");
                 }
@@ -124,6 +138,9 @@ final class FrameGenerationColorContract {
                     missing.add("post-temporal-tone-map");
                 }
             } else {
+                if (sceneEncoding != SceneEncoding.DISPLAY_REFERRED_SRGB) {
+                    missing.add("native-direct-display-referred-scene");
+                }
                 if (temporalEncoding != TemporalEncoding.NOT_APPLICABLE) {
                     missing.add("native-direct-temporal-n/a");
                 }
@@ -152,10 +169,12 @@ final class FrameGenerationColorContract {
     /**
      * Evidence for the renderer as it exists today.
      *
-     * <p>The Temporal path has an API-level linear semantic, but there is currently no explicit
-     * post-Temporal tone-map/transfer pass before {@code sceneOutputTarget} is copied into the
-     * Frame Interpolator ring. The native-direct path likewise has no machine-verifiable transfer
-     * attestation. The UI target is RGBA8_UNORM, but the complete set of GUI/overlay blend modes
+     * <p>The Temporal API has a documented linear semantic, but the current Minecraft scene
+     * target is a plain non-sRGB UNORM texture carrying already tone-mapped/display-referred
+     * values. There is no explicit display-referred -> linear conversion before Temporal, nor an
+     * explicit post-Temporal tone-map/transfer pass before {@code sceneOutputTarget} is copied into
+     * the Frame Interpolator ring. The native-direct path likewise has no machine-verifiable
+     * transfer attestation. The UI target is RGBA8_UNORM, but the complete set of GUI/overlay blend modes
      * has not yet been proven to preserve a premultiplied-alpha invariant. Finally, the
      * CAMetalLayer uses BGRA8Unorm without an explicit sRGB color-space tag. Those unknowns are
      * deliberately represented rather than inferred from storage formats.</p>
@@ -165,6 +184,7 @@ final class FrameGenerationColorContract {
                 sourcePath,
                 GpuFormat.RGBA8_UNORM,
                 GpuFormat.RGBA8_UNORM,
+                SceneEncoding.DISPLAY_REFERRED_SRGB,
                 sourcePath == SourcePath.TEMPORAL_OUTPUT
                         ? TemporalEncoding.LINEAR
                         : TemporalEncoding.NOT_APPLICABLE,

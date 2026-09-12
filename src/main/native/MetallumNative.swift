@@ -4346,7 +4346,10 @@ private func buildMotionDepthResamplePipeline(
     depthFormat: MTLPixelFormat
 ) -> MTLRenderPipelineState? {
     do {
-        let library = try device.makeLibrary(source: presentMslSource(), options: nil)
+        // This is texture-to-texture resampling, not drawable presentation.
+        // Keep depth/motion in the renderer's native Metal orientation; the
+        // final CAMetalLayer present is the only stage that applies the Y flip.
+        let library = try device.makeLibrary(source: copyMslSource(), options: nil)
         guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
               let fragmentFunction = library.makeFunction(name: "metallum_motion_depth_resample_fs") else {
             return nil
@@ -7533,6 +7536,17 @@ public func metallum_metalfx_release_scalers() {
     // presenter rebuilds its interpolator.
     NativeState.lastTemporalScalerForInterpolation = nil
     NativeState.metalFxHistoryLock.lock()
+    // Callers drain submitted GPU work before cache teardown. Metal 4 history
+    // and diagnostic textures are explicitly added to the residency set when
+    // allocated, so remove them symmetrically before dropping the last strong
+    // cache references. Untracked Metal 3 textures are harmless here because
+    // residencyTrackReleased() is ledger-guarded and becomes a no-op.
+    for texture in NativeState.metalFxPreviousDepthTextures.values {
+        residencyTrackReleased(texture)
+    }
+    for texture in NativeState.metalFxValidationReactiveTextures.values {
+        residencyTrackReleased(texture)
+    }
     NativeState.metalFxPreviousDepthTextures.removeAll()
     NativeState.metalFxValidationReactiveTextures.removeAll()
     NativeState.metalFxPreviousDepthValid.removeAll()
