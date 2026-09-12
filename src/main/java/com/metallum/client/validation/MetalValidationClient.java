@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalGpuTimingRecorder;
 import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.MetalFxMotionTelemetry;
 import com.metallum.client.metal.render.TerrainGpuVisibilityProbe;
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.IrisMetalRenderFusionRuntime;
@@ -451,6 +452,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             // jitter and accumulation depth in every run — a prerequisite for
             // byte-identical golden captures.
             MetalFxManager.resetHistory("validation timeline start");
+            MetalFxMotionTelemetry.reset();
             if (PERFORMANCE_ONLY) {
                 MetalGpuTimingRecorder.reset();
                 IrisMetalPerformanceCounters.reset();
@@ -776,6 +778,10 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.add("gpuNativeEncoders", summarizeGpuEncoders(gpuEncoderSamples));
             addNativeEncoderCounts(report, gpuEncoderSamples, keep);
             addPerformanceCounters(report, IrisMetalPerformanceCounters.snapshot());
+            report.add(
+                    "metalfxMotionTelemetry",
+                    new GsonBuilder().create().toJsonTree(MetalFxMotionTelemetry.snapshot())
+            );
             report.add(
                     "presentationPacing",
                     PresentationPacingEvidenceAdapter.toJson(
@@ -2381,6 +2387,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         long[] terrainGpuIcbStats = readTerrainGpuIcbStats();
         TerrainGpuVisibilityProbe.Telemetry terrainGpuVisibility = TerrainGpuVisibilityProbe.telemetry();
         String terrainGpuVisibilityJson = terrainGpuVisibilityJson(terrainGpuVisibility);
+        String metalFxMotionTelemetryJson = new GsonBuilder().create().toJson(MetalFxMotionTelemetry.snapshot());
         Metallum.LOGGER.info(
                 "Terrain ICB validation counters: encoded={} executed={} gpuEncoded={} gpuDispatches={}",
                 terrainIcbStats[0],
@@ -2431,6 +2438,11 @@ public final class MetalValidationClient implements ClientModInitializer {
                       "frameGenerationRequested": %s,
                       "frameGenerationFramesQueued": %d,
                       "frameGenerationEnabledAtCompletion": %s,
+                      "temporalScalerEncodeCount": %d,
+                      "frameGenerationTemporalScalerLinked": %s,
+                      "frameGenerationTemporalScalerLinkStatus": "%s",
+                      "frameGenerationColorContract": "%s",
+                      "metalfxMotionTelemetry": %s,
                       "metal4MainRendererEngaged": %s,
                       "metal4MainRendererLeasesBegun": %d,
                       "metal4MainRendererSubmissions": %d,
@@ -2474,6 +2486,11 @@ public final class MetalValidationClient implements ClientModInitializer {
                             Boolean.getBoolean("metallum.metalfx.frameGeneration"),
                             MetalFxManager.frameGenerationFramesQueued(),
                             MetalFxManager.frameGenerationEnabledAtCompletion(),
+                            MetalFxManager.temporalScalerEncodeCount(),
+                            MetalFxManager.frameGenerationTemporalScalerLinked(),
+                            jsonEscape(MetalFxManager.frameGenerationTemporalScalerLinkStatus()),
+                            jsonEscape(MetalFxManager.frameGenerationColorContract()),
+                            metalFxMotionTelemetryJson,
                             metal4MainStats[0] != 0L,
                             metal4MainStats[1],
                             metal4MainStats[2],

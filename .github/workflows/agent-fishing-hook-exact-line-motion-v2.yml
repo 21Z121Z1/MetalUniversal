@@ -1,0 +1,97 @@
+name: Agent Fishing Hook exact line motion v2
+
+on:
+  push:
+    branches: [agent/metalfx-motion-coverage-26.2]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.event.head_commit.message == 'chore(agent): run fishing-hook exact line motion v2'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Establish canonical context
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin integration/iris-metal-next:refs/remotes/origin/integration/iris-metal-next
+          python3 scripts/agent/context.py --task 'Exact Fishing Hook line motion vectors v2' --claim correctness
+          python3 -m py_compile .github/scripts/apply_fishing_hook_line_exact_motion.py .github/scripts/run_fishing_hook_line_exact_motion_v2.py
+      - name: Reprove 26.2 source and existing owner carrier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,pathlib,urllib.request,zipfile
+          root=pathlib.Path('/tmp/mc-line-v2'); root.mkdir(exist_ok=True)
+          def get(url,p):
+              with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'MetalUniversal-line-v2'}),timeout=60) as r,p.open('wb') as f:
+                  f.write(r.read())
+          def sha1(p): return hashlib.sha1(p.read_bytes()).hexdigest()
+          m=root/'manifest'; get('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json',m)
+          meta=next(x for x in json.loads(m.read_text())['versions'] if x['id']=='26.2')
+          assert meta['sha1']=='3592ebc61c6b6c33bb8228fe5a9e90221df0be68'
+          v=root/'version'; get(meta['url'],v); assert sha1(v)==meta['sha1']
+          c=json.loads(v.read_text())['downloads']['client']
+          assert c['sha1']=='2dc72797acbc1b63fc16a11c4ac393605f453754' and c['size']==39193383
+          j=root/'client.jar'; get(c['url'],j); assert sha1(j)==c['sha1'] and j.stat().st_size==c['size']
+          with zipfile.ZipFile(j) as z: s=z.read('assets/minecraft/shaders/core/rendertype_lines.vsh').decode()
+          for n in ['Position + Normal','LineWidth / ScreenSize','gl_VertexID % 2 == 0','VIEW_SCALE * ModelViewMat']:
+              assert n in s,n
+          print('Mojang 26.2 client + rendertype_lines ABI: PASS')
+          PY
+          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262'
+          curl --fail --location --retry 5 --silent --show-error "$BASE/net/minecraft/client/renderer/entity/FishingHookRenderer.java" -o /tmp/FishingHookRenderer.java
+          grep -F 'submitNodeCollector.submitCustomGeometry(poseStack, RENDER_TYPE' /tmp/FishingHookRenderer.java
+          grep -F 'submitNodeCollector.submitCustomGeometry(poseStack, RenderTypes.lines()' /tmp/FishingHookRenderer.java
+          grep -F '.setNormal(stringPose, nx /= length, ny /= length, nz /= length).setLineWidth(width)' /tmp/FishingHookRenderer.java
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit(pose);' src/main/java/com/metallum/mixin/render/CustomFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.beginModelBuild(pose);' src/main/java/com/metallum/mixin/render/CustomFeatureRendererMetalFxMixin.java
+      - name: Apply runtime candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/run_fishing_hook_line_exact_motion_v2.py
+          git diff --check
+          grep -F 'PreviousPosition + PreviousNormal' src/main/resources/assets/metallum/shaders/core/rendertype_lines_previous_motion.vsh
+          grep -F 'PreviousLineWidth' src/main/resources/assets/metallum/shaders/core/rendertype_lines_previous_motion.vsh
+          grep -F 'state instanceof FishingHookRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+      - name: Compile focused contracts and jar
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
+            --tests 'com.metallum.client.metal.render.MetalLinePreviousMotionShaderTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.MetalSyntheticExactMotionTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionTelemetryTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
+          git diff --check
+      - name: Fail-closed review and commit runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'matchingDraws <= 0' src/main/java/com/metallum/client/metal/render/MetalExactMotionCoverage.java
+          grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+          grep -F 'matchedPreviousVertexData' src/main/java/com/metallum/client/metal/render/MetalPreviousVertexReplay.java
+          grep -F 'previousVertexData = exactPlan.previousVertexData()' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/java src/main/resources src/test/java
+          git diff --cached --check
+          git commit -m 'feat(metalfx): add exact fishing-hook line motion vectors'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2

@@ -1,14 +1,24 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.blaze3d.PrimitiveTopology;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.vertex.ByteBufferBuilder;
+import com.mojang.blaze3d.vertex.VertexFormat;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.renderer.StagedVertexBuffer;
+import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.feature.FlameFeatureRenderer;
+import net.minecraft.client.renderer.feature.ShadowFeatureRenderer;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.jspecify.annotations.Nullable;
 
+import java.util.AbstractList;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -33,15 +43,7 @@ public final class MetalEntityMotionCapture {
             int executesTransferred,
             int executesConsumed,
             int motionDrawsEncoded,
-            // Subset of motionDrawsEncoded that came from the core/item family.
-            // Dropped items, item frames and held items are the only source, so a
-            // scene with dropped items in view and a zero here means the item
-            // motion path is not reaching the interpolator.
             int itemMotionDrawsEncoded,
-            // Subset of motionDrawsEncoded that came from the core/block family.
-            // Falling blocks and block entities are the only source, so a scene
-            // with a falling block in view and a zero here means the block motion
-            // path is not reaching the interpolator.
             int blockMotionDrawsEncoded,
             @Nullable String lastMotionDrawSkip,
             @Nullable String lastVertexShader
@@ -52,11 +54,30 @@ public final class MetalEntityMotionCapture {
             long objectId,
             long generation,
             Matrix4f currentObject,
-            @Nullable Matrix4f previousObject
+            @Nullable Matrix4f previousObject,
+            FrameSynthesisContract.ProducerDomain domain
     ) {
         public Sample {
             currentObject = new Matrix4f(currentObject);
             previousObject = previousObject == null ? null : new Matrix4f(previousObject);
+            if (domain == null) {
+                throw new NullPointerException("domain");
+            }
+        }
+
+        public Sample(
+                final long objectId,
+                final long generation,
+                final Matrix4f currentObject,
+                @Nullable final Matrix4f previousObject
+        ) {
+            this(
+                    objectId,
+                    generation,
+                    currentObject,
+                    previousObject,
+                    FrameSynthesisContract.ProducerDomain.DYNAMIC_CONTENT
+            );
         }
 
         @Override
@@ -74,12 +95,27 @@ public final class MetalEntityMotionCapture {
         }
     }
 
+    private record DrawCapture(
+            Sample sample,
+            MetalPreviousVertexHistory.DrawToken previousVertexToken
+    ) {
+    }
+
+    private record SubmissionFrame(@Nullable Sample sample, @Nullable Object state) {
+    }
+
     private static final ThreadLocal<Sample> ENTITY_SUBMISSION = new ThreadLocal<>();
+    private static final ThreadLocal<Object> ENTITY_SUBMISSION_STATE = new ThreadLocal<>();
+    private static final ThreadLocal<Deque<SubmissionFrame>> ENTITY_SUBMISSION_STACK =
+            ThreadLocal.withInitial(ArrayDeque::new);
     private static final ThreadLocal<Sample> MODEL_BUILD = new ThreadLocal<>();
     private static final Map<Object, Sample> STATES = new IdentityHashMap<>();
     private static final Map<Object, Sample> SUBMITS = new IdentityHashMap<>();
-    private static final Map<StagedVertexBuffer.Draw, Sample> DRAWS = new IdentityHashMap<>();
+    private static final Map<Object, EntityRenderState> SHADOW_SUBMIT_STATES = new IdentityHashMap<>();
+    private static final Map<StagedVertexBuffer.Draw, DrawCapture> DRAWS = new IdentityHashMap<>();
     private static final Map<StagedVertexBuffer.ExecuteInfo, Sample> EXECUTES = new IdentityHashMap<>();
+    private static final Map<StagedVertexBuffer.ExecuteInfo, MetalPreviousVertexHistory.DrawToken> EXECUTE_VERTEX_TOKENS =
+            new IdentityHashMap<>();
     private static int statesAttached;
     private static int entitySubmissionsMatched;
     private static int modelSubmitsCaptured;
@@ -101,6 +137,7 @@ public final class MetalEntityMotionCapture {
         enabled = value;
         if (!value) {
             clearFrameState();
+            MetalExactMotionCoverage.reset();
         }
     }
 
@@ -113,15 +150,20 @@ public final class MetalEntityMotionCapture {
             return;
         }
         clearFrameState();
+        MetalExactMotionCoverage.beginFrame();
     }
 
     private static void clearFrameState() {
         ENTITY_SUBMISSION.remove();
+        ENTITY_SUBMISSION_STATE.remove();
+        ENTITY_SUBMISSION_STACK.remove();
         MODEL_BUILD.remove();
         STATES.clear();
         SUBMITS.clear();
+        SHADOW_SUBMIT_STATES.clear();
         DRAWS.clear();
         EXECUTES.clear();
+        EXECUTE_VERTEX_TOKENS.clear();
         statesAttached = 0;
         entitySubmissionsMatched = 0;
         modelSubmitsCaptured = 0;
@@ -144,22 +186,87 @@ public final class MetalEntityMotionCapture {
         }
     }
 
+    public static boolean hasPreviousState(final Object state) {
+        Sample sample = enabled && state != null ? STATES.get(state) : null;
+        return sample != null && sample.hasPrevious();
+    }
+
+    @Nullable
+    public static Sample sampleForState(final Object state) {
+        return enabled && state != null ? STATES.get(state) : null;
+    }
+
+    /** Marks the actual submitted entity object as requiring exact staged previous positions. */
+    public static void requireExactState(final Object state) {
+        Sample sample = enabled && state != null ? STATES.get(state) : null;
+        if (sample != null) {
+            MetalExactMotionCoverage.require(sample);
+        }
+    }
+
+    /** Marks auxiliary geometry which cannot yet be isolated into an exact per-owner staged draw. */
+    public static void rejectCurrentExactAuxiliary(final String reason) {
+        if (enabled) {
+            MetalExactMotionCoverage.fail(ENTITY_SUBMISSION.get(), reason);
+        }
+    }
+
+    /** Explicit fail-closed hook for synthetic exact owners such as particle feature groups. */
+    public static void failExactSample(final Sample sample, final String reason) {
+        if (enabled && sample != null) {
+            MetalExactMotionCoverage.fail(sample, reason);
+        }
+    }
+
+    /** Final source-frame proof consumed by frame-interpolator admission. */
+    public static boolean exactCoverageComplete() {
+        return !enabled || MetalExactMotionCoverage.complete();
+    }
+
     public static void beginEntitySubmission(final Object state) {
         if (!enabled) {
             return;
         }
+        Deque<SubmissionFrame> stack = ENTITY_SUBMISSION_STACK.get();
+        stack.push(new SubmissionFrame(ENTITY_SUBMISSION.get(), ENTITY_SUBMISSION_STATE.get()));
         Sample sample = STATES.get(state);
         if (sample == null) {
+            // Clear rather than inherit: unsupported/nonnative nested submissions must never
+            // accidentally capture their staged geometry under the outer entity owner.
             ENTITY_SUBMISSION.remove();
+            ENTITY_SUBMISSION_STATE.remove();
         } else {
             ENTITY_SUBMISSION.set(sample);
+            ENTITY_SUBMISSION_STATE.set(state);
             entitySubmissionsMatched++;
         }
     }
 
     public static void endEntitySubmission() {
-        if (enabled) {
+        if (!enabled) {
+            return;
+        }
+        Deque<SubmissionFrame> stack = ENTITY_SUBMISSION_STACK.get();
+        if (stack.isEmpty()) {
+            // Defensive fail-closed recovery for an unmatched end call.
             ENTITY_SUBMISSION.remove();
+            ENTITY_SUBMISSION_STATE.remove();
+            ENTITY_SUBMISSION_STACK.remove();
+            return;
+        }
+        SubmissionFrame previous = stack.pop();
+        if (previous.sample() == null) {
+            ENTITY_SUBMISSION.remove();
+        } else {
+            ENTITY_SUBMISSION.set(previous.sample());
+        }
+        if (previous.state() == null) {
+            ENTITY_SUBMISSION_STATE.remove();
+        } else {
+            ENTITY_SUBMISSION_STATE.set(previous.state());
+        }
+        if (stack.isEmpty()) {
+            ENTITY_SUBMISSION_STACK.remove();
         }
     }
 
@@ -174,34 +281,134 @@ public final class MetalEntityMotionCapture {
         }
     }
 
+    /** Captures one entity-shadow submit while its real dispatcher owner is still active. */
+    public static void captureShadowSubmit(final ShadowFeatureRenderer.Submit submit) {
+        if (!enabled || submit == null) {
+            return;
+        }
+        Sample sample = ENTITY_SUBMISSION.get();
+        Object state = ENTITY_SUBMISSION_STATE.get();
+        if (sample != null && state instanceof EntityRenderState entityState) {
+            SUBMITS.put(submit, sample);
+            SHADOW_SUBMIT_STATES.put(submit, entityState);
+            modelSubmitsCaptured++;
+        }
+    }
+
+    /**
+     * Activates one synthetic exact owner for Minecraft 26.2's complete shared shadow builder.
+     * Every submit is paired with the real entity lifetime and the exact ordered terrain pieces
+     * that generate its four-vertex quads.
+     */
+    public static void beginSharedShadowBuild(final List<ShadowFeatureRenderer.Submit> submits) {
+        if (!enabled) {
+            return;
+        }
+        MODEL_BUILD.remove();
+        if (submits == null || submits.isEmpty()) {
+            return;
+        }
+
+        java.util.ArrayList<MetalShadowBatchMotion.Member> members = new java.util.ArrayList<>(submits.size());
+        for (ShadowFeatureRenderer.Submit submit : submits) {
+            Sample owner = submit == null ? null : SUBMITS.remove(submit);
+            EntityRenderState state = submit == null ? null : SHADOW_SUBMIT_STATES.remove(submit);
+            MetalShadowBatchMotion.Member member =
+                    owner == null || state == null || submit == null
+                            ? null
+                            : MetalShadowBatchMotion.member(owner, state, submit);
+            if (member == null) {
+                MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();
+                return;
+            }
+            members.add(member);
+        }
+
+        Sample batch = MetalShadowBatchMotion.beginShadowBatch(members);
+        if (batch == null) {
+            MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();
+            return;
+        }
+        MODEL_BUILD.set(batch);
+        MetalExactMotionCoverage.require(batch);
+        modelBuildsMatched++;
+    }
+
+    /**
+     * Activates one synthetic exact owner for Minecraft 26.2's complete Flame shared builder.
+     * Every Submit must resolve to the positive-lifetime owner captured at entity submission.
+     * Per-member emitted vertex spans prevent equal-and-opposite topology changes from preserving
+     * an unsafe aggregate ordinal mapping.
+     */
+    public static void beginSharedFlameBuild(final List<FlameFeatureRenderer.Submit> submits) {
+        if (!enabled) {
+            return;
+        }
+        MODEL_BUILD.remove();
+        if (submits == null || submits.isEmpty()) {
+            return;
+        }
+
+        java.util.ArrayList<MetalSharedBatchMotion.Member> members = new java.util.ArrayList<>(submits.size());
+        for (FlameFeatureRenderer.Submit submit : submits) {
+            Sample owner = submit == null ? null : SUBMITS.remove(submit);
+            int vertexSpan = submit == null
+                    ? -1
+                    : MetalSharedBatchMotion.flameVertexSpan(
+                            submit.entityRenderState().boundingBoxWidth,
+                            submit.entityRenderState().boundingBoxHeight
+                    );
+            if (owner == null || owner.generation() <= 0L || vertexSpan <= 0) {
+                MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();
+                return;
+            }
+            members.add(new MetalSharedBatchMotion.Member(
+                    owner.objectId(), owner.generation(), vertexSpan
+            ));
+        }
+
+        Sample batch = MetalSharedBatchMotion.beginFlameBatch(members);
+        if (batch == null) {
+            MetalFxManager.observeUnresolvedSharedAuxiliaryMotion();
+            return;
+        }
+        MODEL_BUILD.set(batch);
+        // First sight, membership/order changes and per-member span changes have no matching exact
+        // history. Marking the synthetic owner exact-required guarantees root-motion fallback can
+        // never make such a source frame eligible for MTLFXFrameInterpolator.
+        MetalExactMotionCoverage.require(batch);
+        modelBuildsMatched++;
+    }
+
     public static void beginModelBuild(final Object submit) {
         beginBuild(submit, false);
     }
 
-    /**
-     * {@code ItemFeatureRenderer.buildGroup} walks its submit list twice — main
-     * geometry first, then the enchantment foil — so the owning entity has to
-     * survive the first pass. {@link #beginFrame()} bounds the map instead.
-     */
+    /** Returns whether a custom submit still resolves to a real entity owner before its build. */
+    public static boolean hasModelSubmitOwner(final Object submit) {
+        return enabled && submit != null && SUBMITS.containsKey(submit);
+    }
+
     public static void beginItemBuild(final Object submit) {
         beginBuild(submit, true);
     }
 
-    /**
-     * Moving blocks are keyed by their {@code MovingBlockRenderState} rather than
-     * by the submit record.
-     *
-     * <p>{@code MovingBlockFeatureRenderer.buildGroup} inlines its per-submit work
-     * in the loop body, so the submit itself is only a local there. The render
-     * state is reachable at both ends — it is a constructor argument of the submit
-     * and the level argument of the {@code tesselateBlock} call — and one falling
-     * block owns one render state, so it identifies the same thing.</p>
-     *
-     * <p>The owner is retained rather than consumed, because a single block model
-     * can tesselate into the solid, cutout and translucent render types and a
-     * future caller may bracket each separately. {@link #beginFrame()} clears the
-     * map every frame, so retaining cannot leak across frames.</p>
-     */
+    public static void attachMovingBlockState(final Object renderState, final Sample sample) {
+        if (enabled && renderState != null && sample != null) {
+            SUBMITS.put(renderState, sample);
+            modelSubmitsCaptured++;
+        }
+    }
+
+    public static boolean hasMovingBlockOwner(final Object renderState) {
+        return enabled && renderState != null && SUBMITS.containsKey(renderState);
+    }
+
+    @Nullable
+    public static Sample sampleForSubmit(final Object submit) {
+        return enabled && submit != null ? SUBMITS.get(submit) : null;
+    }
+
     public static void beginMovingBlockBuild(final Object renderState) {
         beginBuild(renderState, true);
     }
@@ -219,10 +426,43 @@ public final class MetalEntityMotionCapture {
         }
     }
 
+    public static <T> List<T> activateBuildSampleOnAccess(final List<T> submits) {
+        if (!enabled || submits == null || submits.isEmpty()) {
+            return submits;
+        }
+        return new AbstractList<>() {
+            @Override
+            public T get(final int index) {
+                T submit = submits.get(index);
+                beginModelBuild(submit);
+                return submit;
+            }
+
+            @Override
+            public int size() {
+                return submits.size();
+            }
+        };
+    }
+
     public static void endModelBuild() {
         if (enabled) {
             MODEL_BUILD.remove();
         }
+    }
+
+    /** Opens an exact staged build which has no ordinary entity/model submit owner. */
+    public static void beginParticleBatchBuild(final Sample sample) {
+        if (!enabled) {
+            return;
+        }
+        MODEL_BUILD.remove();
+        if (sample == null) {
+            return;
+        }
+        MODEL_BUILD.set(sample);
+        MetalExactMotionCoverage.require(sample);
+        modelBuildsMatched++;
     }
 
     public static boolean shouldSplitEntityDraw(final RenderPipeline pipeline) {
@@ -234,21 +474,61 @@ public final class MetalEntityMotionCapture {
             return false;
         }
         lastVertexShader = pipeline.getVertexShader().toString();
+        boolean rootSupported = MetalEntityMotionPipeline.supports(pipeline);
+        boolean exactSupported = MetalEntityMotionPipeline.supportsPreviousPositions(pipeline);
         boolean matched = MetalEntityMotionPipeline.isSplittableVertexShader(pipeline);
+        if (exactSupported && !rootSupported) {
+            // Exact-only auxiliary families (leash/world text) must prove a complete previous
+            // staged manifest even for otherwise rigid entity classes. They have no safe root fallback.
+            MetalExactMotionCoverage.require(sample);
+        }
+        if (MetalExactMotionCoverage.required(sample) && !exactSupported) {
+            MetalExactMotionCoverage.fail(
+                    sample,
+                    "unsupported-exact-pipeline:" + pipeline.getVertexShader()
+            );
+        }
         if (matched) {
             splitChecksMatched++;
         }
         return matched;
     }
 
-    public static void attachDraw(final StagedVertexBuffer.Draw draw) {
+    public static void attachDraw(final StagedVertexBuffer.Draw draw, final RenderPipeline pipeline) {
         if (!enabled) {
             return;
         }
         Sample sample = MODEL_BUILD.get();
-        if (draw != null && sample != null) {
-            DRAWS.put(draw, sample);
+        if (draw != null && sample != null && pipeline != null) {
+            DRAWS.put(draw, new DrawCapture(
+                    sample,
+                    MetalPreviousVertexHistory.reserveDraw(sample, pipeline)
+            ));
             drawsAttached++;
+        }
+    }
+
+    public static void captureVertexData(
+            final StagedVertexBuffer.Draw draw,
+            final VertexFormat format,
+            final PrimitiveTopology topology,
+            final List<ByteBufferBuilder.Result> slices,
+            final int vertexCount,
+            final int indexCount
+    ) {
+        if (!enabled || draw == null) {
+            return;
+        }
+        DrawCapture capture = DRAWS.get(draw);
+        if (capture != null) {
+            MetalPreviousVertexHistory.capture(
+                    capture.previousVertexToken(),
+                    format,
+                    topology,
+                    slices,
+                    vertexCount,
+                    indexCount
+            );
         }
     }
 
@@ -259,9 +539,12 @@ public final class MetalEntityMotionCapture {
         if (!enabled) {
             return;
         }
-        Sample sample = DRAWS.remove(draw);
-        if (sample != null && executeInfo != null) {
-            EXECUTES.put(executeInfo, sample);
+        DrawCapture capture = DRAWS.remove(draw);
+        if (capture != null && executeInfo != null) {
+            EXECUTES.put(executeInfo, capture.sample());
+            if (capture.previousVertexToken() != null) {
+                EXECUTE_VERTEX_TOKENS.put(executeInfo, capture.previousVertexToken());
+            }
             executesTransferred++;
         }
     }
@@ -276,6 +559,13 @@ public final class MetalEntityMotionCapture {
             executesConsumed++;
         }
         return sample;
+    }
+
+    /** Consumes the staged previous-position identity paired with this exact ExecuteInfo. */
+    static MetalPreviousVertexHistory.DrawToken takePreviousVertexToken(
+            final StagedVertexBuffer.ExecuteInfo executeInfo
+    ) {
+        return enabled && executeInfo != null ? EXECUTE_VERTEX_TOKENS.remove(executeInfo) : null;
     }
 
     public static Diagnostics diagnostics() {
@@ -301,13 +591,12 @@ public final class MetalEntityMotionCapture {
             return;
         }
         motionDrawsEncoded++;
+        MetalFxMotionTelemetry.recordMotionReplayDraw();
         if (source != null) {
             switch (source.getVertexShader().getPath()) {
                 case "core/item" -> itemMotionDrawsEncoded++;
                 case "core/block" -> blockMotionDrawsEncoded++;
                 default -> {
-                    // core/entity carries no subset counter of its own; it is
-                    // motionDrawsEncoded minus the two subsets.
                 }
             }
         }
@@ -317,6 +606,12 @@ public final class MetalEntityMotionCapture {
     static void recordMotionDrawSkip(final String reason) {
         if (enabled) {
             lastMotionDrawSkip = reason;
+        }
+    }
+
+    static void recordExactReplayEncoded(final MetalPreviousVertexHistory.DrawToken token) {
+        if (enabled) {
+            MetalExactMotionCoverage.recordExactEncoded(token);
         }
     }
 

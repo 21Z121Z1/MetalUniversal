@@ -1,17 +1,22 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.math.Transformation;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.renderer.entity.state.ArrowRenderState;
 import net.minecraft.client.renderer.entity.state.BoatRenderState;
+import net.minecraft.client.renderer.entity.state.DisplayEntityRenderState;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.entity.state.MinecartRenderState;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Display;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 import org.joml.Quaternionf;
+import org.joml.Quaternionfc;
 
 /**
  * Rebuilds the root object-to-world transform that an entity renderer applies
@@ -40,11 +45,15 @@ final class MetalEntityObjectPose {
 
     /**
      * Builds the object-to-world matrix for one extracted render state. States
-     * without a known orientation fall back to pure translation, which is still
-     * strictly better than letting their pixels inherit camera motion.
+     * without a source-proven orientation fall back to pure translation; that
+     * fallback remains conservative for Temporal but is not sufficient evidence
+     * for enabling the shipping frame-interpolation producer gate.
      */
     static Matrix4f compose(final EntityRenderState state) {
         Matrix4f out = new Matrix4f();
+        if (state instanceof DisplayEntityRenderState display) {
+            return display(out, display);
+        }
         if (state instanceof ItemEntityRenderState item) {
             return droppedItem(out, item.x, item.y, item.z, item.ageInTicks, item.bobOffset);
         }
@@ -67,6 +76,87 @@ final class MetalEntityObjectPose {
             return living(out, living.x, living.y, living.z, living.bodyRot);
         }
         return out.translation((float) state.x, (float) state.y, (float) state.z);
+    }
+
+    /**
+     * Reproduces {@code DisplayRenderer.submit}: the dispatcher has already
+     * established the display entity's world translation, then the renderer
+     * applies its billboard orientation followed by the interpolated display
+     * transformation before submitting block/item/text geometry.
+     *
+     * <p>Unlike the ordinary fallback above this transform is source-complete for
+     * the display root, including camera-facing billboard modes. Camera rotation is
+     * intentionally part of the object transform here because vanilla makes it part
+     * of the display's submitted pose; omitting it makes CENTER/HORIZONTAL/VERTICAL
+     * displays inherit the wrong history when the camera turns.</p>
+     */
+    private static Matrix4f display(final Matrix4f out, final DisplayEntityRenderState state) {
+        Display.RenderState renderState = state.renderState;
+        if (renderState == null) {
+            return out.translation((float) state.x, (float) state.y, (float) state.z);
+        }
+
+        Quaternionf orientation = new Quaternionf();
+        switch (renderState.billboardConstraints()) {
+            case FIXED -> orientation.rotationYXZ(
+                    (float) (-Math.PI / 180.0) * state.entityYRot,
+                    (float) (Math.PI / 180.0) * state.entityXRot,
+                    0.0F
+            );
+            case HORIZONTAL -> orientation.rotationYXZ(
+                    (float) (-Math.PI / 180.0) * state.entityYRot,
+                    (float) (Math.PI / 180.0) * transformDisplayXRot(state.cameraXRot),
+                    0.0F
+            );
+            case VERTICAL -> orientation.rotationYXZ(
+                    (float) (-Math.PI / 180.0) * transformDisplayYRot(state.cameraYRot),
+                    (float) (Math.PI / 180.0) * state.entityXRot,
+                    0.0F
+            );
+            case CENTER -> orientation.rotationYXZ(
+                    (float) (-Math.PI / 180.0) * transformDisplayYRot(state.cameraYRot),
+                    (float) (Math.PI / 180.0) * transformDisplayXRot(state.cameraXRot),
+                    0.0F
+            );
+        }
+
+        Transformation transformation = renderState.transformation().get(state.interpolationProgress);
+        return display(
+                out,
+                state.x,
+                state.y,
+                state.z,
+                orientation,
+                transformation.getMatrix()
+        );
+    }
+
+    /**
+     * Tested core of the display transform. The order deliberately matches
+     * {@code DisplayRenderer.submit}: world translation, billboard orientation,
+     * then the interpolated {@link Transformation} matrix.
+     */
+    static Matrix4f display(
+            final Matrix4f out,
+            final double x,
+            final double y,
+            final double z,
+            final Quaternionfc orientation,
+            final Matrix4fc transformation
+    ) {
+        return out.translation((float) x, (float) y, (float) z)
+                .rotate(orientation)
+                .mul(transformation);
+    }
+
+    /** {@code DisplayRenderer.transformYRot}. */
+    static float transformDisplayYRot(final float cameraYRot) {
+        return cameraYRot - 180.0F;
+    }
+
+    /** {@code DisplayRenderer.transformXRot}. */
+    static float transformDisplayXRot(final float cameraXRot) {
+        return -cameraXRot;
     }
 
     /**
@@ -135,9 +225,9 @@ final class MetalEntityObjectPose {
         // extracted rotations whenever the rail direction is usable.
         float yRot = cart.yRot;
         float xRot = cart.xRot;
-        Vec3 direction = backPos.add(-frontPos.x, -frontPos.y, -frontPos.z);
-        if (direction.length() != 0.0) {
-            direction = direction.normalize();
+        Vec3 posDelta = backPos.subtract(frontPos);
+        if (posDelta.length() != 0.0) {
+            Vec3 direction = posDelta.normalize();
             yRot = (float) (Math.atan2(direction.z, direction.x) * 180.0 / Math.PI);
             xRot = (float) (Math.atan(direction.y) * 73.0);
         }

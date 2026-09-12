@@ -34,12 +34,18 @@ final class FrameSynthesisContract {
     enum ProducerCoverage {
         REAL_MOTION,
         REACTIVE_ONLY,
+        /**
+         * The domain was not observed in this source frame. This is different
+         * from a present producer whose exact motion was not encoded.
+         */
+        NOT_PRESENT,
         UNSUPPORTED
     }
 
     enum ProducerDomain {
         CAMERA_DEPTH,
         DYNAMIC_CONTENT,
+        BLOCK_ENTITIES,
         FIRST_PERSON,
         TRANSPARENCY,
         PARTICLES_WEATHER,
@@ -89,14 +95,38 @@ final class FrameSynthesisContract {
             if (!temporalEligible()) {
                 return false;
             }
-            EnumSet<ProducerDomain> realMotion = EnumSet.noneOf(ProducerDomain.class);
+            // A reactive-only receipt is sufficient for Temporal, but it is not a
+            // safe substitute for first-person swing/bob/equip motion. When the
+            // hand producer was observed in this source frame, interpolation
+            // requires a real previous-vertex sample; otherwise reject the
+            // entire source frame rather than relying on a reactive mask.
             for (ProducerReceipt receipt : receipts) {
-                if (receipt.coverage() == ProducerCoverage.REAL_MOTION) {
-                    realMotion.add(receipt.domain());
+                if (receipt.domain() == ProducerDomain.FIRST_PERSON
+                        && receipt.samples() > 0
+                        && receipt.coverage() != ProducerCoverage.REAL_MOTION) {
+                    return false;
                 }
             }
-            return realMotion.contains(ProducerDomain.CAMERA_DEPTH)
-                    && realMotion.contains(ProducerDomain.DYNAMIC_CONTENT);
+            boolean cameraMotion = false;
+            boolean dynamicContentSafe = false;
+            boolean blockEntitiesSafe = false;
+            for (ProducerReceipt receipt : receipts) {
+                if (receipt.domain() == ProducerDomain.CAMERA_DEPTH
+                        && receipt.coverage() == ProducerCoverage.REAL_MOTION) {
+                    cameraMotion = true;
+                }
+                if (receipt.domain() == ProducerDomain.DYNAMIC_CONTENT
+                        && (receipt.coverage() == ProducerCoverage.REAL_MOTION
+                        || receipt.coverage() == ProducerCoverage.NOT_PRESENT)) {
+                    dynamicContentSafe = true;
+                }
+                if (receipt.domain() == ProducerDomain.BLOCK_ENTITIES
+                        && (receipt.coverage() == ProducerCoverage.REAL_MOTION
+                        || receipt.coverage() == ProducerCoverage.NOT_PRESENT)) {
+                    blockEntitiesSafe = true;
+                }
+            }
+            return cameraMotion && dynamicContentSafe && blockEntitiesSafe;
         }
     }
 
@@ -118,6 +148,36 @@ final class FrameSynthesisContract {
                     || !Float.isFinite(deltaSeconds)) {
                 throw new IllegalArgumentException("Invalid camera input for Frame Generation");
             }
+        }
+    }
+
+    /**
+     * Evidence for the transfer function and composition contract consumed by
+     * Frame Generation. RGBA8_UNORM storage does not prove whether the bound
+     * view applies sRGB decoding or preserves linear values.
+     */
+    enum ColorEncodingEvidence {
+        UNPROVEN_RGBA8_UNORM_SRGB_VIEW(false, false),
+        DIAGNOSTIC_UNPROVEN_RGBA8_UNORM_SRGB_VIEW(false, true),
+        LINEAR_TEMPORAL_POST_TONEMAP_FG_PREMULTIPLIED_UI(true, false);
+
+        private final boolean provenForFrameGeneration;
+        private final boolean diagnosticAssumption;
+
+        ColorEncodingEvidence(
+                boolean provenForFrameGeneration,
+                boolean diagnosticAssumption
+        ) {
+            this.provenForFrameGeneration = provenForFrameGeneration;
+            this.diagnosticAssumption = diagnosticAssumption;
+        }
+
+        boolean provenForFrameGeneration() {
+            return provenForFrameGeneration;
+        }
+
+        boolean diagnosticAssumption() {
+            return diagnosticAssumption;
         }
     }
 
@@ -172,25 +232,69 @@ final class FrameSynthesisContract {
     /**
      * Pure admission decision before texture-view roles are attached.
      *
-     * <p>Color transfer function and consumer-view format are deliberately not
-     * represented here. The current backend cannot yet prove the sRGB view
-     * semantics required by Frame Generation, so that contract belongs in a
-     * separate texture-view change rather than being approximated as base
-     * {@code RGBA8_UNORM} storage.</p>
+     * <p>Color transfer evidence is explicit. The current backend records
+     * {@code RGBA8_UNORM} storage with an unproven sRGB/linear view, so the
+     * Frame Generation gate remains closed until a texture-view contract proves
+     * the transfer function and composition order.</p>
      */
     record FrameGenerationAdmission(
             FrameStamp stamp,
             ProducerCoverageSet producerCoverage,
             CameraFrameInput camera,
-            boolean reset
+            boolean reset,
+            ColorEncodingEvidence colorEncoding
     ) {
         FrameGenerationAdmission {
             Objects.requireNonNull(stamp, "stamp");
             Objects.requireNonNull(producerCoverage, "producerCoverage");
             Objects.requireNonNull(camera, "camera");
+            Objects.requireNonNull(colorEncoding, "colorEncoding");
             if (!producerCoverage.frameGenerationEligible()) {
                 throw new IllegalArgumentException("Producer coverage is incomplete for Frame Generation");
             }
+        }
+
+        /**
+         * Compatibility constructor for pure coverage tests. Production callers
+         * must select the explicit color evidence when the texture-view contract
+         * becomes proven.
+         */
+        FrameGenerationAdmission(
+                FrameStamp stamp,
+                ProducerCoverageSet producerCoverage,
+                CameraFrameInput camera,
+                boolean reset
+        ) {
+            this(
+                    stamp,
+                    producerCoverage,
+                    camera,
+                    reset,
+                    ColorEncodingEvidence.UNPROVEN_RGBA8_UNORM_SRGB_VIEW
+            );
+        }
+
+        boolean frameGenerationEligible() {
+            return frameGenerationEligible(false);
+        }
+
+        /**
+         * Diagnostic combined validation may assume the unproven RGBA8 view,
+         * but the flag is intentionally explicit and production callers use the
+         * no-argument fail-closed form above.
+         */
+        boolean frameGenerationEligible(boolean allowDiagnosticColorAssumption) {
+            return producerCoverage.frameGenerationEligible()
+                    && (colorEncoding.provenForFrameGeneration()
+                    || allowDiagnosticColorAssumption && colorEncoding.diagnosticAssumption());
+        }
+
+        boolean colorContractProven() {
+            return colorEncoding.provenForFrameGeneration();
+        }
+
+        boolean diagnosticColorAssumption() {
+            return colorEncoding.diagnosticAssumption();
         }
     }
 

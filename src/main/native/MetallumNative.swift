@@ -1729,6 +1729,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         let frameGenerationHeight: Int
         let nativeWidth: Int
         let nativeHeight: Int
+        let jitterX: Float
+        let jitterY: Float
         var sourceGpuStartTime: CFTimeInterval
         var sourceGpuEndTime: CFTimeInterval
         var gpuStartTime: CFTimeInterval
@@ -1778,11 +1780,12 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     private var frameInterpolator: any MTLFXFrameInterpolator
     private var copyPipeline: MTLRenderPipelineState
     private var fusedPresentPipeline: MTLRenderPipelineState
-    private var motionResamplePipeline: MTLRenderPipelineState
-    private var depthResamplePipeline: MTLRenderPipelineState
+    // Depth and motion must be selected from the same source texel when
+    // bounded-input resampling is needed. This combined MRT pipeline applies
+    // the reversed-Z max-depth tie-break and writes that texel's motion.
+    private var motionDepthResamplePipeline: MTLRenderPipelineState
     private var depthResampleState: MTLDepthStencilState
     private var copySampler: MTLSamplerState
-    private var inputResampleSampler: MTLSamplerState
     private var copyFormat: MTLPixelFormat
     // Metal 4 present path (spec M4), non-nil only when metallum.opt.metal4Present
     // and the capability gate both hold and construction succeeded. Nil means
@@ -1793,6 +1796,16 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
     // the Metal 3 one lets the Metal 3 branch stay untouched, at the cost of a
     // second set of MetalFX internal resources on an experimental path.
     private var metal4Interpolator: (any MTL4FXFrameInterpolator)?
+    private var metal3ScalerLinkStatus: MetalFxFrameInterpolatorScalerLinkStatus
+    private var metal4ScalerLinkStatus = MetalFxFrameInterpolatorScalerLinkStatus.unavailable
+
+    /// Status of the interpolator currently selected by the presenter.
+    var activeScalerLinkStatus: MetalFxFrameInterpolatorScalerLinkStatus {
+        if metal4Path != nil, metal4Interpolator != nil {
+            return metal4ScalerLinkStatus
+        }
+        return metal3ScalerLinkStatus
+    }
 
     private var sceneBuffers: [MTLTexture] = []
     private var nativeSceneBuffers: [MTLTexture] = []
@@ -1869,18 +1882,14 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                   device: device,
                   colorFormat: layer.pixelFormat
               ),
-              let motionResamplePipeline = buildPresentPipeline(
+              let motionDepthResamplePipeline = buildMotionDepthResamplePipeline(
                   device: device,
-                  colorFormat: motion.pixelFormat
-              ),
-              let depthResamplePipeline = buildDepthResamplePipeline(
-                  device: device,
+                  motionFormat: motion.pixelFormat,
                   depthFormat: depth.pixelFormat
               ),
               let depthResampleState = buildDepthResampleState(device: device),
               let copySampler = buildPresentSampler(device: device, filter: .linear),
-              let inputResampleSampler = buildPresentSampler(device: device, filter: .nearest),
-              let frameInterpolator = Self.makeFrameInterpolator(
+              let frameInterpolatorCreation = Self.makeFrameInterpolator(
                   device: device,
                   sceneColor: sceneColor,
                   uiColor: uiColor,
@@ -1894,14 +1903,13 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         self.layer = layer
         self.presentQueue = presentQueue
         self.readyEvent = readyEvent
-        self.frameInterpolator = frameInterpolator
+        self.frameInterpolator = frameInterpolatorCreation.interpolator
+        self.metal3ScalerLinkStatus = frameInterpolatorCreation.linkStatus
         self.copyPipeline = copyPipeline
         self.fusedPresentPipeline = fusedPresentPipeline
-        self.motionResamplePipeline = motionResamplePipeline
-        self.depthResamplePipeline = depthResamplePipeline
+        self.motionDepthResamplePipeline = motionDepthResamplePipeline
         self.depthResampleState = depthResampleState
         self.copySampler = copySampler
-        self.inputResampleSampler = inputResampleSampler
         self.copyFormat = layer.pixelFormat
         self.outputWidth = sceneColor.width
         self.outputHeight = sceneColor.height
@@ -1935,11 +1943,10 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                    pipelines: [
                        copyPipeline,
                        fusedPresentPipeline,
-                       motionResamplePipeline,
-                       depthResamplePipeline
+                       motionDepthResamplePipeline
                    ]
                ),
-               let interpolator = Self.makeMetal4FrameInterpolator(
+               let interpolatorCreation = Self.makeMetal4FrameInterpolator(
                    device: device,
                    sceneColor: sceneColor,
                    uiColor: uiColor,
@@ -1947,7 +1954,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                    motion: motion
                ) {
                 self.metal4Path = path
-                self.metal4Interpolator = interpolator
+                self.metal4Interpolator = interpolatorCreation.interpolator
+                self.metal4ScalerLinkStatus = interpolatorCreation.linkStatus
                 NSLog("[metallum] frame generation present path: Metal 4")
             } else {
                 NSLog("[metallum] Metal 4 present path unavailable; using Metal 3")
@@ -1970,7 +1978,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         ) else {
             return nil
         }
-        guard let workInterpolator = Self.makeFrameInterpolator(
+        guard let workInterpolatorCreation = Self.makeFrameInterpolator(
             device: device,
             sceneColor: sceneBuffers[0],
             uiColor: uiOverlayBuffers[0],
@@ -1979,16 +1987,20 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         ) else {
             return nil
         }
-        self.frameInterpolator = workInterpolator
+        self.frameInterpolator = workInterpolatorCreation.interpolator
+        self.metal3ScalerLinkStatus = workInterpolatorCreation.linkStatus
         if metal4Path != nil {
-            self.metal4Interpolator = Self.makeMetal4FrameInterpolator(
+            if let metal4InterpolatorCreation = Self.makeMetal4FrameInterpolator(
                 device: device,
                 sceneColor: sceneBuffers[0],
                 uiColor: uiOverlayBuffers[0],
                 depth: depthBuffers[0],
                 motion: motionBuffers[0]
-            )
-            if metal4Interpolator == nil {
+            ) {
+                self.metal4Interpolator = metal4InterpolatorCreation.interpolator
+                self.metal4ScalerLinkStatus = metal4InterpolatorCreation.linkStatus
+            } else {
+                self.metal4ScalerLinkStatus = .unavailable
                 self.metal4Path = nil
             }
         }
@@ -2031,7 +2043,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         uiColor: MTLTexture,
         depth: MTLTexture,
         motion: MTLTexture
-    ) -> (any MTLFXFrameInterpolator)? {
+    ) -> (interpolator: any MTLFXFrameInterpolator, linkStatus: MetalFxFrameInterpolatorScalerLinkStatus)? {
         let descriptor = MTLFXFrameInterpolatorDescriptor()
         descriptor.colorTextureFormat = sceneColor.pixelFormat
         descriptor.outputTextureFormat = sceneColor.pixelFormat
@@ -2055,11 +2067,19 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         ) {
             descriptor.scaler = linked
             if let interpolator = descriptor.makeFrameInterpolator(device: device) {
-                return interpolator
+                return (interpolator, .metal3Linked)
             }
+            NSLog("[metallum] Metal 3 FrameInterpolator rejected linked Temporal scaler; using standalone")
             descriptor.scaler = nil
+            guard let interpolator = descriptor.makeFrameInterpolator(device: device) else {
+                return nil
+            }
+            return (interpolator, .metal3LinkRejected)
         }
-        return descriptor.makeFrameInterpolator(device: device)
+        guard let interpolator = descriptor.makeFrameInterpolator(device: device) else {
+            return nil
+        }
+        return (interpolator, .metal3Standalone)
     }
 
     /// MTL4 twin of makeFrameInterpolator. The descriptor fields are identical —
@@ -2076,7 +2096,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         uiColor: MTLTexture,
         depth: MTLTexture,
         motion: MTLTexture
-    ) -> (any MTL4FXFrameInterpolator)? {
+    ) -> (interpolator: any MTL4FXFrameInterpolator, linkStatus: MetalFxFrameInterpolatorScalerLinkStatus)? {
         guard let compiler = NativeState.metal4Compiler(device) else {
             return nil
         }
@@ -2096,11 +2116,19 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         ) {
             descriptor.scaler = linked
             if let interpolator = descriptor.makeFrameInterpolator(device: device, compiler: compiler) {
-                return interpolator
+                return (interpolator, .metal4Linked)
             }
+            NSLog("[metallum] Metal 4 FrameInterpolator rejected linked Metal 3 Temporal scaler; using standalone")
             descriptor.scaler = nil
+            guard let interpolator = descriptor.makeFrameInterpolator(device: device, compiler: compiler) else {
+                return nil
+            }
+            return (interpolator, .metal4LinkRejected)
         }
-        return descriptor.makeFrameInterpolator(device: device, compiler: compiler)
+        guard let interpolator = descriptor.makeFrameInterpolator(device: device, compiler: compiler) else {
+            return nil
+        }
+        return (interpolator, .metal4Standalone)
     }
 
     private func makeTexture(
@@ -2328,13 +2356,18 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             depthHeight: inputHeight,
             motionWidth: inputWidth,
             motionHeight: inputHeight
-        ), let newInterpolator = Self.makeFrameInterpolator(
+        ), let newInterpolatorCreation = Self.makeFrameInterpolator(
             device: device,
             sceneColor: textureSet.scene[0],
             uiColor: textureSet.uiOverlay[0],
             depth: textureSet.depth[0],
             motion: textureSet.motion[0]
-        ), let newCopyPipeline = buildPresentPipeline(device: device, colorFormat: layer.pixelFormat),
+        ), let newMotionDepthResamplePipeline = buildMotionDepthResamplePipeline(
+               device: device,
+               motionFormat: motion.pixelFormat,
+               depthFormat: depth.pixelFormat
+           ),
+           let newCopyPipeline = buildPresentPipeline(device: device, colorFormat: layer.pixelFormat),
            let newFusedPresentPipeline = buildFusedPresentPipeline(
                device: device,
                colorFormat: layer.pixelFormat
@@ -2351,29 +2384,33 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             depthFormat: depth.pixelFormat,
             motionFormat: motion.pixelFormat
         )
-        self.frameInterpolator = newInterpolator
+        self.frameInterpolator = newInterpolatorCreation.interpolator
+        self.metal3ScalerLinkStatus = newInterpolatorCreation.linkStatus
         // The MTL4 interpolator is format-bound the same way, so a resize has to
         // rebuild it too. Failing here disables the Metal 4 present path for the
         // rest of the session rather than failing the resize: the Metal 3 branch
         // is always a valid fallback, and metal4Path is what present() dispatches
         // on, so both must be cleared together.
         if metal4Path != nil {
-            if let rebuilt = Self.makeMetal4FrameInterpolator(
+            if let rebuiltCreation = Self.makeMetal4FrameInterpolator(
                 device: device,
                 sceneColor: textureSet.scene[0],
                 uiColor: textureSet.uiOverlay[0],
                 depth: textureSet.depth[0],
                 motion: textureSet.motion[0]
             ) {
-                self.metal4Interpolator = rebuilt
+                self.metal4Interpolator = rebuiltCreation.interpolator
+                self.metal4ScalerLinkStatus = rebuiltCreation.linkStatus
             } else {
-                NSLog("[metallum] Metal 4 interpolator rebuild failed after resize; reverting to Metal 3 present")
+                NSLog("[metallum] Metal 4 interpolator rebuild failed after resize; reverting to Metal 3 present (scaler link unavailable)")
                 self.metal4Interpolator = nil
+                self.metal4ScalerLinkStatus = .unavailable
                 self.metal4Path = nil
             }
         }
         self.copyPipeline = newCopyPipeline
         self.fusedPresentPipeline = newFusedPresentPipeline
+        self.motionDepthResamplePipeline = newMotionDepthResamplePipeline
         metal4Path?.adopt(
             textures: textureSet.scene
                 + textureSet.nativeScene
@@ -2384,8 +2421,7 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             pipelines: [
                 newCopyPipeline,
                 newFusedPresentPipeline,
-                motionResamplePipeline,
-                depthResamplePipeline
+                newMotionDepthResamplePipeline
             ]
         )
         self.copyFormat = layer.pixelFormat
@@ -2403,18 +2439,27 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         destinationDepth: MTLTexture,
         destinationMotion: MTLTexture
     ) -> Bool {
-        let motionPass = MTLRenderPassDescriptor()
-        motionPass.colorAttachments[0].texture = destinationMotion
-        motionPass.colorAttachments[0].loadAction = .dontCare
-        motionPass.colorAttachments[0].storeAction = .store
-        guard let motionEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: motionPass) else {
+        // One render pass owns both outputs. The fragment shader chooses the
+        // nearest source texel by reversed-Z max depth, then reads motion from
+        // that exact texel, so depth/motion cannot disagree at an edge.
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = destinationMotion
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        pass.depthAttachment.texture = destinationDepth
+        pass.depthAttachment.loadAction = .dontCare
+        pass.depthAttachment.storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             return false
         }
-        motionEncoder.label = "Frame Generation Motion Downsample"
-        motionEncoder.setRenderPipelineState(motionResamplePipeline)
-        motionEncoder.setFragmentTexture(sourceMotion, index: 0)
-        motionEncoder.setFragmentSamplerState(inputResampleSampler, index: 0)
-        motionEncoder.setViewport(MTLViewport(
+        encoder.label = "Frame Generation Reversed-Z Depth/Motion Downsample"
+        encoder.setRenderPipelineState(motionDepthResamplePipeline)
+        // The MRT fragment writes depth(any); bind the write-enabled state
+        // explicitly because the encoder's default is not a contract.
+        encoder.setDepthStencilState(depthResampleState)
+        encoder.setFragmentTexture(sourceDepth, index: 0)
+        encoder.setFragmentTexture(sourceMotion, index: 1)
+        encoder.setViewport(MTLViewport(
             originX: 0.0,
             originY: 0.0,
             width: Double(destinationMotion.width),
@@ -2422,30 +2467,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             znear: 0.0,
             zfar: 1.0
         ))
-        motionEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        motionEncoder.endEncoding()
-
-        let depthPass = MTLRenderPassDescriptor()
-        depthPass.depthAttachment.texture = destinationDepth
-        depthPass.depthAttachment.loadAction = .dontCare
-        depthPass.depthAttachment.storeAction = .store
-        guard let depthEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: depthPass) else {
-            return false
-        }
-        depthEncoder.label = "Frame Generation Reversed-Z Depth Downsample"
-        depthEncoder.setRenderPipelineState(depthResamplePipeline)
-        depthEncoder.setDepthStencilState(depthResampleState)
-        depthEncoder.setFragmentTexture(sourceDepth, index: 0)
-        depthEncoder.setViewport(MTLViewport(
-            originX: 0.0,
-            originY: 0.0,
-            width: Double(destinationDepth.width),
-            height: Double(destinationDepth.height),
-            znear: 0.0,
-            zfar: 1.0
-        ))
-        depthEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        depthEncoder.endEncoding()
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
         return true
     }
 
@@ -2457,62 +2480,40 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
         destinationDepth: MTLTexture,
         destinationMotion: MTLTexture
     ) -> Bool {
-        let motionTables = lease.owner.argumentTables(at: lease.slotIndex)
-
-        let motionPass = MTL4RenderPassDescriptor()
-        motionPass.colorAttachments[0].texture = destinationMotion
-        motionPass.colorAttachments[0].loadAction = .dontCare
-        motionPass.colorAttachments[0].storeAction = .store
-        motionPass.renderTargetWidth = destinationMotion.width
-        motionPass.renderTargetHeight = destinationMotion.height
-        guard let motionEncoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: motionPass) else {
+        // Keep Metal 4 equivalent to the Metal 3 bounded-input contract: one
+        // pass selects by reversed-Z max depth and takes motion from that texel.
+        let pass = MTL4RenderPassDescriptor()
+        pass.colorAttachments[0].texture = destinationMotion
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        pass.depthAttachment.texture = destinationDepth
+        pass.depthAttachment.loadAction = .dontCare
+        pass.depthAttachment.storeAction = .store
+        pass.renderTargetWidth = destinationMotion.width
+        pass.renderTargetHeight = destinationMotion.height
+        guard let encoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             return false
         }
-        motionEncoder.label = "Frame Generation Motion Downsample (Metal 4)"
-        motionEncoder.barrier(
+        encoder.label = "Frame Generation Reversed-Z Depth/Motion Downsample (Metal 4)"
+        encoder.barrier(
             afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
             beforeStages: .fragment,
             visibilityOptions: .device
         )
-        motionTables.1.setTexture(sourceMotion.gpuResourceID, index: 0)
-        motionTables.1.setSamplerState(inputResampleSampler.gpuResourceID, index: 0)
-        motionEncoder.setArgumentTable(motionTables.1, stages: .fragment)
-        motionEncoder.setRenderPipelineState(motionResamplePipeline)
-        motionEncoder.setViewport(MTLViewport(
+        let tables = lease.owner.argumentTables(at: lease.slotIndex)
+        tables.1.setTexture(sourceDepth.gpuResourceID, index: 0)
+        tables.1.setTexture(sourceMotion.gpuResourceID, index: 1)
+        encoder.setArgumentTable(tables.1, stages: .fragment)
+        encoder.setRenderPipelineState(motionDepthResamplePipeline)
+        // Keep Metal 4's depth(any) attachment contract identical to Metal 3.
+        encoder.setDepthStencilState(depthResampleState)
+        encoder.setViewport(MTLViewport(
             originX: 0, originY: 0,
             width: Double(destinationMotion.width), height: Double(destinationMotion.height),
             znear: 0, zfar: 1
         ))
-        motionEncoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
-        motionEncoder.endEncoding()
-
-        let depthPass = MTL4RenderPassDescriptor()
-        depthPass.depthAttachment.texture = destinationDepth
-        depthPass.depthAttachment.loadAction = .dontCare
-        depthPass.depthAttachment.storeAction = .store
-        depthPass.renderTargetWidth = destinationDepth.width
-        depthPass.renderTargetHeight = destinationDepth.height
-        guard let depthEncoder = lease.commandBuffer.makeRenderCommandEncoder(descriptor: depthPass) else {
-            return false
-        }
-        let depthTables = lease.owner.argumentTables(at: lease.slotIndex)
-        depthEncoder.label = "Frame Generation Reversed-Z Depth Downsample (Metal 4)"
-        depthEncoder.barrier(
-            afterQueueStages: [.vertex, .fragment, .dispatch, .blit],
-            beforeStages: .fragment,
-            visibilityOptions: .device
-        )
-        depthTables.1.setTexture(sourceDepth.gpuResourceID, index: 0)
-        depthEncoder.setArgumentTable(depthTables.1, stages: .fragment)
-        depthEncoder.setRenderPipelineState(depthResamplePipeline)
-        depthEncoder.setDepthStencilState(depthResampleState)
-        depthEncoder.setViewport(MTLViewport(
-            originX: 0, originY: 0,
-            width: Double(destinationDepth.width), height: Double(destinationDepth.height),
-            znear: 0, zfar: 1
-        ))
-        depthEncoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
-        depthEncoder.endEncoding()
+        encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
         return true
     }
 
@@ -3706,6 +3707,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
             frameGenerationHeight: sourceFrame?.frameGenerationHeight ?? 0,
             nativeWidth: sourceFrame?.nativeWidth ?? 0,
             nativeHeight: sourceFrame?.nativeHeight ?? 0,
+            jitterX: sourceFrame?.jitterX ?? 0.0,
+            jitterY: sourceFrame?.jitterY ?? 0.0,
             sourceGpuStartTime: sourceTiming?.start ?? 0.0,
             sourceGpuEndTime: sourceTiming?.end ?? 0.0,
             gpuStartTime: 0.0,
@@ -3765,6 +3768,8 @@ final class MetalFrameGenerationPresenter: NSObject, CAMetalDisplayLinkDelegate 
                     "frameGenerationHeight": diagnostic.frameGenerationHeight,
                     "nativeWidth": diagnostic.nativeWidth,
                     "nativeHeight": diagnostic.nativeHeight,
+                    "jitterX": diagnostic.jitterX,
+                    "jitterY": diagnostic.jitterY,
                     "sourceGpuStartTime": diagnostic.sourceGpuStartTime,
                     "sourceGpuEndTime": diagnostic.sourceGpuEndTime,
                     "gpuStartTime": diagnostic.gpuStartTime,
@@ -4075,24 +4080,40 @@ private func fullscreenMslSource(flipY: Bool) -> String {
       return tex.sample(smp, in.uv);
     }
 
-    struct DepthResampleOut {
+    struct MotionDepthResampleOut {
+      float4 motion [[color(0)]];
       float depth [[depth(any)]];
     };
 
-    fragment DepthResampleOut metallum_depth_resample_fs(
+    fragment MotionDepthResampleOut metallum_motion_depth_resample_fs(
       PresentVertexOut in [[stage_in]],
-      depth2d<float, access::read> tex [[texture(0)]]
+      depth2d<float, access::read> sourceDepth [[texture(0)]],
+      texture2d<float, access::read> sourceMotion [[texture(1)]]
     ) {
-      uint2 size = uint2(tex.get_width(), tex.get_height());
+      uint2 size = uint2(sourceDepth.get_width(), sourceDepth.get_height());
       float2 sourcePosition = in.uv * float2(size) - 0.5;
       uint2 base = uint2(clamp(floor(sourcePosition), float2(0.0), float2(size - 1)));
       uint2 next = min(base + 1, size - 1);
-      DepthResampleOut out;
-      // Reversed Z: retain the nearest covered surface in the source footprint.
-      out.depth = max(
-        max(tex.read(base), tex.read(uint2(next.x, base.y))),
-        max(tex.read(uint2(base.x, next.y)), tex.read(next))
-      );
+      uint2 candidates[4] = {
+        base,
+        uint2(next.x, base.y),
+        uint2(base.x, next.y),
+        next
+      };
+      // Strictly greater preserves the stable base->x->y->diagonal tie order.
+      float selectedDepth = sourceDepth.read(candidates[0]);
+      uint selectedIndex = 0;
+      for (uint index = 1; index < 4; index++) {
+        float candidateDepth = sourceDepth.read(candidates[index]);
+        if (isfinite(candidateDepth)
+            && (!isfinite(selectedDepth) || candidateDepth > selectedDepth)) {
+          selectedDepth = candidateDepth;
+          selectedIndex = index;
+        }
+      }
+      MotionDepthResampleOut out;
+      out.depth = selectedDepth;
+      out.motion = sourceMotion.read(candidates[selectedIndex]);
       return out;
     }
 
@@ -4319,23 +4340,29 @@ private func buildPresentPipeline(
     }
 }
 
-private func buildDepthResamplePipeline(
+private func buildMotionDepthResamplePipeline(
     device: MTLDevice,
+    motionFormat: MTLPixelFormat,
     depthFormat: MTLPixelFormat
 ) -> MTLRenderPipelineState? {
     do {
-        let library = try device.makeLibrary(source: presentMslSource(), options: nil)
+        // This is texture-to-texture resampling, not drawable presentation.
+        // Keep depth/motion in the renderer's native Metal orientation; the
+        // final CAMetalLayer present is the only stage that applies the Y flip.
+        let library = try device.makeLibrary(source: copyMslSource(), options: nil)
         guard let vertexFunction = library.makeFunction(name: "metallum_present_vs"),
-              let fragmentFunction = library.makeFunction(name: "metallum_depth_resample_fs") else {
+              let fragmentFunction = library.makeFunction(name: "metallum_motion_depth_resample_fs") else {
             return nil
         }
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertexFunction
         descriptor.fragmentFunction = fragmentFunction
+        descriptor.colorAttachments[0].pixelFormat = motionFormat
+        descriptor.colorAttachments[0].isBlendingEnabled = false
         descriptor.depthAttachmentPixelFormat = depthFormat
         return try device.makeRenderPipelineState(descriptor: descriptor)
     } catch {
-        NSLog("[metallum] Failed to create depth-resample pipeline: %@", String(describing: error))
+        NSLog("[metallum] Failed to create depth/motion resample pipeline: %@", String(describing: error))
         return nil
     }
 }
@@ -4675,6 +4702,7 @@ private func handOverlayMslSource() -> String {
       texture2d<half, access::write> objectMotionTexture [[texture(1)]],
       texture2d<half, access::write> objectValidityTexture [[texture(2)]],
       texture2d<half, access::read_write> reactiveTexture [[texture(3)]],
+      texture2d<float, access::read> handExactValidityTexture [[texture(4)]],
       constant HandOverlayUniforms& u [[buffer(0)]],
       uint2 pixel [[thread_position_in_grid]]) {
       if (pixel.x >= u.width || pixel.y >= u.height) return;
@@ -4689,7 +4717,13 @@ private func handOverlayMslSource() -> String {
       float depth = handDepthTexture.read(pixel).r;
       if (!(isfinite(depth) && depth > 0.0000001)) return;
 
-      objectMotionTexture.write(half4(half(0.0)), pixel);
+      float handExactValid = u.reserved > 0.5 ? handExactValidityTexture.read(pixel).r : 0.0;
+      if (!(isfinite(handExactValid) && handExactValid > 0.5)) {
+        objectMotionTexture.write(half4(half(0.0)), pixel);
+      }
+      // Legacy merge has no hand-depth branch. Force it to select the shared
+      // object-motion field at hand pixels; V2 keeps exact motion when the
+      // dedicated mask proves ownership and otherwise writes the safe zero fallback.
       objectValidityTexture.write(
         half4(half(1.0), half(0.0), half(0.0), half(0.0)),
         pixel
@@ -5214,6 +5248,7 @@ private func motionFusedV2MslSource() -> String {
       texture2d<half, access::write> cameraDiagnosticTexture [[texture(6)]],
       texture2d<half, access::write> disocclusionDiagnosticTexture [[texture(7)]],
       texture2d<float, access::read> handDepthTexture [[texture(8)]],
+      texture2d<float, access::read> handExactValidityTexture [[texture(9)]],
       constant FusedMotionUniforms& u [[buffer(0)]],
       uint2 pixel [[thread_position_in_grid]]) {
       uint width = uint(u.viewport.x);
@@ -5311,10 +5346,28 @@ private func motionFusedV2MslSource() -> String {
       if (u.options.z != 0u) {
         float handDepth = handDepthTexture.read(pixel).r;
         if (isfinite(handDepth) && handDepth > 0.0000001) {
-          // The hand target is cleared immediately before first-person
-          // rendering. Covered pixels are camera-locked, so zero motion is the
-          // exact camera component; swing/bob remains protected by reactivity.
-          selected = float2(0.0);
+          // Hand pixels have their own ownership proof. A world entity directly
+          // behind the hand may set objectValidityTexture at the same pixel, so
+          // that plane is intentionally ignored here. Exact first-person motion
+          // is consumed only when the dedicated mask says the shared RG16F value
+          // was produced by this hand replay; otherwise zero remains the safe
+          // camera-locked fallback.
+          bool exactHand = false;
+          if (u.options.w != 0u) {
+            float handValid = handExactValidityTexture.read(pixel).r;
+            if (isfinite(handValid) && handValid > 0.5) {
+              float2 handMotion = float2(objectMotionTexture.read(pixel).rg);
+              if (all(isfinite(handMotion)) && all(abs(handMotion) <= float2(32.0))) {
+                selected = handMotion;
+                exactHand = true;
+              } else {
+                reactive = 1.0;
+              }
+            }
+          }
+          if (!exactHand) {
+            selected = float2(0.0);
+          }
           reactive = max(reactive, quantizeUnorm8(u.params.z));
         }
       }
@@ -5767,6 +5820,7 @@ private func metal3MetalFxEncodeHandOverlay(
     _ handDepthTexture: MTLTexture,
     _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture,
+    _ handExactValidityTexture: MTLTexture?,
     _ reactiveTexture: MTLTexture,
     _ inputWidth: Int32,
     _ inputHeight: Int32,
@@ -5782,6 +5836,9 @@ private func metal3MetalFxEncodeHandOverlay(
               objectMotionTexture.height == Int(inputHeight),
               objectValidityTexture.width == Int(inputWidth),
               objectValidityTexture.height == Int(inputHeight),
+              handExactValidityTexture == nil || (handExactValidityTexture?.width == Int(inputWidth)
+                  && handExactValidityTexture?.height == Int(inputHeight)
+                  && handExactValidityTexture?.pixelFormat == .r8Unorm),
               reactiveTexture.width == Int(inputWidth),
               reactiveTexture.height == Int(inputHeight),
               objectMotionTexture.pixelFormat == .rg16Float,
@@ -5804,7 +5861,7 @@ private func metal3MetalFxEncodeHandOverlay(
             width: UInt32(inputWidth),
             height: UInt32(inputHeight),
             reactiveBoost: reactiveBoost,
-            reserved: 0.0
+            reserved: handExactValidityTexture != nil ? 1.0 : 0.0
         )
         encoder.setComputePipelineState(pipeline)
         encoder.setBytes(
@@ -5816,6 +5873,7 @@ private func metal3MetalFxEncodeHandOverlay(
         encoder.setTexture(objectMotionTexture, index: 1)
         encoder.setTexture(objectValidityTexture, index: 2)
         encoder.setTexture(reactiveTexture, index: 3)
+        encoder.setTexture(handExactValidityTexture, index: 4)
         let threadWidth = max(1, min(pipeline.threadExecutionWidth, 64))
         let threadHeight = max(
             1,
@@ -5857,12 +5915,12 @@ public func metallum_metalfx_encode_hand_overlay(
     )
 }
 
-@_cdecl("metallum_metalfx_encode_hand_overlay")
-public func metallumMetalFxEncodeHandOverlayEntry(
+private func metalFxEncodeHandOverlayEntryImpl(
     _ commandBufferPointer: UnsafeMutableRawPointer,
     _ handDepthTexture: MTLTexture,
     _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture,
+    _ handExactValidityTexture: MTLTexture?,
     _ reactiveTexture: MTLTexture,
     _ inputWidth: Int32,
     _ inputHeight: Int32,
@@ -5875,26 +5933,68 @@ public func metallumMetalFxEncodeHandOverlayEntry(
        handDepthTexture.width == Int(inputWidth), handDepthTexture.height == Int(inputHeight),
        objectMotionTexture.width == Int(inputWidth), objectMotionTexture.height == Int(inputHeight),
        objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
+       handExactValidityTexture == nil || (handExactValidityTexture?.width == Int(inputWidth)
+           && handExactValidityTexture?.height == Int(inputHeight)
+           && handExactValidityTexture?.pixelFormat == .r8Unorm),
        reactiveTexture.width == Int(inputWidth), reactiveTexture.height == Int(inputHeight),
        objectMotionTexture.pixelFormat == .rg16Float,
        objectValidityTexture.pixelFormat == .r8Unorm, reactiveTexture.pixelFormat == .r8Unorm,
        let pipeline = ensureHandOverlayPipeline(handDepthTexture.device) {
         let uniforms = HandOverlayUniforms(
             width: UInt32(inputWidth), height: UInt32(inputHeight),
-            reactiveBoost: reactiveBoost, reserved: 0
+            reactiveBoost: reactiveBoost, reserved: handExactValidityTexture != nil ? 1.0 : 0.0
         )
         return encodeMetal4Compute(
             lease: lease, label: "MetalFX Hand Overlay Motion (Metal 4)",
             pipeline: pipeline, uniforms: uniforms,
             textures: [(0, handDepthTexture), (1, objectMotionTexture),
-                       (2, objectValidityTexture), (3, reactiveTexture)],
+                       (2, objectValidityTexture), (3, reactiveTexture),
+                       (4, handExactValidityTexture)],
             width: Int(inputWidth), height: Int(inputHeight)
         ) ? 1 : 0
     }
     #endif
     return metal3MetalFxEncodeHandOverlay(
         metal3CommandBuffer(commandBufferPointer), handDepthTexture, objectMotionTexture,
-        objectValidityTexture, reactiveTexture, inputWidth, inputHeight, reactiveBoost, fence
+        objectValidityTexture, handExactValidityTexture, reactiveTexture,
+        inputWidth, inputHeight, reactiveBoost, fence
+    )
+}
+
+@_cdecl("metallum_metalfx_encode_hand_overlay")
+public func metallumMetalFxEncodeHandOverlayEntry(
+    _ commandBufferPointer: UnsafeMutableRawPointer,
+    _ handDepthTexture: MTLTexture,
+    _ objectMotionTexture: MTLTexture,
+    _ objectValidityTexture: MTLTexture,
+    _ reactiveTexture: MTLTexture,
+    _ inputWidth: Int32,
+    _ inputHeight: Int32,
+    _ reactiveBoost: Float,
+    _ fence: MTLFence?
+) -> Int32 {
+    metalFxEncodeHandOverlayEntryImpl(
+        commandBufferPointer, handDepthTexture, objectMotionTexture, objectValidityTexture,
+        nil, reactiveTexture, inputWidth, inputHeight, reactiveBoost, fence
+    )
+}
+
+@_cdecl("metallum_metalfx_encode_hand_overlay_v2")
+public func metallumMetalFxEncodeHandOverlayV2Entry(
+    _ commandBufferPointer: UnsafeMutableRawPointer,
+    _ handDepthTexture: MTLTexture,
+    _ objectMotionTexture: MTLTexture,
+    _ objectValidityTexture: MTLTexture,
+    _ handExactValidityTexture: MTLTexture,
+    _ reactiveTexture: MTLTexture,
+    _ inputWidth: Int32,
+    _ inputHeight: Int32,
+    _ reactiveBoost: Float,
+    _ fence: MTLFence?
+) -> Int32 {
+    metalFxEncodeHandOverlayEntryImpl(
+        commandBufferPointer, handDepthTexture, objectMotionTexture, objectValidityTexture,
+        handExactValidityTexture, reactiveTexture, inputWidth, inputHeight, reactiveBoost, fence
     )
 }
 
@@ -6322,6 +6422,7 @@ public func metallumMetalFxEncodeEntry(
 private func metal4MetalFxEncodeV2(
     lease: Metal4MainCommandBufferLease, device: MTLDevice,
     colorTexture: MTLTexture, depthTexture: MTLTexture, handDepthTexture: MTLTexture?,
+    handExactValidityTexture: MTLTexture?,
     cameraMotionTexture: MTLTexture, objectMotionTexture: MTLTexture,
     objectValidityTexture: MTLTexture, disocclusionTexture: MTLTexture,
     motionTexture: MTLTexture, reactiveTexture: MTLTexture, outputTexture: MTLTexture,
@@ -6337,6 +6438,9 @@ private func metal4MetalFxEncodeV2(
           depthTexture.width == Int(inputWidth), depthTexture.height == Int(inputHeight),
           handDepthTexture == nil || (handDepthTexture?.width == Int(inputWidth)
               && handDepthTexture?.height == Int(inputHeight)),
+          handExactValidityTexture == nil || (handExactValidityTexture?.width == Int(inputWidth)
+              && handExactValidityTexture?.height == Int(inputHeight)
+              && handExactValidityTexture?.pixelFormat == .r8Unorm),
           cameraMotionTexture.width == Int(inputWidth), cameraMotionTexture.height == Int(inputHeight),
           objectMotionTexture.width == Int(inputWidth), objectMotionTexture.height == Int(inputHeight),
           objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
@@ -6402,7 +6506,7 @@ private func metal4MetalFxEncodeV2(
         descriptor.inputHeight = colorTexture.height
         descriptor.outputWidth = outputTexture.width
         descriptor.outputHeight = outputTexture.height
-        descriptor.isAutoExposureEnabled = false
+        descriptor.isAutoExposureEnabled = true
         descriptor.requiresSynchronousInitialization = true
         if #available(macOS 14.4, *) {
             descriptor.isReactiveMaskTextureEnabled = true
@@ -6516,7 +6620,8 @@ private func metal4MetalFxEncodeV2(
                          previousDepthIsValid ? 1 : 0, depthReversed != 0 ? 1 : 0),
             options: SIMD4(NativeState.mergeDepthDilation > 0.5 ? 1 : 0,
                            emitMotionDiagnostics != 0 ? 1 : 0,
-                           handDepthTexture != nil ? 1 : 0, 0),
+                           handDepthTexture != nil ? 1 : 0,
+                           handExactValidityTexture != nil ? 1 : 0),
             params: SIMD4(NativeState.reactiveTuning.z,
                           NativeState.disocclusionReactiveCap, handReactiveBoost, 0)
         )
@@ -6527,7 +6632,7 @@ private func metal4MetalFxEncodeV2(
                        (2, objectValidityTexture), (3, previousDepthTexture),
                        (4, motionTexture), (5, reactiveTexture),
                        (6, cameraMotionTexture), (7, disocclusionTexture),
-                       (8, handDepthTexture)],
+                       (8, handDepthTexture), (9, handExactValidityTexture)],
             width: Int(inputWidth), height: Int(inputHeight),
             producerBarrierBeforeStages: [.vertex, .fragment, .dispatch, .blit]
         ) else { return 0 }
@@ -6600,6 +6705,7 @@ private func metal3MetalFxEncodeV2(
     _ colorTexture: MTLTexture,
     _ depthTexture: MTLTexture,
     _ handDepthTexture: MTLTexture?,
+    _ handExactValidityTexture: MTLTexture?,
     _ cameraMotionTexture: MTLTexture,
     _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture,
@@ -6629,6 +6735,9 @@ private func metal3MetalFxEncodeV2(
                   depthTexture.width == Int(inputWidth), depthTexture.height == Int(inputHeight),
                   handDepthTexture == nil || (handDepthTexture?.width == Int(inputWidth)
                       && handDepthTexture?.height == Int(inputHeight)),
+                  handExactValidityTexture == nil || (handExactValidityTexture?.width == Int(inputWidth)
+                      && handExactValidityTexture?.height == Int(inputHeight)
+                      && handExactValidityTexture?.pixelFormat == .r8Unorm),
                   cameraMotionTexture.width == Int(inputWidth), cameraMotionTexture.height == Int(inputHeight),
                   objectMotionTexture.width == Int(inputWidth), objectMotionTexture.height == Int(inputHeight),
                   objectValidityTexture.width == Int(inputWidth), objectValidityTexture.height == Int(inputHeight),
@@ -6698,7 +6807,7 @@ private func metal3MetalFxEncodeV2(
                 descriptor.inputHeight = colorTexture.height
                 descriptor.outputWidth = outputTexture.width
                 descriptor.outputHeight = outputTexture.height
-                descriptor.isAutoExposureEnabled = false
+                descriptor.isAutoExposureEnabled = true
                 descriptor.requiresSynchronousInitialization = true
                 if #available(macOS 14.4, *) {
                     descriptor.isReactiveMaskTextureEnabled = true
@@ -6854,7 +6963,7 @@ private func metal3MetalFxEncodeV2(
                         NativeState.mergeDepthDilation > 0.5 ? 1 : 0,
                         emitMotionDiagnostics != 0 ? 1 : 0,
                         handDepthTexture != nil ? 1 : 0,
-                        0
+                        handExactValidityTexture != nil ? 1 : 0
                     ),
                     params: SIMD4<Float>(
                         NativeState.reactiveTuning.z,
@@ -6878,6 +6987,7 @@ private func metal3MetalFxEncodeV2(
                 fusedEncoder.setTexture(cameraMotionTexture, index: 6)
                 fusedEncoder.setTexture(disocclusionTexture, index: 7)
                 fusedEncoder.setTexture(handDepthTexture, index: 8)
+                fusedEncoder.setTexture(handExactValidityTexture, index: 9)
                 let fusedWidth = max(1, min(pipelines.fused.threadExecutionWidth, 64))
                 let fusedHeight = max(1, min(8, pipelines.fused.maxTotalThreadsPerThreadgroup / fusedWidth))
                 fusedEncoder.dispatchThreads(
@@ -6967,10 +7077,10 @@ public func metallum_metalfx_encode_v2(
     )
 }
 
-@_cdecl("metallum_metalfx_encode_v2")
-public func metallumMetalFxEncodeV2Entry(
+private func metalFxEncodeV2EntryImpl(
     _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
     _ colorTexture: MTLTexture, _ depthTexture: MTLTexture, _ handDepthTexture: MTLTexture?,
+    _ handExactValidityTexture: MTLTexture?,
     _ cameraMotionTexture: MTLTexture, _ objectMotionTexture: MTLTexture,
     _ objectValidityTexture: MTLTexture, _ disocclusionTexture: MTLTexture,
     _ motionTexture: MTLTexture, _ reactiveTexture: MTLTexture, _ outputTexture: MTLTexture,
@@ -6986,10 +7096,10 @@ public func metallumMetalFxEncodeV2Entry(
        let lease = metal4MainLease(commandBufferPointer) {
         return metal4MetalFxEncodeV2(
             lease: lease, device: device, colorTexture: colorTexture, depthTexture: depthTexture,
-            handDepthTexture: handDepthTexture, cameraMotionTexture: cameraMotionTexture,
-            objectMotionTexture: objectMotionTexture, objectValidityTexture: objectValidityTexture,
-            disocclusionTexture: disocclusionTexture, motionTexture: motionTexture,
-            reactiveTexture: reactiveTexture, outputTexture: outputTexture,
+            handDepthTexture: handDepthTexture, handExactValidityTexture: handExactValidityTexture,
+            cameraMotionTexture: cameraMotionTexture, objectMotionTexture: objectMotionTexture,
+            objectValidityTexture: objectValidityTexture, disocclusionTexture: disocclusionTexture,
+            motionTexture: motionTexture, reactiveTexture: reactiveTexture, outputTexture: outputTexture,
             currentViewProjection: currentViewProjection,
             inverseCurrentViewProjection: inverseCurrentViewProjection,
             previousViewProjection: previousViewProjection, fence: fence,
@@ -7002,10 +7112,59 @@ public func metallumMetalFxEncodeV2Entry(
     #endif
     return metal3MetalFxEncodeV2(
         metal3CommandBuffer(commandBufferPointer), device, colorTexture, depthTexture, handDepthTexture,
+        handExactValidityTexture, cameraMotionTexture, objectMotionTexture, objectValidityTexture,
+        disocclusionTexture, motionTexture, reactiveTexture, outputTexture, currentViewProjection,
+        inverseCurrentViewProjection, previousViewProjection, fence, jitterX, jitterY,
+        handReactiveBoost, inputWidth, inputHeight, reset, depthReversed,
+        preserveReactiveMask, emitMotionDiagnostics
+    )
+}
+
+@_cdecl("metallum_metalfx_encode_v2")
+public func metallumMetalFxEncodeV2Entry(
+    _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
+    _ colorTexture: MTLTexture, _ depthTexture: MTLTexture, _ handDepthTexture: MTLTexture?,
+    _ cameraMotionTexture: MTLTexture, _ objectMotionTexture: MTLTexture,
+    _ objectValidityTexture: MTLTexture, _ disocclusionTexture: MTLTexture,
+    _ motionTexture: MTLTexture, _ reactiveTexture: MTLTexture, _ outputTexture: MTLTexture,
+    _ currentViewProjection: UnsafePointer<Float>?,
+    _ inverseCurrentViewProjection: UnsafePointer<Float>?,
+    _ previousViewProjection: UnsafePointer<Float>?, _ fence: MTLFence?,
+    _ jitterX: Float, _ jitterY: Float, _ handReactiveBoost: Float,
+    _ inputWidth: Int32, _ inputHeight: Int32, _ reset: Int32, _ depthReversed: Int32,
+    _ preserveReactiveMask: Int32, _ emitMotionDiagnostics: Int32
+) -> Int32 {
+    metalFxEncodeV2EntryImpl(
+        commandBufferPointer, device, colorTexture, depthTexture, handDepthTexture, nil,
         cameraMotionTexture, objectMotionTexture, objectValidityTexture, disocclusionTexture,
         motionTexture, reactiveTexture, outputTexture, currentViewProjection,
         inverseCurrentViewProjection, previousViewProjection, fence, jitterX, jitterY,
         handReactiveBoost, inputWidth, inputHeight, reset, depthReversed,
+        preserveReactiveMask, emitMotionDiagnostics
+    )
+}
+
+@_cdecl("metallum_metalfx_encode_v3")
+public func metallumMetalFxEncodeV3Entry(
+    _ commandBufferPointer: UnsafeMutableRawPointer, _ device: MTLDevice,
+    _ colorTexture: MTLTexture, _ depthTexture: MTLTexture, _ handDepthTexture: MTLTexture?,
+    _ handExactValidityTexture: MTLTexture,
+    _ cameraMotionTexture: MTLTexture, _ objectMotionTexture: MTLTexture,
+    _ objectValidityTexture: MTLTexture, _ disocclusionTexture: MTLTexture,
+    _ motionTexture: MTLTexture, _ reactiveTexture: MTLTexture, _ outputTexture: MTLTexture,
+    _ currentViewProjection: UnsafePointer<Float>?,
+    _ inverseCurrentViewProjection: UnsafePointer<Float>?,
+    _ previousViewProjection: UnsafePointer<Float>?, _ fence: MTLFence?,
+    _ jitterX: Float, _ jitterY: Float, _ handReactiveBoost: Float,
+    _ inputWidth: Int32, _ inputHeight: Int32, _ reset: Int32, _ depthReversed: Int32,
+    _ preserveReactiveMask: Int32, _ emitMotionDiagnostics: Int32
+) -> Int32 {
+    metalFxEncodeV2EntryImpl(
+        commandBufferPointer, device, colorTexture, depthTexture, handDepthTexture,
+        handExactValidityTexture, cameraMotionTexture, objectMotionTexture, objectValidityTexture,
+        disocclusionTexture, motionTexture, reactiveTexture, outputTexture,
+        currentViewProjection, inverseCurrentViewProjection, previousViewProjection, fence,
+        jitterX, jitterY, handReactiveBoost, inputWidth, inputHeight, reset, depthReversed,
         preserveReactiveMask, emitMotionDiagnostics
     )
 }
@@ -7377,11 +7536,32 @@ public func metallum_metalfx_release_scalers() {
     // presenter rebuilds its interpolator.
     NativeState.lastTemporalScalerForInterpolation = nil
     NativeState.metalFxHistoryLock.lock()
+    // Callers drain submitted GPU work before cache teardown. Metal 4 history
+    // and diagnostic textures are explicitly added to the residency set when
+    // allocated, so remove them symmetrically before dropping the last strong
+    // cache references. Untracked Metal 3 textures are harmless here because
+    // residencyTrackReleased() is ledger-guarded and becomes a no-op.
+    for texture in NativeState.metalFxPreviousDepthTextures.values {
+        residencyTrackReleased(texture)
+    }
+    for texture in NativeState.metalFxValidationReactiveTextures.values {
+        residencyTrackReleased(texture)
+    }
     NativeState.metalFxPreviousDepthTextures.removeAll()
     NativeState.metalFxValidationReactiveTextures.removeAll()
     NativeState.metalFxPreviousDepthValid.removeAll()
     NativeState.metalFxHistoryLock.unlock()
     #endif
+}
+
+@_cdecl("metallum_metalfx_frame_generation_scaler_link_status")
+public func metallumMetalFxFrameGenerationScalerLinkStatus() -> Int32 {
+    #if os(macOS) && canImport(MetalFX)
+    if #available(macOS 26.0, *) {
+        return NativeState.frameGenerationPresenter?.activeScalerLinkStatus.rawValue ?? 0
+    }
+    #endif
+    return 0
 }
 
 @_cdecl("metallum_metalfx_shutdown")

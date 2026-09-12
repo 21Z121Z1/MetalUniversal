@@ -1,5 +1,15 @@
 import Foundation
 
+private func assertScalerLinkStatusContract() {
+    precondition(MetalFxFrameInterpolatorScalerLinkStatus.unavailable.rawValue == 0)
+    precondition(MetalFxFrameInterpolatorScalerLinkStatus.metal3Linked.isLinked)
+    precondition(MetalFxFrameInterpolatorScalerLinkStatus.metal4Linked.isLinked)
+    precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal3Standalone.isLinked)
+    precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal3LinkRejected.isLinked)
+    precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal4Standalone.isLinked)
+    precondition(!MetalFxFrameInterpolatorScalerLinkStatus.metal4LinkRejected.isLinked)
+}
+
 private enum TestFailure: Error, CustomStringConvertible {
     case assertion(String)
 
@@ -17,6 +27,42 @@ private func expect(
     if !condition() {
         throw TestFailure.assertion(message)
     }
+}
+
+private func testBoundedInputUsesDepthWinnerMotion() throws {
+    let candidates = [
+        MetalFxBoundedInputCandidate(
+            sourceIndex: 0, depth: 0.82, motion: SIMD2(0.10, 0.20)
+        ),
+        MetalFxBoundedInputCandidate(
+            sourceIndex: 1, depth: 0.96, motion: SIMD2(0.30, 0.40)
+        ),
+        MetalFxBoundedInputCandidate(
+            sourceIndex: 2, depth: 0.96, motion: SIMD2(0.50, 0.60)
+        ),
+        MetalFxBoundedInputCandidate(
+            sourceIndex: 3, depth: 0.10, motion: SIMD2(0.70, 0.80)
+        )
+    ]
+    let selected = MetalFxBoundedInputOracle.chooseReversedZ(candidates)
+    try expect(selected?.sourceIndex == 1, "reversed-Z max depth must use stable first-winner tie break")
+    try expect(
+        selected?.motion == SIMD2(0.30, 0.40),
+        "motion must come from the selected depth texel"
+    )
+
+    let edge = [
+        MetalFxBoundedInputCandidate(
+            sourceIndex: 0, depth: Float.nan, motion: SIMD2(0.10, 0.20)
+        ),
+        MetalFxBoundedInputCandidate(
+            sourceIndex: 1, depth: 0.25, motion: SIMD2(0.30, 0.40)
+        )
+    ]
+    try expect(
+        MetalFxBoundedInputOracle.chooseReversedZ(edge)?.sourceIndex == 1,
+        "finite edge depth must beat an invalid source texel"
+    )
 }
 
 private func testAdmissionTracksDisplayActivity() throws {
@@ -267,6 +313,8 @@ private func testPresentedTimeZeroFails() throws {
 private enum MetalFrameGenerationLifecycleTestMain {
     static func main() {
         let tests: [(String, () throws -> Void)] = [
+            ("native scaler-link status", assertScalerLinkStatusContract),
+            ("bounded-input depth/motion pairing", testBoundedInputUsesDepthWinnerMotion),
             ("display-aware source admission", testAdmissionTracksDisplayActivity),
             ("generated then real", testGeneratedThenReal),
             ("GUI suspend and resize", testGuiSuspendAndResizeCancel),

@@ -8,6 +8,24 @@ Frame interpolation is a macOS 26+ path based on
 Minecraft cannot enable it while
 `OBJECT_MOTION_PRODUCER_CONNECTED == false`.
 
+### FrameInterpolator camera contract
+
+The macOS 26 SDK's `MTLFXFrameInterpolatorBase` contract supplies scalar camera
+inputs (`fieldOfView`, `nearPlane`, `farPlane`, `aspectRatio`,
+`deltaTime`, and `isDepthReversed`) plus per-frame
+`jitterOffsetX/Y`. Apple's current API reference marks
+`worldToViewMatrix` and `viewToClipMatrix` as macOS 27.0 beta properties,
+not macOS 26 properties. Consequently the macOS 26 Java-to-FFM-to-Swift ABI
+does not invent matrix fields: it carries the verified scalar contract and
+passes the source frame's jitter and camera values. A matrix ABI can only be
+added in a separately availability-gated macOS 27 path after the SDK header and
+column-major `simd_float4x4` semantics are verified.
+
+The current path treats jitter as a pixel-space offset in the range required by
+the shader contract and uses the same jitter for Temporal and FrameInterpolator
+for that source frame. History resets and source-frame stamps prevent a
+matrix/jitter sample from crossing a scene or resource transition.
+
 To run the gate open — this is what the attended QA does, and it does not change
 what ships:
 
@@ -240,7 +258,7 @@ At a 3024x1734 fullscreen drawable with the required 50% mode, its graph is:
 Minecraft 3D 1512x867
   -> MetalFX Temporal 3024x1734 native real scene
   -> linear downsample 1280x734 FrameGen scene
-  -> conservative depth + nearest motion downsample 640x367
+  -> paired reversed-Z depth/motion downsample 640x367 (max-depth winner and motion from that texel)
   -> MTLFXFrameInterpolator 1280x734 generated scene
   -> generated scene scales to 3024x1734 only during fused present
   -> real scene presents directly at 3024x1734
@@ -392,6 +410,7 @@ The timeline records:
 ```text
 sourceFrameID
 generated/real
+jitterX / jitterY
 displayUpdateID
 targetTimestamp
 targetPresentationTimestamp
@@ -476,6 +495,17 @@ also records `frameGenerationFramesQueued` and
 `frameGenerationEnabledAtCompletion`; when the Gradle command explicitly
 requests Frame Generation it fails unless at least one source frame reached the
 native presenter and the feature remained enabled through completion.
+
+For low-overhead motion-producer evidence, set
+`-Dmetallum.metalfx.motionTelemetry=true` (the existing
+`-Dmetallum.hotpath.telemetry=true` switch also enables it). The resulting
+`metalfxMotionTelemetry` object in `run-state.json` reports a canonical
+`RenderContractRuntime.currentFrameId()` sampling window, source-frame
+admission/rejection counts and reasons, exact history vertex/byte accounting,
+motion replay draws, and the distinct input, native-encode, command-buffer
+submit, and successful-completion stages. Java cannot observe CAMetalDisplayLink
+scanout, so `presented` remains explicitly unavailable and must be checked in
+the native `METALLUM_METALFX_PRESENT_DIAGNOSTICS_PATH` timeline instead.
 
 On the Apple M1 Pro the repaired gate-open run recovered from both startup and
 GUI-transition size churn, completed 16/16 GPU readbacks, queued 255 source

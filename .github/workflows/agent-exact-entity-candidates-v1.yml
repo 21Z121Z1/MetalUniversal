@@ -1,0 +1,188 @@
+name: Agent exact entity candidate expansion v1
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.event.head_commit.message == 'chore(agent): apply exact entity candidates v1'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/metalfx-motion-coverage-26.2
+          fetch-depth: 24
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Verify pinned Minecraft 26.2 renderer contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://raw.githubusercontent.com/366862732/DirectXmod/a599796f89eddfe0387c95b119b16aaa452d1166/docs/official-262/net/minecraft/client/renderer/entity'
+          for file in ThrownItemRenderer FireworkEntityRenderer OminousItemSpawnerRenderer ThrownTridentRenderer WitherSkullRenderer LlamaSpitRenderer EvokerFangsRenderer; do
+            curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+              "$BASE/$file.java" -o "/tmp/$file.java"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          checks = {
+              'ThrownItemRenderer': [
+                  'state.item.submit(poseStack, submitNodeCollector, state.lightCoords, OverlayTexture.NO_OVERLAY, state.outlineColor);',
+                  'poseStack.mulPose((Quaternionfc)camera.orientation);',
+              ],
+              'FireworkEntityRenderer': [
+                  'state.item.submit(poseStack, submitNodeCollector, state.lightCoords, OverlayTexture.NO_OVERLAY, state.outlineColor);',
+                  'poseStack.mulPose((Quaternionfc)camera.orientation);',
+              ],
+              'OminousItemSpawnerRenderer': [
+                  'ItemEntityRenderer.submitMultipleFromCount(poseStack, submitNodeCollector, 0xF000F0, state, this.random);',
+                  'poseStack.scale(scale, scale, scale);',
+                  'poseStack.mulPose((Quaternionfc)Axis.YP.rotationDegrees(currentSpin));',
+              ],
+              'ThrownTridentRenderer': [
+                  'submitNodeCollector.order(0).submitModel(this.model, Unit.INSTANCE, poseStack, TRIDENT_LOCATION',
+                  'submitNodeCollector.order(1).submitModel(this.model, Unit.INSTANCE, poseStack, RenderTypes.entityGlint()',
+              ],
+              'WitherSkullRenderer': [
+                  'submitNodeCollector.submitModel(this.model, state.modelState, poseStack, this.getTextureLocation(state)',
+                  'state.modelState.yRot = entity.getYRot(partialTicks);',
+                  'state.modelState.xRot = entity.getXRot(partialTicks);',
+              ],
+              'LlamaSpitRenderer': [
+                  'submitNodeCollector.submitModel(this.model, state, poseStack, LLAMA_SPIT_LOCATION',
+                  'poseStack.mulPose((Quaternionfc)Axis.YP.rotationDegrees(state.yRot - 90.0f));',
+              ],
+              'EvokerFangsRenderer': [
+                  'submitNodeCollector.submitModel(this.model, state, poseStack, TEXTURE_LOCATION',
+                  'float biteProgress = state.biteProgress;',
+                  'if (biteProgress == 0.0f)',
+              ],
+          }
+          for name, needles in checks.items():
+              text = Path('/tmp', name + '.java').read_text()
+              for needle in needles:
+                  if needle not in text:
+                      raise SystemExit(f'Minecraft 26.2 {name} contract changed: {needle}')
+          print('Pinned Minecraft 26.2 exact entity-candidate contracts: PASS')
+          PY
+
+      - name: Verify existing staged capture carriers
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit' src/main/java/com/metallum/mixin/render/ModelFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.captureModelSubmit' src/main/java/com/metallum/mixin/render/ItemFeatureSubmitMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.beginModelBuild' src/main/java/com/metallum/mixin/render/ModelFeatureRendererMetalFxMixin.java
+          grep -F 'MetalEntityMotionCapture.beginItemBuild' src/main/java/com/metallum/mixin/render/ItemFeatureRendererMetalFxMixin.java
+          grep -F 'MetalPreviousVertexHistory.reserveDraw' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+
+      - name: Apply conservative exact candidate admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one anchor, found {count}: {old[:120]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          eligibility = 'src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java'
+          replace_once(
+              eligibility,
+              '''import net.minecraft.client.renderer.entity.state.EntityRenderState;\nimport net.minecraft.client.renderer.entity.state.FallingBlockRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.EntityRenderState;\nimport net.minecraft.client.renderer.entity.state.EvokerFangsRenderState;\nimport net.minecraft.client.renderer.entity.state.FallingBlockRenderState;\nimport net.minecraft.client.renderer.entity.state.FireworkRocketRenderState;\n'''
+          )
+          replace_once(
+              eligibility,
+              '''import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;\nimport net.minecraft.client.renderer.entity.state.LivingEntityRenderState;\nimport net.minecraft.client.renderer.entity.state.MinecartRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.ItemClusterRenderState;\nimport net.minecraft.client.renderer.entity.state.ItemEntityRenderState;\nimport net.minecraft.client.renderer.entity.state.LivingEntityRenderState;\nimport net.minecraft.client.renderer.entity.state.LlamaSpitRenderState;\nimport net.minecraft.client.renderer.entity.state.MinecartRenderState;\nimport net.minecraft.client.renderer.entity.state.ThrownItemRenderState;\nimport net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;\nimport net.minecraft.client.renderer.entity.state.WitherSkullRenderState;\n'''
+          )
+          replace_once(
+              eligibility,
+              '''    static int incompleteEntityReason(final EntityRenderState state) {\n        if (state instanceof LivingEntityRenderState) {\n''',
+              '''    static boolean requiresExactPreviousPositions(final EntityRenderState state) {\n        if (state instanceof LivingEntityRenderState\n                || state instanceof BoatRenderState\n                || state instanceof ThrownItemRenderState\n                || state instanceof FireworkRocketRenderState\n                || state instanceof ItemClusterRenderState\n                || state instanceof ThrownTridentRenderState\n                || state instanceof WitherSkullRenderState\n                || state instanceof LlamaSpitRenderState\n                || state instanceof EvokerFangsRenderState) {\n            return true;\n        }\n        return state instanceof DisplayEntityRenderState displayState\n                && MetalDisplayMotionSafety.requiresExactPreviousPositions(displayState);\n    }\n\n    static int incompleteEntityReason(final EntityRenderState state) {\n        if (state instanceof LivingEntityRenderState) {\n'''
+          )
+          replace_once(
+              eligibility,
+              '''        if (state instanceof ItemEntityRenderState\n                || state instanceof MinecartRenderState\n''',
+              '''        if (state instanceof ThrownItemRenderState\n                || state instanceof FireworkRocketRenderState\n                || state instanceof ItemClusterRenderState\n                || state instanceof ThrownTridentRenderState\n                || state instanceof WitherSkullRenderState\n                || state instanceof LlamaSpitRenderState\n                || state instanceof EvokerFangsRenderState) {\n            // Candidate only. These renderers feed Item/Model staged builders already tracked by\n            // MetalPreviousVertexHistory. Any unsupported material/overlay or manifest change\n            // leaves exact coverage incomplete and rejects frame interpolation.\n            return 0;\n        }\n        if (state instanceof ItemEntityRenderState\n                || state instanceof MinecartRenderState\n'''
+          )
+
+          manager = 'src/main/java/com/metallum/client/metal/render/MetalFxManager.java'
+          replace_once(
+              manager,
+              '''        boolean requiresExactPreviousPositions =\n                state instanceof net.minecraft.client.renderer.entity.state.BoatRenderState\n                || (state instanceof net.minecraft.client.renderer.entity.state.DisplayEntityRenderState displayState\n                && MetalDisplayMotionSafety.requiresExactPreviousPositions(displayState));\n        if (requiresExactPreviousPositions) {\n''',
+              '''        boolean requiresExactPreviousPositions =\n                MetalFxMotionEligibility.requiresExactPreviousPositions(state);\n        if (requiresExactPreviousPositions) {\n'''
+          )
+          replace_once(
+              manager,
+              '''            // TextDisplay background/text and Boat model/water-mask geometry are candidate families\n            // only. The whole per-object staged manifest must match the previous successfully\n            // submitted source frame and every draw must actually encode exact previous positions.\n''',
+              '''            // Deforming/model/item exact candidates, TextDisplay background/text, and Boat\n            // model/water-mask geometry are admitted only when the whole per-object staged manifest\n            // matches the previous submitted source frame and every required draw encodes exact motion.\n'''
+          )
+
+          test = 'src/test/java/com/metallum/client/metal/render/MetalFxMotionEligibilityTest.java'
+          replace_once(
+              test,
+              '''import net.minecraft.client.renderer.entity.state.EntityRenderState;\nimport net.minecraft.client.renderer.entity.state.FallingBlockRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.EntityRenderState;\nimport net.minecraft.client.renderer.entity.state.EvokerFangsRenderState;\nimport net.minecraft.client.renderer.entity.state.FallingBlockRenderState;\nimport net.minecraft.client.renderer.entity.state.FireworkRocketRenderState;\n'''
+          )
+          replace_once(
+              test,
+              '''import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;\nimport net.minecraft.client.renderer.entity.state.LivingEntityRenderState;\nimport net.minecraft.client.renderer.entity.state.MinecartRenderState;\n''',
+              '''import net.minecraft.client.renderer.entity.state.ItemClusterRenderState;\nimport net.minecraft.client.renderer.entity.state.ItemEntityRenderState;\nimport net.minecraft.client.renderer.entity.state.LivingEntityRenderState;\nimport net.minecraft.client.renderer.entity.state.LlamaSpitRenderState;\nimport net.minecraft.client.renderer.entity.state.MinecartRenderState;\nimport net.minecraft.client.renderer.entity.state.ThrownItemRenderState;\nimport net.minecraft.client.renderer.entity.state.ThrownTridentRenderState;\nimport net.minecraft.client.renderer.entity.state.WitherSkullRenderState;\n'''
+          )
+          replace_once(
+              test,
+              '''    @Test\n    void unknownEntityFamiliesStillFailClosed() {\n''',
+              '''    @Test\n    void stagedItemAndModelProjectileFamiliesAreExactCandidates() {\n        EntityRenderState[] candidates = {\n                new ThrownItemRenderState(),\n                new FireworkRocketRenderState(),\n                new ItemClusterRenderState(),\n                new ThrownTridentRenderState(),\n                new WitherSkullRenderState(),\n                new LlamaSpitRenderState(),\n                new EvokerFangsRenderState()\n        };\n        for (EntityRenderState candidate : candidates) {\n            assertEquals(0, MetalFxMotionEligibility.incompleteEntityReason(candidate));\n            assertTrue(MetalFxMotionEligibility.requiresExactPreviousPositions(candidate));\n        }\n    }\n\n    @Test\n    void unknownEntityFamiliesStillFailClosed() {\n'''
+          )
+          PY
+          git diff --check
+
+      - name: Compile and test exact entity candidate contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew compileJava test \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionEligibilityTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalExactMotionCoverageTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityAuxiliaryMotionPipelineTest' \
+            --tests 'com.metallum.client.metal.render.MetalFxMotionTelemetryTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest'
+          ./gradlew jar
+          git diff --check
+
+      - name: Verify fail-closed exact admission wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'state instanceof ThrownItemRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'state instanceof EvokerFangsRenderState' src/main/java/com/metallum/client/metal/render/MetalFxMotionEligibility.java
+          grep -F 'MetalFxMotionEligibility.requiresExactPreviousPositions(state)' src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -F 'matchingDraws <= 0' src/main/java/com/metallum/client/metal/render/MetalExactMotionCoverage.java
+          grep -F 'unsupported-exact-pipeline:' src/main/java/com/metallum/client/metal/render/MetalEntityMotionCapture.java
+
+      - name: Commit verified runtime implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main/java src/test/java
+          git diff --cached --check
+          git commit -m 'feat(metalfx): admit exact staged item and model entity families'
+          git push origin HEAD:agent/metalfx-motion-coverage-26.2

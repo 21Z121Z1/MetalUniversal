@@ -1,0 +1,3 @@
+base=c0e7adac584f43d8e64dd2041d9a12863fdf70d8
+script=496aee56662b439252af945e15fcb48fab75553c
+contract=minecraft-26.2-boat-water-mask
