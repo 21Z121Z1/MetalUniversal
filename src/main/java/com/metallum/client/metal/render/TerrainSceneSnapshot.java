@@ -65,12 +65,14 @@ public final class TerrainSceneSnapshot {
     );
 
     public static boolean captureEnabled() {
-        return ENABLED || ICB_ENABLED || GPU_ICB_ENABLED
-                || VISIBLE_GPU_ICB_ENABLED || DRAW_METADATA_ENABLED;
+        return ENABLED || (TerrainIcbRuntimeAdmission.gpuIcbAdmitted()
+                && (ICB_ENABLED || GPU_ICB_ENABLED
+                || VISIBLE_GPU_ICB_ENABLED || DRAW_METADATA_ENABLED));
     }
 
     public static boolean drawMetadataRequired() {
-        return DRAW_METADATA_ENABLED || VISIBLE_GPU_ICB_ENABLED;
+        return TerrainIcbRuntimeAdmission.gpuIcbAdmitted()
+                && (DRAW_METADATA_ENABLED || VISIBLE_GPU_ICB_ENABLED);
     }
 
     static final int MAX_VERTEX_BUFFERS = RenderPass.MAX_VERTEX_BUFFERS;

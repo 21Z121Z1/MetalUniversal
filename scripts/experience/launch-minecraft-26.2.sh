@@ -7,7 +7,7 @@ set -euo pipefail
 # acceptance substitute.
 
 usage() {
-    printf '%s\n' "Usage: $0 <safe|metal4|visible|fused|framegen> <instance-dir> [world-id]"
+    printf '%s\n' "Usage: $0 <safe|metal4|visible|fused|framegen|iris|iris-modern> <instance-dir> [world-id]"
     exit 2
 }
 
@@ -47,6 +47,7 @@ COMMON_FLAGS=(
     -Dmetallum.validation.sourceCommit="${METALLUM_SOURCE_SHA:-unknown}"
     -Dmetallum.hotpath.telemetry=true
     -Dmetallum.presentation.telemetry=true
+    -Dmetallum.metalfx.debug=true
     -Dmetallum.opt.psoArchive=true
     -Dmetallum.opt.bindingTokens=true
     -Dmetallum.opt.compiledBindingPlan=true
@@ -120,6 +121,31 @@ case "$PROFILE" in
         COMMON_FLAGS+=(
             -Dmetallum.metalfx.mode=TEMPORAL
             -Dmetallum.metalfx.frameGeneration=true
+        )
+        ;;
+    iris)
+        COMMON_FLAGS+=(
+            -Dmetallum.iris.semantic=true
+            -Dmetallum.iris.strict=true
+        )
+        ;;
+    iris-modern)
+        COMMON_FLAGS+=(
+            -Dmetallum.iris.semantic=true
+            -Dmetallum.iris.strict=true
+            -Dmetallum.iris.hazardGraph=true
+            -Dmetallum.iris.passFusion=true
+            -Dmetallum.iris.experimental.passFusion=true
+            -Dmetallum.iris.computeGrouping=true
+            -Dmetallum.iris.experimental.computeGrouping=true
+            -Dmetallum.iris.attachmentLiveness=true
+            -Dmetallum.iris.depthLiveness=true
+            -Dmetallum.iris.finalColorFusion=true
+            -Dmetallum.iris.experimental.finalColorFusion=true
+            -Dmetallum.iris.argumentTables=true
+            -Dmetallum.iris.experimental.argumentTables=true
+            -Dmetallum.iris.indirectSubmission=true
+            -Dmetallum.iris.experimental.icb=true
         )
         ;;
     *) usage ;;

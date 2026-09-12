@@ -477,6 +477,21 @@ final class MetalRenderPass implements RenderPassBackend {
             );
             MemorySegment indexHandle = ((MetalGpuBuffer) indexBuffer).nativeHandle();
 
+            // The Metal 4 compiler may reject ICB eligibility for the final
+            // terrain PSO (observed on M1 Pro fragment pipelines) and compile
+            // a correct non-ICB Metal 3 fallback instead. Admit GPU ICB work
+            // from the final PSO capability, before ending/reopening the
+            // render encoder. This avoids a failed native attempt and log on
+            // every frame while preserving the conservative indirect path.
+            if ((TerrainSceneSnapshot.GPU_ICB_ENABLED
+                    || TerrainCandidateSnapshot.VISIBLE_GPU_ICB_ENABLED)
+                    && !MetalNativeBridge.MTLRenderPipelineState_supportsIndirectCommandBuffers(
+                    pipelineHandle
+            )) {
+                TerrainIcbRuntimeAdmission.rejectFinalPipeline();
+                return false;
+            }
+
             // The visible lane is frame/epoch state and must be attempted before
             // an immutable all-visible ICB can be reused. The candidate snapshot
             // is authoritative only when every source draw resolves to exactly
