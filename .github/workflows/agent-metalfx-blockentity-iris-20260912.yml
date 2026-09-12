@@ -1,0 +1,105 @@
+name: Agent MetalFX block-entity Iris motion 20260912
+
+on:
+  push:
+    branches:
+      - agent/metalfx-motion-coverage-26.2
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    if: "github.event.head_commit.message == 'chore(agent): execute block-entity Iris motion 20260912'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 64
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Apply bounded semantic patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_metalfx_blockentity_iris_20260912.py
+
+      - name: Preserve production fail-closed boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'private static final boolean OBJECT_MOTION_PRODUCER_CONNECTED = false;' \
+            src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -Fq 'iris-active-pipeline-motion-semantics-unproven' \
+            src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+          grep -Fq 'BeaconRenderState.class' \
+            src/test/java/com/metallum/client/metal/render/MetalBlockEntityExactMotionTest.java
+          grep -Fq 'block-entity-renderer-has-no-previous-transform-contract' \
+            src/main/java/com/metallum/client/metal/render/MetalFxManager.java
+
+      - name: Compile product and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon compileJava compileTestJava jar
+
+      - name: Run focused semantic contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon test \
+            --tests 'com.metallum.client.metal.render.MetalBlockEntityExactMotionTest' \
+            --tests 'com.metallum.client.metal.render.FrameSynthesisContractTest' \
+            --tests 'com.metallum.client.metal.render.MetalPreviousVertexHistoryTest' \
+            --tests 'com.metallum.client.metal.render.MetalEntityMotionPipelineTest'
+
+      - name: Check audited Minecraft 26.2 renderer evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF_ROOT="$(bash scripts/minecraft-reference.sh --print-path)"
+          for renderer in ChestRenderer BannerRenderer ShulkerBoxRenderer BellRenderer; do
+            file="$REF_ROOT/net/minecraft/client/renderer/blockentity/${renderer}.java"
+            test -f "$file"
+            grep -Fq 'submitModel' "$file"
+            if grep -Eq 'submitCustomGeometry|submitBlockModel|submitItem|submitText|submitMovingBlock|submitShapeOutline|submitGizmoPrimitives' "$file"; then
+              echo "audited renderer grew an unmodelled collector output: $renderer" >&2
+              exit 1
+            fi
+          done
+          beacon="$REF_ROOT/net/minecraft/client/renderer/blockentity/BeaconRenderer.java"
+          grep -Fq 'submitCustomGeometry' "$beacon"
+
+      - name: Check patch integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+
+      - name: Remove one-shot scaffolding
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/workflows/agent-metalfx-blockentity-iris-20260912.yml \
+            .github/scripts/apply_metalfx_blockentity_iris_20260912.py \
+            .github/agent-triggers/metalfx-blockentity-iris-20260912
+
+      - name: Commit verified semantic changes only
+        shell: bash
+        env:
+          BRANCH: agent/metalfx-motion-coverage-26.2
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(metalfx): add audited block-entity exact motion gates'
+          git push origin "HEAD:${BRANCH}"
