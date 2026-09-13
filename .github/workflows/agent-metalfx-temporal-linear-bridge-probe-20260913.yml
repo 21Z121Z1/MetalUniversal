@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   probe:
-    if: github.event.head_commit.message == 'chore(agent): probe temporal linear bridge'
+    if: "${{ github.event.head_commit.message == 'chore(agent): probe temporal linear bridge v2' }}"
     runs-on: macos-15
     timeout-minutes: 20
     steps:
