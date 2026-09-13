@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.MetalPreviousVertexBridge;
 import com.mojang.blaze3d.pipeline.MainTarget;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.renderer.GameRenderer;
@@ -58,8 +59,16 @@ public abstract class GameRendererMetalFxMixin {
     private Matrix4f metallum$prepareSceneProjection(final Matrix4f projectionMatrix) {
         GameRenderer renderer = (GameRenderer) (Object) this;
         var state = renderer.gameRenderState();
+        var cameraState = state.levelRenderState.cameraRenderState;
+        if (cameraState.initialized) {
+            MetalPreviousVertexBridge.observeCamera(
+                    cameraState.pos.x,
+                    cameraState.pos.y,
+                    cameraState.pos.z
+            );
+        }
         return MetalFxManager.prepareSceneProjection(
-                state.levelRenderState.cameraRenderState,
+                cameraState,
                 projectionMatrix,
                 state.windowRenderState.width,
                 state.windowRenderState.height

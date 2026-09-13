@@ -163,6 +163,14 @@ positive enqueue count and an enabled end state. This prevents a permanently
 disabled presenter from being hidden behind successful Temporal attachment
 readbacks; it does not claim that a background drawable reached scanout.
 
+The same receipt can opt into `metalfxMotionTelemetry` with
+`-Dmetallum.metalfx.motionTelemetry=true` (or the existing hot-path telemetry
+switch). Its stage counters are intentionally monotonic and separate: input
+admission, native encode success, command-buffer submission, and successful
+command-buffer completion are not interchangeable. The Java receipt marks
+presented-frame count unavailable because scanout belongs to the native
+CAMetalDisplayLink timeline; use that timeline for `presentedTime` evidence.
+
 The 2026-07-27 gate-open run found exactly that former false positive: startup
 size churn caused one scene encode failure, Frame Generation was permanently
 disabled, and the old gate still passed 16/16. After changing the failure to a
