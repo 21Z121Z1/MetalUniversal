@@ -175,9 +175,10 @@ final class FrameGenerationColorContract {
      * explicit post-Temporal tone-map/transfer pass before {@code sceneOutputTarget} is copied into
      * the Frame Interpolator ring. The native-direct path likewise has no machine-verifiable
      * transfer attestation. The UI target is RGBA8_UNORM, but the complete set of GUI/overlay blend modes
-     * has not yet been proven to preserve a premultiplied-alpha invariant. Finally, the
-     * CAMetalLayer uses BGRA8Unorm without an explicit sRGB color-space tag. Those unknowns are
-     * deliberately represented rather than inferred from storage formats.</p>
+     * has not yet been proven to preserve a premultiplied-alpha invariant. The CAMetalLayer
+     * keeps BGRA8Unorm storage but explicitly tags its display-referred contents as sRGB, avoiding
+     * an _srgb render-target conversion while giving Core Animation a concrete display color space.
+     * The remaining unknowns are deliberately represented rather than inferred from storage formats.</p>
      */
     static Evidence currentRenderer(final SourcePath sourcePath) {
         return new Evidence(
@@ -191,7 +192,7 @@ final class FrameGenerationColorContract {
                 ToneMapPlacement.UNPROVEN,
                 FrameInterpolationEncoding.UNPROVEN,
                 UiAlphaEncoding.UNPROVEN,
-                DrawableEncoding.UNTAGGED_BGRA8_UNORM
+                DrawableEncoding.EXPLICIT_SRGB
         );
     }
 }

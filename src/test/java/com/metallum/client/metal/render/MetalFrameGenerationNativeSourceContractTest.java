@@ -51,6 +51,19 @@ final class MetalFrameGenerationNativeSourceContractTest {
     }
 
     @Test
+    void drawableLayerTagsSrgbContentWithoutSrgbAttachmentEncoding() throws Exception {
+        String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+        int start = nativeSource.indexOf("@_cdecl(\"metallum_configure_layer\")");
+        int end = nativeSource.indexOf("\n@_cdecl(", start + 1);
+        assertTrue(start >= 0 && end > start);
+
+        String block = nativeSource.substring(start, end);
+        assertTrue(block.contains("layer.pixelFormat = .bgra8Unorm"));
+        assertTrue(block.contains("layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)"));
+        assertFalse(block.contains("layer.pixelFormat = .bgra8Unorm_srgb"));
+    }
+
+    @Test
     void frameGenerationDocumentIsNotBuildScriptPayload() throws Exception {
         String document = Files.readString(Path.of("docs/metalfx-frame-generation.md"));
         assertTrue(document.startsWith("# MetalFX Frame Generation"));

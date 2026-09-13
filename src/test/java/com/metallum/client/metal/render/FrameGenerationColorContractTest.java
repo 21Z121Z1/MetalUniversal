@@ -31,9 +31,12 @@ final class FrameGenerationColorContractTest {
                 "temporal-input-linearization",
                 "post-temporal-tone-map",
                 "frame-interpolation-transfer",
-                "ui-premultiplied-alpha",
-                "drawable-srgb-colorspace"
+                "ui-premultiplied-alpha"
         )));
+        assertEquals(
+                FrameGenerationColorContract.DrawableEncoding.EXPLICIT_SRGB,
+                evidence.drawableEncoding()
+        );
     }
 
     @Test

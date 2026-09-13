@@ -7,6 +7,7 @@ import UIKit
 #endif
 import Metal
 import QuartzCore
+import CoreGraphics
 import simd
 #if os(macOS)
 import Darwin
@@ -12411,7 +12412,11 @@ public func metallum_MTLRenderCommandEncoder_clearDraw(
 
 @_cdecl("metallum_configure_layer")
 public func metallum_configure_layer(_ layer: CAMetalLayer, _ width: Double, _ height: Double, _ immediatePresentMode: Int32) {
+    // The present shader writes display-referred sRGB code values into a plain UNORM drawable.
+    // Tag those values for Core Animation color matching without selecting an _srgb attachment,
+    // which would apply an additional linear-to-sRGB conversion on render writes.
     layer.pixelFormat = .bgra8Unorm
+    layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
     layer.drawableSize = CGSize(width: width, height: height)
     // Present command buffers directly through CAMetalLayer. Leaving this at
     // the default makes presentation depend on an unrelated Core Animation
