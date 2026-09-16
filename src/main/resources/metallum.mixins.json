@@ -5,6 +5,7 @@
   "compatibilityLevel": "JAVA_25",
   "mixins": [],
   "client": [
+    "render.FrontendRenderPassBackendAccessMixin",
     "render.PreferredGraphicsApiMixin",
     "render.BackendFrameComparisonMixin",
     "render.BackendFrameComparisonGameRendererMixin",
