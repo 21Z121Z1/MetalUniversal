@@ -30,6 +30,7 @@ jobs:
       - name: Generate repository task capsule
         run: |
           mkdir -p build/agent-evidence
+          git rev-parse HEAD | tee build/agent-evidence/minecraft-26.3-source-sha.txt
           python3 scripts/agent/context.py --task "Migrate MetalUniversal render.execution from Minecraft 26.2 Blaze3D GPU ABI to Minecraft 26.3 RenderPearl backend ABI while preserving the supported Minecraft 26.2 release line and making Sodium optional on 26.3" \
             | tee build/agent-evidence/context.txt
 
@@ -81,6 +82,7 @@ jobs:
               'SpvModule.java',
               'SPIRVModule.java',
               'RenderPass.java',
+              'RenderPassDescriptor.java',
               'CommandEncoder.java',
               'GpuBuffer.java',
               'GpuBufferSlice.java',
@@ -96,11 +98,20 @@ jobs:
               'ShaderSource.java',
               'ShaderType.java',
               'GpuDebugOptions.java',
+              'DeviceInfo.java',
+              'DeviceFeatures.java',
+              'DeviceLimits.java',
+              'DeviceType.java',
+              'HintsAndWorkarounds.java',
               'GlslCompiler.java',
               'ShaderCompileException.java',
               'VulkanDevice.java',
               'GlDevice.java',
               'OpenGlDevice.java',
+              'FeatureRenderDispatcher.java',
+              'SubmitNodeCollector.java',
+              'SubmitNodeStorage.java',
+              'EntityRenderer.java',
           ]
           for name in names:
               matches = sorted(root.rglob(name))
@@ -109,7 +120,7 @@ jobs:
                   rel = path.relative_to(root)
                   print(f'--- {rel} ---')
                   lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
-                  for line in lines[:520]:
+                  for line in lines[:720]:
                       print(line)
 
           print('===== targeted symbol search =====')
@@ -118,6 +129,8 @@ jobs:
               'implements RenderPassBackend',
               'void pushConstants',
               'void setUniform(int',
+              'submitNameTag',
+              'NameTag',
           ]
           for path in sorted(root.rglob('*.java')):
               text = path.read_text(encoding='utf-8', errors='replace')
@@ -126,8 +139,8 @@ jobs:
                   hits = [i for i, line in enumerate(lines) if needle in line]
                   for i in hits:
                       print(f'--- {path.relative_to(root)} :: {needle} @ {i + 1} ---')
-                      lo = max(0, i - 14)
-                      hi = min(len(lines), i + 45)
+                      lo = max(0, i - 18)
+                      hi = min(len(lines), i + 60)
                       for line in lines[lo:hi]:
                           print(line)
           PY
@@ -152,15 +165,14 @@ jobs:
         with:
           name: minecraft-26.3-migration-evidence-${{ github.run_attempt }}
           path: |
+            build/agent-evidence/minecraft-26.3-source-sha.txt
             build/agent-evidence/minecraft-26.3-api-probe.txt
             build/agent-evidence/compile-26.3.log
             build/agent-evidence/context.txt
-            src/main/java/com/metallum/client/metal/render/MetalDevice.java
-            src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java
-            src/main/java/com/metallum/client/metal/render/MetalRenderPass.java
-            src/main/java/com/metallum/client/metal/render/MetalCompiledRenderPipeline.java
-            src/main/java/com/metallum/client/metal/render/MetalCrossShaderCompiler.java
-            src/main/java/com/metallum/client/metal/render/TerrainCandidateSnapshot.java
+            build.gradle
+            gradle.properties
+            src/main/java
+            src/main/resources
           if-no-files-found: error
           retention-days: 14
 
