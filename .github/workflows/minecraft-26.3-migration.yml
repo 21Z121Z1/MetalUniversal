@@ -12,7 +12,7 @@ permissions:
 jobs:
   compile:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
@@ -37,8 +37,67 @@ jobs:
       - name: Resolve 26.3 dependencies
         run: ./gradlew --no-daemon dependencies --configuration compileClasspath
 
+      - name: Materialize exact Minecraft 26.3 reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(bash scripts/minecraft-reference.sh --print-path)"
+          test "$root" = "$PWD/.minecraft-reference/26.3/sources"
+          mkdir -p build/agent-evidence
+          python3 - "$root" > build/agent-evidence/minecraft-26.3-api-probe.txt <<'PY'
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          names = [
+              'GpuBackend.java',
+              'GpuDeviceBackend.java',
+              'GpuSurfaceBackend.java',
+              'CommandEncoderBackend.java',
+              'RenderPassBackend.java',
+              'RenderPass.java',
+              'CommandEncoder.java',
+              'GpuBuffer.java',
+              'GpuBufferSlice.java',
+              'GpuTexture.java',
+              'GpuTextureView.java',
+              'GpuSampler.java',
+              'RenderPipeline.java',
+              'CompiledRenderPipeline.java',
+              'BindGroupLayout.java',
+              'GpuFormat.java',
+              'ShaderSource.java',
+              'ShaderType.java',
+              'GpuDebugOptions.java',
+              'GlslCompiler.java',
+              'IntermediaryShaderModule.java',
+              'ShaderCompileException.java',
+          ]
+          for name in names:
+              matches = sorted(root.rglob(name))
+              print(f'===== {name} ({len(matches)}) =====')
+              for path in matches:
+                  rel = path.relative_to(root)
+                  print(f'--- {rel} ---')
+                  lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+                  for line in lines[:260]:
+                      print(line)
+          PY
+          cat build/agent-evidence/minecraft-26.3-api-probe.txt
+          test -z "$(git status --short --untracked-files=all -- .minecraft-reference)"
+
       - name: Compile Java migration surface
         run: ./gradlew --no-daemon compileJava compileTestJava -x buildIOSNative
 
       - name: Diff hygiene
+        if: always()
         run: git diff --check HEAD^ HEAD
+
+      - name: Preserve 26.3 API probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-26.3-api-probe-${{ github.run_attempt }}
+          path: build/agent-evidence/minecraft-26.3-api-probe.txt
+          if-no-files-found: error
+          retention-days: 14
