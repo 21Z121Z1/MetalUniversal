@@ -2,18 +2,18 @@ package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.commands.RenderPass;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
-import net.caffeinemc.mods.sodium.mixin.core.RenderPassAccessor;
 import org.lwjgl.vulkan.VkDrawIndexedIndirectCommand;
 
 import java.util.List;
 
 /**
- * A lexical Sodium-terrain producer/consumer transaction.
+ * A lexical terrain producer/consumer transaction.
  *
- * <p>The thread-local is scoped to the exact {@code DefaultChunkRenderer}
- * batch call.  There is no global scene cache and no generic indirect-draw
- * interception: an indirect pass can consume a snapshot only while this
- * producer-owned scope is active.</p>
+ * <p>The thread-local is scoped to the exact terrain batch call. There is no
+ * global scene cache and no generic indirect-draw interception: an indirect
+ * pass can consume a snapshot only while this producer-owned scope is active.
+ * Minecraft 26.3 owns the RenderPearl pass boundary; Sodium is an optional
+ * producer, not the authority used to unwrap the backend pass.</p>
  */
 public final class TerrainSubmissionScope implements AutoCloseable {
     private static final ThreadLocal<TerrainSubmissionScope> CURRENT = new ThreadLocal<>();
@@ -32,7 +32,7 @@ public final class TerrainSubmissionScope implements AutoCloseable {
         return scope;
     }
 
-    /** Called only by the Sodium VK indirect producer mixin. */
+    /** Called only by an indirect terrain producer adapter. */
     public static void capture(
             final RenderPass pass,
             final Object producerIdentity,
@@ -43,7 +43,7 @@ public final class TerrainSubmissionScope implements AutoCloseable {
         capture(pass, producerIdentity, commandAddress, drawCount, commandSlice, null);
     }
 
-    /** Called only by Sodium's VK indirect producer mixin. */
+    /** Called by an optional terrain producer adapter after command materialization. */
     public static void capture(
             final RenderPass pass,
             final Object producerIdentity,
@@ -76,14 +76,14 @@ public final class TerrainSubmissionScope implements AutoCloseable {
                     metalPass, producerIdentity, commandSlice, commands, metadata
             );
         } catch (RuntimeException ignored) {
-            // A missing/retired binding is a normal fail-closed condition.  Do
-            // not suppress Sodium's original indirect submission.
+            // A missing/retired binding is a normal fail-closed condition. Do
+            // not suppress the producer's original indirect submission.
             scope.snapshot = null;
         }
     }
 
     /**
-     * Consumes a snapshot exactly once.  False means the caller must execute
+     * Consumes a snapshot exactly once. False means the caller must execute
      * its existing legacy/native submission, also exactly once.
      */
     public static boolean consume(
@@ -161,10 +161,10 @@ public final class TerrainSubmissionScope implements AutoCloseable {
     }
 
     private static MetalRenderPass metalPass(final RenderPass pass) {
-        if (!(pass instanceof RenderPassAccessor accessor)) {
+        if (!(pass instanceof RenderPearlBackendAccess access)) {
             return null;
         }
-        return accessor.getBackend() instanceof MetalRenderPass metalPass ? metalPass : null;
+        return access.metallum$getBackend() instanceof MetalRenderPass metalPass ? metalPass : null;
     }
 
     /** Package-private host fixture hook; production uses {@link #capture}. */
