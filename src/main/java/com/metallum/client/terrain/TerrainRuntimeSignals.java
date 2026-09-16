@@ -2,6 +2,7 @@ package com.metallum.client.terrain;
 
 import com.metallum.client.metal.render.MetalGpuTimingRecorder;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.mojang.blaze3d.platform.VideoMode;
 import net.minecraft.client.Minecraft;
 
 import java.lang.management.ManagementFactory;
@@ -50,8 +51,14 @@ public final class TerrainRuntimeSignals {
             if (minecraft == null || minecraft.getWindow() == null) {
                 return PresentationPacingSnapshot.UNAVAILABLE_REFRESH_RATE_HZ;
             }
-            int refreshRate = minecraft.getWindow().getRefreshRate();
-            return refreshRate > 0 ? refreshRate : PresentationPacingSnapshot.UNAVAILABLE_REFRESH_RATE_HZ;
+            VideoMode activeMode = minecraft.getWindow().getActiveVideoMode();
+            if (activeMode == null) {
+                return PresentationPacingSnapshot.UNAVAILABLE_REFRESH_RATE_HZ;
+            }
+            float refreshRate = activeMode.getRefreshRate();
+            return Float.isFinite(refreshRate) && refreshRate > 0.0F
+                    ? Math.max(1, Math.round(refreshRate))
+                    : PresentationPacingSnapshot.UNAVAILABLE_REFRESH_RATE_HZ;
         } catch (Throwable ignored) {
             return PresentationPacingSnapshot.UNAVAILABLE_REFRESH_RATE_HZ;
         }
