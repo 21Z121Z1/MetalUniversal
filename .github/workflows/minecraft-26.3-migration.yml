@@ -1,0 +1,43 @@
+name: Minecraft 26.3 migration
+
+on:
+  push:
+    branches:
+      - agent/minecraft-26.3-renderpearl-migration-20260916
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      - name: Verify migration pins
+        run: |
+          set -euxo pipefail
+          grep -Fqx 'minecraft_version=26.3' gradle.properties
+          grep -Fqx 'sodium_version=mc26.3-0.9.2-fabric' gradle.properties
+          grep -Fqx 'iris_version=1.11.6+26.3-fabric' gradle.properties
+          grep -F '"minecraft": "~26.3-"' src/main/resources/fabric.mod.json
+          ! grep -R --line-number --fixed-strings 'org.lwjgl.glfw' src/main/java src/test/java
+
+      - name: Resolve 26.3 dependencies
+        run: ./gradlew --no-daemon dependencies --configuration compileClasspath
+
+      - name: Compile Java migration surface
+        run: ./gradlew --no-daemon compileJava compileTestJava -x buildIOSNative
+
+      - name: Diff hygiene
+        run: git diff --check HEAD^ HEAD

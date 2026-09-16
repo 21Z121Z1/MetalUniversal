@@ -10,7 +10,6 @@
     "render.BackendFrameComparisonGameRendererMixin",
     "render.BackendFrameComparisonServerMixin",
     "render.BackendFrameComparisonDeltaTrackerMixin",
-    "render.MacRetinaFullscreenMixin",
     "render.GameRendererMetalFxMixin",
     "render.GameRenderStateMetalFxMixin",
     "render.EntityRenderDispatcherMetalFxMixin",
