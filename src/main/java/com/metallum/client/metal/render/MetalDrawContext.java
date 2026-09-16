@@ -1,41 +1,44 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.renderpearl.api.buffers.GpuBuffer;
-import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
-import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import net.caffeinemc.mods.sodium.client.gpu.device.context.VKIndirectContext;
 import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegion;
 import net.caffeinemc.mods.sodium.client.render.viewport.CameraTransform;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
+/**
+ * Optional Sodium 26.3 adapter. Region state is submitted through the public
+ * RenderPearl push-constant contract so Sodium never owns or unwraps the Metal
+ * backend pass. Vanilla terrain and Sodium therefore share the same backend ABI.
+ */
 public final class MetalDrawContext extends VKIndirectContext {
-    private MetalRenderPass metalPass;
+    private static final int TERRAIN_PUSH_CONSTANT_BYTES = 20;
+
+    private final ByteBuffer pushConstants = ByteBuffer
+            .allocateDirect(TERRAIN_PUSH_CONSTANT_BYTES)
+            .order(ByteOrder.nativeOrder());
 
     @Override
-    public void setContext(RenderPass pass, RenderPipeline pipeline) {
+    public void setContext(final RenderPass pass, final RenderPipeline pipeline) {
         this.pass = pass;
-        this.metalPass = (MetalRenderPass) ((net.caffeinemc.mods.sodium.mixin.core.RenderPassAccessor) pass).getBackend();
     }
 
     @Override
-    public void updateData(RenderRegion region, CameraTransform camera) {
+    public void updateData(final RenderRegion region, final CameraTransform camera) {
         float x = getCameraTranslation(region.getOriginX(), camera.intX, camera.fracX);
         float y = getCameraTranslation(region.getOriginY(), camera.intY, camera.fracY);
         float z = getCameraTranslation(region.getOriginZ(), camera.intZ, camera.fracZ);
 
-        GpuBufferSlice pushConstantsBufferSlice;
-        try (GpuBufferSlice.MappedView mapped = metalPass.allocateTransient(20, 4, GpuBuffer.USAGE_UNIFORM)) {
-            ByteBuffer data = mapped.data();
-            data.putFloat(0, x);
-            data.putFloat(4, y);
-            data.putFloat(8, z);
-            data.putInt(12, Math.toIntExact(System.currentTimeMillis() - region.getCreationTime()));
-            data.putInt(16, region.getId());
-            pushConstantsBufferSlice = mapped.slice();
-        }
-
-        this.metalPass.setUniform("push_constants", pushConstantsBufferSlice);
+        this.pushConstants.clear();
+        this.pushConstants.putFloat(x);
+        this.pushConstants.putFloat(y);
+        this.pushConstants.putFloat(z);
+        this.pushConstants.putInt(Math.toIntExact(System.currentTimeMillis() - region.getCreationTime()));
+        this.pushConstants.putInt(region.getId());
+        this.pushConstants.flip();
+        this.pass.pushConstants(this.pushConstants);
     }
 }

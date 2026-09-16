@@ -37,8 +37,6 @@
     "render.ShadowFeatureRendererMetalFxMixin",
     "render.LeashFeatureSubmitMetalFxMixin",
     "render.LeashFeatureRendererMetalFxMixin",
-    "render.NameTagFeatureSubmitMetalFxMixin",
-    "render.NameTagFeatureRendererMetalFxMixin",
     "render.TextFeatureSubmitMetalFxMixin",
     "render.TextFeatureRendererMetalFxMixin",
     "render.ItemStackRenderStateMetalFxMixin",
