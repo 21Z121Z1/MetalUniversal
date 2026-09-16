@@ -10,6 +10,8 @@ on:
 permissions:
   contents: write
 
+# Second push is intentional: GitHub registers a newly-created workflow before
+# this commit, so the replay lane is eligible for the push event.
 jobs:
   replay:
     runs-on: ubuntu-24.04
