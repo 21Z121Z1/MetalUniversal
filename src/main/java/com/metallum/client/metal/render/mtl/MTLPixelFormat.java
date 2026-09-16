@@ -72,7 +72,7 @@ public enum MTLPixelFormat {
         return this == Depth24Unorm_Stencil8 || this == Depth32Float_Stencil8;
     }
 
-    public static MTLPixelFormat from(final com.mojang.blaze3d.GpuFormat format) {
+    public static MTLPixelFormat from(final com.mojang.renderpearl.api.GpuFormat format) {
         return switch (format) {
             case R8_UNORM -> R8Unorm;
             case R8_SNORM -> R8Snorm;

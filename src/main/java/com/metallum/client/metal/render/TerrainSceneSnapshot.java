@@ -1,7 +1,7 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.blaze3d.systems.RenderPass;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import com.metallum.client.metal.render.mtl.MTLIndexType;
 import org.lwjgl.vulkan.VkDrawIndexedIndirectCommand;
 

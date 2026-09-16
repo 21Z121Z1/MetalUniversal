@@ -7,13 +7,13 @@ import com.metallum.client.metal.render.MetalIrisShaderCompiler.ReflectedUniform
 import com.metallum.client.metal.render.MetalIrisShaderCompiler.StageKind;
 import com.metallum.client.metal.render.MetalIrisShaderCompiler.UniformMember;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.pipeline.BlendFunction;
-import com.mojang.blaze3d.pipeline.ColorTargetState;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.shaders.GpuDebugOptions;
-import com.mojang.blaze3d.shaders.ShaderSource;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.pipeline.BlendFunction;
+import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.device.GpuDebugOptions;
+import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import net.irisshaders.iris.Iris;
@@ -792,7 +792,7 @@ final class MetalIrisSodiumTerrainTest {
         // Sodium's real terrain bind group (ShaderChunkRenderer.<clinit> bytecode):
         // samplers u_LightTex/u_BlockTex, UBO u_Globals, texel buffer
         // u_SectionTimeInfo (R32_SINT).
-        com.mojang.blaze3d.pipeline.BindGroupLayout sodiumLayout = com.mojang.blaze3d.pipeline.BindGroupLayout.builder()
+        com.mojang.renderpearl.api.pipeline.BindGroupLayout sodiumLayout = com.mojang.renderpearl.api.pipeline.BindGroupLayout.builder()
                 .withSampler("u_LightTex")
                 .withSampler("u_BlockTex")
                 .withUniform("u_Globals", com.mojang.blaze3d.shaders.UniformType.UNIFORM_BUFFER)
@@ -803,7 +803,7 @@ final class MetalIrisSodiumTerrainTest {
                 .withVertexShader(Identifier.fromNamespaceAndPath("sodium", "test_chunk_shader_v"))
                 .withFragmentShader(Identifier.fromNamespaceAndPath("sodium", "test_chunk_shader_f"))
                 .withCull(true)
-                .withPrimitiveTopology(com.mojang.blaze3d.PrimitiveTopology.TRIANGLES)
+                .withPrimitiveTopology(com.mojang.renderpearl.api.pipeline.PrimitiveTopology.TRIANGLES)
                 .withBindGroupLayout(sodiumLayout)
                 .withVertexBinding(0, DefaultVertexFormat.BLOCK);
         if (kind == TerrainKind.TRANSLUCENT) {

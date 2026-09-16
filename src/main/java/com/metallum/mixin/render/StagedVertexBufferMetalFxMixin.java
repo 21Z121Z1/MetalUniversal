@@ -2,8 +2,8 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalEntityMotionCapture;
 import com.metallum.client.metal.render.MetalParticleBatchMotion;
-import com.mojang.blaze3d.PrimitiveTopology;
-import com.mojang.blaze3d.vertex.VertexFormat;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexSorting;
 import net.minecraft.client.renderer.StagedVertexBuffer;
 import org.jspecify.annotations.Nullable;

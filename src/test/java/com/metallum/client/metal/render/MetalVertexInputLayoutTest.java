@@ -1,9 +1,9 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.PrimitiveTopology;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.shaders.ShaderType;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vulkan.glsl.GlslCompiler;
 import com.mojang.blaze3d.vulkan.glsl.IntermediaryShaderModule;
@@ -189,7 +189,7 @@ final class MetalVertexInputLayoutTest {
         );
     }
 
-    private static RenderPipeline pipeline(final String name, final com.mojang.blaze3d.vertex.VertexFormat format) {
+    private static RenderPipeline pipeline(final String name, final com.mojang.renderpearl.api.vertex.VertexFormat format) {
         Identifier shader = Identifier.fromNamespaceAndPath("metallum", name);
         return RenderPipeline.builder()
                 .withLocation(shader)

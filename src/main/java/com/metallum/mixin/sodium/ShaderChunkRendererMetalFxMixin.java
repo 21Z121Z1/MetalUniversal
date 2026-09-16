@@ -3,8 +3,8 @@ package com.metallum.mixin.sodium;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalCutoutReactivePipeline;
 import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.vertex.VertexFormat;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.vertex.VertexFormat;
 import java.util.concurrent.atomic.AtomicBoolean;
 import net.caffeinemc.mods.sodium.client.render.chunk.ShaderChunkRenderer;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
@@ -28,7 +28,7 @@ public abstract class ShaderChunkRendererMetalFxMixin {
     private void metallum$beginCutoutReactivePass(
             final TerrainRenderPass pass,
             final net.caffeinemc.mods.sodium.client.util.FogParameters parameters,
-            final com.mojang.blaze3d.textures.GpuSampler terrainSampler,
+            final com.mojang.renderpearl.api.textures.GpuSampler terrainSampler,
             final CallbackInfo ci
     ) {
         MetalCutoutReactivePipeline.beginTerrainPass(pass);
@@ -38,7 +38,7 @@ public abstract class ShaderChunkRendererMetalFxMixin {
     private void metallum$beginIrisTerrainPass(
             final TerrainRenderPass pass,
             final net.caffeinemc.mods.sodium.client.util.FogParameters parameters,
-            final com.mojang.blaze3d.textures.GpuSampler terrainSampler,
+            final com.mojang.renderpearl.api.textures.GpuSampler terrainSampler,
             final CallbackInfo ci
     ) {
         IrisMetalPipelineOverrides.beginTerrainPass(pass);

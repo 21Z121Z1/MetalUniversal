@@ -5,14 +5,14 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.validation.contract.RenderContractRuntime;
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.shaders.GpuDebugOptions;
-import com.mojang.blaze3d.shaders.ShaderSource;
-import com.mojang.blaze3d.systems.GpuDevice;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.device.GpuDebugOptions;
+import com.mojang.renderpearl.api.pipeline.ShaderSource;
+import com.mojang.renderpearl.api.device.GpuDevice;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.pathways.colorspace.ColorSpace;
 import net.irisshaders.iris.gl.shader.StandardMacros;
@@ -286,9 +286,9 @@ final class IrisMetalComputeConformanceTest {
 
         try (MetalGpuTexture mainTarget = (MetalGpuTexture) device.createTexture(
                 "Iris conformance final target",
-                com.mojang.blaze3d.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
-                        | com.mojang.blaze3d.textures.GpuTexture.USAGE_TEXTURE_BINDING
-                        | com.mojang.blaze3d.textures.GpuTexture.USAGE_COPY_SRC,
+                com.mojang.renderpearl.api.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
+                        | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_TEXTURE_BINDING
+                        | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_SRC,
                 GpuFormat.RGBA8_UNORM,
                 width,
                 height,
@@ -305,8 +305,8 @@ final class IrisMetalComputeConformanceTest {
 
             try (MetalGpuTexture presentCopy = (MetalGpuTexture) device.createTexture(
                     "Iris conformance present-copy target",
-                    com.mojang.blaze3d.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
-                            | com.mojang.blaze3d.textures.GpuTexture.USAGE_COPY_SRC,
+                    com.mojang.renderpearl.api.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
+                            | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_SRC,
                     GpuFormat.RGBA8_UNORM,
                     width,
                     height,

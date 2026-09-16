@@ -1,8 +1,8 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;

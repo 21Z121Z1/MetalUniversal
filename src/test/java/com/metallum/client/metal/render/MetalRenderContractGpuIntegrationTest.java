@@ -9,16 +9,16 @@ import com.metallum.client.validation.contract.CapturePointKind;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.validation.expectation.ExactExpectation;
 import com.metallum.client.validation.expectation.ExpectationSpec;
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.PrimitiveTopology;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.pipeline.ColorTargetState;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.shaders.GpuDebugOptions;
-import com.mojang.blaze3d.shaders.ShaderSource;
-import com.mojang.blaze3d.shaders.ShaderType;
-import com.mojang.blaze3d.systems.RenderPass;
-import com.mojang.blaze3d.systems.RenderPassDescriptor;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.device.GpuDebugOptions;
+import com.mojang.renderpearl.api.pipeline.ShaderSource;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -48,8 +48,8 @@ final class MetalRenderContractGpuIntegrationTest {
     private static final int WIDTH = 8;
     private static final int HEIGHT = 2;
     private static final int TEXTURE_USAGE =
-            com.mojang.blaze3d.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
-                    | com.mojang.blaze3d.textures.GpuTexture.USAGE_COPY_SRC;
+            com.mojang.renderpearl.api.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
+                    | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_SRC;
     private static final String VERTEX_SHADER = """
             #version 450
             void main() {

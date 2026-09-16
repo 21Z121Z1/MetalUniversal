@@ -1,10 +1,10 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.systems.CommandEncoder;
-import com.mojang.blaze3d.systems.RenderPass;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.commands.CommandEncoder;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.pathways.HorizonRenderer;
 import net.irisshaders.iris.pipeline.WorldRenderingPipeline;

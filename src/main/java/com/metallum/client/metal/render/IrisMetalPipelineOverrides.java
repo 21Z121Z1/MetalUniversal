@@ -2,28 +2,28 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.systems.CommandEncoder;
-import com.mojang.blaze3d.systems.RenderPass;
-import com.mojang.blaze3d.systems.RenderPassDescriptor;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.commands.CommandEncoder;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.pipeline.BindGroupLayout;
-import com.mojang.blaze3d.pipeline.BlendFunction;
-import com.mojang.blaze3d.pipeline.ColorTargetState;
-import com.mojang.blaze3d.pipeline.DepthStencilState;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
+import com.mojang.renderpearl.api.pipeline.BlendFunction;
+import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.pipeline.DepthStencilState;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderTarget;
-import com.mojang.blaze3d.GpuFormat;
+import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.blaze3d.platform.BlendFactor;
-import com.mojang.blaze3d.shaders.ShaderSource;
+import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.blaze3d.shaders.UniformType;
-import com.mojang.blaze3d.textures.AddressMode;
-import com.mojang.blaze3d.textures.FilterMode;
-import com.mojang.blaze3d.textures.GpuSampler;
-import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.vertex.VertexFormat;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.textures.AddressMode;
+import com.mojang.renderpearl.api.textures.FilterMode;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.api.vertex.VertexFormat;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import it.unimi.dsi.fastutil.objects.Object2ObjectMap;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -1994,7 +1994,7 @@ public final class IrisMetalPipelineOverrides {
             if (this.renderTargets == null || minecraft == null || minecraft.gameRenderer == null) {
                 return;
             }
-            com.mojang.blaze3d.textures.GpuTexture depth =
+            com.mojang.renderpearl.api.textures.GpuTexture depth =
                     minecraft.gameRenderer.mainRenderTarget().getDepthTexture();
             MetalDevice device = MetalDevice.current();
             if (depth == null || device == null) {
@@ -2009,7 +2009,7 @@ public final class IrisMetalPipelineOverrides {
             if (this.renderTargets == null || minecraft == null || minecraft.gameRenderer == null) {
                 return;
             }
-            com.mojang.blaze3d.textures.GpuTexture depth =
+            com.mojang.renderpearl.api.textures.GpuTexture depth =
                     minecraft.gameRenderer.mainRenderTarget().getDepthTexture();
             MetalDevice device = MetalDevice.current();
             if (depth == null || device == null) {

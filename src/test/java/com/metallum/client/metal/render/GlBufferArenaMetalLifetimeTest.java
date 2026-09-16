@@ -1,8 +1,8 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.mixin.sodium.GlBufferArenaMetalLifetimeMixin;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferArena;
 import org.junit.jupiter.api.Test;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;

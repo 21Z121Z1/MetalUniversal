@@ -1,9 +1,9 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.textures.GpuSampler;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.reflect.Field;

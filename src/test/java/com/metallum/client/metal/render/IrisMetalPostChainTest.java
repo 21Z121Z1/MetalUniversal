@@ -1,6 +1,6 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import org.junit.jupiter.api.Test;
 
 import java.util.BitSet;
@@ -198,7 +198,7 @@ final class IrisMetalPostChainTest {
         AtomicReference<MetalIrisShaderCompiler.SamplerDecl> observed = new AtomicReference<>();
         IrisMetalPostChain.ResourceProvider provider = new IrisMetalPostChain.ResourceProvider() {
             @Override
-            public com.mojang.blaze3d.buffers.GpuBufferSlice uniform(
+            public com.mojang.renderpearl.api.buffers.GpuBufferSlice uniform(
                     final IrisMetalPostChain.PassInfo ignoredPass,
                     final String ignoredBlockName
             ) {
@@ -243,11 +243,11 @@ final class IrisMetalPostChainTest {
                 new MetalIrisShaderCompiler.SamplerDecl("sampleBuffer", "samplerBuffer");
         GpuBufferSlice slice = new GpuBufferSlice(null, 16L, 64L);
         IrisMetalPostChain.TexelBufferBinding binding =
-                new IrisMetalPostChain.TexelBufferBinding(slice, com.mojang.blaze3d.GpuFormat.R32_FLOAT);
+                new IrisMetalPostChain.TexelBufferBinding(slice, com.mojang.renderpearl.api.GpuFormat.R32_FLOAT);
 
         IrisMetalPostChain.ResourceProvider provider = new IrisMetalPostChain.ResourceProvider() {
             @Override
-            public com.mojang.blaze3d.buffers.GpuBufferSlice uniform(
+            public com.mojang.renderpearl.api.buffers.GpuBufferSlice uniform(
                     final IrisMetalPostChain.PassInfo ignoredPass,
                     final String ignoredBlockName
             ) {
@@ -274,7 +274,7 @@ final class IrisMetalPostChainTest {
         };
 
         assertEquals(binding, provider.texelBuffer(pass, sampler));
-        assertEquals(com.mojang.blaze3d.GpuFormat.R32_FLOAT, binding.format());
+        assertEquals(com.mojang.renderpearl.api.GpuFormat.R32_FLOAT, binding.format());
         assertEquals(64L, binding.slice().length());
     }
 

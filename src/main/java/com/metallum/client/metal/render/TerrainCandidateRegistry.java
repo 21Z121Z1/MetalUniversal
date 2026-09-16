@@ -1,7 +1,7 @@
 package com.metallum.client.metal.render;
 
 import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
-import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionFlags;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.BuiltSectionInfo;

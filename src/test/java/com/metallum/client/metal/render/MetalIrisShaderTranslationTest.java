@@ -6,8 +6,8 @@ import com.metallum.client.metal.render.MetalIrisShaderCompiler.TranslatedProgra
 import com.metallum.client.metal.render.MetalIrisShaderCompiler.TranslatedStage;
 import com.metallum.client.metal.render.MetalIrisShaderCompiler.TranslationException;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
-import com.mojang.blaze3d.shaders.GpuDebugOptions;
-import com.mojang.blaze3d.shaders.ShaderSource;
+import com.mojang.renderpearl.api.device.GpuDebugOptions;
+import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.gl.shader.StandardMacros;
 import net.irisshaders.iris.helpers.StringPair;

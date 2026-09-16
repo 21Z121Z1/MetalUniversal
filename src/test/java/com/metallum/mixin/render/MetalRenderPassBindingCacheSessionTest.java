@@ -2,9 +2,9 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalBindingToken;
 import com.metallum.client.metal.render.MetalIrisBindingTokenLayout;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.textures.GpuSampler;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

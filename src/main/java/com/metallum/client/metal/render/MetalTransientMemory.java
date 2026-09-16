@@ -1,9 +1,9 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBuffer.Usage;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.buffers.GpuBufferSlice.MappedView;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBuffer.Usage;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice.MappedView;
 import com.mojang.blaze3d.systems.TransientMemory;
 import com.mojang.blaze3d.util.TransientBlockAllocator;
 import it.unimi.dsi.fastutil.objects.ReferenceArrayList;

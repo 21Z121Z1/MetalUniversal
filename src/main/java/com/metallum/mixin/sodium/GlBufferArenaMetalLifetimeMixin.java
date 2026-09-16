@@ -1,7 +1,7 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.metal.render.MetalGpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferArena;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;

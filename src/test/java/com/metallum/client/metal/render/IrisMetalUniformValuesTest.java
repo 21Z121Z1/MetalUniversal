@@ -9,7 +9,7 @@ import net.irisshaders.iris.uniforms.custom.CustomUniformFixedInputUniformsHolde
 import net.irisshaders.iris.gl.uniform.FloatSupplier;
 import net.irisshaders.iris.gl.uniform.UniformUpdateFrequency;
 import net.caffeinemc.mods.sodium.client.util.FogParameters;
-import com.mojang.blaze3d.pipeline.BlendFunction;
+import com.mojang.renderpearl.api.pipeline.BlendFunction;
 import net.minecraft.client.renderer.fog.FogData;
 import org.junit.jupiter.api.Test;
 import org.joml.Matrix3f;

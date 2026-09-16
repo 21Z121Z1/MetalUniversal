@@ -15,12 +15,12 @@ import com.metallum.client.validation.contract.SemanticPassIdResolver;
 import com.metallum.client.validation.contract.ScissorRecord;
 import com.metallum.client.validation.contract.TraceIdentity;
 import com.metallum.client.validation.contract.ViewportRecord;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.buffers.GpuFence;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.commands.GpuFence;
 import com.mojang.blaze3d.systems.*;
-import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -532,7 +532,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final String label
     ) {
         if (colorTextureViews == null || colorTextureViews.length > Math.min(
-                com.mojang.blaze3d.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
+                com.mojang.renderpearl.api.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
                 device.getDeviceInfo().limits().maxColorAttachments()
         )
                 || clearColorEnabled == null || clearColorValues == null
@@ -755,7 +755,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     public @NonNull RenderPassBackend createRenderPass(final RenderPassDescriptor descriptor) {
         List<RenderPassDescriptor.Attachment<Optional<Vector4fc>>> colorAttachments = descriptor.colorAttachments();
         int maxColorAttachments = Math.min(
-                com.mojang.blaze3d.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
+                com.mojang.renderpearl.api.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
                 device.getDeviceInfo().limits().maxColorAttachments()
         );
         if (colorAttachments.size() > maxColorAttachments) {

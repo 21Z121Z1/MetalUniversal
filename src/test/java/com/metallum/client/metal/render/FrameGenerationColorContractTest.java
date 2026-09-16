@@ -1,6 +1,6 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.blaze3d.GpuFormat;
+import com.mojang.renderpearl.api.GpuFormat;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

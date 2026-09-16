@@ -2,20 +2,20 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.IndexType;
-import com.mojang.blaze3d.PrimitiveTopology;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.pipeline.BlendFunction;
-import com.mojang.blaze3d.pipeline.ColorTargetState;
-import com.mojang.blaze3d.pipeline.DepthStencilState;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.pipeline.IndexType;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.pipeline.BlendFunction;
+import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.pipeline.DepthStencilState;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.blaze3d.platform.CompareOp;
-import com.mojang.blaze3d.shaders.GpuDebugOptions;
-import com.mojang.blaze3d.shaders.ShaderSource;
-import com.mojang.blaze3d.shaders.ShaderType;
-import com.mojang.blaze3d.systems.RenderPass;
-import com.mojang.blaze3d.systems.RenderPassDescriptor;
+import com.mojang.renderpearl.api.device.GpuDebugOptions;
+import com.mojang.renderpearl.api.pipeline.ShaderSource;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
 import org.joml.Vector4f;
 import org.joml.Vector4fc;
 import org.junit.jupiter.api.AfterEach;
@@ -46,8 +46,8 @@ final class MetalMrtBackendIntegrationTest {
     private static final int WIDTH = 256;
     private static final int HEIGHT = 4;
     private static final int TEXTURE_USAGE =
-            com.mojang.blaze3d.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
-                    | com.mojang.blaze3d.textures.GpuTexture.USAGE_COPY_SRC;
+            com.mojang.renderpearl.api.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
+                    | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_SRC;
 
     private static final String VERTEX_SHADER = """
             #version 450
@@ -234,8 +234,8 @@ final class MetalMrtBackendIntegrationTest {
         List<MetalGpuTexture> textures = createTextures(formats, "depth-mrt");
         try (MetalGpuTexture depthTexture = (MetalGpuTexture) device.createTexture(
                 "depth-mrt-depth",
-                com.mojang.blaze3d.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
-                        | com.mojang.blaze3d.textures.GpuTexture.USAGE_COPY_SRC,
+                com.mojang.renderpearl.api.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
+                        | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_SRC,
                 GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 1)) {
             RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "depth+MRT integration");
             List<MetalGpuTextureView> views = new ArrayList<>();
