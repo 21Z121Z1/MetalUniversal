@@ -1,14 +1,17 @@
 package com.metallum.client.metal.render;
 
-import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
+import net.caffeinemc.mods.sodium.client.gpu.arena.BufferSegment;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
 
 import java.lang.reflect.Method;
 
 /**
- * Reflective bridge for Sodium methods injected by mixins. Mixin-defined
+ * Reflective bridge for optional Sodium methods injected by mixins. Mixin-defined
  * interfaces are not application APIs: loading one directly from production
  * code violates Fabric's defined-mixin-package rule on current Loader/Mixin.
+ *
+ * <p>This class is intentionally an adapter boundary. Minecraft 26.3 vanilla
+ * terrain submission must not require it.</p>
  */
 public final class TerrainStorageBridge {
     private TerrainStorageBridge() {
@@ -51,17 +54,17 @@ public final class TerrainStorageBridge {
                 baseChunkX, baseChunkY, baseChunkZ, translucent);
     }
 
-    static GlBufferSegment[] vertexAllocations(final SectionRenderDataStorage storage) {
+    static BufferSegment[] vertexAllocations(final SectionRenderDataStorage storage) {
         return segments(invoke(storage, "metallum$getVertexAllocations"));
     }
 
-    static GlBufferSegment[] elementAllocations(final SectionRenderDataStorage storage) {
+    static BufferSegment[] elementAllocations(final SectionRenderDataStorage storage) {
         return segments(invoke(storage, "metallum$getElementAllocations"));
     }
 
-    static GlBufferSegment sharedIndexAllocation(final SectionRenderDataStorage storage) {
+    static BufferSegment sharedIndexAllocation(final SectionRenderDataStorage storage) {
         Object value = invoke(storage, "metallum$getSharedIndexAllocation");
-        return value instanceof GlBufferSegment segment ? segment : null;
+        return value instanceof BufferSegment segment ? segment : null;
     }
 
     static boolean hasMetadataBatch(final Object batch) {
@@ -78,8 +81,8 @@ public final class TerrainStorageBridge {
         invoke(batch, "metallum$setTerrainDrawMetadata", store);
     }
 
-    private static GlBufferSegment[] segments(final Object value) {
-        return value instanceof GlBufferSegment[] segments ? segments : null;
+    private static BufferSegment[] segments(final Object value) {
+        return value instanceof BufferSegment[] segments ? segments : null;
     }
 
     private static Integer number(final Object value) {
