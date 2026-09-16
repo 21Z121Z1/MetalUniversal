@@ -46,7 +46,7 @@ final class MetalGpuSampler implements GpuSampler {
     }
 
     /**
-     * Mod-private extension: vanilla Blaze3D samplers have no depth-compare
+     * Mod-private extension: vanilla RenderPearl samplers have no depth-compare
      * concept, but Iris shadow samplers ({@code sampler2DShadow} /
      * {@code GL_TEXTURE_COMPARE_MODE}) require one. A non-null
      * {@code compareFunction} creates an MSL {@code sample_compare}-capable
@@ -173,36 +173,6 @@ final class MetalGpuSampler implements GpuSampler {
         }
         this.closed = true;
         MetalNativeBridge.metallum_release_object(this.nativeHandle);
-    }
-
-    @Override
-    public AddressMode getAddressModeU() {
-        return this.addressModeU;
-    }
-
-    @Override
-    public AddressMode getAddressModeV() {
-        return this.addressModeV;
-    }
-
-    @Override
-    public FilterMode getMinFilter() {
-        return this.minFilter;
-    }
-
-    @Override
-    public FilterMode getMagFilter() {
-        return this.magFilter;
-    }
-
-    @Override
-    public int getMaxAnisotropy() {
-        return this.maxAnisotropy;
-    }
-
-    @Override
-    public OptionalDouble getMaxLod() {
-        return this.maxLod;
     }
 
     @Override
