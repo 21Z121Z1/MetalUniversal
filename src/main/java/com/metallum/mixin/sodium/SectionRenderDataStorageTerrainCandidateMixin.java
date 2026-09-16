@@ -1,8 +1,8 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.metal.render.TerrainCandidateRegistry;
-import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
-import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferArena;
+import net.caffeinemc.mods.sodium.client.gpu.arena.BufferSegment;
+import net.caffeinemc.mods.sodium.client.gpu.arena.RegionAllocatorHandle;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -10,13 +10,18 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/** Revalidates candidates at the actual Sodium storage mutation boundary. */
+/**
+ * Revalidates optional Sodium terrain candidates at its storage mutation
+ * boundary. Minecraft 26.3 vanilla MDI remains the canonical submission path;
+ * this mixin only maintains additional Sodium-derived metadata when Sodium is
+ * present.
+ */
 @Mixin(SectionRenderDataStorage.class)
 public abstract class SectionRenderDataStorageTerrainCandidateMixin {
     @Inject(method = "setVertexData", at = @At("RETURN"), remap = false)
     private void metallum$vertexUploaded(
             final int localIndex,
-            final GlBufferSegment allocation,
+            final BufferSegment allocation,
             final int[] vertexCounts,
             final CallbackInfo ci
     ) {
@@ -26,7 +31,7 @@ public abstract class SectionRenderDataStorageTerrainCandidateMixin {
     @Inject(method = "setIndexData", at = @At("RETURN"), remap = false)
     private void metallum$indexUploaded(
             final int localIndex,
-            final GlBufferSegment allocation,
+            final BufferSegment allocation,
             final CallbackInfo ci
     ) {
         TerrainCandidateRegistry.onStorageMutation((SectionRenderDataStorage) (Object) this, localIndex);
@@ -43,8 +48,7 @@ public abstract class SectionRenderDataStorageTerrainCandidateMixin {
 
     @Inject(method = "updateSharedIndexData", at = @At("RETURN"), remap = false)
     private void metallum$sharedIndexUploaded(
-            final GlBufferArena arena,
-            final float frame,
+            final RegionAllocatorHandle arena,
             final CallbackInfoReturnable<Boolean> cir
     ) {
         TerrainCandidateRegistry.onStorageMutation((SectionRenderDataStorage) (Object) this, -1);
