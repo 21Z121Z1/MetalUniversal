@@ -15,6 +15,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - name: Resolve canonical agent route
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/agent/context.py --task "migrate MetalUniversal backend host ABI to Minecraft 26.3 RenderPearl canonical SPIR-V and push constants"
+          python3 scripts/agent/checkpoint.py init \
+            --task "Minecraft 26.3 RenderPearl backend migration" \
+            --hypothesis "Consuming RenderPearl BackendRenderPipeline.CreateInfo directly and treating push constants as a dedicated Metal binding removes the obsolete Mojang Vulkan frontend dependency without changing native Metal execution semantics" \
+            --next-command "./gradlew --no-daemon compileJava -x buildIOSNative"
       - name: Show compiler and pipeline usages
         shell: bash
         run: |
