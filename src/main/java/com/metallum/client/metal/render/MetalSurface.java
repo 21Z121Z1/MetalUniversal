@@ -1,10 +1,10 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
-import com.mojang.renderpearl.api.commands.CommandEncoderBackend;
-import com.mojang.blaze3d.systems.GpuSurface;
+import com.mojang.renderpearl.backend.api.CommandEncoderBackend;
+import com.mojang.renderpearl.api.device.GpuSurface;
 import com.mojang.renderpearl.backend.api.GpuSurfaceBackend;
-import com.mojang.blaze3d.systems.SurfaceException;
+import com.mojang.renderpearl.api.device.SurfaceException;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;

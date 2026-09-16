@@ -4,7 +4,7 @@ import com.metallum.Metallum;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import com.mojang.renderpearl.api.pipeline.BlendFunction;
-import com.mojang.blaze3d.platform.BlendFactor;
+import com.mojang.renderpearl.api.pipeline.BlendFactor;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import kroppeb.stareval.function.FunctionReturn;
 import net.caffeinemc.mods.sodium.client.util.FogParameters;

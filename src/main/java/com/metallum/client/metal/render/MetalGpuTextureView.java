@@ -10,7 +10,10 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
-final class MetalGpuTextureView extends GpuTextureView {
+final class MetalGpuTextureView implements GpuTextureView {
+    private final GpuTexture texture;
+    private final int baseMipLevel;
+    private final int mipLevels;
     private final boolean alphaOneSwizzle;
     private boolean closed;
     @Nullable
@@ -26,9 +29,42 @@ final class MetalGpuTextureView extends GpuTextureView {
             final int mipLevels,
             final boolean alphaOneSwizzle
     ) {
-        super(texture, baseMipLevel, mipLevels);
+        this.texture = texture;
+        this.baseMipLevel = baseMipLevel;
+        this.mipLevels = mipLevels;
         this.alphaOneSwizzle = alphaOneSwizzle;
         ((MetalGpuTexture) texture).addView();
+    }
+
+    @Override
+    public GpuTexture texture() {
+        return this.texture;
+    }
+
+    @Override
+    public int baseMipLevel() {
+        return this.baseMipLevel;
+    }
+
+    @Override
+    public int mipLevels() {
+        return this.mipLevels;
+    }
+
+    @Override
+    public int getWidth(final int mipLevel) {
+        if (mipLevel < 0 || mipLevel >= this.mipLevels) {
+            throw new IllegalArgumentException("Mip level out of view range: " + mipLevel);
+        }
+        return this.texture.getWidth(this.baseMipLevel + mipLevel);
+    }
+
+    @Override
+    public int getHeight(final int mipLevel) {
+        if (mipLevel < 0 || mipLevel >= this.mipLevels) {
+            throw new IllegalArgumentException("Mip level out of view range: " + mipLevel);
+        }
+        return this.texture.getHeight(this.baseMipLevel + mipLevel);
     }
 
     MemorySegment nativeHandle() {

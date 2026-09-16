@@ -14,7 +14,7 @@ import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
 @Environment(EnvType.CLIENT)
-final class MetalGpuTexture extends GpuTexture {
+final class MetalGpuTexture implements GpuTexture {
     static final int USAGE_SHADER_WRITE = 1 << 5;
     // Minimal usage flags keep Apple GPU lossless bandwidth compression alive:
     // MTLTextureUsage.ShaderWrite disables it on pre-M5 GPUs, so it is only
@@ -24,6 +24,13 @@ final class MetalGpuTexture extends GpuTexture {
     private static final boolean MINIMAL_USAGE =
             Boolean.parseBoolean(System.getProperty("metallum.opt.minimalTextureUsage", "true"));
     private final MetalDevice device;
+    private final int usage;
+    private final String label;
+    private final GpuFormat format;
+    private final int width;
+    private final int height;
+    private final int depthOrLayers;
+    private final int mipLevels;
     private final MetalAllocationIdentity allocationIdentity;
     private final MTLPixelFormat mtlPixelFormat;
     private boolean closed;
@@ -63,8 +70,14 @@ final class MetalGpuTexture extends GpuTexture {
             final int mipLevels,
             final MetalTextureDimension dimension
     ) {
-        super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
+        this.usage = usage;
+        this.label = label;
+        this.format = format;
+        this.width = width;
+        this.height = height;
+        this.depthOrLayers = depthOrLayers;
+        this.mipLevels = mipLevels;
         this.allocationIdentity = MetalAllocationIdentity.allocate(label);
         this.mtlPixelFormat = MTLPixelFormat.from(format);
 
@@ -87,6 +100,47 @@ final class MetalGpuTexture extends GpuTexture {
                             + width + 'x' + height + 'x' + depthOrLayers + ", " + format + ')'
             );
         }
+    }
+
+    @Override
+    public int getWidth(final int mipLevel) {
+        if (mipLevel < 0 || mipLevel >= this.mipLevels) {
+            throw new IllegalArgumentException("Mip level out of range: " + mipLevel);
+        }
+        return Math.max(1, this.width >> mipLevel);
+    }
+
+    @Override
+    public int getHeight(final int mipLevel) {
+        if (mipLevel < 0 || mipLevel >= this.mipLevels) {
+            throw new IllegalArgumentException("Mip level out of range: " + mipLevel);
+        }
+        return Math.max(1, this.height >> mipLevel);
+    }
+
+    @Override
+    public int getDepthOrLayers() {
+        return this.depthOrLayers;
+    }
+
+    @Override
+    public int getMipLevels() {
+        return this.mipLevels;
+    }
+
+    @Override
+    public GpuFormat getFormat() {
+        return this.format;
+    }
+
+    @Override
+    public int usage() {
+        return this.usage;
+    }
+
+    @Override
+    public String getLabel() {
+        return this.label;
     }
 
     int pixelSize() {

@@ -795,8 +795,8 @@ final class MetalIrisSodiumTerrainTest {
         com.mojang.renderpearl.api.pipeline.BindGroupLayout sodiumLayout = com.mojang.renderpearl.api.pipeline.BindGroupLayout.builder()
                 .withSampler("u_LightTex")
                 .withSampler("u_BlockTex")
-                .withUniform("u_Globals", com.mojang.blaze3d.shaders.UniformType.UNIFORM_BUFFER)
-                .withUniform("u_SectionTimeInfo", com.mojang.blaze3d.shaders.UniformType.TEXEL_BUFFER, GpuFormat.R32_SINT)
+                .withUniform("u_Globals", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER)
+                .withUniform("u_SectionTimeInfo", com.mojang.renderpearl.api.pipeline.UniformType.TEXEL_BUFFER, GpuFormat.R32_SINT)
                 .build();
         RenderPipeline.Builder builder = RenderPipeline.builder()
                 .withLocation(Identifier.fromNamespaceAndPath("sodium", "test_chunk_shader_" + kind.name().toLowerCase(Locale.ROOT)))

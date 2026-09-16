@@ -1,6 +1,6 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.blaze3d.platform.CompareOp;
+import com.mojang.renderpearl.api.pipeline.CompareOp;
 import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
 

@@ -23,8 +23,10 @@ import java.util.function.Supplier;
  * deduplication hook. The generated bridge lives in a synthetic package and
  * must be able to resolve this method-descriptor type at runtime.
  */
-public class MetalGpuBuffer extends GpuBuffer {
+public class MetalGpuBuffer implements GpuBuffer {
     private final MetalDevice device;
+    private final int usage;
+    private final long size;
     private final String logicalLabel;
     private final boolean cpuAccessible;
     private final boolean dynamic;
@@ -54,8 +56,9 @@ public class MetalGpuBuffer extends GpuBuffer {
             @GpuBuffer.Usage final int usage,
             final long size
     ) {
-        super(usage, size);
         this.device = device;
+        this.usage = usage;
+        this.size = size;
         this.logicalLabel = normalizeLabel(label == null ? null : label.get());
         this.allocationIdentity = MetalAllocationIdentity.allocate(this.logicalLabel);
 
@@ -108,8 +111,9 @@ public class MetalGpuBuffer extends GpuBuffer {
     }
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size, final @Nullable MemorySegment wrappedHandle) {
-        super(usage, size);
         this.device = device;
+        this.usage = usage;
+        this.size = size;
         this.logicalLabel = "metal-buffer";
         this.allocationIdentity = MetalAllocationIdentity.allocate(this.logicalLabel);
         this.cpuAccessible = false;
@@ -118,6 +122,16 @@ public class MetalGpuBuffer extends GpuBuffer {
         this.allocationSize = size;
         this.nativeHandle = wrappedHandle;
         this.storage = null;
+    }
+
+    @Override
+    public long size() {
+        return this.size;
+    }
+
+    @Override
+    public int usage() {
+        return this.usage;
     }
 
     ByteBuffer sliceStorage(final long offset, final long length) {

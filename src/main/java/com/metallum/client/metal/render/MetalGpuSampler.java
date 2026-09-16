@@ -17,7 +17,7 @@ import java.util.Objects;
 import java.util.OptionalDouble;
 
 @Environment(EnvType.CLIENT)
-final class MetalGpuSampler extends GpuSampler {
+final class MetalGpuSampler implements GpuSampler {
     private final MetalDevice device;
     private final MemorySegment nativeHandle;
     private final AddressMode addressModeU;
@@ -175,7 +175,8 @@ final class MetalGpuSampler extends GpuSampler {
         MetalNativeBridge.metallum_release_object(this.nativeHandle);
     }
 
-    boolean isClosed() {
+    @Override
+    public boolean isClosed() {
         return this.closed;
     }
 
