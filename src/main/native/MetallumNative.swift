@@ -8206,6 +8206,26 @@ public func metallum_metal_hud_status(_ layer: CAMetalLayer) -> Int32 {
     return status
 }
 
+/// Configures a CAMetalLayer owned by SDL without taking ownership of it.
+/// SDL_Metal_DestroyView remains the sole lifetime authority for this layer.
+@_cdecl("metallum_configure_existing_metal_layer")
+public func metallum_configure_existing_metal_layer(
+    _ rawLayer: UnsafeMutableRawPointer?,
+    _ device: MTLDevice,
+    _ contentsScale: Double
+) -> Int32 {
+    guard let rawLayer else { return 0 }
+    let layer = Unmanaged<CAMetalLayer>.fromOpaque(rawLayer).takeUnretainedValue()
+    layer.device = device
+    layer.framebufferOnly = true
+    layer.isOpaque = true
+    if contentsScale > 0 {
+        layer.contentsScale = CGFloat(contentsScale)
+    }
+    setMetalHudProperties(layer, enabled: false)
+    return 1
+}
+
 @_cdecl("metallum_NSView_setMetalLayer")
 public func metallum_NSView_setMetalLayer(
     _ view: MetallumView,

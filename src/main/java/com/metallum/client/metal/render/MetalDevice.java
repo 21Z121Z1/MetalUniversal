@@ -31,6 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -38,9 +39,10 @@ import java.util.regex.Pattern;
 final class MetalDevice implements GpuDeviceBackend {
     private static final Pattern BLOCK_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/");
     private static final Pattern LINE_COMMENTS = Pattern.compile("(?m)//[^\\n]*");
+    private final MetalBackend backend;
     private final MemorySegment metalDeviceHandle;
-    private final MemorySegment metalLayer;
-    private final MemorySegment cocoaView;
+    private MemorySegment metalLayer = MemorySegment.NULL;
+    private boolean presentationInitialized;
     private final GpuDebugOptions debugOptions;
     private final MetalCommandEncoder commandEncoder;
     private final MetalGpuBuffer genericVertexAttributeBuffer;
@@ -67,6 +69,7 @@ final class MetalDevice implements GpuDeviceBackend {
             return true;
         }
     };
+    @Nullable
     private ShaderSource activeShaderSource;
     private int pendingExtraTextureUsage;
     private static final boolean PSO_ARCHIVE =
@@ -142,7 +145,7 @@ final class MetalDevice implements GpuDeviceBackend {
                     "metallum.opt.metal4MainRenderer", "false"));
     /** METAL4_REQUESTED AND the device/SDK actually supporting Metal 4. */
     private final boolean metal4Available;
-    private final boolean metal4MainRenderer;
+    private boolean metal4MainRenderer;
     /**
      * Explicit residency tracking (spec M3). MTLResidencySet is macOS 15 / iOS 18
      * and needs no Metal 4, so this switch is independent of the master one: the
@@ -211,64 +214,38 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     MetalDevice(
-            final ShaderSource defaultShaderSource,
+            final MetalBackend backend,
             final GpuDebugOptions debugOptions,
             final MemorySegment metalDeviceHandle,
-            final MemorySegment metalLayer,
-            final String deviceName,
-            final MemorySegment cocoaView
+            final String deviceName
     ) {
-        this.activeShaderSource = defaultShaderSource;
+        this.backend = backend;
+        this.activeShaderSource = null;
         this.debugOptions = debugOptions;
         this.metalDeviceHandle = metalDeviceHandle;
-        this.metalLayer = metalLayer;
-        this.cocoaView = cocoaView;
-        final boolean presentationBacked = hasPresentationLayer(metalLayer);
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
         this.metal4Available = METAL4_REQUESTED
                 && MetalNativeBridge.metallum_metal4_supported(metalDeviceHandle) != 0;
-        boolean metal4MainRenderer = this.metal4Available && METAL4_MAIN_RENDERER;
-        // Before metallum_init_pipelines and before any texture or buffer exists:
-        // resources created earlier would never enter the set.
-        if ((RESIDENCY_SET || metal4MainRenderer)
+        boolean metal4MainRendererRequested = this.metal4Available && METAL4_MAIN_RENDERER;
+        // Explicit residency is device state and can be established before a
+        // presentation surface exists. The main render encoder itself is
+        // enabled later, once createSurface has a real CAMetalLayer.
+        if ((RESIDENCY_SET || metal4MainRendererRequested)
                 && !this.commandQueue.enableResidencySet(metalDeviceHandle)) {
-            if (metal4MainRenderer && VISIBILITY_PROBE_FALLBACK_ALLOWED) {
+            if (metal4MainRendererRequested && VISIBILITY_PROBE_FALLBACK_ALLOWED) {
                 Metallum.LOGGER.warn(
                         "[metallum] terrain visibility probe Metal 4 residency unavailable; falling back"
                 );
-                metal4MainRenderer = false;
-            } else if (metal4MainRenderer) {
+                metal4MainRendererRequested = false;
+            } else if (metal4MainRendererRequested) {
                 throw new IllegalStateException("Metal 4 main renderer requires explicit residency");
             }
-            if (!metal4MainRenderer) {
+            if (!metal4MainRendererRequested) {
                 Metallum.LOGGER.warn("[metallum] residency set unavailable; residency stays automatic");
             }
         }
-        if (metal4MainRenderer
-                && MetalNativeBridge.metallum_metal4_main_renderer_enable(
-                        metalDeviceHandle,
-                        metalLayer
-                ) == 0) {
-            if (VISIBILITY_PROBE_FALLBACK_ALLOWED) {
-                Metallum.LOGGER.warn(
-                        "[metallum] terrain visibility probe Metal 4 main renderer unavailable; falling back"
-                );
-                metal4MainRenderer = false;
-            } else {
-                throw new IllegalStateException("Metal 4 main renderer initialization failed");
-            }
-        }
-        this.metal4MainRenderer = metal4MainRenderer;
-        // metallum_init_pipelines eagerly builds the swapchain/present PSO and
-        // associated presentation samplers. An offscreen MetalDevice has no
-        // CAMetalLayer by contract, so do not initialize presentation-only state
-        // for it. Render/compute pipelines continue to compile through their
-        // normal lazy shipping paths; production devices with a real layer keep
-        // the existing eager presentation prewarm unchanged.
-        if (presentationBacked) {
-            MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
-        }
+        this.metal4MainRenderer = false;
         // Must agree with MetalCommandEncoder.DEFERRED_DEPTH_STORE before the
         // first render encoder: the native side only sets storeAction=.unknown
         // (which Java must then resolve before endEncoding) when enabled.
@@ -281,7 +258,7 @@ final class MetalDevice implements GpuDeviceBackend {
         // MetalFX's Metal 4 scaler/interpolator factories require an
         // MTL4Compiler. Enabling the main renderer therefore implies the
         // compiler even when its independent pilot switch is absent.
-        boolean metal4Compiler = this.metal4Available && (METAL4_COMPILER || metal4MainRenderer);
+        boolean metal4Compiler = this.metal4Available && (METAL4_COMPILER || metal4MainRendererRequested);
         MetalNativeBridge.metallum_set_metal4_compiler_enabled(metal4Compiler ? 1 : 0);
         // Terrain ICB requires both the Metal 4 capability and an active
         // MTL4Compiler PSO path. Snapshot capture remains enabled when the
@@ -304,7 +281,7 @@ final class MetalDevice implements GpuDeviceBackend {
         );
         // Depends on the compiler switch: the MTL4 frame interpolator factory
         // takes an MTL4Compiler, so the present pilot cannot run without it.
-        boolean metal4Present = metal4Compiler && (METAL4_PRESENT || metal4MainRenderer);
+        boolean metal4Present = metal4Compiler && (METAL4_PRESENT || metal4MainRendererRequested);
         MetalNativeBridge.metallum_set_metal4_present_enabled(metal4Present ? 1 : 0);
         boolean metal4MainQueuePilot = this.metal4Available && METAL4_MAIN_QUEUE_PILOT;
         if (metal4MainQueuePilot
@@ -322,7 +299,7 @@ final class MetalDevice implements GpuDeviceBackend {
                 metal4Compiler,
                 metal4Present,
                 metal4MainQueuePilot,
-                metal4MainRenderer,
+                metal4MainRendererRequested,
                 METAL4_BARRIER
         );
         if (PSO_ARCHIVE) {
@@ -367,12 +344,6 @@ final class MetalDevice implements GpuDeviceBackend {
                 genericVertexAttributeDefaults()
         );
         current = this;
-        // MetalFX owns presentation/HUD/frame-generation state. It is not part
-        // of a layerless offscreen device's resource graph and its startup path
-        // requires a real CAMetalLayer.
-        if (presentationBacked) {
-            MetalFxManager.initialize(this);
-        }
     }
 
     /** Current source chain used by lazy PSO compilation; package seam for generated Iris stages. */
@@ -395,8 +366,53 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     @Override
-    public @NonNull GpuSurfaceBackend createSurface(final long windowHandle) {
-        return new MetalSurface(this, this.metalLayer);
+    public synchronized @NonNull GpuSurfaceBackend createSurface(
+            final long windowHandle,
+            final @NonNull BooleanSupplier isIconified
+    ) {
+        if (this.presentationInitialized) {
+            throw new IllegalStateException("MetalDevice supports one live presentation surface");
+        }
+
+        MetalBackend.SurfaceBinding binding = this.backend.createSurfaceBinding(windowHandle, this.metalDeviceHandle);
+        this.metalLayer = binding.layer();
+        if (!hasPresentationLayer(this.metalLayer)) {
+            throw new IllegalStateException("Metal surface binding returned a null CAMetalLayer");
+        }
+
+        boolean requestedMainRenderer = this.metal4Available && METAL4_MAIN_RENDERER;
+        if (requestedMainRenderer
+                && MetalNativeBridge.metallum_metal4_main_renderer_enable(
+                        this.metalDeviceHandle,
+                        this.metalLayer
+                ) == 0) {
+            if (VISIBILITY_PROBE_FALLBACK_ALLOWED) {
+                Metallum.LOGGER.warn(
+                        "[metallum] terrain visibility probe Metal 4 main renderer unavailable; falling back"
+                );
+            } else {
+                if (binding.sdlMetalView() != 0L) {
+                    org.lwjgl.sdl.SDLMetal.SDL_Metal_DestroyView(binding.sdlMetalView());
+                }
+                this.metalLayer = MemorySegment.NULL;
+                throw new IllegalStateException("Metal 4 main renderer initialization failed");
+            }
+        } else {
+            this.metal4MainRenderer = requestedMainRenderer;
+        }
+
+        MetalNativeBridge.metallum_init_pipelines(this.metalDeviceHandle);
+        MetalFxManager.initialize(this);
+        this.presentationInitialized = true;
+        return new MetalSurface(this, this.metalLayer, binding.sdlMetalView());
+    }
+
+    synchronized void presentationSurfaceClosed(final long sdlMetalView) {
+        if (sdlMetalView != 0L) {
+            org.lwjgl.sdl.SDLMetal.SDL_Metal_DestroyView(sdlMetalView);
+        }
+        this.presentationInitialized = false;
+        this.metalLayer = MemorySegment.NULL;
     }
 
     MemorySegment metalLayerHandle() {
@@ -741,12 +757,6 @@ final class MetalDevice implements GpuDeviceBackend {
         }
         this.clearPipelineCache();
         this.drainBufferPool();
-        if (!MetalNativeBridge.isNullHandle(this.cocoaView)) {
-            try {
-                MetalNativeBridge.metallum_NSView_clearLayer(this.cocoaView);
-            } catch (Throwable ignored) {
-            }
-        }
         this.commandQueue.close();
         MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
     }

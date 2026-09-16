@@ -161,6 +161,7 @@ public final class MetalNativeBridge {
             copyDeviceName = downcall(lookup, "metallum_copy_device_name", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             NSWindowBackingScaleFactor = downcall(lookup, "metallum_NSWindow_backingScaleFactor", FunctionDescriptor.of(DOUBLE, ValueLayout.ADDRESS));
             createMetalLayer = downcall(lookup, "metallum_create_metal_layer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, DOUBLE));
+            configureExistingMetalLayer = downcall(lookup, "metallum_configure_existing_metal_layer", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, DOUBLE));
             setMetalHud = downcall(lookup, "metallum_set_metal_hud", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT));
             metalHudStatus = downcall(lookup, "metallum_metal_hud_status", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             NSViewSetMetalLayer = downcall(lookup, "metallum_NSView_setMetalLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -1060,6 +1061,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle copyDeviceName;
     private static final MethodHandle NSWindowBackingScaleFactor;
     private static final MethodHandle createMetalLayer;
+    private static final MethodHandle configureExistingMetalLayer;
     private static final MethodHandle NSViewSetMetalLayer;
     private static final MethodHandle NSViewClearLayer;
     private static final MethodHandle setDebugLabelsEnabled;
@@ -1390,6 +1392,18 @@ public final class MetalNativeBridge {
             return (int) metalHudStatus.invokeExact(segment(layer));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_metal_hud_status", throwable);
+        }
+    }
+
+    public static int metallum_configure_existing_metal_layer(
+            final MemorySegment layer,
+            final MemorySegment device,
+            final double contentsScale
+    ) {
+        try {
+            return (int) configureExistingMetalLayer.invokeExact(segment(layer), segment(device), contentsScale);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_configure_existing_metal_layer", throwable);
         }
     }
 
