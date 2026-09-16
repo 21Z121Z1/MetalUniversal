@@ -8,6 +8,7 @@ import com.mojang.renderpearl.api.pipeline.ColorTargetState;
 import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
 import com.mojang.renderpearl.api.pipeline.DepthStencilState;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.pipeline.PolygonMode;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
 import com.mojang.renderpearl.api.vertex.VertexFormatElement;
@@ -116,7 +117,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.cullMode = info.isCull() ? MTLCullMode.Back : MTLCullMode.None;
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
-        this.vertexBufferCount = info.getVertexFormatBindings().length;
+        this.vertexBufferCount = info.getVertexFormatBindings().size();
         this.genericVertexBufferSlot = resolveGenericVertexBufferSlot(
                 this.firstAvailableVertexBufferSlot,
                 this.vertexBufferCount,
@@ -189,16 +190,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 depthWrite
         );
 
-        ColorTargetState[] colorTargets = info.getColorTargetStates();
-        if (colorTargets.length == 0 || colorTargets.length > ColorTargetState.MAX_COLOR_TARGETS) {
+        List<ColorTargetState> colorTargets = info.getColorTargetStates();
+        if (colorTargets.isEmpty() || colorTargets.size() > ColorTargetState.MAX_COLOR_TARGETS) {
             throw new IllegalArgumentException(
-                    "Pipeline " + info.getLocation() + " has " + colorTargets.length
+                    "Pipeline " + info.getLocation() + " has " + colorTargets.size()
                             + " color targets; supported range is 1.." + ColorTargetState.MAX_COLOR_TARGETS
             );
         }
-        this.colorFormats = new MTLPixelFormat[colorTargets.length];
-        for (int index = 0; index < colorTargets.length; index++) {
-            ColorTargetState target = colorTargets[index];
+        this.colorFormats = new MTLPixelFormat[colorTargets.size()];
+        for (int index = 0; index < colorTargets.size(); index++) {
+            ColorTargetState target = colorTargets.get(index);
             this.colorFormats[index] = target == null ? MTLPixelFormat.Invalid : MTLPixelFormat.from(target.format());
         }
         this.colorFormatsView = List.of(this.colorFormats);
@@ -440,9 +441,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         try (MTLRenderPipelineDescriptor pipelineDesc = new MTLRenderPipelineDescriptor()) {
             pipelineDesc.setCompiledFunctions(vertexFunction, fragmentFunction);
             pipelineDesc.setVertexDescriptor(vertexDescriptor);
-            ColorTargetState[] colorTargets = info.getColorTargetStates();
+            List<ColorTargetState> colorTargets = info.getColorTargetStates();
             for (int index = 0; index < colorFormats.length; index++) {
-                ColorTargetState colorTarget = colorTargets[index];
+                ColorTargetState colorTarget = colorTargets.get(index);
                 pipelineDesc.setColorAttachmentFormat(index, colorFormats[index]);
                 if (colorTarget == null) {
                     pipelineDesc.disableBlending(index, MTLColorWriteMask.None.value);
@@ -471,7 +472,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
             pipelineDesc.setDepthStencilFormats(depthFormat, stencilFormat);
             if ((TerrainSceneSnapshot.ICB_ENABLED || TerrainSceneSnapshot.GPU_ICB_ENABLED)
-                    && isSodiumTerrainPipeline(info.getVertexShader())) {
+                    && isSodiumTerrainPipeline(info.getShaders().get(ShaderType.VERTEX))) {
                 pipelineDesc.setSupportIndirectCommandBuffers(true);
             }
 
@@ -482,9 +483,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         }
     }
 
-    @Override
     public boolean isValid() {
         return !MetalNativeBridge.isNullHandle(this.withoutDepthPipeline);
+    }
+
+    @Override
+    public boolean isClosed() {
+        return this.closed;
     }
 
     List<ResourceBinding> resources() {
@@ -502,7 +507,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     boolean usesStableTerrainSampler(final ResourceBinding binding) {
         return binding.kind() == ResourceKind.SAMPLED_IMAGE
-                && isSodiumTerrainBlockSampler(binding.name(), this.info.getVertexShader());
+                && isSodiumTerrainBlockSampler(binding.name(), this.info.getShaders().get(ShaderType.VERTEX));
     }
 
     static boolean isSodiumTerrainBlockSampler(final String bindingName, final Identifier vertexShader) {
@@ -577,11 +582,11 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     /** Returns the stride for the logical RenderPass slot, not the Metal ABI slot. */
     int vertexStride(final int logicalSlot) {
         int binding = logicalSlot;
-        VertexFormat[] formats = this.info.getVertexFormatBindings();
-        if (binding < 0 || binding >= formats.length || formats[binding] == null) {
+        List<VertexFormat> formats = this.info.getVertexFormatBindings();
+        if (binding < 0 || binding >= formats.size() || formats.get(binding) == null) {
             return 0;
         }
-        return formats[binding].getVertexSize();
+        return formats.get(binding).getVertexSize();
     }
 
     int genericVertexBufferSlot() {
@@ -640,12 +645,12 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs,
             final int genericVertexBufferSlot
     ) {
-        VertexFormat[] bindings = pipeline.getVertexFormatBindings();
+        List<VertexFormat> bindings = pipeline.getVertexFormatBindings();
         MTLVertexDescriptor vertexDesc = new MTLVertexDescriptor();
         long attrIndex = 0;
 
-        for (int i = 0; i < bindings.length; i++) {
-            VertexFormat binding = bindings[i];
+        for (int i = 0; i < bindings.size(); i++) {
+            VertexFormat binding = bindings.get(i);
             if (binding == null || binding.getElements().isEmpty()) {
                 continue;
             }

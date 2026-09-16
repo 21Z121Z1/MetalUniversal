@@ -200,9 +200,17 @@ final class MetalDevice implements GpuDeviceBackend {
 
     /** Vanilla marker result for a precompile that was queued, not run. */
     private record PendingCompiledPipeline() implements CompiledRenderPipeline {
-        @Override
         public boolean isValid() {
             return true;
+        }
+
+        @Override
+        public boolean isClosed() {
+            return false;
+        }
+
+        @Override
+        public void close() {
         }
     }
 
@@ -776,6 +784,12 @@ final class MetalDevice implements GpuDeviceBackend {
     @Override
     public long getTimestampNow() {
         return System.nanoTime();
+    }
+
+    @Override
+    public long getTimestampCalibrationOffset() {
+        // MetalGpuQueryPool records host monotonic nanoseconds.
+        return 0L;
     }
 
     @Override

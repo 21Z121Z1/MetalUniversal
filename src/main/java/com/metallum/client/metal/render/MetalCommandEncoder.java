@@ -1455,8 +1455,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int regionX,
             final int regionY,
             final int regionWidth,
-            final int regionHeight
+            final int regionHeight,
+            final int mipLevel
     ) {
+        if (mipLevel != 0) {
+            throw new UnsupportedOperationException(
+                    "Metal regional color/depth clear currently supports mip level 0 only (got " + mipLevel + ")"
+            );
+        }
         MetalGpuTexture color = (MetalGpuTexture) colorTexture;
         MetalGpuTexture depth = (MetalGpuTexture) depthTexture;
         Vector4fc clearColorCopy = new Vector4f(clearColor);

@@ -1,6 +1,6 @@
 package com.metallum.client.metal.render;
 
-import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
+import net.caffeinemc.mods.sodium.client.gpu.arena.BufferSegment;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 
@@ -155,7 +155,7 @@ public final class TerrainCandidateSnapshot {
          * shared-index buffer.
          */
         boolean live() {
-            if (allocation instanceof GlBufferSegment segment) {
+            if (allocation instanceof BufferSegment segment) {
                 long liveGeneration = TerrainSegmentIdentity.generation(segment);
                 if (TerrainSegmentIdentity.isFree(segment) || liveGeneration < 0L) {
                     return false;

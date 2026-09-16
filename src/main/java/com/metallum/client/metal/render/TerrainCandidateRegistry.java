@@ -1,6 +1,6 @@
 package com.metallum.client.metal.render;
 
-import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
+import net.caffeinemc.mods.sodium.client.gpu.arena.BufferSegment;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionFlags;
@@ -352,11 +352,11 @@ public final class TerrainCandidateRegistry {
         if (localIndex < 0 || localIndex >= 256) {
             return null;
         }
-        GlBufferSegment[] vertices = TerrainStorageBridge.vertexAllocations(storage);
+        BufferSegment[] vertices = TerrainStorageBridge.vertexAllocations(storage);
         if (vertices == null || localIndex >= vertices.length) {
             return null;
         }
-        GlBufferSegment vertex = vertices[localIndex];
+        BufferSegment vertex = vertices[localIndex];
         if (vertex == null) {
             return null;
         }
@@ -375,9 +375,9 @@ public final class TerrainCandidateRegistry {
         } catch (RuntimeException exception) {
             return null;
         }
-        GlBufferSegment index;
+        BufferSegment index;
         if (localIndexMode) {
-            GlBufferSegment[] elements = TerrainStorageBridge.elementAllocations(storage);
+            BufferSegment[] elements = TerrainStorageBridge.elementAllocations(storage);
             index = elements == null || localIndex >= elements.length ? null : elements[localIndex];
         } else {
             index = TerrainStorageBridge.sharedIndexAllocation(storage);
@@ -451,7 +451,7 @@ public final class TerrainCandidateRegistry {
         );
     }
 
-    private static TerrainCandidateSnapshot.AllocationIdentity allocation(final GlBufferSegment segment) {
+    private static TerrainCandidateSnapshot.AllocationIdentity allocation(final BufferSegment segment) {
         long stamp = TerrainSegmentIdentity.generation(segment);
         if (segment == null || TerrainSegmentIdentity.isFree(segment) || stamp < 0L) {
             return null;

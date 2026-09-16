@@ -1,7 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
-import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
+import net.caffeinemc.mods.sodium.client.gpu.arena.BufferSegment;
 import net.caffeinemc.mods.sodium.client.gpu.device.batch.MultiDrawBatch;
 import net.caffeinemc.mods.sodium.client.render.chunk.LocalSectionIndex;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
@@ -180,13 +180,13 @@ public final class TerrainDrawMetadataCapture {
             final long dataPointer,
             final boolean localIndexMode
     ) {
-        GlBufferSegment[] vertices = TerrainStorageBridge.vertexAllocations(storage);
+        BufferSegment[] vertices = TerrainStorageBridge.vertexAllocations(storage);
         if (vertices == null || localIndex < 0 || localIndex >= vertices.length) {
             return null;
         }
-        GlBufferSegment[] elements = TerrainStorageBridge.elementAllocations(storage);
-        GlBufferSegment vertex = vertices[localIndex];
-        GlBufferSegment index = localIndexMode
+        BufferSegment[] elements = TerrainStorageBridge.elementAllocations(storage);
+        BufferSegment vertex = vertices[localIndex];
+        BufferSegment index = localIndexMode
                 ? elements == null || localIndex >= elements.length ? null : elements[localIndex]
                 : TerrainStorageBridge.sharedIndexAllocation(storage);
         if (vertex == null || index == null) {
