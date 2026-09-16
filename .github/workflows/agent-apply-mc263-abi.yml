@@ -1,0 +1,122 @@
+name: Agent apply Minecraft 26.3 ABI batch
+
+on:
+  push:
+    branches:
+      - agent/minecraft-26.3-renderpearl-migration-20260916
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'agent: apply RenderPearl ABI batch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - name: Apply asserted Minecraft 26.3 ABI transformations
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('src/main/java/com/metallum/client/metal/render')
+
+          def replace_once(path, old, new):
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one anchor, found {count}: {old[:80]!r}')
+              path.write_text(text.replace(old, new, 1))
+
+          # Sodium 26.3 renamed the arena allocation type; this adapter remains optional.
+          for name in ['TerrainCandidateSnapshot.java', 'TerrainCandidateRegistry.java', 'TerrainDrawMetadataCapture.java']:
+              path = root / name
+              text = path.read_text()
+              if 'GlBufferSegment' in text:
+                  text = text.replace(
+                      'net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment',
+                      'net.caffeinemc.mods.sodium.client.gpu.arena.BufferSegment'
+                  ).replace('GlBufferSegment', 'BufferSegment')
+                  path.write_text(text)
+
+          # RenderPearl 26.3 regional clear carries an explicit mip level. Until the
+          # native bridge grows a mip-aware regional clear, fail closed for non-zero mips.
+          path = root / 'MetalCommandEncoder.java'
+          replace_once(
+              path,
+              '''            final int regionWidth,\n            final int regionHeight\n    ) {\n        MetalGpuTexture color = (MetalGpuTexture) colorTexture;''',
+              '''            final int regionWidth,\n            final int regionHeight,\n            final int mipLevel\n    ) {\n        if (mipLevel != 0) {\n            throw new UnsupportedOperationException(\n                    "Metal regional color/depth clear currently supports mip level 0 only (got " + mipLevel + ")"\n            );\n        }\n        MetalGpuTexture color = (MetalGpuTexture) colorTexture;'''
+          )
+
+          # Frontend RenderPipeline collections are Lists in 26.3. Keep this class
+          # compiling while the following migration batch moves it fully to CreateInfo.
+          path = root / 'MetalCompiledRenderPipeline.java'
+          text = path.read_text()
+          if 'import com.mojang.renderpearl.api.pipeline.ShaderType;' not in text:
+              text = text.replace(
+                  'import com.mojang.renderpearl.api.pipeline.RenderPipeline;\n',
+                  'import com.mojang.renderpearl.api.pipeline.RenderPipeline;\nimport com.mojang.renderpearl.api.pipeline.ShaderType;\n', 1
+              )
+          text = text.replace('this.vertexBufferCount = info.getVertexFormatBindings().length;',
+                              'this.vertexBufferCount = info.getVertexFormatBindings().size();')
+          text = text.replace(
+              'ColorTargetState[] colorTargets = info.getColorTargetStates();\n        if (colorTargets.length == 0 || colorTargets.length > ColorTargetState.MAX_COLOR_TARGETS)',
+              'List<ColorTargetState> colorTargets = info.getColorTargetStates();\n        if (colorTargets.isEmpty() || colorTargets.size() > ColorTargetState.MAX_COLOR_TARGETS)'
+          )
+          text = text.replace('" has " + colorTargets.length\n', '" has " + colorTargets.size()\n')
+          text = text.replace(
+              'this.colorFormats = new MTLPixelFormat[colorTargets.length];\n        for (int index = 0; index < colorTargets.length; index++) {\n            ColorTargetState target = colorTargets[index];',
+              'this.colorFormats = new MTLPixelFormat[colorTargets.size()];\n        for (int index = 0; index < colorTargets.size(); index++) {\n            ColorTargetState target = colorTargets.get(index);'
+          )
+          text = text.replace(
+              'ColorTargetState[] colorTargets = info.getColorTargetStates();\n            for (int index = 0; index < colorFormats.length; index++) {\n                ColorTargetState colorTarget = colorTargets[index];',
+              'List<ColorTargetState> colorTargets = info.getColorTargetStates();\n            for (int index = 0; index < colorFormats.length; index++) {\n                ColorTargetState colorTarget = colorTargets.get(index);'
+          )
+          text = text.replace('info.getVertexShader()', 'info.getShaders().get(ShaderType.VERTEX)')
+          text = text.replace('this.info.getVertexShader()', 'this.info.getShaders().get(ShaderType.VERTEX)')
+          text = text.replace(
+              'VertexFormat[] formats = this.info.getVertexFormatBindings();\n        if (binding < 0 || binding >= formats.length || formats[binding] == null) {\n            return 0;\n        }\n        return formats[binding].getVertexSize();',
+              'List<VertexFormat> formats = this.info.getVertexFormatBindings();\n        if (binding < 0 || binding >= formats.size() || formats.get(binding) == null) {\n            return 0;\n        }\n        return formats.get(binding).getVertexSize();'
+          )
+          text = text.replace(
+              'VertexFormat[] bindings = pipeline.getVertexFormatBindings();\n        MTLVertexDescriptor vertexDesc = new MTLVertexDescriptor();',
+              'List<VertexFormat> bindings = pipeline.getVertexFormatBindings();\n        MTLVertexDescriptor vertexDesc = new MTLVertexDescriptor();'
+          )
+          text = text.replace(
+              'for (int i = 0; i < bindings.length; i++) {\n            VertexFormat binding = bindings[i];',
+              'for (int i = 0; i < bindings.size(); i++) {\n            VertexFormat binding = bindings.get(i);'
+          )
+          text = text.replace(
+              '    @Override\n    public boolean isValid() {\n        return !MetalNativeBridge.isNullHandle(this.withoutDepthPipeline);\n    }',
+              '    public boolean isValid() {\n        return !MetalNativeBridge.isNullHandle(this.withoutDepthPipeline);\n    }\n\n    @Override\n    public boolean isClosed() {\n        return this.closed;\n    }'
+          )
+          path.write_text(text)
+
+          # Backend query timestamps currently use System.nanoTime directly, so the
+          # calibration offset between query and host clock is exactly zero.
+          path = root / 'MetalDevice.java'
+          replace_once(
+              path,
+              '''    private record PendingCompiledPipeline() implements CompiledRenderPipeline {\n        @Override\n        public boolean isValid() {\n            return true;\n        }\n    }''',
+              '''    private record PendingCompiledPipeline() implements CompiledRenderPipeline {\n        public boolean isValid() {\n            return true;\n        }\n\n        @Override\n        public boolean isClosed() {\n            return false;\n        }\n\n        @Override\n        public void close() {\n        }\n    }'''
+          )
+          replace_once(
+              path,
+              '''    @Override\n    public long getTimestampNow() {\n        return System.nanoTime();\n    }\n\n    @Override\n    public @NonNull DeviceInfo getDeviceInfo() {''',
+              '''    @Override\n    public long getTimestampNow() {\n        return System.nanoTime();\n    }\n\n    @Override\n    public long getTimestampCalibrationOffset() {\n        // MetalGpuQueryPool records host monotonic nanoseconds.\n        return 0L;\n    }\n\n    @Override\n    public @NonNull DeviceInfo getDeviceInfo() {'''
+          )
+          PY
+          git diff --check
+          git diff --stat
+      - name: Commit generated ABI batch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name '21Z121Z1'
+          git config user.email '89170834+21Z121Z1@users.noreply.github.com'
+          git add src/main/java/com/metallum/client/metal/render
+          git commit -m 'compat: align baseline backend ABI with Minecraft 26.3'
+          git push origin HEAD:agent/minecraft-26.3-renderpearl-migration-20260916
