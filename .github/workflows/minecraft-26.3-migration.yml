@@ -55,6 +55,11 @@ jobs:
               'GpuSurfaceBackend.java',
               'CommandEncoderBackend.java',
               'RenderPassBackend.java',
+              'BackendRenderPipeline.java',
+              'FrontendRenderPipeline.java',
+              'PipelineBuilder.java',
+              'SpvModule.java',
+              'SPIRVModule.java',
               'RenderPass.java',
               'CommandEncoder.java',
               'GpuBuffer.java',
@@ -62,15 +67,16 @@ jobs:
               'GpuTexture.java',
               'GpuTextureView.java',
               'GpuSampler.java',
+              'TextureViewAndSampler.java',
               'RenderPipeline.java',
               'CompiledRenderPipeline.java',
               'BindGroupLayout.java',
+              'UniformType.java',
               'GpuFormat.java',
               'ShaderSource.java',
               'ShaderType.java',
               'GpuDebugOptions.java',
               'GlslCompiler.java',
-              'IntermediaryShaderModule.java',
               'ShaderCompileException.java',
           ]
           for name in names:
@@ -80,7 +86,7 @@ jobs:
                   rel = path.relative_to(root)
                   print(f'--- {rel} ---')
                   lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
-                  for line in lines[:260]:
+                  for line in lines[:420]:
                       print(line)
           PY
           cat build/agent-evidence/minecraft-26.3-api-probe.txt
