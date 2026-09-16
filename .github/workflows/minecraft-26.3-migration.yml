@@ -155,6 +155,12 @@ jobs:
             build/agent-evidence/minecraft-26.3-api-probe.txt
             build/agent-evidence/compile-26.3.log
             build/agent-evidence/context.txt
+            src/main/java/com/metallum/client/metal/render/MetalDevice.java
+            src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java
+            src/main/java/com/metallum/client/metal/render/MetalRenderPass.java
+            src/main/java/com/metallum/client/metal/render/MetalCompiledRenderPipeline.java
+            src/main/java/com/metallum/client/metal/render/MetalCrossShaderCompiler.java
+            src/main/java/com/metallum/client/metal/render/TerrainCandidateSnapshot.java
           if-no-files-found: error
           retention-days: 14
 
