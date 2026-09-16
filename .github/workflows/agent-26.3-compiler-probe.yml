@@ -1,0 +1,29 @@
+name: Probe Minecraft 26.3 compiler migration surface
+
+on:
+  push:
+    branches:
+      - agent/minecraft-26.3-renderpearl-migration-20260916
+    paths:
+      - '.github/workflows/agent-26.3-compiler-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Show compiler and pipeline usages
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== MetalCrossShaderCompiler usages ==='
+          rg -n 'MetalCrossShaderCompiler\.' src/main src/test || true
+          echo '=== IrisMetalPipelineOverrides usages ==='
+          rg -n 'IrisMetalPipelineOverrides|compileWithIrisOverride|getOrCompilePipeline|precompilePipeline|clearPipelineCache' src/main src/test || true
+          echo '=== RenderPass backend methods ==='
+          rg -n 'setPipeline\(|setUniform\(|pushConstants\(|bindTexture\(' src/main/java/com/metallum/client/metal/render/MetalRenderPass.java src/main/java/com/metallum/client/metal/render || true
+          echo '=== old shader compiler dependencies ==='
+          rg -n 'IntermediaryShaderModule|VulkanBindGroupLayout|GlslCompiler|GlslPreprocessor|ShaderCompilationKey' src/main/java src/test || true
