@@ -1,17 +1,16 @@
 package com.metallum.client.metal.render;
 
-import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
+import net.caffeinemc.mods.sodium.client.gpu.arena.BufferSegment;
 
 import java.util.Objects;
 
 /**
  * The producer-owned identity attached to one indexed Sodium terrain draw.
  *
- * <p>All fields are values from the same {@code fillCommandBuffer} section
- * loop.  In particular, {@link AllocationStamp#allocation()} is a Sodium
- * mesh allocation object, not a process-wide sequence number or an object
- * hash.  Keeping the allocation reference in the immutable record lets the
- * snapshot detect a replaced mesh even when the allocator reuses offsets.</p>
+ * <p>All fields are values from the same terrain-command production section
+ * loop. In particular, {@link AllocationStamp#allocation()} is the optional
+ * Sodium mesh allocation identity, not draw authority. Minecraft 26.3's
+ * vanilla RenderPearl/MDI path can operate without constructing these stamps.</p>
  */
 record TerrainDrawMetadata(
         int ordinal,
@@ -47,13 +46,13 @@ record TerrainDrawMetadata(
         }
     }
 
-    /** A value-plus-identity stamp for one Sodium arena range. */
+    /** A value-plus-identity stamp for one optional Sodium arena range. */
     record AllocationStamp(Object allocation, long offset, long length, long generation) {
         AllocationStamp(final Object allocation, final long offset, final long length) {
             this(allocation, offset, length, 0L);
         }
 
-        static AllocationStamp of(final GlBufferSegment allocation) {
+        static AllocationStamp of(final BufferSegment allocation) {
             if (allocation == null) {
                 return new AllocationStamp(null, -1L, -1L, -1L);
             }
@@ -65,7 +64,7 @@ record TerrainDrawMetadata(
             if (allocation == null) {
                 return false;
             }
-            if (allocation instanceof GlBufferSegment segment) {
+            if (allocation instanceof BufferSegment segment) {
                 long liveGeneration = TerrainSegmentIdentity.generation(segment);
                 if (TerrainSegmentIdentity.isFree(segment) || liveGeneration < 0L) {
                     return false;
