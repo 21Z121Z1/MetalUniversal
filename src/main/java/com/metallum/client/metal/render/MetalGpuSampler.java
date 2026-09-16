@@ -176,6 +176,36 @@ final class MetalGpuSampler implements GpuSampler {
     }
 
     @Override
+    public AddressMode getAddressModeU() {
+        return this.addressModeU;
+    }
+
+    @Override
+    public AddressMode getAddressModeV() {
+        return this.addressModeV;
+    }
+
+    @Override
+    public FilterMode getMinFilter() {
+        return this.minFilter;
+    }
+
+    @Override
+    public FilterMode getMagFilter() {
+        return this.magFilter;
+    }
+
+    @Override
+    public int getMaxAnisotropy() {
+        return this.maxAnisotropy;
+    }
+
+    @Override
+    public OptionalDouble getMaxLod() {
+        return this.maxLod;
+    }
+
+    @Override
     public boolean isClosed() {
         return this.closed;
     }
