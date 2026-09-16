@@ -24,6 +24,12 @@ jobs:
           java-version: '25'
           cache: gradle
 
+      - name: Generate repository task capsule
+        run: |
+          mkdir -p build/agent-evidence
+          python3 scripts/agent/context.py --task "Migrate MetalUniversal render.execution from Minecraft 26.2 Blaze3D GPU ABI to Minecraft 26.3 RenderPearl backend ABI, preserving Metal/Iris semantics" \
+            | tee build/agent-evidence/context.txt
+
       - name: Verify migration pins
         run: |
           set -euxo pipefail
@@ -57,6 +63,7 @@ jobs:
               'RenderPassBackend.java',
               'BackendRenderPipeline.java',
               'FrontendRenderPipeline.java',
+              'FrontendRenderPass.java',
               'PipelineBuilder.java',
               'SpvModule.java',
               'SPIRVModule.java',
@@ -78,6 +85,9 @@ jobs:
               'GpuDebugOptions.java',
               'GlslCompiler.java',
               'ShaderCompileException.java',
+              'VulkanDevice.java',
+              'GlDevice.java',
+              'OpenGlDevice.java',
           ]
           for name in names:
               matches = sorted(root.rglob(name))
@@ -86,8 +96,27 @@ jobs:
                   rel = path.relative_to(root)
                   print(f'--- {rel} ---')
                   lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
-                  for line in lines[:420]:
+                  for line in lines[:520]:
                       print(line)
+
+          print('===== targeted symbol search =====')
+          needles = [
+              'getTimestampCalibrationOffset',
+              'implements RenderPassBackend',
+              'void pushConstants',
+              'void setUniform(int',
+          ]
+          for path in sorted(root.rglob('*.java')):
+              text = path.read_text(encoding='utf-8', errors='replace')
+              lines = text.splitlines()
+              for needle in needles:
+                  hits = [i for i, line in enumerate(lines) if needle in line]
+                  for i in hits:
+                      print(f'--- {path.relative_to(root)} :: {needle} @ {i + 1} ---')
+                      lo = max(0, i - 14)
+                      hi = min(len(lines), i + 45)
+                      for line in lines[lo:hi]:
+                          print(line)
           PY
           cat build/agent-evidence/minecraft-26.3-api-probe.txt
           test -z "$(git status --short --untracked-files=all -- .minecraft-reference)"
@@ -104,6 +133,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: minecraft-26.3-api-probe-${{ github.run_attempt }}
-          path: build/agent-evidence/minecraft-26.3-api-probe.txt
+          path: |
+            build/agent-evidence/minecraft-26.3-api-probe.txt
+            build/agent-evidence/context.txt
           if-no-files-found: error
           retention-days: 14
