@@ -168,6 +168,7 @@ jobs:
           fi
           ./gradlew --no-daemon -Pmetallum.noOptionalMods=true \
             compileJava compileTestJava test -x buildIOSNative --console=plain \
+            --tests com.metallum.client.metal.render.MetalRenderPearlBoundaryTest \
             | tee build/agent-evidence/test-no-optional-mods.log
 
       - name: Diff hygiene
@@ -224,7 +225,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew --no-daemon compileJava compileTestJava test -x buildIOSNative --console=plain 2>&1 \
+          # The support checkout is Linux-only here. Compile both production and
+          # test sources to catch ABI drift; native Metal execution remains in the
+          # macOS/physical-GPU validation lanes of the 26.2 line.
+          ./gradlew --no-daemon compileJava compileTestJava -x buildIOSNative --console=plain 2>&1 \
             | tee build/agent-evidence/compile-26.2.log
 
       - name: Preserve 26.2 support evidence

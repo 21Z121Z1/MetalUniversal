@@ -28,6 +28,10 @@ dependencies {
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	compileOnly "maven.modrinth:sodium:${project.sodium_version}"
 	compileOnly "maven.modrinth:iris:${project.iris_version}"
+	// Tests exercise the optional adapters at compile time, but the vanilla
+	// runtime gate below must still be able to remove both jars completely.
+	testCompileOnly "maven.modrinth:sodium:${project.sodium_version}"
+	testCompileOnly "maven.modrinth:iris:${project.iris_version}"
 	if (!noOptionalRenderMods) {
 		runtimeOnly "maven.modrinth:sodium:${project.sodium_version}"
 		runtimeOnly "maven.modrinth:iris:${project.iris_version}"
