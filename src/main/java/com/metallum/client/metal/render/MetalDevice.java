@@ -173,8 +173,8 @@ final class MetalDevice implements GpuDeviceBackend {
             Boolean.parseBoolean(System.getProperty("metallum.opt.residencySet", "false"));
     private static final boolean RENDER_PIPELINE_IDENTITY_EQUALS = renderPipelineUsesIdentityEquals();
     /**
-     * Serializes the whole GLSL→SPIR-V→MSL→PSO chain across threads: the
-     * thread-safety of GlslCompiler, SPIRV-Cross contexts and the Swift-side
+     * Serializes the backend-owned SPIR-V→MSL→PSO chain across threads: the
+     * thread-safety of SPIRV-Cross contexts and the Swift-side
      * depth-stencil/archive caches is unverified, so exactly one thread may
      * be inside the chain at a time. Lock order is always
      * COMPILE_CHAIN_LOCK → map bins (never taken inside a computeIfAbsent

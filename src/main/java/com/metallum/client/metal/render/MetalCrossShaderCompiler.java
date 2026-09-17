@@ -15,6 +15,7 @@ import net.fabricmc.api.Environment;
 import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
 import org.lwjgl.PointerBuffer;
+import org.lwjgl.Version;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.util.spvc.Spv;
@@ -25,10 +26,13 @@ import org.lwjgl.util.spvc.SpvcReflectedResource;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.IntBuffer;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -72,43 +76,95 @@ final class MetalCrossShaderCompiler {
     static MetalCompiledRenderPipeline compile(
             final MetalDevice device, final BackendRenderPipeline.CreateInfo info
     ) {
+        ByteBuffer vertexSpirv = null;
+        ByteBuffer fragmentSpirv = null;
         try {
             SpvModule vertex = shader(info, ShaderType.VERTEX);
             SpvModule fragment = shader(info, ShaderType.FRAGMENT);
             if (vertex == null || fragment == null) {
                 throw new ShaderCompileException("Render pipeline must contain vertex and fragment SPIR-V modules");
             }
+
+            // RenderPearl owns and may reuse/cache SpvModule instances. Descriptor
+            // rebinding is a Metal backend concern, so never patch those shared
+            // buffers in place. Work on private native copies instead.
+            vertexSpirv = mutableSpirvCopy(vertex.spv());
+            fragmentSpirv = mutableSpirvCopy(fragment.spv());
+
             int firstStorageBinding = info.uniforms().size();
             List<RasterStorageResource> storageResources = rebindRasterStorageResources(
-                    vertex, fragment, firstStorageBinding
+                    vertexSpirv, fragmentSpirv, firstStorageBinding
             );
             int pushConstantBinding = firstStorageBinding + storageResources.size();
+            float sampleLodBias = MetalFxManager.shaderSampleLodBias();
+            RenderPipeline syntheticPipeline = syntheticPipeline(info);
+
+            MetalMslDiskCache diskCache = MetalMslDiskCache.instance();
+            String cacheKey = diskCache == null ? null : renderPearlCacheKey(
+                    info, vertexSpirv, fragmentSpirv, storageResources, sampleLodBias
+            );
+            if (diskCache != null && cacheKey != null) {
+                MetalMslDiskCache.Entry cached = diskCache.load(cacheKey);
+                if (cached != null) {
+                    MetalMslDiskCache.recordHit();
+                    return new MetalCompiledRenderPipeline(
+                            device,
+                            syntheticPipeline,
+                            cached.vertexMsl(),
+                            cached.fragmentMsl(),
+                            cached.vertexEntryPoint(),
+                            cached.fragmentEntryPoint(),
+                            cached.resources(),
+                            cached.genericVertexInputs()
+                    );
+                }
+            }
+
+            long translateStart = System.nanoTime();
             MslShader vertexMsl = spirvToMsl(
-                    vertex.spv(), pushConstantBinding,
+                    vertexSpirv, pushConstantBinding,
                     vertexAttributeFormats(vertex, info.attribBindings()), Map.of()
             );
             MslShader fragmentMsl = spirvToMsl(
-                    fragment.spv(), pushConstantBinding, Map.of(), Map.of()
+                    fragmentSpirv, pushConstantBinding, Map.of(), Map.of()
             );
-            String vertexSource = applySampleLodBias(vertexMsl.source(), MetalFxManager.shaderSampleLodBias());
-            String fragmentSource = applySampleLodBias(fragmentMsl.source(), MetalFxManager.shaderSampleLodBias());
+            String vertexSource = applySampleLodBias(vertexMsl.source(), sampleLodBias);
+            String fragmentSource = applySampleLodBias(fragmentMsl.source(), sampleLodBias);
             validateFragmentOutputSignature(info.colorTargetStates(), fragmentMsl.stageOutputLocations());
             List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(
                     info.uniforms(), storageResources, vertexMsl, fragmentMsl
             );
             List<GenericVertexInput> genericInputs = genericVertexInputs(vertex.reflect(), info.attribBindings());
+            String vertexEntryPoint = extractEntryPoint(vertexSource, VERTEX_ENTRY_PATTERN, "main0");
+            String fragmentEntryPoint = extractEntryPoint(fragmentSource, FRAGMENT_ENTRY_PATTERN, "main0");
+
+            if (diskCache != null && cacheKey != null) {
+                MetalMslDiskCache.recordMiss(System.nanoTime() - translateStart);
+                diskCache.store(cacheKey, new MetalMslDiskCache.Entry(
+                        vertexSource,
+                        fragmentSource,
+                        vertexEntryPoint,
+                        fragmentEntryPoint,
+                        resources,
+                        genericInputs
+                ));
+            }
+
             return new MetalCompiledRenderPipeline(
                     device,
-                    syntheticPipeline(info),
+                    syntheticPipeline,
                     vertexSource,
                     fragmentSource,
-                    extractEntryPoint(vertexSource, VERTEX_ENTRY_PATTERN, "main0"),
-                    extractEntryPoint(fragmentSource, FRAGMENT_ENTRY_PATTERN, "main0"),
+                    vertexEntryPoint,
+                    fragmentEntryPoint,
                     resources,
                     genericInputs
             );
         } catch (ShaderCompileException exception) {
             throw new IllegalStateException("Failed to translate RenderPearl pipeline " + info.name(), exception);
+        } finally {
+            if (vertexSpirv != null) MemoryUtil.memFree(vertexSpirv);
+            if (fragmentSpirv != null) MemoryUtil.memFree(fragmentSpirv);
         }
     }
 
@@ -119,6 +175,82 @@ final class MetalCrossShaderCompiler {
             if (shader.module().type() == type) return shader.module();
         }
         return null;
+    }
+
+    /**
+     * Returns a mutable native copy without changing the source position,
+     * limit, byte order, or contents. Package-private for the ownership test.
+     */
+    static ByteBuffer mutableSpirvCopy(final ByteBuffer source) {
+        ByteBuffer view = source.duplicate();
+        ByteBuffer copy = MemoryUtil.memAlloc(view.remaining()).order(source.order());
+        copy.put(view);
+        copy.flip();
+        return copy;
+    }
+
+    private static String renderPearlCacheKey(
+            final BackendRenderPipeline.CreateInfo info,
+            final ByteBuffer vertexSpirv,
+            final ByteBuffer fragmentSpirv,
+            final List<RasterStorageResource> storageResources,
+            final float sampleLodBias
+    ) {
+        StringBuilder layout = new StringBuilder();
+        layout.append("uniforms:");
+        for (BindGroupLayout.UniformDescription uniform : info.uniforms()) {
+            layout.append(uniform.name()).append('/')
+                    .append(uniform.type()).append('/')
+                    .append(uniform.gpuFormat()).append(';');
+        }
+        layout.append("|storage:");
+        for (RasterStorageResource storage : storageResources) {
+            layout.append(storage.kind()).append('/')
+                    .append(storage.descriptorName()).append('/')
+                    .append(storage.physicalBinding()).append('/')
+                    .append(storage.stageMask()).append(';');
+        }
+        layout.append("|vertexBuffers:");
+        for (BackendRenderPipeline.CreateInfo.VertexBuffer buffer : info.vertexBuffers()) {
+            layout.append(buffer.bufferSlot()).append('/')
+                    .append(buffer.stride()).append('/')
+                    .append(buffer.stepRate()).append(';');
+        }
+        layout.append("|attribs:");
+        for (BackendRenderPipeline.CreateInfo.AttribBinding attribute : info.attribBindings()) {
+            layout.append(attribute.location()).append('/')
+                    .append(attribute.bufferSlot()).append('/')
+                    .append(attribute.offset()).append('/')
+                    .append(attribute.format()).append(';');
+        }
+        layout.append("|targets:");
+        List<@Nullable ColorTargetState> targets = info.colorTargetStates();
+        for (int index = 0; index < targets.size(); index++) {
+            ColorTargetState target = targets.get(index);
+            layout.append(index).append('=')
+                    .append(target == null ? "unused" : target.format().toString()).append(';');
+        }
+        layout.append("|pushConstants=").append(info.pushConstantsSize());
+
+        return MetalMslDiskCache.key(
+                "vertex-spv=" + spirvDigest(vertexSpirv),
+                "fragment-spv=" + spirvDigest(fragmentSpirv),
+                layout.toString(),
+                "sample-lod-bias=" + Integer.toHexString(Float.floatToIntBits(sampleLodBias)),
+                "lwjgl-spvc=" + Version.getVersion(),
+                "msl-version=" + Integer.toHexString(MSL_VERSION_4_0),
+                MetalMslDiskCache.CACHE_SALT
+        );
+    }
+
+    private static String spirvDigest(final ByteBuffer bytes) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(bytes.duplicate());
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 unavailable", exception);
+        }
     }
 
     private static RenderPipeline syntheticPipeline(final BackendRenderPipeline.CreateInfo info) {
@@ -294,11 +426,11 @@ final class MetalCrossShaderCompiler {
     }
 
     private static List<RasterStorageResource> rebindRasterStorageResources(
-            final SpvModule vertex, final SpvModule fragment, final int firstPhysicalBinding
+            final ByteBuffer vertexSpirv, final ByteBuffer fragmentSpirv, final int firstPhysicalBinding
     ) throws ShaderCompileException {
         List<RasterStorageUse> uses = new ArrayList<>();
-        collectRasterStorageUses(vertex.spv(), MetalCompiledRenderPipeline.STAGE_VERTEX, uses);
-        collectRasterStorageUses(fragment.spv(), MetalCompiledRenderPipeline.STAGE_FRAGMENT, uses);
+        collectRasterStorageUses(vertexSpirv, MetalCompiledRenderPipeline.STAGE_VERTEX, uses);
+        collectRasterStorageUses(fragmentSpirv, MetalCompiledRenderPipeline.STAGE_FRAGMENT, uses);
         Map<String, Integer> physicalByDescriptor = new LinkedHashMap<>();
         Map<String, Integer> stagesByDescriptor = new LinkedHashMap<>();
         Map<String, RasterStorageKind> kindsByDescriptor = new LinkedHashMap<>();

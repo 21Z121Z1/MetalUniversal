@@ -22,11 +22,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Disk cache for the GLSL→SPIR-V→MSL translation result of one render
+ * Disk cache for the RenderPearl SPIR-V→MSL translation result of one render
  * pipeline: the translated stages, entry points, resource bindings, and
  * generic-current vertex inputs consumed by
- * {@link MetalCompiledRenderPipeline}'s constructor. A hit skips shaderc and
- * SPIRV-Cross entirely; {@code makeLibrary} still runs (Metal's own shader
+ * {@link MetalCompiledRenderPipeline}'s constructor. A hit skips SPIRV-Cross;
+ * {@code makeLibrary} still runs (Metal's own shader
  * cache absorbs that) and PSO-level caching is the binary archive's job.
  *
  * <p>One JSON file per key under {@code <gameDir>/metallum-cache/msl/}
@@ -44,7 +44,7 @@ final class MetalMslDiskCache {
      * native), {@code applySampleLodBias} rewriting, entry-point
      * extraction, or binding assignment in {@code addToBindGroup}.
      */
-    static final String CACHE_SALT = "metallum-msl-v5-raster-storage-resources";
+    static final String CACHE_SALT = "metallum-msl-v6-renderpearl-spv-owned-copy";
 
     private static final boolean ENABLED =
             Boolean.parseBoolean(System.getProperty("metallum.opt.mslCache", "true"));

@@ -155,6 +155,21 @@ jobs:
           ./gradlew --no-daemon compileJava compileTestJava -x buildIOSNative 2>&1 \
             | tee build/agent-evidence/compile-26.3.log
 
+      - name: Verify vanilla 26.3 without Sodium or Iris
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/agent-evidence
+          ./gradlew --no-daemon -Pmetallum.noOptionalMods=true dependencies --configuration runtimeClasspath \
+            | tee build/agent-evidence/runtime-no-optional-mods.txt
+          if grep -Eq 'maven\.modrinth:(sodium|iris)' build/agent-evidence/runtime-no-optional-mods.txt; then
+            echo "Optional render mods leaked into the vanilla runtime classpath" >&2
+            exit 1
+          fi
+          ./gradlew --no-daemon -Pmetallum.noOptionalMods=true \
+            compileJava compileTestJava test -x buildIOSNative --console=plain \
+            | tee build/agent-evidence/test-no-optional-mods.log
+
       - name: Diff hygiene
         if: always()
         run: git diff --check HEAD^ HEAD
@@ -168,6 +183,8 @@ jobs:
             build/agent-evidence/minecraft-26.3-source-sha.txt
             build/agent-evidence/minecraft-26.3-api-probe.txt
             build/agent-evidence/compile-26.3.log
+            build/agent-evidence/runtime-no-optional-mods.txt
+            build/agent-evidence/test-no-optional-mods.log
             build/agent-evidence/context.txt
             build.gradle
             gradle.properties
@@ -207,7 +224,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew --no-daemon compileJava compileTestJava -x buildIOSNative 2>&1 \
+          ./gradlew --no-daemon compileJava compileTestJava test -x buildIOSNative --console=plain 2>&1 \
             | tee build/agent-evidence/compile-26.2.log
 
       - name: Preserve 26.2 support evidence

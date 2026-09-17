@@ -14,18 +14,24 @@ repositories {
 	maven { url "https://api.modrinth.com/maven" }
 }
 
+// Sodium and Iris are integration adapters on Minecraft 26.3, not prerequisites
+// for the canonical RenderPearl/Metal backend. They remain on the compile
+// classpath because optional adapter sources reference their APIs, and are on
+// the default dev runtime so the existing integration profiles keep working.
+// -Pmetallum.noOptionalMods=true removes both from runtime for the vanilla gate.
+def noOptionalRenderMods =
+		(findProperty("metallum.noOptionalMods") ?: "false").toString().toBoolean()
+
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
-	implementation "maven.modrinth:sodium:${project.sodium_version}"
-	// Iris ships as an unobfuscated MC 26.2 mod (no refmap); a plain
-	// implementation dependency puts it on the dev classpath where the
-	// Fabric loader discovers and loads it as a mod. The metallum iris.*
-	// compat mixins (gated on the mod being present) keep it dormant on
-	// the Metal backend. The incomplete semantic layer is explicit opt-in via
-	// -Dmetallum.iris.semantic=true until its runtime acceptance gates pass.
-	implementation "maven.modrinth:iris:${project.iris_version}"
+	compileOnly "maven.modrinth:sodium:${project.sodium_version}"
+	compileOnly "maven.modrinth:iris:${project.iris_version}"
+	if (!noOptionalRenderMods) {
+		runtimeOnly "maven.modrinth:sodium:${project.sodium_version}"
+		runtimeOnly "maven.modrinth:iris:${project.iris_version}"
+	}
 	testImplementation "org.junit.jupiter:junit-jupiter:5.12.2"
 	testImplementation "com.networknt:json-schema-validator:1.5.6"
 	testRuntimeOnly "org.junit.platform:junit-platform-launcher:1.12.2"
@@ -45,6 +51,12 @@ configurations {
 	validationImplementation.extendsFrom(implementation)
 	validationCompileOnly.extendsFrom(compileOnly)
 	validationRuntimeOnly.extendsFrom(runtimeOnly)
+}
+
+tasks.withType(Test).configureEach {
+	if (noOptionalRenderMods) {
+		systemProperty "metallum.test.noOptionalMods", "true"
+	}
 }
 
 java {
