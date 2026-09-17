@@ -131,7 +131,7 @@ final class IrisMetalExternalLevelSamplerTest {
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice));
         return new MetalDevice(
-                (identifier, type) -> null,
+                MetalShaderSourceAdapters.empty(),
                 new GpuDebugOptions(2, true, true, true),
                 nativeDevice,
                 MemorySegment.NULL,

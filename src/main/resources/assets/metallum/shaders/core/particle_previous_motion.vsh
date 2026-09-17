@@ -1,7 +1,7 @@
 #version 330
 
-#moj_import <minecraft:dynamictransforms.glsl>
-#moj_import <minecraft:projection.glsl>
+#include <minecraft:dynamictransforms.glsl>
+#include <minecraft:projection.glsl>
 
 // Minecraft 26.2 DefaultVertexFormat.PARTICLE is Position, UV0, Color, UV2. Binding 1 therefore
 // starts PreviousPosition at location 4. The current staged Position is already camera-relative.
@@ -15,10 +15,10 @@ layout(std140) uniform MetallumMotion {
     mat4 PreviousFromRaster;
 };
 
-noperspective out vec2 metallumObjectMotion;
-flat out float metallumObjectValidity;
-out vec2 metallumTexCoord;
-flat out float metallumVertexAlpha;
+layout(location = 0) noperspective out vec2 metallumObjectMotion;
+layout(location = 1) flat out float metallumObjectValidity;
+layout(location = 2) out vec2 metallumTexCoord;
+layout(location = 3) flat out float metallumVertexAlpha;
 
 void main() {
     vec4 rasterClip = ProjMat * ModelViewMat * vec4(Position, 1.0);

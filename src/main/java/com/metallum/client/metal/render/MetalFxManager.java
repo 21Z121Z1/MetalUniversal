@@ -55,6 +55,15 @@ import java.util.UUID;
 /** Owns the per-device MetalFX resources and the frame-level history contract. */
 @Environment(EnvType.CLIENT)
 public final class MetalFxManager {
+    // The reactive CUTOUT shader writes an additional MRT coverage target.
+    // Minecraft 26.3's shared main world pass still exposes only its ordinary
+    // scene-color attachment, so enabling this before the descriptor bridge is
+    // complete would make RenderPearl reject the pipeline at draw time. Keep
+    // the unfinished path explicitly opt-in and preserve the native CUTOUT
+    // render contract by default.
+    private static final boolean CUTOUT_REACTIVE_TERRAIN_OPT_IN =
+            "true".equalsIgnoreCase(System.getProperty(
+                    "metallum.metalfx.cutoutReactiveTerrain", "false"));
     public static final int USAGE_SHADER_WRITE = 1 << 5;
     private static final double SCENE_CUT_DISTANCE = 32.0;
     private static final float FOV_SCENE_CUT_DEGREES = 5.0F;
@@ -416,8 +425,8 @@ public final class MetalFxManager {
                 this.config.mergeDepthDilation ? 1.0F : 0.0F
         );
         this.motionPipelineV2Available = MetalNativeBridge.metallum_metalfx_supports_motion_v2(device.metalDeviceHandle());
-        this.cutoutReactivePipelineAvailable =
-                MetalNativeBridge.metallum_metalfx_supports_cutout_reactive(device.metalDeviceHandle());
+        this.cutoutReactivePipelineAvailable = CUTOUT_REACTIVE_TERRAIN_OPT_IN
+                && MetalNativeBridge.metallum_metalfx_supports_cutout_reactive(device.metalDeviceHandle());
         this.handOverlayPipelineAvailable =
                 MetalNativeBridge.metallum_metalfx_supports_hand_overlay(device.metalDeviceHandle());
         this.effectiveMode = chooseMode(device, this.config);
@@ -1307,7 +1316,8 @@ public final class MetalFxManager {
                 effectiveLimit,
                 minecraft.getFramerateLimitTracker().getThrottleReason(),
                 minecraft.options.enableVsync().get(),
-                minecraft.getWindow().getRefreshRate(),
+                minecraft.getWindow().getActiveVideoMode() == null
+                        ? 60.0F : minecraft.getWindow().getActiveVideoMode().getRefreshRate(),
                 minecraft.level != null,
                 effectiveMode,
                 config.scale,
@@ -1794,7 +1804,7 @@ public final class MetalFxManager {
             return;
         }
 
-        CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
+        MetalCommandEncoder encoder = this.device.commandEncoder();
         Matrix4f currentUnjitteredFromRaster =
                 new Matrix4f(currentViewProjection).mul(inverseCurrentViewProjection);
         if (!MetalFxMath.isFinite(currentUnjitteredFromRaster)) {
@@ -1887,8 +1897,8 @@ public final class MetalFxManager {
         // world pass (even with no draws) so object motion/validity are deterministically
         // cleared for this source frame, then append first-person exact motion into the
         // shared RG16F motion field while writing a dedicated R8 validity plane.
-        RenderPassDescriptor worldDescriptor = RenderPassDescriptor
-                .create(() -> "Metallum batched world object motion");
+        RenderPassDescriptor.Builder worldDescriptor = RenderPassDescriptor
+                .builder(() -> "Metallum batched world object motion");
         if (objectMotionInputsCleared) {
             worldDescriptor = worldDescriptor
                     .withColorAttachment(objectMotionView)
@@ -1901,26 +1911,27 @@ public final class MetalFxManager {
         worldDescriptor = worldDescriptor
                 .withDepthAttachment(depthView)
                 .withRenderArea(new RenderPass.RenderArea(0, 0, renderWidth, renderHeight));
-        try (RenderPass pass = encoder.createRenderPass(worldDescriptor)) {
+        try (MetalRenderPass pass = encoder.createRenderPass(worldDescriptor.build())) {
             encodePreparedMotionReplays(pass, worldReplays);
         }
         objectMotionInputsCleared = true;
 
         if (!firstPersonReplays.isEmpty()) {
             RenderPassDescriptor handDescriptor = RenderPassDescriptor
-                    .create(() -> "Metallum batched first-person exact motion")
+                    .builder(() -> "Metallum batched first-person exact motion")
                     .withColorAttachment(objectMotionView)
                     .withColorAttachment(handExactValidityView)
                     .withDepthAttachment(depthView)
-                    .withRenderArea(new RenderPass.RenderArea(0, 0, renderWidth, renderHeight));
-            try (RenderPass pass = encoder.createRenderPass(handDescriptor)) {
+                    .withRenderArea(new RenderPass.RenderArea(0, 0, renderWidth, renderHeight))
+                    .build();
+            try (MetalRenderPass pass = encoder.createRenderPass(handDescriptor)) {
                 encodePreparedMotionReplays(pass, firstPersonReplays);
             }
         }
     }
 
     private void encodePreparedMotionReplays(
-            final RenderPass pass,
+            final MetalRenderPass pass,
             final List<PreparedObjectMotionReplay> replays
     ) {
         for (PreparedObjectMotionReplay replay : replays) {
@@ -2110,10 +2121,12 @@ public final class MetalFxManager {
         // Menus and loading screens can render a GUI frame without a world
         // scene. They still need the native-resolution UI target; otherwise
         // Minecraft's window-sized scissor rectangles are submitted to the
-        // low-resolution scene target and fail validation (or crash).
+        // low-resolution scene target and fail validation (or crash). The UI
+        // target is intentionally color-only, so never submit a depth clear
+        // for it through RenderPearl.
         if (!sceneFrame) {
-            RenderSystem.getDevice().createCommandEncoder().clearColorAndDepthTextures(
-                    uiTarget.getColorTexture(), UI_CLEAR, uiTarget.getDepthTexture(), 0.0
+            RenderSystem.getDevice().createCommandEncoder().clearColorTexture(
+                    uiTarget.getColorTexture(), UI_CLEAR
             );
             this.frameResetForPresent = true;
             this.frameUsesUpscaledTarget = true;
@@ -2309,8 +2322,8 @@ public final class MetalFxManager {
                 );
             }
             if (!encoded) {
-                RenderSystem.getDevice().createCommandEncoder().clearColorAndDepthTextures(
-                        uiTarget.getColorTexture(), UI_CLEAR, uiTarget.getDepthTexture(), 0.0
+                RenderSystem.getDevice().createCommandEncoder().clearColorTexture(
+                        uiTarget.getColorTexture(), UI_CLEAR
                 );
                 disableForSession(renderer, "MetalFX encode and fullscreen copy fallback both failed");
                 return;
@@ -2344,8 +2357,8 @@ public final class MetalFxManager {
             // overlay onto both the generated and real scene. Keeping the scene
             // out of this texture lets interpolation run at its bounded work
             // resolution without alternating GUI sharpness.
-            RenderSystem.getDevice().createCommandEncoder().clearColorAndDepthTextures(
-                    uiTarget.getColorTexture(), UI_CLEAR, uiTarget.getDepthTexture(), 0.0
+            RenderSystem.getDevice().createCommandEncoder().clearColorTexture(
+                    uiTarget.getColorTexture(), UI_CLEAR
             );
         } else {
             if (nativeSceneEncoded) {
@@ -2361,7 +2374,9 @@ public final class MetalFxManager {
                     return;
                 }
             }
-            RenderSystem.getDevice().createCommandEncoder().clearDepthTexture(uiTarget.getDepthTexture(), 0.0);
+            // The UI target has no depth attachment. Its color texture already
+            // contains the copied native scene (when required), so there is no
+            // corresponding depth clear to issue here.
         }
         this.frameUsesUpscaledTarget = true;
         if (historyTransactionEncoded) {
@@ -3991,11 +4006,19 @@ public final class MetalFxManager {
             return;
         }
 
-        ResourceHandle<RenderTarget> translucent = targets.translucent;
-        ResourceHandle<RenderTarget> itemEntity = targets.itemEntity;
-        ResourceHandle<RenderTarget> particles = targets.particles;
-        ResourceHandle<RenderTarget> weather = targets.weather;
-        ResourceHandle<RenderTarget> clouds = targets.clouds;
+        // Minecraft 26.3 folds the former per-producer transparency targets
+        // into its OIT bundle. The accumulation target is the only canonical
+        // color evidence available at this boundary; keep the other semantic
+        // inputs absent instead of pretending that an OIT buffer is an entity,
+        // particle, weather or cloud target.
+        // A FrameGraph handle is virtual while the graph is being assembled.
+        // Do not call get() here: 26.3 resolves the resource only when this
+        // pass executes after the OIT accumulation pass.
+        ResourceHandle<RenderTarget> translucent = targets.accumulate;
+        ResourceHandle<RenderTarget> itemEntity = null;
+        ResourceHandle<RenderTarget> particles = null;
+        ResourceHandle<RenderTarget> weather = null;
+        ResourceHandle<RenderTarget> clouds = null;
         // The pass is created below so all optional handles can be registered
         // before its callback is installed.
         var pass = frame.addPass("metallum_reactive_mask_layers");
@@ -4041,7 +4064,12 @@ public final class MetalFxManager {
         if (handle == null) {
             return null;
         }
-        GpuTexture color = handle.get().getColorTexture();
+        final GpuTexture color;
+        try {
+            color = handle.get().getColorTexture();
+        } catch (IllegalStateException invalidHandle) {
+            return null;
+        }
         return color instanceof MetalGpuTexture value ? value : null;
     }
 
@@ -4120,7 +4148,7 @@ public final class MetalFxManager {
                 // writes its full-resolution output directly into the UI target.
                 device.withExtraTextureUsage(MetalGpuTexture.USAGE_SHADER_WRITE, () ->
                         uiTarget = new TextureTarget(
-                                "MetalFX Native Resolution UI", width, height, true, GpuFormat.RGBA8_UNORM
+                                "MetalFX Native Resolution UI", width, height, GpuFormat.RGBA8_UNORM, null
                         )
                 );
             } else {
@@ -4128,7 +4156,7 @@ public final class MetalFxManager {
                 // rendered and sampled. Omitting ShaderWrite preserves Apple
                 // GPU lossless compression for the native-resolution overlay.
                 uiTarget = new TextureTarget(
-                        "MetalFX Native Resolution UI", width, height, true, GpuFormat.RGBA8_UNORM
+                        "MetalFX Native Resolution UI", width, height, GpuFormat.RGBA8_UNORM, null
                 );
             }
             uiTargetShaderWrite = targetUiShaderWrite;
@@ -4141,7 +4169,7 @@ public final class MetalFxManager {
                 if (nativeSceneTarget != null) nativeSceneTarget.destroyBuffers();
                 device.withExtraTextureUsage(MetalGpuTexture.USAGE_SHADER_WRITE, () ->
                         nativeSceneTarget = new TextureTarget(
-                                "MetalFX Native Scene", width, height, false, GpuFormat.RGBA8_UNORM
+                                "MetalFX Native Scene", width, height, GpuFormat.RGBA8_UNORM, null
                         )
                 );
                 dimensionsChanged = true;
@@ -4160,8 +4188,8 @@ public final class MetalFxManager {
                         "MetalFX FrameGen Scene",
                         targetFrameGenerationOutputWidth,
                         targetFrameGenerationOutputHeight,
-                        false,
-                        GpuFormat.RGBA8_UNORM
+                        GpuFormat.RGBA8_UNORM,
+                        null
                 );
                 dimensionsChanged = true;
             }

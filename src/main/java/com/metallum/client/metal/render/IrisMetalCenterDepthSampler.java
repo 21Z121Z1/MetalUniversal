@@ -8,6 +8,7 @@ import com.mojang.renderpearl.api.pipeline.ColorTargetState;
 import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
+import com.mojang.renderpearl.api.pipeline.ShaderSource.CachedIncludeSource;
 import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.pipeline.UniformType;
 import com.mojang.renderpearl.api.commands.RenderPass;
@@ -19,6 +20,7 @@ import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.resources.Identifier;
+import org.jspecify.annotations.Nullable;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -101,19 +103,31 @@ final class IrisMetalCenterDepthSampler implements AutoCloseable {
         String base = "iris/gen" + generation + "/center_depth";
         Identifier vertexId = Identifier.fromNamespaceAndPath("metallum", base + "_v");
         Identifier fragmentId = Identifier.fromNamespaceAndPath("metallum", base + "_f");
-        ShaderSource source = (identifier, type) -> {
-            if (identifier.equals(vertexId) && type == ShaderType.VERTEX) {
-                return VERTEX_SOURCE;
+        ShaderSource source = new ShaderSource() {
+            @Override
+            public @Nullable String getShader(final Identifier identifier, final ShaderType type) {
+                if (identifier.equals(vertexId) && type == ShaderType.VERTEX) {
+                    return VERTEX_SOURCE;
+                }
+                if (identifier.equals(fragmentId) && type == ShaderType.FRAGMENT) {
+                    return FRAGMENT_SOURCE;
+                }
+                return fallback.getShader(identifier, type);
             }
-            if (identifier.equals(fragmentId) && type == ShaderType.FRAGMENT) {
-                return FRAGMENT_SOURCE;
+
+            @Override
+            public @Nullable CachedIncludeSource getInclude(final Identifier identifier) {
+                return fallback.getInclude(identifier);
             }
-            return fallback.get(identifier, type);
+
+            @Override
+            public void close() {
+            }
         };
         BindGroupLayout resources = BindGroupLayout.builder()
                 .withUniform("CenterDepthParameters", UniformType.UNIFORM_BUFFER)
-                .withSampler("depth")
-                .withSampler("altDepth")
+                .withUniform("depth", UniformType.COMBINED_IMAGE_SAMPLER)
+                .withUniform("altDepth", UniformType.COMBINED_IMAGE_SAMPLER)
                 .build();
         this.pipeline = RenderPipeline.builder()
                 .withLocation(Identifier.fromNamespaceAndPath("metallum", base))
@@ -127,7 +141,9 @@ final class IrisMetalCenterDepthSampler implements AutoCloseable {
                 ))
                 .build();
         CompiledRenderPipeline compiled = device.precompilePipeline(this.pipeline, source);
-        if (!device.asyncPrewarmEnabled() && !compiled.isValid()) {
+        if (!device.asyncPrewarmEnabled()
+                && compiled instanceof MetalCompiledRenderPipeline metal
+                && !metal.isValid()) {
             throw new IllegalStateException("Metal center-depth render pipeline is invalid");
         }
 
@@ -200,9 +216,10 @@ final class IrisMetalCenterDepthSampler implements AutoCloseable {
         MetalCommandEncoder encoder = this.device.commandEncoder();
         encoder.writeToBuffer(this.parameters.slice(), this.parameterStaging);
         RenderPassDescriptor descriptor = RenderPassDescriptor
-                .create(() -> "Iris centerDepthSmooth sampler")
+                .builder(() -> "Iris centerDepthSmooth sampler")
                 .withColorAttachment(this.currentView, Optional.empty())
-                .withRenderArea(new RenderPass.RenderArea(0, 0, 1, 1));
+                .withRenderArea(new RenderPass.RenderArea(0, 0, 1, 1))
+                .build();
         MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
         try {
             pass.setPipeline(this.pipeline);

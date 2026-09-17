@@ -3,11 +3,9 @@ package com.metallum.client.metal.render;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
-import com.mojang.renderpearl.api.pipeline.ShaderType;
-import com.mojang.blaze3d.vertex.DefaultVertexFormat;
-import com.mojang.blaze3d.vulkan.glsl.GlslCompiler;
-import com.mojang.blaze3d.vulkan.glsl.IntermediaryShaderModule;
-import com.mojang.blaze3d.vulkan.glsl.SpvVariable;
+import com.mojang.renderpearl.api.vertex.VertexFormat;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
+import com.mojang.renderpearl.backend.api.SpvModule;
 import net.irisshaders.iris.vertices.IrisVertexFormats;
 import net.minecraft.resources.Identifier;
 import org.junit.jupiter.api.Test;
@@ -15,14 +13,15 @@ import org.junit.jupiter.api.Test;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/** RenderPearl 26.3 SPIR-V reflection and Metal generic-input contracts. */
 final class MetalVertexInputLayoutTest {
     @Test
-    void irisAliasesKeepEntityAttributesInPhysicalOrderAndFormat() {
+    void declaredVertexFormatNamesRemainThePhysicalAttributeMap() {
         RenderPipeline pipeline = RenderPipeline.builder()
                 .withLocation(Identifier.fromNamespaceAndPath("metallum", "iris_entity_vertex_layout_test"))
                 .withVertexShader(Identifier.fromNamespaceAndPath("metallum", "iris_entity_vertex_layout_test"))
@@ -31,95 +30,35 @@ final class MetalVertexInputLayoutTest {
                 .withVertexBinding(0, IrisVertexFormats.ENTITY)
                 .build();
 
-        List<SpvVariable> reflectedInputs = List.of(
-                new SpvVariable("iris_Entity", 0),
-                new SpvVariable("iris_UV1", 0),
-                new SpvVariable("iris_Color", 0),
-                new SpvVariable("iris_UV0", 0),
-                new SpvVariable("iris_UV2", 0),
-                new SpvVariable("iris_Position", 0),
-                new SpvVariable("iris_Normal", 0),
-                new SpvVariable("mc_midTexCoord", 0),
-                new SpvVariable("at_tangent", 0)
-        );
+        Map<String, GpuFormat> formats = MetalCrossShaderCompiler.vertexAttributeFormats(pipeline);
+        assertEquals(GpuFormat.RGB32_FLOAT, formats.get("Position"));
+        assertEquals(GpuFormat.RG16_SINT, formats.get("UV1"));
+        assertEquals(GpuFormat.RGBA8_SNORM, formats.get("Normal"));
+        assertEquals(9, formats.size());
+    }
 
-        MetalCrossShaderCompiler.VertexInputLayout layout =
-                MetalCrossShaderCompiler.vertexInputLayout(pipeline, reflectedInputs);
+    @Test
+    void unboundSpirvInputsBecomeSortedGenericMetalInputs() throws Exception {
+        SpvModule.Reflection reflection = reflection(
+                input("Position", 0, 13, 3),
+                input("iris_Entity", 5, 7, 3),
+                input("mc_midTexCoord", 2, 8, 2)
+        );
+        List<BackendRenderPipeline.CreateInfo.AttribBinding> physical = List.of(
+                new BackendRenderPipeline.CreateInfo.AttribBinding(0, 0, 0, GpuFormat.RGB32_FLOAT)
+        );
 
         assertEquals(
                 List.of(
-                        "iris_Position", "iris_Color", "iris_UV0", "iris_UV1", "iris_UV2",
-                        "iris_Normal", "iris_Entity", "mc_midTexCoord", "at_tangent"
+                        new MetalCrossShaderCompiler.GenericVertexInput(
+                                2, MetalCrossShaderCompiler.BaseType.UINT, 2
+                        ),
+                        new MetalCrossShaderCompiler.GenericVertexInput(
+                                5, MetalCrossShaderCompiler.BaseType.INT, 3
+                        )
                 ),
-                layout.names()
+                MetalCrossShaderCompiler.genericVertexInputs(reflection, physical)
         );
-        assertEquals(GpuFormat.RGB32_FLOAT, layout.formats().get("iris_Position"));
-        assertEquals(GpuFormat.RG16_SINT, layout.formats().get("iris_UV1"));
-        assertEquals(GpuFormat.RGBA16_UINT, layout.formats().get("iris_Entity"));
-        assertEquals(GpuFormat.RG32_FLOAT, layout.formats().get("mc_midTexCoord"));
-        assertEquals(GpuFormat.RGBA8_SNORM, layout.formats().get("at_tangent"));
-    }
-
-    @Test
-    void missingIrisEntityUsesReboundInt3GenericInput() throws Exception {
-        RenderPipeline pipeline = pipeline("missing_iris_entity", DefaultVertexFormat.POSITION_TEX);
-        String source = """
-                #version 450
-                layout(location = 0) in vec3 Position;
-                layout(location = 1) in ivec3 iris_Entity;
-                void main() {
-                    float keepActive = float(iris_Entity.x + iris_Entity.y + iris_Entity.z);
-                    gl_Position = vec4(Position + vec3(keepActive * 0.000001), 1.0);
-                }
-                """;
-
-        try (GlslCompiler compiler = new GlslCompiler();
-             IntermediaryShaderModule module = compiler.createIntermediary(
-                     "missing_iris_entity", source, ShaderType.VERTEX
-             )) {
-            MetalCrossShaderCompiler.VertexInputLayout physical =
-                    MetalCrossShaderCompiler.vertexInputLayout(pipeline, module.inputs());
-            module.rebind(
-                    MetalCrossShaderCompiler.tolerateUnprovidedInputs(physical.names(), module.inputs()),
-                    List.of()
-            );
-            MetalCrossShaderCompiler.applyVertexInputLocations(module, physical);
-
-            assertEquals(
-                    List.of(new MetalCrossShaderCompiler.GenericVertexInput(
-                            2, MetalCrossShaderCompiler.BaseType.INT, 3
-                    )),
-                    MetalCrossShaderCompiler.genericVertexInputs(module.spirv(), physical.names())
-            );
-        }
-    }
-
-    @Test
-    void physicallyBackedIrisEntityIsNeverGeneric() throws Exception {
-        RenderPipeline pipeline = pipeline("backed_iris_entity", IrisVertexFormats.ENTITY);
-        String source = """
-                #version 450
-                layout(location = 0) in vec3 iris_Position;
-                layout(location = 1) in ivec3 iris_Entity;
-                void main() {
-                    gl_Position = vec4(iris_Position + vec3(iris_Entity) * 0.000001, 1.0);
-                }
-                """;
-
-        try (GlslCompiler compiler = new GlslCompiler();
-             IntermediaryShaderModule module = compiler.createIntermediary(
-                     "backed_iris_entity", source, ShaderType.VERTEX
-             )) {
-            MetalCrossShaderCompiler.VertexInputLayout physical =
-                    MetalCrossShaderCompiler.vertexInputLayout(pipeline, module.inputs());
-            module.rebind(
-                    MetalCrossShaderCompiler.tolerateUnprovidedInputs(physical.names(), module.inputs()),
-                    List.of()
-            );
-            MetalCrossShaderCompiler.applyVertexInputLocations(module, physical);
-
-            assertTrue(MetalCrossShaderCompiler.genericVertexInputs(module.spirv(), physical.names()).isEmpty());
-        }
     }
 
     @Test
@@ -189,7 +128,7 @@ final class MetalVertexInputLayoutTest {
         );
     }
 
-    private static RenderPipeline pipeline(final String name, final com.mojang.renderpearl.api.vertex.VertexFormat format) {
+    private static RenderPipeline pipeline(final String name, final VertexFormat format) {
         Identifier shader = Identifier.fromNamespaceAndPath("metallum", name);
         return RenderPipeline.builder()
                 .withLocation(shader)
@@ -198,5 +137,84 @@ final class MetalVertexInputLayoutTest {
                 .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
                 .withVertexBinding(0, format)
                 .build();
+    }
+
+    private static SpvModule.Reflection reflection(final SpvModule.Reflection.InterfaceVariable... inputs) {
+        return new SpvModule.Reflection() {
+            @Override
+            public List<SpvModule.Reflection.InterfaceVariable> inputs() {
+                return List.of(inputs);
+            }
+
+            @Override
+            public List<SpvModule.Reflection.InterfaceVariable> outputs() {
+                return List.of();
+            }
+
+            @Override
+            public List<SpvModule.Reflection.Descriptor> descriptors(final int resourceType) {
+                return List.of();
+            }
+
+            @Override
+            public List<SpvModule.Reflection.Descriptor> descriptors() {
+                return List.of();
+            }
+
+            @Override
+            public List<SpvModule.Reflection.PushConstant> pushConstants() {
+                return List.of();
+            }
+        };
+    }
+
+    private static SpvModule.Reflection.InterfaceVariable input(
+            final String name, final int location, final int baseType, final int vectorSize
+    ) {
+        return new SpvModule.Reflection.InterfaceVariable() {
+            private int currentLocation = location;
+
+            @Override
+            public String name() {
+                return name;
+            }
+
+            @Override
+            public SpvModule.Reflection.Type type() {
+                return new TestType(baseType, vectorSize);
+            }
+
+            @Override
+            public int location() {
+                return currentLocation;
+            }
+
+            @Override
+            public void location(final int value) {
+                currentLocation = value;
+            }
+
+            @Override
+            public int decoration(final int decoration) {
+                return 0;
+            }
+        };
+    }
+
+    private record TestType(int baseType, int vectorSize) implements SpvModule.Reflection.Type {
+        @Override
+        public int dimensions() {
+            return 1;
+        }
+
+        @Override
+        public int arrayDimensions() {
+            return 0;
+        }
+
+        @Override
+        public int arrayLength(final int dimensionIndex) {
+            throw new IndexOutOfBoundsException(dimensionIndex);
+        }
     }
 }

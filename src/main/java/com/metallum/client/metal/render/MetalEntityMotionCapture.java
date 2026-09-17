@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.blaze3d.vertex.ByteBufferBuilder;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
 import net.fabricmc.api.EnvType;
@@ -473,7 +474,7 @@ public final class MetalEntityMotionCapture {
         if (sample == null || pipeline == null) {
             return false;
         }
-        lastVertexShader = pipeline.getVertexShader().toString();
+        lastVertexShader = pipeline.getShaders().get(ShaderType.VERTEX).toString();
         boolean rootSupported = MetalEntityMotionPipeline.supports(pipeline);
         boolean exactSupported = MetalEntityMotionPipeline.supportsPreviousPositions(pipeline);
         boolean matched = MetalEntityMotionPipeline.isSplittableVertexShader(pipeline);
@@ -485,7 +486,7 @@ public final class MetalEntityMotionCapture {
         if (MetalExactMotionCoverage.required(sample) && !exactSupported) {
             MetalExactMotionCoverage.fail(
                     sample,
-                    "unsupported-exact-pipeline:" + pipeline.getVertexShader()
+                    "unsupported-exact-pipeline:" + pipeline.getShaders().get(ShaderType.VERTEX)
             );
         }
         if (matched) {
@@ -593,7 +594,7 @@ public final class MetalEntityMotionCapture {
         motionDrawsEncoded++;
         MetalFxMotionTelemetry.recordMotionReplayDraw();
         if (source != null) {
-            switch (source.getVertexShader().getPath()) {
+            switch (source.getShaders().get(ShaderType.VERTEX).getPath()) {
                 case "core/item" -> itemMotionDrawsEncoded++;
                 case "core/block" -> blockMotionDrawsEncoded++;
                 default -> {

@@ -8,24 +8,28 @@ import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
 import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
-import com.mojang.blaze3d.preprocessor.GlslPreprocessor;
 import com.mojang.renderpearl.api.device.GpuDebugOptions;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
-import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.commands.GpuQueryPool;
 import com.mojang.renderpearl.api.device.DeviceInfo;
+import com.mojang.renderpearl.api.device.DeviceFeatures;
+import com.mojang.renderpearl.api.device.DeviceLimits;
+import com.mojang.renderpearl.api.device.DeviceType;
+import com.mojang.renderpearl.api.device.HintsAndWorkarounds;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
 import com.mojang.renderpearl.backend.api.GpuDeviceBackend;
 import com.mojang.renderpearl.backend.api.GpuSurfaceBackend;
+import com.mojang.renderpearl.frontend.FrontendRenderPipeline;
+import com.mojang.renderpearl.frontend.FrontendGpuDevice;
+import com.mojang.renderpearl.frontend.shaders.PipelineBuilder;
 import com.mojang.renderpearl.api.textures.AddressMode;
 import com.mojang.renderpearl.api.textures.FilterMode;
 import com.mojang.renderpearl.api.textures.GpuSampler;
 import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
-import com.mojang.blaze3d.vulkan.glsl.GlslCompiler;
-import com.mojang.blaze3d.vulkan.glsl.IntermediaryShaderModule;
-import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.renderer.ShaderDefines;
 import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.NonNull;
@@ -40,12 +44,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
-import java.util.regex.Pattern;
 
 @Environment(EnvType.CLIENT)
 final class MetalDevice implements GpuDeviceBackend {
-    private static final Pattern BLOCK_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/");
-    private static final Pattern LINE_COMMENTS = Pattern.compile("(?m)//[^\\n]*");
     private final MetalBackend backend;
     private final MemorySegment metalDeviceHandle;
     private MemorySegment metalLayer = MemorySegment.NULL;
@@ -59,7 +60,7 @@ final class MetalDevice implements GpuDeviceBackend {
     // RenderPipeline never overrides equals/hashCode; RENDER_PIPELINE_IDENTITY_EQUALS
     // verifies that at class load and disables async precompile otherwise.
     private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new ConcurrentHashMap<>();
-    private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new ConcurrentHashMap<>();
+    private final Map<RenderPipeline, FrontendRenderPipeline> frontendPipelines = new ConcurrentHashMap<>();
     private final Map<MslFunctionKey, MemorySegment> functionCache = new ConcurrentHashMap<>();
     private final Map<StableTerrainSamplerKey, MetalGpuSampler> stableTerrainSamplers = new HashMap<>();
     private static final int MAX_POOLED_BUFFER_BUCKETS = 32;
@@ -78,6 +79,7 @@ final class MetalDevice implements GpuDeviceBackend {
     };
     @Nullable
     private ShaderSource activeShaderSource;
+    private final PipelineBuilder pipelineBuilder;
     private int pendingExtraTextureUsage;
     private static final boolean PSO_ARCHIVE =
             Boolean.parseBoolean(System.getProperty("metallum.opt.psoArchive", "true"));
@@ -188,34 +190,6 @@ final class MetalDevice implements GpuDeviceBackend {
     private volatile int pipelineCacheGeneration;
     @Nullable
     private final ExecutorService prewarmExecutor;
-    @Nullable
-    private final ExecutorService prewarmLookupExecutor;
-    private static final int PREWARM_LOOKUP_WORKERS = Math.max(
-            1,
-            Math.min(4, Integer.getInteger(
-                    "metallum.opt.prewarmLookupWorkers",
-                    Math.max(1, Runtime.getRuntime().availableProcessors() / 2)
-            ))
-    );
-
-    /** Vanilla marker result for a precompile that was queued, not run. */
-    private record PendingCompiledPipeline() implements CompiledRenderPipeline {
-        public boolean isValid() {
-            return true;
-        }
-
-        @Override
-        public boolean isClosed() {
-            return false;
-        }
-
-        @Override
-        public void close() {
-        }
-    }
-
-    private static final CompiledRenderPipeline PENDING_PRECOMPILE = new PendingCompiledPipeline();
-
     private static boolean renderPipelineUsesIdentityEquals() {
         try {
             return RenderPipeline.class.getMethod("equals", Object.class).getDeclaringClass() == Object.class;
@@ -344,15 +318,9 @@ final class MetalDevice implements GpuDeviceBackend {
                     return thread;
                 })
                 : null;
-        this.prewarmLookupExecutor = this.prewarmExecutor == null
-                ? null
-                : Executors.newFixedThreadPool(PREWARM_LOOKUP_WORKERS, runnable -> {
-                    Thread thread = new Thread(runnable, "metallum-pso-artifact-lookup");
-                    thread.setDaemon(true);
-                    return thread;
-                });
         this.commandEncoder = new MetalCommandEncoder(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
+        this.pipelineBuilder = new PipelineBuilder(this);
         this.genericVertexAttributeBuffer = (MetalGpuBuffer) this.createBuffer(
                 () -> "OpenGL generic vertex attribute defaults",
                 GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_DST,
@@ -361,9 +329,46 @@ final class MetalDevice implements GpuDeviceBackend {
         current = this;
     }
 
+    /**
+     * Constructor seam for macOS integration fixtures that own a standalone
+     * RenderPearl shader provider.  Minecraft creates devices through
+     * {@link MetalBackend}; this overload keeps those fixtures on the same
+     * 26.3 backend implementation without fabricating a frontend device.
+     */
+    MetalDevice(
+            final ShaderSource shaderSource,
+            final GpuDebugOptions debugOptions,
+            final MemorySegment metalDeviceHandle,
+            final MemorySegment ignoredPresentationHandle,
+            final String deviceName,
+            final MemorySegment ignoredContextHandle
+    ) {
+        this(new MetalBackend(), debugOptions, metalDeviceHandle, deviceName);
+        this.activeShaderSource = shaderSource;
+        if (RenderSystem.tryGetDevice() == null) {
+            if (!RenderSystem.isOnRenderThread()) {
+                RenderSystem.initRenderThread();
+            }
+            RenderSystem.initRenderer(new FrontendGpuDevice(this));
+        }
+    }
+
     /** Current source chain used by lazy PSO compilation; package seam for generated Iris stages. */
     ShaderSource activeShaderSource() {
         return this.activeShaderSource;
+    }
+
+    /**
+     * Publishes Minecraft's complete 26.3 shader/include provider to the
+     * backend. RenderPearl keeps this provider in the frontend pipeline cache,
+     * while Metal also needs it for backend-owned lazy pipelines such as the
+     * object-motion replay passes.
+     */
+    public static void captureShaderSource(final ShaderSource shaderSource) {
+        MetalDevice device = current;
+        if (device != null) {
+            device.activeShaderSource = shaderSource;
+        }
     }
 
     /**
@@ -484,7 +489,6 @@ final class MetalDevice implements GpuDeviceBackend {
         return derived;
     }
 
-    @Override
     public @NonNull GpuTexture createTexture(
             @Nullable final Supplier<String> label,
             @GpuTexture.Usage final int usage,
@@ -531,7 +535,6 @@ final class MetalDevice implements GpuDeviceBackend {
         }
     }
 
-    @Override
     public @NonNull GpuTextureView createTextureView(final @NonNull GpuTexture texture) {
         return this.createTextureView(texture, 0, texture.getMipLevels());
     }
@@ -582,84 +585,40 @@ final class MetalDevice implements GpuDeviceBackend {
         return this.debugOptions.logLevel() > 0 || this.debugOptions.useLabels() || this.debugOptions.useValidationLayers();
     }
 
+    @Override
+    public BackendRenderPipeline.Pending compilePipeline(
+            final BackendRenderPipeline.CreateInfo pipelineCreateInfo
+    ) {
+        return MetalCrossShaderCompiler.compilePending(this, pipelineCreateInfo);
+    }
+
     boolean useLabels() {
         return this.debugOptions.useLabels();
     }
 
-    @Override
     public @NonNull CompiledRenderPipeline precompilePipeline(final @NonNull RenderPipeline pipeline, @Nullable final ShaderSource shaderSource) {
         ShaderSource effectiveSource = shaderSource == null ? this.activeShaderSource : shaderSource;
-        if (shaderSource != null) {
-            this.activeShaderSource = shaderSource;
+        if (effectiveSource == null) {
+            throw new IllegalStateException("RenderPearl shader source is required to compile " + pipeline.getLocation());
         }
         MetalCompiledRenderPipeline existing = this.compiledPipelines.get(pipeline);
         if (existing != null) {
             return existing;
         }
-        if (this.prewarmExecutor != null && this.prewarmLookupExecutor != null) {
-            int generation = this.pipelineCacheGeneration;
-            try {
-                this.prewarmLookupExecutor.execute(() -> {
-                    try {
-                        MetalCrossShaderCompiler.CacheLookup lookup =
-                                MetalCrossShaderCompiler.tryLoadCacheLookup(pipeline, effectiveSource);
-                        if (generation != this.pipelineCacheGeneration
-                                || this.compiledPipelines.containsKey(pipeline)) {
-                            return;
-                        }
-                        this.submitPrewarmTask(() -> {
-                            try {
-                                this.compileInBackground(pipeline, effectiveSource, generation, lookup);
-                            } catch (Throwable t) {
-                                // First real use on the render thread recompiles and
-                                // surfaces the error with vanilla's own handling.
-                                Metallum.LOGGER.warn(
-                                        "[metallum] background precompile failed for {}",
-                                        pipeline.getLocation(),
-                                        t
-                                );
-                            }
-                        });
-                    } catch (Throwable t) {
-                        Metallum.LOGGER.warn(
-                                "[metallum] background MSL artifact lookup failed for {}",
-                                pipeline.getLocation(),
-                                t
-                        );
-                    }
-                });
-            } catch (java.util.concurrent.RejectedExecutionException ignored) {
-            }
-            return PENDING_PRECOMPILE;
-        }
+        this.activeShaderSource = effectiveSource;
         synchronized (COMPILE_CHAIN_LOCK) {
-            return this.compiledPipelines.computeIfAbsent(pipeline, p -> compileWithIrisOverride(p, effectiveSource));
+            CompiledRenderPipeline frontend = this.pipelineBuilder
+                    .compilePipeline(pipeline, effectiveSource, Runnable::run)
+                    .join()
+                    .finishCompile();
+            if (!(frontend instanceof FrontendRenderPipeline frontendPipeline)
+                    || !(frontendPipeline.backendRenderPipeline() instanceof MetalCompiledRenderPipeline compiled)) {
+                throw new IllegalStateException("RenderPearl rejected pipeline " + pipeline.getLocation());
+            }
+            this.compiledPipelines.put(pipeline, compiled);
+            this.frontendPipelines.put(pipeline, frontendPipeline);
+            return compiled;
         }
-    }
-
-    /**
-     * The single funnel every compile path goes through, so the Iris terrain
-     * override is consulted on the render thread and on the prewarm thread
-     * alike. Missing the background path would let prewarm win the cache race
-     * with a native PSO and silently disable the override.
-     */
-    private MetalCompiledRenderPipeline compileWithIrisOverride(
-            final RenderPipeline pipeline, final ShaderSource source
-    ) {
-        return compileWithIrisOverride(pipeline, source, null);
-    }
-
-    private MetalCompiledRenderPipeline compileWithIrisOverride(
-            final RenderPipeline pipeline,
-            final ShaderSource source,
-            final MetalCrossShaderCompiler.@Nullable CacheLookup preloadedLookup
-    ) {
-        // Iris remains the first and only override authority. A generic MSL
-        // artifact may be looked up speculatively, but can never win this race.
-        MetalCompiledRenderPipeline override = IrisMetalPipelineOverrides.tryCompile(this, pipeline, source);
-        return override != null
-                ? override
-                : MetalCrossShaderCompiler.compile(this, pipeline, source, preloadedLookup);
     }
 
     /** True when the background prewarm thread exists (async precompile on). */
@@ -685,29 +644,6 @@ final class MetalDevice implements GpuDeviceBackend {
         }
     }
 
-    private void compileInBackground(
-            final RenderPipeline pipeline,
-            final ShaderSource source,
-            final int generation,
-            final MetalCrossShaderCompiler.CacheLookup lookup
-    ) {
-        if (this.compiledPipelines.containsKey(pipeline)) {
-            return;
-        }
-        synchronized (COMPILE_CHAIN_LOCK) {
-            // The volatile generation write happens under this lock, so this
-            // read also orders us after every render-thread write (shader
-            // source swap, MetalFX LOD bias) that preceded the last clear.
-            if (generation != this.pipelineCacheGeneration) {
-                return;
-            }
-            this.compiledPipelines.computeIfAbsent(
-                    pipeline, p -> compileWithIrisOverride(p, source, lookup)
-            );
-        }
-    }
-
-    @Override
     public void clearPipelineCache() {
         this.waitForSubmittedGpuWork();
         this.stableTerrainSamplers.values().forEach(MetalGpuSampler::closeImmediately);
@@ -717,8 +653,7 @@ final class MetalDevice implements GpuDeviceBackend {
             this.pipelineCacheGeneration++;
             this.compiledPipelines.values().forEach(MetalCompiledRenderPipeline::close);
             this.compiledPipelines.clear();
-            this.shaderCache.values().forEach(IntermediaryShaderModule::close);
-            this.shaderCache.clear();
+            this.frontendPipelines.clear();
             for (MemorySegment function : this.functionCache.values()) {
                 if (!MetalNativeBridge.isNullHandle(function)) {
                     MetalNativeBridge.metallum_release_object(function);
@@ -748,16 +683,6 @@ final class MetalDevice implements GpuDeviceBackend {
         this.waitForSubmittedGpuWork();
         this.genericVertexAttributeBuffer.close();
         this.commandEncoder.close();
-        if (this.prewarmLookupExecutor != null) {
-            this.prewarmLookupExecutor.shutdownNow();
-            try {
-                if (!this.prewarmLookupExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                    Metallum.LOGGER.warn("[metallum] PSO artifact lookup workers still busy at shutdown");
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
         if (this.prewarmExecutor != null) {
             // Stop background compiles after lookup producers. A straggler past
             // the 5s bail-out still serializes with cache teardown via the lock.
@@ -771,6 +696,7 @@ final class MetalDevice implements GpuDeviceBackend {
             }
         }
         this.clearPipelineCache();
+        this.pipelineBuilder.close();
         this.drainBufferPool();
         this.commandQueue.close();
         MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
@@ -781,7 +707,6 @@ final class MetalDevice implements GpuDeviceBackend {
         return new MetalGpuQueryPool(size);
     }
 
-    @Override
     public long getTimestampNow() {
         return System.nanoTime();
     }
@@ -872,38 +797,28 @@ final class MetalDevice implements GpuDeviceBackend {
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {
-        // Lock-free on the hot path; a miss takes the chain lock, so a first
-        // use may wait out whatever the prewarm thread is currently building.
         MetalCompiledRenderPipeline existing = this.compiledPipelines.get(pipeline);
         if (existing != null) {
             return existing;
         }
-        synchronized (COMPILE_CHAIN_LOCK) {
-            return this.compiledPipelines.computeIfAbsent(
-                    pipeline, p -> compileWithIrisOverride(p, this.activeShaderSource));
+        CompiledRenderPipeline compiled = precompilePipeline(pipeline, this.activeShaderSource);
+        if (!(compiled instanceof MetalCompiledRenderPipeline metal)) {
+            throw new IllegalStateException("Pipeline is not backed by Metal: " + pipeline.getLocation());
         }
+        return metal;
     }
 
-    IntermediaryShaderModule getOrCompileShader(final Identifier id, final ShaderType type, final ShaderDefines defines, final ShaderSource shaderSource) {
-        ShaderCompilationKey key = new ShaderCompilationKey(id, type, defines);
-        return this.shaderCache.computeIfAbsent(key, k -> {
-            String source = shaderSource.get(k.id(), k.type());
-            if (source == null) {
-                return IntermediaryShaderModule.INVALID;
-            }
-            String sourceWithDefines = prepareShaderSource(source, k.defines());
-            try (GlslCompiler glslCompiler = new GlslCompiler()) {
-                return glslCompiler.createIntermediary(k.id().toDebugFileName(), sourceWithDefines, k.type());
-            } catch (ShaderCompileException e) {
-                throw new IllegalStateException("Failed to compile shader " + k.id(), e);
-            }
-        });
-    }
-
-    static String prepareShaderSource(final String source, final ShaderDefines defines) {
-        String stripped = BLOCK_COMMENTS.matcher(source).replaceAll("");
-        stripped = LINE_COMMENTS.matcher(stripped).replaceAll("").stripLeading();
-        return GlslPreprocessor.injectDefines(stripped, defines);
+    FrontendRenderPipeline getOrCompileFrontendPipeline(final RenderPipeline pipeline) {
+        FrontendRenderPipeline existing = this.frontendPipelines.get(pipeline);
+        if (existing != null) {
+            return existing;
+        }
+        getOrCompilePipeline(pipeline);
+        existing = this.frontendPipelines.get(pipeline);
+        if (existing == null) {
+            throw new IllegalStateException("Missing RenderPearl frontend pipeline for " + pipeline.getLocation());
+        }
+        return existing;
     }
 
     MemorySegment getOrCompileFunction(final String msl, final String entryPoint) {
@@ -911,9 +826,6 @@ final class MetalDevice implements GpuDeviceBackend {
                 new MslFunctionKey(msl, entryPoint),
                 key -> MetalNativeBridge.metallum_create_shader_function(this.metalDeviceHandle, key.msl(), key.entryPoint())
         );
-    }
-
-    private record ShaderCompilationKey(Identifier id, ShaderType type, ShaderDefines defines) {
     }
 
     private record StableTerrainSamplerKey(
@@ -945,10 +857,16 @@ final class MetalDevice implements GpuDeviceBackend {
                 // ColorTargetState contract has the same upper bound. Keep
                 // the advertised limit aligned with both APIs so the generic
                 // CommandEncoder rejects an impossible pass before native use.
-                new DeviceLimits(1, 256, 16384, maxMemoryAllocationSize, 0, ColorTargetState.MAX_COLOR_TARGETS),
-                new DeviceFeatures(false, false, true, true, true, false, true),
+                // Interleaved multi-draw is expanded into ordinary indexed
+                // draws by MetalRenderPass, so Metal imposes no draw-count
+                // limit at this boundary. Report a positive generic limit;
+                // RenderPearl still validates the parameter buffer and a
+                // future backend/device-specific cap can be split by the
+                // Sodium adapter.
+                new DeviceLimits(1, 256, 16384, maxMemoryAllocationSize, Integer.MAX_VALUE, ColorTargetState.MAX_COLOR_TARGETS, Integer.MAX_VALUE),
+                new DeviceFeatures(false, false, true, true, true, false, true, true),
                 underlyingExtensions,
-                new HintsAndWorkarounds(false, false),
+                new HintsAndWorkarounds(false, false, false, false),
                 type
         );
     }

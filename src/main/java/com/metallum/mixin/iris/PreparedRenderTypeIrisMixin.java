@@ -1,120 +1,28 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
-import com.mojang.renderpearl.api.pipeline.IndexType;
-import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
-import com.mojang.renderpearl.api.commands.CommandEncoder;
-import com.mojang.renderpearl.api.commands.RenderPass;
-import com.mojang.renderpearl.api.textures.GpuTextureView;
-import net.irisshaders.iris.Iris;
-import net.irisshaders.iris.pipeline.WorldRenderingPipeline;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
-import org.joml.Vector4fc;
-import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
-import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import java.util.Optional;
-import java.util.OptionalDouble;
-import java.util.function.Supplier;
-
-/** Atomically routes Mojang prepared draws through the active Iris gbuffer PSO and MRT descriptor. */
+/** Routes Mojang 26.3 prepared draws through the active Iris synthetic PSO. */
 @Mixin(PreparedRenderType.class)
 public abstract class PreparedRenderTypeIrisMixin {
-    @Shadow
-    @Final
-    private RenderPipeline pipeline;
-
-    @Unique
-    private static final ThreadLocal<IrisMetalPipelineOverrides.CoreDrawOverride> METALLUM_CORE_DRAW =
-            new ThreadLocal<>();
-    @Inject(
-            method = "drawFromBuffer(Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/IndexType;III)V",
-            at = @At("HEAD")
-    )
-    private void metallum$beginCoreDraw(
-            final GpuBuffer vertexBuffer,
-            final GpuBuffer indexBuffer,
-            final IndexType indexType,
-            final int baseVertex,
-            final int firstIndex,
-            final int indexCount,
-            final CallbackInfo ci
-    ) {
-        METALLUM_CORE_DRAW.remove();
-    }
-
     @Redirect(
-            method = "drawFromBuffer(Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/IndexType;III)V",
+            method = "draw(Lnet/minecraft/client/renderer/StagedVertexBuffer$ExecuteInfo;Lcom/mojang/renderpearl/api/commands/RenderPass;Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;)V",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/mojang/blaze3d/systems/CommandEncoder;createRenderPass("
-                            + "Ljava/util/function/Supplier;"
-                            + "Lcom/mojang/blaze3d/textures/GpuTextureView;"
-                            + "Ljava/util/Optional;"
-                            + "Lcom/mojang/blaze3d/textures/GpuTextureView;"
-                            + "Ljava/util/OptionalDouble;"
-                            + ")Lcom/mojang/blaze3d/systems/RenderPass;"
+                    target = "Lcom/mojang/blaze3d/systems/RenderSystem;getCompiledPipeline("
+                            + "Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;)"
+                            + "Lcom/mojang/renderpearl/api/pipeline/CompiledRenderPipeline;"
             )
     )
-    private RenderPass metallum$createCoreRenderPass(
-            final CommandEncoder encoder,
-            final Supplier<String> label,
-            final GpuTextureView sceneColor,
-            final Optional<Vector4fc> clearColor,
-            final GpuTextureView sceneDepth,
-            final OptionalDouble clearDepth
-    ) {
-        WorldRenderingPipeline worldPipeline = Iris.getPipelineManager().getPipelineNullable();
-        IrisMetalPipelineOverrides.CoreDrawOverride override = IrisMetalPipelineOverrides.prepareCoreDraw(
-                this.pipeline,
-                worldPipeline,
-                label,
-                sceneColor,
-                clearColor,
-                sceneDepth,
-                clearDepth
-        );
-        if (override == null) {
-            METALLUM_CORE_DRAW.remove();
-            return encoder.createRenderPass(label, sceneColor, clearColor, sceneDepth, clearDepth);
-        }
-        METALLUM_CORE_DRAW.set(override);
-        return encoder.createRenderPass(override.descriptor());
+    private CompiledRenderPipeline metallum$compileCorePipeline(final RenderPipeline source) {
+        return RenderSystem.getCompiledPipeline(IrisMetalPipelineOverrides.pipelineForCore(source));
     }
 
-    @Redirect(
-            method = "drawFromBuffer(Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/IndexType;III)V",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lcom/mojang/blaze3d/systems/RenderPass;setPipeline("
-                            + "Lcom/mojang/blaze3d/pipeline/RenderPipeline;)V"
-            )
-    )
-    private void metallum$setCorePipeline(final RenderPass renderPass, final RenderPipeline source) {
-        IrisMetalPipelineOverrides.CoreDrawOverride override = METALLUM_CORE_DRAW.get();
-        renderPass.setPipeline(override == null ? source : override.pipeline());
-    }
-
-    @Inject(
-            method = "drawFromBuffer(Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/buffers/GpuBuffer;Lcom/mojang/blaze3d/IndexType;III)V",
-            at = @At("RETURN")
-    )
-    private void metallum$endCoreDraw(
-            final GpuBuffer vertexBuffer,
-            final GpuBuffer indexBuffer,
-            final IndexType indexType,
-            final int baseVertex,
-            final int firstIndex,
-            final int indexCount,
-            final CallbackInfo ci
-    ) {
-        METALLUM_CORE_DRAW.remove();
-    }
 }

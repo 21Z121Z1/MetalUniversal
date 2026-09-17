@@ -1,12 +1,12 @@
 #version 330
 
-#moj_import <minecraft:dynamictransforms.glsl>
+#include <minecraft:dynamictransforms.glsl>
 uniform sampler2D Sampler0;
 
-noperspective in vec2 metallumObjectMotion;
-flat in float metallumObjectValidity;
-in vec4 metallumVertexColor;
-in vec2 metallumTexCoord;
+layout(location = 0) noperspective in vec2 metallumObjectMotion;
+layout(location = 1) flat in float metallumObjectValidity;
+layout(location = 2) in vec4 metallumVertexColor;
+layout(location = 3) in vec2 metallumTexCoord;
 
 layout(location = 0) out vec2 metallumMotionTarget;
 layout(location = 1) out float metallumValidityTarget;

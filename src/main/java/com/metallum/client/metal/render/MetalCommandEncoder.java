@@ -757,7 +757,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     @Override
-    public @NonNull RenderPassBackend createRenderPass(final RenderPassDescriptor descriptor) {
+    public @NonNull MetalRenderPass createRenderPass(final RenderPassDescriptor descriptor) {
         List<RenderPassDescriptor.Attachment<Optional<Vector4fc>>> colorAttachments = descriptor.colorAttachments();
         int maxColorAttachments = Math.min(
                 com.mojang.renderpearl.api.pipeline.ColorTargetState.MAX_COLOR_TARGETS,
@@ -857,11 +857,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             metalDepth.markContentsDirty();
         }
 
-        assert descriptor.renderArea != null;
-        RenderPass.RenderArea renderArea = descriptor.renderArea;
-        if (renderArea == null) {
-            throw new IllegalArgumentException("RenderPassDescriptor.renderArea must be provided");
-        }
+        RenderPass.RenderArea renderArea = descriptor.renderArea();
         long renderRight = (long) renderArea.x() + renderArea.width();
         long renderBottom = (long) renderArea.y() + renderArea.height();
         if (renderArea.x() < 0 || renderArea.y() < 0

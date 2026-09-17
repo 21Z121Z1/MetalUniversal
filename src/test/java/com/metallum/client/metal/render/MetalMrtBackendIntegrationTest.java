@@ -70,12 +70,12 @@ final class MetalMrtBackendIntegrationTest {
     void createDevice() {
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice), "MTLCreateSystemDefaultDevice returned null");
-        ShaderSource source = (identifier, type) -> {
+        ShaderSource source = MetalShaderSourceAdapters.from((identifier, type) -> {
             String name = identifier.getPath().substring(identifier.getPath().lastIndexOf('/') + 1);
             return type == ShaderType.VERTEX
                     ? vertexShaders.getOrDefault(name, VERTEX_SHADER)
                     : fragmentShaders.get(name);
-        };
+        });
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),
@@ -237,7 +237,7 @@ final class MetalMrtBackendIntegrationTest {
                 com.mojang.renderpearl.api.textures.GpuTexture.USAGE_RENDER_ATTACHMENT
                         | com.mojang.renderpearl.api.textures.GpuTexture.USAGE_COPY_SRC,
                 GpuFormat.D32_FLOAT, WIDTH, HEIGHT, 1, 1)) {
-            RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "depth+MRT integration");
+            RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> "depth+MRT integration");
             List<MetalGpuTextureView> views = new ArrayList<>();
             for (int index = 0; index < textures.size(); index++) {
                 MetalGpuTextureView view = new MetalGpuTextureView(textures.get(index), 0, 1);
@@ -248,7 +248,7 @@ final class MetalMrtBackendIntegrationTest {
             views.add(depthView);
             descriptor.withDepthAttachment(depthView, java.util.OptionalDouble.of(0.75));
             descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-            MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+            MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
             pass.setPipeline(pipeline);
             pass.draw(3, 1, 0, 0);
             encoder.submitRenderPass();
@@ -289,11 +289,11 @@ final class MetalMrtBackendIntegrationTest {
         int resizedHeight = HEIGHT * 2;
         try (MetalGpuTexture resized = (MetalGpuTexture) device.createTexture(
                 "resize-after-0", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, resizedWidth, resizedHeight, 1, 1)) {
-            RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "resize integration");
+            RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> "resize integration");
             try (MetalGpuTextureView view = new MetalGpuTextureView(resized, 0, 1)) {
                 descriptor.withColorAttachment(view, Optional.of(new Vector4f(0.0F)));
                 descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, resizedWidth, resizedHeight));
-                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
                 pass.setPipeline(pipeline);
                 pass.draw(3, 1, 0, 0);
                 encoder.submitRenderPass();
@@ -669,9 +669,9 @@ final class MetalMrtBackendIntegrationTest {
                 IllegalStateException.class,
                 () -> device.getOrCompilePipeline(pipeline)
         );
-        assertTrue(mismatch.getMessage().contains("Failed to compile Metal cross shader"));
+        assertTrue(mismatch.getMessage().contains("Failed to translate RenderPearl pipeline"));
         assertNotNull(mismatch.getCause());
-        assertTrue(mismatch.getCause().getMessage().contains("location mismatch"));
+        assertTrue(mismatch.getCause().getMessage().contains("Fragment output location mismatch"));
     }
 
     private void verifyFragmentOutputFormatMismatchFailsClosed() {
@@ -784,7 +784,7 @@ final class MetalMrtBackendIntegrationTest {
             List<Vector4f> clearColors,
             boolean load
     ) {
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "Java MRT backend integration");
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> "Java MRT backend integration");
         List<MetalGpuTextureView> views = new ArrayList<>();
         for (int index = 0; index < textures.size(); index++) {
             MetalGpuTexture texture = textures.get(index);
@@ -803,7 +803,7 @@ final class MetalMrtBackendIntegrationTest {
             }
         }
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-        return new PassWithViews((MetalRenderPass) encoder.createRenderPass(descriptor), views);
+        return new PassWithViews((MetalRenderPass) encoder.createRenderPass(descriptor.build()), views);
     }
 
     private ByteBuffer readback(MetalGpuTexture texture) {

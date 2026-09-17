@@ -202,7 +202,7 @@ tasks.withType(JavaExec).configureEach {
 					|| it.endsWith(":minecraftMetalFxCombinedValidation")
 		}
 		if (!dedicatedValidation && validationWorld != null && !validationWorld.isBlank()) {
-			args "--quickPlaySingleplayer", validationWorld
+			args "--quickPlaySingleplayer=${validationWorld}"
 		}
 	}
 }
@@ -1276,8 +1276,10 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 				systemProperty propertyName, requestedValue
 			}
 		}
-		args "--quickPlaySingleplayer",
-				System.getProperty("metallum.validation.world", "New World"),
+		def validationWorldId = providers.gradleProperty("world").orNull
+				?: System.getProperty("metallum.validation.world", "New World")
+		systemProperty "metallum.validation.world", validationWorldId
+		args "--quickPlaySingleplayer=${validationWorldId}",
 				// Pin the window (and with it the framebuffer) size: macOS
 				// window management can zoom/tile the client window, and a
 				// different framebuffer size makes golden captures
@@ -2360,9 +2362,190 @@ if (nonIrisCaptureRequested && org.gradle.internal.os.OperatingSystem.current().
 		// be verified independently in the runtime receipt.
 		args "--gameDir", gameDir == null ? "" : gameDir.absolutePath
 		args "--username", playerName, "--uuid", playerUuid
-		args "--quickPlaySingleplayer", worldName, "--width", "854", "--height", "480"
+		args "--quickPlaySingleplayer=${worldName}", "--width", "854", "--height", "480"
 		environment "MTL_DEBUG_LAYER", "1"
 		environment "MTL_SHADER_VALIDATION", "0"
+	}
+}
+
+// One explicit, isolated launcher for the 26.3 native backend comparison.
+// This is intentionally separate from the non-Iris regression lanes: it
+// selects the actual Minecraft PreferredGraphicsApi in a copied game
+// directory, captures the final RenderPearl target, and emits a structured
+// pacing/GPU receipt. No launcher UI or mutable user instance is involved.
+def backendCaptureRequested = gradle.startParameter.taskNames.any {
+	it == "minecraftBackendCapture" || it.endsWith(":minecraftBackendCapture")
+}
+if (backendCaptureRequested) {
+	if (!org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+		tasks.register("minecraftBackendCapture") {
+			group = "verification"
+			description = "Captures a 26.3 native Metal or Vulkan backend lane."
+			doLast { logger.lifecycle("minecraftBackendCapture SKIPPED: macOS is required") }
+		}
+	} else {
+		def backendApi = (findProperty("backendCompareApi") ?: "metal").toString().trim().toLowerCase(Locale.ROOT)
+		if (!(backendApi in ["metal", "metal4", "vulkan"])) {
+			throw new GradleException("-PbackendCompareApi must be metal, metal4 or vulkan, found '${backendApi}'")
+		}
+		def metal4Lane = backendApi == "metal4"
+		def metalLane = backendApi in ["metal", "metal4"]
+		def gameDirValue = findProperty("backendCompareGameDir")?.toString()
+		def gameDir = gameDirValue == null ? null : new File(gameDirValue)
+		def root = file(findProperty("backendCompareRoot") ?: "${buildDir}/backend-compare")
+		def lane = (findProperty("backendCompareLane") ?: backendApi).toString().trim()
+		def worldName = (findProperty("backendCompareWorld") ?: "testworld").toString()
+		def frames = (findProperty("backendCompareFrames") ?: "60,90").toString()
+		def fixedClock = (findProperty("backendCompareClock") ?: "108500").toString()
+		def playerName = (findProperty("backendComparePlayerName") ?: "MetalBackend").toString()
+		def playerUuid = (findProperty("backendComparePlayerUuid")
+				?: "8f16930a-42ad-4f9b-9d59-02698f26b145").toString()
+		def fixedCamera = (findProperty("backendCompareCamera")
+				?: "579.4938336701937,90.45083448610046,-177.71662902161114,-164.09991455078125,29.249996185302734").toString()
+		def scenarioId = (findProperty("backendCompareScenario") ?: "mc26.3-native-backend-v1").toString()
+		def hashWorldSnapshot = { File worldDirectory ->
+			def digest = java.security.MessageDigest.getInstance("SHA-256")
+			def files = []
+			worldDirectory.eachFileRecurse(groovy.io.FileType.FILES) { candidate -> files << candidate }
+			files.sort { left, right ->
+				worldDirectory.toPath().relativize(left.toPath()).toString() <=>
+						worldDirectory.toPath().relativize(right.toPath()).toString()
+			}
+			def buffer = new byte[64 * 1024]
+			files.each { candidate ->
+				def relative = worldDirectory.toPath().relativize(candidate.toPath()).toString()
+						.replace(File.separatorChar, '/' as char)
+				digest.update(relative.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+				digest.update((byte) 0)
+				candidate.withInputStream { input ->
+					int read
+					while ((read = input.read(buffer)) >= 0) {
+						if (read > 0) digest.update(buffer, 0, read)
+					}
+				}
+			}
+			java.util.HexFormat.of().formatHex(digest.digest())
+		}
+		def replaceOption = { File optionsFile, String key, String value ->
+			def lines = optionsFile.isFile()
+					? java.nio.file.Files.readAllLines(optionsFile.toPath(), java.nio.charset.StandardCharsets.UTF_8)
+					: []
+			boolean found = false
+			def updated = lines.collect { line ->
+				if (line.startsWith(key + ":")) {
+					found = true
+					return key + ":" + value
+				}
+				if (line.startsWith(key + "=")) {
+					found = true
+					return key + "=" + value
+				}
+				line
+			}
+			if (!found) updated << key + ":" + value
+			java.nio.file.Files.write(
+					optionsFile.toPath(), updated, java.nio.charset.StandardCharsets.UTF_8
+			)
+		}
+
+		loom.runs.named("client") {
+			if (gameDir != null) runDir project.relativePath(gameDir)
+		}
+		tasks.named("runClient") {
+				systemProperty "metallum.backend.compare.enabled", "true"
+				systemProperty "metallum.backend.compare.auto-stop", "true"
+				systemProperty "metallum.backend.compare.output", root.absolutePath
+				systemProperty "metallum.backend.compare.name", lane
+				systemProperty "metallum.backend.compare.scenario-id", scenarioId
+				systemProperty "metallum.backend.compare.world-name", worldName
+				systemProperty "metallum.backend.compare.game-directory", gameDir == null ? "" : gameDir.absolutePath
+				systemProperty "metallum.backend.compare.player-name", playerName
+				systemProperty "metallum.backend.compare.player-uuid", playerUuid
+				systemProperty "metallum.backend.compare.frames", frames
+				systemProperty "metallum.backend.compare.fixed-clock-ticks", fixedClock
+				systemProperty "metallum.backend.compare.fixed-camera", fixedCamera
+				systemProperty "metallum.backend.compare.fixed-iris-frame-millis", "16"
+				systemProperty "metallum.backend.compare.freeze-simulation", "true"
+				systemProperty "metallum.backend.compare.freeze-atlas-animation", "true"
+				systemProperty "metallum.backend.compare.fixed-weather", "clear"
+				systemProperty "metallum.backend.compare.stable-scene-frames", "120"
+				systemProperty "metallum.backend.compare.stable-scene-millis", "4000"
+				systemProperty "metallum.backend.compare.iris-reload-frame", "-1"
+				systemProperty "metallum.iris.semantic", "false"
+				systemProperty "metallum.metalfx.mode", "OFF"
+				systemProperty "metallum.metalfx.frameGeneration", "false"
+				systemProperty "metallum.metalfx.objectMotionProducer", "false"
+				systemProperty "metallum.metal.hud", "false"
+				systemProperty "metallum.validation.forceMetal", metalLane ? "true" : "false"
+				systemProperty "metallum.validation.gpuTiming", "true"
+				systemProperty "metallum.iris.performanceCounters", "true"
+				if (metal4Lane) {
+					// A named Metal 4 lane is an end-to-end MTL4 main-renderer
+					// exercise, not merely an MTL4Compiler PSO smoke test.
+					systemProperty "metallum.opt.metal4", "true"
+					systemProperty "metallum.opt.metal4Compiler", "true"
+					systemProperty "metallum.opt.metal4MainQueuePilot", "true"
+					systemProperty "metallum.opt.metal4MainRenderer", "true"
+				}
+				args "--gameDir", gameDir == null ? "" : gameDir.absolutePath
+				args "--username", playerName, "--uuid", playerUuid
+				args "--quickPlaySingleplayer=${worldName}", "--width", "854", "--height", "480"
+				environment "MTL_DEBUG_LAYER", metalLane ? "1" : "0"
+				environment "MTL_SHADER_VALIDATION", "0"
+				doFirst {
+					if (gameDir == null || !gameDir.absolute) {
+						throw new GradleException("-PbackendCompareGameDir=<absolute isolated game directory> is required")
+					}
+					def worldDirectory = new File(new File(gameDir, "saves"), worldName)
+					if (!new File(worldDirectory, "level.dat").isFile()) {
+						throw new GradleException("Missing comparison world: ${worldDirectory}")
+					}
+					if (!playerName.matches("[A-Za-z0-9_]{1,16}")) {
+						throw new GradleException("backendComparePlayerName must be 1-16 ASCII username characters")
+					}
+					try { java.util.UUID.fromString(playerUuid) }
+					catch (IllegalArgumentException invalidUuid) {
+						throw new GradleException("backendComparePlayerUuid must be canonical UUID", invalidUuid)
+					}
+					def optionsFile = new File(gameDir, "options.txt")
+					// MetalUniversal is selected by the existing DEFAULT->Metal
+					// adapter; "metal" is not a Minecraft PreferredGraphicsApi enum.
+						replaceOption(optionsFile, "preferredGraphicsBackend", metalLane ? "\"default\"" : "\"vulkan\"")
+					replaceOption(optionsFile, "startedCleanly", "true")
+						replaceOption(optionsFile, "fullscreen", "false")
+					replaceOption(optionsFile, "enableVsync", "false")
+					replaceOption(optionsFile, "maxFps", "260")
+					def irisConfig = new File(new File(gameDir, "config"), "iris.properties")
+					replaceOption(irisConfig, "enableShaders", "false")
+					def outputDirectory = new File(root, lane)
+					if (outputDirectory.exists()) {
+						throw new GradleException("Refusing to overwrite existing backend evidence: ${outputDirectory}")
+					}
+					systemProperty "metallum.backend.compare.world-snapshot-sha256", hashWorldSnapshot(worldDirectory)
+					logger.lifecycle("Minecraft 26.3 ${backendApi} capture: gameDir=${gameDir}, world=${worldDirectory}")
+				}
+		}
+		tasks.register("minecraftBackendCapture") {
+			group = "verification"
+			description = "Captures an isolated Minecraft 26.3 ${backendApi} backend lane."
+			dependsOn "runClient"
+			doLast {
+				def session = new File(new File(root, lane), "session.json")
+				def performance = new File(new File(root, lane), "performance.json")
+				if (!session.isFile() || !performance.isFile()) {
+					throw new GradleException("${name} produced incomplete evidence under ${root}/${lane}")
+				}
+				def receipt = new groovy.json.JsonSlurper().parse(session)
+				def expectedBackend = metalLane ? "Metal" : "Vulkan"
+				if (receipt.status != "passed" || receipt.failedCaptures != 0
+						|| !expectedBackend.equalsIgnoreCase(receipt.deviceBackend.toString())) {
+					throw new GradleException(
+							"${name} did not pass: status=${receipt.status}, failedCaptures=${receipt.failedCaptures}, deviceBackend=${receipt.deviceBackend}, expected=${expectedBackend}"
+					)
+				}
+				logger.lifecycle("${name}: PASS; session=${session}, performance=${performance}")
+			}
+		}
 	}
 }
 
@@ -2817,6 +3000,10 @@ def configureRenderContractNativeTest = { Test task, boolean metal4 ->
 	}
 	task.jvmArgs "--enable-native-access=ALL-UNNAMED"
 	task.systemProperty "metallum.opt.metal4", metal4.toString()
+	// The Metal 4 lane must exercise MTL4Compiler-backed PSO creation rather
+	// than merely observing the device family bit. Main-queue rendering remains
+	// covered by metal4PipelinePathTest and the named minecraft metal4 lane.
+	task.systemProperty "metallum.opt.metal4Compiler", metal4.toString()
 	task.environment "MTL_DEBUG_LAYER", metalApiValidation
 	task.environment "MTL_SHADER_VALIDATION", metalShaderValidation
 	task.testLogging {

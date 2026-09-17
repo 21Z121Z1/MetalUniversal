@@ -90,7 +90,7 @@ final class MetalIrisShaderTranslationTest {
     void createDevice() {
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice), "MTLCreateSystemDefaultDevice returned null");
-        ShaderSource source = (identifier, type) -> null;
+        ShaderSource source = MetalShaderSourceAdapters.empty();
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),

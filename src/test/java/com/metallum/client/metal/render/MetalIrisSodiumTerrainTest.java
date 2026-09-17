@@ -87,7 +87,7 @@ final class MetalIrisSodiumTerrainTest {
     void createDevice() {
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice), "MTLCreateSystemDefaultDevice returned null");
-        ShaderSource source = (identifier, type) -> null;
+        ShaderSource source = MetalShaderSourceAdapters.empty();
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),
@@ -546,7 +546,7 @@ final class MetalIrisSodiumTerrainTest {
                     }
                     assertEquals(
                             program.drawBuffers().length,
-                            synthetic.getColorTargetStates().length,
+                            synthetic.getColorTargetStates().size(),
                             () -> "Potato DRAWBUFFERS target count differs for " + coreCase.label()
                     );
                     MetalCompiledRenderPipeline compiled = device.getOrCompilePipeline(synthetic);
@@ -610,15 +610,15 @@ final class MetalIrisSodiumTerrainTest {
                 packName + " " + kind + ": fake pipeline discrimination mismatch");
         RenderPipeline selected = IrisMetalPipelineOverrides.pipelineForTerrain(fake);
         assertNotSame(fake, selected, packName + " " + kind + ": synthetic pipeline was not selected");
-        ColorTargetState[] selectedTargets = selected.getColorTargetStates();
-        assertEquals(program.drawBuffers().length, selectedTargets.length,
+        List<ColorTargetState> selectedTargets = selected.getColorTargetStates();
+        assertEquals(program.drawBuffers().length, selectedTargets.size(),
                 packName + " " + kind + ": color-target count does not match DRAWBUFFERS");
         for (int slot = 0; slot < program.drawBuffers().length; slot++) {
             int logicalTarget = program.drawBuffers()[slot];
             GpuFormat expectedFormat = instance.targetFormat(logicalTarget);
-            assertNotNull(selectedTargets[slot],
+            assertNotNull(selectedTargets.get(slot),
                     packName + " " + kind + ": color-target state " + slot + " is null");
-            assertEquals(expectedFormat, selectedTargets[slot].format(),
+            assertEquals(expectedFormat, selectedTargets.get(slot).format(),
                     packName + " " + kind + ": slot " + slot + " for logical colortex"
                             + logicalTarget + " declares the wrong format");
         }
@@ -793,8 +793,8 @@ final class MetalIrisSodiumTerrainTest {
         // samplers u_LightTex/u_BlockTex, UBO u_Globals, texel buffer
         // u_SectionTimeInfo (R32_SINT).
         com.mojang.renderpearl.api.pipeline.BindGroupLayout sodiumLayout = com.mojang.renderpearl.api.pipeline.BindGroupLayout.builder()
-                .withSampler("u_LightTex")
-                .withSampler("u_BlockTex")
+                .withUniform("u_LightTex", com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER)
+                .withUniform("u_BlockTex", com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER)
                 .withUniform("u_Globals", com.mojang.renderpearl.api.pipeline.UniformType.UNIFORM_BUFFER)
                 .withUniform("u_SectionTimeInfo", com.mojang.renderpearl.api.pipeline.UniformType.TEXEL_BUFFER, GpuFormat.R32_SINT)
                 .build();

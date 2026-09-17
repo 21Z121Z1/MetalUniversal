@@ -1,7 +1,7 @@
 #version 330
 
-#moj_import <minecraft:dynamictransforms.glsl>
-#moj_import <minecraft:projection.glsl>
+#include <minecraft:dynamictransforms.glsl>
+#include <minecraft:projection.glsl>
 
 // Binding 0 is the exact Minecraft ENTITY stream. Binding 1 is a compact
 // float3 stream captured from the previous successfully submitted source
@@ -20,10 +20,10 @@ layout(std140) uniform MetallumMotion {
     mat4 PreviousFromRaster;
 };
 
-noperspective out vec2 metallumObjectMotion;
-flat out float metallumObjectValidity;
-out vec2 metallumTexCoord;
-flat out float metallumVertexColorGuard;
+layout(location = 0) noperspective out vec2 metallumObjectMotion;
+layout(location = 1) flat out float metallumObjectValidity;
+layout(location = 2) out vec2 metallumTexCoord;
+layout(location = 3) flat out float metallumVertexColorGuard;
 
 void main() {
     vec4 rasterClip = ProjMat * ModelViewMat * vec4(Position, 1.0);

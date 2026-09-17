@@ -18,7 +18,6 @@ public abstract class ItemFeatureRendererMetalFxMixin {
     @Inject(method = "prepareSubmit", at = @At("HEAD"))
     private void metallum$beginMotionItem(
             final ItemFeatureRenderer.Submit submit,
-            final boolean foil,
             final CallbackInfo ci
     ) {
         MetalEntityMotionCapture.beginItemBuild(submit);
@@ -27,7 +26,6 @@ public abstract class ItemFeatureRendererMetalFxMixin {
     @Inject(method = "prepareSubmit", at = @At("RETURN"))
     private void metallum$endMotionItem(
             final ItemFeatureRenderer.Submit submit,
-            final boolean foil,
             final CallbackInfo ci
     ) {
         MetalEntityMotionCapture.endModelBuild();

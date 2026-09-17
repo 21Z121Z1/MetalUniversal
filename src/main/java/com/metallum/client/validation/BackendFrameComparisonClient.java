@@ -1,7 +1,9 @@
 package com.metallum.client.validation;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
+import com.metallum.client.metal.render.MetalGpuTimingRecorder;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
@@ -121,6 +123,11 @@ public final class BackendFrameComparisonClient {
     private static final FixedCamera FIXED_CAMERA = parseFixedCamera(
             System.getProperty("metallum.backend.compare.fixed-camera", "")
     );
+    /** Pins the visible hotbar selection so A/B captures do not include input-state drift. */
+    private static final int FIXED_HOTBAR_SLOT = Math.max(
+            0,
+            Math.min(8, Integer.getInteger("metallum.backend.compare.fixed-hotbar-slot", 0))
+    );
     private static final long FIXED_IRIS_FRAME_MILLIS = Long.getLong(
             "metallum.backend.compare.fixed-iris-frame-millis",
             -1L
@@ -151,6 +158,10 @@ public final class BackendFrameComparisonClient {
             STABLE_SCENE_MILLIS
     );
     private static final List<Integer> COMPLETED_FRAMES = new ArrayList<>();
+    /** Render-frame pacing measured only after the stable scene boundary. */
+    private static final List<Double> FRAME_INTERVALS_MILLISECONDS = new ArrayList<>();
+    /** Java renderFrame duration, excluding the synchronous readback below. */
+    private static final List<Double> CPU_FRAME_MILLISECONDS = new ArrayList<>();
     private static int levelFrame = -1;
     private static int pendingCaptures;
     private static int failedCaptures;
@@ -208,6 +219,9 @@ public final class BackendFrameComparisonClient {
     private static boolean sceneStartIrisResetCompleted;
     private static int sceneReadinessPolls;
     private static SceneReadinessSample sceneStartSample;
+    private static boolean comparisonWorldOpenAttempted;
+    private static long previousFrameStartNanos;
+    private static long currentFrameStartNanos;
 
     private BackendFrameComparisonClient() {
     }
@@ -217,6 +231,31 @@ public final class BackendFrameComparisonClient {
             return;
         }
         Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null
+                && !comparisonWorldOpenAttempted
+                && !WORLD_NAME.isEmpty()
+                && minecraft.isGameLoadFinished()
+                && !minecraft.hasSingleplayerServer()) {
+            comparisonWorldOpenAttempted = true;
+            if (minecraft.getLevelSource().levelExists(WORLD_NAME)) {
+                Metallum.LOGGER.info(
+                        "[metallum-backend-compare] opening world '{}' through WorldOpenFlows",
+                        WORLD_NAME
+                );
+                minecraft.createWorldOpenFlows().openWorld(
+                        WORLD_NAME,
+                        () -> Metallum.LOGGER.error(
+                                "[metallum-backend-compare] could not open world '{}'",
+                                WORLD_NAME
+                        )
+                );
+            } else {
+                Metallum.LOGGER.error(
+                        "[metallum-backend-compare] world '{}' does not exist under the active game directory",
+                        WORLD_NAME
+                );
+            }
+        }
         if (minecraft.level == null || minecraft.player == null) {
             return;
         }
@@ -273,6 +312,15 @@ public final class BackendFrameComparisonClient {
                 return;
             }
             sceneReady = true;
+            // Startup, resource reload, and chunk arrival are deliberately
+            // outside the performance sample. Reset the optional Metal
+            // recorder and implementation counters at the same boundary.
+            FRAME_INTERVALS_MILLISECONDS.clear();
+            CPU_FRAME_MILLISECONDS.clear();
+            previousFrameStartNanos = 0L;
+            currentFrameStartNanos = 0L;
+            MetalGpuTimingRecorder.reset();
+            IrisMetalPerformanceCounters.reset();
             Metallum.LOGGER.info(
                     "[metallum-backend-compare] scene ready; logical timeline starts:"
                             + " polls={}, stableFrames={}, stableMillis={},"
@@ -286,6 +334,15 @@ public final class BackendFrameComparisonClient {
                     sample.entitySha256()
             );
         }
+        long frameStartNanos = System.nanoTime();
+        if (previousFrameStartNanos != 0L) {
+            double intervalMilliseconds = (frameStartNanos - previousFrameStartNanos) / 1_000_000.0;
+            if (Double.isFinite(intervalMilliseconds) && intervalMilliseconds > 0.0) {
+                FRAME_INTERVALS_MILLISECONDS.add(intervalMilliseconds);
+            }
+        }
+        previousFrameStartNanos = frameStartNanos;
+        currentFrameStartNanos = frameStartNanos;
         levelFrame++;
         if (!sessionWritten) {
             sessionWritten = true;
@@ -314,7 +371,17 @@ public final class BackendFrameComparisonClient {
     }
 
     public static void afterFrame(final boolean renderLevel, final GameRenderer renderer) {
-        if (!ENABLED || !renderLevel || levelFrame < 0 || CAPTURE_FRAMES.isEmpty()) {
+        if (!ENABLED || !renderLevel || levelFrame < 0) {
+            return;
+        }
+        if (currentFrameStartNanos != 0L) {
+            long elapsedNanos = System.nanoTime() - currentFrameStartNanos;
+            if (elapsedNanos > 0L) {
+                CPU_FRAME_MILLISECONDS.add(elapsedNanos / 1_000_000.0);
+            }
+            currentFrameStartNanos = 0L;
+        }
+        if (CAPTURE_FRAMES.isEmpty()) {
             return;
         }
         if (!CAPTURE_FRAMES.contains(levelFrame) || COMPLETED_FRAMES.contains(levelFrame)) {
@@ -933,6 +1000,17 @@ public final class BackendFrameComparisonClient {
             return;
         }
         flawlessFramesAttempted = true;
+        // Sodium's FlawlessFrames provider forces synchronous section work.
+        // On the 26.3 Vulkan path that can make the VK indirect ring rotate
+        // and wait on the command submission currently being recorded. The
+        // comparison only needs this accelerator on the Metal lane; Vulkan
+        // still has the fixed-clock and stable scene snapshot gates below.
+        if ("Vulkan".equalsIgnoreCase(RenderSystem.getDevice().getDeviceInfo().backendName())) {
+            Metallum.LOGGER.info(
+                    "[metallum-backend-compare] FlawlessFrames disabled for Vulkan ring-buffer safety"
+            );
+            return;
+        }
         try {
             FlawlessFrames.getProvider()
                     .apply("metallum-backend-compare")
@@ -970,6 +1048,17 @@ public final class BackendFrameComparisonClient {
      */
     private static boolean resetIrisAtSceneStart() {
         sceneStartIrisResetAttempted = true;
+        // Iris deliberately remains dormant on the native Vulkan baseline;
+        // its config singleton is not initialized in that mode. Reloading it
+        // would turn a valid vanilla RenderPearl run into an NPE.
+        if (Iris.getIrisConfig() == null) {
+            sceneStartIrisResetCompleted = true;
+            Metallum.LOGGER.info(
+                    "[metallum-backend-compare] Iris scene-start reset skipped; Iris is dormant for backend {}",
+                    backendName()
+            );
+            return true;
+        }
         String packBefore = Iris.getCurrentPackName();
         try {
             Iris.reload();
@@ -1118,6 +1207,7 @@ public final class BackendFrameComparisonClient {
         minecraft.player.setYHeadRot(FIXED_CAMERA.yaw());
         minecraft.player.setYBodyRot(FIXED_CAMERA.yaw());
         minecraft.player.setDeltaMovement(Vec3.ZERO);
+        minecraft.player.getInventory().setSelectedSlot(FIXED_HOTBAR_SLOT);
     }
 
     private static void reloadIris() {
@@ -1683,9 +1773,99 @@ public final class BackendFrameComparisonClient {
                     ),
                     StandardCharsets.UTF_8
             );
+            writePerformanceReport(directory, status);
         } catch (IOException ignoredException) {
             // Diagnostic metadata must not turn a rendered frame into a crash.
         }
+    }
+
+    /**
+     * Writes a backend-neutral performance receipt beside session.json. GPU
+     * timing is intentionally reported as unavailable for Vulkan: this
+     * project exposes completed Metal command-buffer timing only, and a Java
+     * wall-clock interval must never be mislabeled as Vulkan GPU time.
+     */
+    private static void writePerformanceReport(final Path directory, final String status)
+            throws IOException {
+        List<MetalGpuTimingRecorder.Sample> gpuSamples = MetalGpuTimingRecorder.snapshot();
+        List<Double> gpuMilliseconds = gpuSamples.stream()
+                .map(MetalGpuTimingRecorder.Sample::milliseconds)
+                .filter(value -> value > 0.0 && Double.isFinite(value))
+                .toList();
+        String observedBackend;
+        try {
+            observedBackend = RenderSystem.getDevice().getDeviceInfo().backendName();
+        } catch (RuntimeException unavailable) {
+            observedBackend = "unavailable";
+        }
+        boolean metal = "metal".equalsIgnoreCase(observedBackend)
+                || "metal".equalsIgnoreCase(backendName());
+        IrisMetalPerformanceCounters.Snapshot counters = IrisMetalPerformanceCounters.snapshot();
+        long renderEncoders = gpuSamples.stream()
+                .filter(sample -> sample instanceof MetalGpuTimingRecorder.Sample)
+                .count();
+        Files.writeString(
+                directory.resolve("performance.json"),
+                "{\n"
+                        + "  \"schema\": 1,\n"
+                        + "  \"status\": \"" + jsonEscape(status) + "\",\n"
+                        + "  \"backend\": \"" + jsonEscape(backendName()) + "\",\n"
+                        + "  \"deviceBackend\": \"" + jsonEscape(observedBackend) + "\",\n"
+                        + "  \"sampleBoundary\": \"stable-scene-ready; startup and readback excluded\",\n"
+                        + "  \"frameIntervalsMilliseconds\": " + scalarSummary(FRAME_INTERVALS_MILLISECONDS) + ",\n"
+                        + "  \"sourceFpsFromFrameIntervalP50\": "
+                        + numberOrNull(FRAME_INTERVALS_MILLISECONDS.isEmpty()
+                        ? 0.0 : 1_000.0 / percentile(FRAME_INTERVALS_MILLISECONDS, 0.50)) + ",\n"
+                        + "  \"cpuRenderFrameMilliseconds\": " + scalarSummary(CPU_FRAME_MILLISECONDS) + ",\n"
+                        + "  \"gpuCommandBufferMilliseconds\": "
+                        + (metal ? scalarSummary(gpuMilliseconds)
+                        : "{\"available\":false,\"reason\":\"unavailable — Vulkan GPU timestamp telemetry is not exposed by the current validation ABI\"}")
+                        + ",\n"
+                        + "  \"nativeEncoderCounts\": "
+                        + (metal ? "{\"available\":true,\"completedTimedSubmissions\":" + renderEncoders + "}"
+                        : "{\"available\":false,\"reason\":\"unavailable — current timing ABI exports Metal render/blit encoders only\"}")
+                        + ",\n"
+                        + "  \"activationCounters\": {\n"
+                        + "    \"descriptorBindingsSkipped\": " + counters.descriptorBindingsSkipped() + ",\n"
+                        + "    \"uniformUploadsSkipped\": " + counters.uniformUploadsSkipped() + ",\n"
+                        + "    \"textureCopiesSkipped\": " + counters.textureCopiesSkipped() + ",\n"
+                        + "    \"bindingClassificationCacheHits\": " + counters.bindingClassificationCacheHits() + ",\n"
+                        + "    \"uniformLookupCacheHits\": " + counters.uniformLookupCacheHits() + "\n"
+                        + "  },\n"
+                        + "  \"unavailableMetrics\": {\n"
+                        + "    \"gpuTimeVulkan\": \"unavailable — no Vulkan timestamp source is exported\",\n"
+                        + "    \"attachmentStoreLoadBytes\": \"unavailable — native bridge does not expose per-attachment load/store accounting\",\n"
+                        + "    \"residentRenderResourceBytes\": \"unavailable — native bridge does not expose MTLResource allocated-size telemetry\",\n"
+                        + "    \"peakResidentMemoryBytes\": \"unavailable — this comparison does not sample process or Metal resident memory\"\n"
+                        + "  }\n"
+                        + "}\n",
+                StandardCharsets.UTF_8
+        );
+    }
+
+    private static String scalarSummary(final List<Double> values) {
+        return "{\"available\":" + !values.isEmpty()
+                + ",\"samples\":" + values.size()
+                + ",\"p50Milliseconds\":" + numberOrNull(percentile(values, 0.50))
+                + ",\"p95Milliseconds\":" + numberOrNull(percentile(values, 0.95))
+                + ",\"maximumMilliseconds\":" + numberOrNull(
+                values.stream().mapToDouble(Double::doubleValue).max().orElse(0.0)) + "}";
+    }
+
+    private static double percentile(final List<Double> values, final double quantile) {
+        if (values.isEmpty()) {
+            return 0.0;
+        }
+        List<Double> sorted = values.stream().sorted().toList();
+        int index = Math.max(0, Math.min(
+                sorted.size() - 1,
+                (int) Math.ceil(quantile * sorted.size()) - 1
+        ));
+        return sorted.get(index);
+    }
+
+    private static String numberOrNull(final double value) {
+        return Double.isFinite(value) ? String.format(Locale.ROOT, "%.9f", value) : "null";
     }
 
     private static boolean validateDirectories(final Minecraft minecraft) {
@@ -2009,8 +2189,9 @@ public final class BackendFrameComparisonClient {
     }
 
     private static IrisRuntimeReceipt irisRuntimeReceipt() {
-        boolean shadersEnabled = Iris.getIrisConfig().areShadersEnabled();
-        boolean packPresent = Iris.getCurrentPack().isPresent();
+        var irisConfig = Iris.getIrisConfig();
+        boolean shadersEnabled = irisConfig != null && irisConfig.areShadersEnabled();
+        boolean packPresent = irisConfig != null && Iris.getCurrentPack().isPresent();
         // Iris reports the UI status sentinel "(off)" when shader packs are
         // disabled. The receipt describes an active pack identity, so a
         // non-present pack is canonically null in both dormant lanes.
@@ -2033,10 +2214,30 @@ public final class BackendFrameComparisonClient {
             String entitySha256
     ) {
         boolean eligible() {
+            // Sodium 0.9.2 on 26.3 reports zero visible chunks until its
+            // render-tree camera extraction has completed, while the same
+            // frame already reports terrainComplete=true and a populated
+            // loaded-chunk set. Visible count remains in the receipt and is
+            // part of the equality/stability sample, but must not deadlock
+            // the comparison before the first extracted camera frame.
             return this.loadedChunks > 0
-                    && this.visibleChunks > 0
                     && this.terrainComplete
-                    && this.entityCount > 0;
+                    && this.entityCount > 0
+                    // A populated client level is not yet a renderable
+                    // comparison scene while 26.3 is still showing its
+                    // LevelLoadingScreen. Backend differences in that GUI
+                    // path would otherwise be mistaken for world-rendering
+                    // differences.
+                    && comparisonSceneIsRenderable();
+        }
+
+        private static boolean comparisonSceneIsRenderable() {
+            Minecraft minecraft = Minecraft.getInstance();
+            // Pure JVM tracker tests run without a constructed Minecraft
+            // singleton; in that environment there is no loading overlay to
+            // exclude. The live capture path always has the singleton.
+            return minecraft == null
+                    || (minecraft.gui.screen() == null && minecraft.gui.overlay() == null);
         }
     }
 

@@ -5,6 +5,7 @@ import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
 import com.mojang.renderpearl.api.pipeline.DepthStencilState;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.pipeline.UniformType;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
@@ -109,7 +110,7 @@ final class MetalEntityMotionPipeline {
         if (source == null) {
             return null;
         }
-        return switch (source.getVertexShader().getPath()) {
+        return switch (source.getShaders().get(ShaderType.VERTEX).getPath()) {
             case "core/entity", "core/item" -> Family.ENTITY;
             case "core/block" -> Family.BLOCK;
             default -> null;
@@ -124,7 +125,8 @@ final class MetalEntityMotionPipeline {
         if (familyOf(source) == null) {
             return false;
         }
-        ColorTargetState sourceTarget = source.getColorTargetState();
+        ColorTargetState sourceTarget = source.getColorTargetStates().isEmpty()
+                ? null : source.getColorTargetStates().getFirst();
         return sourceTarget != null
                 && sourceTarget.blendFunction().isEmpty()
                 && !source.getShaderDefines().flags().contains("DISSOLVE");
@@ -143,12 +145,12 @@ final class MetalEntityMotionPipeline {
         if (source == null) {
             return null;
         }
-        VertexFormat[] bindings = source.getVertexFormatBindings();
-        if (bindings.length == 0 || bindings[0] == null || (bindings.length >= 2 && bindings[1] != null)) {
+        java.util.List<@Nullable VertexFormat> bindings = source.getVertexFormatBindings();
+        if (bindings.isEmpty() || bindings.get(0) == null || (bindings.size() >= 2 && bindings.get(1) != null)) {
             return null;
         }
-        VertexFormat format = bindings[0];
-        String shader = source.getVertexShader().getPath();
+        VertexFormat format = bindings.get(0);
+        String shader = source.getShaders().get(ShaderType.VERTEX).getPath();
         if ((shader.equals("core/entity") || shader.equals("core/item"))
                 && DefaultVertexFormat.ENTITY.equals(format)
                 && supports(source)) {
@@ -224,7 +226,8 @@ final class MetalEntityMotionPipeline {
         Family family = familyOf(source);
         if (family == null) {
             throw new IllegalArgumentException(
-                    "No root motion family replays " + source.getLocation() + " (" + source.getVertexShader() + ")");
+                    "No root motion family replays " + source.getLocation() + " ("
+                            + source.getShaders().get(ShaderType.VERTEX) + ")");
         }
         if (previousPositions) {
             PreviousFamily previousFamily = previousFamilyOf(source);
@@ -263,7 +266,7 @@ final class MetalEntityMotionPipeline {
 
         source.getBindGroupLayouts().forEach(builder::withBindGroupLayout);
         builder.withBindGroupLayout(RESOURCES);
-        for (int slot = 0; slot < source.getVertexFormatBindings().length; slot++) {
+        for (int slot = 0; slot < source.getVertexFormatBindings().size(); slot++) {
             if (source.getVertexFormatBinding(slot) != null) {
                 builder.withVertexBinding(slot, source.getVertexFormatBinding(slot));
             }

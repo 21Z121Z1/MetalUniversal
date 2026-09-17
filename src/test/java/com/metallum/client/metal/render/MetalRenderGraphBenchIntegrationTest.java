@@ -114,12 +114,12 @@ final class MetalRenderGraphBenchIntegrationTest {
         MetalCommandEncoder.setRenderPassAbiModeForTests("auto");
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice), "MTLCreateSystemDefaultDevice returned null");
-        ShaderSource source = (identifier, type) -> {
+        ShaderSource source = MetalShaderSourceAdapters.from((identifier, type) -> {
             String name = identifier.getPath().substring(identifier.getPath().lastIndexOf('/') + 1);
             return type == ShaderType.VERTEX
                     ? vertexShaders.getOrDefault(name, FULLSCREEN_VERTEX)
                     : fragmentShaders.get(name);
-        };
+        });
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),
@@ -207,12 +207,12 @@ final class MetalRenderGraphBenchIntegrationTest {
                         new float[] { 0.0F, 1.0F, 0.0F, 1.0F },
                         new float[] { 0.0F, 0.0F, 1.0F, 1.0F },
                         new float[] { 1.0F, 1.0F, 0.0F, 1.0F });
-                RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "bench mrt full");
+                RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> "bench mrt full");
                 for (int index = 0; index < 4; index++) {
                     descriptor.withColorAttachment(view(textures.get(index)), Optional.of(new Vector4f(0.0F)));
                 }
                 descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
                 pass.setPipeline(pipeline);
                 pass.draw(3, 1, 0, 0);
                 encoder.submitRenderPass();
@@ -263,12 +263,12 @@ final class MetalRenderGraphBenchIntegrationTest {
                         .withColorTargetState(2, new ColorTargetState(
                                 Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
                         .build();
-                RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "bench mrt null middle");
+                RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> "bench mrt null middle");
                 descriptor.withColorAttachment(view(textures.get(0)), Optional.of(new Vector4f(0.0F)));
                 descriptor.withUnusedColorAttachment();
                 descriptor.withColorAttachment(view(textures.get(1)), Optional.of(new Vector4f(0.0F)));
                 descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
                 pass.setPipeline(pipeline);
                 pass.draw(3, 1, 0, 0);
                 encoder.submitRenderPass();
@@ -329,19 +329,19 @@ final class MetalRenderGraphBenchIntegrationTest {
                         new float[] { 1.0F, 0.0F, 0.0F, 1.0F }, null, null, null);
 
                 // P1: clear to white only.
-                RenderPassDescriptor clearDescriptor = RenderPassDescriptor.create(() -> "bench scissor clear");
+                RenderPassDescriptor.Builder clearDescriptor = RenderPassDescriptor.builder(() -> "bench scissor clear");
                 clearDescriptor.withColorAttachment(view(texture), Optional.of(new Vector4f(1.0F, 1.0F, 1.0F, 1.0F)));
                 clearDescriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-                MetalRenderPass clearPass = (MetalRenderPass) encoder.createRenderPass(clearDescriptor);
+                MetalRenderPass clearPass = (MetalRenderPass) encoder.createRenderPass(clearDescriptor.build());
                 encoder.submitRenderPass();
 
                 // P2: LOAD + scissored quadrant draw. The quadrant draw does
                 // NOT prove full overwrite, so the load of the other pixels'
                 // content is semantically mandatory.
-                RenderPassDescriptor drawDescriptor = RenderPassDescriptor.create(() -> "bench scissor draw");
+                RenderPassDescriptor.Builder drawDescriptor = RenderPassDescriptor.builder(() -> "bench scissor draw");
                 drawDescriptor.withColorAttachment(view(texture), Optional.empty());
                 drawDescriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-                MetalRenderPass drawPass = (MetalRenderPass) encoder.createRenderPass(drawDescriptor);
+                MetalRenderPass drawPass = (MetalRenderPass) encoder.createRenderPass(drawDescriptor.build());
                 drawPass.setPipeline(redPipeline);
                 drawPass.enableScissor(0, 0, WIDTH / 2, HEIGHT / 2);
                 drawPass.draw(3, 1, 0, 0);
@@ -385,18 +385,18 @@ final class MetalRenderGraphBenchIntegrationTest {
                         """);
 
                 // P1: opaque gray base.
-                RenderPassDescriptor baseDescriptor = RenderPassDescriptor.create(() -> "bench blend base");
+                RenderPassDescriptor.Builder baseDescriptor = RenderPassDescriptor.builder(() -> "bench blend base");
                 baseDescriptor.withColorAttachment(view(texture), Optional.of(new Vector4f(0.5F, 0.5F, 0.5F, 1.0F)));
                 baseDescriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-                MetalRenderPass basePass = (MetalRenderPass) encoder.createRenderPass(baseDescriptor);
+                MetalRenderPass basePass = (MetalRenderPass) encoder.createRenderPass(baseDescriptor.build());
                 encoder.submitRenderPass();
 
                 // P2: translucent red over gray. Blending reads the stored
                 // destination, so this pass's LOAD is semantically required.
-                RenderPassDescriptor blendDescriptor = RenderPassDescriptor.create(() -> "bench blend over");
+                RenderPassDescriptor.Builder blendDescriptor = RenderPassDescriptor.builder(() -> "bench blend over");
                 blendDescriptor.withColorAttachment(view(texture), Optional.empty());
                 blendDescriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-                MetalRenderPass blendPass = (MetalRenderPass) encoder.createRenderPass(blendDescriptor);
+                MetalRenderPass blendPass = (MetalRenderPass) encoder.createRenderPass(blendDescriptor.build());
                 blendPass.setPipeline(blendPipeline);
                 blendPass.draw(3, 1, 0, 0);
                 encoder.submitRenderPass();
@@ -500,10 +500,10 @@ final class MetalRenderGraphBenchIntegrationTest {
                 // dead bandwidth under V2 semantics.
                 RenderPipeline cyanPipeline = solidPipeline("dead_cyan", 1,
                         new float[] { 0.0F, 1.0F, 1.0F, 1.0F }, null, null, null);
-                RenderPassDescriptor overwrite = RenderPassDescriptor.create(() -> "bench dead overwrite");
+                RenderPassDescriptor.Builder overwrite = RenderPassDescriptor.builder(() -> "bench dead overwrite");
                 overwrite.withColorAttachment(view(texture), Optional.of(new Vector4f(0.0F, 1.0F, 1.0F, 1.0F)));
                 overwrite.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(overwrite);
+                MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(overwrite.build());
                 pass.setPipeline(cyanPipeline);
                 pass.draw(3, 1, 0, 0);
                 encoder.submitRenderPass();
@@ -582,10 +582,10 @@ final class MetalRenderGraphBenchIntegrationTest {
                 fullscreenSolid("store_alive_p2", b, new Vector4f(0.0F, 0.0F, 1.0F, 1.0F));
                 RenderPipeline greenLoadPipeline = solidPipeline("store_alive_green", 1,
                         new float[] {0.0F, 1.0F, 0.0F, 1.0F}, null, null, null);
-                RenderPassDescriptor reloadB = RenderPassDescriptor.create(() -> "bench store alive p3");
+                RenderPassDescriptor.Builder reloadB = RenderPassDescriptor.builder(() -> "bench store alive p3");
                 reloadB.withColorAttachment(view(b), Optional.empty());
                 reloadB.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-                MetalRenderPass reloadPass = (MetalRenderPass) encoder.createRenderPass(reloadB);
+                MetalRenderPass reloadPass = (MetalRenderPass) encoder.createRenderPass(reloadB.build());
                 reloadPass.setPipeline(greenLoadPipeline);
                 reloadPass.draw(3, 1, 0, 0);
                 encoder.submitRenderPass();
@@ -715,10 +715,10 @@ final class MetalRenderGraphBenchIntegrationTest {
         // evidence to the immediate successor, so this adjacency is the
         // honest scenario (a later clear of A cannot retroactively suppress
         // an already-resolved store).
-        RenderPassDescriptor clearA = RenderPassDescriptor.create(() -> "bench killed p2");
+        RenderPassDescriptor.Builder clearA = RenderPassDescriptor.builder(() -> "bench killed p2");
         clearA.withColorAttachment(view(a), Optional.of(new Vector4f(0.0F, 0.0F, 0.0F, 0.0F)));
         clearA.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-        MetalRenderPass passA = (MetalRenderPass) encoder.createRenderPass(clearA);
+        MetalRenderPass passA = (MetalRenderPass) encoder.createRenderPass(clearA.build());
         passA.setPipeline(bluePipeline);
         passA.draw(3, 1, 0, 0);
         encoder.submitRenderPass();
@@ -727,10 +727,10 @@ final class MetalRenderGraphBenchIntegrationTest {
         fullscreenSolid("killed_p3", b, new Vector4f(1.0F, 1.0F, 0.0F, 1.0F));
         RenderPipeline finalRed = solidPipeline("killed_final", 1,
                 new float[] {1.0F, 0.0F, 0.0F, 1.0F}, null, null, null);
-        RenderPassDescriptor touchB = RenderPassDescriptor.create(() -> "bench killed p4");
+        RenderPassDescriptor.Builder touchB = RenderPassDescriptor.builder(() -> "bench killed p4");
         touchB.withColorAttachment(view(b), Optional.of(new Vector4f(0.0F)));
         touchB.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-        MetalRenderPass passB = (MetalRenderPass) encoder.createRenderPass(touchB);
+        MetalRenderPass passB = (MetalRenderPass) encoder.createRenderPass(touchB.build());
         passB.setPipeline(finalRed);
         passB.draw(3, 1, 0, 0);
         encoder.submitRenderPass();
@@ -820,7 +820,7 @@ final class MetalRenderGraphBenchIntegrationTest {
     private RenderPipeline samplePipeline(final String name) {
         fragmentShaders.put(name, SAMPLE_FRAGMENT);
         BindGroupLayout layout = BindGroupLayout.builder()
-                .withSampler("SourceSampler")
+                .withUniform("SourceSampler", com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER)
                 .build();
         return RenderPipeline.builder()
                 .withLocation("metallum_test/" + name)
@@ -849,10 +849,10 @@ final class MetalRenderGraphBenchIntegrationTest {
     private void fullscreenSolid(final String shaderName, final MetalGpuTexture target, final Vector4f clear) {
         RenderPipeline pipeline = solidPipeline(shaderName, 1,
                 new float[] { clear.x(), clear.y(), clear.z(), clear.w() }, null, null, null);
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "bench " + shaderName);
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> "bench " + shaderName);
         descriptor.withColorAttachment(view(target), Optional.of(clear));
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-        MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+        MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
         pass.setPipeline(pipeline);
         pass.draw(3, 1, 0, 0);
         encoder.submitRenderPass();
@@ -902,11 +902,11 @@ final class MetalRenderGraphBenchIntegrationTest {
             final RenderPipeline pipeline,
             final Vector4f clearColor
     ) {
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "bench " + label);
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> "bench " + label);
         descriptor.withColorAttachment(view(target), Optional.of(clearColor));
         descriptor.withDepthAttachment(view(depth), java.util.OptionalDouble.empty());
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-        MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+        MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
         pass.setPipeline(pipeline);
         pass.draw(3, 1, 0, 0);
         encoder.submitRenderPass();
@@ -920,10 +920,10 @@ final class MetalRenderGraphBenchIntegrationTest {
             final MetalGpuTexture target,
             final MetalGpuTexture source
     ) {
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "bench " + label);
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> "bench " + label);
         descriptor.withColorAttachment(view(target), Optional.empty());
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-        MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+        MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
         pass.setPipeline(pipeline);
         pass.bindTexture("SourceSampler", view(source), sampler);
         pass.draw(3, 1, 0, 0);

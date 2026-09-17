@@ -49,7 +49,7 @@ public abstract class IrisMetalUniformLookupCacheMixin {
     }
 
     @Inject(
-            method = "slice(Ljava/lang/Object;)Lcom/mojang/blaze3d/buffers/GpuBufferSlice;",
+            method = "slice(Ljava/lang/Object;)Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;",
             at = @At("HEAD"),
             cancellable = true
     )
@@ -65,7 +65,7 @@ public abstract class IrisMetalUniformLookupCacheMixin {
     }
 
     @Inject(
-            method = "slice(Ljava/lang/Object;)Lcom/mojang/blaze3d/buffers/GpuBufferSlice;",
+            method = "slice(Ljava/lang/Object;)Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;",
             at = @At("RETURN")
     )
     private void metallum$rememberSlice(

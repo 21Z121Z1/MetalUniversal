@@ -1,5 +1,6 @@
 package com.metallum.mixin.render;
 
+import com.metallum.client.metal.render.MetalMultiDrawScratch;
 import org.junit.jupiter.api.Test;
 
 import java.lang.foreign.ValueLayout;

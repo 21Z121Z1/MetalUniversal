@@ -56,12 +56,12 @@ final class MetalIrisTargetsIntegrationTest {
     void createDevice() {
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice), "MTLCreateSystemDefaultDevice returned null");
-        ShaderSource source = (identifier, type) -> {
+        ShaderSource source = MetalShaderSourceAdapters.from((identifier, type) -> {
             String name = identifier.getPath().substring(identifier.getPath().lastIndexOf('/') + 1);
             return type == ShaderType.VERTEX
                     ? vertexShaders.getOrDefault(name, FULLSCREEN_VERTEX)
                     : fragmentShaders.get(name);
-        };
+        });
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),
@@ -416,7 +416,7 @@ final class MetalIrisTargetsIntegrationTest {
             );
 
             BindGroupLayout sampleLayout = BindGroupLayout.builder()
-                    .withSampler("SourceSampler")
+                    .withUniform("SourceSampler", com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER)
                     .build();
             RenderPipeline samplePipeline = RenderPipeline.builder()
                     .withLocation("metallum_iris/iris_mip_sample")
@@ -489,7 +489,7 @@ final class MetalIrisTargetsIntegrationTest {
                     .withColorTargetState(0, new ColorTargetState(
                             Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
                     .build();
-            RenderPassDescriptor sourceDescriptor = RenderPassDescriptor.create(
+            RenderPassDescriptor.Builder sourceDescriptor = RenderPassDescriptor.builder(
                     () -> "logical RGB physical write"
             ).withColorAttachment(
                     source.readView(0),
@@ -497,13 +497,13 @@ final class MetalIrisTargetsIntegrationTest {
             ).withRenderArea(new com.mojang.renderpearl.api.commands.RenderPass.RenderArea(
                     0, 0, WIDTH, HEIGHT
             ));
-            MetalRenderPass sourcePass = (MetalRenderPass) encoder.createRenderPass(sourceDescriptor);
+            MetalRenderPass sourcePass = (MetalRenderPass) encoder.createRenderPass(sourceDescriptor.build());
             sourcePass.setPipeline(sourcePipeline);
             sourcePass.draw(3, 1, 0, 0);
             encoder.submitRenderPass();
 
             BindGroupLayout sampleLayout = BindGroupLayout.builder()
-                    .withSampler("SourceSampler")
+                    .withUniform("SourceSampler", com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER)
                     .build();
             RenderPipeline samplePipeline = RenderPipeline.builder()
                     .withLocation("metallum_iris/iris_rgb_sample")

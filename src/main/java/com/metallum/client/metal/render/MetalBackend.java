@@ -6,6 +6,7 @@ import com.mojang.renderpearl.api.device.BackendCreationException;
 import com.mojang.renderpearl.api.device.GpuBackend;
 import com.mojang.renderpearl.api.device.GpuDebugOptions;
 import com.mojang.renderpearl.api.device.GpuDevice;
+import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.renderpearl.frontend.FrontendGpuDevice;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -18,6 +19,13 @@ import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
 public final class MetalBackend implements GpuBackend {
+    /** Publishes Minecraft's complete RenderPearl source provider for lazy Metal PSO compilation. */
+    public static ShaderSource captureShaderSource(final ShaderSource shaderSource) {
+        ShaderSource effectiveSource = MetalShaderSourceAdapters.withClasspathFallback(shaderSource);
+        MetalDevice.captureShaderSource(effectiveSource);
+        return effectiveSource;
+    }
+
     @Override
     public @NonNull String getName() {
         return "Metal";

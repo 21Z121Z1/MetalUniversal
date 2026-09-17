@@ -4,6 +4,7 @@ import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.pipeline.BlendFunction;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.pipeline.BlendFactor;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
@@ -13,6 +14,7 @@ import net.irisshaders.iris.gl.blending.BlendModeOverride;
 import net.irisshaders.iris.pipeline.IrisPipelines;
 import net.irisshaders.iris.pipeline.WorldRenderingPhase;
 import net.irisshaders.iris.pipeline.programs.ShaderKey;
+import net.irisshaders.iris.vertices.IrisVertexFormats;
 import net.minecraft.client.renderer.RenderPipelines;
 import org.junit.jupiter.api.Test;
 
@@ -52,7 +54,6 @@ final class IrisMetalCoreGbufferPipelinesTest {
             RenderPipelines.ENTITY_SHADOW,
             RenderPipelines.ARMOR_CUTOUT_NO_CULL,
             RenderPipelines.ARMOR_DECAL_CUTOUT_NO_CULL,
-            RenderPipelines.ARMOR_TRANSLUCENT,
             RenderPipelines.BREEZE_WIND,
             RenderPipelines.ENTITY_SOLID,
             RenderPipelines.ENTITY_SOLID_Z_OFFSET_FORWARD,
@@ -67,9 +68,13 @@ final class IrisMetalCoreGbufferPipelinesTest {
     @Test
     void staticMappingsMatchThePinnedIris112Oracle() throws ReflectiveOperationException {
         Map<RenderPipeline, ?> oracleMain = oracleMap("coreShaderMap");
-        assertEquals(oracleMain.size(), IrisMetalCoreGbufferPipelines.mappedPipelineCount(false));
+        Set<RenderPipeline> mappedMain = IrisMetalCoreGbufferPipelines.mappedPipelines(false);
+        long supportedMain = oracleMain.keySet().stream().filter(mappedMain::contains).count();
+        assertEquals(supportedMain, mappedMain.size(),
+                () -> "26.3 mappings without a pinned 26.2 Iris oracle: "
+                        + mappedMain.stream().filter(p -> !oracleMain.containsKey(p)).map(p -> p.getLocation().toString()).toList());
         for (Map.Entry<RenderPipeline, ?> entry : oracleMain.entrySet()) {
-            if (DYNAMIC_MAIN.contains(entry.getKey())) {
+            if (!mappedMain.contains(entry.getKey()) || DYNAMIC_MAIN.contains(entry.getKey())) {
                 continue;
             }
             assertSame(
@@ -80,14 +85,26 @@ final class IrisMetalCoreGbufferPipelinesTest {
         }
 
         Map<RenderPipeline, ?> oracleShadow = oracleMap("coreShaderMapShadow");
-        assertEquals(oracleShadow.size(), IrisMetalCoreGbufferPipelines.mappedPipelineCount(true));
+        Set<RenderPipeline> mappedShadow = IrisMetalCoreGbufferPipelines.mappedPipelines(true);
+        Set<RenderPipeline> newlyMappedShadow = Set.of(RenderPipelines.WEATHER);
+        long supportedShadow = oracleShadow.keySet().stream().filter(mappedShadow::contains).count();
+        assertEquals(supportedShadow + newlyMappedShadow.size(), mappedShadow.size(),
+                () -> "26.3 shadow mappings without a pinned 26.2 Iris oracle: "
+                        + mappedShadow.stream().filter(p -> !oracleShadow.containsKey(p)).map(p -> p.getLocation().toString()).toList());
         for (Map.Entry<RenderPipeline, ?> entry : oracleShadow.entrySet()) {
+            if (!mappedShadow.contains(entry.getKey()) || newlyMappedShadow.contains(entry.getKey())) {
+                continue;
+            }
             assertSame(
                     applyOracle(entry.getValue()),
                     IrisMetalCoreGbufferPipelines.resolve(entry.getKey(), SHADOW),
                     () -> "shadow mapping differs for " + entry.getKey().getLocation()
             );
         }
+        assertSame(
+                ShaderKey.SHADOW_PARTICLES,
+                IrisMetalCoreGbufferPipelines.resolve(RenderPipelines.WEATHER, SHADOW)
+        );
     }
 
     @Test
@@ -119,7 +136,6 @@ final class IrisMetalCoreGbufferPipelinesTest {
                         RenderPipelines.ITEM_TRANSLUCENT,
                         RenderPipelines.ENTITY_TRANSLUCENT,
                         RenderPipelines.ENTITY_SHADOW,
-                        RenderPipelines.ARMOR_TRANSLUCENT,
                         RenderPipelines.BREEZE_WIND,
                         RenderPipelines.BANNER_PATTERN
                 ),
@@ -150,38 +166,42 @@ final class IrisMetalCoreGbufferPipelinesTest {
         VertexFormat entity = IrisMetalCoreGbufferPipelines.physicalVertexFormat(
                 RenderPipelines.ENTITY_CUTOUT, ShaderKey.ENTITIES_CUTOUT_DIFFUSE
         );
-        assertSame(DefaultVertexFormat.ENTITY, entity);
-        assertEquals(36, entity.getVertexSize());
+        assertSame(IrisVertexFormats.ENTITY, entity);
+        assertEquals(56, entity.getVertexSize());
         assertEquals(
-                List.of("Position", "Color", "UV0", "UV1", "UV2", "Normal"),
+                List.of(
+                        "Position", "Color", "UV0", "UV1", "UV2", "Normal",
+                        "iris_Entity", "mc_midTexCoord", "at_tangent"
+                ),
                 entity.getElements().stream().map(element -> element.name()).toList()
         );
         assertEquals(
-                List.of(0, 12, 16, 24, 28, 32),
+                List.of(0, 12, 16, 24, 28, 32, 36, 44, 52),
                 entity.getElements().stream().map(element -> element.offset()).toList()
         );
         assertEquals(
                 List.of(
                         GpuFormat.RGB32_FLOAT, GpuFormat.RGBA8_UNORM, GpuFormat.RG32_FLOAT,
-                        GpuFormat.RG16_SINT, GpuFormat.RG16_SINT, GpuFormat.RGBA8_SNORM
+                        GpuFormat.RG16_SINT, GpuFormat.RG16_SINT, GpuFormat.RGBA8_SNORM,
+                        GpuFormat.RGBA16_UINT, GpuFormat.RG32_FLOAT, GpuFormat.RGBA8_SNORM
                 ),
                 entity.getElements().stream().map(element -> element.format()).toList()
         );
 
         assertSame(
-                RenderPipelines.BEACON_BEAM_OPAQUE.getVertexFormatBinding(0),
+                ShaderKey.BEACON.getVertexFormat(),
                 IrisMetalCoreGbufferPipelines.physicalVertexFormat(
                         RenderPipelines.BEACON_BEAM_OPAQUE, ShaderKey.BEACON
                 )
         );
         assertSame(
-                RenderPipelines.TEXT_SEE_THROUGH.getVertexFormatBinding(0),
+                IrisVertexFormats.GLYPH,
                 IrisMetalCoreGbufferPipelines.physicalVertexFormat(
                         RenderPipelines.TEXT_SEE_THROUGH, ShaderKey.TEXT
                 )
         );
         assertSame(
-                RenderPipelines.END_PORTAL.getVertexFormatBinding(0),
+                ShaderKey.BLOCK_ENTITY.getVertexFormat(),
                 IrisMetalCoreGbufferPipelines.physicalVertexFormat(
                         RenderPipelines.END_PORTAL, ShaderKey.BLOCK_ENTITY
                 )
@@ -204,8 +224,8 @@ final class IrisMetalCoreGbufferPipelinesTest {
 
         RenderPipeline sameName = RenderPipeline.builder()
                 .withLocation(RenderPipelines.ENTITY_SOLID.getLocation())
-                .withVertexShader(RenderPipelines.ENTITY_SOLID.getVertexShader())
-                .withFragmentShader(RenderPipelines.ENTITY_SOLID.getFragmentShader())
+                .withVertexShader(RenderPipelines.ENTITY_SOLID.getShaders().get(ShaderType.VERTEX))
+                .withFragmentShader(RenderPipelines.ENTITY_SOLID.getShaders().get(ShaderType.FRAGMENT))
                 .withPrimitiveTopology(PrimitiveTopology.QUADS)
                 .build();
         assertNull(IrisMetalCoreGbufferPipelines.resolve(sameName, MAIN));

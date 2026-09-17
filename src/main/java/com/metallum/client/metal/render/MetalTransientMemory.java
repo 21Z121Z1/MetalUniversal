@@ -26,10 +26,10 @@ final class MetalTransientMemory implements TransientMemory {
 
     private final MetalDevice device;
     private final MetalCommandEncoder encoder;
-    private final TransientBlockAllocator<Long> cpuBlockAllocator = new TransientBlockAllocator<>(
+    private final TransientBlockAllocator<TransientBlockAllocator.Allocator.CpuBlock> cpuBlockAllocator = new TransientBlockAllocator<>(
             BLOCK_SIZE,
             MAX_CPU_ALIGNMENT,
-            TransientBlockAllocator.Allocator.create(MemoryUtil::nmemAlloc, MemoryUtil::nmemFree)
+            TransientBlockAllocator.Allocator.CpuBlock.memalloc()
     );
     private final TransientBlockAllocator<MetalGpuBuffer> gpuBlockAllocator;
     /** One lightweight GpuBuffer facade per backing/usage pair in the current frame. */
@@ -85,14 +85,14 @@ final class MetalTransientMemory implements TransientMemory {
             final long minimumAllocation,
             final long elementSize
     ) {
-        TransientBlockAllocator.Allocation<Long> allocation = this.cpuBlockAllocator.allocate(
+        TransientBlockAllocator.Allocation<TransientBlockAllocator.Allocator.CpuBlock> allocation = this.cpuBlockAllocator.allocate(
                 size,
                 alignment,
                 minimumAllocation,
                 elementSize
         );
         return MemoryUtil.memByteBuffer(
-                allocation.block() + allocation.offset(),
+                allocation.block().address() + allocation.offset(),
                 Math.toIntExact(allocation.size())
         );
     }

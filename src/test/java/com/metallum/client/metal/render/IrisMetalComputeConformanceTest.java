@@ -10,8 +10,6 @@ import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import com.mojang.renderpearl.api.device.GpuDebugOptions;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
-import com.mojang.renderpearl.api.device.GpuDevice;
-import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.pathways.colorspace.ColorSpace;
@@ -59,7 +57,7 @@ final class IrisMetalComputeConformanceTest {
 
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice));
-        ShaderSource fallback = (identifier, type) -> null;
+        ShaderSource fallback = MetalShaderSourceAdapters.empty();
         MetalDevice device = new MetalDevice(
                 fallback,
                 new GpuDebugOptions(2, true, true, true),
@@ -68,9 +66,6 @@ final class IrisMetalComputeConformanceTest {
                 "Iris compute conformance device",
                 MemorySegment.NULL
         );
-        GpuDevice renderDevice = new GpuDevice(device, () -> { });
-        RenderSystem.initRenderThread();
-        RenderSystem.initRenderer(renderDevice);
         try {
             try (IrisMetalPostChain chain = IrisMetalPostChain.create(
                     1, programSet, formats.length, new BitSet()
@@ -112,7 +107,6 @@ final class IrisMetalComputeConformanceTest {
             }
         } finally {
             MetalFxManager.close();
-            RenderSystem.shutdownRenderer();
         }
     }
 
@@ -127,7 +121,7 @@ final class IrisMetalComputeConformanceTest {
 
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice));
-        ShaderSource fallback = (identifier, type) -> null;
+        ShaderSource fallback = MetalShaderSourceAdapters.empty();
         MetalDevice device = new MetalDevice(
                 fallback,
                 new GpuDebugOptions(2, true, true, true),

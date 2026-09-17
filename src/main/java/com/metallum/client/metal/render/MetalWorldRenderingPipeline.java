@@ -11,7 +11,6 @@ import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
 import net.caffeinemc.mods.sodium.client.render.viewport.ViewportProvider;
 import net.caffeinemc.mods.sodium.client.util.FogStorage;
-import net.caffeinemc.mods.sodium.client.util.SodiumChunkSection;
 import net.caffeinemc.mods.sodium.client.world.LevelRendererExtension;
 import net.caffeinemc.mods.sodium.mixin.core.render.world.FrustumAccessor;
 import net.fabricmc.api.EnvType;
@@ -59,6 +58,7 @@ import net.minecraft.client.renderer.culling.Frustum;
 import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.feature.FeatureRenderDispatcher;
+import com.mojang.renderpearl.api.commands.RenderPass;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
 import net.minecraft.core.BlockPos;
@@ -400,7 +400,7 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             this.shadowLevelRenderState.reset();
             camera.extractRenderState(
                     this.shadowLevelRenderState.cameraRenderState,
-                    CapturedRenderingState.INSTANCE.getTickDelta()
+                    client.getDeltaTracker()
             );
             this.shadowLevelRenderState.cameraRenderState.viewRotationMatrix = shadowView;
             this.shadowLevelRenderState.cameraRenderState.projectionMatrix = shadowProjection;
@@ -429,33 +429,51 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             );
             client.smartCull = previousSmartCull;
 
-            ChunkSectionsToRender sections = new ChunkSectionsToRender(null, null, 0, null);
-            ((SodiumChunkSection) (Object) sections).sodium$setRendering(
-                    sodium, shadowMatrices, cameraPosition.x, cameraPosition.y, cameraPosition.z
-            );
             IrisMetalPipelineOverrides.executeShadowFrame(new IrisMetalShadowPipeline.LevelRendererAdapter() {
                 @Override
                 public void renderOpaqueShadows() {
-                    if (shadow.shouldRenderTerrain()) {
+                    if (shadow.shouldRenderTerrain() || needsShadowFeatureSubmission(shadow)) {
                         frameState.setPhase(WorldRenderingPhase.TERRAIN_SOLID);
-                        sections.renderGroup(ChunkSectionLayerGroup.OPAQUE, shadowSampler);
-                        frameState.setPhase(WorldRenderingPhase.NONE);
-                    }
-                    if (needsShadowFeatureSubmission(shadow)) {
-                        RenderSystem.getModelViewStack().identity();
-                        try {
-                            renderShadowFeatures(
-                                    levelRenderer,
-                                    sodium,
-                                    camera,
-                                    shadowPose,
-                                    shadowFrustum,
-                                    cameraPosition,
-                                    shadow
-                            );
-                        } finally {
-                            RenderSystem.getModelViewStack().set(shadowView);
+                        try (RenderPass pass = IrisMetalPipelineOverrides.createShadowTerrainRenderPass(
+                                RenderSystem.getDevice().createCommandEncoder(),
+                                () -> "Iris Metal opaque shadow terrain",
+                                false
+                        )) {
+                            if (pass == null) {
+                                throw new IllegalStateException("Iris Metal opaque shadow terrain pass was not created");
+                            }
+                            RenderSystem.bindDefaultUniforms(pass);
+                            if (shadow.shouldRenderTerrain()) {
+                                sodium.drawChunkLayer(
+                                        pass,
+                                        ChunkSectionLayerGroup.OPAQUE,
+                                        shadowMatrices,
+                                        cameraPosition.x,
+                                        cameraPosition.y,
+                                        cameraPosition.z,
+                                        shadowSampler,
+                                        null
+                                );
+                            }
+                            if (needsShadowFeatureSubmission(shadow)) {
+                                RenderSystem.getModelViewStack().identity();
+                                try {
+                                    renderShadowFeatures(
+                                            levelRenderer,
+                                            sodium,
+                                            camera,
+                                            shadowPose,
+                                            shadowFrustum,
+                                            cameraPosition,
+                                            shadow,
+                                            pass
+                                    );
+                                } finally {
+                                    RenderSystem.getModelViewStack().set(shadowView);
+                                }
+                            }
                         }
+                        frameState.setPhase(WorldRenderingPhase.NONE);
                     }
                 }
 
@@ -463,7 +481,26 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                 public void renderTranslucentShadows() {
                     if (shadow.shouldRenderTranslucent()) {
                         frameState.setPhase(WorldRenderingPhase.TERRAIN_TRANSLUCENT);
-                        sections.renderGroup(ChunkSectionLayerGroup.TRANSLUCENT, shadowSampler);
+                        try (RenderPass pass = IrisMetalPipelineOverrides.createShadowTerrainRenderPass(
+                                RenderSystem.getDevice().createCommandEncoder(),
+                                () -> "Iris Metal translucent shadow terrain",
+                                true
+                        )) {
+                            if (pass == null) {
+                                throw new IllegalStateException("Iris Metal translucent shadow terrain pass was not created");
+                            }
+                            RenderSystem.bindDefaultUniforms(pass);
+                            sodium.drawChunkLayer(
+                                    pass,
+                                    ChunkSectionLayerGroup.TRANSLUCENT,
+                                    shadowMatrices,
+                                    cameraPosition.x,
+                                    cameraPosition.y,
+                                    cameraPosition.z,
+                                    shadowSampler,
+                                    null
+                            );
+                        }
                         frameState.setPhase(WorldRenderingPhase.NONE);
                     }
                 }
@@ -498,7 +535,8 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             final PoseStack shadowPose,
             final Frustum entityFrustum,
             final Vector3d cameraPosition,
-            final PackShadowDirectives shadow
+            final PackShadowDirectives shadow,
+            final RenderPass renderPass
     ) {
         Minecraft client = Minecraft.getInstance();
         EntityRenderDispatcher entityDispatcher = levelRenderer.getEntityRenderDispatcher();
@@ -546,7 +584,9 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
                 submitShadowBlockEntities(client, camera, shadowPose);
             }
 
-            this.shadowFeatureRenderDispatcher.renderAllFeatures(this.shadowSubmitNodeStorage);
+            FeatureRenderDispatcher.PreparedFrame preparedFrame =
+                    this.shadowFeatureRenderDispatcher.prepareFrame(this.shadowSubmitNodeStorage);
+            FeatureRenderDispatcher.renderAllFeatures(renderPass, preparedFrame);
         } finally {
             this.shadowRenderBuffers.endFrame();
             this.frameState.setPhase(WorldRenderingPhase.NONE);
@@ -577,13 +617,14 @@ public final class MetalWorldRenderingPipeline extends VanillaRenderingPipeline 
             if (!shouldExtractGeneralShadowEntity(entity instanceof AbstractClientPlayer player && player.isSpectator())) {
                 continue;
             }
-            if (!dispatcher.shouldRender(entity, frustum, cameraX, cameraY, cameraZ)
+            if (!dispatcher.shouldRender(entity, frustum, cameraX, cameraY, cameraZ,
+                    deltaTracker.getGameTimeDeltaPartialTick(false))
                     && !entity.hasIndirectPassenger(client.player)) {
                 continue;
             }
             BlockPos blockPos = entity.blockPosition();
             if (!client.level.isOutsideBuildHeight(blockPos.getY())
-                    && !client.levelRenderer.isSectionCompiledAndVisible(blockPos)) {
+                    && !client.levelRenderer.isSectionCompiledAndVisible(blockPos, 0L)) {
                 continue;
             }
             if (entity.tickCount == 0) {

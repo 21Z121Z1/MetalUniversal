@@ -1,7 +1,7 @@
 #version 330
 
-#moj_import <minecraft:dynamictransforms.glsl>
-#moj_import <minecraft:projection.glsl>
+#include <minecraft:dynamictransforms.glsl>
+#include <minecraft:projection.glsl>
 
 // Match the packed entity vertex format even though this reduced shader does
 // not consume Color at location 1. Without explicit locations SPIR-V assigns
@@ -16,10 +16,10 @@ layout(std140) uniform MetallumMotion {
     mat4 PreviousFromRaster;
 };
 
-noperspective out vec2 metallumObjectMotion;
-flat out float metallumObjectValidity;
-out vec2 metallumTexCoord;
-flat out float metallumVertexColorGuard;
+layout(location = 0) noperspective out vec2 metallumObjectMotion;
+layout(location = 1) flat out float metallumObjectValidity;
+layout(location = 2) out vec2 metallumTexCoord;
+layout(location = 3) flat out float metallumVertexColorGuard;
 
 void main() {
     // Entity model vertices already contain the exact CPU-side PoseStack

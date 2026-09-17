@@ -3,6 +3,8 @@ package com.metallum.mixin.render;
 import com.metallum.client.metal.render.MetalFxManager;
 import net.minecraft.client.renderer.feature.FeatureFrameContext;
 import net.minecraft.client.renderer.feature.RenderTypeFeatureRenderer;
+import net.minecraft.client.renderer.oit.OitStage;
+import com.mojang.renderpearl.api.commands.RenderPass;
 import net.minecraft.client.renderer.feature.submit.SubmitNode;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -17,6 +19,8 @@ public abstract class RenderTypeFeatureRendererMetalFxMixin {
     @Inject(method = "executeGroup", at = @At("HEAD"))
     private void metallum$observeTranslucentFeatureGroup(
             final FeatureFrameContext context,
+            final OitStage stage,
+            final RenderPass renderPass,
             final int groupIndex,
             final List<? extends SubmitNode> submits,
             final boolean strictlyOrdered,

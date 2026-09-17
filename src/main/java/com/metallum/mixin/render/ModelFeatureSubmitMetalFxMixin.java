@@ -5,7 +5,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import net.minecraft.client.model.Model;
 import net.minecraft.client.renderer.feature.ModelFeatureRenderer;
 import net.minecraft.client.renderer.rendertype.RenderType;
-import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import net.minecraft.client.renderer.texture.UvMapping;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -22,7 +22,7 @@ public abstract class ModelFeatureSubmitMetalFxMixin {
             final int lightCoords,
             final int overlayCoords,
             final int tintedColor,
-            final TextureAtlasSprite sprite,
+            final UvMapping uvMapping,
             final PoseStack.Pose sheetedDecalPose,
             final CallbackInfo ci
     ) {

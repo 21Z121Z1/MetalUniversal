@@ -8,6 +8,7 @@ import com.mojang.renderpearl.api.vertex.VertexFormat;
 import java.util.concurrent.atomic.AtomicBoolean;
 import net.caffeinemc.mods.sodium.client.render.chunk.ShaderChunkRenderer;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
+import net.minecraft.client.renderer.oit.OitStage;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -29,6 +30,7 @@ public abstract class ShaderChunkRendererMetalFxMixin {
             final TerrainRenderPass pass,
             final net.caffeinemc.mods.sodium.client.util.FogParameters parameters,
             final com.mojang.renderpearl.api.textures.GpuSampler terrainSampler,
+            final OitStage oitStage,
             final CallbackInfo ci
     ) {
         MetalCutoutReactivePipeline.beginTerrainPass(pass);
@@ -39,6 +41,7 @@ public abstract class ShaderChunkRendererMetalFxMixin {
             final TerrainRenderPass pass,
             final net.caffeinemc.mods.sodium.client.util.FogParameters parameters,
             final com.mojang.renderpearl.api.textures.GpuSampler terrainSampler,
+            final OitStage oitStage,
             final CallbackInfo ci
     ) {
         IrisMetalPipelineOverrides.beginTerrainPass(pass);
@@ -47,6 +50,7 @@ public abstract class ShaderChunkRendererMetalFxMixin {
     @Inject(method = "compileProgram", at = @At("HEAD"), cancellable = true, remap = false)
     private void metallum$compileCutoutReactivePipeline(
             final TerrainRenderPass pass,
+            final OitStage oitStage,
             final CallbackInfoReturnable<RenderPipeline> cir
     ) {
         if (MetalCutoutReactivePipeline.isActiveCutoutPass()) {

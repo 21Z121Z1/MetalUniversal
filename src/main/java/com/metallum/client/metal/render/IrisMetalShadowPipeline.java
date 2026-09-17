@@ -353,12 +353,11 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                 RenderPipeline pipeline = this.compositePipelines.computeIfAbsent(
                         pass, this::buildCompositePipeline
                 );
-                ShaderSource source = (identifier, type) -> {
-                    String generated = this.generatedSources.get(identifier);
-                    return generated != null ? generated : fallback.get(identifier, type);
-                };
+                ShaderSource source = MetalShaderSourceAdapters.overlay(this.generatedSources, fallback);
                 CompiledRenderPipeline compiled = device.precompilePipeline(pipeline, source);
-                if (!device.asyncPrewarmEnabled() && !compiled.isValid()) {
+                if (!device.asyncPrewarmEnabled()
+                        && compiled instanceof MetalCompiledRenderPipeline metal
+                        && !metal.isValid()) {
                     throw new IllegalStateException(
                             "Metal shadow composite pipeline is invalid for " + pass.name()
                     );
@@ -468,7 +467,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                         "Shadow composite sampler buffer '" + sampler.name() + "' has no typed Metal binding"
                 );
             }
-            bindings.withSampler(sampler.name());
+            bindings.withUniform(sampler.name(), UniformType.COMBINED_IMAGE_SAMPLER);
         }
         RenderPipeline.Builder builder = RenderPipeline.builder()
                 .withLocation(Identifier.fromNamespaceAndPath("metallum", base))
@@ -1061,13 +1060,13 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
             final ShadowProgram program
     ) {
         requirePhase(Phase.OPAQUE, Phase.TRANSLUCENT);
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> label);
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> label);
         BitSet main = new BitSet(targetCount);
         for (int target : program.drawBuffers()) {
             descriptor.withColorAttachment(targets.colorView(target, main));
         }
         descriptor.withDepthAttachment(targets.shadowDepthView());
-        return descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, resolution(), resolution()));
+        return descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, resolution(), resolution())).build();
     }
 
     void captureOpaqueDepth(final MetalCommandEncoder encoder) {
@@ -1273,6 +1272,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                     source.getName(), vertex, null, null, null, fragment,
                     alpha,
                     textureMap,
+                    Set.of(),
                     true
             );
         } else if (key.patch == Patch.VANILLA) {
@@ -1283,7 +1283,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
             patched = TransformPatcher.patchVanilla(
                     source.getName(), vertex, null, null, null, fragment,
                     alpha,
-                    isLines, false, true, inputs, textureMap
+                    isLines, false, true, inputs, textureMap, Set.of()
             );
         } else {
             throw new IllegalStateException("Unsupported shadow patch family " + key.patch + " for " + key);
@@ -1324,7 +1324,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
         String fragment = source.getFragmentSource().orElseThrow(
                 () -> translationFailure(source, MetalIrisShaderCompiler.StageKind.FRAGMENT, "missing fragment source"));
         Map<PatchShaderType, String> patched = TransformPatcher.patchComposite(
-                source.getName(), vertex, null, fragment, TextureStage.SHADOWCOMP, textureMap
+                source.getName(), vertex, null, fragment, TextureStage.SHADOWCOMP, textureMap, Set.of()
         );
         return linkPatchedPair(source, patched, shadowDrawBuffers(source.getDirectives()));
     }
@@ -1333,7 +1333,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
         String glsl = source.getSource().orElseThrow(() -> new IllegalStateException(
                 "Compute source " + source.getName() + " has no shader text"));
         String patched = TransformPatcher.patchCompute(
-                source.getName(), glsl, TextureStage.SHADOWCOMP, textureMap
+                source.getName(), glsl, TextureStage.SHADOWCOMP, textureMap, Set.of()
         );
         MetalIrisShaderCompiler.TranslatedStage stage = MetalIrisShaderCompiler.translateStage(
                 source.getName(), MetalIrisShaderCompiler.StageKind.COMPUTE, patched

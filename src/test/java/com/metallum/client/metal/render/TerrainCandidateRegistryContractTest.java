@@ -2,7 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.mixin.sodium.SectionRenderDataStorageOwner;
 import com.metallum.mixin.sodium.SectionRenderDataStorageAccessor;
-import net.caffeinemc.mods.sodium.client.gpu.arena.GlBufferSegment;
+import net.caffeinemc.mods.sodium.client.gpu.arena.BufferSegment;
 import net.caffeinemc.mods.sodium.client.render.chunk.LocalSectionIndex;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
 import org.joml.Matrix4f;
@@ -335,17 +335,17 @@ final class TerrainCandidateRegistryContractTest {
         }
 
         @Override
-        public GlBufferSegment[] metallum$getVertexAllocations() {
+        public BufferSegment[] metallum$getVertexAllocations() {
             return null;
         }
 
         @Override
-        public GlBufferSegment[] metallum$getElementAllocations() {
+        public BufferSegment[] metallum$getElementAllocations() {
             return null;
         }
 
         @Override
-        public GlBufferSegment metallum$getSharedIndexAllocation() {
+        public BufferSegment metallum$getSharedIndexAllocation() {
             return null;
         }
 

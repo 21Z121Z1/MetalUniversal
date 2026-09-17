@@ -71,14 +71,16 @@ public final class MetalCutoutReactivePipeline {
     private static RenderPipeline build(final VertexFormat vertexFormat) {
         var builder = RenderPipeline.builder()
                 .withBindGroupLayout(ShaderChunkRenderer.BIND_GROUP)
+                .withBindGroupLayout(ShaderChunkRenderer.LIGHT_GROUP)
+                .withPushConstantSize(20)
                 .withLocation(Identifier.fromNamespaceAndPath(
                         "metallum",
                         "pipeline/terrain_cutout_reactive"
                 ))
                 .withCull(true)
                 .withVertexShader(Identifier.fromNamespaceAndPath(
-                        "sodium",
-                        "blocks/block_layer_opaque"
+                        "metallum",
+                        "blocks/block_layer_cutout_reactive"
                 ))
                 .withFragmentShader(SHADER)
                 .withDepthStencilState(DepthStencilState.DEFAULT)

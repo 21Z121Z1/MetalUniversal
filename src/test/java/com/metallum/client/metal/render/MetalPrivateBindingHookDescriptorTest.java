@@ -28,17 +28,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * must fail here instead of pairing an old token with a new compatibility key.</p>
  */
 final class MetalPrivateBindingHookDescriptorTest {
-    private static final String RENDER_PASS = "com/mojang/blaze3d/systems/RenderPass";
+    private static final String RENDER_PASS = "com/mojang/renderpearl/api/commands/RenderPass";
     private static final String METAL_RENDER_PASS = "com/metallum/client/metal/render/MetalRenderPass";
     private static final String SET_UNIFORM_SLICE =
-            "(Ljava/lang/String;Lcom/mojang/blaze3d/buffers/GpuBufferSlice;)V";
+            "(Ljava/lang/String;Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;)V";
     private static final String SET_UNIFORM_BUFFER =
-            "(Ljava/lang/String;Lcom/mojang/blaze3d/buffers/GpuBuffer;)V";
+            "(Ljava/lang/String;Lcom/mojang/renderpearl/api/buffers/GpuBuffer;)V";
     private static final String BIND_TEXTURE =
-            "(Ljava/lang/String;Lcom/mojang/blaze3d/textures/GpuTextureView;"
-                    + "Lcom/mojang/blaze3d/textures/GpuSampler;)V";
+            "(Ljava/lang/String;Lcom/mojang/renderpearl/api/textures/GpuTextureView;"
+                    + "Lcom/mojang/renderpearl/api/textures/GpuSampler;)V";
     private static final String BIND_STORAGE_IMAGE =
-            "(Ljava/lang/String;Lcom/mojang/blaze3d/textures/GpuTextureView;)V";
+            "(Ljava/lang/String;Lcom/mojang/renderpearl/api/textures/GpuTextureView;)V";
     private static final String MULTI_DRAW_BATCH =
             "net/caffeinemc/mods/sodium/client/gpu/device/batch/MultiDrawBatch";
     private static final String DRAW_CONTEXT =
@@ -46,7 +46,7 @@ final class MetalPrivateBindingHookDescriptorTest {
     private static final String VK_INDIRECT_BATCH =
             "net/caffeinemc/mods/sodium/client/gpu/device/batch/VKIndirectDrawBatch";
     private static final String DRAW_INDEXED_INDIRECT =
-            "(Lcom/mojang/blaze3d/buffers/GpuBufferSlice;I)V";
+            "(Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;I)V";
 
     @Test
     void sodiumTerrainStillHasTheFourFixedBindingCallSites() {
@@ -66,7 +66,7 @@ final class MetalPrivateBindingHookDescriptorTest {
                 invocationStringKeys(render, RENDER_PASS, "setUniform", SET_UNIFORM_BUFFER),
                 "the GpuBuffer terrain binding is no longer the fixed u_SectionTimeInfo resource");
         assertEquals(List.of("u_LightTex", "u_BlockTex"),
-                invocationStringKeys(render, RENDER_PASS, "bindTexture", BIND_TEXTURE),
+                invocationStringKeys(render, RENDER_PASS, "setUniform", BIND_TEXTURE),
                 "the two texture ordinals no longer map to u_LightTex then u_BlockTex");
     }
 

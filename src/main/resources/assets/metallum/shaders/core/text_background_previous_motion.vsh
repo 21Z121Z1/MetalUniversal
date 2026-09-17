@@ -1,10 +1,10 @@
 #version 330
 
 #ifndef IS_SEE_THROUGH
-#moj_import <minecraft:sample_lightmap.glsl>
+#include <minecraft:sample_lightmap.glsl>
 #endif
-#moj_import <minecraft:dynamictransforms.glsl>
-#moj_import <minecraft:projection.glsl>
+#include <minecraft:dynamictransforms.glsl>
+#include <minecraft:projection.glsl>
 
 layout(location = 0) in vec3 Position;
 layout(location = 1) in vec4 Color;
@@ -21,9 +21,9 @@ layout(std140) uniform MetallumMotion {
     mat4 PreviousFromRaster;
 };
 
-noperspective out vec2 metallumObjectMotion;
-flat out float metallumObjectValidity;
-out vec4 metallumVertexColor;
+layout(location = 0) noperspective out vec2 metallumObjectMotion;
+layout(location = 1) flat out float metallumObjectValidity;
+layout(location = 2) out vec4 metallumVertexColor;
 
 void main() {
     vec4 rasterClip = ProjMat * ModelViewMat * vec4(Position, 1.0);

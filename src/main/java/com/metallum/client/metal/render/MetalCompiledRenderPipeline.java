@@ -12,6 +12,7 @@ import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.pipeline.PolygonMode;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
 import com.mojang.renderpearl.api.vertex.VertexFormatElement;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.resources.Identifier;
@@ -30,7 +31,7 @@ import java.util.Optional;
 import java.util.Set;
 
 @Environment(EnvType.CLIENT)
-final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoCloseable {
+final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, BackendRenderPipeline, AutoCloseable {
     static final int MAX_METAL_VERTEX_SLOTS = 31;
 
     private static final Identifier SODIUM_TERRAIN_VERTEX_SHADER =
@@ -62,6 +63,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final MTLTriangleFillMode fillMode;
     private final float depthBiasScaleFactor;
     private final float depthBiasConstant;
+    private final boolean writesDepth;
     private final MTLPrimitiveType topology;
     private final int vertexBufferCount;
 
@@ -166,6 +168,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         int depthWrite;
         var depthStencilState = info.getDepthStencilState();
         this.hasDepthStencilState = depthStencilState != null;
+        this.writesDepth = depthStencilState != null && depthStencilState.writeDepth();
         if (depthStencilState == null) {
             depthCompareOp = MTLCompareFunction.Always;
             depthWrite = 0;
@@ -190,11 +193,11 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 depthWrite
         );
 
-        List<ColorTargetState> colorTargets = info.getColorTargetStates();
-        if (colorTargets.isEmpty() || colorTargets.size() > ColorTargetState.MAX_COLOR_TARGETS) {
+        List<@Nullable ColorTargetState> colorTargets = info.getColorTargetStates();
+        if (colorTargets.size() > ColorTargetState.MAX_COLOR_TARGETS) {
             throw new IllegalArgumentException(
                     "Pipeline " + info.getLocation() + " has " + colorTargets.size()
-                            + " color targets; supported range is 1.." + ColorTargetState.MAX_COLOR_TARGETS
+                            + " color targets; supported range is 0.." + ColorTargetState.MAX_COLOR_TARGETS
             );
         }
         this.colorFormats = new MTLPixelFormat[colorTargets.size()];
@@ -399,10 +402,26 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MTLPixelFormat depthFormat,
             final MTLPixelFormat stencilFormat
     ) {
-        return supportedDepthStencilFormats().contains(new DepthStencilFormats(depthFormat, stencilFormat));
+        return List.of(
+                new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Invalid),
+                new DepthStencilFormats(MTLPixelFormat.Depth16Unorm, MTLPixelFormat.Invalid),
+                new DepthStencilFormats(MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid),
+                new DepthStencilFormats(MTLPixelFormat.Depth32Float_Stencil8, MTLPixelFormat.Depth32Float_Stencil8),
+                new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Stencil8)
+        ).contains(new DepthStencilFormats(depthFormat, stencilFormat));
     }
 
-    private static List<DepthStencilFormats> supportedDepthStencilFormats() {
+    private List<DepthStencilFormats> supportedDepthStencilFormats() {
+        if (this.writesDepth) {
+            // A fragment shader that writes depth cannot be paired with an
+            // invalid depth attachment on Apple Metal. Keep only signatures
+            // that can actually receive the shader output.
+            return List.of(
+                    new DepthStencilFormats(MTLPixelFormat.Depth16Unorm, MTLPixelFormat.Invalid),
+                    new DepthStencilFormats(MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid),
+                    new DepthStencilFormats(MTLPixelFormat.Depth32Float_Stencil8, MTLPixelFormat.Depth32Float_Stencil8)
+            );
+        }
         return List.of(
                 new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Invalid),
                 new DepthStencilFormats(MTLPixelFormat.Depth16Unorm, MTLPixelFormat.Invalid),
@@ -417,7 +436,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
      * and the Depth32Float main framebuffer. Everything else is built on first
      * real demand; async prewarm may additionally create it in the background.
      */
-    private static List<DepthStencilFormats> eagerDepthStencilFormats() {
+    private List<DepthStencilFormats> eagerDepthStencilFormats() {
+        if (this.writesDepth) {
+            return List.of(new DepthStencilFormats(MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid));
+        }
         return List.of(
                 new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Invalid),
                 new DepthStencilFormats(MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid)
@@ -441,7 +463,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         try (MTLRenderPipelineDescriptor pipelineDesc = new MTLRenderPipelineDescriptor()) {
             pipelineDesc.setCompiledFunctions(vertexFunction, fragmentFunction);
             pipelineDesc.setVertexDescriptor(vertexDescriptor);
-            List<ColorTargetState> colorTargets = info.getColorTargetStates();
+            List<@Nullable ColorTargetState> colorTargets = info.getColorTargetStates();
             for (int index = 0; index < colorFormats.length; index++) {
                 ColorTargetState colorTarget = colorTargets.get(index);
                 pipelineDesc.setColorAttachmentFormat(index, colorFormats[index]);
@@ -505,6 +527,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return this.resourcesByName.get(name);
     }
 
+    @Nullable
+    ResourceBinding resource(final int bindingIndex) {
+        for (ResourceBinding resource : this.resources) {
+            if (resource.bindingIndex() == bindingIndex) {
+                return resource;
+            }
+        }
+        return null;
+    }
+
     boolean usesStableTerrainSampler(final ResourceBinding binding) {
         return binding.kind() == ResourceKind.SAMPLED_IMAGE
                 && isSodiumTerrainBlockSampler(binding.name(), this.info.getShaders().get(ShaderType.VERTEX));
@@ -535,7 +567,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     MemorySegment getNativePipeline(final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
-        if (!isSupportedDepthStencilFormatPair(depthFormat, stencilFormat)) {
+        if (!isSupportedDepthStencilFormatPair(depthFormat, stencilFormat)
+                || (this.writesDepth && depthFormat == MTLPixelFormat.Invalid)) {
             throw new IllegalArgumentException(
                     "Unsupported Metal depth/stencil attachment signature: depth=" + depthFormat
                             + ", stencil=" + stencilFormat
@@ -582,7 +615,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     /** Returns the stride for the logical RenderPass slot, not the Metal ABI slot. */
     int vertexStride(final int logicalSlot) {
         int binding = logicalSlot;
-        List<VertexFormat> formats = this.info.getVertexFormatBindings();
+        List<@Nullable VertexFormat> formats = this.info.getVertexFormatBindings();
         if (binding < 0 || binding >= formats.size() || formats.get(binding) == null) {
             return 0;
         }
@@ -645,9 +678,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs,
             final int genericVertexBufferSlot
     ) {
-        List<VertexFormat> bindings = pipeline.getVertexFormatBindings();
+        List<@Nullable VertexFormat> bindings = pipeline.getVertexFormatBindings();
         MTLVertexDescriptor vertexDesc = new MTLVertexDescriptor();
-        long attrIndex = 0;
+        int sequentialAttributeIndex = 0;
+        boolean[] physicalLocations = new boolean[MAX_METAL_VERTEX_SLOTS];
 
         for (int i = 0; i < bindings.size(); i++) {
             VertexFormat binding = bindings.get(i);
@@ -667,8 +701,19 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 if (format == MTLVertexFormat.Invalid) {
                     throw new IllegalStateException("Unsupported vertex attribute format: " + element.format());
                 }
-                vertexDesc.setAttribute(attrIndex, format.value, element.offset(), metalSlot);
-                attrIndex++;
+                int attributeIndex = syntheticAttributeLocation(element.name(), sequentialAttributeIndex);
+                if (attributeIndex < 0 || attributeIndex >= MAX_METAL_VERTEX_SLOTS) {
+                    throw new IllegalStateException(
+                            "Vertex attribute location " + attributeIndex + " is outside Metal's 0.."
+                                    + (MAX_METAL_VERTEX_SLOTS - 1) + " range"
+                    );
+                }
+                if (physicalLocations[attributeIndex]) {
+                    throw new IllegalStateException("Duplicate physical vertex attribute location " + attributeIndex);
+                }
+                physicalLocations[attributeIndex] = true;
+                vertexDesc.setAttribute(attributeIndex, format.value, element.offset(), metalSlot);
+                sequentialAttributeIndex++;
             }
         }
 
@@ -680,7 +725,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                     0
             );
             for (MetalCrossShaderCompiler.GenericVertexInput input : genericVertexInputs) {
-                if (input.location() < attrIndex) {
+                if (input.location() < 0 || input.location() >= physicalLocations.length) {
+                    throw new IllegalStateException(
+                            "Generic vertex attribute location " + input.location()
+                                    + " is outside Metal's 0.." + (MAX_METAL_VERTEX_SLOTS - 1) + " range"
+                    );
+                }
+                if (physicalLocations[input.location()]) {
                     throw new IllegalStateException(
                             "Generic vertex attribute location " + input.location()
                                     + " overlaps the physical vertex layout of " + pipeline.getLocation()
@@ -696,6 +747,18 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         }
 
         return vertexDesc;
+    }
+
+    /** RenderPearl's backend bindings preserve shader locations in the synthetic names. */
+    private static int syntheticAttributeLocation(final String name, final int fallback) {
+        if (name.startsWith("attribute")) {
+            try {
+                return Integer.parseInt(name.substring("attribute".length()));
+            } catch (NumberFormatException ignored) {
+                // Tests and non-synthetic callers may use ordinary semantic names.
+            }
+        }
+        return fallback;
     }
 
     private static int firstAvailableVertexBufferSlot(final List<ResourceBinding> resources) {

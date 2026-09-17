@@ -237,7 +237,7 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
     }
 
     @Inject(
-            method = "drawIndexedIndirect(Lcom/mojang/blaze3d/buffers/GpuBufferSlice;I)V",
+            method = "drawIndexedIndirect(Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;I)V",
             at = @At("HEAD"),
             cancellable = true
     )
@@ -316,7 +316,7 @@ public abstract class MetalRenderPassNoTraceDrawMixin {
     }
 
     @Inject(
-            method = "drawIndirect(Lcom/mojang/blaze3d/buffers/GpuBufferSlice;I)V",
+            method = "drawIndirect(Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;I)V",
             at = @At("HEAD"),
             cancellable = true
     )

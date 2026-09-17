@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class MetalPsoArtifactPrewarmContractTest {
     @Test
-    void diskArtifactLookupRunsBeforeLockedCompileWithoutBypassingIris() throws Exception {
+    void renderPearlOwnsFrontendAndMetalConsumesNormalizedSpirv() throws Exception {
         String device = Files.readString(Path.of(
                 "src/main/java/com/metallum/client/metal/render/MetalDevice.java"
         ));
@@ -18,24 +18,15 @@ final class MetalPsoArtifactPrewarmContractTest {
         ));
         String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
 
-        assertTrue(compiler.contains("synchronized (shaderSource)"));
-        assertTrue(compiler.contains("rawVertex = shaderSource.get"));
-        assertTrue(compiler.contains("rawFragment = shaderSource.get"));
-
-        int lookup = device.indexOf("MetalCrossShaderCompiler.tryLoadCacheLookup(pipeline, effectiveSource)");
-        int submitCompile = device.indexOf("this.submitPrewarmTask(() ->");
-        int lockedCompile = device.indexOf("synchronized (COMPILE_CHAIN_LOCK)", submitCompile);
-        assertTrue(lookup >= 0 && submitCompile > lookup && lockedCompile > submitCompile);
-
-        int override = device.indexOf("IrisMetalPipelineOverrides.tryCompile(this, pipeline, source)");
-        int generic = device.indexOf("MetalCrossShaderCompiler.compile(this, pipeline, source, preloadedLookup)");
-        assertTrue(override >= 0 && generic > override);
-
-        assertTrue(device.contains("Executors.newFixedThreadPool(PREWARM_LOOKUP_WORKERS"));
-        assertTrue(device.contains("Executors.newSingleThreadExecutor"));
+        assertTrue(device.contains(".compilePipeline("));
+        assertTrue(device.contains("synchronized (COMPILE_CHAIN_LOCK)"));
+        assertTrue(device.contains("frontendPipelines"));
+        assertTrue(device.contains("getOrCompileFrontendPipeline"));
+        assertTrue(compiler.contains("SpvModule"));
+        assertTrue(compiler.contains("RenderPearl owns GLSL preprocessing"));
+        assertTrue(compiler.contains("compilePending"));
         assertTrue(compiler.contains("record CacheLookup("));
-        assertTrue(compiler.contains("does not create Metal functions/PSOs"));
-        assertTrue(compiler.contains("Float.floatToIntBits(lookup.sampleLodBias())"));
+        assertTrue(!compiler.contains("com.mojang.blaze3d.vulkan.glsl"));
         assertTrue(nativeSource.contains("pipelineCompilerQueue = DispatchQueue(label: \"com.metallum.pipeline-compiler\""));
     }
 }

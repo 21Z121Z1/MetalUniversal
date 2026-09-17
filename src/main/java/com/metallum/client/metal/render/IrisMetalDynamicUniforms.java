@@ -792,6 +792,16 @@ final class IrisMetalDynamicUniforms implements DynamicUniformHolder {
     }
 
     @Override
+    public IrisMetalDynamicUniforms uniformMatrix3(
+            final UniformUpdateFrequency frequency,
+            final String name,
+            final Supplier<Matrix3fc> supplier
+    ) {
+        register(name, UniformType.MAT3, supplier, false, frequency, null);
+        return this;
+    }
+
+    @Override
     public IrisMetalDynamicUniforms uniform1f(
             final String name,
             final FloatSupplier supplier,

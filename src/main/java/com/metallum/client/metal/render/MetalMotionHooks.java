@@ -50,7 +50,7 @@ public final class MetalMotionHooks {
     /** {@code MovingBlockFeatureRenderer.Submit(Matrix4fc, MovingBlockRenderState, int)}. */
     public static final String MOVING_BLOCK_SUBMIT_DESCRIPTOR =
             "(Lorg/joml/Matrix4fc;"
-                    + "Lnet/minecraft/client/renderer/block/MovingBlockRenderState;I)V";
+                    + "Lnet/minecraft/client/renderer/block/MovingBlockRenderState;IZ)V";
 
     private MetalMotionHooks() {
     }

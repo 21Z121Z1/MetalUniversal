@@ -59,7 +59,7 @@ public abstract class IrisMetalDepthAllocationMixin {
     }
 
     @Inject(
-            method = "captureNoTranslucentsDepth(Lcom/metallum/client/metal/render/MetalCommandEncoder;Lcom/mojang/blaze3d/textures/GpuTexture;)V",
+            method = "captureNoTranslucentsDepth(Lcom/metallum/client/metal/render/MetalCommandEncoder;Lcom/mojang/renderpearl/api/textures/GpuTexture;)V",
             at = @At("HEAD"),
             require = 0
     )
@@ -84,7 +84,7 @@ public abstract class IrisMetalDepthAllocationMixin {
     }
 
     @Inject(
-            method = "captureNoHandDepth(Lcom/metallum/client/metal/render/MetalCommandEncoder;Lcom/mojang/blaze3d/textures/GpuTexture;)V",
+            method = "captureNoHandDepth(Lcom/metallum/client/metal/render/MetalCommandEncoder;Lcom/mojang/renderpearl/api/textures/GpuTexture;)V",
             at = @At("HEAD"),
             require = 0
     )

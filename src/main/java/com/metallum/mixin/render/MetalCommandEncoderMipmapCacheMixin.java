@@ -32,7 +32,7 @@ public abstract class MetalCommandEncoderMipmapCacheMixin {
     }
 
     @Inject(
-            method = "clearColorTexture(Lcom/mojang/blaze3d/textures/GpuTexture;Lorg/joml/Vector4fc;)V",
+            method = "clearColorTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;Lorg/joml/Vector4fc;)V",
             at = @At("HEAD")
     )
     private void metallum$invalidateColorClear(
@@ -44,7 +44,7 @@ public abstract class MetalCommandEncoderMipmapCacheMixin {
     }
 
     @Inject(
-            method = "clearColorAndDepthTextures(Lcom/mojang/blaze3d/textures/GpuTexture;Lorg/joml/Vector4fc;Lcom/mojang/blaze3d/textures/GpuTexture;D)V",
+            method = "clearColorAndDepthTextures(Lcom/mojang/renderpearl/api/textures/GpuTexture;Lorg/joml/Vector4fc;Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V",
             at = @At("HEAD")
     )
     private void metallum$invalidateColorDepthClear(
@@ -59,7 +59,7 @@ public abstract class MetalCommandEncoderMipmapCacheMixin {
     }
 
     @Inject(
-            method = "clearColorAndDepthTextures(Lcom/mojang/blaze3d/textures/GpuTexture;Lorg/joml/Vector4fc;Lcom/mojang/blaze3d/textures/GpuTexture;DIIII)V",
+            method = "clearColorAndDepthTextures(Lcom/mojang/renderpearl/api/textures/GpuTexture;Lorg/joml/Vector4fc;Lcom/mojang/renderpearl/api/textures/GpuTexture;DIIIII)V",
             at = @At("HEAD")
     )
     private void metallum$invalidateColorDepthRegionClear(
@@ -71,6 +71,7 @@ public abstract class MetalCommandEncoderMipmapCacheMixin {
             final int regionY,
             final int regionWidth,
             final int regionHeight,
+            final int mipLevel,
             final CallbackInfo ci
     ) {
         metallum$markChanged(colorTexture);
@@ -78,7 +79,7 @@ public abstract class MetalCommandEncoderMipmapCacheMixin {
     }
 
     @Inject(
-            method = "clearDepthTexture(Lcom/mojang/blaze3d/textures/GpuTexture;D)V",
+            method = "clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V",
             at = @At("HEAD")
     )
     private void metallum$invalidateDepthClear(

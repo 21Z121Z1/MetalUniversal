@@ -59,7 +59,7 @@ public abstract class IrisMetalPostChainBindingTokenMixin {
             method = "bindResources",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/MetalRenderPass;setUniform(Ljava/lang/String;Lcom/mojang/blaze3d/buffers/GpuBufferSlice;)V"
+                    target = "Lcom/metallum/client/metal/render/MetalRenderPass;setUniform(Ljava/lang/String;Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;)V"
             )
     )
     private static void metallum$setUniformByToken(
@@ -76,7 +76,7 @@ public abstract class IrisMetalPostChainBindingTokenMixin {
             method = "bindResources",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/MetalRenderPass;bindTexture(Ljava/lang/String;Lcom/mojang/blaze3d/textures/GpuTextureView;Lcom/mojang/blaze3d/textures/GpuSampler;)V"
+                    target = "Lcom/metallum/client/metal/render/MetalRenderPass;bindTexture(Ljava/lang/String;Lcom/mojang/renderpearl/api/textures/GpuTextureView;Lcom/mojang/renderpearl/api/textures/GpuSampler;)V"
             )
     )
     private static void metallum$bindTextureByToken(
@@ -94,7 +94,7 @@ public abstract class IrisMetalPostChainBindingTokenMixin {
             method = "bindResources",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/metallum/client/metal/render/MetalRenderPass;bindStorageImage(Ljava/lang/String;Lcom/mojang/blaze3d/textures/GpuTextureView;)V"
+                    target = "Lcom/metallum/client/metal/render/MetalRenderPass;bindStorageImage(Ljava/lang/String;Lcom/mojang/renderpearl/api/textures/GpuTextureView;)V"
             )
     )
     private static void metallum$bindStorageImageByToken(

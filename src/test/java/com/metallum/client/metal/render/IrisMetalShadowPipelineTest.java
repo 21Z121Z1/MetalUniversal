@@ -47,10 +47,10 @@ final class IrisMetalShadowPipelineTest {
     void createDevice() {
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice));
-        ShaderSource source = (identifier, type) -> {
+        ShaderSource source = MetalShaderSourceAdapters.from((identifier, type) -> {
             String name = identifier.getPath().substring(identifier.getPath().lastIndexOf('/') + 1);
             return type == ShaderType.VERTEX ? FULLSCREEN_VERTEX : fragments.get(name);
-        };
+        });
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),

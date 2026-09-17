@@ -57,7 +57,7 @@ final class IrisMetalPostChainCompilationTest {
 
             MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
             assertFalse(MetalNativeBridge.isNullHandle(nativeDevice));
-            ShaderSource fallback = (identifier, type) -> null;
+            ShaderSource fallback = MetalShaderSourceAdapters.empty();
             MetalDevice device = new MetalDevice(
                     fallback,
                     new GpuDebugOptions(2, true, true, true),
@@ -149,7 +149,7 @@ final class IrisMetalPostChainCompilationTest {
 
             MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
             assertFalse(MetalNativeBridge.isNullHandle(nativeDevice));
-            ShaderSource fallback = (identifier, type) -> null;
+            ShaderSource fallback = MetalShaderSourceAdapters.empty();
             MetalDevice device = new MetalDevice(
                     fallback,
                     new GpuDebugOptions(2, true, true, true),

@@ -363,7 +363,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
         if (readTargets != null) {
             colorTargets.checkNoFeedbackLoop(drawBuffers, readTargets);
         }
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> label);
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> label);
         MetalGpuTextureView[] ownedViews = new MetalGpuTextureView[drawBuffers.length + (withDepth ? 1 : 0)];
         for (int slot = 0; slot < drawBuffers.length; slot++) {
             MetalGpuTextureView view = colorTargets.writeView(drawBuffers[slot]);
@@ -383,7 +383,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             );
         }
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, width, height));
-        return new RenderPassDescriptorWithViews(descriptor, ownedViews);
+        return new RenderPassDescriptorWithViews(descriptor.build(), ownedViews);
     }
 
     RenderPassDescriptor createTerrainWriteDescriptor(
@@ -404,7 +404,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
                             + " does not match Iris targets " + width + "x" + height
             );
         }
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> label);
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> label);
         boolean[] written = new boolean[colorTargets.targetCount()];
         for (int logicalTarget : drawBuffers) {
             if (logicalTarget < 0 || logicalTarget >= colorTargets.targetCount()) {
@@ -427,7 +427,7 @@ final class IrisMetalRenderTargets implements AutoCloseable {
             );
         }
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, width, height));
-        return descriptor;
+        return descriptor.build();
     }
 
     void resize(final int newWidth, final int newHeight) {

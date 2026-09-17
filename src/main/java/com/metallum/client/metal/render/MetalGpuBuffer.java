@@ -23,7 +23,7 @@ import java.util.function.Supplier;
  * deduplication hook. The generated bridge lives in a synthetic package and
  * must be able to resolve this method-descriptor type at runtime.
  */
-public class MetalGpuBuffer implements GpuBuffer {
+public class MetalGpuBuffer implements GpuBuffer, com.mojang.renderpearl.backend.util.TransientBlockAllocator.Allocator.Block {
     private final MetalDevice device;
     private final int usage;
     private final long size;
@@ -226,6 +226,11 @@ public class MetalGpuBuffer implements GpuBuffer {
     }
 
     @Override
+    public boolean suboptimal() {
+        return false;
+    }
+
+    @Override
     public void close() {
         if (this.closed) {
             return;
@@ -282,7 +287,10 @@ public class MetalGpuBuffer implements GpuBuffer {
 
     private static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {
         MTLStorageMode storageMode = isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private;
-        return MTLResourceOptions.of(storageMode, MTLHazardTrackingMode.Untracked);
+        return MTLResourceOptions.of(
+                storageMode,
+                MTLHazardTrackingMode.Untracked
+        );
     }
 
     private void observeAllocationIdentity() {

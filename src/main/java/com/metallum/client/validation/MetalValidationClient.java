@@ -80,6 +80,9 @@ import java.util.UUID;
  */
 public final class MetalValidationClient implements ClientModInitializer {
     private static final boolean ENABLED = Boolean.getBoolean("metallum.validation.enabled");
+    private static final String VALIDATION_WORLD = System.getProperty(
+            "metallum.validation.world", ""
+    ).trim();
     private static final boolean PRESERVE_FULLSCREEN = Boolean.getBoolean(
             "metallum.validation.preserveFullscreen"
     );
@@ -237,6 +240,8 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static boolean sceneReinstalledAfterWarmup;
     private static boolean loggedFirstFrame;
     private static boolean loggedFirstLevelFrame;
+    private static boolean loggedPostLoadState;
+    private static boolean validationWorldOpenAttempted;
     private static String observedBackend = "unknown";
     private static ArmorStand controlledEntity;
     private static ItemEntity spinningItem;
@@ -318,7 +323,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         // MacRetinaFullscreenMixin owns the actual borderless transition; we
         // only request it through Minecraft's normal option/update path and
         // keep the fail-closed check below as the admission proof.
-        if (PRESERVE_FULLSCREEN && !minecraft.getWindow().isFullscreen()) {
+        if (PRESERVE_FULLSCREEN && !minecraft.options.fullscreen().get()) {
             windowResizeAttempts++;
             if (windowResizeAttempts > 200) {
                 throw new IllegalStateException(
@@ -339,7 +344,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                         minecraft.getWindow().getHeight()
                 );
             }
-            if (!minecraft.getWindow().isFullscreen()) {
+            if (!minecraft.options.fullscreen().get()) {
                 sleepForAsyncWork(25L);
                 return;
             }
@@ -356,6 +361,50 @@ public final class MetalValidationClient implements ClientModInitializer {
                     minecraft.level != null,
                     minecraft.player != null
             );
+            Metallum.LOGGER.info(
+                    "Validation initial UI state: gameLoadFinished={}, screen={}, overlay={}, world='{}', worldExists={}",
+                    minecraft.isGameLoadFinished(),
+                    minecraft.gui.screen() == null ? "none" : minecraft.gui.screen().getClass().getName(),
+                    minecraft.gui.overlay() == null ? "none" : minecraft.gui.overlay().getClass().getName(),
+                    VALIDATION_WORLD,
+                    !VALIDATION_WORLD.isBlank() && minecraft.getLevelSource().levelExists(VALIDATION_WORLD)
+            );
+        }
+        if (minecraft.isGameLoadFinished() && !loggedPostLoadState) {
+            loggedPostLoadState = true;
+            Metallum.LOGGER.info(
+                    "Validation post-load UI state: screen={}, overlay={}, level={}, player={}, singleplayerServer={}",
+                    minecraft.gui.screen() == null ? "none" : minecraft.gui.screen().getClass().getName(),
+                    minecraft.gui.overlay() == null ? "none" : minecraft.gui.overlay().getClass().getName(),
+                    minecraft.level != null,
+                    minecraft.player != null,
+                    minecraft.hasSingleplayerServer()
+            );
+        }
+        if (minecraft.level == null
+                && !validationWorldOpenAttempted
+                && !VALIDATION_WORLD.isBlank()
+                && minecraft.isGameLoadFinished()
+                && !minecraft.hasSingleplayerServer()) {
+            validationWorldOpenAttempted = true;
+            if (minecraft.getLevelSource().levelExists(VALIDATION_WORLD)) {
+                Metallum.LOGGER.info(
+                        "Validation driver opening world '{}' through WorldOpenFlows",
+                        VALIDATION_WORLD
+                );
+                minecraft.createWorldOpenFlows().openWorld(
+                        VALIDATION_WORLD,
+                        () -> Metallum.LOGGER.error(
+                                "Validation driver could not open world '{}'",
+                                VALIDATION_WORLD
+                        )
+                );
+            } else {
+                Metallum.LOGGER.error(
+                        "Validation driver world '{}' does not exist under the active game directory",
+                        VALIDATION_WORLD
+                );
+            }
         }
         if (minecraft.level == null || minecraft.player == null) {
             return;
@@ -392,7 +441,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             int framebufferWidth = minecraft.getWindow().getWidth();
             int framebufferHeight = minecraft.getWindow().getHeight();
             if (PRESERVE_FULLSCREEN) {
-                if (!minecraft.getWindow().isFullscreen() || framebufferWidth <= 0 || framebufferHeight <= 0) {
+                if (!minecraft.options.fullscreen().get() || framebufferWidth <= 0 || framebufferHeight <= 0) {
                     throw new IllegalStateException(
                             "Fullscreen validation requires an active non-empty fullscreen drawable; found "
                                     + framebufferWidth + "x" + framebufferHeight
@@ -405,13 +454,11 @@ public final class MetalValidationClient implements ClientModInitializer {
                 );
             } else {
                 // Golden captures use one pinned windowed framebuffer across runs.
-                if (minecraft.getWindow().isFullscreen()) {
+                if (minecraft.options.fullscreen().get()) {
                     minecraft.options.exclusiveFullscreen().set(false);
                     minecraft.options.fullscreen().set(false);
                     minecraft.getWindow().updateFullscreenIfChanged();
-                    if (minecraft.getWindow().isFullscreen()) {
-                        minecraft.getWindow().toggleFullScreen();
-                    }
+                    minecraft.getWindow().updateFullscreenIfChanged();
                     windowResizeAttempts = 0;
                     holdInitialPose(minecraft);
                     sleepForAsyncWork(25L);
@@ -1207,11 +1254,11 @@ public final class MetalValidationClient implements ClientModInitializer {
             // transform at progress 1.0 legitimately moves the held item out
             // of frame, which is not Temporal breakup and would make a
             // minimum-per-frame coverage gate report a false failure.
-            float attackProgress = 0.15F + (float) pose.entityOffset() * 0.45F;
-            minecraft.player.swinging = true;
-            minecraft.player.swingingArm = InteractionHand.MAIN_HAND;
-            minecraft.player.oAttackAnim = attackProgress;
-            minecraft.player.attackAnim = attackProgress;
+            minecraft.player.swing(
+                    InteractionHand.MAIN_HAND,
+                    net.minecraft.world.item.component.SwingAnimation.DEFAULT,
+                    false
+            );
         }
         // old == new: the renderer lerps old→new by partialTick, and the
         // wall-clock partialTick would smear the entity's rendered position

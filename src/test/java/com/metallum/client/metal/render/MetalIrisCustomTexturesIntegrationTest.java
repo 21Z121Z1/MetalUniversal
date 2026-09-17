@@ -63,11 +63,11 @@ final class MetalIrisCustomTexturesIntegrationTest {
     void createDevice() {
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice));
-        ShaderSource source = (identifier, type) -> {
+        ShaderSource source = MetalShaderSourceAdapters.from((identifier, type) -> {
             String path = identifier.getPath();
             String name = path.substring(path.lastIndexOf('/') + 1);
             return type == ShaderType.VERTEX ? VERTEX_SHADER : fragmentShaders.get(name);
-        };
+        });
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),
@@ -462,7 +462,7 @@ final class MetalIrisCustomTexturesIntegrationTest {
     }
 
     @Test
-    void oneDimensionalRectangleAndThreeDimensionalSamplersCompileOnDevice() {
+    void renderPearlRejectsUnsupportedOneDimensionalSamplerFailClosed() {
         String shader = "raw_dimensions";
         fragmentShaders.put(shader, """
                 #version 450
@@ -477,9 +477,9 @@ final class MetalIrisCustomTexturesIntegrationTest {
                 }
                 """);
         BindGroupLayout layout = BindGroupLayout.builder()
-                .withSampler("oneD")
-                .withSampler("rectangle")
-                .withSampler("threeD")
+                .withUniform("oneD", com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER)
+                .withUniform("rectangle", com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER)
+                .withUniform("threeD", com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER)
                 .build();
         RenderPipeline pipeline = RenderPipeline.builder()
                 .withLocation("metallum_test/raw_dimensions")
@@ -493,11 +493,11 @@ final class MetalIrisCustomTexturesIntegrationTest {
                 ))
                 .build();
 
-        MetalCompiledRenderPipeline compiled = (MetalCompiledRenderPipeline) device.precompilePipeline(pipeline, null);
-        assertTrue(compiled.isValid());
-        assertFalse(MetalNativeBridge.isNullHandle(compiled.getNativePipeline(
-                MTLPixelFormat.Invalid, MTLPixelFormat.Invalid
-        )));
+        IllegalStateException failure = assertThrows(
+                IllegalStateException.class,
+                () -> device.precompilePipeline(pipeline, null)
+        );
+        assertTrue(failure.getMessage().contains("RenderPearl rejected pipeline"));
     }
 
     private ByteBuffer readback(final MetalGpuTexture texture) {

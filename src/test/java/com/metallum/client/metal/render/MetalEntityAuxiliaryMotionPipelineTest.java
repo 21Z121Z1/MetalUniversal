@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
 import net.minecraft.resources.Identifier;
@@ -24,7 +25,7 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
         assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(leash));
         assertTrue(MetalEntityMotionPipeline.isSplittableVertexShader(leash));
         assertFalse(MetalEntityMotionPipeline.supports(leash));
-        assertEquals("core/leash_previous_motion", MetalEntityMotionPipeline.forPreviousPositions(leash).getVertexShader().getPath());
+        assertEquals("core/leash_previous_motion", MetalEntityMotionPipeline.forPreviousPositions(leash).getShaders().get(ShaderType.VERTEX).getPath());
     }
 
     @Test
@@ -35,8 +36,8 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
         assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(world));
         assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(seeThrough));
         assertFalse(MetalEntityMotionPipeline.supportsPreviousPositions(gui));
-        assertEquals("core/text_previous_motion", MetalEntityMotionPipeline.forPreviousPositions(world).getVertexShader().getPath());
-        assertEquals("core/text_previous_motion", MetalEntityMotionPipeline.forPreviousPositions(seeThrough).getVertexShader().getPath());
+        assertEquals("core/text_previous_motion", MetalEntityMotionPipeline.forPreviousPositions(world).getShaders().get(ShaderType.VERTEX).getPath());
+        assertEquals("core/text_previous_motion", MetalEntityMotionPipeline.forPreviousPositions(seeThrough).getShaders().get(ShaderType.VERTEX).getPath());
     }
 
     @Test
@@ -45,8 +46,8 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
         RenderPipeline seeThrough = pipeline("core/text_background", DefaultVertexFormat.POSITION_COLOR, "IS_SEE_THROUGH");
         assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(world));
         assertTrue(MetalEntityMotionPipeline.supportsPreviousPositions(seeThrough));
-        assertEquals("core/text_background_previous_motion", MetalEntityMotionPipeline.forPreviousPositions(world).getVertexShader().getPath());
-        assertEquals("core/text_background_previous_motion", MetalEntityMotionPipeline.forPreviousPositions(seeThrough).getVertexShader().getPath());
+        assertEquals("core/text_background_previous_motion", MetalEntityMotionPipeline.forPreviousPositions(world).getShaders().get(ShaderType.VERTEX).getPath());
+        assertEquals("core/text_background_previous_motion", MetalEntityMotionPipeline.forPreviousPositions(seeThrough).getShaders().get(ShaderType.VERTEX).getPath());
     }
 
     @Test
@@ -56,8 +57,8 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
         assertTrue(MetalEntityMotionPipeline.isSplittableVertexShader(particle));
         assertFalse(MetalEntityMotionPipeline.supports(particle));
         RenderPipeline exact = MetalEntityMotionPipeline.forPreviousPositions(particle);
-        assertEquals("core/particle_previous_motion", exact.getVertexShader().getPath());
-        assertEquals("core/particle_previous_motion", exact.getFragmentShader().getPath());
+        assertEquals("core/particle_previous_motion", exact.getShaders().get(ShaderType.VERTEX).getPath());
+        assertEquals("core/particle_previous_motion", exact.getShaders().get(ShaderType.FRAGMENT).getPath());
     }
 
     @Test
@@ -67,8 +68,8 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
         assertTrue(MetalEntityMotionPipeline.isSplittableVertexShader(shadow));
         assertFalse(MetalEntityMotionPipeline.supports(shadow));
         RenderPipeline exact = MetalEntityMotionPipeline.forPreviousPositions(shadow);
-        assertEquals("core/entity_previous_motion", exact.getVertexShader().getPath());
-        assertEquals("core/shadow_previous_motion", exact.getFragmentShader().getPath());
+        assertEquals("core/entity_previous_motion", exact.getShaders().get(ShaderType.VERTEX).getPath());
+        assertEquals("core/shadow_previous_motion", exact.getShaders().get(ShaderType.FRAGMENT).getPath());
     }
 
     @Test
@@ -78,8 +79,8 @@ final class MetalEntityAuxiliaryMotionPipelineTest {
         assertTrue(MetalEntityMotionPipeline.isSplittableVertexShader(waterMask));
         assertFalse(MetalEntityMotionPipeline.supports(waterMask));
         RenderPipeline exact = MetalEntityMotionPipeline.forPreviousPositions(waterMask);
-        assertEquals("core/position_previous_motion", exact.getVertexShader().getPath());
-        assertEquals("core/position_previous_motion", exact.getFragmentShader().getPath());
+        assertEquals("core/position_previous_motion", exact.getShaders().get(ShaderType.VERTEX).getPath());
+        assertEquals("core/position_previous_motion", exact.getShaders().get(ShaderType.FRAGMENT).getPath());
     }
 
     @Test

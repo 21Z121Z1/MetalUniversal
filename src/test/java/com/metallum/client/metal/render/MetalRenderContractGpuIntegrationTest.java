@@ -97,9 +97,9 @@ final class MetalRenderContractGpuIntegrationTest {
         shaders.put("contract_fragment", FRAGMENT_SHADER);
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice), "MTLCreateSystemDefaultDevice returned null");
-        ShaderSource source = (identifier, type) -> type == ShaderType.VERTEX
+        ShaderSource source = MetalShaderSourceAdapters.from((identifier, type) -> type == ShaderType.VERTEX
                 ? shaders.get("contract_vertex")
-                : shaders.get("contract_fragment");
+                : shaders.get("contract_fragment"));
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),
@@ -161,13 +161,13 @@ final class MetalRenderContractGpuIntegrationTest {
                 )
         );
 
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "synthetic/mrt-basic")
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> "synthetic/mrt-basic")
                 .withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
         try (MetalGpuTextureView view0 = new MetalGpuTextureView(color0, 0, 1);
              MetalGpuTextureView view1 = new MetalGpuTextureView(color1, 0, 1)) {
             descriptor.withColorAttachment(view0, Optional.of(new org.joml.Vector4f(0.0F)));
             descriptor.withColorAttachment(view1, Optional.of(new org.joml.Vector4f(0.0F)));
-            MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+            MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
             pass.setPipeline(pipeline);
             pass.draw(3, 1, 0, 0);
             encoder.submitRenderPass();

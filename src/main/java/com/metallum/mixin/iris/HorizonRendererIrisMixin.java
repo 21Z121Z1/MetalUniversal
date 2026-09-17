@@ -1,9 +1,11 @@
 package com.metallum.mixin.iris;
 
 import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
+import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.commands.CommandEncoder;
 import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.pathways.HorizonRenderer;
@@ -49,13 +51,13 @@ public abstract class HorizonRendererIrisMixin {
             method = "renderHorizon(Lorg/joml/Matrix4fc;Lorg/joml/Matrix4fc;Lorg/joml/Vector4f;)V",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/mojang/blaze3d/systems/CommandEncoder;createRenderPass("
+                    target = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;createRenderPass("
                             + "Ljava/util/function/Supplier;"
-                            + "Lcom/mojang/blaze3d/textures/GpuTextureView;"
+                            + "Lcom/mojang/renderpearl/api/textures/GpuTextureView;"
                             + "Ljava/util/Optional;"
-                            + "Lcom/mojang/blaze3d/textures/GpuTextureView;"
+                            + "Lcom/mojang/renderpearl/api/textures/GpuTextureView;"
                             + "Ljava/util/OptionalDouble;"
-                            + ")Lcom/mojang/blaze3d/systems/RenderPass;"
+                            + ")Lcom/mojang/renderpearl/api/commands/RenderPass;"
             )
     )
     private RenderPass metallum$createHorizonPass(
@@ -86,11 +88,12 @@ public abstract class HorizonRendererIrisMixin {
             method = "renderHorizon(Lorg/joml/Matrix4fc;Lorg/joml/Matrix4fc;Lorg/joml/Vector4f;)V",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/mojang/blaze3d/systems/RenderPass;setPipeline("
-                            + "Lcom/mojang/blaze3d/pipeline/RenderPipeline;)V"
+                    target = "Lcom/mojang/blaze3d/systems/RenderSystem;getCompiledPipeline("
+                            + "Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;)"
+                            + "Lcom/mojang/renderpearl/api/pipeline/CompiledRenderPipeline;"
             )
     )
-    private void metallum$setHorizonPipeline(final RenderPass renderPass, final RenderPipeline source) {
+    private CompiledRenderPipeline metallum$compileHorizonPipeline(final RenderPipeline source) {
         if (source != RenderPipelines.SKY) {
             throw new IllegalStateException(
                     "Iris Metal horizon descriptor was prepared for "
@@ -98,7 +101,7 @@ public abstract class HorizonRendererIrisMixin {
             );
         }
         IrisMetalPipelineOverrides.CoreDrawOverride override = this.metallum$horizonDraw;
-        renderPass.setPipeline(override == null ? source : override.pipeline());
+        return override == null ? RenderSystem.getCompiledPipeline(source) : override.pipeline();
     }
 
     @Inject(

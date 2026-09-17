@@ -12,7 +12,7 @@ import com.metallum.client.metal.render.MetalTokenBindingPass;
 import com.metallum.client.metal.render.MetalUploadDedupBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
-import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
 import com.mojang.renderpearl.api.textures.GpuSampler;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
@@ -121,7 +121,7 @@ public abstract class MetalRenderPassBindingCacheMixin implements MetalIrisToken
 
     @Inject(method = "setPipeline", at = @At("RETURN"))
     private void metallum$installCompiledBindingPlan(
-            final RenderPipeline pipeline,
+            final BackendRenderPipeline pipeline,
             final CallbackInfo ci
     ) {
         if (!metallum$TOKENIZED_BINDINGS || !metallum$COMPILED_BINDING_PLAN) {
@@ -269,7 +269,7 @@ public abstract class MetalRenderPassBindingCacheMixin implements MetalIrisToken
     }
 
     @Inject(
-            method = "setUniform(Ljava/lang/String;Lcom/mojang/blaze3d/buffers/GpuBufferSlice;)V",
+            method = "setUniform(Ljava/lang/String;Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;)V",
             at = @At("HEAD"),
             cancellable = true
     )
@@ -325,9 +325,9 @@ public abstract class MetalRenderPassBindingCacheMixin implements MetalIrisToken
 
     @Redirect(
             method = {
-                    "setUniform(Ljava/lang/String;Lcom/mojang/blaze3d/buffers/GpuBufferSlice;)V",
-                    "bindTexture(Ljava/lang/String;Lcom/mojang/blaze3d/textures/GpuTextureView;Lcom/mojang/blaze3d/textures/GpuSampler;)V",
-                    "bindStorageImage(Ljava/lang/String;Lcom/mojang/blaze3d/textures/GpuTextureView;)V"
+                    "setUniform(Ljava/lang/String;Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;)V",
+                    "bindTexture(Ljava/lang/String;Lcom/mojang/renderpearl/api/textures/GpuTextureView;Lcom/mojang/renderpearl/api/textures/GpuSampler;)V",
+                    "bindStorageImage(Ljava/lang/String;Lcom/mojang/renderpearl/api/textures/GpuTextureView;)V"
             },
             at = @At(
                     value = "INVOKE",
@@ -412,7 +412,7 @@ public abstract class MetalRenderPassBindingCacheMixin implements MetalIrisToken
     }
 
     @Inject(
-            method = "bindStorageBuffer(ILcom/mojang/blaze3d/buffers/GpuBufferSlice;)V",
+            method = "bindStorageBuffer(ILcom/mojang/renderpearl/api/buffers/GpuBufferSlice;)V",
             at = @At("HEAD"),
             cancellable = true
     )

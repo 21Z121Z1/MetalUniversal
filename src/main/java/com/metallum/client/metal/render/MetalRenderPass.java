@@ -7,12 +7,15 @@ import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.pipeline.IndexType;
+import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
-import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.commands.GpuQueryPool;
 import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
 import com.mojang.renderpearl.backend.api.RenderPassBackend;
+import com.mojang.renderpearl.frontend.FrontendRenderPipeline;
 import com.mojang.blaze3d.systems.ScissorState;
 import com.mojang.renderpearl.api.textures.GpuSampler;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
@@ -38,7 +41,7 @@ import java.util.Objects;
 import java.util.function.Supplier;
 
 @Environment(EnvType.CLIENT)
-final class MetalRenderPass implements RenderPassBackend {
+final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoCloseable {
     static final boolean VALIDATION = SharedConstants.IS_RUNNING_IN_IDE;
     static final int MAX_VERTEX_BUFFERS = RenderPass.MAX_VERTEX_BUFFERS;
     private final MetalDevice device;
@@ -161,11 +164,13 @@ final class MetalRenderPass implements RenderPassBackend {
     }
 
     @Override
-    public void setPipeline(final @NonNull RenderPipeline pipeline) {
-        MetalCompiledRenderPipeline compiled = device.getOrCompilePipeline(pipeline);
+    public void setPipeline(final @NonNull BackendRenderPipeline pipeline) {
+        if (!(pipeline instanceof MetalCompiledRenderPipeline compiled)) {
+            throw new IllegalArgumentException("Pipeline must be instance of MetalCompiledRenderPipeline");
+        }
         if (!Arrays.equals(compiled.colorAttachmentFormats(), colorAttachmentFormats())) {
             throw new IllegalArgumentException(
-                    "Metal pipeline/render-pass color attachment signature mismatch for " + pipeline.getLocation()
+                    "Metal pipeline/render-pass color attachment signature mismatch for " + compiled.validationPipelineId()
                             + ": pipeline=" + Arrays.toString(compiled.colorAttachmentFormats())
                             + ", renderPass=" + Arrays.toString(colorAttachmentFormats())
             );
@@ -184,11 +189,26 @@ final class MetalRenderPass implements RenderPassBackend {
             RenderContractRuntime.updateShaders(contractPassToken, compiled.validationShaderIds());
             this.contractPipelineId = compiled.validationPipelineId();
         } else {
-            this.contractPipelineId = pipeline.getLocation().toString();
+            this.contractPipelineId = compiled.validationPipelineId();
         }
     }
 
+    /** Direct backend entry point retained for Metal-owned Iris passes. */
+    public void setPipeline(final @NonNull RenderPipeline pipeline) {
+        setPipeline((BackendRenderPipeline) device.getOrCompilePipeline(pipeline));
+    }
+
     @Override
+    public void setPipeline(final @NonNull CompiledRenderPipeline pipeline) {
+        if (pipeline instanceof FrontendRenderPipeline frontend) {
+            setPipeline(frontend.backendRenderPipeline());
+        } else if (pipeline instanceof BackendRenderPipeline backend) {
+            setPipeline(backend);
+        } else {
+            throw new IllegalArgumentException("Pipeline is not backed by Metal: " + pipeline);
+        }
+    }
+
     public void bindTexture(final @NonNull String name, @Nullable final GpuTextureView textureView, @Nullable final GpuSampler sampler) {
         if (textureView != null && sampler != null) {
             TextureViewAndSampler next = new TextureViewAndSampler(textureView, sampler);
@@ -205,6 +225,15 @@ final class MetalRenderPass implements RenderPassBackend {
         } else {
             throw new IllegalArgumentException();
         }
+    }
+
+    @Override
+    public void setUniform(
+            final @NonNull String name,
+            @Nullable final GpuTextureView textureView,
+            @Nullable final GpuSampler sampler
+    ) {
+        bindTexture(name, textureView, sampler);
     }
 
     void bindStorageImage(final String name, final GpuTextureView textureView) {
@@ -248,12 +277,10 @@ final class MetalRenderPass implements RenderPassBackend {
         return this.samplers;
     }
 
-    @Override
     public void setUniform(final @NonNull String name, final GpuBuffer value) {
         setUniform(name, value.slice());
     }
 
-    @Override
     public void setUniform(final @NonNull String name, final @NonNull GpuBufferSlice value) {
         if (value.buffer() instanceof MetalGpuBuffer buffer) {
             observeContractBuffer(buffer);
@@ -266,6 +293,67 @@ final class MetalRenderPass implements RenderPassBackend {
         if ("DynamicTransforms".equals(name) || "Projection".equals(name)) {
             markDescriptorDirty(MetalIrisShaderCompiler.UNIFORM_BLOCK_NAME);
         }
+    }
+
+    @Override
+    public void setUniform(final int index, @Nullable final Object value) {
+        if (compiledPipeline == null) {
+            throw new IllegalStateException("Cannot set a uniform before binding a pipeline");
+        }
+        MetalCompiledRenderPipeline.ResourceBinding binding = compiledPipeline.resource(index);
+        if (binding == null) {
+            throw new IllegalArgumentException("Unknown RenderPearl uniform index " + index);
+        }
+        if (value == null) {
+            uniforms.remove(binding.name());
+            samplers.remove(binding.name());
+            storageImages.remove(binding.name());
+            markDescriptorDirty(binding.name());
+            terrainBindingChanged();
+            return;
+        }
+        if (value instanceof com.mojang.renderpearl.util.TextureViewAndSampler pair) {
+            if (binding.kind() != MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
+                throw new IllegalArgumentException("Texture uniform " + binding.name() + " is not a sampled image");
+            }
+            bindTexture(binding.name(), pair.view(), pair.sampler());
+            return;
+        }
+        if (value instanceof GpuBufferSlice slice) {
+            setUniform(binding.name(), slice);
+            return;
+        }
+        if (value instanceof GpuBuffer buffer) {
+            setUniform(binding.name(), buffer);
+            return;
+        }
+        throw new IllegalArgumentException(
+                "Unsupported RenderPearl uniform value for " + binding.name() + ": " + value.getClass().getName()
+        );
+    }
+
+    @Override
+    public void pushConstants(final java.nio.@NonNull ByteBuffer value) {
+        if (compiledPipeline == null) {
+            throw new IllegalStateException("Cannot push constants before binding a pipeline");
+        }
+        GpuBufferSlice slice = commandEncoder.transientMemory().uploadGpu(
+                List.of(value.duplicate()),
+                device.getDeviceInfo().limits().minUniformOffsetAlignment(),
+                GpuBuffer.USAGE_UNIFORM,
+                128L,
+                16L
+        );
+        GpuBufferSlice previous = uniforms.put("push_constants", slice);
+        if (!sameSlice(previous, slice)) {
+            terrainBindingChanged();
+        }
+        markDescriptorDirty("push_constants");
+    }
+
+    @Override
+    public void close() {
+        commandEncoder.submitRenderPass();
     }
 
     @Override
@@ -720,9 +808,12 @@ final class MetalRenderPass implements RenderPassBackend {
         bindDrawState(enc);
 
         for (int i = 0; i < drawCount; i++) {
-            int firstIndex = drawParameters.get(i * 3);
-            int indexCount = drawParameters.get(i * 3 + 1);
-            int baseVertex = drawParameters.get(i * 3 + 2);
+            int base = drawParameters.position() + i * 3;
+            // RenderPearl exposes the Vulkan struct's native field offsets:
+            // firstIndex=0, indexCount=4, vertexOffset=8.
+            int firstIndex = drawParameters.get(base);
+            int indexCount = drawParameters.get(base + 1);
+            int baseVertex = drawParameters.get(base + 2);
             if (indexCount > 0) {
                 drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
             }
@@ -857,7 +948,17 @@ final class MetalRenderPass implements RenderPassBackend {
             setVertexBuffer(draw.slot(), draw.vertexBuffer().slice());
 
             if (draw.uniformUploaderConsumer() != null) {
-                draw.uniformUploaderConsumer().accept(uniformArgument, this::setUniform);
+                draw.uniformUploaderConsumer().accept(uniformArgument, new RenderPass.UniformUploader() {
+                    @Override
+                    public void setUniform(final String name, final GpuBufferSlice buffer) {
+                        MetalRenderPass.this.setUniform(name, buffer);
+                    }
+
+                    @Override
+                    public void pushConstants(final java.nio.ByteBuffer buffer) {
+                        MetalRenderPass.this.pushConstants(buffer);
+                    }
+                });
             }
 
             if (scissorDirty || vertexBuffersDirty || dirtyDescriptorMask != 0L || pipelineDirty) {

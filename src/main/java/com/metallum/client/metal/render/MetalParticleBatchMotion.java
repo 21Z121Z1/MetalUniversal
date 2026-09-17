@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
 import net.minecraft.client.particle.SingleQuadParticle;
@@ -77,7 +78,7 @@ public final class MetalParticleBatchMotion {
                     layer.translucent(),
                     layer.textureAtlasLocation().toString(),
                     pipeline.getLocation().toString(),
-                    pipeline.getVertexShader().toString(),
+                    pipeline.getShaders().get(ShaderType.VERTEX).toString(),
                     particleIds
             );
         }
@@ -288,7 +289,7 @@ public final class MetalParticleBatchMotion {
             if (attach) {
                 if (!MetalEntityMotionPipeline.supportsPreviousPositions(pipeline)) {
                     rejectGroup(pendingIndex, null,
-                            "particle-exact-pipeline-unsupported:" + pipeline.getVertexShader());
+                            "particle-exact-pipeline-unsupported:" + pipeline.getShaders().get(ShaderType.VERTEX));
                     return;
                 }
                 signatureLayers.add(accumulator.signature());

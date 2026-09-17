@@ -39,7 +39,7 @@ final class IrisMetalCenterDepthSamplerTest {
     void samplesCenterDepthAndAdvancesHalfLifeHistoryOnMetal() {
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice), "MTLCreateSystemDefaultDevice returned null");
-        ShaderSource fallback = (identifier, type) -> null;
+        ShaderSource fallback = MetalShaderSourceAdapters.empty();
         this.device = new MetalDevice(
                 fallback,
                 new GpuDebugOptions(2, true, true, true),

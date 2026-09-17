@@ -1,7 +1,7 @@
 #version 330
 
-noperspective in vec2 metallumObjectMotion;
-flat in float metallumObjectValidity;
+layout(location = 0) noperspective in vec2 metallumObjectMotion;
+layout(location = 1) flat in float metallumObjectValidity;
 
 layout(location = 0) out vec2 metallumMotionTarget;
 layout(location = 1) out float metallumValidityTarget;

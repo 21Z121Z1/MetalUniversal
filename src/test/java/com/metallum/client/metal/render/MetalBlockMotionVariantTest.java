@@ -8,6 +8,7 @@ import com.mojang.renderpearl.api.pipeline.BlendFunction;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
 import com.mojang.renderpearl.api.pipeline.DepthStencilState;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import net.minecraft.resources.Identifier;
@@ -92,9 +93,9 @@ final class MetalBlockMotionVariantTest {
         RenderPipeline variant = MetalEntityMotionPipeline.forSource(solidBlock());
 
         assertEquals(MetalEntityMotionPipeline.Family.BLOCK.shader().toString(),
-                variant.getVertexShader().toString(), "block variants must replay with the block shader");
+                variant.getShaders().get(ShaderType.VERTEX).toString(), "block variants must replay with the block shader");
         assertEquals(MetalEntityMotionPipeline.Family.BLOCK.shader().toString(),
-                variant.getFragmentShader().toString());
+                variant.getShaders().get(ShaderType.FRAGMENT).toString());
         assertTrue(variant.getLocation().getPath()
                         .startsWith(MetalEntityMotionPipeline.Family.BLOCK.locationPrefix()),
                 "variant location was " + variant.getLocation());
@@ -107,7 +108,7 @@ final class MetalBlockMotionVariantTest {
                 source("solid_entity", "core/entity").withVertexBinding(0, DefaultVertexFormat.ENTITY).build());
 
         assertEquals(MetalEntityMotionPipeline.Family.ENTITY.shader().toString(),
-                variant.getVertexShader().toString(),
+                variant.getShaders().get(ShaderType.VERTEX).toString(),
                 "adding the block family must not have moved the entity family's shader");
     }
 
@@ -115,11 +116,11 @@ final class MetalBlockMotionVariantTest {
     void theVariantWritesMotionAndValidityAndNoDepth() {
         RenderPipeline variant = MetalEntityMotionPipeline.forSource(solidBlock());
 
-        assertEquals(GpuFormat.RG16_FLOAT, variant.getColorTargetStates()[0].format(),
+        assertEquals(GpuFormat.RG16_FLOAT, variant.getColorTargetStates().get(0).format(),
                 "slot 0 carries the motion vector");
-        assertEquals(GpuFormat.R8_UNORM, variant.getColorTargetStates()[1].format(),
+        assertEquals(GpuFormat.R8_UNORM, variant.getColorTargetStates().get(1).format(),
                 "slot 1 carries per-pixel validity");
-        assertTrue(variant.getColorTargetStates()[0].blendFunction().isEmpty(),
+        assertTrue(variant.getColorTargetStates().get(0).blendFunction().isEmpty(),
                 "a motion vector must never be blended");
 
         DepthStencilState depth = variant.getDepthStencilState();

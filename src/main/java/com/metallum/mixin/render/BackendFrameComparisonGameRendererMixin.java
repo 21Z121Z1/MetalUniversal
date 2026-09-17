@@ -1,7 +1,6 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.validation.BackendFrameComparisonClient;
-import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.GameRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -18,10 +17,7 @@ abstract class BackendFrameComparisonGameRendererMixin {
             method = "renderLevel",
             at = @At("HEAD")
     )
-    private void metallum$fixIrisSystemTime(
-            final DeltaTracker deltaTracker,
-            final CallbackInfo ci
-    ) {
+    private void metallum$fixIrisSystemTime(final CallbackInfo ci) {
         BackendFrameComparisonClient.beforeLevelRender();
     }
 }

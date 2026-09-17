@@ -11,6 +11,7 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
 import com.mojang.renderpearl.api.pipeline.BlendFunction;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
 import com.mojang.renderpearl.api.pipeline.DepthStencilState;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderTarget;
@@ -28,6 +29,7 @@ import it.unimi.dsi.fastutil.objects.Object2ObjectMap;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.irisshaders.iris.gl.texture.TextureType;
+import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.gl.blending.BlendMode;
 import net.irisshaders.iris.gl.blending.BlendModeFunction;
 import net.irisshaders.iris.gl.blending.BlendModeOverride;
@@ -237,6 +239,42 @@ public final class IrisMetalPipelineOverrides {
         return synthetic;
     }
 
+    /**
+     * Resolves a 26.3 prepared/core pipeline to the generation-owned Iris
+     * synthetic pipeline. RenderPearl opens the pass before
+     * {@code PreparedRenderType} draws, so this hook owns only the PSO choice;
+     * terrain and shadow producers still use their atomic descriptor path.
+     */
+    public static RenderPipeline pipelineForCore(final RenderPipeline pipeline) {
+        Instance instance = active;
+        if (instance == null) {
+            return pipeline;
+        }
+        WorldRenderingPipeline worldPipeline = Iris.getPipelineManager().getPipelineNullable();
+        if (!(worldPipeline instanceof MetalWorldRenderingPipeline metalPipeline)) {
+            return pipeline;
+        }
+        boolean shadow = isShadowPassActive();
+        if (!shadow && !metalPipeline.shouldOverrideCoreShaders(false)) {
+            return pipeline;
+        }
+        ShaderKey key = IrisMetalCoreGbufferPipelines.resolve(pipeline, worldPipeline);
+        if (key == null) {
+            return pipeline;
+        }
+        MetalIrisShaderCompiler.GlslProgram program = instance.coreProgram(key);
+        if (program == null) {
+            instance.requireNoFallback("no translated core program for " + key);
+            return pipeline;
+        }
+        RenderPipeline synthetic = instance.coreSyntheticPipeline(pipeline, key, program);
+        if (synthetic == null) {
+            instance.requireNoFallback("no synthetic core pipeline for " + key);
+            return pipeline;
+        }
+        return synthetic;
+    }
+
     /** Atomic descriptor/PSO selection for Mojang's non-Sodium prepared draws. */
     public static @Nullable CoreDrawOverride prepareCoreDraw(
             final RenderPipeline source,
@@ -296,7 +334,7 @@ public final class IrisMetalPipelineOverrides {
         );
     }
 
-    public record CoreDrawOverride(RenderPipeline pipeline, RenderPassDescriptor descriptor) {
+    public record CoreDrawOverride(CompiledRenderPipeline pipeline, RenderPassDescriptor descriptor) {
     }
 
     private IrisMetalPipelineOverrides() {
@@ -534,6 +572,23 @@ public final class IrisMetalPipelineOverrides {
         if (instance != null) {
             instance.completeShadowFrame();
         }
+    }
+
+    /** Opens the generation-owned shadow target pass used by vanilla 26.3/Sodium terrain. */
+    static @Nullable RenderPass createShadowTerrainRenderPass(
+            final CommandEncoder encoder,
+            final Supplier<String> label,
+            final boolean translucent
+    ) {
+        Instance instance = active;
+        if (instance == null) {
+            return null;
+        }
+        return instance.createShadowTerrainRenderPass(
+                encoder,
+                label,
+                translucent ? TerrainKind.TRANSLUCENT : TerrainKind.SOLID
+        );
     }
 
     /**
@@ -928,7 +983,10 @@ public final class IrisMetalPipelineOverrides {
                 if (this.closed || active != this) {
                     throw new IllegalStateException("Iris generation changed while preparing the core draw");
                 }
-                return new CoreDrawOverride(synthetic, descriptor);
+                return new CoreDrawOverride(
+                        currentDevice.getOrCompileFrontendPipeline(synthetic),
+                        descriptor
+                );
             } catch (Throwable t) {
                 requireNoFallback(
                         "core draw " + key + " could not prepare an atomic PSO/descriptor pair",
@@ -1167,7 +1225,8 @@ public final class IrisMetalPipelineOverrides {
         }
 
         static TerrainKind discriminate(final RenderPipeline pipeline) {
-            ColorTargetState target = pipeline.getColorTargetState();
+            ColorTargetState target = pipeline.getColorTargetStates().isEmpty()
+                    ? null : pipeline.getColorTargetStates().getFirst();
             if (target != null && target.blendFunction().isPresent()) {
                 return TerrainKind.TRANSLUCENT;
             }
@@ -1296,18 +1355,15 @@ public final class IrisMetalPipelineOverrides {
                     requireNoFallback("no synthetic terrain pipeline available while compiling " + kind);
                     return null;
                 }
-                ShaderSource source = (id, type) -> {
-                    String generated = this.generatedGlsl.get(id);
-                    if (generated != null) {
-                        return generated;
-                    }
-                    return fallbackSource == null ? null : fallbackSource.get(id, type);
-                };
+                ShaderSource source = MetalShaderSourceAdapters.overlay(this.generatedGlsl, fallbackSource);
                 Metallum.LOGGER.info(
                         "[metallum-iris] compiling terrain override {} for {} via {}",
                         kind, pipeline.getLocation(), compilePipeline.getLocation()
                 );
-                MetalCompiledRenderPipeline compiled = MetalCrossShaderCompiler.compile(device, compilePipeline, source);
+                CompiledRenderPipeline compiledPipeline = device.precompilePipeline(compilePipeline, source);
+                if (!(compiledPipeline instanceof MetalCompiledRenderPipeline compiled)) {
+                    throw new IllegalStateException("Terrain override did not produce a Metal pipeline");
+                }
                 this.compiledKinds.put(compiled, kind);
                 this.compiledGlobalBlends.put(
                         compiled,
@@ -1345,18 +1401,15 @@ public final class IrisMetalPipelineOverrides {
                 throw new IllegalStateException("No translated core program registered for " + key);
             }
             try {
-                ShaderSource source = (id, type) -> {
-                    String generated = this.generatedGlsl.get(id);
-                    if (generated != null) {
-                        return generated;
-                    }
-                    return fallbackSource == null ? null : fallbackSource.get(id, type);
-                };
+                ShaderSource source = MetalShaderSourceAdapters.overlay(this.generatedGlsl, fallbackSource);
                 Metallum.LOGGER.info(
                         "[metallum-iris] compiling core override {} via {}",
                         key, pipeline.getLocation()
                 );
-                MetalCompiledRenderPipeline compiled = MetalCrossShaderCompiler.compile(device, pipeline, source);
+                CompiledRenderPipeline compiledPipeline = device.precompilePipeline(pipeline, source);
+                if (!(compiledPipeline instanceof MetalCompiledRenderPipeline compiled)) {
+                    throw new IllegalStateException("Core override did not produce a Metal pipeline");
+                }
                 this.compiledCoreKeys.put(compiled, key);
                 this.compiledGlobalBlends.put(
                         compiled,
@@ -1400,7 +1453,8 @@ public final class IrisMetalPipelineOverrides {
                     .withPolygonMode(source.getPolygonMode())
                     .withPrimitiveTopology(source.getPrimitiveTopology());
 
-            ColorTargetState sourceTarget = source.getColorTargetState();
+            ColorTargetState sourceTarget = source.getColorTargetStates().isEmpty()
+                    ? null : source.getColorTargetStates().getFirst();
             if (sourceTarget == null) {
                 throw new IllegalStateException("Sodium pipeline " + source.getLocation() + " has no color target");
             }
@@ -1448,8 +1502,7 @@ public final class IrisMetalPipelineOverrides {
             Set<String> declared = new java.util.HashSet<>();
             for (BindGroupLayout layout : source.getBindGroupLayouts()) {
                 builder.withBindGroupLayout(layout);
-                layout.getUniforms().forEach(uniform -> declared.add(uniform.name()));
-                declared.addAll(layout.getSamplers());
+                layout.uniforms().forEach(uniform -> declared.add(uniform.name()));
             }
             BindGroupLayout.Builder extras = BindGroupLayout.builder();
             for (String blockName : program.uniformBlockNames()) {
@@ -1470,7 +1523,7 @@ public final class IrisMetalPipelineOverrides {
                                     + ") is a texel buffer with no known GpuFormat; not supported in B2-1"
                     );
                 }
-                extras.withSampler(sampler.name());
+                extras.withUniform(sampler.name(), UniformType.COMBINED_IMAGE_SAMPLER);
             }
             builder.withBindGroupLayout(extras.build());
             builder.withVertexBinding(0, chunkFormat);
@@ -1507,7 +1560,8 @@ public final class IrisMetalPipelineOverrides {
                     .withPolygonMode(source.getPolygonMode())
                     .withPrimitiveTopology(source.getPrimitiveTopology());
 
-            ColorTargetState sourceTarget = source.getColorTargetState();
+            ColorTargetState sourceTarget = source.getColorTargetStates().isEmpty()
+                    ? null : source.getColorTargetStates().getFirst();
             if (sourceTarget == null) {
                 throw new IllegalStateException("Core pipeline " + source.getLocation() + " has no color target");
             }
@@ -1553,8 +1607,7 @@ public final class IrisMetalPipelineOverrides {
             Set<String> declared = new java.util.HashSet<>();
             for (BindGroupLayout layout : source.getBindGroupLayouts()) {
                 builder.withBindGroupLayout(layout);
-                layout.getUniforms().forEach(uniform -> declared.add(uniform.name()));
-                declared.addAll(layout.getSamplers());
+                layout.uniforms().forEach(uniform -> declared.add(uniform.name()));
             }
             BindGroupLayout.Builder extras = BindGroupLayout.builder();
             for (String blockName : program.uniformBlockNames()) {
@@ -1575,14 +1628,14 @@ public final class IrisMetalPipelineOverrides {
                                     + ") is a texel buffer without a Metal format"
                     );
                 }
-                extras.withSampler(sampler.name());
+                extras.withUniform(sampler.name(), UniformType.COMBINED_IMAGE_SAMPLER);
             }
             builder.withBindGroupLayout(extras.build());
 
-            VertexFormat[] sourceBindings = source.getVertexFormatBindings();
-            for (int binding = 0; binding < sourceBindings.length; binding++) {
-                if (sourceBindings[binding] != null) {
-                    builder.withVertexBinding(binding, sourceBindings[binding]);
+            java.util.List<@Nullable VertexFormat> sourceBindings = source.getVertexFormatBindings();
+            for (int binding = 0; binding < sourceBindings.size(); binding++) {
+                if (sourceBindings.get(binding) != null) {
+                    builder.withVertexBinding(binding, sourceBindings.get(binding));
                 }
             }
             VertexFormat physicalVertexFormat = shadowProgram == null
@@ -2372,7 +2425,8 @@ public final class IrisMetalPipelineOverrides {
                 final @Nullable ProgramSource program,
                 final @Nullable BlendModeOverride fallback
         ) {
-            ColorTargetState sourceTarget = source.getColorTargetState();
+            ColorTargetState sourceTarget = source.getColorTargetStates().isEmpty()
+                    ? null : source.getColorTargetStates().getFirst();
             Optional<BlendFunction> blend = sourceTarget == null
                     ? Optional.empty()
                     : sourceTarget.blendFunction();

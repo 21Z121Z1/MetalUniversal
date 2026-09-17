@@ -363,7 +363,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         if (clearColors != null && clearColors.length != drawBuffers.length) {
             throw new IllegalArgumentException("Clear color array must match draw buffer count");
         }
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> label);
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> label);
         MetalGpuTextureView[] views = new MetalGpuTextureView[drawBuffers.length + 1];
         boolean[] written = new boolean[colorTargets.targetCount()];
         for (int slot = 0; slot < drawBuffers.length; slot++) {
@@ -384,7 +384,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
                 clearDepth == null ? OptionalDouble.empty() : OptionalDouble.of(clearDepth)
         );
         descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, resolution, resolution));
-        return new IrisMetalRenderTargets.RenderPassDescriptorWithViews(descriptor, views);
+        return new IrisMetalRenderTargets.RenderPassDescriptorWithViews(descriptor.build(), views);
     }
 
     /**
@@ -414,7 +414,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
                             + viewportX + "," + viewportY + " " + viewportWidth + "x" + viewportHeight
             );
         }
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> label);
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> label);
         MetalGpuTextureView[] views = new MetalGpuTextureView[drawBuffers.length];
         boolean[] written = new boolean[colorTargets.targetCount()];
         for (int slot = 0; slot < drawBuffers.length; slot++) {
@@ -427,7 +427,7 @@ final class IrisMetalShadowTargets implements AutoCloseable {
         descriptor.withRenderArea(new RenderPass.RenderArea(
                 viewportX, viewportY, viewportWidth, viewportHeight
         ));
-        return new IrisMetalRenderTargets.RenderPassDescriptorWithViews(descriptor, views);
+        return new IrisMetalRenderTargets.RenderPassDescriptorWithViews(descriptor.build(), views);
     }
 
     /** Publishes the plan's final state for world-pass shadowcolor sampling. */

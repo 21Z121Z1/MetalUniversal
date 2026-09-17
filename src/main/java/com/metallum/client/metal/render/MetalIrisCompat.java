@@ -88,14 +88,22 @@ public final class MetalIrisCompat {
 
     /** True when the live GpuDevice is the Metal backend. */
     public static boolean holdIrisDormant() {
+        // RenderSystem.initRenderer publishes its DEVICE only after the
+        // backend has been constructed. Iris calls its init hook from inside
+        // that same method, so the device-local identity is the authoritative
+        // early-startup signal and avoids entering OpenGL while DEVICE is not
+        // yet observable through RenderSystem.getDevice().
+        if (MetalDevice.current() == null) {
+            return false;
+        }
         try {
             if (!"Metal".equals(RenderSystem.getDevice().getDeviceInfo().backendName())) {
                 return false;
             }
         } catch (Throwable notReady) {
-            // No device yet: nothing GL-flavored can be running either; do not
-            // suppress Iris based on a guess.
-            return false;
+            // The Metal backend is already live, but RenderSystem may still be
+            // publishing its frontend wrapper during renderer initialization.
+            // Keep Iris's GL entry points cancelled in that narrow window.
         }
         if (!announced) {
             announced = true;

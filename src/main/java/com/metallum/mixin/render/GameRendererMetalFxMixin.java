@@ -1,9 +1,11 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.MetalBackend;
 import com.metallum.client.metal.render.MetalPreviousVertexBridge;
 import com.mojang.blaze3d.pipeline.MainTarget;
 import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
@@ -15,6 +17,18 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(GameRenderer.class)
 public abstract class GameRendererMetalFxMixin {
+    @ModifyArg(
+            method = "preloadUiShader",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lcom/mojang/blaze3d/pipeline/PipelineCache;<init>(Lcom/mojang/renderpearl/api/device/GpuDevice;Lcom/mojang/renderpearl/api/pipeline/ShaderSource;)V"
+            ),
+            index = 1
+    )
+    private static ShaderSource metallum$captureRenderPearlShaderSource(final ShaderSource shaderSource) {
+        return MetalBackend.captureShaderSource(shaderSource);
+    }
+
     @Redirect(
             method = "<init>",
             at = @At(value = "NEW", target = "com/mojang/blaze3d/pipeline/MainTarget")
@@ -52,7 +66,7 @@ public abstract class GameRendererMetalFxMixin {
             method = "renderLevel",
             at = @At(
                     value = "INVOKE",
-                    target = "Lnet/minecraft/client/renderer/ProjectionMatrixBuffer;getBuffer(Lorg/joml/Matrix4f;)Lcom/mojang/blaze3d/buffers/GpuBufferSlice;"
+                    target = "Lnet/minecraft/client/renderer/ProjectionMatrixBuffer;getBuffer(Lorg/joml/Matrix4f;)Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;"
             ),
             index = 0
     )
@@ -76,15 +90,18 @@ public abstract class GameRendererMetalFxMixin {
     }
 
     @Inject(
-            method = "renderLevel",
+            method = "render3dHud",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/mojang/blaze3d/systems/CommandEncoder;clearDepthTexture(Lcom/mojang/blaze3d/textures/GpuTexture;D)V",
+                    target = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V",
                     shift = At.Shift.BEFORE
             )
     )
     private void metallum$preserveWorldDepthBeforeHand(
-            final net.minecraft.client.DeltaTracker deltaTracker,
+            final net.minecraft.client.renderer.state.level.CameraRenderState cameraState,
+            final net.minecraft.client.renderer.state.level.PlayerRenderState playerState,
+            final net.minecraft.client.renderer.state.OptionsRenderState optionsState,
+            final boolean consistentDepthRequired,
             final CallbackInfo ci
     ) {
         MetalFxManager.preserveWorldDepthBeforeHand((GameRenderer) (Object) this);
@@ -94,11 +111,11 @@ public abstract class GameRendererMetalFxMixin {
             method = "render",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/mojang/blaze3d/systems/CommandEncoder;clearDepthTexture(Lcom/mojang/blaze3d/textures/GpuTexture;D)V",
+                    target = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V",
                     shift = At.Shift.BEFORE
             )
     )
-    private void metallum$upscaleBeforeGui(final net.minecraft.client.DeltaTracker deltaTracker, final boolean advanceGameTime, final CallbackInfo ci) {
+    private void metallum$upscaleBeforeGui(final CallbackInfo ci) {
         MetalFxManager.beforeGui((GameRenderer) (Object) this);
     }
 

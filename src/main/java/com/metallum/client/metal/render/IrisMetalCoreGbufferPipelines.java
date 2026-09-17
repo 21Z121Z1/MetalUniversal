@@ -53,7 +53,6 @@ public final class IrisMetalCoreGbufferPipelines {
         main(RenderPipelines.EYES, ShaderKey.ENTITIES_EYES);
         main(RenderPipelines.ENTITY_TRANSLUCENT_EMISSIVE, ShaderKey.ENTITIES_EYES_TRANS);
         main(RenderPipelines.ARMOR_DECAL_CUTOUT_NO_CULL, IrisMetalCoreGbufferPipelines::cutout);
-        main(RenderPipelines.ARMOR_TRANSLUCENT, IrisMetalCoreGbufferPipelines::translucent);
         main(RenderPipelines.BREEZE_WIND, IrisMetalCoreGbufferPipelines::translucent);
         main(RenderPipelines.ENTITY_SOLID, IrisMetalCoreGbufferPipelines::solid);
         main(RenderPipelines.ENTITY_SOLID_Z_OFFSET_FORWARD, IrisMetalCoreGbufferPipelines::solid);
@@ -67,14 +66,11 @@ public final class IrisMetalCoreGbufferPipelines {
         main(RenderPipelines.BEACON_BEAM_TRANSLUCENT, ShaderKey.BEACON);
         main(RenderPipelines.END_PORTAL, ShaderKey.BLOCK_ENTITY);
         main(RenderPipelines.END_SKY, ShaderKey.SKY_TEXTURED);
-        main(RenderPipelines.WEATHER_DEPTH_WRITE, ShaderKey.WEATHER);
-        main(RenderPipelines.WEATHER_NO_DEPTH_WRITE, ShaderKey.WEATHER);
+        main(RenderPipelines.WEATHER, ShaderKey.WEATHER);
         main(RenderPipelines.TEXT, IrisMetalCoreGbufferPipelines::text);
         main(RenderPipelines.TEXT_POLYGON_OFFSET, IrisMetalCoreGbufferPipelines::text);
         main(RenderPipelines.TEXT_SEE_THROUGH, IrisMetalCoreGbufferPipelines::text);
         main(RenderPipelines.TEXT_GRAYSCALE_SEE_THROUGH, IrisMetalCoreGbufferPipelines::intensityText);
-        main(RenderPipelines.TEXT_BACKGROUND, ShaderKey.TEXT_BG);
-        main(RenderPipelines.TEXT_BACKGROUND_SEE_THROUGH, ShaderKey.TEXT_BG);
         main(RenderPipelines.TEXT_GRAYSCALE, IrisMetalCoreGbufferPipelines::intensityText);
         main(RenderPipelines.CRUMBLING, ShaderKey.CRUMBLING);
         main(RenderPipelines.LEASH, ShaderKey.LEASH);
@@ -108,8 +104,7 @@ public final class IrisMetalCoreGbufferPipelines {
         shadow(RenderPipelines.BANNER_PATTERN, ShaderKey.SHADOW_ENTITIES_CUTOUT);
         shadow(RenderPipelines.ENERGY_SWIRL, ShaderKey.SHADOW_ENTITIES_CUTOUT);
         shadow(RenderPipelines.GLINT, ShaderKey.SHADOW_ENTITIES_CUTOUT);
-        shadow(RenderPipelines.WEATHER_DEPTH_WRITE, ShaderKey.SHADOW_PARTICLES);
-        shadow(RenderPipelines.WEATHER_NO_DEPTH_WRITE, ShaderKey.SHADOW_PARTICLES);
+        shadow(RenderPipelines.WEATHER, ShaderKey.SHADOW_PARTICLES);
         shadow(RenderPipelines.OPAQUE_PARTICLE, ShaderKey.SHADOW_PARTICLES);
         shadow(RenderPipelines.TRANSLUCENT_PARTICLE, ShaderKey.SHADOW_PARTICLES);
         shadow(RenderPipelines.LINES, ShaderKey.SHADOW_LINES);
@@ -119,15 +114,12 @@ public final class IrisMetalCoreGbufferPipelines {
         shadow(RenderPipelines.TEXT_POLYGON_OFFSET, ShaderKey.SHADOW_TEXT);
         shadow(RenderPipelines.TEXT_SEE_THROUGH, ShaderKey.SHADOW_TEXT);
         shadow(RenderPipelines.TEXT_GRAYSCALE_SEE_THROUGH, ShaderKey.SHADOW_TEXT_INTENSITY);
-        shadow(RenderPipelines.TEXT_BACKGROUND, ShaderKey.SHADOW_TEXT_BG);
-        shadow(RenderPipelines.TEXT_BACKGROUND_SEE_THROUGH, ShaderKey.SHADOW_TEXT_BG);
         shadow(RenderPipelines.TEXT_GRAYSCALE, ShaderKey.SHADOW_TEXT_INTENSITY);
         shadow(RenderPipelines.WATER_MASK, ShaderKey.SHADOW_BASIC);
         shadow(RenderPipelines.BEACON_BEAM_OPAQUE, ShaderKey.SHADOW_BEACON_BEAM);
         shadow(RenderPipelines.BEACON_BEAM_TRANSLUCENT, ShaderKey.SHADOW_BEACON_BEAM);
         shadow(RenderPipelines.END_PORTAL, ShaderKey.SHADOW_BLOCK);
         shadow(RenderPipelines.END_GATEWAY, ShaderKey.SHADOW_BLOCK);
-        shadow(RenderPipelines.ARMOR_TRANSLUCENT, ShaderKey.SHADOW_ENTITIES_CUTOUT);
         shadow(RenderPipelines.LIGHTNING, ShaderKey.SHADOW_LIGHTNING);
         shadow(RenderPipelines.DRAGON_RAYS, ShaderKey.SHADOW_LIGHTNING);
     }
@@ -166,12 +158,25 @@ public final class IrisMetalCoreGbufferPipelines {
     }
 
     /**
-     * Preserves the physical ABI of Mojang's draw, including an absent stream
-     * for procedural pipelines. Logical Iris inputs not present in that ABI
-     * are supplied by the cross-compiler's generic constant-input path.
+     * Resolves the format that Iris's transformed draw actually writes.
+     *
+     * <p>RenderPearl 26.3 validates vertex shader inputs before the Metal
+     * backend is reached. Iris extends the vanilla ENTITY/BLOCK/glyph streams
+     * while a shader pack is active, so keeping the vanilla format here would
+     * reject the generated {@code iris_Entity}, {@code mc_midTexCoord} and
+     * tangent inputs. Procedural Mojang pipelines still deliberately retain an
+     * absent stream.</p>
      */
     static @Nullable VertexFormat physicalVertexFormat(final RenderPipeline source, final ShaderKey key) {
-        return source.getVertexFormatBinding(0);
+        VertexFormat sourceFormat = source.getVertexFormatBinding(0);
+        if (sourceFormat == null) {
+            return null;
+        }
+        VertexFormat irisFormat = key.getVertexFormat();
+        if (irisFormat != null) {
+            return irisFormat;
+        }
+        return sourceFormat;
     }
 
     private static void main(final RenderPipeline pipeline, final ShaderKey key) {

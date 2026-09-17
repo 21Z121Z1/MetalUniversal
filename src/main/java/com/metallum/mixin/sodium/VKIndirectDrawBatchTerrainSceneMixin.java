@@ -70,8 +70,8 @@ public abstract class VKIndirectDrawBatchTerrainSceneMixin
             method = "draw(Lnet/caffeinemc/mods/sodium/client/gpu/device/context/DrawContext;)V",
             at = @At(
                     value = "INVOKE",
-                    target = "Lcom/mojang/blaze3d/systems/RenderPass;drawIndexedIndirect("
-                            + "Lcom/mojang/blaze3d/buffers/GpuBufferSlice;I)V"
+                    target = "Lcom/mojang/renderpearl/api/commands/RenderPass;drawIndexedIndirect("
+                            + "Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;I)V"
             ),
             remap = false
     )

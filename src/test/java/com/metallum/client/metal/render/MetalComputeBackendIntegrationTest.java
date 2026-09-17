@@ -55,9 +55,9 @@ final class MetalComputeBackendIntegrationTest {
         assertTrue(MetalNativeBridge.supportsComputeAbi(), "dylib must export the compute ABI");
         assertTrue(MetalNativeBridge.supportsGenerateMipmaps(), "dylib must export generateMipmaps");
         assertTrue(MetalNativeBridge.supportsSamplerCompare(), "dylib must export the compare-sampler ABI");
-        ShaderSource source = (identifier, type) ->
+        ShaderSource source = MetalShaderSourceAdapters.from((identifier, type) ->
                 shaders.get(identifier.getPath().substring(identifier.getPath().lastIndexOf('/') + 1)
-                        + (type == ShaderType.VERTEX ? ".vert" : ".frag"));
+                        + (type == ShaderType.VERTEX ? ".vert" : ".frag")));
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),
@@ -434,11 +434,11 @@ final class MetalComputeBackendIntegrationTest {
                 .withColorTargetState(0, new ColorTargetState(
                         Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
                 .build();
-        RenderPassDescriptor descriptor = RenderPassDescriptor.create(() -> "caps " + shaderName);
+        RenderPassDescriptor.Builder descriptor = RenderPassDescriptor.builder(() -> "caps " + shaderName);
         try (MetalGpuTextureView view = new MetalGpuTextureView(target, 0, 1)) {
             descriptor.withColorAttachment(view, Optional.of(clear));
             descriptor.withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT));
-            MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor);
+            MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor.build());
             pass.setPipeline(pipeline);
             pass.draw(3, 1, 0, 0);
             encoder.submitRenderPass();

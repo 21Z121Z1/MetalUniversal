@@ -16,7 +16,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(targets = "com.metallum.client.metal.render.MetalCommandEncoder")
 public abstract class MetalCommandEncoderCopyDedupMixin {
     @Inject(
-            method = "copyTextureToTexture(Lcom/mojang/blaze3d/textures/GpuTexture;Lcom/mojang/blaze3d/textures/GpuTexture;IIIIIII)V",
+            method = "copyTextureToTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;Lcom/mojang/renderpearl/api/textures/GpuTexture;IIIIIII)V",
             at = @At("HEAD"),
             cancellable = true
     )
@@ -53,7 +53,7 @@ public abstract class MetalCommandEncoderCopyDedupMixin {
     }
 
     @Inject(
-            method = "copyTextureToTexture(Lcom/mojang/blaze3d/textures/GpuTexture;Lcom/mojang/blaze3d/textures/GpuTexture;IIIIIII)V",
+            method = "copyTextureToTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;Lcom/mojang/renderpearl/api/textures/GpuTexture;IIIIIII)V",
             at = @At("RETURN")
     )
     private void metallum$rememberFullCopy(

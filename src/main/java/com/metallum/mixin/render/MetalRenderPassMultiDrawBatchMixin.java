@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalGpuBuffer;
+import com.metallum.client.metal.render.MetalMultiDrawScratch;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLIndexType;
 import com.metallum.client.metal.render.mtl.MTLPrimitiveType;
@@ -30,7 +31,7 @@ import java.util.Map;
 @Mixin(targets = "com.metallum.client.metal.render.MetalRenderPass")
 public abstract class MetalRenderPassMultiDrawBatchMixin {
     private static final boolean ENABLED = !"false".equalsIgnoreCase(
-            System.getProperty("metallum.opt.nativeMultiDrawBatch", "true")
+            System.getProperty("metallum.opt.nativeMultiDrawBatch", "false")
     );
     private static final boolean NO_TRACE_FAST_PATH = !"false".equalsIgnoreCase(
             System.getProperty("metallum.opt.noTraceDrawFastPath", "true")
@@ -90,8 +91,10 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
         final boolean noTrace = NO_TRACE_FAST_PATH && this.contractPassToken < 0L;
         if (drawCount < 0
                 || drawCount > Integer.MAX_VALUE / 3
-                // Absolute IntBuffer.get(index) is bounded by limit(), not capacity().
-                || drawParameters.limit() < drawCount * 3
+                // RenderPearl specifies records from the current buffer
+                // position. Absolute reads below therefore use position()+
+                // offset rather than silently assuming position zero.
+                || drawParameters.remaining() < drawCount * 3
                 || !(this.indexBuffer instanceof MetalGpuBuffer nativeIndexBuffer)) {
             return;
         }
@@ -114,7 +117,9 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
             scratch = MetalMultiDrawScratch.CURRENT.get();
             scratch.ensureCapacity(drawCount);
             for (int draw = 0; draw < drawCount; draw++) {
-                int base = draw * 3;
+                int base = drawParameters.position() + draw * 3;
+                // RenderPearl exposes the Vulkan struct's native field
+                // offsets: firstIndex=0, indexCount=4, vertexOffset=8.
                 int firstIndex = drawParameters.get(base);
                 int indexCount = drawParameters.get(base + 1);
                 int baseVertex = drawParameters.get(base + 2);
@@ -165,7 +170,7 @@ public abstract class MetalRenderPassMultiDrawBatchMixin {
             // Preserve the legacy per-draw behavior but omit render-contract
             // parameter objects that would be discarded immediately.
             for (int draw = 0; draw < drawCount; draw++) {
-                int base = draw * 3;
+                int base = drawParameters.position() + draw * 3;
                 int firstIndex = drawParameters.get(base);
                 int indexCount = drawParameters.get(base + 1);
                 int baseVertex = drawParameters.get(base + 2);

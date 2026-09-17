@@ -3,7 +3,7 @@ package com.metallum.mixin.render;
 import com.metallum.client.metal.render.IrisMetalArgumentBindingRuntime;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
-import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
 import com.mojang.renderpearl.api.textures.GpuSampler;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import org.spongepowered.asm.mixin.Mixin;
@@ -16,14 +16,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class IrisMetalArgumentSnapshotMixin {
     @Inject(method = "setPipeline", at = @At("RETURN"), require = 0)
     private void metallum$attachArgumentLayout(
-            final RenderPipeline pipeline,
+            final BackendRenderPipeline pipeline,
             final CallbackInfo ci
     ) {
         IrisMetalArgumentBindingRuntime.attachPipeline(this);
     }
 
     @Inject(
-            method = "setUniform(Ljava/lang/String;Lcom/mojang/blaze3d/buffers/GpuBufferSlice;)V",
+            method = "setUniform(Ljava/lang/String;Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;)V",
             at = @At("RETURN"),
             require = 0
     )

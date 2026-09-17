@@ -957,7 +957,12 @@ private final class Metal4MainQueueContext {
             tableDescriptor.maxTextureBindCount = 128
             tableDescriptor.maxSamplerStateBindCount = 16
             tableDescriptor.initializeBindings = true
-            tableDescriptor.supportAttributeStrides = true
+            // The shipping vertex descriptors carry a fixed stride.  The
+            // bridge binds ordinary GPU addresses, not the
+            // setAddress(_:attributeStride:index:) form; advertising dynamic
+            // attribute strides here leaves the Metal 4 vertex fetch stride
+            // unspecified and corrupts terrain geometry on the main queue.
+            tableDescriptor.supportAttributeStrides = false
             tableDescriptor.label = "Metallum Main Arguments \(index) (Metal 4)"
             guard let allocator = try? device.makeCommandAllocator(descriptor: allocatorDescriptor),
               let commandBuffer = device.makeCommandBuffer(),

@@ -771,10 +771,7 @@ final class IrisMetalPostChain implements AutoCloseable {
      */
     ShaderSource shaderSource(final ShaderSource fallback) {
         Objects.requireNonNull(fallback, "fallback");
-        return (identifier, type) -> {
-            String generated = this.generatedSources.get(identifier);
-            return generated != null ? generated : fallback.get(identifier, type);
-        };
+        return MetalShaderSourceAdapters.overlay(this.generatedSources, fallback);
     }
 
     /**
@@ -940,9 +937,10 @@ final class IrisMetalPostChain implements AutoCloseable {
             if (this.finalPass != null) {
                 generateMipmaps(encoder, targets, this.finalPass.mipmappedBuffers);
                 RenderPassDescriptor descriptor = RenderPassDescriptor
-                        .create(() -> "Iris final: " + this.finalPass.name)
+                        .builder(() -> "Iris final: " + this.finalPass.name)
                         .withColorAttachment(mainColor, Optional.empty())
-                        .withRenderArea(new RenderPass.RenderArea(0, 0, targets.width(), targets.height()));
+                        .withRenderArea(new RenderPass.RenderArea(0, 0, targets.width(), targets.height()))
+                        .build();
                 MetalRenderPass renderPass = (MetalRenderPass) encoder.createRenderPass(descriptor);
                 try {
                     renderFullscreen(
@@ -1023,11 +1021,12 @@ final class IrisMetalPostChain implements AutoCloseable {
         MetalGpuTextureView swapView = Objects.requireNonNull(this.colorSpaceSwapView, "color-space swap view");
         MetalGpuSampler sampler = Objects.requireNonNull(this.colorSpaceSampler, "color-space sampler");
         RenderPassDescriptor descriptor = RenderPassDescriptor
-                .create(() -> "Iris color space: " + colorSpace)
+                .builder(() -> "Iris color space: " + colorSpace)
                 .withColorAttachment(swapView, Optional.empty())
                 .withRenderArea(new RenderPass.RenderArea(
                         0, 0, mainColor.getWidth(0), mainColor.getHeight(0)
-                ));
+                ))
+                .build();
         MetalCommandEncoder encoder = device.commandEncoder();
         MetalRenderPass renderPass = (MetalRenderPass) encoder.createRenderPass(descriptor);
         try {
@@ -1466,9 +1465,15 @@ final class IrisMetalPostChain implements AutoCloseable {
                 null,
                 null
         )) {
-            descriptor.descriptor().withRenderArea(area);
+            RenderPassDescriptor baseDescriptor = descriptor.descriptor();
+            RenderPassDescriptor passDescriptor = new RenderPassDescriptor(
+                    baseDescriptor.label(),
+                    baseDescriptor.colorAttachments(),
+                    baseDescriptor.depthAttachment(),
+                    area
+            );
             MetalCommandEncoder encoder = device.commandEncoder();
-            MetalRenderPass renderPass = (MetalRenderPass) encoder.createRenderPass(descriptor.descriptor());
+            MetalRenderPass renderPass = encoder.createRenderPass(passDescriptor);
             try {
                 renderFullscreen(
                         renderPass,
@@ -1781,7 +1786,7 @@ final class IrisMetalPostChain implements AutoCloseable {
                 bindings.withUniform(sampler.name(), UniformType.UNIFORM_BUFFER, format);
                 continue;
             }
-            bindings.withSampler(sampler.name());
+            bindings.withUniform(sampler.name(), UniformType.COMBINED_IMAGE_SAMPLER);
         }
         RenderPipeline.Builder builder = RenderPipeline.builder()
                 .withLocation(location)
@@ -1862,7 +1867,8 @@ final class IrisMetalPostChain implements AutoCloseable {
                 null,
                 source.getFragmentSource().orElseThrow(),
                 textureStage,
-                textureMap
+                textureMap,
+                Set.of()
         );
         String vertex = Objects.requireNonNull(patched.get(PatchShaderType.VERTEX), "patched vertex");
         String fragment = widenFragmentOutputsForMetal(
@@ -2090,7 +2096,9 @@ final class IrisMetalPostChain implements AutoCloseable {
             final CompiledRenderPipeline compiled,
             final String passName
     ) {
-        if (!device.asyncPrewarmEnabled() && !compiled.isValid()) {
+        if (!device.asyncPrewarmEnabled()
+                && compiled instanceof MetalCompiledRenderPipeline metal
+                && !metal.isValid()) {
             throw new IllegalStateException(
                     "Metal render pipeline state is invalid for Iris pass " + passName
             );
@@ -2119,7 +2127,8 @@ final class IrisMetalPostChain implements AutoCloseable {
                     source.getName(),
                     source.getSource().orElseThrow(),
                     stage.textureStage,
-                    textureMap
+                    textureMap,
+                    Set.of()
             );
             MetalIrisShaderCompiler.TranslatedStage translated = MetalIrisShaderCompiler.translateStage(
                     source.getName(), MetalIrisShaderCompiler.StageKind.COMPUTE, patched

@@ -246,7 +246,7 @@ final class MetalIrisShaderCompiler {
         rejectUnsupportedStages(name, geometrySource, null, null);
         Map<PatchShaderType, String> patched;
         try {
-            patched = TransformPatcher.patchComposite(name, vertexSource, null, fragmentSource, stage, emptyTextureMap());
+            patched = TransformPatcher.patchComposite(name, vertexSource, null, fragmentSource, stage, emptyTextureMap(), Set.of());
         } catch (TranslationException e) {
             throw e;
         } catch (Throwable t) {
@@ -352,7 +352,7 @@ final class MetalIrisShaderCompiler {
         try {
             return TransformPatcher.patchVanilla(
                     name, vertex, null, null, null, fragment,
-                    alpha, isLines, isClouds, true, inputs, textureMap
+                    alpha, isLines, isClouds, true, inputs, textureMap, Set.of()
             );
         } catch (TranslationException e) {
             throw e;
@@ -365,7 +365,7 @@ final class MetalIrisShaderCompiler {
     static TranslatedProgram translateCompute(final String name, final String computeSource, final TextureStage stage) {
         String patched;
         try {
-            patched = TransformPatcher.patchCompute(name, computeSource, stage, emptyTextureMap());
+            patched = TransformPatcher.patchCompute(name, computeSource, stage, emptyTextureMap(), Set.of());
         } catch (Throwable t) {
             throw new TranslationException(name, PHASE_PATCH, StageKind.COMPUTE, String.valueOf(t.getMessage()), t);
         }
@@ -1100,7 +1100,7 @@ final class MetalIrisShaderCompiler {
         AlphaTest alpha = source.getDirectives().getAlphaTestOverride().orElse(fallbackAlpha);
         Map<PatchShaderType, String> patched;
         try {
-            patched = TransformPatcher.patchSodium(name, vertex, null, null, null, fragment, alpha, textureMap, false);
+            patched = TransformPatcher.patchSodium(name, vertex, null, null, null, fragment, alpha, textureMap, Set.of(), false);
         } catch (Throwable t) {
             throw new TranslationException(name, PHASE_PATCH, null, String.valueOf(t.getMessage()), t);
         }

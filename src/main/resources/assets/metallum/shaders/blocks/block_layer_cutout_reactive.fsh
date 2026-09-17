@@ -1,13 +1,13 @@
-#version 330 core
+#version 460 core
 
-#moj_import <sodium:globals.glsl>
-#moj_import <sodium:fog.glsl>
-#moj_import <sodium:chunk_material.glsl>
+#include <sodium:globals.glsl>
+#include <sodium:fog.glsl>
+#include <sodium:chunk_material.glsl>
 
-in vec4 v_Color;
-in vec2 v_TexCoord;
-in vec2 v_FragDistance;
-in float fadeFactor;
+layout(location = 0) in vec4 v_Color;
+layout(location = 1) in vec2 v_TexCoord;
+layout(location = 2) in vec2 v_FragDistance;
+layout(location = 3) in float fadeFactor;
 
 uniform sampler2D u_BlockTex;
 
