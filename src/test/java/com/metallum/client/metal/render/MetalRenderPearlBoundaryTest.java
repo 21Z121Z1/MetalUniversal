@@ -54,7 +54,7 @@ final class MetalRenderPearlBoundaryTest {
         assertThrows(ClassNotFoundException.class, () ->
                 Class.forName("net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer", false, loader));
         assertThrows(ClassNotFoundException.class, () ->
-                Class.forName("net.irisshaders.iris.Iris", false, loader));
+                Class.forName("net.irisshaders.iris.mixinterface.GpuTextureInterface", false, loader));
 
         for (String className : List.of(
                 "com.metallum.client.metal.render.MetalBackend",
