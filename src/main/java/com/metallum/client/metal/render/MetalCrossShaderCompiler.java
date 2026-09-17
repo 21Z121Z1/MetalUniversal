@@ -58,15 +58,6 @@ final class MetalCrossShaderCompiler {
     private MetalCrossShaderCompiler() {
     }
 
-    record CacheLookup(@Nullable MetalMslDiskCache diskCache, @Nullable String cacheKey,
-                       MetalMslDiskCache.@Nullable Entry cached, float sampleLodBias) {
-    }
-
-    /** Source-side cache lookup is not valid after the 26.3 frontend migration. */
-    static CacheLookup tryLoadCacheLookup(final RenderPipeline pipeline, final Object ignoredSource) {
-        return new CacheLookup(null, null, null, MetalFxManager.shaderSampleLodBias());
-    }
-
     static BackendRenderPipeline.Pending compilePending(
             final MetalDevice device, final BackendRenderPipeline.CreateInfo info
     ) {

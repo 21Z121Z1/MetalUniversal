@@ -25,7 +25,10 @@ final class MetalPsoArtifactPrewarmContractTest {
         assertTrue(compiler.contains("SpvModule"));
         assertTrue(compiler.contains("RenderPearl owns GLSL preprocessing"));
         assertTrue(compiler.contains("compilePending"));
-        assertTrue(compiler.contains("record CacheLookup("));
+        assertTrue(compiler.contains("renderPearlCacheKey("));
+        assertTrue(compiler.contains("mutableSpirvCopy("));
+        assertTrue(compiler.contains("MetalMslDiskCache.instance()"));
+        assertTrue(!compiler.contains("tryLoadCacheLookup("));
         assertTrue(!compiler.contains("com.mojang.blaze3d.vulkan.glsl"));
         assertTrue(nativeSource.contains("pipelineCompilerQueue = DispatchQueue(label: \"com.metallum.pipeline-compiler\""));
     }
