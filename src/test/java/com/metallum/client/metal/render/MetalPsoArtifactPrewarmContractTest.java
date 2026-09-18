@@ -22,6 +22,13 @@ final class MetalPsoArtifactPrewarmContractTest {
         assertTrue(device.contains("synchronized (COMPILE_CHAIN_LOCK)"));
         assertTrue(device.contains("frontendPipelines"));
         assertTrue(device.contains("getOrCompileFrontendPipeline"));
+        int precompileStart = device.indexOf("precompilePipeline(");
+        int precompileEnd = device.indexOf("/** True when the background prewarm thread exists", precompileStart);
+        String precompile = device.substring(precompileStart, precompileEnd);
+        int firstLookup = precompile.indexOf("this.compiledPipelines.get(pipeline)");
+        int secondLookup = precompile.indexOf("this.compiledPipelines.get(pipeline)", firstLookup + 1);
+        assertTrue(firstLookup >= 0 && secondLookup > firstLookup,
+                "precompilePipeline must re-check the cache after taking COMPILE_CHAIN_LOCK");
         assertTrue(compiler.contains("SpvModule"));
         assertTrue(compiler.contains("RenderPearl owns GLSL preprocessing"));
         assertTrue(compiler.contains("compilePending"));

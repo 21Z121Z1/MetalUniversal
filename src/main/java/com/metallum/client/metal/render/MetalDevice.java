@@ -605,8 +605,16 @@ final class MetalDevice implements GpuDeviceBackend {
         if (existing != null) {
             return existing;
         }
-        this.activeShaderSource = effectiveSource;
         synchronized (COMPILE_CHAIN_LOCK) {
+            // Async prewarm callers may race on the same RenderPipeline. The
+            // outer lookup is the fast path; this locked lookup prevents the
+            // second waiter from recompiling and overwriting a native pipeline
+            // that the first waiter just published.
+            existing = this.compiledPipelines.get(pipeline);
+            if (existing != null) {
+                return existing;
+            }
+            this.activeShaderSource = effectiveSource;
             CompiledRenderPipeline frontend = this.pipelineBuilder
                     .compilePipeline(pipeline, effectiveSource, Runnable::run)
                     .join()
