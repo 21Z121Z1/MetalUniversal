@@ -857,14 +857,15 @@ final class MetalDevice implements GpuDeviceBackend {
                 // ColorTargetState contract has the same upper bound. Keep
                 // the advertised limit aligned with both APIs so the generic
                 // CommandEncoder rejects an impossible pass before native use.
-                // Interleaved multi-draw is expanded into ordinary indexed
-                // draws by MetalRenderPass, so Metal imposes no draw-count
-                // limit at this boundary. Report a positive generic limit;
-                // RenderPearl still validates the parameter buffer and a
-                // future backend/device-specific cap can be split by the
-                // Sodium adapter.
-                new DeviceLimits(1, 256, 16384, maxMemoryAllocationSize, Integer.MAX_VALUE, ColorTargetState.MAX_COLOR_TARGETS, Integer.MAX_VALUE),
-                new DeviceFeatures(false, false, true, true, true, false, true, true),
+                // Direct multi-draw is expanded into ordinary Metal draws.
+                // RenderPearl validates interleaved records with int arithmetic
+                // (drawCount * 3 for indexed commands), so advertise the largest
+                // count that cannot overflow that validation before the backend
+                // sees the buffer. Indirect drawing remains intentionally
+                // unsupported; do not advertise multiDrawIndirect without its
+                // prerequisite drawIndirect capability.
+                new DeviceLimits(1, 256, 16384, maxMemoryAllocationSize, Integer.MAX_VALUE / 3, ColorTargetState.MAX_COLOR_TARGETS, Integer.MAX_VALUE),
+                new DeviceFeatures(false, false, true, true, false, false, true, true),
                 underlyingExtensions,
                 new HintsAndWorkarounds(false, false, false, false),
                 type

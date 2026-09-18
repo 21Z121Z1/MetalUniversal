@@ -992,12 +992,58 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
     @Override
     public void multiDraw(@NonNull IntBuffer drawParameters, int instanceCount, int firstInstance, int drawCount) {
-        throw new UnsupportedOperationException();
+        MTLPrimitiveType primitiveType = primitiveTopology();
+        MTLRenderCommandEncoder enc = renderEncoder();
+        bindDrawState(enc);
+
+        int position = drawParameters.position();
+        for (int draw = 0; draw < drawCount; draw++) {
+            int base = position + draw * 2;
+            // VkMultiDrawInfoEXT layout used by RenderPearl 26.3:
+            // firstVertex=0, vertexCount=4.
+            int firstVertex = drawParameters.get(base);
+            int vertexCount = drawParameters.get(base + 1);
+            if (vertexCount <= 0 || instanceCount <= 0) {
+                continue;
+            }
+            if (primitiveType == MTLPrimitiveType.TriangleFan) {
+                drawTriangleFan(enc, firstVertex, vertexCount, instanceCount, firstInstance);
+            } else {
+                enc.drawPrimitives(primitiveType, firstVertex, vertexCount, instanceCount, firstInstance);
+            }
+        }
+
+        recordProducer(ProducerType.MULTI_DRAW, Map.of(
+                "drawCount", Integer.toString(drawCount),
+                "instanceCount", Integer.toString(instanceCount)
+        ));
     }
 
     @Override
     public void multiDraw(@NonNull IntBuffer firstVertices, @NonNull IntBuffer vertexCounts, int drawCount) {
-        throw new UnsupportedOperationException();
+        MTLPrimitiveType primitiveType = primitiveTopology();
+        MTLRenderCommandEncoder enc = renderEncoder();
+        bindDrawState(enc);
+
+        int firstPosition = firstVertices.position();
+        int countPosition = vertexCounts.position();
+        for (int draw = 0; draw < drawCount; draw++) {
+            int firstVertex = firstVertices.get(firstPosition + draw);
+            int vertexCount = vertexCounts.get(countPosition + draw);
+            if (vertexCount <= 0) {
+                continue;
+            }
+            if (primitiveType == MTLPrimitiveType.TriangleFan) {
+                drawTriangleFan(enc, firstVertex, vertexCount, 1, 0);
+            } else {
+                enc.drawPrimitives(primitiveType, firstVertex, vertexCount, 1, 0);
+            }
+        }
+
+        recordProducer(ProducerType.MULTI_DRAW, Map.of(
+                "drawCount", Integer.toString(drawCount),
+                "instanceCount", "1"
+        ));
     }
 
     @Override

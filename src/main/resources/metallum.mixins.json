@@ -83,7 +83,6 @@
     "sodium.DefaultChunkRendererTerrainSceneMixin",
     "sodium.DefaultChunkRendererTerrainCandidateMixin",
     "sodium.VKIndirectDrawBatchTerrainSceneMixin",
-    "sodium.VKMultiDrawBatchMetalFxMixin",
     "sodium.SectionRenderDataStorageAccessor",
     "sodium.SectionRenderDataStorageOwnerMixin",
     "sodium.SectionRenderDataStorageTerrainCandidateMixin",

@@ -877,8 +877,10 @@ tasks.register("extractIrisNestedJars", Copy) {
 
 def irisNestedJars = fileTree("${buildDir}/iris-nested-jars") { include "*.jar" }
 irisNestedJars.builtBy("extractIrisNestedJars")
-dependencies {
-	testRuntimeOnly irisNestedJars
+if (!noOptionalRenderMods) {
+	dependencies {
+		testRuntimeOnly irisNestedJars
+	}
 }
 
 tasks.register("metalIrisShaderTranslationTest", Test) {
