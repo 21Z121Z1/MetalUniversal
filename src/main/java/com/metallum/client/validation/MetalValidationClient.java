@@ -21,7 +21,6 @@ import com.metallum.client.terrain.TerrainSchedulingController;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.metallum.client.validation.storage.ValidationStorageBudget;
 import com.mojang.blaze3d.systems.RenderSystem;
-import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.CloudStatus;
 import net.minecraft.client.CameraType;
@@ -282,20 +281,14 @@ public final class MetalValidationClient implements ClientModInitializer {
                 outputDirectory,
                 System.getProperty("metallum.renderContract.runId", "minecraft-current")
         );
-        try {
-            // ReplayMod's FlawlessFrames protocol, implemented by Sodium:
-            // while active, every frame builds all pending chunk sections
-            // with an unlimited upload budget and blocks until they land.
-            // This removes the upload-budget race that otherwise makes scene
-            // mutations (occlusion wall, cutout scenes) mesh a frame late
-            // depending on the estimator state — the last source of
-            // frame-timing nondeterminism in golden captures.
-            net.caffeinemc.mods.sodium.client.util.FlawlessFrames.getProvider()
-                    .apply("metallum-validation")
-                    .accept(true);
+        // ReplayMod's FlawlessFrames protocol is supplied by Sodium when the
+        // optional mod is installed. Keep the production validation entrypoint
+        // loadable without Sodium by crossing that boundary through the
+        // reflection-only bridge.
+        if (SodiumValidationBridge.enableFlawlessFrames("metallum-validation")) {
             Metallum.LOGGER.info("FlawlessFrames enabled for deterministic chunk building");
-        } catch (Throwable t) {
-            Metallum.LOGGER.warn("FlawlessFrames unavailable; scene mutations may mesh a frame late", t);
+        } else {
+            Metallum.LOGGER.warn("FlawlessFrames unavailable; scene mutations may mesh a frame late");
         }
     }
 
@@ -1206,8 +1199,7 @@ public final class MetalValidationClient implements ClientModInitializer {
     }
 
     private static boolean terrainSettled() {
-        SodiumWorldRenderer renderer = SodiumWorldRenderer.instanceNullable();
-        return renderer == null || renderer.isTerrainRenderComplete();
+        return SodiumValidationBridge.terrainSettled();
     }
 
     /** Applies the pose's camera and entity placement; returns the entity position. */
@@ -1684,10 +1676,6 @@ public final class MetalValidationClient implements ClientModInitializer {
      * rather than racing asynchronous worker threads.
      */
     private static void requestImportantRebuild(final Iterable<BlockPos> positions) {
-        SodiumWorldRenderer renderer = SodiumWorldRenderer.instanceNullable();
-        if (renderer == null) {
-            return;
-        }
         int minX = Integer.MAX_VALUE;
         int minY = Integer.MAX_VALUE;
         int minZ = Integer.MAX_VALUE;
@@ -1705,7 +1693,9 @@ public final class MetalValidationClient implements ClientModInitializer {
             maxZ = Math.max(maxZ, pos.getZ());
         }
         if (any) {
-            renderer.scheduleRebuildForBlockArea(minX, minY, minZ, maxX, maxY, maxZ, true);
+            SodiumValidationBridge.requestImportantRebuild(
+                    minX, minY, minZ, maxX, maxY, maxZ
+            );
         }
     }
 
