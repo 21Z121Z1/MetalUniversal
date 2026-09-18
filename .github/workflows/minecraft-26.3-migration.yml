@@ -162,8 +162,10 @@ jobs:
           mkdir -p build/agent-evidence
           ./gradlew --no-daemon -Pmetallum.noOptionalMods=true dependencies --configuration runtimeClasspath \
             | tee build/agent-evidence/runtime-no-optional-mods.txt
-          if grep -Eq 'maven\.modrinth:(sodium|iris)' build/agent-evidence/runtime-no-optional-mods.txt; then
-            echo "Optional render mods leaked into the vanilla runtime classpath" >&2
+          ./gradlew --no-daemon -Pmetallum.noOptionalMods=true dependencies --configuration testRuntimeClasspath \
+            | tee -a build/agent-evidence/runtime-no-optional-mods.txt
+          if grep -Eq 'maven\.modrinth:(sodium|iris)|iris-nested-jars' build/agent-evidence/runtime-no-optional-mods.txt; then
+            echo "Optional render mods leaked into the vanilla runtime/test runtime classpath" >&2
             exit 1
           fi
           ./gradlew --no-daemon -Pmetallum.noOptionalMods=true \
