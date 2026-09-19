@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://metallum.invalid/schemas/terrain-work-events.schema.json",
+  "title": "MetalUniversal Minecraft 26.3 terrain work event report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "source",
+    "status",
+    "observationStartNanos",
+    "observationEndNanos",
+    "droppedEvents",
+    "overflowed",
+    "failureReason",
+    "events"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceSha",
+        "minecraftVersion",
+        "trialId",
+        "worldEpoch",
+        "clock"
+      ],
+      "properties": {
+        "sourceSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "minecraftVersion": {"const": "26.3"},
+        "trialId": {"type": "string", "minLength": 1, "maxLength": 160},
+        "worldEpoch": {"$ref": "#/$defs/u64"},
+        "clock": {"const": "System.nanoTime"}
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["complete", "failed", "environment-blocked"]
+    },
+    "observationStartNanos": {"$ref": "#/$defs/u64"},
+    "observationEndNanos": {"$ref": "#/$defs/u64"},
+    "droppedEvents": {"type": "integer", "minimum": 0},
+    "overflowed": {"type": "boolean"},
+    "failureReason": {"type": ["string", "null"], "minLength": 1},
+    "events": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/event"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "complete"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {"failureReason": {"type": "null"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {"enum": ["failed", "environment-blocked"]}
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "failureReason": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "u64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "i64": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]{0,18})$"
+    },
+    "workKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worldEpoch",
+        "sectionId",
+        "geometryRevision",
+        "lightingRevision",
+        "materialGeneration"
+      ],
+      "properties": {
+        "worldEpoch": {"$ref": "#/$defs/u64"},
+        "sectionId": {"$ref": "#/$defs/i64"},
+        "geometryRevision": {"$ref": "#/$defs/u64"},
+        "lightingRevision": {"$ref": "#/$defs/u64"},
+        "materialGeneration": {"$ref": "#/$defs/u64"}
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "key",
+        "stage",
+        "monotonicNanos",
+        "bytes",
+        "reason",
+        "domain",
+        "frameIndex",
+        "meshGeneration"
+      ],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 0},
+        "key": {"$ref": "#/$defs/workKey"},
+        "stage": {
+          "type": "string",
+          "enum": [
+            "DATA_READY",
+            "QUEUED",
+            "BUILD_START",
+            "BUILD_END",
+            "UPLOAD_QUEUED",
+            "GPU_ENCODED",
+            "GPU_DEPENDENCY_READY",
+            "PUBLISHED",
+            "FIRST_VALID_DRAW",
+            "GPU_COMPLETED",
+            "CANCELLED",
+            "RETIRED"
+          ]
+        },
+        "monotonicNanos": {"$ref": "#/$defs/u64"},
+        "bytes": {"type": "integer", "minimum": 0},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 160},
+        "domain": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96,
+          "pattern": "^[A-Za-z0-9._/-]+$"
+        },
+        "frameIndex": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "meshGeneration": {
+          "anyOf": [
+            {"$ref": "#/$defs/u64"},
+            {"type": "null"}
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"stage": {"enum": ["PUBLISHED", "FIRST_VALID_DRAW"]}},
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {"meshGeneration": {"$ref": "#/$defs/u64"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {"stage": {"const": "FIRST_VALID_DRAW"}},
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {"frameIndex": {"type": "integer", "minimum": 0}}
+          }
+        }
+      ]
+    }
+  }
+}

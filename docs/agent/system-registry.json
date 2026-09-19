@@ -555,12 +555,15 @@
       "owned_paths": [
         "src/main/java/com/metallum/client/validation/**",
         "validation/render-contract/**",
+        "validation/terrain-work-events/**",
+        "docs/agent/terrain-work-events.schema.json",
         "docs/render-contract-validation.md"
       ],
       "canonical_docs": [
         "docs/render-contract-validation.md",
         "docs/agent/unified-evaluation-loop.md",
-        "docs/agent/unified-evaluation-acceptance.json"
+        "docs/agent/unified-evaluation-acceptance.json",
+        "docs/agent/terrain-work-events.schema.json"
       ],
       "agent_guide": "src/main/java/com/metallum/client/validation/AGENTS.md",
       "impact_targets": [
@@ -602,6 +605,7 @@
         "docs/AGENTS.md",
         "docs/agent/system-*.md",
         "docs/agent/system-*.json",
+        "docs/agent/minecraft-26.3-p0-baseline.json",
         "docs/agent/routing-fixtures.json",
         "docs/agent/decisions/**"
       ],
