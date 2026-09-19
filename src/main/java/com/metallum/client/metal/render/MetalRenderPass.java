@@ -792,13 +792,15 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
         bindDrawState(enc);
         drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, vertexOffset, instanceCount, indexType, firstInstance);
-        recordProducer(ProducerType.DRAW_INDEXED, Map.of(
-                "indexCount", Integer.toString(indexCount),
-                "instanceCount", Integer.toString(instanceCount),
-                "firstIndex", Integer.toString(firstIndex),
-                "vertexOffset", Integer.toString(vertexOffset),
-                "firstInstance", Integer.toString(firstInstance)
-        ));
+        if (contractPassToken >= 0L) {
+            recordProducer(ProducerType.DRAW_INDEXED, Map.of(
+                    "indexCount", Integer.toString(indexCount),
+                    "instanceCount", Integer.toString(instanceCount),
+                    "firstIndex", Integer.toString(firstIndex),
+                    "vertexOffset", Integer.toString(vertexOffset),
+                    "firstInstance", Integer.toString(firstInstance)
+            ));
+        }
     }
 
     @Override
@@ -818,10 +820,12 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, baseVertex, instanceCount, indexType, firstInstance);
             }
         }
-        recordProducer(ProducerType.MULTI_DRAW, Map.of(
-                "drawCount", Integer.toString(drawCount),
-                "instanceCount", Integer.toString(instanceCount)
-        ));
+        if (contractPassToken >= 0L) {
+            recordProducer(ProducerType.MULTI_DRAW, Map.of(
+                    "drawCount", Integer.toString(drawCount),
+                    "instanceCount", Integer.toString(instanceCount)
+            ));
+        }
     }
 
     @Override
@@ -847,7 +851,9 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 1L,
                 0L
         );
-        recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(drawCount)));
+        if (contractPassToken >= 0L) {
+            recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(drawCount)));
+        }
     }
 
     @Override
@@ -895,19 +901,25 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                     || TerrainSceneSnapshot.GPU_ICB_ENABLED
                     || TerrainSceneSnapshot.VISIBLE_GPU_ICB_ENABLED) {
                 if (terrainSnapshotSubmitted(primitiveType, commands, drawCount)) {
-                    recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
+                    if (contractPassToken >= 0L) {
+                        recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
+                    }
                     return;
                 }
             } else if (terrainSnapshotAuthorized(commands, drawCount)) {
                 submitIndexedIndirect(primitiveType, commands, drawCount);
-                recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
+                if (contractPassToken >= 0L) {
+                    recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
+                }
                 return;
             }
         }
         // Snapshot mismatch, close, resize, or an unscoped caller reaches the
         // original ABI exactly once.
         submitIndexedIndirect(primitiveType, commands, drawCount);
-        recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
+        if (contractPassToken >= 0L) {
+            recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
+        }
     }
 
     private void submitIndexedIndirect(
@@ -967,7 +979,9 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
             drawIndexedNative(enc, nativeIndexBuffer, draw.firstIndex(), draw.indexCount(), draw.baseVertex(), 1, drawIndexType, 0);
         }
-        recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(draws.size())));
+        if (contractPassToken >= 0L) {
+            recordProducer(ProducerType.MULTI_DRAW, Map.of("drawCount", Integer.toString(draws.size())));
+        }
     }
 
     @Override
@@ -984,12 +998,14 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 enc.drawPrimitives(primitiveType, firstVertex, vertexCount, instanceCount, firstInstance);
             }
         }
-        recordProducer(ProducerType.DRAW, Map.of(
-                "vertexCount", Integer.toString(vertexCount),
-                "instanceCount", Integer.toString(instanceCount),
-                "firstVertex", Integer.toString(firstVertex),
-                "firstInstance", Integer.toString(firstInstance)
-        ));
+        if (contractPassToken >= 0L) {
+            recordProducer(ProducerType.DRAW, Map.of(
+                    "vertexCount", Integer.toString(vertexCount),
+                    "instanceCount", Integer.toString(instanceCount),
+                    "firstVertex", Integer.toString(firstVertex),
+                    "firstInstance", Integer.toString(firstInstance)
+            ));
+        }
     }
 
     @Override
@@ -1015,10 +1031,12 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             }
         }
 
-        recordProducer(ProducerType.MULTI_DRAW, Map.of(
-                "drawCount", Integer.toString(drawCount),
-                "instanceCount", Integer.toString(instanceCount)
-        ));
+        if (contractPassToken >= 0L) {
+            recordProducer(ProducerType.MULTI_DRAW, Map.of(
+                    "drawCount", Integer.toString(drawCount),
+                    "instanceCount", Integer.toString(instanceCount)
+            ));
+        }
     }
 
     @Override
@@ -1042,10 +1060,12 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             }
         }
 
-        recordProducer(ProducerType.MULTI_DRAW, Map.of(
-                "drawCount", Integer.toString(drawCount),
-                "instanceCount", "1"
-        ));
+        if (contractPassToken >= 0L) {
+            recordProducer(ProducerType.MULTI_DRAW, Map.of(
+                    "drawCount", Integer.toString(drawCount),
+                    "instanceCount", "1"
+            ));
+        }
     }
 
     @Override
@@ -1066,7 +1086,9 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 drawCount,
                 VkDrawIndirectCommand.SIZEOF
         );
-        recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
+        if (contractPassToken >= 0L) {
+            recordProducer(ProducerType.DRAW_INDIRECT, Map.of("drawCount", Integer.toString(drawCount)));
+        }
     }
 
     @Override
@@ -1131,6 +1153,11 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         }
     }
 
+    /**
+     * Callers guard parameter construction before entering this method so the
+     * disabled contract lane does not allocate maps or decimal strings. Keep
+     * the defensive token check here for direct/private callers.
+     */
     private void recordProducer(
             final ProducerType type,
             final Map<String, String> parameters
