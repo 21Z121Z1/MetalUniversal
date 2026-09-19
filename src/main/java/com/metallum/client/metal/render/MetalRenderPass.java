@@ -173,7 +173,10 @@ final class MetalRenderPass implements RenderPassBackend {
         }
         if (value instanceof TextureViewAndSampler pair) {
             slotSamplers.put(bindingIndex, pair);
-            commandEncoder.flushPendingClear((MetalGpuTexture) pair.view().texture());
+            // 只有在纹理确实由本后端创建时才需要处理待定清屏；否则交给后续绑定路径校验。
+            if (pair.view().texture() instanceof MetalGpuTexture metalTexture) {
+                commandEncoder.flushPendingClear(metalTexture);
+            }
             return;
         }
         throw new IllegalArgumentException("Unsupported uniform value for slot " + bindingIndex + ": " + value.getClass());
