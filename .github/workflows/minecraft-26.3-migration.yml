@@ -170,15 +170,15 @@ jobs:
           import sys
 
           root = Path(sys.argv[1])
-          targets = [
-              "net/minecraft/client/renderer/LevelRenderer.java",
-              "net/minecraft/client/renderer/LevelExtractor.java",
-              "net/minecraft/client/renderer/ViewArea.java",
-              "net/minecraft/client/renderer/RenderRegionCache.java",
-              "net/minecraft/client/renderer/chunk/SectionRenderDispatcher.java",
-              "net/minecraft/client/renderer/chunk/SectionCompiler.java",
-              "net/minecraft/client/renderer/chunk/SectionTaskDynamicQueue.java",
-              "net/minecraft/client/renderer/chunk/ChunkSectionsToRender.java",
+          target_names = [
+              "LevelRenderer.java",
+              "LevelExtractor.java",
+              "ViewArea.java",
+              "RenderRegionCache.java",
+              "SectionRenderDispatcher.java",
+              "SectionCompiler.java",
+              "SectionTaskDynamicQueue.java",
+              "ChunkSectionsToRender.java",
           ]
           needles = (
               "compileSections",
@@ -197,28 +197,28 @@ jobs:
               "resetLevelRenderData",
           )
 
-          for rel in targets:
-              path = root / rel
-              print(f"===== {rel} exists={path.is_file()} =====")
-              if not path.is_file():
-                  continue
-              lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-              print(f"line_count={len(lines)}")
-              hit_lines = []
-              for index, line in enumerate(lines):
-                  if any(needle in line for needle in needles):
-                      hit_lines.append(index)
-              emitted = set()
-              for index in hit_lines:
-                  lo = max(0, index - 35)
-                  hi = min(len(lines), index + 95)
-                  key = (lo, hi)
-                  if key in emitted:
-                      continue
-                  emitted.add(key)
-                  print(f"--- lines {lo + 1}-{hi} ---")
-                  for lineno in range(lo, hi):
-                      print(f"{lineno + 1:05d}: {lines[lineno]}")
+          for name in target_names:
+              matches = sorted(root.rglob(name))
+              print(f"===== {name} matches={len(matches)} =====")
+              for path in matches:
+                  rel = path.relative_to(root)
+                  lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                  print(f"--- {rel}; line_count={len(lines)} ---")
+                  hit_lines = []
+                  for index, line in enumerate(lines):
+                      if any(needle in line for needle in needles):
+                          hit_lines.append(index)
+                  emitted = set()
+                  for index in hit_lines:
+                      lo = max(0, index - 35)
+                      hi = min(len(lines), index + 95)
+                      key = (lo, hi)
+                      if key in emitted:
+                          continue
+                      emitted.add(key)
+                      print(f"--- lines {lo + 1}-{hi} ---")
+                      for lineno in range(lo, hi):
+                          print(f"{lineno + 1:05d}: {lines[lineno]}")
           PY
           cat build/agent-evidence/minecraft-26.3-terrain-probe.txt
 
