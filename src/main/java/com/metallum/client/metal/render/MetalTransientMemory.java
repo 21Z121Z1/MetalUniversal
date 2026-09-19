@@ -1,11 +1,11 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBuffer.Usage;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.buffers.GpuBufferSlice.MappedView;
-import com.mojang.blaze3d.systems.TransientMemory;
-import com.mojang.blaze3d.util.TransientBlockAllocator;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBuffer.Usage;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice.MappedView;
+import com.mojang.renderpearl.api.buffers.TransientMemory;
+import com.mojang.renderpearl.backend.util.TransientBlockAllocator;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.ints.IntComparator;
 import it.unimi.dsi.fastutil.objects.ReferenceArrayList;
@@ -29,8 +29,8 @@ final class MetalTransientMemory implements TransientMemory {
 
     private final MetalDevice device;
     private final MetalCommandEncoder encoder;
-    private final TransientBlockAllocator<Long> cpuBlockAllocator = new TransientBlockAllocator<>(
-            BLOCK_SIZE, MAX_CPU_ALIGNMENT, TransientBlockAllocator.Allocator.create(MemoryUtil::nmemAlloc, MemoryUtil::nmemFree)
+    private final TransientBlockAllocator<CpuBlock> cpuBlockAllocator = new TransientBlockAllocator<>(
+            BLOCK_SIZE, MAX_CPU_ALIGNMENT, TransientBlockAllocator.Allocator.create(CpuBlock::new, CpuBlock::free)
     );
     private final TransientBlockAllocator<MetalGpuBuffer> gpuBlockAllocator;
     private long submitIndex = 0L;
@@ -64,8 +64,8 @@ final class MetalTransientMemory implements TransientMemory {
 
     @Override
     public @NonNull ByteBuffer allocateCpu(final long size, final long alignment, final long minimumAllocation, final long elementSize) {
-        TransientBlockAllocator.Allocation<Long> alloc = cpuBlockAllocator.allocate(size, alignment, minimumAllocation, elementSize);
-        return MemoryUtil.memByteBuffer(alloc.block() + alloc.offset(), (int) alloc.size());
+        TransientBlockAllocator.Allocation<CpuBlock> alloc = cpuBlockAllocator.allocate(size, alignment, minimumAllocation, elementSize);
+        return MemoryUtil.memByteBuffer(alloc.block().address() + alloc.offset(), (int) alloc.size());
     }
 
     @Override
@@ -93,7 +93,7 @@ final class MetalTransientMemory implements TransientMemory {
     }
 
     private MetalGpuBuffer wrap(final MetalGpuBuffer block, @Usage final int usage) {
-        return new TransientGpuBuffer(device, block.nativeHandle(), usage, block.size(), this, submitIndex);
+        return new TransientGpuBuffer(device, block.nativeHandle(), usage, block.allocationSize(), this, submitIndex);
     }
 
     @Override
@@ -174,6 +174,32 @@ final class MetalTransientMemory implements TransientMemory {
         }
 
         return uploaded;
+    }
+
+    /**
+     * 26.3 的 {@link TransientBlockAllocator} 要求块类型实现
+     * {@link TransientBlockAllocator.Allocator.Block}，旧的 {@code Long} 句柄写法已不再适用，
+     * 因此把裸指针包一层。
+     */
+    private static final class CpuBlock implements TransientBlockAllocator.Allocator.Block {
+        private final long address;
+
+        CpuBlock(final long size) {
+            this.address = MemoryUtil.nmemAlloc(size);
+        }
+
+        long address() {
+            return this.address;
+        }
+
+        void free() {
+            MemoryUtil.nmemFree(this.address);
+        }
+
+        @Override
+        public boolean suboptimal() {
+            return this.address == 0L;
+        }
     }
 
     private static final class TransientGpuBuffer extends MetalGpuBuffer {

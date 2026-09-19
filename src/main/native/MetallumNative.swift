@@ -526,6 +526,26 @@ public func metallum_NSWindow_backingScaleFactor(_ window: MetallumWindow) -> Do
     #endif
 }
 
+/// Returns the content view of an NSWindow, for attaching a CAMetalLayer.
+///
+/// MC 26.3 moved window creation from GLFW to SDL. SDL exposes the Cocoa
+/// `NSWindow*` through the `SDL_PROP_WINDOW_COCOA_WINDOW_POINTER` property but
+/// deliberately does NOT publish the `NSView*` (only the Metal view tag used by
+/// its own Metal renderer). We therefore resolve the content view ourselves via
+/// `contentView`, matching what the old GLFW path obtained from
+/// `glfwGetCocoaView`. Returns an *unretained* pointer: the window owns the view.
+@_cdecl("metallum_NSWindow_contentView")
+public func metallum_NSWindow_contentView(_ window: MetallumWindow) -> UnsafeMutableRawPointer? {
+    #if os(macOS)
+    guard let view = window.contentView else {
+        return nil
+    }
+    return unretainedPointer(view)
+    #elseif os(iOS)
+    return nil
+    #endif
+}
+
 @_cdecl("metallum_create_metal_layer")
 public func metallum_create_metal_layer(
     _ device: MTLDevice,

@@ -3,12 +3,15 @@ package com.metallum.client.metal.render;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.buffers.GpuFence;
-import com.mojang.blaze3d.systems.*;
-import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.TransientMemory;
+import com.mojang.renderpearl.api.commands.GpuFence;
+import com.mojang.renderpearl.api.commands.*;
+import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.renderpearl.backend.api.CommandEncoderBackend;
+import com.mojang.renderpearl.backend.api.RenderPassBackend;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -221,8 +224,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             metalDepth.markContentsDirty();
         }
 
-        assert descriptor.renderArea != null;
-        RenderPass.RenderArea renderArea = descriptor.renderArea;
+        // 26.3 把 renderArea 收为私有字段，必须通过 record accessor 读取。
+        RenderPass.RenderArea renderArea = descriptor.renderArea();
         MetalRenderPass renderPass = new MetalRenderPass(
                 device,
                 this,
@@ -235,8 +238,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 depthClear.orElse(0.0)
         );
         currentRenderPass = renderPass;
+        MetalRenderPassRegistry.offer(renderPass);
         renderPass.pushDebugGroup(descriptor.label());
         return renderPass;
+    }
+
+    @Nullable
+    MetalRenderPass currentRenderPass() {
+        return this.currentRenderPass;
     }
 
     @Override
@@ -279,7 +288,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int regionX,
             final int regionY,
             final int regionWidth,
-            final int regionHeight
+            final int regionHeight,
+            final int regionDepthOrLayers
     ) {
         MetalGpuTexture color = (MetalGpuTexture) colorTexture;
         MetalGpuTexture depth = (MetalGpuTexture) depthTexture;
@@ -348,8 +358,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         ByteBuffer freshStorage = MetalNativeBridge.nativeByteBufferView(
                 MetalNativeBridge.metallum_get_buffer_contents(fresh), size).order(ByteOrder.nativeOrder());
 
-        if (offset != 0 || data.remaining() != buffer.size()) {
-            ByteBuffer previous = buffer.currentStorage();
+        if (offset != 0 || data.remaining() != buffer.size()) {            ByteBuffer previous = buffer.currentStorage();
             previous.clear();
             freshStorage.duplicate().put(previous);
         }

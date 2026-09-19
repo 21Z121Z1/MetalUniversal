@@ -4,8 +4,9 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLHazardTrackingMode;
 import com.metallum.client.metal.render.mtl.MTLResourceOptions;
 import com.metallum.client.metal.render.mtl.MTLStorageMode;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.backend.util.TransientBlockAllocator;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.NonNull;
@@ -16,12 +17,13 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 @Environment(EnvType.CLIENT)
-class MetalGpuBuffer extends GpuBuffer {
+class MetalGpuBuffer implements GpuBuffer, TransientBlockAllocator.Allocator.Block {
     private final MetalDevice device;
     private final boolean cpuAccessible;
     private final boolean dynamic;
     private final long resourceOptions;
     private final long allocationSize;
+    private final int usage;
     @Nullable
     private MemorySegment nativeHandle;
     @Nullable
@@ -29,8 +31,8 @@ class MetalGpuBuffer extends GpuBuffer {
     private boolean closed;
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size) {
-        super(usage, size);
         this.device = device;
+        this.usage = usage;
 
         this.dynamic = isDynamic(usage);
         this.cpuAccessible = isCpuAccessible(usage) || this.dynamic;
@@ -81,8 +83,8 @@ class MetalGpuBuffer extends GpuBuffer {
     }
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size, final @Nullable MemorySegment wrappedHandle) {
-        super(usage, size);
         this.device = device;
+        this.usage = usage;
         this.cpuAccessible = false;
         this.dynamic = false;
         this.resourceOptions = 0L;
@@ -134,6 +136,16 @@ class MetalGpuBuffer extends GpuBuffer {
     }
 
     @Override
+    public long size() {
+        return this.allocationSize;
+    }
+
+    @Override
+    public int usage() {
+        return this.usage;
+    }
+
+    @Override
     public boolean isClosed() {
         return this.closed || this.nativeHandle == null;
     }
@@ -175,7 +187,11 @@ class MetalGpuBuffer extends GpuBuffer {
         return this.usage();
     }
 
-    private static boolean isCpuAccessible(@GpuBuffer.Usage final int usage) {
+    /** 瞬态分配器用它判断该块是否适合继续切分：已被复用的块视为次优。 */
+    @Override
+    public boolean suboptimal() {
+        return this.closed;
+    }    private static boolean isCpuAccessible(@GpuBuffer.Usage final int usage) {
         return (usage & GpuBuffer.USAGE_MAP_READ) != 0
                 || (usage & GpuBuffer.USAGE_MAP_WRITE) != 0
                 || (usage & GpuBuffer.USAGE_HINT_CLIENT_STORAGE) != 0;

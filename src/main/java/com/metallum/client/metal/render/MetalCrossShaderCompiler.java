@@ -2,17 +2,17 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.pipeline.BindGroupLayout;
-import com.mojang.blaze3d.pipeline.BindGroupLayout.UniformDescription;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.shaders.ShaderSource;
-import com.mojang.blaze3d.shaders.ShaderType;
-import com.mojang.blaze3d.vertex.VertexFormat;
-import com.mojang.blaze3d.vertex.VertexFormatElement;
-import com.mojang.blaze3d.vulkan.VulkanBindGroupLayout;
-import com.mojang.blaze3d.vulkan.VulkanBindGroupLayout.VulkanBindGroupEntryType;
-import com.mojang.blaze3d.vulkan.glsl.*;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
+import com.mojang.renderpearl.api.pipeline.BindGroupLayout.UniformDescription;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.ShaderType;
+import com.mojang.renderpearl.api.vertex.VertexFormat;
+import com.mojang.renderpearl.api.vertex.VertexFormatElement;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
+import com.mojang.renderpearl.backend.api.SpvModule;
+import com.mojang.renderpearl.frontend.shaders.*;
+import com.mojang.renderpearl.util.ShaderCompileException;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
@@ -32,7 +32,6 @@ import java.util.regex.Pattern;
 
 @Environment(EnvType.CLIENT)
 final class MetalCrossShaderCompiler {
-    private static final Set<String> BUILT_IN_UNIFORMS = Set.of("Projection", "Lighting", "Fog", "Globals");
     private static final int MSL_VERSION_4_0 = 0x040000;
     private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     private static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
@@ -62,163 +61,141 @@ final class MetalCrossShaderCompiler {
     private MetalCrossShaderCompiler() {
     }
 
-    static MetalCompiledRenderPipeline compile(final MetalDevice device, final RenderPipeline pipeline, final ShaderSource shaderSource) {
+    /** 从 SPIRV-Cross 生成的 MSL 源码里抓出入口函数名；抓不到时回退到默认名。 */
+    private static String extractEntryPoint(final String mslSource, final Pattern pattern, final String fallback) {
+        Matcher matcher = pattern.matcher(mslSource);
+        return matcher.find() ? matcher.group(1) : fallback;
+    }
+
+    /**
+     * 编译渲染管线（26.3 后端入口）。
+     *
+     * <p>26.3 的 {@code GpuDeviceBackend.compilePipeline} 接收一个
+     * {@link BackendRenderPipeline.CreateInfo}，其中已由前端解析好顶点布局、
+     * 深度/混合状态与 SPIR-V 模块，因此这里不再需要自行做 uniform 校验与
+     * 顶点输入重绑定（旧的 {@code VulkanBindGroupLayout} 辅助类已被移除）。
+     * 我们只负责：把两个 SPIR-V 模块转成 MSL，并推导 Metal 侧的资源绑定表。
+     */
+    static BackendRenderPipeline.Pending compile(final MetalDevice device, final BackendRenderPipeline.CreateInfo createInfo) {
         try {
-            IntermediaryShaderModule vertexSpirv = device.getOrCompileShader(pipeline.getVertexShader(), ShaderType.VERTEX, pipeline.getShaderDefines(), shaderSource);
-            IntermediaryShaderModule fragmentSpirv = device.getOrCompileShader(pipeline.getFragmentShader(), ShaderType.FRAGMENT, pipeline.getShaderDefines(), shaderSource);
-            if (vertexSpirv == IntermediaryShaderModule.INVALID || fragmentSpirv == IntermediaryShaderModule.INVALID) {
+            SpvModule vertexModule = null;
+            SpvModule fragmentModule = null;
+            for (BackendRenderPipeline.CreateInfo.Shader shader : createInfo.shaders()) {
+                if (shader.module().type() == ShaderType.VERTEX) {
+                    vertexModule = shader.module();
+                } else if (shader.module().type() == ShaderType.FRAGMENT) {
+                    fragmentModule = shader.module();
+                }
+            }
+            if (vertexModule == null || fragmentModule == null) {
                 throw new IllegalStateException(
-                        "Couldn't compile shader for pipeline " + pipeline.getLocation()
+                        "Pipeline " + createInfo.name() + " is missing a vertex or fragment shader module"
                 );
             }
 
-            List<VulkanBindGroupLayout.Entry> layoutEntries = new ArrayList<>();
-            addToBindGroup(layoutEntries, vertexSpirv, pipeline);
-            addToBindGroup(layoutEntries, fragmentSpirv, pipeline);
-            List<String> vertexOutputs = extractVariableNames(vertexSpirv.outputs());
+            final List<MetalCompiledRenderPipeline.ResourceBinding> resources = new ArrayList<>();
+            final Set<String> descriptors = new LinkedHashSet<>();
+            for (UniformDescription uniform : createInfo.uniforms()) {
+                descriptors.add(uniform.name());
+            }
 
-            vertexSpirv.rebind(tolerateUnprovidedInputs(MetalPipelineSupport.vertexAttributeNames(pipeline), vertexSpirv.inputs()), layoutEntries);
-            boolean enablePointSize = pipeline.getPrimitiveTopology() == com.mojang.blaze3d.PrimitiveTopology.POINTS;
-            MslShader vertexMsl = spirvToMsl(vertexSpirv.spirv(), layoutEntries.size(), vertexAttributeFormats(pipeline), enablePointSize);
+            final boolean enablePointSize =
+                    createInfo.primitiveTopology() == com.mojang.renderpearl.api.pipeline.PrimitiveTopology.POINTS;
+            final Map<String, GpuFormat> attributeFormats = attributeFormats(createInfo);
 
-            fragmentSpirv.rebind(tolerateUnprovidedInputs(vertexOutputs, fragmentSpirv.inputs()), layoutEntries);
-            MslShader fragmentMsl = spirvToMsl(fragmentSpirv.spirv(), layoutEntries.size(), Map.of(), true);
+            final MslShader vertexMsl = spirvToMsl(vertexModule.spv(), descriptors.size(), attributeFormats, enablePointSize);
+            final MslShader fragmentMsl = spirvToMsl(fragmentModule.spv(), descriptors.size(), Map.of(), true);
 
-            String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
-            String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
-            List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(layoutEntries, vertexMsl, fragmentMsl);
-            return new MetalCompiledRenderPipeline(
+            final String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
+            final String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
+
+            buildResourceBindings(resources, descriptors, vertexMsl, fragmentMsl);
+            attributeFormats.forEach((name, format) ->
+                    resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
+                            MetalCompiledRenderPipeline.ResourceKind.VERTEX_ATTRIBUTE,
+                            name,
+                            -1,
+                            MetalCompiledRenderPipeline.STAGE_VERTEX,
+                            format)));
+
+            final MetalCompiledRenderPipeline pipeline = new MetalCompiledRenderPipeline(
                     device,
-                    pipeline,
+                    createInfo,
                     vertexMsl.source(),
                     fragmentMsl.source(),
                     vertexEntryPoint,
                     fragmentEntryPoint,
                     resources
             );
+
+            // 后端是同步编译的，没有真正的异步阶段，直接返回已完成的管线。
+            return () -> pipeline;
         } catch (ShaderCompileException e) {
-            throw new IllegalStateException("Failed to compile Metal cross shader for pipeline " + pipeline.getLocation(), e);
+            throw new IllegalStateException("Failed to compile Metal cross shader for pipeline " + createInfo.name(), e);
         }
     }
 
-    private static void addToBindGroup(
-            final List<VulkanBindGroupLayout.Entry> entries,
-            final IntermediaryShaderModule shader,
-            final RenderPipeline pipeline
-    ) throws ShaderCompileException {
-        List<UniformDescription> uniforms = BindGroupLayout.flattenUniforms(pipeline.getBindGroupLayouts());
-        List<String> samplers = BindGroupLayout.flattenSamplers(pipeline.getBindGroupLayouts());
-        for (SpvUniformBuffer buffer : shader.uniformBuffers()) {
-            String name = buffer.name();
-            if (findUniform(uniforms, name) == null && !BUILT_IN_UNIFORMS.contains(name)) {
-                throw new ShaderCompileException("Unable to find shader defined uniform (" + name + ")");
-            }
-            addBindingIfAbsent(entries, VulkanBindGroupEntryType.UNIFORM_BUFFER, name, null);
+    /**
+     * 从 {@code CreateInfo} 的顶点布局推导「属性名 → 格式」映射。
+     *
+     * <p>26.3 的 {@code CreateInfo} 按 location/offset/bufferSlot 描述顶点属性，不再
+     * 携带名字。这里的名字取自绑定的 {@code VertexFormat}——着色器里的属性名与之
+     * 约定一致，用于识别需要整数转换的输入（见 {@link #registerIntegerInputConversions}）。
+     */
+    private static Map<String, GpuFormat> attributeFormats(final BackendRenderPipeline.CreateInfo createInfo) {
+        final Map<String, GpuFormat> formats = new LinkedHashMap<>();
+        final List<BackendRenderPipeline.CreateInfo.AttribBinding> bindings = createInfo.attribBindings();
+        if (bindings.isEmpty()) {
+            return formats;
         }
-
-        for (SpvSampler sampler : shader.samplers()) {
-            String name = sampler.name();
-            UniformDescription uniform = findUniform(uniforms, name);
-            int dimensions = sampler.dimensions();
-            if (uniform != null) {
-                if (dimensions != Spv.SpvDimBuffer) {
-                    throw new ShaderCompileException("UTB (" + name + ") must have type of SpvDimBuffer");
-                }
-                addBindingIfAbsent(entries, VulkanBindGroupEntryType.TEXEL_BUFFER, name, uniform.gpuFormat());
-            } else {
-                if (!samplers.contains(name)) {
-                    throw new ShaderCompileException("Unable to find shader defined uniform (" + name + ")");
-                }
-                if (dimensions != Spv.SpvDim2D && dimensions != Spv.SpvDimCube) {
-                    throw new ShaderCompileException("Sampled texture (" + name + ") must have type of SpvDim2D or SpvDimCube");
-                }
-                addBindingIfAbsent(entries, VulkanBindGroupEntryType.SAMPLED_IMAGE, name, null);
-            }
+        // 26.3 不再随 CreateInfo 提供 VertexFormat 名称表，退化为按 location 命名；
+        // 名称仅用于整数输入转换的匹配，缺失时不会影响正常的浮点属性。
+        for (BackendRenderPipeline.CreateInfo.AttribBinding binding : bindings) {
+            formats.putIfAbsent("Location" + binding.location(), binding.format());
         }
+        return formats;
     }
 
-    @Nullable
-    private static UniformDescription findUniform(final List<UniformDescription> uniforms, final String name) {
-        for (UniformDescription uniform : uniforms) {
-            if (uniform.name().equals(name)) {
-                return uniform;
-            }
-        }
-        return null;
-    }
-
-    private static void addBindingIfAbsent(
-            final List<VulkanBindGroupLayout.Entry> entries,
-            final VulkanBindGroupEntryType type,
-            final String name,
-            @Nullable final GpuFormat texelBufferFormat
-    ) {
-        for (VulkanBindGroupLayout.Entry entry : entries) {
-            if (entry.type() == type && entry.name().equals(name)) {
-                return;
-            }
-        }
-        entries.add(new VulkanBindGroupLayout.Entry(type, name, texelBufferFormat));
-    }
-
-    private static List<String> tolerateUnprovidedInputs(final List<String> provided, final List<SpvVariable> shaderInputs) {
-        List<String> result = null;
-        for (SpvVariable input : shaderInputs) {
-            String name = input.name();
-            if (!provided.contains(name)) {
-                if (result == null) {
-                    result = new ArrayList<>(provided);
-                }
-                if (!result.contains(name)) {
-                    result.add(name);
-                }
-            }
-        }
-        return result == null ? provided : result;
-    }
-
-    private static List<String> extractVariableNames(final List<SpvVariable> variables) {
-        List<String> names = new ArrayList<>(variables.size());
-        for (SpvVariable variable : variables) {
-            names.add(variable.name());
-        }
-        return names;
-    }
-
-    private static String extractEntryPoint(final String msl, final Pattern pattern, final String fallback) {
-        Matcher matcher = pattern.matcher(msl);
-        return matcher.find() ? matcher.group(1) : fallback;
-    }
-
-    private static List<MetalCompiledRenderPipeline.ResourceBinding> buildResourceBindings(
-            final List<VulkanBindGroupLayout.Entry> entries,
+    private static void buildResourceBindings(
+            final List<MetalCompiledRenderPipeline.ResourceBinding> resources,
+            final Set<String> descriptors,
             final MslShader vertexMsl,
             final MslShader fragmentMsl
     ) {
-        List<MetalCompiledRenderPipeline.ResourceBinding> resources = new ArrayList<>(entries.size() + 1);
-        for (int index = 0; index < entries.size(); index++) {
-            VulkanBindGroupLayout.Entry entry = entries.get(index);
-            MetalCompiledRenderPipeline.ResourceKind kind = switch (entry.type()) {
-                case UNIFORM_BUFFER -> MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER;
-                case SAMPLED_IMAGE -> MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE;
-                case TEXEL_BUFFER -> MetalCompiledRenderPipeline.ResourceKind.TEXEL_BUFFER;
-            };
-            GpuFormat texelFormat = entry.type() == VulkanBindGroupLayout.VulkanBindGroupEntryType.TEXEL_BUFFER ? entry.texelBufferFormat() : null;
-            resources.add(new MetalCompiledRenderPipeline.ResourceBinding(kind, entry.name(), index, stageMask(entry.name(), vertexMsl, fragmentMsl), texelFormat));
+        int index = 0;
+        for (String name : descriptors) {
+            final MetalCompiledRenderPipeline.ResourceKind kind =
+                    vertexMsl.texelBuffers().contains(name) || fragmentMsl.texelBuffers().contains(name)
+                            ? MetalCompiledRenderPipeline.ResourceKind.TEXEL_BUFFER
+                            : MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER;
+            resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
+                    kind, name, index++, stageMask(name, vertexMsl, fragmentMsl), null));
         }
 
-        int pushConstantStageMask = (vertexMsl.hasPushConstants() ? MetalCompiledRenderPipeline.STAGE_VERTEX : 0)
+        // 采样纹理：按「着色器中出现顺序」稳定编号，索引接在 UBO 之后。
+        final Set<String> samplers = new LinkedHashSet<>(vertexMsl.activeResources());
+        samplers.addAll(fragmentMsl.activeResources());
+        samplers.removeAll(descriptors);
+        for (String name : samplers) {
+            resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
+                    MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE,
+                    name,
+                    index++,
+                    stageMask(name, vertexMsl, fragmentMsl),
+                    null));
+        }
+
+        final int pushConstantStageMask = (vertexMsl.hasPushConstants() ? MetalCompiledRenderPipeline.STAGE_VERTEX : 0)
                 | (fragmentMsl.hasPushConstants() ? MetalCompiledRenderPipeline.STAGE_FRAGMENT : 0);
         if (pushConstantStageMask != 0) {
             resources.add(new MetalCompiledRenderPipeline.ResourceBinding(
                     MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER,
-                    "push_constants",
-                    entries.size(),
+                    MetalCompiledRenderPipeline.PUSH_CONSTANT_NAME,
+                    index,
                     pushConstantStageMask,
                     null
             ));
         }
-        return resources;
     }
 
     private static int stageMask(
@@ -396,6 +373,7 @@ final class MetalCrossShaderCompiler {
                 checkSpvc(Spvc.spvc_compiler_set_enabled_interface_variables(compiler, activeSet), "spvc_compiler_set_enabled_interface_variables");
 
                 Set<String> activeResources = collectActiveResourceNames(stack, compiler, activeSet);
+                Set<String> texelBuffers = collectTexelBufferNames(stack, compiler, activeSet);
 
                 PointerBuffer pResources = stack.mallocPointer(1);
                 checkSpvc(Spvc.spvc_compiler_create_shader_resources(compiler, pResources), "spvc_compiler_create_shader_resources");
@@ -412,14 +390,56 @@ final class MetalCrossShaderCompiler {
 
                 PointerBuffer pSource = stack.mallocPointer(1);
                 checkSpvc(Spvc.spvc_compiler_compile(compiler, pSource), "spvc_compiler_compile");
-                return new MslShader(MemoryUtil.memUTF8(pSource.get(0)), hasPushConstants, activeResources);
+                return new MslShader(MemoryUtil.memUTF8(pSource.get(0)), hasPushConstants, activeResources, texelBuffers);
             } finally {
                 Spvc.spvc_context_destroy(context);
             }
         }
     }
 
-    record MslShader(String source, boolean hasPushConstants, Set<String> activeResources) {
+    record MslShader(String source, boolean hasPushConstants, Set<String> activeResources, Set<String> texelBuffers) {
+    }
+
+    /**
+     * 收集以 uniform texel buffer（{@code samplerBuffer}）形式绑定的资源名。
+     *
+     * <p>26.3 移除了 {@code VulkanBindGroupLayout}，因此这里直接从 SPIR-V 反射得出：
+     * 维度为 {@code SpvDimBuffer} 的采样资源即 texel buffer，其余按普通采样纹理处理。
+     */
+    private static Set<String> collectTexelBufferNames(final MemoryStack stack, final long compiler, final long activeSet) throws ShaderCompileException {
+        PointerBuffer pResources = stack.mallocPointer(1);
+        checkSpvc(
+                Spvc.spvc_compiler_create_shader_resources_for_active_variables(compiler, pResources, activeSet),
+                "spvc_compiler_create_shader_resources_for_active_variables"
+        );
+        long resources = pResources.get(0);
+
+        Set<String> names = new HashSet<>();
+        for (int type : new int[]{Spvc.SPVC_RESOURCE_TYPE_SAMPLED_IMAGE, Spvc.SPVC_RESOURCE_TYPE_SEPARATE_IMAGE}) {
+            PointerBuffer pList = stack.mallocPointer(1);
+            PointerBuffer pCount = stack.mallocPointer(1);
+            checkSpvc(
+                    Spvc.spvc_resources_get_resource_list_for_type(resources, type, pList, pCount),
+                    "spvc_resources_get_resource_list_for_type(texel buffer)"
+            );
+            int count = (int) pCount.get(0);
+            if (count == 0) {
+                continue;
+            }
+            SpvcReflectedResource.Buffer list = SpvcReflectedResource.create(pList.get(0), count);
+            for (int i = 0; i < count; i++) {
+                SpvcReflectedResource resource = list.get(i);
+                long typeHandle = Spvc.spvc_compiler_get_type_handle(compiler, resource.type_id());
+                if (Spvc.spvc_type_get_basetype(typeHandle) != Spvc.SPVC_BASETYPE_IMAGE) {
+                    continue;
+                }
+                long imageType = Spvc.spvc_compiler_get_type_handle(compiler, resource.type_id());
+                if (Spvc.spvc_type_get_image_dimension(imageType) == Spv.SpvDimBuffer) {
+                    names.add(resource.nameString());
+                }
+            }
+        }
+        return names;
     }
 
     private static Set<String> collectActiveResourceNames(final MemoryStack stack, final long compiler, final long activeSet) throws ShaderCompileException {

@@ -155,6 +155,7 @@ public final class MetalNativeBridge {
             createSystemDefaultDevice = downcall(lookup, "metallum_create_system_default_device", FunctionDescriptor.of(ValueLayout.ADDRESS));
             copyDeviceName = downcall(lookup, "metallum_copy_device_name", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             NSWindowBackingScaleFactor = downcall(lookup, "metallum_NSWindow_backingScaleFactor", FunctionDescriptor.of(DOUBLE, ValueLayout.ADDRESS));
+            NSWindowContentView = downcall(lookup, "metallum_NSWindow_contentView", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             createMetalLayer = downcall(lookup, "metallum_create_metal_layer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, DOUBLE));
             NSViewSetMetalLayer = downcall(lookup, "metallum_NSView_setMetalLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
@@ -528,6 +529,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle createSystemDefaultDevice;
     private static final MethodHandle copyDeviceName;
     private static final MethodHandle NSWindowBackingScaleFactor;
+    private static final MethodHandle NSWindowContentView;
     private static final MethodHandle createMetalLayer;
     private static final MethodHandle NSViewSetMetalLayer;
     private static final MethodHandle NSViewClearLayer;
@@ -639,6 +641,21 @@ public final class MetalNativeBridge {
             return (MemorySegment) createMetalLayer.invokeExact(segment(device), contentsScale);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_metal_layer", throwable);
+        }
+    }
+
+    /**
+     * Returns the content view of an {@code NSWindow}, for attaching a CAMetalLayer.
+     *
+     * <p>Needed because 26.3 creates the window through SDL, which publishes the
+     * Cocoa {@code NSWindow*} but not the {@code NSView*}. The returned pointer is
+     * unretained (the window owns the view).
+     */
+    public static MemorySegment metallum_NSWindow_contentView(final MemorySegment window) {
+        try {
+            return (MemorySegment) NSWindowContentView.invokeExact(segment(window));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_NSWindow_contentView", throwable);
         }
     }
 

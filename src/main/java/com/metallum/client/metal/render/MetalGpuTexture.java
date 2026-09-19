@@ -4,8 +4,8 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.metallum.client.metal.render.mtl.MTLStorageMode;
 import com.metallum.client.metal.render.mtl.MTLTextureUsage;
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.joml.Vector4fc;
@@ -14,9 +14,16 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
-final class MetalGpuTexture extends GpuTexture {
+final class MetalGpuTexture implements GpuTexture {
     private final MetalDevice device;
     private final MTLPixelFormat mtlPixelFormat;
+    private final int usage;
+    private final String label;
+    private final GpuFormat format;
+    private final int width;
+    private final int height;
+    private final int depthOrLayers;
+    private final int mipLevels;
     private boolean closed;
     @Nullable
     private Vector4fc materializedColorClear;
@@ -36,8 +43,14 @@ final class MetalGpuTexture extends GpuTexture {
             final int depthOrLayers,
             final int mipLevels
     ) {
-        super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
+        this.usage = usage;
+        this.label = label;
+        this.format = format;
+        this.width = width;
+        this.height = height;
+        this.depthOrLayers = depthOrLayers;
+        this.mipLevels = mipLevels;
         this.mtlPixelFormat = MTLPixelFormat.from(format);
 
         this.nativeHandle = MetalNativeBridge.metallum_create_texture_2d(
@@ -55,7 +68,42 @@ final class MetalGpuTexture extends GpuTexture {
     }
 
     int pixelSize() {
-        return this.getFormat().blockSize();
+        return this.format.blockSize();
+    }
+
+    @Override
+    public int getWidth(final int mipLevel) {
+        return Math.max(1, this.width >> mipLevel);
+    }
+
+    @Override
+    public int getHeight(final int mipLevel) {
+        return Math.max(1, this.height >> mipLevel);
+    }
+
+    @Override
+    public int getDepthOrLayers() {
+        return this.depthOrLayers;
+    }
+
+    @Override
+    public int getMipLevels() {
+        return this.mipLevels;
+    }
+
+    @Override
+    public GpuFormat getFormat() {
+        return this.format;
+    }
+
+    @Override
+    public int usage() {
+        return this.usage;
+    }
+
+    @Override
+    public String getLabel() {
+        return this.label;
     }
 
     void recordMaterializedClear(@Nullable final Vector4fc color, @Nullable final Double depth) {

@@ -3,17 +3,19 @@ package com.metallum.client.metal.render;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.IndexType;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.systems.GpuQueryPool;
-import com.mojang.blaze3d.systems.RenderPass;
-import com.mojang.blaze3d.systems.RenderPassBackend;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.pipeline.CompiledRenderPipeline;
+import com.mojang.renderpearl.api.pipeline.IndexType;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.commands.GpuQueryPool;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
+import com.mojang.renderpearl.backend.api.RenderPassBackend;
 import com.mojang.blaze3d.systems.ScissorState;
-import com.mojang.blaze3d.textures.GpuSampler;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.SharedConstants;
@@ -25,11 +27,20 @@ import org.lwjgl.vulkan.VkDrawIndexedIndirectCommand;
 import org.lwjgl.vulkan.VkDrawIndirectCommand;
 
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.function.Supplier;
 
+/**
+ * Metal 渲染通道（后端实现）。
+ *
+ * <p>26.3 把渲染通道拆成两层：前端 {@code FrontendRenderPass} 负责「名字 → 槽位」解析、
+ * 绑定状态校验与 push constant 收拢，后端 {@link RenderPassBackend} 只负责原生调用。
+ * Metallum 实现后端这一层，Sodium 的 draw context 通过
+ * {@code FrontendRenderPass} 间接使用它。
+ */
 @Environment(EnvType.CLIENT)
 final class MetalRenderPass implements RenderPassBackend {
     static final boolean VALIDATION = SharedConstants.IS_RUNNING_IN_IDE;
@@ -50,6 +61,9 @@ final class MetalRenderPass implements RenderPassBackend {
     private final GpuBufferSlice[] vertexBuffers = new GpuBufferSlice[MAX_VERTEX_BUFFERS];
     private final HashMap<String, GpuBufferSlice> uniforms = new HashMap<>();
     private final HashMap<String, TextureViewAndSampler> samplers = new HashMap<>();
+    /** 按绑定槽位索引存放的 uniform / 纹理，由后端接口的 setUniform(int, Object) 填充。 */
+    private final java.util.Map<Integer, GpuBufferSlice> slotUniforms = new java.util.HashMap<>();
+    private final java.util.Map<Integer, TextureViewAndSampler> slotSamplers = new java.util.HashMap<>();
     private long dirtyDescriptorMask;
     @Nullable
     private MetalCompiledRenderPipeline compiledPipeline;
@@ -83,6 +97,27 @@ final class MetalRenderPass implements RenderPassBackend {
         this.clearDepthValue = clearDepthValue;
     }
 
+    private boolean closed = false;
+
+    boolean isClosed() {
+        return this.closed;
+    }
+
+    void close() {
+        if (this.closed) {
+            return;
+        }
+        submitRenderPassIfCurrent();
+        MetalRenderPassRegistry.forget(this);
+        this.closed = true;
+    }
+
+    private void submitRenderPassIfCurrent() {
+        if (commandEncoder.currentRenderPass() == this) {
+            commandEncoder.submitRenderPass();
+        }
+    }
+
     @Override
     public void pushDebugGroup(final @NonNull Supplier<String> label) {
         pushedDebugGroups++;
@@ -102,9 +137,13 @@ final class MetalRenderPass implements RenderPassBackend {
         }
     }
 
+    /**
+     * 前端 {@code RenderPass#setPipeline} 会把前端管线条目解包后转到后端这一层，
+     * 这里直接收后端实现。
+     */
     @Override
-    public void setPipeline(final @NonNull RenderPipeline pipeline) {
-        MetalCompiledRenderPipeline compiled = device.getOrCompilePipeline(pipeline);
+    public void setPipeline(final BackendRenderPipeline pipeline) {
+        MetalCompiledRenderPipeline compiled = (MetalCompiledRenderPipeline) pipeline;
         if (this.compiledPipeline != compiled) {
             this.compiledPipeline = compiled;
             vertexBuffersDirty = true;
@@ -112,28 +151,80 @@ final class MetalRenderPass implements RenderPassBackend {
         }
     }
 
+    /**
+     * 前端 {@code RenderPass} 通过 {@code FrontendRenderPass} 把名字解析成槽位后再调到这里，
+     * 因此这个入口只处理「按槽位 + 已解析对象」的分发。
+     */
     @Override
-    public void bindTexture(final @NonNull String name, @Nullable final GpuTextureView textureView, @Nullable final GpuSampler sampler) {
-        if (textureView != null && sampler != null) {
-            samplers.put(name, new TextureViewAndSampler(textureView, sampler));
-            commandEncoder.flushPendingClear((MetalGpuTexture) textureView.texture());
-            markDescriptorDirty(name);
-        } else if (textureView == null && sampler == null) {
-            samplers.remove(name);
-        } else {
-            throw new IllegalArgumentException();
+    public void setUniform(final int bindingIndex, final @Nullable Object value) {
+        if (value == null) {
+            slotUniforms.remove(bindingIndex);
+            slotSamplers.remove(bindingIndex);
+            return;
+        }
+        if (value instanceof GpuBufferSlice slice) {
+            slotUniforms.put(bindingIndex, slice);
+            return;
+        }
+        if (value instanceof GpuBuffer buffer) {
+            slotUniforms.put(bindingIndex, buffer.slice());
+            return;
+        }
+        if (value instanceof TextureViewAndSampler pair) {
+            slotSamplers.put(bindingIndex, pair);
+            commandEncoder.flushPendingClear((MetalGpuTexture) pair.textureView().texture());
+            return;
+        }
+        throw new IllegalArgumentException("Unsupported uniform value for slot " + bindingIndex + ": " + value.getClass());
+    }
+
+    /** 按名字登记 uniform，供 {@link MetalCompiledRenderPipeline#resource(String)} 解析到槽位。 */
+    void setUniform(final String name, final GpuBufferSlice value) {
+        uniforms.put(name, value);
+        MetalCompiledRenderPipeline.ResourceBinding binding = resourceOf(name);
+        if (binding != null) {
+            setUniform(binding.bindingIndex(), value);
         }
     }
 
-    @Override
-    public void setUniform(final @NonNull String name, final GpuBuffer value) {
+    void setUniform(final String name, final GpuBuffer value) {
         setUniform(name, value.slice());
     }
 
+    void setUniform(final String name, final GpuTextureView textureView, final GpuSampler sampler) {
+        samplers.put(name, new TextureViewAndSampler(textureView, sampler));
+        MetalCompiledRenderPipeline.ResourceBinding binding = resourceOf(name);
+        if (binding != null) {
+            setUniform(binding.bindingIndex(), samplers.get(name));
+        }
+    }
+
+    private MetalCompiledRenderPipeline.@Nullable ResourceBinding resourceOf(final String name) {
+        return compiledPipeline == null ? null : compiledPipeline.resource(name);
+    }
+
     @Override
-    public void setUniform(final @NonNull String name, final @NonNull GpuBufferSlice value) {
-        uniforms.put(name, value);
-        markDescriptorDirty(name);
+    public void pushConstants(final ByteBuffer data) {
+        if (compiledPipeline == null) {
+            throw new IllegalStateException("Pipeline is missing");
+        }
+        MetalCompiledRenderPipeline.ResourceBinding binding = compiledPipeline.resource(MetalCompiledRenderPipeline.PUSH_CONSTANT_NAME);
+        if (binding == null) {
+            // 该管线没有 push constant 块，Minecraft 侧也不应发来数据；保持宽容以免打断渲染。
+            return;
+        }
+
+        MTLRenderCommandEncoder enc = renderEncoder();
+        bindDrawState(enc);
+
+        ByteBuffer payload = data.duplicate();
+        GpuBufferSlice slice;
+        try (GpuBufferSlice.MappedView mapped = commandEncoder.transientMemory()
+                .allocateGpuMapped(payload.remaining(), 256L, GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_COPY_DST)) {
+            org.lwjgl.system.MemoryUtil.memCopy(payload, mapped.data());
+            slice = mapped.slice();
+        }
+        enc.setBuffer(((MetalGpuBuffer) slice.buffer()).nativeHandle(), slice.offset(), binding.bindingIndex(), binding.stageMask());
     }
 
     @Override
@@ -294,13 +385,19 @@ final class MetalRenderPass implements RenderPassBackend {
         );
     }
 
-    @Override
-    public <T> void drawMultipleIndexed(
+    /**
+     * 批量索引绘制的前端入口。
+     *
+     * <p>26.3 的 {@code RenderPassBackend} 不再声明该方法（前端 {@code FrontendRenderPass}
+     * 会把它展开成逐个 {@code drawIndexed} 调用），但 Metallum 保留自己的批量路径以减少
+     * Java→native 的跨越次数，因此这里作为内部方法暴露给 {@link MetalDrawContext} 使用。
+     */
+    <T> void drawMultipleIndexed(
             final Collection<RenderPass.Draw<T>> draws,
             @Nullable final GpuBuffer defaultIndexBuffer,
             @Nullable final IndexType defaultIndexType,
-            final @NonNull Collection<String> dynamicUniforms,
-            final @NonNull T uniformArgument
+            final Collection<String> dynamicUniforms,
+            final T uniformArgument
     ) {
         IndexType fallbackIndexType = defaultIndexType == null ? IndexType.SHORT : defaultIndexType;
         MTLRenderCommandEncoder enc = renderEncoder();
@@ -313,7 +410,19 @@ final class MetalRenderPass implements RenderPassBackend {
             setVertexBuffer(draw.slot(), draw.vertexBuffer().slice());
 
             if (draw.uniformUploaderConsumer() != null) {
-                draw.uniformUploaderConsumer().accept(uniformArgument, this::setUniform);
+                // 26.3 把上传回调的第二个参数从方法引用换成了显式的 UniformUploader 接口，
+                // 这里用一个 lambda 把两个方法转发回当前 render pass。
+                draw.uniformUploaderConsumer().accept(uniformArgument, new RenderPass.UniformUploader() {
+                    @Override
+                    public void setUniform(final String name, final GpuBufferSlice value) {
+                        MetalRenderPass.this.setUniform(name, value);
+                    }
+
+                    @Override
+                    public void pushConstants(final ByteBuffer data) {
+                        MetalRenderPass.this.pushConstants(data);
+                    }
+                });
             }
 
             if (scissorDirty || vertexBuffersDirty || dirtyDescriptorMask != 0L || pipelineDirty) {
@@ -604,8 +713,13 @@ final class MetalRenderPass implements RenderPassBackend {
             final MTLRenderCommandEncoder enc,
             final MetalCompiledRenderPipeline.ResourceBinding binding
     ) {
+        int slot = binding.bindingIndex();
+
         if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
-            TextureViewAndSampler textureBinding = samplers.get(binding.name());
+            TextureViewAndSampler textureBinding = slotSamplers.get(slot);
+            if (textureBinding == null) {
+                textureBinding = samplers.get(binding.name());
+            }
             if (textureBinding == null) {
                 throw new IllegalStateException("Missing sampler " + binding.name());
             }
@@ -616,7 +730,7 @@ final class MetalRenderPass implements RenderPassBackend {
 
             MetalGpuTextureView textureView = (MetalGpuTextureView) textureBinding.textureView();
             MetalGpuSampler sampler = (MetalGpuSampler) textureBinding.sampler();
-            enc.setTextureAndSampler(textureView.nativeHandle(), sampler.nativeHandle(), binding.bindingIndex(), binding.stageMask());
+            enc.setTextureAndSampler(textureView.nativeHandle(), sampler.nativeHandle(), slot, binding.stageMask());
             return;
         }
 
@@ -625,7 +739,10 @@ final class MetalRenderPass implements RenderPassBackend {
             return;
         }
 
-        GpuBufferSlice uniformSlice = uniforms.get(binding.name());
+        GpuBufferSlice uniformSlice = slotUniforms.get(slot);
+        if (uniformSlice == null) {
+            uniformSlice = uniforms.get(binding.name());
+        }
         if (uniformSlice == null) {
             throw new IllegalStateException("Missing uniform " + binding.name());
         }
@@ -634,11 +751,14 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         MetalGpuBuffer uniformBuffer = (MetalGpuBuffer) uniformSlice.buffer();
-        enc.setBuffer(uniformBuffer.nativeHandle(), uniformSlice.offset(), binding.bindingIndex(), binding.stageMask());
+        enc.setBuffer(uniformBuffer.nativeHandle(), uniformSlice.offset(), slot, binding.stageMask());
     }
 
     private void pushTexelBufferDescriptor(final MTLRenderCommandEncoder enc, final MetalCompiledRenderPipeline.ResourceBinding binding) {
-        GpuBufferSlice texelSlice = uniforms.get(binding.name());
+        GpuBufferSlice texelSlice = slotUniforms.get(binding.bindingIndex());
+        if (texelSlice == null) {
+            texelSlice = uniforms.get(binding.name());
+        }
         if (texelSlice == null) {
             throw new IllegalStateException("Missing texel buffer " + binding.name());
         }

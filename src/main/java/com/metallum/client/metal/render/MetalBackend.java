@@ -2,17 +2,17 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
-import com.mojang.blaze3d.GLFWErrorCapture;
-import com.mojang.blaze3d.shaders.GpuDebugOptions;
-import com.mojang.blaze3d.shaders.ShaderSource;
-import com.mojang.blaze3d.systems.BackendCreationException;
-import com.mojang.blaze3d.systems.GpuBackend;
-import com.mojang.blaze3d.systems.GpuDevice;
+import com.mojang.renderpearl.api.device.GpuDebugOptions;
+import com.mojang.renderpearl.api.device.BackendCreationException;
+import com.mojang.renderpearl.api.device.GpuBackend;
+import com.mojang.renderpearl.api.device.GpuDevice;
+import com.mojang.renderpearl.frontend.FrontendGpuDevice;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.NonNull;
-import org.lwjgl.glfw.GLFW;
-import org.lwjgl.glfw.GLFWNativeCocoa;
+import org.lwjgl.sdl.SDLKeyboard;
+import org.lwjgl.sdl.SDLProperties;
+import org.lwjgl.sdl.SDLVideo;
 
 import java.lang.foreign.MemorySegment;
 
@@ -24,19 +24,37 @@ public class MetalBackend implements GpuBackend {
     }
 
     @Override
-    public void setWindowHints() {
-        GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_NO_API);
+    public void loadLibrary() throws BackendCreationException {
+        // Metal 由系统框架提供（Metal.framework / QuartzCore.framework），
+        // 无需像 Vulkan 那样预加载独立的 loader 动态库。
     }
 
     @Override
-    public void handleWindowCreationErrors(final GLFWErrorCapture.Error error) throws BackendCreationException {
-        throw new BackendCreationException(error.toString(), BackendCreationException.Reason.GLFW_ERROR);
+    public void unloadLibrary() {
+        // 对称操作：系统框架不归我们卸载。
+    }
+
+    /**
+     * 创建承载 Metal 绘制目标的窗口。
+     *
+     * <p>MC 26.3 起窗口层由 GLFW 迁移到 SDL，因此这里必须走 SDL API：
+     * {@link SDLVideo#SDL_WINDOW_METAL} 让 SDL 创建出可附加 CAMetalLayer 的原生窗口，
+     * 返回值是 SDL 的 {@code SDL_Window*} 句柄（非 Cocoa 句柄）。
+     *
+     * <p>Cocoa 侧的 {@code NSWindow}/{@code NSView} 在 {@link #createDevice} 中
+     * 通过 {@code SDL_GetWindowProperties} 反查得到。
+     */
+    @Override
+    public long createWindow(final @NonNull String title, final int width, final int height, final long flags) {
+        final long window = SDLVideo.SDL_CreateWindow(title, width, height, SDLVideo.SDL_WINDOW_METAL | flags);
+        if (window != 0L) {
+            this.lastCreatedWindow = window;
+        }
+        return window;
     }
 
     @Override
-    public @NonNull GpuDevice createDevice(
-            final long window, final @NonNull ShaderSource defaultShaderSource, final @NonNull GpuDebugOptions debugOptions, final @NonNull Runnable criticalShaderLoader
-    ) throws BackendCreationException {
+    public @NonNull GpuDevice createDevice(final @NonNull GpuDebugOptions debugOptions) throws BackendCreationException {
         // iOS: 必须在任何 Spvc 类加载之前设置 Configuration.SPVC_LIBRARY_NAME，
         // 否则 LWJGL 会通过 dlsym(RTLD_DEFAULT) 拿到 MoltenVK 的精简版 SPIRV-Cross
         // 符号（无 MSL 后端），导致 spvc_context_create_compiler(SPVC_BACKEND_MSL)
@@ -58,22 +76,32 @@ public class MetalBackend implements GpuBackend {
 
         double scale;
         if (MetalNativeBridge.isIOS()) {
-            // iOS: GLFW does not expose Cocoa window handles. The host launcher
-            // (e.g. PojavLauncher) owns the UIWindow/UIView and publishes the
-            // view pointer (and optionally the backing scale) via system
-            // properties so we can attach a CAMetalLayer to it.
+            // iOS: SDL/UIKit 不暴露可用的 Cocoa 窗口句柄。宿主启动器
+            // (e.g. PojavLauncher) 持有 UIWindow/UIView，并通过系统属性发布
+            // view 指针（以及可选的 backing scale），以便我们附加 CAMetalLayer。
             cocoaWindow = MemorySegment.NULL;
             cocoaView = readIOSSurfacePointer();
             scale = readIOSScreenScale();
         } else {
-            cocoaWindow = MemorySegment.ofAddress(GLFWNativeCocoa.glfwGetCocoaWindow(window));
-            if (MetalNativeBridge.isNullHandle(cocoaWindow)) {
-                throw new BackendCreationException("glfwGetCocoaWindow returned null", BackendCreationException.Reason.GLFW_ERROR);
+            // macOS: 26.3 的窗口由 SDL 创建，NSWindow/NSView 需要通过 SDL 的
+            // 窗口属性反查（SDL_PROP_WINDOW_COCOA_WINDOW_POINTER / ..._VIEW_POINTER）。
+            // 这里用本后端自己创建的 SDL 窗口句柄；SDL 在 macOS 上可能为每个窗口
+            // 维护独立的 property store，因此再兜底取一次当前键盘焦点窗口。
+            final long sdlWindow = resolveSdlWindow();
+            if (sdlWindow == 0L) {
+                throw new BackendCreationException("No SDL window available to query Cocoa handles from", BackendCreationException.Reason.OTHER);
             }
 
-            cocoaView = MemorySegment.ofAddress(GLFWNativeCocoa.glfwGetCocoaView(window));
+            cocoaWindow = readCocoaHandle(sdlWindow, SDLVideo.SDL_PROP_WINDOW_COCOA_WINDOW_POINTER);
+            if (MetalNativeBridge.isNullHandle(cocoaWindow)) {
+                throw new BackendCreationException("SDL reported no Cocoa NSWindow handle", BackendCreationException.Reason.OTHER);
+            }
+
+            // SDL 只发布 Cocoa 的 NSWindow*，不发布 NSView*（它只为自家的 Metal
+            // 渲染器暴露 view tag）。因此 NSView 由原生侧通过 contentView 取出。
+            cocoaView = MetalNativeBridge.metallum_NSWindow_contentView(cocoaWindow);
             if (MetalNativeBridge.isNullHandle(cocoaView)) {
-                throw new BackendCreationException("glfwGetCocoaView returned null", BackendCreationException.Reason.GLFW_ERROR);
+                throw new BackendCreationException("metallum_NSWindow_contentView returned null", BackendCreationException.Reason.OTHER);
             }
 
             scale = MetalNativeBridge.metallum_NSWindow_backingScaleFactor(cocoaWindow);
@@ -107,10 +135,49 @@ public class MetalBackend implements GpuBackend {
         Metallum.LOGGER.info("Metal device: {}", deviceName);
 
         try {
-            return new GpuDevice(new MetalDevice(defaultShaderSource, debugOptions, deviceHandle, metalLayer, deviceName, cocoaView), criticalShaderLoader);
+            // 26.3 起设备抽象分为两层：后端实现（MetalDevice / GpuDeviceBackend）
+            // 必须由 FrontendGpuDevice 包装后才能作为公开的 GpuDevice 使用。
+            // 这与官方 Vulkan 路径完全一致（VulkanBackend.createDevice 同样
+            // `new FrontendGpuDevice(new VulkanDevice(...))`）。
+            final MetalDevice metalDevice =
+                    new MetalDevice(debugOptions, deviceHandle, metalLayer, deviceName, cocoaView);
+            return new FrontendGpuDevice(metalDevice);
         } catch (Throwable throwable) {
             throw new BackendCreationException("Metal device initialization failed: " + throwable.getMessage(), BackendCreationException.Reason.OTHER);
         }
+    }
+
+    /**
+     * 本后端最近一次通过 {@link #createWindow} 创建的 SDL 窗口句柄。
+     *
+     * <p>SDL 的 {@code SDL_GetWindowProperties} 需要一个 {@code SDL_Window*}，
+     * 而 26.3 的 {@code createDevice} 不再把窗口句柄传进来，因此这里自行记录。
+     */
+    private long lastCreatedWindow;
+
+    /**
+     * 解析用于查询 Cocoa 句柄的 SDL 窗口。
+     *
+     * <p>优先使用本后端创建的窗口；若该窗口不可用（例如窗口由其他组件创建），
+     * 则退回当前键盘焦点窗口。
+     */
+    private long resolveSdlWindow() {
+        if (this.lastCreatedWindow != 0L && SDLVideo.SDL_GetWindowProperties(this.lastCreatedWindow) != 0) {
+            return this.lastCreatedWindow;
+        }
+        return SDLKeyboard.SDL_GetKeyboardFocus();
+    }
+
+    /**
+     * 从 SDL 窗口属性中取出 Cocoa 侧的原生句柄（{@code NSWindow*} / {@code NSView*}）。
+     *
+     * <p>SDL 把这些指针以指针属性挂在窗口的 property store 上，键名形如
+     * {@code SDL.window.cocoa.window}。取不到时返回 {@link MemorySegment#NULL}。
+     */
+    private static MemorySegment readCocoaHandle(final long sdlWindow, final String propertyName) {
+        final long address = SDLProperties.SDL_GetPointerProperty(
+                SDLVideo.SDL_GetWindowProperties(sdlWindow), propertyName, 0L);
+        return MemorySegment.ofAddress(address);
     }
 
     /**
