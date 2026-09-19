@@ -47,7 +47,9 @@
     "docs/agent/system-model.md",
     "docs/agent/unified-evaluation-loop.md",
     "docs/agent/unified-evaluation-acceptance.json",
-    "docs/render-contract-validation.md"
+    "docs/render-contract-validation.md",
+    "docs/agent/minecraft-26.3-implementation-baseline.json",
+    "docs/agent/terrain-work-evidence.schema.json"
   ],
   "historical_or_advisory": [
     "docs/handoffs/**",
@@ -609,7 +611,9 @@
         "AGENTS.md",
         "docs/agent/system-model.md",
         "docs/agent/unified-evaluation-loop.md",
-        "docs/agent/unified-evaluation-acceptance.json"
+        "docs/agent/unified-evaluation-acceptance.json",
+        "docs/agent/minecraft-26.3-implementation-baseline.json",
+        "docs/agent/terrain-work-evidence.schema.json"
       ],
       "agent_guide": "scripts/agent/AGENTS.md",
       "impact_targets": [],

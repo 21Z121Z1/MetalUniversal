@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "sourceSha": "5694bdbd04d7754e0df8c523786a6a8ee95a246b",
+  "trialStatus": "passed",
+  "complete": true,
+  "droppedEvents": 0,
+  "observationWindowEndNanos": 20000000,
+  "events": [
+    {
+      "sequence": 0,
+      "domain": "main:terrain",
+      "key": {
+        "worldEpoch": 1,
+        "sectionId": 42,
+        "geometryRevision": 3,
+        "lightingRevision": 5,
+        "materialGeneration": 2
+      },
+      "stage": "DATA_READY",
+      "monotonicNanos": 100,
+      "bytes": 0,
+      "reason": "fixture",
+      "frameId": null,
+      "meshGeneration": null,
+      "drawExpected": false
+    },
+    {
+      "sequence": 1,
+      "domain": "main:terrain",
+      "key": {
+        "worldEpoch": 1,
+        "sectionId": 42,
+        "geometryRevision": 3,
+        "lightingRevision": 5,
+        "materialGeneration": 2
+      },
+      "stage": "BUILD_START",
+      "monotonicNanos": 120,
+      "bytes": 0,
+      "reason": "fixture",
+      "frameId": null,
+      "meshGeneration": null,
+      "drawExpected": false
+    },
+    {
+      "sequence": 2,
+      "domain": "main:terrain",
+      "key": {
+        "worldEpoch": 1,
+        "sectionId": 42,
+        "geometryRevision": 3,
+        "lightingRevision": 5,
+        "materialGeneration": 2
+      },
+      "stage": "BUILD_END",
+      "monotonicNanos": 150,
+      "bytes": 0,
+      "reason": "fixture",
+      "frameId": null,
+      "meshGeneration": null,
+      "drawExpected": false
+    },
+    {
+      "sequence": 3,
+      "domain": "main:terrain",
+      "key": {
+        "worldEpoch": 1,
+        "sectionId": 42,
+        "geometryRevision": 3,
+        "lightingRevision": 5,
+        "materialGeneration": 2
+      },
+      "stage": "PUBLISHED",
+      "monotonicNanos": 160,
+      "bytes": 0,
+      "reason": "fixture",
+      "frameId": null,
+      "meshGeneration": 7,
+      "drawExpected": false
+    }
+  ]
+}
