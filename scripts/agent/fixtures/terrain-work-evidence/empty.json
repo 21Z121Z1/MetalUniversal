@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "sourceSha": "5694bdbd04d7754e0df8c523786a6a8ee95a246b",
+  "trialStatus": "passed",
+  "complete": true,
+  "droppedEvents": 0,
+  "observationWindowEndNanos": 20000000,
+  "events": []
+}
