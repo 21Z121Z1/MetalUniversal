@@ -54,6 +54,18 @@ jobs:
           test ! -e src/main/java/com/metallum/mixin/render/MacRetinaFullscreenMixin.java
           ! grep -Fq 'render.MacRetinaFullscreenMixin' src/main/resources/metallum.mixins.json
 
+      - name: Verify P0 terrain evidence contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m json.tool docs/agent/minecraft-26.3-p0-baseline.json >/dev/null
+          python3 -m json.tool docs/agent/terrain-work-events.schema.json >/dev/null
+          python3 -m json.tool validation/terrain-work-events/oracle-fixtures.json >/dev/null
+          python3 -m py_compile scripts/agent/verify_terrain_work_events.py
+          python3 scripts/agent/verify_terrain_work_events.py --self-test
+          python3 scripts/agent/verify_terrain_work_events.py \
+            --check-baseline docs/agent/minecraft-26.3-p0-baseline.json
+
       - name: Resolve 26.3 dependencies
         run: ./gradlew --no-daemon dependencies --configuration compileClasspath
 
