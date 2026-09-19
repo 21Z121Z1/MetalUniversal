@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - agent/minecraft-26.3-renderpearl-migration-20260916
+      - agent/mc26.3-p0b-terrain-observability-20260920
   workflow_dispatch:
 
 permissions:
