@@ -16,6 +16,7 @@ import com.mojang.renderpearl.backend.api.RenderPassBackend;
 import com.mojang.blaze3d.systems.ScissorState;
 import com.mojang.renderpearl.api.textures.GpuSampler;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.SharedConstants;
@@ -172,7 +173,7 @@ final class MetalRenderPass implements RenderPassBackend {
         }
         if (value instanceof TextureViewAndSampler pair) {
             slotSamplers.put(bindingIndex, pair);
-            commandEncoder.flushPendingClear((MetalGpuTexture) pair.textureView().texture());
+            commandEncoder.flushPendingClear((MetalGpuTexture) pair.view().texture());
             return;
         }
         throw new IllegalArgumentException("Unsupported uniform value for slot " + bindingIndex + ": " + value.getClass());
@@ -192,10 +193,11 @@ final class MetalRenderPass implements RenderPassBackend {
     }
 
     void setUniform(final String name, final GpuTextureView textureView, final GpuSampler sampler) {
-        samplers.put(name, new TextureViewAndSampler(textureView, sampler));
+        TextureViewAndSampler pair = new TextureViewAndSampler(textureView, sampler);
+        samplers.put(name, pair);
         MetalCompiledRenderPipeline.ResourceBinding binding = resourceOf(name);
         if (binding != null) {
-            setUniform(binding.bindingIndex(), samplers.get(name));
+            setUniform(binding.bindingIndex(), pair);
         }
     }
 
@@ -724,11 +726,11 @@ final class MetalRenderPass implements RenderPassBackend {
                 throw new IllegalStateException("Missing sampler " + binding.name());
             }
 
-            if (VALIDATION && textureBinding.textureView().isClosed()) {
+            if (VALIDATION && textureBinding.view().isClosed()) {
                 throw new IllegalStateException("Sampler " + binding.name() + " texture view has been closed");
             }
 
-            MetalGpuTextureView textureView = (MetalGpuTextureView) textureBinding.textureView();
+            MetalGpuTextureView textureView = (MetalGpuTextureView) textureBinding.view();
             MetalGpuSampler sampler = (MetalGpuSampler) textureBinding.sampler();
             enc.setTextureAndSampler(textureView.nativeHandle(), sampler.nativeHandle(), slot, binding.stageMask());
             return;
@@ -794,9 +796,6 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         enc.setTexture(texelTexture, binding.bindingIndex(), binding.stageMask());
-    }
-
-    record TextureViewAndSampler(GpuTextureView textureView, GpuSampler sampler) {
     }
 
     private static boolean sameSlice(@Nullable final GpuBufferSlice left, @Nullable final GpuBufferSlice right) {
