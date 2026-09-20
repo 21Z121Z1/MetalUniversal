@@ -401,6 +401,10 @@ public final class TerrainPublicationGenerationGuard<T> {
             case MESH_REBOUND -> meshReboundFailOpenCount = saturatedIncrement(meshReboundFailOpenCount);
             case NONE -> throw new IllegalArgumentException("fail-open reason must be explicit");
         }
+        // Metadata is no longer authoritative after fail-open. Drop strong identity references so
+        // the diagnostic safety layer cannot retain vanilla tasks/meshes for the rest of the game.
+        taskTokens.clear();
+        meshTokens.clear();
     }
 
     private static long incrementGeneration(final long value) {
