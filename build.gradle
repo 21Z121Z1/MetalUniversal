@@ -1177,8 +1177,10 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 		systemProperty "metallum.validation.requireMetal", "true"
 		systemProperty "metallum.renderContract.enabled", renderContractMinecraftValidationRequested ? "true" : "false"
 		systemProperty "metallum.renderContract.runId",
-				renderContractMinecraftDiagnoseRequested ? "minecraft-diagnose-current"
-						: renderContractMinecraftValidationRequested ? "minecraft-current" : "disabled"
+				System.getProperty("metallum.renderContract.runId",
+						renderContractMinecraftDiagnoseRequested ? "minecraft-diagnose-current"
+								: renderContractMinecraftValidationRequested ? "minecraft-current"
+								: validationOutputDir.name)
 		systemProperty "metallum.validation.sourceCommit", renderContractSourceCommit
 		systemProperty "metallum.opt.terrainGpuEncode",
 				System.getProperty("metallum.opt.terrainGpuEncode", "false")

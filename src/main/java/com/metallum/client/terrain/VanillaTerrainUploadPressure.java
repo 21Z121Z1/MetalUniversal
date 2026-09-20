@@ -39,7 +39,7 @@ public final class VanillaTerrainUploadPressure {
         JsonObject limits = new JsonObject();
         limits.addProperty("requestedBytesIncludingRetries", "not accepted bytes or GPU upload bytes");
         limits.addProperty("attemptCpuNanos", "wall time including copy-lock wait and render-thread upload retries");
-        limits.addProperty("copyLockWaitNanos", "lock-call wall time including uncontended acquisition overhead");
+        limits.addProperty("waitNanos", "copy-lock call wall time including uncontended acquisition overhead");
         limits.addProperty("uploadCpuNanos", "CPU encoding call wall time, not GPU completion");
         limits.addProperty("gpuCompletion", "unavailable: no completion hook");
         limits.addProperty("inFlightBytes", "unavailable: no allocation retirement accounting");
