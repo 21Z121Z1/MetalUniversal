@@ -12,6 +12,7 @@ import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.pipeline.PolygonMode;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
 import com.mojang.renderpearl.api.vertex.VertexFormatElement;
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -36,6 +37,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
 
     private static final Identifier SODIUM_TERRAIN_VERTEX_SHADER =
             Identifier.fromNamespaceAndPath("sodium", "blocks/block_layer_opaque");
+    /** Optional A/B lane; the linear compatibility path remains the default. */
+    private static final boolean NUMERIC_RESOURCE_LOOKUP =
+            Boolean.getBoolean("metallum.opt.numericResourceLookup");
 
     enum ResourceKind {
         UNIFORM_BUFFER,
@@ -55,6 +59,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
 
     private final List<ResourceBinding> resources;
     private final Map<String, ResourceBinding> resourcesByName;
+    private final @Nullable NumericResourceIndex resourcesByBindingIndex;
     private final long allResourceMask;
     private final int firstAvailableVertexBufferSlot;
     private final List<MetalCrossShaderCompiler.GenericVertexInput> genericVertexInputs;
@@ -102,6 +107,11 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     ) {
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
+        // Keep the compatibility lane allocation-free: the index is only needed
+        // by the explicitly enabled A/B implementation.
+        this.resourcesByBindingIndex = NUMERIC_RESOURCE_LOOKUP
+                ? new NumericResourceIndex(resources)
+                : null;
         this.genericVertexInputs = List.copyOf(genericVertexInputs);
 
         int maxBindingIndex = -1;
@@ -529,6 +539,15 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
 
     @Nullable
     ResourceBinding resource(final int bindingIndex) {
+        if (NUMERIC_RESOURCE_LOOKUP) {
+            // The index is sparse and may be negative in malformed input; the
+            // primitive map handles both without a max-index-sized allocation.
+            NumericResourceIndex index = this.resourcesByBindingIndex;
+            if (index == null) {
+                throw new IllegalStateException("Numeric resource lookup index was not initialized");
+            }
+            return index.get(bindingIndex);
+        }
         for (ResourceBinding resource : this.resources) {
             NumericBindingDiagnostics.recordResourceScanStep();
             if (resource.bindingIndex() == bindingIndex) {
@@ -536,6 +555,25 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             }
         }
         return null;
+    }
+
+    /** Immutable per-pipeline numeric index map; duplicate indices retain the first resource. */
+    static final class NumericResourceIndex {
+        private final Int2ObjectOpenHashMap<ResourceBinding> values;
+
+        NumericResourceIndex(final List<ResourceBinding> resources) {
+            this.values = new Int2ObjectOpenHashMap<>(Math.max(2, resources.size()));
+            for (ResourceBinding resource : resources) {
+                if (!this.values.containsKey(resource.bindingIndex())) {
+                    this.values.put(resource.bindingIndex(), resource);
+                }
+            }
+        }
+
+        @Nullable
+        ResourceBinding get(final int bindingIndex) {
+            return this.values.get(bindingIndex);
+        }
     }
 
     boolean usesStableTerrainSampler(final ResourceBinding binding) {
