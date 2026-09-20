@@ -80,18 +80,21 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
 
         BoundedTerrainTaskAdmission.OfferResult<SectionRenderDispatcher.RenderSection.SectionTask> result =
                 admission.offer(task, tasks.size(), System.nanoTime());
+        int vanillaQueuedAfter = tasks.size();
         switch (result.action()) {
             case DISCARD_TERMINAL, DEFER, REPLACE_DEFERRED -> ci.cancel();
             case FAIL_OPEN -> {
                 // Restore all work held by the experimental layer before allowing vanilla's
                 // original add() to append the current task.
                 tasks.addAll(result.failOpenTasks());
+                vanillaQueuedAfter = tasks.size() + 1;
             }
             case BASELINE, ADMIT -> {
-                // Continue into vanilla add().
+                // Vanilla add() executes after this HEAD injection.
+                vanillaQueuedAfter = tasks.size() + 1;
             }
         }
-        VanillaTerrainAdmissionTelemetry.publish(admission, tasks.size(), System.nanoTime());
+        VanillaTerrainAdmissionTelemetry.publish(admission, vanillaQueuedAfter, System.nanoTime());
     }
 
     @Inject(method = "poll", at = @At("HEAD"))
