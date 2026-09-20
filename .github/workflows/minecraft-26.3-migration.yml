@@ -5,6 +5,7 @@ on:
     branches:
       - agent/minecraft-26.3-renderpearl-migration-20260916
       - agent/mc26.3-p0b-terrain-observability-20260920
+      - agent/mc26.3-t1a-vanilla-admission-20260920
   workflow_dispatch:
 
 permissions:
@@ -280,6 +281,7 @@ jobs:
             compileJava compileTestJava test -x buildIOSNative --console=plain \
             --tests com.metallum.client.metal.render.MetalRenderPearlBoundaryTest \
             --tests com.metallum.client.terrain.TerrainWorkEventRecorderTest \
+            --tests com.metallum.client.terrain.BoundedTerrainTaskAdmissionTest \
             --tests com.metallum.client.terrain.VanillaTerrainWorkTrackerTest \
             --tests com.metallum.client.terrain.TerrainWorkReportTest \
             --tests com.metallum.client.validation.SodiumValidationBridgeTest \
