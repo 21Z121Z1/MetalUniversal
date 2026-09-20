@@ -2413,6 +2413,30 @@ public final class MetalValidationClient implements ClientModInitializer {
         String failureReasonsJson = new GsonBuilder().create().toJson(validationFailureScenarios);
         String runId = System.getProperty("metallum.renderContract.runId", "minecraft-current");
         String sourceCommit = System.getProperty("metallum.validation.sourceCommit", "unknown");
+        if (Boolean.getBoolean("metallum.terrain.vanillaWorkEvents")) {
+            if (!sourceCommit.matches("[0-9a-f]{40}")) {
+                Metallum.LOGGER.warn(
+                        "Skipping terrain work evidence: metallum.validation.sourceCommit is not an exact SHA"
+                );
+            } else {
+                try {
+                    var reports = com.metallum.client.terrain.VanillaTerrainWorkTelemetry.reports(
+                            sourceCommit,
+                            runId,
+                            "passed".equals(status),
+                            "passed".equals(status) ? null : status
+                    );
+                    for (var entry : reports.entrySet()) {
+                        ValidationStorageBudget.shared(outputDirectory).writeString(
+                                outputDirectory.resolve("terrain-work-epoch-" + entry.getKey() + ".json"),
+                                new GsonBuilder().serializeNulls().create().toJson(entry.getValue()) + "\n"
+                        );
+                    }
+                } catch (IOException exception) {
+                    throw new IllegalStateException("Could not write terrain work evidence", exception);
+                }
+            }
+        }
         if ("failed".equals(status)) {
             RenderContractRuntime.markFailed();
         }
