@@ -217,6 +217,7 @@ public final class BackendFrameComparisonClient {
     private static volatile boolean integratedServerConfigured;
     private static boolean flawlessFramesAttempted;
     private static boolean sceneReady;
+    private static boolean vanillaVisibilityRefreshRequested;
     private static boolean runtimeIdentityValidated;
     private static boolean runtimeIdentityValid = true;
     private static boolean sceneStartIrisResetAttempted;
@@ -308,6 +309,16 @@ public final class BackendFrameComparisonClient {
                             sample.entitySha256()
                     );
                 }
+                return;
+            }
+            if (!SODIUM_LOADED && FREEZE_SIMULATION && FIXED_CAMERA != null
+                    && !vanillaVisibilityRefreshRequested) {
+                // The incremental visibility graph can settle differently while
+                // chunks arrive. Rebuild once from the loaded, fixed scene, then
+                // require the full stability interval again before any capture.
+                minecraft.levelRenderer.sectionOcclusionGraph().invalidate();
+                vanillaVisibilityRefreshRequested = true;
+                SCENE_STABILITY.reset();
                 return;
             }
             sceneStartSample = sample;
@@ -1481,6 +1492,9 @@ public final class BackendFrameComparisonClient {
                 ? ""
                 : sceneStartSample.entitySha256();
         String fixedCamera = FIXED_CAMERA == null ? "null" : FIXED_CAMERA.json();
+        var camera = minecraft.gameRenderer.mainCamera();
+        String observedCamera = new FixedCamera(camera.position().x(), camera.position().y(),
+                camera.position().z(), camera.yRot(), camera.xRot()).json();
         String actualGameDirectory = actualGameDirectory(minecraft);
         String actualWorkingDirectory = actualWorkingDirectory();
         String actualPlayerName = actualPlayerName(minecraft);
@@ -1563,6 +1577,9 @@ public final class BackendFrameComparisonClient {
                         + "  \"irisFrameTimeCounter\": %s,\n"
                         + "  \"fixedIrisFrameMillis\": %s,\n"
                         + "  \"fixedCamera\": %s,\n"
+                        + "  \"observedCamera\": %s,\n"
+                        + "  \"observedCameraFov\": %.9g,\n"
+                        + "  \"vanillaVisibilityRefreshRequested\": %s,\n"
                         + "  \"observedPlayer\": %s\n"
                         + "}\n",
                 jsonEscape(backend),
@@ -1627,6 +1644,9 @@ public final class BackendFrameComparisonClient {
                         ? "null"
                         : Long.toString(FIXED_IRIS_FRAME_MILLIS),
                 fixedCamera,
+                observedCamera,
+                camera.getFov(),
+                vanillaVisibilityRefreshRequested,
                 observedPlayer
         );
     }
@@ -2295,6 +2315,12 @@ public final class BackendFrameComparisonClient {
             }
             return this.stableFrames >= Math.max(1, this.requiredFrames)
                     && nowNanos - this.stableSinceNanos >= this.requiredNanos;
+        }
+
+        void reset() {
+            this.lastSample = null;
+            this.stableFrames = 0;
+            this.stableSinceNanos = 0L;
         }
 
         int stableFrames() {

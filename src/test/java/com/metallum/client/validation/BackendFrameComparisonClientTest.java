@@ -238,6 +238,11 @@ final class BackendFrameComparisonClientTest {
         assertFalse(tracker.observe(stable, 500_000_000L));
         assertTrue(tracker.observe(stable, 1_000_000_000L));
 
+        tracker.reset();
+        assertFalse(tracker.observe(stable, 1_000_000_000L));
+        assertFalse(tracker.observe(stable, 1_500_000_000L));
+        assertTrue(tracker.observe(stable, 2_000_000_000L));
+
         BackendFrameComparisonClient.SceneReadinessSample changedEntity =
                 new BackendFrameComparisonClient.SceneReadinessSample(
                         2_048,
