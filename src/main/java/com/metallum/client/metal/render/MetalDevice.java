@@ -665,10 +665,17 @@ final class MetalDevice implements GpuDeviceBackend {
                 return existing;
             }
             this.activeShaderSource = effectiveSource;
-            CompiledRenderPipeline frontend = this.pipelineBuilder
-                    .compilePipeline(pipeline, effectiveSource, Runnable::run)
-                    .join()
-                    .finishCompile();
+            CompiledRenderPipeline frontend;
+            try {
+                frontend = this.pipelineBuilder.compilePipeline(pipeline, effectiveSource, Runnable::run)
+                        .join().finishCompile();
+            } catch (java.util.concurrent.CompletionException failure) {
+                // This helper is synchronous even when backend work finishes in
+                // RenderPearl's preparation stage. Preserve its original error contract.
+                if (failure.getCause() instanceof RuntimeException cause) throw cause;
+                if (failure.getCause() instanceof Error cause) throw cause;
+                throw failure;
+            }
             if (!(frontend instanceof FrontendRenderPipeline frontendPipeline)
                     || !(frontendPipeline.backendRenderPipeline() instanceof MetalCompiledRenderPipeline compiled)) {
                 throw new IllegalStateException("RenderPearl rejected pipeline " + pipeline.getLocation());
