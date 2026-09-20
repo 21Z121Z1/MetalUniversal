@@ -76,6 +76,8 @@
     "terrain.RenderSectionTerrainWorkMixin",
     "terrain.LevelRendererTerrainDrawMixin",
     "terrain.ChunkSectionsDrawTerrainWorkMixin",
+    "terrain.SectionTaskTerrainAdmissionAccessor",
+    "terrain.SectionTaskDynamicQueueAdmissionMixin",
     "sodium.MinecraftTerrainSchedulingMixin",
     "sodium.RenderRegionManagerTerrainSchedulingMixin",
     "sodium.RenderSectionManagerTerrainSchedulingMixin",
