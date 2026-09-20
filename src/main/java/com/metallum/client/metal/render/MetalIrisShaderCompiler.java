@@ -61,12 +61,10 @@ import java.util.regex.Pattern;
  * the same). Opaque types (samplers/images) stay put and receive bindings via
  * shaderc's auto-binding.</p>
  *
- * <p><b>Interface locations.</b> Vertex outputs and fragment inputs get
- * auto-assigned locations per stage. shaderc assigns them in declaration
- * order, which matches between stages for glsl-transformer output (both
- * stages emit the shared varyings in source order), but this is not a
- * guaranteed invariant; the PSO-link step of B2-3 must pair stages by name
- * and inject explicit locations before trusting draws.</p>
+ * <p><b>Interface locations.</b> The paired GLSL entry point assigns explicit
+ * locations before RenderPearl compilation. It links legacy varyings by name,
+ * preserves explicit locations, and accounts for matrix and array ranges.
+ * Unsupported declarations fail before pipeline activation.</p>
  *
  * <p>Class notes: this class references Iris types and must only be loaded
  * when Iris is on the classpath (B2 code paths and the translation test).
@@ -948,9 +946,9 @@ final class MetalIrisShaderCompiler {
     //
     // The B2-2 matrix above compiles each stage in isolation (device-library
     // proof). Executable PSOs instead go through the *stock* chain
-    // (vanilla GlslCompiler -> IntermediaryShaderModule.rebind -> Spvc ->
-    // MetalCompiledRenderPipeline), which pairs varyings by name and assigns
-    // bindings from the RenderPipeline's BindGroupLayout. This lane therefore
+    // (RenderPearl GlslCompiler -> Spvc -> MetalCompiledRenderPipeline).
+    // This adapter pairs legacy varyings before RenderPearl assigns bindings.
+    // This lane therefore
     // stops at GLSL and reports the metadata the synthetic RenderPipeline
     // needs: the unified std140 uniform block (one identical text in both
     // stages — per-stage blocks would alias the same binding with different
@@ -1121,6 +1119,160 @@ final class MetalIrisShaderCompiler {
         );
     }
 
+    private record InterfaceVariable(String name, int start, boolean explicit, int location,
+                                     int slots, List<Integer> type) {
+    }
+
+    private record StageInterface(String source, List<InterfaceVariable> inputs,
+                                  List<InterfaceVariable> outputs) {
+    }
+
+    /** Assign locations once, before RenderPearl compiles the paired stages. */
+    private static String[] linkInterfaceLocations(String name, String vertex, String fragment) {
+        StageInterface v = reflectInterface(name, StageKind.VERTEX, vertex);
+        StageInterface f = reflectInterface(name, StageKind.FRAGMENT, fragment);
+        Map<String, Integer> locations = new java.util.LinkedHashMap<>();
+        Map<Integer, String> occupied = new java.util.HashMap<>();
+        Map<String, InterfaceVariable> outputs = new java.util.LinkedHashMap<>();
+        for (InterfaceVariable output : v.outputs()) {
+            outputs.put(output.name(), output);
+            if (output.explicit()) reserveInterface(output.name(), output, output.location(), locations, occupied);
+        }
+        Map<String, String> producers = new java.util.HashMap<>();
+        for (InterfaceVariable input : f.inputs()) {
+            InterfaceVariable output = input.explicit() ? v.outputs().stream()
+                    .filter(candidate -> candidate.explicit() && candidate.location() == input.location())
+                    .findFirst().orElse(outputs.get(input.name())) : outputs.get(input.name());
+            if (output == null || !output.type().equals(input.type())) {
+                throw new IllegalArgumentException("Missing or incompatible vertex output for " + input.name());
+            }
+            producers.put(input.name(), output.name());
+            if (input.explicit()) reserveInterface(output.name(), input, input.location(), locations, occupied);
+        }
+        for (InterfaceVariable output : v.outputs()) {
+            if (locations.containsKey(output.name())) continue;
+            int location = 0;
+            while (!freeInterfaceRange(occupied, location, output.slots())) location++;
+            reserveInterface(output.name(), output, location, locations, occupied);
+        }
+        Map<String, Integer> inputLocations = new java.util.HashMap<>();
+        for (InterfaceVariable input : f.inputs()) inputLocations.put(input.name(), locations.get(producers.get(input.name())));
+        return new String[]{explicitInterface(v, Map.of(), locations), explicitInterface(f, inputLocations, Map.of())};
+    }
+
+    private static boolean freeInterfaceRange(Map<Integer, String> occupied, int location, int slots) {
+        for (int i = 0; i < slots; i++) if (occupied.containsKey(Math.addExact(location, i))) return false;
+        return true;
+    }
+
+    private static void reserveInterface(String owner, InterfaceVariable variable, int location,
+                                         Map<String, Integer> locations, Map<Integer, String> occupied) {
+        Integer previous = locations.putIfAbsent(owner, location);
+        if (previous != null && previous != location) {
+            throw new IllegalArgumentException("Conflicting interface locations for " + owner);
+        }
+        for (int i = 0; i < variable.slots(); i++) {
+            String conflict = occupied.putIfAbsent(Math.addExact(location, i), owner);
+            if (conflict != null && !conflict.equals(owner)) {
+                throw new IllegalArgumentException("Overlapping interface locations for " + owner + " and " + conflict);
+            }
+        }
+    }
+
+    private static String explicitInterface(StageInterface stage, Map<String, Integer> inputs,
+                                            Map<String, Integer> outputs) {
+        Map<Integer, String> edits = new java.util.TreeMap<>(java.util.Comparator.reverseOrder());
+        for (int side = 0; side < 2; side++) {
+            for (InterfaceVariable variable : side == 0 ? stage.inputs() : stage.outputs()) {
+                if (!variable.explicit()) {
+                    int location = (side == 0 ? inputs : outputs).getOrDefault(variable.name(), variable.location());
+                    edits.put(variable.start(), "layout(location = " + location + ") ");
+                }
+            }
+        }
+        StringBuilder result = new StringBuilder(stage.source());
+        edits.forEach(result::insert);
+        return result.toString();
+    }
+
+    private static StageInterface reflectInterface(String name, StageKind kind, String source) {
+        SpirvResult spirv = glslToSpirv(name, kind, source);
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            PointerBuffer pointer = stack.mallocPointer(1);
+            checkSpvc(name, kind, Spvc.spvc_context_create(pointer), "interface context");
+            long context = pointer.get(0);
+            try {
+                IntBuffer words = spirv.spirv().asIntBuffer();
+                checkSpvc(name, kind, Spvc.spvc_context_parse_spirv(context, words, words.remaining(), pointer), "interface IR");
+                long ir = pointer.get(0);
+                checkSpvc(name, kind, Spvc.spvc_context_create_compiler(context, Spvc.SPVC_BACKEND_NONE,
+                        ir, Spvc.SPVC_CAPTURE_MODE_COPY, pointer), "interface compiler");
+                long compiler = pointer.get(0);
+                checkSpvc(name, kind, Spvc.spvc_compiler_create_shader_resources(compiler, pointer), "interface resources");
+                long resources = pointer.get(0);
+                List<InterfaceVariable> inputs = reflectInterfaceVariables(name, kind, source, stack, compiler, resources,
+                        Spvc.SPVC_RESOURCE_TYPE_STAGE_INPUT, "in");
+                List<InterfaceVariable> outputs = reflectInterfaceVariables(name, kind, source, stack, compiler, resources,
+                        Spvc.SPVC_RESOURCE_TYPE_STAGE_OUTPUT, "out");
+                return new StageInterface(source, inputs, outputs);
+            } finally {
+                Spvc.spvc_context_destroy(context);
+            }
+        }
+    }
+
+    private static List<InterfaceVariable> reflectInterfaceVariables(
+            String program, StageKind kind, String source, MemoryStack stack, long compiler,
+            long resources, int resourceType, String direction) {
+        PointerBuffer list = stack.mallocPointer(1), count = stack.mallocPointer(1);
+        checkSpvc(program, kind, Spvc.spvc_resources_get_resource_list_for_type(resources, resourceType, list, count),
+                "interface variables");
+        int size = Math.toIntExact(count.get(0));
+        List<InterfaceVariable> variables = new ArrayList<>();
+        if (size == 0) return variables;
+        for (SpvcReflectedResource resource : SpvcReflectedResource.create(list.get(0), size)) {
+            if (Spvc.spvc_compiler_has_decoration(compiler, resource.id(), Spv.SpvDecorationBuiltIn)) continue;
+            String name = resource.nameString();
+            // Iris has already parsed and printed these declarations. Reject blocks,
+            // multiple declarators and component packing rather than rewrite them by guess.
+            Pattern declaration = Pattern.compile("(?m)^[ \\t]*(?<qualifiers>(?:(?:layout\\s*\\([^;{}]*\\)|"
+                    + "in|out|flat|smooth|noperspective|centroid|sample|invariant|precise|lowp|mediump|highp)\\s+)+)"
+                    + "[A-Za-z_][A-Za-z0-9_]*\\s+" + Pattern.quote(name) + "\\s*(?:\\[[^;{}]*?\\]\\s*)*;");
+            Matcher match = declaration.matcher(source);
+            if (!match.find() || !Pattern.compile("\\b" + direction + "\\b").matcher(match.group("qualifiers")).find()) {
+                throw new IllegalArgumentException("Unsupported " + kind + " interface declaration: " + name);
+            }
+            int start = match.start();
+            boolean explicit = Pattern.compile("\\blocation\\s*=").matcher(match.group("qualifiers")).find();
+            if (match.find() || Spvc.spvc_compiler_has_decoration(compiler, resource.id(), Spv.SpvDecorationComponent)
+                    || Spvc.spvc_compiler_has_decoration(compiler, resource.id(), Spv.SpvDecorationIndex)) {
+                throw new IllegalArgumentException("Unsupported packed or duplicate interface: " + name);
+            }
+            long type = Spvc.spvc_compiler_get_type_handle(compiler, resource.type_id());
+            int base = Spvc.spvc_type_get_basetype(type);
+            int components = Spvc.spvc_type_get_vector_size(type);
+            int columns = Spvc.spvc_type_get_columns(type);
+            if (base == Spvc.SPVC_BASETYPE_STRUCT || components < 1 || columns < 1) {
+                throw new IllegalArgumentException("Unsupported interface type: " + name);
+            }
+            int slots = Math.multiplyExact(columns, (base == Spvc.SPVC_BASETYPE_FP64
+                    || base == Spvc.SPVC_BASETYPE_INT64 || base == Spvc.SPVC_BASETYPE_UINT64) && components > 2 ? 2 : 1);
+            List<Integer> signature = new ArrayList<>(List.of(base, components, columns));
+            for (int dimension = 0; dimension < Spvc.spvc_type_get_num_array_dimensions(type); dimension++) {
+                int length = Spvc.spvc_type_get_array_dimension(type, dimension);
+                if (!Spvc.spvc_type_array_dimension_is_literal(type, dimension) || length <= 0) {
+                    throw new IllegalArgumentException("Unsupported interface array size: " + name);
+                }
+                slots = Math.multiplyExact(slots, length);
+                signature.add(length);
+            }
+            int location = Spvc.spvc_compiler_get_decoration(compiler, resource.id(), Spv.SpvDecorationLocation);
+            variables.add(new InterfaceVariable(name, start, explicit, location, slots, List.copyOf(signature)));
+        }
+        return variables;
+    }
+
+
     static GlslProgram linkPatchedPair(
             final String name,
             final String patchedVertex,
@@ -1164,6 +1316,10 @@ final class MetalIrisShaderCompiler {
             if (fragmentPack.size() != fragmentLoose.uniforms().size()) {
                 fragmentOut = insertUniformBlock(fragmentOut, SODIUM_PUSH_CONSTANT_BLOCK);
             }
+
+            String[] linkedStages = linkInterfaceLocations(name, vertexOut, fragmentOut);
+            vertexOut = linkedStages[0];
+            fragmentOut = linkedStages[1];
 
             Map<String, String> samplers = new java.util.LinkedHashMap<>();
             collectSamplerDecls(vertexOut, samplers);
