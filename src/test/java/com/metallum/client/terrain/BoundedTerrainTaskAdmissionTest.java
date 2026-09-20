@@ -61,6 +61,10 @@ final class BoundedTerrainTaskAdmissionTest {
         assertEquals(BoundedTerrainTaskAdmission.Action.FAIL_OPEN, result.action());
         assertEquals(List.of(old), result.failOpenTasks());
         assertTrue(f.admission.snapshot().failOpen());
+        assertEquals(
+                BoundedTerrainTaskAdmission.FailOpenReason.LIVE_SLOT_CONFLICT,
+                f.admission.snapshot().failOpenReason()
+        );
         assertFalse(f.admission.snapshot().active(), "fail-open must report mutation as inactive");
         assertEquals(BoundedTerrainTaskAdmission.Action.BASELINE, f.offer(new Task(new Object(), "compile"), 999, 30).action());
     }
@@ -79,6 +83,10 @@ final class BoundedTerrainTaskAdmissionTest {
         assertEquals(List.of(first, second), result.failOpenTasks());
         assertEquals(0, f.admission.deferredSize());
         assertEquals(1L, f.admission.snapshot().failOpenCount());
+        assertEquals(
+                BoundedTerrainTaskAdmission.FailOpenReason.DEFERRED_CAPACITY,
+                f.admission.snapshot().failOpenReason()
+        );
     }
 
     @Test
@@ -133,6 +141,26 @@ final class BoundedTerrainTaskAdmissionTest {
         order.addAll(f.admission.drain(1, 110).tasks());
         order.addAll(f.admission.drain(1, 120).tasks());
         assertEquals(List.of(latestFirst, second, third), order);
+    }
+
+    @Test
+    void explicitRecoveryFailOpenReturnsOwnedWorkAndRecordsReason() {
+        Fixture f = new Fixture(new BoundedTerrainTaskAdmission.Config(true, 1, 3));
+        Task first = new Task(new Object(), "compile");
+        Task second = new Task(new Object(), "compile");
+        f.offer(first, 1, 10);
+        f.offer(second, 1, 20);
+
+        var result = f.admission.releaseDeferredToBaseline(
+                BoundedTerrainTaskAdmission.FailOpenReason.CANCELLED_COHORT_RECOVERY_BOUND
+        );
+        assertEquals(BoundedTerrainTaskAdmission.Action.FAIL_OPEN, result.action());
+        assertEquals(List.of(first, second), result.failOpenTasks());
+        assertEquals(
+                BoundedTerrainTaskAdmission.FailOpenReason.CANCELLED_COHORT_RECOVERY_BOUND,
+                f.admission.snapshot().failOpenReason()
+        );
+        assertFalse(f.admission.snapshot().active());
     }
 
     @Test
