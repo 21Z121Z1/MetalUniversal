@@ -7,11 +7,12 @@ load/store action, resource lifetime, render order, or submission policy.
 Disabled factories check a flag before reading descriptor properties or
 allocating rows. This is a small diagnostic gate, not a claim of zero overhead.
 
-These records are not yet an accepted attachment byte metric. The independent
-estimator must establish descriptor coverage and supported format/subresource
-semantics before admitting them. The canonical load/store byte metric remains
-unavailable until that work passes. Logical attachment action bytes will also
-remain distinct from physical GPU/DRAM traffic.
+The independent estimator admits a bounded set of format/subresource semantics
+after validating descriptor coverage. The canonical normalizer then admits
+`render_pass_store_load_bytes_estimate_median` only for the same complete GPU and
+encoder measurement window. This metric is logical action payload, not measured
+GPU/DRAM traffic. Capture remains opt-in; observer overhead must be measured before
+using this capture profile to accept a performance candidate.
 
 ## Capture boundaries
 
@@ -126,4 +127,53 @@ python3 scripts/agent/verify_native_attachment_facts.py \
 This cross-checks attachment masks and encoder identities against the native
 encoder ledger and GPU submission samples, including command buffers with no
 render encoders. Exit 0 accepts diagnostic integrity only; exit 2 rejects the
-receipt. It does not turn on the canonical attachment byte metric.
+receipt. Byte estimation is a separate check:
+
+```bash
+python3 scripts/agent/estimate_attachment_actions.py \
+  build/agent-runs/<run>/native-fullscreen-baseline.json \
+  --output build/agent-runs/<run>/attachment-bytes.json
+python3 scripts/agent/normalize_unified_trial.py build/agent-runs/<run>
+```
+
+The trial directory must contain `exit-status.txt` with the actually observed
+client command exit status. A source report alone does not establish successful
+process completion. Missing metrics are separate performance-admission limits.
+
+## Logical action byte model
+
+The estimator sums load, final store, and resolve-destination payload per completed
+frame, including explicit zero-render frames, then recomputes the median. The
+historical metric name includes resolve bytes. Initial `unknown` resolved to
+`dontCare` has a separate `deferredDiscardBytes` field; it is excluded from total
+bytes and is not evidence of measured savings. Clear and dontCare do not load old
+external contents. No physical allocation padding, compression, caches, tile
+traffic, shader accesses, or auxiliary queues are inferred.
+
+Supported shapes are level-zero 2D and 2D-array textures, including multisample
+variants (1/2/4/8 samples), with valid selected slices or explicit layer counts.
+[`renderTargetArrayLength`](https://developer.apple.com/documentation/metal/mtlrenderpassdescriptor/rendertargetarraylength)
+equal to zero disables layered rendering: count the selected attachment slice,
+not the entire texture array.
+Explicit render dimensions must fit all attachments; implicit dimensions require
+equal attachment extents. Mixed explicit/implicit dimensions, cube/3D textures,
+nonzero mip levels, unknown formats, custom store options, and cross-aspect
+resolve filters reject the entire estimate. No partial sum is published.
+
+Color formats use their uncompressed logical sample width (1/2/4/8/16 bytes).
+Depth16, Depth32 and Stencil8 use 2, 4 and 1 bytes. Depth32Float_Stencil8 uses
+4 bytes for its depth aspect and 1 for stencil; this does not imply a 5-byte
+allocation. Depth24Unorm_Stencil8 is not admitted. The exact enum allowlist is
+`ASPECT_BYTES` in the estimator.
+
+MSAA stores include every source sample; resolve stores include one destination
+sample, and store-and-resolve includes both. Resolve destinations must be backed,
+single-sample, format-matched and large enough. Memoryless source load/store is
+rejected; clear/discard has zero external source payload, while a resolve still
+counts its backed destination. This does not assert zero execution cost.
+
+The model follows Apple's [load/store action semantics](https://developer.apple.com/documentation/metal/setting-load-and-store-actions)
+and [Depth32Float_Stencil8 component and allocation distinction](https://developer.apple.com/documentation/metal/mtlpixelformat/depth32float_stencil8).
+Synthetic tests establish arithmetic and rejection behavior. Real-client receipts
+cover only the descriptor combinations actually present; they do not certify
+every synthetic combination on hardware or full render-contract equivalence.

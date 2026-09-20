@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import normalize_unified_trial as normalizer  # noqa: E402
+from verify_native_attachment_facts import ATTACHMENT_FIELDS  # noqa: E402
 
 
 def write_trial(report: dict) -> Path:
@@ -152,7 +153,55 @@ def valid_report() -> dict:
     }
 
 
+def with_attachment_facts(report: dict) -> dict:
+    rows = []
+    for index, encoder in enumerate(report["nativeEncoderLedger"]["rows"]):
+        for offset in range(2):
+            marker = dict.fromkeys(ATTACHMENT_FIELDS, 0)
+            marker.update({key: encoder[key] for key in ("windowId", "frameId", "submitIndex", "backend")})
+            marker.update(encoderSequence=index * 2 + offset + 1, aspect=-1, slot=1, ended=1)
+            child = dict(marker)
+            child.update(aspect=0, slot=0, pixelFormat=70, width=2, height=index + 1,
+                         depth=1, arrayLength=1, textureType=2, sampleCount=1,
+                         storageMode=2, loadAction=1, initialStoreAction=4, finalStoreAction=1)
+            rows.extend((marker, child))
+    report["nativeAttachmentLedger"] = {
+        "schemaVersion": 1, "enabled": True, "capacityRows": len(rows),
+        "droppedRows": 0, "invalidEvents": 0, "activeRenderEncoders": 0,
+        "createdRenderEncoders": 6, "rowCount": len(rows),
+        "scope": "main-queue-render-attachment-actions", "rows": rows,
+    }
+    return report
+
+
 class MeasurementWindowTests(unittest.TestCase):
+    def test_attachment_action_metric_is_recomputed_per_frame(self) -> None:
+        result = normalizer.normalize(write_trial(with_attachment_facts(valid_report())))
+        self.assertTrue(result["complete"], result["identity_errors"])
+        metric = result["metrics"]["render_pass_store_load_bytes_estimate_median"]
+        self.assertTrue(metric["available"])
+        # 2 encoders * 2 pixels wide * 2 rows * 4 bytes * (load + store).
+        self.assertEqual(64, metric["median"])
+        self.assertFalse(metric["source"]["physicalBandwidthMeasured"])
+
+    def test_missing_attachment_facts_remain_unavailable(self) -> None:
+        result = normalizer.normalize(write_trial(valid_report()))
+        self.assertTrue(result["complete"])
+        self.assertFalse(result["metrics"]["render_pass_store_load_bytes_estimate_median"]["available"])
+
+    def test_incomplete_or_unsupported_attachment_facts_reject_trial(self) -> None:
+        for mutate in (
+            lambda ledger: ledger.update(droppedRows=1),
+            lambda ledger: ledger["rows"][1].update(pixelFormat=255),
+            lambda ledger: ledger["rows"][1].update(finalStoreAction=4),
+        ):
+            report = with_attachment_facts(valid_report())
+            mutate(report["nativeAttachmentLedger"])
+            result = normalizer.normalize(write_trial(report))
+            self.assertFalse(result["complete"])
+            self.assertFalse(result["metrics"]["render_pass_store_load_bytes_estimate_median"]["available"])
+            self.assertTrue(result["source_summary"]["attachment_action_errors"])
+
     def test_valid_window_enables_all_windowed_metrics(self) -> None:
         root = write_trial(valid_report())
         result = normalizer.normalize(root)

@@ -22,6 +22,7 @@ python3 scripts/agent/verify_native_encoder_coverage.py
 python3 scripts/agent/verify_native_attachment_coverage.py --self-test
 python3 scripts/agent/verify_native_attachment_coverage.py
 python3 scripts/agent/verify_native_attachment_facts.py --self-test
+python3 scripts/agent/test_estimate_attachment_actions.py
 python3 scripts/agent/check_metal4_main_e2e_pair.py --self-test
 python3 scripts/agent/check_metal4_main_profile_matrix.py --self-test
 python3 scripts/agent/check_metal4_main_trial.py --self-test
@@ -44,6 +45,7 @@ python3 -m py_compile \
   scripts/agent/check_metal4_main_trial.py \
   scripts/agent/analyze_unified_eval.py \
   scripts/agent/normalize_unified_trial.py \
+  scripts/agent/estimate_attachment_actions.py \
   scripts/agent/check_unified_eval_admission.py \
   scripts/agent/verify_terrain_work_events.py
 bash -n scripts/agent/doctor.sh

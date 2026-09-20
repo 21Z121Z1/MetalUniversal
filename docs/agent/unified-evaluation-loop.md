@@ -352,8 +352,11 @@ For performance report before/after, raw delta, direction-normalized improvement
 
 Optional raw native attachment facts are documented in
 [`native-attachment-actions.md`](native-attachment-actions.md). Their opt-in
-capture and independent integrity checker do not yet make attachment byte
-estimates available to the performance gate.
+capture, independent integrity checker and conservative estimator can supply
+logical load/store/resolve bytes for supported descriptors. These are not physical
+bandwidth measurements; capture observer overhead remains a performance-admission
+limit. Unsupported or incomplete facts reject the estimate, and absent opt-in
+facts leave the metric unavailable.
 
 `processMemory` samples the current client process with public Mach
 `task_info(TASK_VM_INFO)` at each measured frame's beginning and end, plus once
