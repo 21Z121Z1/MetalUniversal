@@ -83,7 +83,6 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             });
             JsonArray waypoints = new JsonArray();
             worldEvidence.add("waypoints", waypoints);
-            var start = context.computeOnClient(client -> client.player.blockPosition());
             singleplayer.getServer().runCommand("gamemode spectator @a");
             singleplayer.getServer().runCommand("time set noon");
 
@@ -109,8 +108,9 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
             List<CaptureSample> samples = new ArrayList<>();
             for (long frameId = 1; frameId <= METAL_CAPTURE_SAMPLES; frameId++) {
                 // Move beyond the spawn region, allowing ordinary generation and chunk upload.
-                int x = start.getX() + (int) (frameId - 1) * 96;
-                int z = start.getZ() + (int) (frameId - 1) * 48;
+                // A fixed seed still has a randomized player spawn within the spawn radius.
+                int x = 160 + (int) (frameId - 1) * 96;
+                int z = 160 + (int) (frameId - 1) * 48;
                 int y = singleplayer.getServer().computeOnServer(server ->
                         server.overworld().getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) + 20);
                 singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");

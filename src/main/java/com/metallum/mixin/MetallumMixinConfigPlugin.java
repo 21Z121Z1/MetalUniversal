@@ -88,8 +88,11 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (mixinClassName.contains(".mixin.terrain.")) {
             FabricLoader loader = FabricLoader.getInstance();
+            // Frame evidence needs only the actual layer-submission hook, not terrain lifecycle tracing.
+            boolean frameEvidenceDrawHook = Boolean.getBoolean("metallum.frameEvidence.enabled")
+                    && mixinClassName.equals("com.metallum.mixin.terrain.ChunkSectionsDrawTerrainWorkMixin");
             return this.isDefaultGraphicsApi
-                    && Boolean.getBoolean("metallum.terrain.vanillaWorkEvents")
+                    && (Boolean.getBoolean("metallum.terrain.vanillaWorkEvents") || frameEvidenceDrawHook)
                     && !loader.isModLoaded("sodium")
                     && !loader.isModLoaded("iris");
         }
