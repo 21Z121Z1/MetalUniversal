@@ -1,6 +1,7 @@
 package com.metallum.mixin.terrain;
 
 import com.metallum.client.terrain.BoundedTerrainTaskAdmission;
+import com.metallum.client.terrain.VanillaTerrainAdmissionTelemetry;
 import java.util.List;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
 import net.minecraft.client.renderer.chunk.SectionTaskDynamicQueue;
@@ -90,6 +91,7 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
                 // Continue into vanilla add().
             }
         }
+        VanillaTerrainAdmissionTelemetry.publish(admission, tasks.size(), System.nanoTime());
     }
 
     @Inject(method = "poll", at = @At("HEAD"))
@@ -114,6 +116,7 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
         // Direct insertion is intentional: poll() already runs under the queue monitor and vanilla
         // immediately applies its own distance + recompile-quota choice across these tasks.
         tasks.addAll(ready.tasks());
+        VanillaTerrainAdmissionTelemetry.publish(admission, tasks.size(), System.nanoTime());
     }
 
     @Inject(method = "clear", at = @At("HEAD"))
@@ -122,6 +125,7 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
                 metallum$terrainAdmission;
         if (admission != null) {
             admission.clearDeferredAndReset();
+            VanillaTerrainAdmissionTelemetry.publish(admission, tasks.size(), System.nanoTime());
         }
     }
 
