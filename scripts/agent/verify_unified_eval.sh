@@ -51,6 +51,7 @@ bash -n scripts/agent/verify.sh
   -x buildIOSNative \
   -x buildIOSSpvc \
   --tests com.metallum.client.terrain.TerrainSchedulingControllerTest \
+  --tests com.metallum.client.terrain.BoundedTerrainTaskAdmissionTest \
   --tests com.metallum.client.terrain.TerrainWorkEventRecorderTest \
   --tests com.metallum.client.terrain.TerrainWorkReportTest \
   --tests com.metallum.client.terrain.VanillaTerrainWorkTrackerTest \
