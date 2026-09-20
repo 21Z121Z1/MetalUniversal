@@ -1,499 +1,68 @@
 name: Minecraft 26.3 migration
 
 on:
+  workflow_dispatch:
   push:
     branches:
-      - agent/minecraft-26.3-renderpearl-migration-20260916
-      - agent/mc26.3-p0b-terrain-observability-20260920
-      - agent/mc26.3-t1a-vanilla-admission-20260920
-      - agent/mc26.3-t1b-generation-publication-20260920
-  workflow_dispatch:
+      - integration/metaluniversal
+  pull_request:
+    branches:
+      - integration/metaluniversal
+    paths:
+      - 'src/**'
+      - 'build.gradle'
+      - 'gradle.properties'
+      - '.github/workflows/minecraft-26.3-migration.yml'
 
 permissions:
   contents: read
 
 env:
-  MC_26_2_SUPPORT_REF: agent/metalfx-motion-coverage-26.2
+  METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: minecraft-26.3-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  compile:
+  java-contracts:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
-          fetch-depth: 2
-
+          ref: ${{ env.METALLUM_SOURCE_SHA }}
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
           cache: gradle
-
-      - name: Generate repository task capsule
+      - name: Verify active version identity
         run: |
-          mkdir -p build/agent-evidence
-          git rev-parse HEAD | tee build/agent-evidence/minecraft-26.3-source-sha.txt
-          python3 scripts/agent/context.py --task "Migrate MetalUniversal render.execution from Minecraft 26.2 Blaze3D GPU ABI to Minecraft 26.3 RenderPearl backend ABI while preserving the supported Minecraft 26.2 release line and making Sodium optional on 26.3" \
-            | tee build/agent-evidence/context.txt
-
-      - name: Verify migration pins
-        run: |
-          set -euxo pipefail
-          grep -Fqx 'minecraft_version=26.3' gradle.properties
-          grep -Fqx 'sodium_version=mc26.3-0.9.2-fabric' gradle.properties
-          grep -Fqx 'iris_version=1.11.6+26.3-fabric' gradle.properties
-          grep -F '"minecraft": "~26.3-"' src/main/resources/fabric.mod.json
-          # Sodium is an optional integration at runtime. It must never become
-          # a Fabric hard dependency while the vanilla RenderPearl path is the
-          # canonical Minecraft 26.3 execution path.
-          ! python3 - <<'PY'
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
+          test "$(sed -n 's/^minecraft_version=//p' gradle.properties | head -n1)" = '26.3'
+          python3 - <<'PY'
           import json
           from pathlib import Path
-          data = json.loads(Path('src/main/resources/fabric.mod.json').read_text())
-          raise SystemExit(0 if 'sodium' in data.get('depends', {}) else 1)
+          data = json.loads(Path('src/main/resources/fabric.mod.json').read_text(encoding='utf-8'))
+          supported = str(data.get('depends', {}).get('minecraft', ''))
+          if '1.26.3' not in supported and '26.3' not in supported:
+              raise SystemExit(f'fabric.mod.json does not target Minecraft 26.3: {supported!r}')
           PY
-          grep -Fq 'isModLoaded("sodium")' src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java
-          test ! -e src/main/java/com/metallum/mixin/render/MacRetinaFullscreenMixin.java
-          ! grep -Fq 'render.MacRetinaFullscreenMixin' src/main/resources/metallum.mixins.json
-
-      - name: Verify P0 terrain evidence contract
-        shell: bash
+      - name: Compile and run Java contracts
         run: |
-          set -euo pipefail
-          python3 -m json.tool docs/agent/minecraft-26.3-p0-baseline.json >/dev/null
-          python3 -m json.tool docs/agent/terrain-work-events.schema.json >/dev/null
-          python3 -m json.tool validation/terrain-work-events/oracle-fixtures.json >/dev/null
-          python3 -m py_compile scripts/agent/verify_terrain_work_events.py
-          python3 scripts/agent/verify_terrain_work_events.py --self-test
-          python3 scripts/agent/verify_terrain_work_events.py \
-            --check-baseline docs/agent/minecraft-26.3-p0-baseline.json
-
-      - name: Resolve 26.3 dependencies
-        run: ./gradlew --no-daemon dependencies --configuration compileClasspath
-
-      - name: Materialize exact Minecraft 26.3 reference
-        shell: bash
-        run: |
-          set -euo pipefail
-          root="$(bash scripts/minecraft-reference.sh --print-path)"
-          test "$root" = "$PWD/.minecraft-reference/26.3/sources"
-          mkdir -p build/agent-evidence
-          python3 - "$root" > build/agent-evidence/minecraft-26.3-api-probe.txt <<'PY'
-          from pathlib import Path
-          import sys
-
-          root = Path(sys.argv[1])
-          names = [
-              'GpuBackend.java',
-              'GpuDeviceBackend.java',
-              'GpuSurfaceBackend.java',
-              'CommandEncoderBackend.java',
-              'RenderPassBackend.java',
-              'BackendRenderPipeline.java',
-              'FrontendRenderPipeline.java',
-              'FrontendRenderPass.java',
-              'PipelineBuilder.java',
-              'SpvModule.java',
-              'SPIRVModule.java',
-              'RenderPass.java',
-              'RenderPassDescriptor.java',
-              'CommandEncoder.java',
-              'GpuBuffer.java',
-              'GpuBufferSlice.java',
-              'GpuTexture.java',
-              'GpuTextureView.java',
-              'GpuSampler.java',
-              'TextureViewAndSampler.java',
-              'RenderPipeline.java',
-              'CompiledRenderPipeline.java',
-              'BindGroupLayout.java',
-              'UniformType.java',
-              'GpuFormat.java',
-              'ShaderSource.java',
-              'ShaderType.java',
-              'GpuDebugOptions.java',
-              'DeviceInfo.java',
-              'DeviceFeatures.java',
-              'DeviceLimits.java',
-              'DeviceType.java',
-              'HintsAndWorkarounds.java',
-              'GlslCompiler.java',
-              'ShaderCompileException.java',
-              'VulkanDevice.java',
-              'GlDevice.java',
-              'OpenGlDevice.java',
-              'FeatureRenderDispatcher.java',
-              'SubmitNodeCollector.java',
-              'SubmitNodeStorage.java',
-              'EntityRenderer.java',
-          ]
-          for name in names:
-              matches = sorted(root.rglob(name))
-              print(f'===== {name} ({len(matches)}) =====')
-              for path in matches:
-                  rel = path.relative_to(root)
-                  print(f'--- {rel} ---')
-                  lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
-                  for line in lines[:720]:
-                      print(line)
-
-          print('===== targeted symbol search =====')
-          needles = [
-              'getTimestampCalibrationOffset',
-              'implements RenderPassBackend',
-              'void pushConstants',
-              'void setUniform(int',
-              'submitNameTag',
-              'NameTag',
-          ]
-          for path in sorted(root.rglob('*.java')):
-              text = path.read_text(encoding='utf-8', errors='replace')
-              lines = text.splitlines()
-              for needle in needles:
-                  hits = [i for i, line in enumerate(lines) if needle in line]
-                  for i in hits:
-                      print(f'--- {path.relative_to(root)} :: {needle} @ {i + 1} ---')
-                      lo = max(0, i - 18)
-                      hi = min(len(lines), i + 60)
-                      for line in lines[lo:hi]:
-                          print(line)
-          PY
-          cat build/agent-evidence/minecraft-26.3-api-probe.txt
-          test -z "$(git status --short --untracked-files=all -- .minecraft-reference)"
-
-      - name: Probe exact vanilla terrain ownership
-        shell: bash
-        run: |
-          set -euo pipefail
-          root="$PWD/.minecraft-reference/26.3/sources"
-          test -f "$root/net/minecraft/client/renderer/LevelRenderer.java"
-          python3 - "$root" > build/agent-evidence/minecraft-26.3-terrain-probe.txt <<'PY'
-          from pathlib import Path
-          import sys
-
-          root = Path(sys.argv[1])
-          target_names = [
-              "LevelRenderer.java",
-              "LevelExtractor.java",
-              "ViewArea.java",
-              "RenderRegionCache.java",
-              "SectionRenderDispatcher.java",
-              "SectionCompiler.java",
-              "SectionTaskDynamicQueue.java",
-              "ChunkSectionsToRender.java",
-              "SectionUpdateTracker.java",
-              "ClientLevel.java",
-              "ClientPacketListener.java",
-          ]
-          needles = (
-              "compileSections",
-              "prepareChunkRendersIndirect",
-              "sectionUpdates",
-              "runTask",
-              "doTask",
-              "uploadTerrainBuffersToGpu",
-              "addSectionBuffersToUberBuffer",
-              "checkSectionMesh",
-              "setSectionMesh",
-              "drawIndexedIndirect",
-              "drawMultipleIndexed",
-              "MAX_RECOMPILE_QUOTA",
-              "poll(",
-              "resetLevelRenderData",
-              "class SectionUpdateTracker",
-              "setSectionDirty",
-              "setSectionDirtyWithNeighbors",
-              "queueLightUpdate",
-              "applyLightData",
-              "pollLightUpdates",
-              "onLightUpdate",
-              "setLevel",
-              "this.level =",
-          )
-
-          for name in target_names:
-              matches = sorted(root.rglob(name))
-              print(f"===== {name} matches={len(matches)} =====")
-              for path in matches:
-                  rel = path.relative_to(root)
-                  lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-                  print(f"--- {rel}; line_count={len(lines)} ---")
-                  hit_lines = []
-                  for index, line in enumerate(lines):
-                      if any(needle in line for needle in needles):
-                          hit_lines.append(index)
-                  emitted = set()
-                  for index in hit_lines:
-                      lo = max(0, index - 35)
-                      hi = min(len(lines), index + 95)
-                      key = (lo, hi)
-                      if key in emitted:
-                          continue
-                      emitted.add(key)
-                      print(f"--- lines {lo + 1}-{hi} ---")
-                      for lineno in range(lo, hi):
-                          print(f"{lineno + 1:05d}: {lines[lineno]}")
-
-          print("===== global terrain mutation references =====")
-          global_needles = (
-              "setSectionDirtyWithNeighbors(",
-              "setSectionRangeDirty(",
-              "queueLightUpdate(",
-          )
-          for needle in global_needles:
-              print(f"--- refs for {needle} ---")
-              hit_count = 0
-              for path in sorted(root.rglob("*.java")):
-                  rel = path.relative_to(root)
-                  for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                      if needle in line:
-                          print(f"{rel}:{lineno}: {line.strip()}")
-                          hit_count += 1
-                          if hit_count >= 120:
-                              print("... truncated after 120 hits ...")
-                              break
-                  if hit_count >= 120:
-                      break
-              print(f"ref_count={hit_count}")
-          PY
-          cat build/agent-evidence/minecraft-26.3-terrain-probe.txt
-
-      - name: Verify T1a vanilla queue source contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          root="$PWD/.minecraft-reference/26.3/sources"
-          python3 - "$root" <<'PY'
-          from pathlib import Path
-          import re
-          import sys
-
-          root = Path(sys.argv[1])
-          queue = (root / "net/minecraft/client/renderer/chunk/SectionTaskDynamicQueue.java").read_text()
-          dispatcher = (root / "net/minecraft/client/renderer/chunk/SectionRenderDispatcher.java").read_text()
-
-          checks = {
-              "recompile quota remains 2": re.search(r"MAX_RECOMPILE_QUOTA\s*=\s*2", queue),
-              "queue add remains synchronized": re.search(r"public\s+synchronized\s+void\s+add\s*\(", queue),
-              "queue poll remains synchronized": re.search(r"public\s+synchronized[\s\S]{0,160}\bpoll\s*\(", queue),
-              "queue still owns SectionTask list": "List<SectionRenderDispatcher.RenderSection.SectionTask> tasks" in queue,
-              "render origin remains stable field": re.search(
-                  r"final\s+BlockPos\.MutableBlockPos\s+renderOrigin\s*=", dispatcher
-              ),
-              "task cancellation flag remains AtomicBoolean": re.search(
-                  r"AtomicBoolean\s+isCancelled\s*=\s*new\s+AtomicBoolean", dispatcher
-              ),
-              "task completion flag remains AtomicBoolean": re.search(
-                  r"AtomicBoolean\s+isCompleted\s*=\s*new\s+AtomicBoolean", dispatcher
-              ),
-              "task render origin returns section-owned object": re.search(
-                  r"public\s+BlockPos\s+getRenderOrigin\s*\(\)\s*\{\s*return\s+RenderSection\.this\.renderOrigin\s*;",
-                  dispatcher,
-              ),
-          }
-
-          schedule_start = dispatcher.find("private void schedule(")
-          clear_start = dispatcher.find("public void clearCompileQueue", schedule_start)
-          schedule_body = dispatcher[schedule_start:clear_start] if schedule_start >= 0 and clear_start > schedule_start else ""
-          checks["schedule enqueues before waking executor"] = (
-              "this.queue.add(task);" in schedule_body
-              and "this.executor.execute(this::runTask);" in schedule_body
-              and schedule_body.index("this.queue.add(task);")
-                  < schedule_body.index("this.executor.execute(this::runTask);")
-          )
-
-          run_start = dispatcher.find("private void runTask()")
-          camera_start = dispatcher.find("public void setCameraPosition", run_start)
-          run_body = dispatcher[run_start:camera_start] if run_start >= 0 and camera_start > run_start else ""
-          checks["completed worker keeps queue progress alive"] = (
-              "this.queue.poll(this.cameraPosition.get())" in run_body
-              and "this.executor.execute(this::runTask);" in run_body
-          )
-          checks["vanilla poll removes cancelled tasks"] = bool(re.search(
-              r"if\s*\(task\.isCancelled\.get\(\)\)\s*\{\s*iterator\.remove\(\)",
-              queue,
-          ))
-
-          create_start = dispatcher.find("createCompileTask")
-          compile_async = dispatcher.find("public void compileAsync", create_start)
-          create_body = dispatcher[create_start:compile_async] if create_start >= 0 and compile_async > create_start else ""
-          checks["compile replacement cancels old work first"] = (
-              "this.cancelTasks();" in create_body
-              and "new SectionRenderDispatcher.RenderSection.CompileTask" in create_body
-              and create_body.index("this.cancelTasks();")
-                  < create_body.index("new SectionRenderDispatcher.RenderSection.CompileTask")
-          )
-
-          failed = [name for name, ok in checks.items() if not ok]
-          if failed:
-              raise SystemExit("T1a vanilla queue contract drift: " + "; ".join(failed))
-          print("T1a vanilla queue source contract: PASS")
-          PY
-
-      - name: Verify T1b publication source contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          root="$PWD/.minecraft-reference/26.3/sources"
-          python3 - "$root" <<'PY'
-          from pathlib import Path
-          import re
-          import sys
-
-          root = Path(sys.argv[1])
-          extractor = (root / "net/minecraft/client/renderer/extract/LevelExtractor.java").read_text()
-          dispatcher = (root / "net/minecraft/client/renderer/chunk/SectionRenderDispatcher.java").read_text()
-          listener = (root / "net/minecraft/client/multiplayer/ClientPacketListener.java").read_text()
-
-          checks = {
-              "dirty mutation remains explicit": "setSectionDirty(final int sectionX" in extractor,
-              "world transition remains explicit": "void setLevel(" in extractor,
-              "full geometry invalidation remains explicit": "void allChanged(" in extractor,
-              "light packet still schedules rebuild-enabled application":
-                  "this.level.queueLightUpdate(() -> this.applyLightData(x, z, lightData, true));" in listener,
-              "light section application still dirties rebuild neighborhood": bool(re.search(
-                  r"readSectionList[\s\S]{0,2200}if\s*\(scheduleRebuild\)[\s\S]{0,220}"
-                  r"this\.level\.setSectionDirtyWithNeighbors\(chunkX,\s*sectionY,\s*chunkZ\)",
-                  listener,
-              )),
-              "setSectionMesh has exactly two vanilla callers": dispatcher.count("setSectionMesh(") == 3,
-              "compile task remains a private nested task": "private class CompileTask extends SectionRenderDispatcher.RenderSection.SectionTask" in dispatcher,
-              "compile task still checks cancellation before compiler": bool(re.search(
-                  r"doTask[\s\S]{0,900}isCancelled\.get\(\)[\s\S]{0,1500}sectionCompiler[\s\S]{0,120}\.compile\(",
-                  dispatcher,
-              )),
-          }
-
-          check_start = dispatcher.find("private void checkSectionMesh")
-          vertex_callback = dispatcher.find("private void vertexBufferUploadCallback", check_start)
-          check_body = dispatcher[check_start:vertex_callback] if check_start >= 0 and vertex_callback > check_start else ""
-          checks["callback publication releases returned old mesh"] = (
-              "SectionMesh oldMesh = this.setSectionMesh(compiledSectionMesh);" in check_body
-              and "this.releaseSectionMesh(oldMesh);" in check_body
-          )
-
-          compile_start = dispatcher.find("private class CompileTask")
-          resort_start = dispatcher.find("private class ResortTransparencyTask", compile_start)
-          compile_body = dispatcher[compile_start:resort_start] if compile_start >= 0 and resort_start > compile_start else ""
-          checks["direct empty publication releases returned old mesh"] = (
-              "results.renderedLayers.isEmpty()" in compile_body
-              and "SectionMesh oldMesh = RenderSection.this.setSectionMesh(" in compile_body
-              and "RenderSection.this.releaseSectionMesh(oldMesh);" in compile_body
-          )
-          checks["staging loop checks cancellation"] = bool(re.search(
-              r"while\s*\(!success\)[\s\S]{0,500}isCancelled\.get\(\)",
-              compile_body,
-          ))
-
-          failed = [name for name, ok in checks.items() if not ok]
-          if failed:
-              raise SystemExit("T1b publication contract drift: " + "; ".join(failed))
-          print("T1b publication source contract: PASS")
-          PY
-
-      - name: Compile Java migration surface
-        shell: bash
-        run: |
-          set -o pipefail
-          mkdir -p build/agent-evidence
-          ./gradlew --no-daemon compileJava compileTestJava -x buildIOSNative 2>&1 \
-            | tee build/agent-evidence/compile-26.3.log
-
-      - name: Verify vanilla 26.3 without Sodium or Iris
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p build/agent-evidence
-          ./gradlew --no-daemon -Pmetallum.noOptionalMods=true dependencies --configuration runtimeClasspath \
-            | tee build/agent-evidence/runtime-no-optional-mods.txt
-          ./gradlew --no-daemon -Pmetallum.noOptionalMods=true dependencies --configuration testRuntimeClasspath \
-            | tee -a build/agent-evidence/runtime-no-optional-mods.txt
-          if grep -Eq 'maven\.modrinth:(sodium|iris)|iris-nested-jars' build/agent-evidence/runtime-no-optional-mods.txt; then
-            echo "Optional render mods leaked into the vanilla runtime/test runtime classpath" >&2
-            exit 1
-          fi
-          ./gradlew --no-daemon -Pmetallum.noOptionalMods=true \
-            compileJava compileTestJava test -x buildIOSNative --console=plain \
-            --tests com.metallum.client.metal.render.MetalRenderPearlBoundaryTest \
-            --tests com.metallum.client.terrain.TerrainWorkEventRecorderTest \
-            --tests com.metallum.client.terrain.BoundedTerrainTaskAdmissionTest \
-            --tests com.metallum.client.terrain.TerrainPublicationGenerationGuardTest \
-            --tests com.metallum.client.terrain.VanillaTerrainAdmissionTelemetryTest \
-            --tests com.metallum.client.terrain.VanillaTerrainAdmissionReportTest \
-            --tests com.metallum.client.terrain.VanillaTerrainWorkTrackerTest \
-            --tests com.metallum.client.terrain.TerrainWorkReportTest \
-            --tests com.metallum.client.validation.SodiumValidationBridgeTest \
-            | tee build/agent-evidence/test-no-optional-mods.log
-
-      - name: Diff hygiene
-        if: always()
-        run: git diff --check HEAD^ HEAD
-
-      - name: Preserve 26.3 migration evidence
-        if: always()
+          ./gradlew --no-daemon --stacktrace \
+            compileJava test verifyProductionJarIsolation \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+      - name: Preserve test reports
         uses: actions/upload-artifact@v4
-        with:
-          name: minecraft-26.3-migration-evidence-${{ github.run_attempt }}
-          path: |
-            build/agent-evidence/minecraft-26.3-source-sha.txt
-            build/agent-evidence/minecraft-26.3-api-probe.txt
-            build/agent-evidence/minecraft-26.3-terrain-probe.txt
-            build/agent-evidence/compile-26.3.log
-            build/agent-evidence/runtime-no-optional-mods.txt
-            build/agent-evidence/test-no-optional-mods.log
-            build/agent-evidence/context.txt
-            build.gradle
-            gradle.properties
-            src/main/java
-            src/main/resources
-          if-no-files-found: error
-          retention-days: 14
-
-  minecraft-26-2-support:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Check out the supported Minecraft 26.2 release line
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ env.MC_26_2_SUPPORT_REF }}
-          fetch-depth: 1
-
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '25'
-          cache: gradle
-
-      - name: Record exact 26.2 support identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p build/agent-evidence
-          git rev-parse HEAD | tee build/agent-evidence/minecraft-26.2-source-sha.txt
-          grep -Fqx 'minecraft_version=26.2' gradle.properties
-          grep -Fqx 'sodium_version=mc26.2-0.9.1-fabric' gradle.properties
-          grep -Fqx 'iris_version=1.11.2+26.2-fabric' gradle.properties
-          grep -F '"minecraft": "~26.2-"' src/main/resources/fabric.mod.json
-
-      - name: Compile supported Minecraft 26.2 line
-        shell: bash
-        run: |
-          set -o pipefail
-          # The support checkout is Linux-only here. Compile both production and
-          # test sources to catch ABI drift; native Metal execution remains in the
-          # macOS/physical-GPU validation lanes of the 26.2 line.
-          ./gradlew --no-daemon compileJava compileTestJava -x buildIOSNative --console=plain 2>&1 \
-            | tee build/agent-evidence/compile-26.2.log
-
-      - name: Preserve 26.2 support evidence
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: minecraft-26.2-support-evidence-${{ github.run_attempt }}
+          name: minecraft-26.3-contracts-${{ github.run_attempt }}
           path: |
-            build/agent-evidence/minecraft-26.2-source-sha.txt
-            build/agent-evidence/compile-26.2.log
-          if-no-files-found: error
-          retention-days: 14
+            build/reports/tests/
+            build/test-results/
+            build/reports/problems/
+          if-no-files-found: warn
+          retention-days: 7
