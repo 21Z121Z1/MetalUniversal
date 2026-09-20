@@ -109,6 +109,9 @@ public final class BoundedTerrainTaskAdmission<T> {
             long drainedTasks,
             long failOpenCount,
             FailOpenReason failOpenReason,
+            long liveSlotConflictFailOpenCount,
+            long deferredCapacityFailOpenCount,
+            long cancelledCohortRecoveryFailOpenCount,
             long compactedVanillaTasks,
             int maxDeferredDepth,
             long maxDeferredWaitNanos
@@ -127,6 +130,9 @@ public final class BoundedTerrainTaskAdmission<T> {
     private long drainedTasks;
     private long failOpenCount;
     private FailOpenReason failOpenReason = FailOpenReason.NONE;
+    private long liveSlotConflictFailOpenCount;
+    private long deferredCapacityFailOpenCount;
+    private long cancelledCohortRecoveryFailOpenCount;
     private long compactedVanillaTasks;
     private int maxDeferredDepth;
     private long maxDeferredWaitNanos;
@@ -298,6 +304,9 @@ public final class BoundedTerrainTaskAdmission<T> {
                 drainedTasks,
                 failOpenCount,
                 failOpenReason,
+                liveSlotConflictFailOpenCount,
+                deferredCapacityFailOpenCount,
+                cancelledCohortRecoveryFailOpenCount,
                 compactedVanillaTasks,
                 maxDeferredDepth,
                 maxDeferredWaitNanos
@@ -308,6 +317,16 @@ public final class BoundedTerrainTaskAdmission<T> {
         failOpen = true;
         failOpenReason = Objects.requireNonNull(reason, "reason");
         failOpenCount = saturatedIncrement(failOpenCount);
+        switch (reason) {
+            case LIVE_SLOT_CONFLICT ->
+                    liveSlotConflictFailOpenCount = saturatedIncrement(liveSlotConflictFailOpenCount);
+            case DEFERRED_CAPACITY ->
+                    deferredCapacityFailOpenCount = saturatedIncrement(deferredCapacityFailOpenCount);
+            case CANCELLED_COHORT_RECOVERY_BOUND ->
+                    cancelledCohortRecoveryFailOpenCount =
+                            saturatedIncrement(cancelledCohortRecoveryFailOpenCount);
+            case NONE -> throw new IllegalArgumentException("fail-open reason must be explicit");
+        }
         List<T> tasks = new ArrayList<>(deferred.size());
         for (Pending<T> pending : deferred.values()) {
             if (taskOps.isTerminal(pending.task())) {
