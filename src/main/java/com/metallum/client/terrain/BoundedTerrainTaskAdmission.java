@@ -139,6 +139,17 @@ public final class BoundedTerrainTaskAdmission<T> {
         return deferred.size();
     }
 
+    public long oldestDeferredAgeNanos(final long nowNanos) {
+        if (nowNanos < 0L) {
+            throw new IllegalArgumentException("nowNanos must be non-negative");
+        }
+        if (deferred.isEmpty()) {
+            return 0L;
+        }
+        Pending<T> oldest = deferred.values().iterator().next();
+        return Math.max(0L, nowNanos - oldest.firstDeferredNanos());
+    }
+
     /**
      * Decides where a new vanilla task belongs. The caller must pass the number of live entries in
      * the original queue after safely compacting terminal entries when it is at capacity.
