@@ -256,6 +256,50 @@ jobs:
           PY
           cat build/agent-evidence/minecraft-26.3-terrain-probe.txt
 
+      - name: Verify T1a vanilla queue source contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/.minecraft-reference/26.3/sources"
+          python3 - "$root" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          root = Path(sys.argv[1])
+          queue = (root / "net/minecraft/client/renderer/chunk/SectionTaskDynamicQueue.java").read_text()
+          dispatcher = (root / "net/minecraft/client/renderer/chunk/SectionRenderDispatcher.java").read_text()
+
+          checks = {
+              "recompile quota remains 2": re.search(r"MAX_RECOMPILE_QUOTA\s*=\s*2", queue),
+              "queue add remains synchronized": re.search(r"public\s+synchronized\s+void\s+add\s*\(", queue),
+              "queue poll remains synchronized": re.search(r"public\s+synchronized[\s\S]{0,160}\bpoll\s*\(", queue),
+              "queue still owns SectionTask list": "List<SectionRenderDispatcher.RenderSection.SectionTask> tasks" in queue,
+              "render origin remains stable field": re.search(
+                  r"final\s+BlockPos\.MutableBlockPos\s+renderOrigin\s*=", dispatcher
+              ),
+              "task render origin returns section-owned object": re.search(
+                  r"public\s+BlockPos\s+getRenderOrigin\s*\(\)\s*\{\s*return\s+RenderSection\.this\.renderOrigin\s*;",
+                  dispatcher,
+              ),
+          }
+
+          create_start = dispatcher.find("createCompileTask")
+          compile_async = dispatcher.find("public void compileAsync", create_start)
+          create_body = dispatcher[create_start:compile_async] if create_start >= 0 and compile_async > create_start else ""
+          checks["compile replacement cancels old work first"] = (
+              "this.cancelTasks();" in create_body
+              and "new SectionRenderDispatcher.RenderSection.CompileTask" in create_body
+              and create_body.index("this.cancelTasks();")
+                  < create_body.index("new SectionRenderDispatcher.RenderSection.CompileTask")
+          )
+
+          failed = [name for name, ok in checks.items() if not ok]
+          if failed:
+              raise SystemExit("T1a vanilla queue contract drift: " + "; ".join(failed))
+          print("T1a vanilla queue source contract: PASS")
+          PY
+
       - name: Compile Java migration surface
         shell: bash
         run: |
