@@ -62,7 +62,7 @@ def main():
             pid = json.loads(ready.read_text())["pid"]
             trace_command = ["xcrun", "xctrace", "record", "--template", args.template,
                              "--attach", str(pid), "--output", str(output / "gameplay.trace"),
-                             "--time-limit", "120s", "--no-prompt",
+                             "--time-limit", "120s", "--window", "120s", "--no-prompt",
                              "--notify-tracing-started", notification]
             receipt["traceCommand"] = trace_command
             recording = subprocess.Popen(trace_command, stdout=trace_log, stderr=subprocess.STDOUT)

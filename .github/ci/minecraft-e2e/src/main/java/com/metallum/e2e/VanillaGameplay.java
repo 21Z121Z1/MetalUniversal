@@ -102,6 +102,8 @@ final class VanillaGameplay {
             input.pressKey(options -> options.keyInventory);
             context.waitFor(client -> client.gui.screen() == null);
             world.getServer().runCommand("item replace entity @a hotbar.0 with minecraft:stone 64");
+            input.pressKey(options -> options.keyHotbarSlots[0]);
+            context.waitFor(client -> client.player.getMainHandItem().is(net.minecraft.world.item.Items.STONE));
             // Aim beyond the player's collision box; a near-vertical placement
             // targets the block occupied by the player and Vanilla rejects it.
             input.lookAt(0, 45);
@@ -110,9 +112,13 @@ final class VanillaGameplay {
                 require(client.hitResult instanceof BlockHitResult && client.hitResult.getType() == HitResult.Type.BLOCK,
                         "No ground block targeted for placement");
                 BlockHitResult hit = (BlockHitResult) client.hitResult;
-                return hit.getBlockPos().relative(hit.getDirection());
+                // Tall grass/snow can be replaced in-place; Vanilla owns that decision.
+                return new net.minecraft.world.item.context.BlockPlaceContext(client.player,
+                        net.minecraft.world.InteractionHand.MAIN_HAND, client.player.getMainHandItem(), hit).getClickedPos();
             });
-            input.pressKey(options -> options.keyUse);
+            report.addProperty("placementTarget", target.toShortString());
+            write(output.resolve("gameplay-progress.json"), report);
+            input.holdKeyFor(options -> options.keyUse, 2);
             context.waitFor(client -> client.level.getBlockState(target).is(net.minecraft.world.level.block.Blocks.STONE));
             report.addProperty("placedBlock", target.toShortString());
             input.lookAt(target);
