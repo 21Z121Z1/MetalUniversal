@@ -6,6 +6,10 @@ server work occurs during an opted-in client run. It is not a performance
 measurement source and it does not prove complete world-generation or light
 work coverage.
 
+The emitted recorder report uses schema 2. A schema-1 report is an older
+warmup-inclusive process observation and must not be interpreted as schema-2
+window evidence.
+
 ## Activation and output
 
 The instrumentation is disabled by default. Set the JVM property
@@ -20,10 +24,10 @@ The report is written at the end of the validation run as
 `WorldStageRecorder.Report`:
 
 ```text
-schemaVersion=1
+schemaVersion=2
 evidenceClass=diagnostic
 performanceEligible=false
-scope=process-observation-including-warmup
+scope=measurement-window | process-observation-including-warmup
 clock=System.nanoTime
 minecraftVersion=26.3
 sourceSha, trialId, status
@@ -31,9 +35,46 @@ measurementLimits
 snapshot
 ```
 
-The snapshot contains `eventCapacity`, `eventCount`, `droppedEvents`,
-`invalidEvents`, `contextOverflowEvents`, `liveContextCount`, and the ordered
-event list. A report includes warmup and has no measurement-window identity.
+The schema-2 `measurementLimits` value is
+`bounded begin/end observations; active calls retained at snapshot; nested
+wall-clock intervals are inclusive`.
+
+The schema-2 `Snapshot` fields are:
+`schemaVersion`, `eventCapacity`, `eventCount`, `droppedEvents`,
+`invalidEvents`, `contextOverflowEvents`, `liveContextCount`,
+`startedInvocations`, `finishedInvocations`, `activeOverflowEvents`,
+`activeInvocations`, `events`, `window`, and `timestampOffsetNanos`.
+
+Each `Event` contains `sequence`, `invocationId`, `stage`, `contextId`,
+`threadId`, `startOffsetNanos`, `endOffsetNanos`, `completed`, `queueBefore`,
+`queueAfter`, `workCount`, and `resultCode`. Each `ActiveInvocation` contains
+`invocationId`, `stage`, `contextId`, `threadId`, `startOffsetNanos`, and
+`queueBefore`. `Window` contains `id`, `startFrameInclusive`,
+`endFrameExclusive`, `startOffsetNanos`, `endOffsetNanos`, `activeAtStart`,
+and `closed`.
+
+The window and active-call invariants are:
+
+- A `START`/`COMPLETE` begin/end token pair defines one fixed baseline window.
+  The window is fixed under the recorder lock and is not inferred from report
+  serialization time.
+- Completed warmup rows are cleared at `START`. An invocation that crosses the
+  boundary remains represented as an active/pending call and is clipped by the
+  oracle to the intersection with the fixed window.
+- After `endWindow` completes, the report snapshot is frozen. Calls still
+  active at that close are represented in `activeInvocations` as pending/right-
+  censored state and are not silently counted as finished rows. Before
+  `endWindow`, `snapshot()` is a live snapshot.
+- For valid closed-window accounting, the conservation identities are
+  `activeAtStart + started = finished + active` and
+  `finished = rows + dropped`.
+
+The serialized raw offsets and `timestampOffsetNanos` remain available for audit.
+Loss or invalid-event counters reject diagnostic integrity. An unfinished call
+is retained explicitly; it does not invalidate the accounting, but its full
+duration and eventual result remain unavailable. A five-second sample may legitimately contain no
+`CHUNK_INSTALL` event when chunk installation finished during warmup; that
+stage must be reported as unobserved rather than treated as zero work.
 
 A repository client task can enable it with the same output and run identity
 used by the existing automation, for example:
@@ -76,12 +117,18 @@ The chunk, enqueue, poll, task, update, and server-tick wrappers all record in
 `finally`; an exception is rethrown unchanged after a failed-exit event is
 recorded. A call still in progress when a snapshot is taken has not reached
 its post-invocation `finally` record and may be absent from that snapshot.
+The begin/end bookkeeping is admission under the recorder lock only; it does
+not claim that a strict physical CPU interval was executing while the lock was
+held. Enabling the recorder must not alter vanilla queue policy, packet policy,
+light policy, or server tick behavior.
 
 ## Intervals and identity
 
-Each event uses `System.nanoTime` offsets from the recorder origin and includes
-`sequence`, `contextId`, `threadId`, `startOffsetNanos`, `endOffsetNanos`,
-`completed`, queue gauges, `workCount`, and `resultCode`.
+Each event uses raw `System.nanoTime` offsets from the recorder origin and
+includes `sequence`, `contextId`, `threadId`, begin/end offsets, completion,
+queue gauges, `workCount`, and `resultCode`. The timestamp is captured before
+recorder-lock bookkeeping can wait; it therefore describes the supplied
+operation timestamp, not a strict physical CPU-execution interval.
 
 The stages are inclusive and can nest. For example, `LIGHT_UPDATE` contains
 the vanilla `pollLightUpdates` call, and `LIGHT_POLL` can contain multiple
@@ -99,14 +146,22 @@ has capacity 128; overflow increments `contextOverflowEvents` and
 ## Capacity and evidence limits
 
 The recorder uses fixed primitive arrays and does not grow its event buffer.
-When the event capacity is reached, later events are omitted and
-`droppedEvents` increments. Invalid timestamps, gauges, sequence state, or
-overflowed arithmetic increment `invalidEvents`. A consumer must treat any
-nonzero dropped or invalid count as incomplete evidence and fail closed for a
-claim requiring a complete trace; the runtime stage wrappers continue to
-preserve vanilla control flow.
+The active-call table has 256 primitive slots. When row or active capacity is
+reached, later observations are dropped and the corresponding loss counter is
+retained; the conservation identities expose the loss. Invalid timestamps,
+gauges, sequence state, or overflowed arithmetic increment `invalidEvents`. A
+consumer must treat any nonzero dropped, invalid, or unresolved-active count as
+incomplete evidence and fail closed for a claim requiring a complete trace;
+the runtime stage wrappers continue to preserve vanilla control flow.
 
-This telemetry is a process observation including warmup. It does not identify
+Window duration is computed by the oracle from the intersection of each raw
+begin/end interval with the fixed measurement window. It must distinguish a
+fully observed interval from one clipped at `START`, `COMPLETE`, or snapshot
+drain. Nested intervals remain inclusive: intersected durations across stage
+kinds still must not be added together.
+
+Outside the baseline window this telemetry is a process observation including
+warmup. Both modes are diagnostic only. It does not identify
 world epochs or generations, does not establish that every packet/light task
 was observed after truncation, and does not establish atomicity or ownership
 between world work and renderer publication. `performanceEligible` is always
@@ -126,3 +181,6 @@ CPU utilization; observer overhead has not been isolated. `SERVER_TICK`
 includes paused invocations, which must be separated using the raw result
 flag before interpreting server simulation cost. Accepted diagnostic integrity
 does not close whole P0 or any paired performance gate.
+
+The baseline numeric window ID is serialized as its decimal string in this
+report; frame bounds must also match the baseline measurement manifest.

@@ -11,18 +11,31 @@ public final class VanillaWorldStageTelemetry {
         return RECORDER;
     }
 
-    public static long contextId(Object context) {
+    public static long contextId(final Object context) {
         return RECORDER.contextId(context);
     }
 
-    public static void record(WorldStageRecorder.Stage stage, long contextId, long startNanos,
-                              long endNanos, boolean completed, long queueBefore, long queueAfter,
-                              long workCount, int resultCode) {
-        RECORDER.record(stage, contextId, startNanos, endNanos, completed, queueBefore, queueAfter,
-                workCount, resultCode);
+    public static long begin(final WorldStageRecorder.Stage stage, final long contextId,
+                             final long startNanos, final long queueBefore) {
+        return RECORDER.begin(stage, contextId, startNanos, queueBefore);
     }
 
-    public static WorldStageRecorder.Report report(String sourceSha, String trialId, String status) {
+    public static void end(final long token, final long endNanos, final boolean completed,
+                           final long queueAfter, final long workCount, final int resultCode) {
+        RECORDER.end(token, endNanos, completed, queueAfter, workCount, resultCode);
+    }
+
+    public static void beginWindow(final String id, final long startFrameInclusive,
+                                   final long nowNanos) {
+        RECORDER.beginWindow(id, startFrameInclusive, nowNanos);
+    }
+
+    public static void endWindow(final long endFrameExclusive, final long nowNanos) {
+        RECORDER.endWindow(endFrameExclusive, nowNanos);
+    }
+
+    public static WorldStageRecorder.Report report(final String sourceSha, final String trialId,
+                                                   final String status) {
         return RECORDER.report(sourceSha, trialId, status);
     }
 }

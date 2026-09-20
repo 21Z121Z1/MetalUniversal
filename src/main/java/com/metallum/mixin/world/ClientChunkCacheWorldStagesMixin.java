@@ -22,6 +22,7 @@ abstract class ClientChunkCacheWorldStagesMixin {
         var recorder = VanillaWorldStageTelemetry.recorder();
         long context = VanillaWorldStageTelemetry.contextId(level);
         long start = System.nanoTime();
+        long token = recorder.begin(Stage.CHUNK_INSTALL, context, start, -1);
         boolean completed = false;
         LevelChunk result = null;
         try {
@@ -29,8 +30,7 @@ abstract class ClientChunkCacheWorldStagesMixin {
             completed = true;
             return result;
         } finally {
-            recorder.record(Stage.CHUNK_INSTALL, context, start, System.nanoTime(), completed,
-                    -1, -1, 1, completed ? (result == null ? 0 : 1) : -1);
+            recorder.end(token, System.nanoTime(), completed, -1, 1, completed ? (result == null ? 0 : 1) : -1);
         }
     }
 }

@@ -22,12 +22,13 @@ abstract class MinecraftServerWorldStagesMixin {
         var recorder = VanillaWorldStageTelemetry.recorder();
         long context = VanillaWorldStageTelemetry.contextId(this);
         long start = System.nanoTime();
+        long token = recorder.begin(Stage.SERVER_PACKETS, context, start, -1);
         boolean completed = false;
         try {
             original.call(processor);
             completed = true;
         } finally {
-            recorder.record(Stage.SERVER_PACKETS, context, start, System.nanoTime(), completed, -1, -1, -1, -1);
+            recorder.end(token, System.nanoTime(), completed, -1, -1, -1);
         }
     }
 }

@@ -697,7 +697,12 @@ public final class MetalValidationClient implements ClientModInitializer {
             IrisMetalPerformanceCounters.reset();
             IrisMetalArgumentBindingRuntime.resetStats();
             baselineMemory.begin(BASELINE_WINDOW_ID, frame);
-            baselineWindow.reanchorStart(System.nanoTime());
+            long measurementStart = System.nanoTime();
+            if (Boolean.getBoolean("metallum.validation.worldStages")) {
+                com.metallum.client.validation.telemetry.VanillaWorldStageTelemetry.recorder()
+                        .beginWindow(Long.toString(BASELINE_WINDOW_ID), frame, measurementStart);
+            }
+            baselineWindow.reanchorStart(measurementStart);
         }
         if (step != FrameMeasurementWindow.Step.COMPLETE) {
             if (step != FrameMeasurementWindow.Step.WARMUP) {
@@ -708,6 +713,10 @@ public final class MetalValidationClient implements ClientModInitializer {
             return;
         }
         baselineReported = true;
+        if (Boolean.getBoolean("metallum.validation.worldStages")) {
+            com.metallum.client.validation.telemetry.VanillaWorldStageTelemetry.recorder()
+                    .endWindow(baselineWindow.endFrame(), now);
+        }
         long endSubmitIndex = MetalGpuTimingRecorder.drainSubmittedWorkForMeasurement();
         var processMemory = baselineMemory.finish(BASELINE_WINDOW_ID, baselineWindow.endFrame());
         com.metallum.client.metal.render.NativeResourceAllocations.Snapshot resourceAllocations;
@@ -875,7 +884,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             );
             unavailable.addProperty(
                     "residentRenderResourceBytes",
-                    "unavailable — current native bridge does not expose MTLResource allocated-size telemetry"
+                    "unavailable — complete renderer residency/window peak is not measured; the optional module-owned allocation snapshot is narrower"
             );
             if (!processMemory.complete()) {
                 unavailable.addProperty("peakResidentMemoryBytes", "unavailable — " + processMemory.status());
@@ -2450,6 +2459,25 @@ public final class MetalValidationClient implements ClientModInitializer {
         String failureReasonsJson = new GsonBuilder().create().toJson(validationFailureScenarios);
         String runId = System.getProperty("metallum.renderContract.runId", "minecraft-current");
         String sourceCommit = System.getProperty("metallum.validation.sourceCommit", "unknown");
+        if (com.metallum.client.metal.render.NumericBindingDiagnostics.enabled()) {
+            JsonObject bindingReport = new JsonObject();
+            bindingReport.addProperty("schemaVersion", 1);
+            bindingReport.addProperty("evidenceClass", "diagnostic");
+            bindingReport.addProperty("performanceEligible", false);
+            bindingReport.addProperty("scope", "process-observation-including-warmup");
+            bindingReport.addProperty("sourceSha", sourceCommit);
+            bindingReport.addProperty("trialId", runId);
+            bindingReport.addProperty("status", status);
+            bindingReport.add("counters", new GsonBuilder().create().toJsonTree(
+                    com.metallum.client.metal.render.NumericBindingDiagnostics.snapshot()));
+            try {
+                ValidationStorageBudget.shared(outputDirectory).writeString(
+                        outputDirectory.resolve("numeric-binding-diagnostics.json"),
+                        new GsonBuilder().create().toJson(bindingReport) + "\n");
+            } catch (IOException exception) {
+                throw new IllegalStateException("Could not write numeric binding diagnostics", exception);
+            }
+        }
         if (Boolean.getBoolean("metallum.validation.worldStages")) {
             try {
                 var stageReport = com.metallum.client.validation.telemetry.VanillaWorldStageTelemetry.report(

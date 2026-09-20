@@ -24,6 +24,7 @@ python3 scripts/agent/verify_native_attachment_coverage.py
 python3 scripts/agent/verify_native_attachment_facts.py --self-test
 python3 scripts/agent/test_estimate_attachment_actions.py
 python3 scripts/agent/verify_world_stages.py --self-test
+python3 scripts/agent/verify_numeric_bindings.py --self-test
 python3 scripts/agent/verify_resource_allocations.py --self-test
 python3 scripts/agent/verify_resource_allocation_coverage.py --self-test
 python3 scripts/agent/verify_resource_allocation_coverage.py
@@ -59,7 +60,7 @@ bash -n scripts/agent/run_metal4_main_p1_physical_performance.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_matrix.sh
 bash -n scripts/agent/verify.sh
 
-./gradlew --no-daemon compileJava gpuTimingRecorderRetentionTest test \
+./gradlew --no-daemon compileJava gpuTimingRecorderRetentionTest numericBindingDiagnosticsEnabledTest test \
   -x buildMacNative \
   -x buildIOSNative \
   -x buildIOSSpvc \
@@ -86,6 +87,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.validation.ProcessMemoryMeasurementTest \
   --tests com.metallum.client.metal.render.NativeAttachmentActionsTest \
   --tests com.metallum.client.metal.render.NativeResourceAllocationsTest \
+  --tests com.metallum.client.metal.render.NumericBindingDiagnosticsTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
 

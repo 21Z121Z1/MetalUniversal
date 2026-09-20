@@ -251,6 +251,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
     }
 
     void bindStorageBuffer(final int binding, final GpuBufferSlice slice) {
+        NumericBindingDiagnostics.recordNumericStorageBufferCall();
         if (binding < 0 || !(slice.buffer() instanceof MetalGpuBuffer)) {
             throw new IllegalArgumentException("Invalid Metal storage buffer binding " + binding);
         }
@@ -261,9 +262,12 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         }
         if (compiledPipeline != null) {
             for (MetalCompiledRenderPipeline.ResourceBinding resource : compiledPipeline.resources()) {
-                if (resource.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER
-                        && MetalCrossShaderCompiler.storageBufferLogicalBinding(resource.name()) == binding) {
-                    dirtyDescriptorMask |= 1L << resource.bindingIndex();
+                NumericBindingDiagnostics.recordResourceScanStep();
+                if (resource.kind() == MetalCompiledRenderPipeline.ResourceKind.STORAGE_BUFFER) {
+                    NumericBindingDiagnostics.recordDescriptorNameParse();
+                    if (MetalCrossShaderCompiler.storageBufferLogicalBinding(resource.name()) == binding) {
+                        dirtyDescriptorMask |= 1L << resource.bindingIndex();
+                    }
                 }
             }
         }
@@ -297,6 +301,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
     @Override
     public void setUniform(final int index, @Nullable final Object value) {
+        NumericBindingDiagnostics.recordNumericUniformCall();
         if (compiledPipeline == null) {
             throw new IllegalStateException("Cannot set a uniform before binding a pipeline");
         }
@@ -304,6 +309,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         if (binding == null) {
             throw new IllegalArgumentException("Unknown RenderPearl uniform index " + index);
         }
+        NumericBindingDiagnostics.recordNumericToNameDispatch();
         if (value == null) {
             uniforms.remove(binding.name());
             samplers.remove(binding.name());

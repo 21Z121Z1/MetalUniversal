@@ -22,13 +22,13 @@ abstract class ClientLevelWorldStagesMixin {
         long context = VanillaWorldStageTelemetry.contextId(this);
         int before = lightUpdateQueue.size();
         long start = System.nanoTime();
+        long token = recorder.begin(Stage.LIGHT_ENQUEUE, context, start, before);
         boolean completed = false;
         try {
             original.call(update);
             completed = true;
         } finally {
-            recorder.record(Stage.LIGHT_ENQUEUE, context, start, System.nanoTime(), completed,
-                    before, lightUpdateQueue.size(), completed ? 1 : 0, -1);
+            recorder.end(token, System.nanoTime(), completed, lightUpdateQueue.size(), completed ? 1 : 0, -1);
         }
     }
 
@@ -38,14 +38,14 @@ abstract class ClientLevelWorldStagesMixin {
         long context = VanillaWorldStageTelemetry.contextId(this);
         int before = lightUpdateQueue.size();
         long start = System.nanoTime();
+        long token = recorder.begin(Stage.LIGHT_POLL, context, start, before);
         boolean completed = false;
         try {
             original.call();
             completed = true;
         } finally {
             // Reentrant callbacks can enqueue more work. Queue delta is not a task count.
-            recorder.record(Stage.LIGHT_POLL, context, start, System.nanoTime(), completed,
-                    before, lightUpdateQueue.size(), -1, -1);
+            recorder.end(token, System.nanoTime(), completed, lightUpdateQueue.size(), -1, -1);
         }
     }
 
@@ -55,13 +55,13 @@ abstract class ClientLevelWorldStagesMixin {
         long context = VanillaWorldStageTelemetry.contextId(this);
         int before = lightUpdateQueue.size();
         long start = System.nanoTime();
+        long token = recorder.begin(Stage.LIGHT_TASK, context, start, before);
         boolean completed = false;
         try {
             original.call(update);
             completed = true;
         } finally {
-            recorder.record(Stage.LIGHT_TASK, context, start, System.nanoTime(), completed,
-                    before, lightUpdateQueue.size(), 1, -1);
+            recorder.end(token, System.nanoTime(), completed, lightUpdateQueue.size(), 1, -1);
         }
     }
 
@@ -71,13 +71,13 @@ abstract class ClientLevelWorldStagesMixin {
         long context = VanillaWorldStageTelemetry.contextId(this);
         int before = lightUpdateQueue.size();
         long start = System.nanoTime();
+        long token = recorder.begin(Stage.LIGHT_UPDATE, context, start, before);
         boolean completed = false;
         try {
             original.call();
             completed = true;
         } finally {
-            recorder.record(Stage.LIGHT_UPDATE, context, start, System.nanoTime(), completed,
-                    before, lightUpdateQueue.size(), -1, -1);
+            recorder.end(token, System.nanoTime(), completed, lightUpdateQueue.size(), -1, -1);
         }
     }
 }

@@ -7,27 +7,27 @@ import java.util.Objects;
 import java.util.function.LongSupplier;
 
 /**
- * Bounded, diagnostic-only observations of vanilla world and packet stages.
+ * Bounded diagnostic observations of vanilla world and packet stages.
  *
- * <p>Recording is synchronized and snapshots are strong, immutable copies of one
- * recorder state.  A snapshot is therefore internally consistent, but it is only
- * a process observation: it includes warmup and does not identify a world epoch,
- * generation, or renderer policy.  The recorder retains no world or task object.
- * Event storage is primitive and fixed at construction; event recording allocates
- * no event objects.  Context registration allocates at most one weak reference per
- * live identity in its fixed registry.</p>
+ * <p>Begin/end admission is intentionally separate from serialization.  The
+ * recorder retains only primitive active-call state, and a closed measurement
+ * window freezes both completed rows and active right-censored rows.  These
+ * observations include warmup in process mode and are never a performance or
+ * renderer-correctness acceptance metric.</p>
  */
 public final class WorldStageRecorder {
-    public static final int SCHEMA_VERSION = 1;
+    public static final int SCHEMA_VERSION = 2;
+    private static final String EVIDENCE_CLASS = "diagnostic";
+    private static final String CLOCK = "System.nanoTime";
     public static final int DEFAULT_CAPACITY = 16_384;
     public static final int MAX_CAPACITY = 65_536;
+    public static final int MAX_ACTIVE_INVOCATIONS = 256;
     public static final int CONTEXT_CAPACITY = 128;
     public static final long UNAVAILABLE = -1L;
     public static final String MEASUREMENT_LIMITS =
-            "activeInvocations=unavailable: post-invocation recording; snapshot can censor calls still active; "
-                    + "rawScope=completed-and-failed-exits-observed";
+            "bounded begin/end observations; active calls retained at snapshot; "
+                    + "nested wall-clock intervals are inclusive";
 
-    /** Stage role and receiver-kind labels are diagnostic schema, not identity. */
     public enum Stage {
         CLIENT_PACKETS("client-main", "client-process"),
         CHUNK_INSTALL("client-main", "client-level"),
@@ -41,7 +41,7 @@ public final class WorldStageRecorder {
         private final String role;
         private final String contextKind;
 
-        Stage(String role, String contextKind) {
+        Stage(final String role, final String contextKind) {
             this.role = role;
             this.contextKind = contextKind;
         }
@@ -56,8 +56,10 @@ public final class WorldStageRecorder {
     }
 
     private final int capacity;
+    private final LongSupplier clock;
     private final long originNanos;
     private final long[] sequence;
+    private final long[] invocationId;
     private final byte[] stage;
     private final long[] contextId;
     private final long[] threadId;
@@ -69,39 +71,48 @@ public final class WorldStageRecorder {
     private final long[] workCount;
     private final byte[] resultCode;
 
+    private final boolean[] active = new boolean[MAX_ACTIVE_INVOCATIONS];
+    private final long[] activeToken = new long[MAX_ACTIVE_INVOCATIONS];
+    private final byte[] activeStage = new byte[MAX_ACTIVE_INVOCATIONS];
+    private final long[] activeContextId = new long[MAX_ACTIVE_INVOCATIONS];
+    private final long[] activeThreadId = new long[MAX_ACTIVE_INVOCATIONS];
+    private final long[] activeStartOffsetNanos = new long[MAX_ACTIVE_INVOCATIONS];
+    private final long[] activeQueueBefore = new long[MAX_ACTIVE_INVOCATIONS];
+
     private final WeakReference<?>[] contexts = new WeakReference<?>[CONTEXT_CAPACITY];
     private final long[] contextIds = new long[CONTEXT_CAPACITY];
-    private long nextContextId = 1;
+    private long nextContextId = 1L;
     private int contextSlots;
     private int eventCount;
-    private long nextSequence = 1;
+    private long nextSequence = 1L;
+    private long nextInvocationId = 1L;
     private long droppedEvents;
     private long invalidEvents;
     private long contextOverflowEvents;
+    private long activeOverflowEvents;
+    private long startedInvocations;
+    private long finishedInvocations;
 
-    /** Creates a recorder using the configured bounded capacity and System.nanoTime. */
+    private Window window;
+    private Snapshot frozenSnapshot;
+
     public WorldStageRecorder() {
         this(configuredCapacity(), System::nanoTime);
     }
 
-    /** Creates a recorder with a bounded event capacity, using System.nanoTime. */
-    public WorldStageRecorder(int capacity) {
+    public WorldStageRecorder(final int capacity) {
         this(capacity, System::nanoTime);
     }
 
-    /**
-     * Testable constructor.  Production callers should use one of the constructors
-     * above; the supplied clock must have the same monotonic, absolute semantics as
-     * System.nanoTime().
-     */
-    WorldStageRecorder(int capacity, LongSupplier clock) {
+    WorldStageRecorder(final int capacity, final LongSupplier clock) {
         if (capacity < 1 || capacity > MAX_CAPACITY) {
             throw new IllegalArgumentException("capacity must be in [1," + MAX_CAPACITY + "]");
         }
         this.capacity = capacity;
-        Objects.requireNonNull(clock, "clock");
+        this.clock = Objects.requireNonNull(clock, "clock");
         this.originNanos = clock.getAsLong();
         this.sequence = new long[capacity];
+        this.invocationId = new long[capacity];
         this.stage = new byte[capacity];
         this.contextId = new long[capacity];
         this.threadId = new long[capacity];
@@ -114,7 +125,6 @@ public final class WorldStageRecorder {
         this.resultCode = new byte[capacity];
     }
 
-    /** Returns the absolute monotonic origin used for serialized offsets. */
     public long originNanos() {
         return originNanos;
     }
@@ -123,27 +133,16 @@ public final class WorldStageRecorder {
         return capacity;
     }
 
-    /**
-     * Gets a stable id for an object identity without retaining the object.  Zero
-     * denotes null or a registry overflow.  IDs never identify a world generation.
-     */
-    public synchronized long contextId(Object context) {
-        if (context == null) {
-            return 0L;
+    /** Returns an identity id without retaining the context object. */
+    public synchronized long contextId(final Object context) {
+        if (context == null) return 0L;
+        for (int i = 0; i < contextSlots; i++) {
+            if (contexts[i].get() == context) return contextIds[i];
         }
         for (int i = 0; i < contextSlots; i++) {
-            Object current = contexts[i].get();
-            if (current == context) {
-                return contextIds[i];
-            }
+            if (contexts[i].get() == null) return installContext(i, context);
         }
-        // Reuse dead weak-reference slots before declaring the fixed registry full.
-        for (int i = 0; i < contextSlots; i++) {
-            if (contexts[i].get() == null) {
-                return installContext(i, context);
-            }
-        }
-        if (contextSlots == CONTEXT_CAPACITY || nextContextId <= 0) {
+        if (contextSlots == CONTEXT_CAPACITY || nextContextId <= 0L) {
             contextOverflowEvents = saturatingIncrement(contextOverflowEvents);
             invalidEvents = saturatingIncrement(invalidEvents);
             return 0L;
@@ -152,82 +151,232 @@ public final class WorldStageRecorder {
     }
 
     /**
-     * Records one completed or failed stage.  All times are absolute nanoTime
-     * values; serialized offsets are computed from the recorder origin.
+     * Admits an invocation and returns its non-recycled token.  A zero token is
+     * disabled evidence: callers must still invoke {@link #end(long, long,
+     * boolean, long, long, int)} with it, but it can never become a valid row.
      */
-    public synchronized void record(Stage stage, long contextId, long startNanos, long endNanos,
-                                     boolean completed, long queueBefore, long queueAfter,
-                                     long workCount, int resultCode) {
-        if (stage == null || contextId <= 0L
-                || (nextContextId > 0L && contextId >= nextContextId)
-                || (nextContextId <= 0L)
-                || endNanos < startNanos
-                || !validGauge(queueBefore) || !validGauge(queueAfter) || !validGauge(workCount)
-                || resultCode < -1 || resultCode > 1) {
+    public synchronized long begin(final Stage stage, final long contextId,
+                                   final long startNanos, final long queueBefore) {
+        if (frozenSnapshot != null) return 0L;
+        if (stage == null || contextId <= 0L || contextId >= nextContextId
+                || !validGauge(queueBefore)) {
             invalidEvents = saturatingIncrement(invalidEvents);
-            return;
+            return 0L;
         }
         final long startOffset;
-        final long endOffset;
         try {
             startOffset = Math.subtractExact(startNanos, originNanos);
-            endOffset = Math.subtractExact(endNanos, originNanos);
         } catch (ArithmeticException overflow) {
             invalidEvents = saturatingIncrement(invalidEvents);
-            return;
+            return 0L;
         }
-        if (startOffset < 0L || endOffset < startOffset) {
+        if (startOffset < 0L) {
             invalidEvents = saturatingIncrement(invalidEvents);
-            return;
+            return 0L;
         }
-        if (eventCount >= capacity) {
-            droppedEvents = saturatingIncrement(droppedEvents);
-            return;
-        }
-        if (nextSequence <= 0L) {
+        final long thread = Thread.currentThread().threadId();
+        if (thread <= 0L || nextInvocationId <= 0L) {
             invalidEvents = saturatingIncrement(invalidEvents);
-            droppedEvents = saturatingIncrement(droppedEvents);
-            return;
+            activeOverflowEvents = saturatingIncrement(activeOverflowEvents);
+            return 0L;
         }
-        int slot = eventCount++;
-        sequence[slot] = nextSequence;
-        nextSequence = nextSequence == Long.MAX_VALUE ? 0L : nextSequence + 1L;
-        this.stage[slot] = (byte) stage.ordinal();
-        this.contextId[slot] = contextId;
-        this.threadId[slot] = Thread.currentThread().threadId();
-        startOffsetNanos[slot] = startOffset;
-        endOffsetNanos[slot] = endOffset;
-        this.completed[slot] = completed;
-        this.queueBefore[slot] = queueBefore;
-        this.queueAfter[slot] = queueAfter;
-        this.workCount[slot] = workCount;
-        this.resultCode[slot] = (byte) resultCode;
+        int slot = -1;
+        for (int i = 0; i < active.length; i++) {
+            if (!active[i]) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) {
+            activeOverflowEvents = saturatingIncrement(activeOverflowEvents);
+            return 0L;
+        }
+        final long token = nextInvocationId;
+        nextInvocationId = token == Long.MAX_VALUE ? 0L : token + 1L;
+        active[slot] = true;
+        activeToken[slot] = token;
+        activeStage[slot] = (byte) stage.ordinal();
+        activeContextId[slot] = contextId;
+        activeThreadId[slot] = thread;
+        activeStartOffsetNanos[slot] = startOffset;
+        activeQueueBefore[slot] = queueBefore;
+        startedInvocations = saturatingIncrement(startedInvocations);
+        return token;
     }
 
-    /** Returns a strong, immutable and internally consistent diagnostic snapshot. */
+    /** Completes an admitted invocation, or rejects an invalid token/exit. */
+    public synchronized void end(final long token, final long endNanos, final boolean completed,
+                                 final long queueAfter, final long workCount, final int resultCode) {
+        if (frozenSnapshot != null) return;
+        final int slot = findActive(token);
+        if (slot < 0) {
+            invalidEvents = saturatingIncrement(invalidEvents);
+            return;
+        }
+        final long thread = Thread.currentThread().threadId();
+        if (thread != activeThreadId[slot]) {
+            invalidEvents = saturatingIncrement(invalidEvents);
+            return;
+        }
+        final long endOffset;
+        try {
+            endOffset = Math.subtractExact(endNanos, originNanos);
+        } catch (ArithmeticException overflow) {
+            clearActive(slot);
+            invalidEvents = saturatingIncrement(invalidEvents);
+            return;
+        }
+        if (endOffset < activeStartOffsetNanos[slot] || !validGauge(queueAfter)
+                || !validGauge(workCount) || resultCode < -1 || resultCode > 1) {
+            clearActive(slot);
+            invalidEvents = saturatingIncrement(invalidEvents);
+            return;
+        }
+        final long sequenceValue = nextSequence;
+        nextSequence = sequenceValue == Long.MAX_VALUE ? 0L : sequenceValue + 1L;
+        finishedInvocations = saturatingIncrement(finishedInvocations);
+        if (eventCount >= capacity || sequenceValue <= 0L) {
+            droppedEvents = saturatingIncrement(droppedEvents);
+            clearActive(slot);
+            return;
+        }
+        final int row = eventCount++;
+        sequence[row] = sequenceValue;
+        invocationId[row] = activeToken[slot];
+        stage[row] = activeStage[slot];
+        contextId[row] = activeContextId[slot];
+        threadId[row] = activeThreadId[slot];
+        startOffsetNanos[row] = activeStartOffsetNanos[slot];
+        endOffsetNanos[row] = endOffset;
+        this.completed[row] = completed;
+        this.queueBefore[row] = activeQueueBefore[slot];
+        this.queueAfter[row] = queueAfter;
+        this.workCount[row] = workCount;
+        this.resultCode[row] = (byte) resultCode;
+        clearActive(slot);
+    }
+
+    /** Begins the one bounded measurement window, retaining active calls. */
+    public synchronized void beginWindow(final String id, final long startFrameInclusive,
+                                         final long nowNanos) {
+        if (frozenSnapshot != null) {
+            throw new IllegalStateException("measurement window is already closed");
+        }
+        if (window != null) {
+            throw new IllegalStateException("measurement window already began");
+        }
+        if (id == null || id.isBlank() || id.length() > 160 || startFrameInclusive < 0L) {
+            invalidEvents = saturatingIncrement(invalidEvents);
+            return;
+        }
+        final long offset = offset(nowNanos);
+        if (offset < 0L) {
+            invalidEvents = saturatingIncrement(invalidEvents);
+            return;
+        }
+        eventCount = 0;
+        droppedEvents = 0L;
+        nextSequence = 1L;
+        startedInvocations = 0L;
+        finishedInvocations = 0L;
+        long activeAtStart = activeCount();
+        window = new Window(id, startFrameInclusive, -1L, offset, -1L, activeAtStart, false);
+    }
+
+    /** Closes and freezes the one measurement window. */
+    public synchronized void endWindow(final long endFrameExclusive, final long nowNanos) {
+        if (frozenSnapshot != null || (window != null && window.closed())) {
+            throw new IllegalStateException("measurement window is already closed");
+        }
+        if (window == null) {
+            throw new IllegalStateException("measurement window has not begun");
+        }
+        if (endFrameExclusive <= window.startFrameInclusive()) {
+            invalidEvents = saturatingIncrement(invalidEvents);
+            return;
+        }
+        final long offset = offset(nowNanos);
+        if (offset <= window.startOffsetNanos()) {
+            invalidEvents = saturatingIncrement(invalidEvents);
+            return;
+        }
+        final long snapshotNow = clock.getAsLong();
+        if (snapshotNow < nowNanos) {
+            invalidEvents = saturatingIncrement(invalidEvents);
+            return;
+        }
+        final long snapshotOffset = offset(snapshotNow);
+        if (snapshotOffset < 0L) {
+            invalidEvents = saturatingIncrement(invalidEvents);
+            return;
+        }
+        window = new Window(window.id(), window.startFrameInclusive(), endFrameExclusive,
+                window.startOffsetNanos(), offset, window.activeAtStart(), true);
+        frozenSnapshot = snapshotLocked(snapshotOffset);
+    }
+
+    /** Returns an immutable snapshot; a closed window returns the frozen copy. */
     public synchronized Snapshot snapshot() {
-        ArrayList<Event> events = new ArrayList<>(eventCount);
+        if (frozenSnapshot != null) return frozenSnapshot;
+        return snapshotLocked(offset(clock.getAsLong()));
+    }
+
+    public synchronized Report report(final String sourceSha, final String trialId, final String status) {
+        return new Report(SCHEMA_VERSION, EVIDENCE_CLASS, false,
+                window == null ? "process-observation-including-warmup" : "measurement-window",
+                CLOCK, "26.3", Objects.requireNonNull(sourceSha, "sourceSha"),
+                Objects.requireNonNull(trialId, "trialId"), Objects.requireNonNull(status, "status"),
+                MEASUREMENT_LIMITS, snapshot());
+    }
+
+    private Snapshot snapshotLocked(final long timestampOffset) {
+        final ArrayList<Event> events = new ArrayList<>(eventCount);
         for (int i = 0; i < eventCount; i++) {
-            events.add(new Event(sequence[i], Stage.values()[stage[i]], contextId[i], threadId[i],
-                    startOffsetNanos[i], endOffsetNanos[i], completed[i], queueBefore[i],
+            events.add(new Event(sequence[i], invocationId[i], Stage.values()[stage[i]], contextId[i],
+                    threadId[i], startOffsetNanos[i], endOffsetNanos[i], completed[i], queueBefore[i],
                     queueAfter[i], workCount[i], resultCode[i]));
         }
+        final ArrayList<ActiveInvocation> activeRows = new ArrayList<>();
+        for (int i = 0; i < active.length; i++) {
+            if (active[i]) {
+                activeRows.add(new ActiveInvocation(activeToken[i], Stage.values()[activeStage[i]],
+                        activeContextId[i], activeThreadId[i], activeStartOffsetNanos[i], activeQueueBefore[i]));
+            }
+        }
         return new Snapshot(SCHEMA_VERSION, capacity, eventCount, droppedEvents, invalidEvents,
-                contextOverflowEvents, liveContextCount(), events);
+                contextOverflowEvents, liveContextCount(), startedInvocations, finishedInvocations,
+                activeOverflowEvents, activeRows, events, window, timestampOffset);
     }
 
-    public synchronized Report report(String sourceSha, String trialId, String status) {
-        validateReportText(sourceSha, "sourceSha", 40, 40);
-        validateSha40(sourceSha);
-        validateReportText(trialId, "trialId", 1, 160);
-        validateReportText(status, "status", 1, 128);
-        return new Report(SCHEMA_VERSION, "diagnostic", false,
-                "process-observation-including-warmup", "System.nanoTime", "26.3",
-                sourceSha, trialId, status, MEASUREMENT_LIMITS, snapshot());
+    private int findActive(final long token) {
+        if (token <= 0L) return -1;
+        for (int i = 0; i < active.length; i++) {
+            if (active[i] && activeToken[i] == token) return i;
+        }
+        return -1;
     }
 
-    private long installContext(int slot, Object context) {
-        long id = nextContextId;
+    private void clearActive(final int slot) {
+        active[slot] = false;
+        activeToken[slot] = 0L;
+    }
+
+    private int activeCount() {
+        int count = 0;
+        for (boolean value : active) if (value) count++;
+        return count;
+    }
+
+    private long offset(final long timestamp) {
+        try {
+            return Math.subtractExact(timestamp, originNanos);
+        } catch (ArithmeticException overflow) {
+            return -1L;
+        }
+    }
+
+    private long installContext(final int slot, final Object context) {
+        final long id = nextContextId;
         if (id <= 0L) {
             contextOverflowEvents = saturatingIncrement(contextOverflowEvents);
             invalidEvents = saturatingIncrement(invalidEvents);
@@ -241,70 +390,53 @@ public final class WorldStageRecorder {
 
     private int liveContextCount() {
         int live = 0;
-        for (int i = 0; i < contextSlots; i++) {
-            if (contexts[i].get() != null) {
-                live++;
-            }
-        }
+        for (int i = 0; i < contextSlots; i++) if (contexts[i].get() != null) live++;
         return live;
     }
 
-    private static boolean validGauge(long value) {
+    private static boolean validGauge(final long value) {
         return value == UNAVAILABLE || value >= 0L;
     }
 
-    private static void validateReportText(String value, String name, int minimum, int maximum) {
-        if (value == null || value.length() < minimum || value.length() > maximum || value.isBlank()) {
-            throw new IllegalArgumentException(name + " must be nonblank and bounded");
-        }
-    }
-
-    private static void validateSha40(String value) {
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            boolean hex = c >= '0' && c <= '9' || c >= 'a' && c <= 'f';
-            if (!hex) {
-                throw new IllegalArgumentException("sourceSha must be exactly 40 hexadecimal characters");
-            }
-        }
-    }
-
-    private static long saturatingIncrement(long value) {
+    private static long saturatingIncrement(final long value) {
         return value == Long.MAX_VALUE ? Long.MAX_VALUE : value + 1L;
     }
 
     private static int configuredCapacity() {
-        String configured = System.getProperty("metallum.validation.worldStageCapacity");
-        if (configured == null) {
-            return DEFAULT_CAPACITY;
-        }
+        final String configured = System.getProperty("metallum.validation.worldStageCapacity");
+        if (configured == null) return DEFAULT_CAPACITY;
         try {
-            int parsed = Integer.parseInt(configured.trim());
-            if (parsed < 1 || parsed > MAX_CAPACITY) {
-                throw new IllegalArgumentException("worldStageCapacity must be in [1," + MAX_CAPACITY + "]");
+            final long parsed = Long.parseLong(configured.trim());
+            if (parsed < 1L || parsed > MAX_CAPACITY) {
+                throw new IllegalArgumentException("world stage capacity must be in [1," + MAX_CAPACITY + "]");
             }
-            return parsed;
-        } catch (NumberFormatException exception) {
-            throw new IllegalArgumentException("worldStageCapacity must be a bounded integer", exception);
+            return (int) parsed;
+        } catch (NumberFormatException ignored) {
+            throw new IllegalArgumentException("world stage capacity must be an integer", ignored);
         }
     }
 
-    public record Event(long sequence, Stage stage, long contextId, long threadId,
+    public record Event(long sequence, long invocationId, Stage stage, long contextId, long threadId,
                         long startOffsetNanos, long endOffsetNanos, boolean completed,
                         long queueBefore, long queueAfter, long workCount, int resultCode) {
-        public String role() {
-            return stage.role();
-        }
-
-        public String contextKind() {
-            return stage.contextKind();
-        }
+        public String role() { return stage.role(); }
+        public String contextKind() { return stage.contextKind(); }
     }
 
-    public record Snapshot(int schemaVersion, int eventCapacity, long eventCount, long droppedEvents,
-                           long invalidEvents, long contextOverflowEvents, long liveContextCount,
-                           List<Event> events) {
+    public record ActiveInvocation(long invocationId, Stage stage, long contextId, long threadId,
+                                   long startOffsetNanos, long queueBefore) { }
+
+    public record Window(String id, long startFrameInclusive, long endFrameExclusive,
+                         long startOffsetNanos, long endOffsetNanos, long activeAtStart,
+                         boolean closed) { }
+
+    public record Snapshot(int schemaVersion, int eventCapacity, long eventCount,
+                           long droppedEvents, long invalidEvents, long contextOverflowEvents,
+                           long liveContextCount, long startedInvocations, long finishedInvocations,
+                           long activeOverflowEvents, List<ActiveInvocation> activeInvocations,
+                           List<Event> events, Window window, long timestampOffsetNanos) {
         public Snapshot {
+            activeInvocations = List.copyOf(activeInvocations);
             events = List.copyOf(events);
         }
     }
@@ -313,7 +445,43 @@ public final class WorldStageRecorder {
                          String scope, String clock, String minecraftVersion, String sourceSha,
                          String trialId, String status, String measurementLimits, Snapshot snapshot) {
         public Report {
+            if (schemaVersion != SCHEMA_VERSION) {
+                throw new IllegalArgumentException("schemaVersion must be " + SCHEMA_VERSION);
+            }
+            evidenceClass = Objects.requireNonNull(evidenceClass, "evidenceClass");
+            if (!EVIDENCE_CLASS.equals(evidenceClass)) {
+                throw new IllegalArgumentException("evidenceClass must be diagnostic");
+            }
+            if (performanceEligible) {
+                throw new IllegalArgumentException("world stage evidence is diagnostic-only");
+            }
+            scope = Objects.requireNonNull(scope, "scope");
+            if (!"measurement-window".equals(scope)
+                    && !"process-observation-including-warmup".equals(scope)) {
+                throw new IllegalArgumentException("invalid world stage report scope");
+            }
+            clock = Objects.requireNonNull(clock, "clock");
+            if (!CLOCK.equals(clock)) throw new IllegalArgumentException("clock must be System.nanoTime");
+            minecraftVersion = Objects.requireNonNull(minecraftVersion, "minecraftVersion");
+            if (!"26.3".equals(minecraftVersion)) {
+                throw new IllegalArgumentException("minecraftVersion must be 26.3");
+            }
+            sourceSha = Objects.requireNonNull(sourceSha, "sourceSha");
+            if (!sourceSha.matches("[0-9a-f]{40}")) {
+                throw new IllegalArgumentException("sourceSha must be a lowercase 40-hex commit");
+            }
+            trialId = Objects.requireNonNull(trialId, "trialId");
+            if (trialId.isBlank() || trialId.length() > 160) {
+                throw new IllegalArgumentException("trialId must be a non-empty string <= 160 characters");
+            }
+            status = Objects.requireNonNull(status, "status");
+            if (status.isBlank() || status.length() > 128) {
+                throw new IllegalArgumentException("status must be a non-empty string <= 128 characters");
+            }
             measurementLimits = Objects.requireNonNull(measurementLimits, "measurementLimits");
+            if (!MEASUREMENT_LIMITS.equals(measurementLimits)) {
+                throw new IllegalArgumentException("measurementLimits do not match the bounded interval contract");
+            }
             snapshot = Objects.requireNonNull(snapshot, "snapshot");
         }
     }

@@ -17,15 +17,13 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCOPE = "process-observation-including-warmup"
 CLOCK = "System.nanoTime"
 MINECRAFT_VERSION = "26.3"
 EVIDENCE_CLASS = "diagnostic"
-MEASUREMENT_LIMITS = (
-    "activeInvocations=unavailable: post-invocation recording; snapshot can censor calls still active; "
-    "rawScope=completed-and-failed-exits-observed"
-)
+MEASUREMENT_LIMITS = "bounded begin/end observations; active calls retained at snapshot; nested wall-clock intervals are inclusive"
+
 I64_MAX = (1 << 63) - 1
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 MAX_CAPACITY = 65_536
@@ -65,7 +63,7 @@ def _validate_event(raw: Any, index: int, errors: list[str]) -> dict[str, Any] |
     error_count = len(errors)
     label = f"snapshot.events[{index}]"
     fields = (
-        "sequence", "stage", "contextId", "threadId", "startOffsetNanos",
+        "sequence", "invocationId", "stage", "contextId", "threadId", "startOffsetNanos",
         "endOffsetNanos", "completed", "queueBefore", "queueAfter", "workCount", "resultCode",
     )
     if not _required_fields(raw, fields, label, errors):
@@ -76,7 +74,7 @@ def _validate_event(raw: Any, index: int, errors: list[str]) -> dict[str, Any] |
         errors.append(f"{label}.sequence must be a positive signed Int64 JSON integer")
     if not isinstance(raw.get("stage"), str) or raw["stage"] not in STAGES:
         errors.append(f"{label}.stage is not in the stage allowlist: {raw.get('stage')!r}")
-    for name in ("contextId", "threadId"):
+    for name in ("invocationId", "contextId", "threadId"):
         value = raw.get(name)
         if not _i64(value) or value <= 0:
             errors.append(f"{label}.{name} must be a positive signed Int64 JSON integer")
@@ -116,214 +114,218 @@ def _validate_event(raw: Any, index: int, errors: list[str]) -> dict[str, Any] |
     return raw
 
 
+def _validate_active(raw: Any, index: int, errors: list[str]) -> dict[str, Any] | None:
+    label = f"activeInvocations[{index}]"
+    count = len(errors)
+    if not _required_fields(raw, ("invocationId", "stage", "contextId", "threadId", "startOffsetNanos", "queueBefore"), label, errors):
+        return None
+    for key in ("invocationId", "contextId", "threadId"):
+        if not _i64(raw[key]) or raw[key] == 0:
+            errors.append(f"{label}.{key} must be positive Int64")
+    if not _i64(raw["startOffsetNanos"]):
+        errors.append(f"{label}.startOffsetNanos must be nonnegative Int64")
+    stage = raw["stage"]
+    if not isinstance(stage, str) or stage not in STAGES:
+        errors.append(f"{label}.stage invalid")
+    queue = raw["queueBefore"]
+    if not _signed_i64(queue) or queue < -1:
+        errors.append(f"{label}.queueBefore invalid")
+    if len(errors) != count:
+        return None
+    if (stage.startswith("LIGHT_") and queue < 0) or (not stage.startswith("LIGHT_") and queue != -1):
+        errors.append(f"{label}.queueBefore violates stage contract")
+        return None
+    return raw
+
+
 def evaluate(payload: Any, required_stages: tuple[str, ...] = ()) -> dict[str, Any]:
     errors: list[str] = []
+    def result(summary: dict[str, Any]) -> dict[str, Any]:
+        return {"schema_version": 2, "accepted": not errors, "complete": not errors,
+                "state": "incomplete-invalid-evidence" if errors else "accepted-diagnostic-only",
+                "errors": errors, "summary": {"status": "diagnostic-only", "wholeP0Closure": False, **summary}}
     if not isinstance(payload, dict):
-        return {
-            "schema_version": SCHEMA_VERSION, "accepted": False, "complete": False,
-            "state": "incomplete-invalid-evidence", "errors": ["report root must be an object"],
-            "summary": {"status": "diagnostic-only", "wholeP0Closure": False},
-        }
-    root_fields = (
-        "schemaVersion", "evidenceClass", "performanceEligible", "scope", "clock",
-        "minecraftVersion", "sourceSha", "trialId", "status", "measurementLimits", "snapshot",
-    )
-    _required_fields(payload, root_fields, "report", errors)
-    if payload.get("schemaVersion") != 1 or type(payload.get("schemaVersion")) is not int:
-        errors.append("schemaVersion must be 1")
-    if payload.get("evidenceClass") != EVIDENCE_CLASS:
-        errors.append("evidenceClass must be diagnostic")
-    if payload.get("performanceEligible") is not False:
-        errors.append("performanceEligible must be false")
-    if payload.get("scope") != SCOPE:
-        errors.append(f"scope must be {SCOPE}")
-    if payload.get("clock") != CLOCK:
-        errors.append(f"clock must be {CLOCK}")
-    if payload.get("minecraftVersion") != MINECRAFT_VERSION:
-        errors.append(f"minecraftVersion must be {MINECRAFT_VERSION}")
-    source_sha = payload.get("sourceSha")
-    if not isinstance(source_sha, str) or SHA40.fullmatch(source_sha) is None:
-        errors.append("sourceSha must be a lowercase 40-hex commit")
-        source_sha = None
-    trial_id = payload.get("trialId")
-    if not isinstance(trial_id, str) or not trial_id.strip() or len(trial_id) > 160:
-        errors.append("trialId must be a non-empty string <= 160 characters")
-        trial_id = None
-    if payload.get("status") != "passed":
-        errors.append("status must be passed")
-    if payload.get("measurementLimits") != MEASUREMENT_LIMITS:
-        errors.append("measurementLimits does not preserve post-invocation/right-censoring boundary")
-
-    snapshot = payload.get("snapshot")
-    snapshot_fields = (
-        "schemaVersion", "eventCapacity", "eventCount", "droppedEvents", "invalidEvents",
-        "contextOverflowEvents", "liveContextCount", "events",
-    )
-    _required_fields(snapshot, snapshot_fields, "snapshot", errors)
-    if not isinstance(snapshot, dict):
-        snapshot = {}
-    if snapshot.get("schemaVersion") != 1 or type(snapshot.get("schemaVersion")) is not int:
-        errors.append("snapshot.schemaVersion must be 1")
-    capacity = snapshot.get("eventCapacity")
-    if not _i64(capacity) or not 1 <= capacity <= MAX_CAPACITY:
-        errors.append("snapshot.eventCapacity must be an integer in 1..65536")
-    event_count = snapshot.get("eventCount")
-    if not _i64(event_count):
-        errors.append("snapshot.eventCount must be a non-negative signed Int64 JSON integer")
-    for name in ("droppedEvents", "invalidEvents", "contextOverflowEvents"):
-        value = snapshot.get(name)
-        if not _i64(value):
-            errors.append(f"snapshot.{name} must be a non-negative signed Int64 JSON integer")
-        elif value != 0:
-            errors.append(f"snapshot.{name} must be zero")
-    live_contexts = snapshot.get("liveContextCount")
-    if not _i64(live_contexts) or live_contexts > MAX_CONTEXTS:
-        errors.append("snapshot.liveContextCount must be a non-negative integer <= 128")
-    events = snapshot.get("events")
-    if not isinstance(events, list):
-        errors.append("snapshot.events must be an array")
-        events = []
-    if _i64(capacity) and len(events) > capacity:
-        errors.append("snapshot.events exceeds eventCapacity")
-    if _i64(event_count) and event_count != len(events):
-        errors.append("snapshot.eventCount must equal snapshot.events length")
-    if not events:
-        errors.append("snapshot.events must contain at least one observation")
-
-    valid_events: list[dict[str, Any]] = []
-    for index, raw in enumerate(events):
-        event = _validate_event(raw, index, errors)
-        if event is not None:
-            valid_events.append(event)
-    sequences = [event["sequence"] for event in valid_events if _i64(event.get("sequence"))]
-    if sequences:
-        if len(set(sequences)) != len(sequences):
-            errors.append("snapshot event sequence values must be unique")
-        if any(right <= left for left, right in zip(sequences, sequences[1:])):
-            errors.append("snapshot event sequence values must be strictly increasing")
-        ordered = sorted(sequences)
-        if ordered != list(range(ordered[0], ordered[0] + len(ordered))):
-            errors.append("snapshot event sequence values must be contiguous")
-        if ordered[0] != 1:
-            errors.append("snapshot event sequence must start at 1")
-
-    by_stage: dict[str, list[dict[str, Any]]] = {}
-    for event in valid_events:
-        if event.get("stage") in STAGES and _i64(event.get("startOffsetNanos")) \
-                and _i64(event.get("endOffsetNanos")) and event["endOffsetNanos"] >= event["startOffsetNanos"]:
-            by_stage.setdefault(event["stage"], []).append(event)
-    observed = set(by_stage)
+        errors.append("report root must be object")
+        return result({})
+    for key, expected in (("schemaVersion", 2), ("evidenceClass", "diagnostic"),
+                          ("performanceEligible", False), ("clock", CLOCK),
+                          ("minecraftVersion", MINECRAFT_VERSION), ("status", "passed"),
+                          ("measurementLimits", MEASUREMENT_LIMITS)):
+        if type(payload.get(key)) is not type(expected) or payload[key] != expected:
+            errors.append(f"{key} must equal {expected!r}")
+    sha = payload.get("sourceSha")
+    trial = payload.get("trialId")
+    if not isinstance(sha, str) or not SHA40.fullmatch(sha):
+        errors.append("sourceSha must be lowercase 40 hex")
+    if not isinstance(trial, str) or not trial.strip() or len(trial) > 160:
+        errors.append("trialId must be nonblank and <=160 chars")
+    snap = payload.get("snapshot")
+    if not isinstance(snap, dict):
+        errors.append("snapshot must be object")
+        return result({})
+    counts = ("eventCapacity", "eventCount", "droppedEvents", "invalidEvents", "contextOverflowEvents",
+              "liveContextCount", "startedInvocations", "finishedInvocations", "activeOverflowEvents", "timestampOffsetNanos")
+    for key in counts:
+        if not _i64(snap.get(key)):
+            errors.append(f"snapshot.{key} must be nonnegative Int64")
+    if type(snap.get("schemaVersion")) is not int or snap["schemaVersion"] != 2:
+        errors.append("snapshot.schemaVersion must be 2")
+    if errors:
+        return result({})
+    if not 1 <= snap["eventCapacity"] <= MAX_CAPACITY or snap["liveContextCount"] > MAX_CONTEXTS:
+        errors.append("snapshot capacity/context bounds invalid")
+    for key in ("droppedEvents", "invalidEvents", "contextOverflowEvents", "activeOverflowEvents"):
+        if snap[key] != 0:
+            errors.append(f"snapshot.{key} must be zero")
+    window = snap.get("window")
+    start = 0
+    end = snap["timestampOffsetNanos"]
+    active_start = 0
+    if window is not None:
+        if not isinstance(window, dict):
+            errors.append("window must be object")
+            return result({})
+        for key in ("startFrameInclusive", "endFrameExclusive", "startOffsetNanos", "endOffsetNanos", "activeAtStart"):
+            if not _i64(window.get(key)):
+                errors.append(f"window.{key} must be nonnegative Int64")
+        if not isinstance(window.get("id"), str) or not window["id"].strip() or len(window["id"]) > 160:
+            errors.append("window.id invalid")
+        if window.get("closed") is not True:
+            errors.append("window must be closed")
+        if errors:
+            return result({})
+        start, end, active_start = window["startOffsetNanos"], window["endOffsetNanos"], window["activeAtStart"]
+        if end <= start or end > snap["timestampOffsetNanos"] or window["endFrameExclusive"] <= window["startFrameInclusive"] or active_start > 256:
+            errors.append("window boundaries invalid")
+    scope = "measurement-window" if window is not None else SCOPE
+    if payload.get("scope") != scope:
+        errors.append("scope does not match window")
+    events, active = snap.get("events"), snap.get("activeInvocations")
+    if not isinstance(events, list) or not isinstance(active, list):
+        errors.append("events and activeInvocations must be arrays")
+        return result({})
+    if len(events) != snap["eventCount"] or len(events) > snap["eventCapacity"] or len(active) > 256:
+        errors.append("event/active count or capacity mismatch")
+    valid_events = [row for i, raw in enumerate(events) if (row := _validate_event(raw, i, errors)) is not None]
+    valid_active = [row for i, raw in enumerate(active) if (row := _validate_active(raw, i, errors)) is not None]
+    if errors:
+        return result({})
+    if [row["sequence"] for row in events] != list(range(1, len(events) + 1)):
+        errors.append("event exit sequence must be contiguous from1")
+    ids = [row["invocationId"] for row in events + active]
+    if len(set(ids)) != len(ids):
+        errors.append("duplicate invocationId in ended/active rows")
+    if active_start + snap["startedInvocations"] != snap["finishedInvocations"] + len(active):
+        errors.append("begin/end/active conservation mismatch")
+    if snap["finishedInvocations"] != snap["eventCount"] + snap["droppedEvents"]:
+        errors.append("finished/rows/loss conservation mismatch")
+    if not events and not active:
+        errors.append("no observations")
+    if any(row["startOffsetNanos"] > snap["timestampOffsetNanos"] for row in events + active) or any(row["endOffsetNanos"] > snap["timestampOffsetNanos"] for row in events):
+        errors.append("event timestamp after snapshot")
+    observed = {row["stage"] for row in events + active}
     for stage in required_stages:
-        if stage not in STAGES:
-            errors.append(f"--require-stage is not in the stage allowlist: {stage!r}")
-        elif stage not in observed:
-            errors.append(f"required stage was not observed: {stage}")
-
-    stage_summary: dict[str, Any] = {}
-    for stage in sorted(by_stage):
-        durations = [event["endOffsetNanos"] - event["startOffsetNanos"] for event in by_stage[stage]]
+        if not isinstance(stage, str) or stage not in STAGES or stage not in observed:
+            errors.append(f"required stage not observed: {stage!r}")
+    summaries = {}
+    for stage in sorted(observed):
+        ended = [row for row in events if row["stage"] == stage]
+        pending = [row for row in active if row["stage"] == stage]
+        overlap = lambda row, stop: max(0, min(stop, end) - max(row["startOffsetNanos"], start))
+        durations = [d for row in ended if (d := overlap(row, row["endOffsetNanos"])) > 0]
+        active_durations = [overlap(row, end) for row in pending]
         total = sum(durations)
-        if total > I64_MAX:
-            errors.append(f"{stage} total inclusive duration overflows signed Int64")
-        executed = 0
-        executed_samples = 0
-        completed_count = 0
-        for event in by_stage[stage]:
-            if event["completed"]:
-                completed_count += 1
-            count = event["workCount"]
-            if _i64(count):
-                if executed > I64_MAX - count:
-                    errors.append(f"{stage} summed workCount overflows signed Int64")
-                else:
-                    executed += count
-                    executed_samples += 1
-        stage_summary[stage] = {
-            "invocations": len(durations),
-            "completedInvocations": completed_count,
-            "totalInclusiveDurationNanos": total,
-            "p50InclusiveDurationNanos": _nearest_rank(durations, 0.50),
-            "p95InclusiveDurationNanos": _nearest_rank(durations, 0.95),
-            "maxInclusiveDurationNanos": max(durations),
-            "observedWorkCount": executed,
-            "observedWorkCountSamples": executed_samples,
+        active_total = sum(active_durations)
+        work = sum(row["workCount"] for row in ended if row["workCount"] >= 0)
+        if max(total, active_total, work) > I64_MAX:
+            errors.append(f"{stage} aggregate overflows Int64")
+        summaries[stage] = {
+            "endedInvocations": len(ended), "normalReturns": sum(row["completed"] for row in ended),
+            "activeAtSnapshot": len(pending),
+            "leftCensoredIntervals": sum(row["startOffsetNanos"] < start for row in ended + pending),
+            "positiveOverlapEndedInvocations": len(durations),
+            "endedOverlapTotalNanos": total, "activeOverlapTotalNanos": active_total,
+            "p50EndedOverlapNanos": _nearest_rank(durations, .50),
+            "p95EndedOverlapNanos": _nearest_rank(durations, .95),
+            "maxEndedOverlapNanos": max(durations, default=None),
+            "observedWorkCount": work,
+            "observedWorkCountSamples": sum(row["workCount"] >= 0 for row in ended),
         }
-
-    summary = {
-        "status": "diagnostic-only", "sourceSha": source_sha, "trialId": trial_id,
-        "scope": SCOPE, "measurementLimits": MEASUREMENT_LIMITS,
-        "wholeP0Closure": False, "observedStages": sorted(observed),
-        "unobservedStages": sorted(STAGES - observed), "requiredStages": list(required_stages),
-        "snapshot": {
-            "eventCapacity": capacity,
-            "eventCount": event_count,
-            "droppedEvents": snapshot.get("droppedEvents"),
-            "invalidEvents": snapshot.get("invalidEvents"),
-            "contextOverflowEvents": snapshot.get("contextOverflowEvents"),
-            "liveContextCount": live_contexts,
-        },
-        "stages": stage_summary,
-    }
-    complete = not errors
-    return {
-        "schema_version": SCHEMA_VERSION, "accepted": complete, "complete": complete,
-        "state": "accepted-diagnostic-only" if complete else "incomplete-invalid-evidence",
-        "errors": errors, "summary": summary,
-    }
+    return result({"sourceSha": sha, "trialId": trial, "scope": scope,
+                   "measurementLimits": MEASUREMENT_LIMITS, "window": window,
+                   "snapshot": {key: snap[key] for key in counts},
+                   "activeAtSnapshot": len(active), "observedStages": sorted(observed),
+                   "unobservedStages": sorted(STAGES - observed), "stages": summaries})
 
 
 def _fixture() -> dict[str, Any]:
     return {
-        "schemaVersion": 1, "evidenceClass": "diagnostic", "performanceEligible": False,
-        "scope": SCOPE, "clock": CLOCK, "minecraftVersion": MINECRAFT_VERSION,
+        "schemaVersion": 2, "evidenceClass": "diagnostic", "performanceEligible": False,
+        "scope": "measurement-window", "clock": CLOCK, "minecraftVersion": MINECRAFT_VERSION,
         "sourceSha": "0123456789abcdef0123456789abcdef01234567", "trialId": "world-stage-fixture",
         "status": "passed", "measurementLimits": MEASUREMENT_LIMITS,
         "snapshot": {
-            "schemaVersion": 1, "eventCapacity": 64, "eventCount": 1,
-            "droppedEvents": 0, "invalidEvents": 0, "contextOverflowEvents": 0,
-            "liveContextCount": 1,
-            "events": [{
-                "sequence": 1, "stage": "LIGHT_TASK", "contextId": 1, "threadId": 2,
-                "startOffsetNanos": 10, "endOffsetNanos": 40, "completed": False,
-                "queueBefore": 2, "queueAfter": 1, "workCount": 1, "resultCode": -1,
-            }],
+            "schemaVersion": 2, "eventCapacity": 64, "eventCount": 1, "droppedEvents": 0,
+            "invalidEvents": 0, "contextOverflowEvents": 0, "liveContextCount": 1,
+            "startedInvocations": 1, "finishedInvocations": 1, "activeOverflowEvents": 0,
+            "timestampOffsetNanos": 100,
+            "window": {"id": "fixture", "startFrameInclusive": 2, "endFrameExclusive": 4,
+                       "startOffsetNanos": 20, "endOffsetNanos": 80, "activeAtStart": 1, "closed": True},
+            "events": [{"sequence": 1, "invocationId": 1, "stage": "LIGHT_TASK", "contextId": 1,
+                        "threadId": 2, "startOffsetNanos": 10, "endOffsetNanos": 40,
+                        "completed": False, "queueBefore": 2, "queueAfter": 1, "workCount": 1, "resultCode": -1}],
+            "activeInvocations": [{"invocationId": 2, "stage": "SERVER_TICK", "contextId": 1,
+                                   "threadId": 3, "startOffsetNanos": 50, "queueBefore": -1}],
         },
     }
 
 
 def self_test() -> None:
     valid = evaluate(_fixture())
-    assert valid["complete"]
-    assert valid["summary"]["stages"]["LIGHT_TASK"]["observedWorkCount"] == 1
-    assert not valid["summary"]["wholeP0Closure"]
-    mutations: list[tuple[str, dict[str, Any]]] = []
-    mutation = copy.deepcopy(_fixture()); mutation["status"] = "failed"; mutations.append(("rejected status", mutation))
-    mutation = copy.deepcopy(_fixture()); mutation["sourceSha"] = "bad"; mutations.append(("bad sha", mutation))
-    mutation = copy.deepcopy(_fixture()); mutation["snapshot"]["events"][0]["sequence"] = 2; mutations.append(("noncontiguous sequence", mutation))
-    mutation = copy.deepcopy(_fixture()); mutation["snapshot"]["events"][0]["stage"] = "COMPRESSION"; mutations.append(("unknown stage", mutation))
-    mutation = copy.deepcopy(_fixture()); mutation["snapshot"]["events"][0]["contextId"] = 0; mutations.append(("zero context", mutation))
-    mutation = copy.deepcopy(_fixture()); mutation["snapshot"]["events"][0]["queueBefore"] = -2; mutations.append(("bad queue", mutation))
-    mutation = copy.deepcopy(_fixture()); mutation["snapshot"]["events"][0]["resultCode"] = 2; mutations.append(("bad result", mutation))
-    mutation = copy.deepcopy(_fixture()); mutation["snapshot"]["events"][0]["endOffsetNanos"] = 9; mutations.append(("time inversion", mutation))
-    mutation = copy.deepcopy(_fixture()); mutation["snapshot"]["droppedEvents"] = 1; mutations.append(("dropped rows", mutation))
-    mutation = copy.deepcopy(_fixture()); mutation["snapshot"]["contextOverflowEvents"] = 1; mutations.append(("context overflow", mutation))
-    mutation = copy.deepcopy(_fixture()); mutation["snapshot"]["events"] = []; mutation["snapshot"]["eventCount"] = 0; mutations.append(("empty evidence", mutation))
-    for key in _fixture()["snapshot"]["events"][0]:
-        mutation = copy.deepcopy(_fixture())
-        del mutation["snapshot"]["events"][0][key]
-        mutations.append((f"missing {key}", mutation))
-        for value in (None, [], {}, "bad", True, -2, 1 << 64):
-            mutation = copy.deepcopy(_fixture())
-            mutation["snapshot"]["events"][0][key] = value
-            # True is valid only for the completion field.
-            if key == "completed" and value is True:
-                continue
-            mutations.append((f"malformed {key}: {value!r}", mutation))
+    assert valid["complete"], valid
+    assert valid["summary"]["stages"]["LIGHT_TASK"]["endedOverlapTotalNanos"] == 20
+    assert valid["summary"]["stages"]["SERVER_TICK"]["activeOverlapTotalNanos"] == 30
+    assert valid["summary"]["stages"]["LIGHT_TASK"]["leftCensoredIntervals"] == 1
+    process = _fixture(); process["scope"] = SCOPE; del process["snapshot"]["window"]
+    process["snapshot"]["startedInvocations"] = 2
+    assert evaluate(process)["complete"]
+    mutations = []
+    for route in (("snapshot", "events", 0), ("snapshot", "activeInvocations", 0)):
+        original = _fixture()
+        row = original[route[0]][route[1]][route[2]]
+        for key in row:
+            mutant = copy.deepcopy(original); del mutant[route[0]][route[1]][route[2]][key]
+            mutations.append((f"missing {route}/{key}", mutant))
+            for value in (None, [], {}, "bad", True, -2, 1 << 64):
+                if key == "completed" and value is True:
+                    continue
+                mutant = copy.deepcopy(original); mutant[route[0]][route[1]][route[2]][key] = value
+                mutations.append((f"malformed {route}/{key}", mutant))
+    for key, value in (("startedInvocations", 2), ("finishedInvocations", 2), ("activeOverflowEvents", 1),
+                       ("droppedEvents", 1), ("invalidEvents", 1), ("contextOverflowEvents", 1), ("timestampOffsetNanos", 25)):
+        mutant = _fixture(); mutant["snapshot"][key] = value; mutations.append((key, mutant))
+    for key, value in (("closed", False), ("startOffsetNanos", 90), ("endFrameExclusive", 1), ("activeAtStart", 0)):
+        mutant = _fixture(); mutant["snapshot"]["window"][key] = value; mutations.append((key, mutant))
+    mutant = _fixture(); mutant["snapshot"]["activeInvocations"][0]["invocationId"] = 1
+    mutations.append(("duplicate active/ended id", mutant))
+    for route in ((), ("snapshot",), ("snapshot", "window")):
+        original = _fixture()
+        target = original
+        for part in route:
+            target = target[part]
+        for key in target:
+            for value in (None, [], {}, -1, 1 << 64):
+                if type(value) is type(target[key]) and value == target[key]:
+                    continue
+                mutant = copy.deepcopy(original)
+                destination = mutant
+                for part in route:
+                    destination = destination[part]
+                destination[key] = value
+                mutations.append((f"malformed envelope {route}/{key}", mutant))
     for label, mutant in mutations:
-        if evaluate(mutant)["complete"]:
-            raise AssertionError(f"hostile mutation unexpectedly accepted: {label}")
-    assert evaluate(_fixture(), ("LIGHT_TASK",))["complete"]
-    assert not evaluate(_fixture(), ("SERVER_TICK",))["complete"]
+        assert not evaluate(mutant)["complete"], label
+    assert not evaluate(_fixture(), ("CHUNK_INSTALL",))["complete"]
     print(f"World stage observation self-test: PASS ({len(mutations)} rejecting mutations)")
 
 

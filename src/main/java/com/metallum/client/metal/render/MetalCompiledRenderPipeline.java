@@ -530,6 +530,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
     @Nullable
     ResourceBinding resource(final int bindingIndex) {
         for (ResourceBinding resource : this.resources) {
+            NumericBindingDiagnostics.recordResourceScanStep();
             if (resource.bindingIndex() == bindingIndex) {
                 return resource;
             }

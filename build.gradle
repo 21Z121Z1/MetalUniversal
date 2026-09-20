@@ -3135,6 +3135,16 @@ tasks.register("gpuTimingRecorderRetentionTest", Test) { task ->
 	task.systemProperty "metallum.validation.gpuTiming", "true"
 }
 
+// The diagnostic startup gate is immutable; exercise the enabled lane in its own JVM.
+tasks.register("numericBindingDiagnosticsEnabledTest", Test) { task ->
+    task.group = "verification"
+    task.testClassesDirs = sourceSets.test.output.classesDirs
+    task.classpath = sourceSets.test.runtimeClasspath
+    task.useJUnitPlatform()
+    task.filter { includeTestsMatching "com.metallum.client.metal.render.NumericBindingDiagnosticsTest" }
+    task.systemProperty "metallum.validation.numericBindings", "true"
+}
+
 // Separate JVMs prevent a Metal 4 main-queue context from contaminating the Metal 3 lane.
 [false, true].each { metal4 ->
 	tasks.register("nativeEncoderCountsMetal${metal4 ? 4 : 3}Test", Test) { task ->
