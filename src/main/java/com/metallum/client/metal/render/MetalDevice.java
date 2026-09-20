@@ -876,7 +876,9 @@ final class MetalDevice implements GpuDeviceBackend {
                 // limit: Vanilla 26.3 selects terrain indirect drawing from
                 // that limit plus nonZeroFirstInstance, before frontend checks.
                 new DeviceLimits(1, 256, 16384, maxMemoryAllocationSize, Integer.MAX_VALUE / 3, ColorTargetState.MAX_COLOR_TARGETS, Integer.MAX_VALUE),
-                new DeviceFeatures(false, false, true, true, true, true, true, true),
+                // Both native encoder paths implement setTriangleFillMode(.lines).
+                // Without this bit RenderPearl rejects Vanilla's wireframe pipelines.
+                new DeviceFeatures(true, false, true, true, true, true, true, true),
                 underlyingExtensions,
                 new HintsAndWorkarounds(false, false, false, false),
                 type
