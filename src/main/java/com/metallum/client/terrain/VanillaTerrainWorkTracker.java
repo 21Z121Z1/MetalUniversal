@@ -280,6 +280,19 @@ public final class VanillaTerrainWorkTracker {
         }
     }
 
+    public void retireMesh(final Object meshIdentity, final long nowNanos, final String reason) {
+        WorkContext context = contextForMesh(meshIdentity);
+        if (context == null) {
+            return;
+        }
+        context.retire(recorder, nowNanos, reason);
+        synchronized (meshContexts) {
+            meshContexts.remove(meshIdentity);
+        }
+        latestBySection.remove(context.key.sectionId(), context);
+        clearActiveBuildIfMatches(context);
+    }
+
     /**
      * Cancels not-yet-published work, or retires a published mesh, at a real section reset.
      */
@@ -310,8 +323,18 @@ public final class VanillaTerrainWorkTracker {
      * LevelExtractor world transition hook, not on camera/view changes.
      */
     public long advanceWorldEpoch(final long nowNanos) {
-        List<WorkContext> contexts = new ArrayList<>(latestBySection.values());
-        for (WorkContext context : contexts) {
+        List<WorkContext> contexts = new ArrayList<>();
+        contexts.addAll(latestBySection.values());
+        synchronized (regionContexts) {
+            contexts.addAll(regionContexts.values());
+        }
+        synchronized (meshContexts) {
+            contexts.addAll(meshContexts.values());
+        }
+        java.util.Set<WorkContext> uniqueContexts =
+                Collections.newSetFromMap(new IdentityHashMap<>());
+        uniqueContexts.addAll(contexts);
+        for (WorkContext context : uniqueContexts) {
             if (context.meshGeneration.get() >= 0L) {
                 context.retire(recorder, nowNanos, "world-epoch-change");
             } else {
