@@ -279,6 +279,9 @@ jobs:
           ./gradlew --no-daemon -Pmetallum.noOptionalMods=true \
             compileJava compileTestJava test -x buildIOSNative --console=plain \
             --tests com.metallum.client.metal.render.MetalRenderPearlBoundaryTest \
+            --tests com.metallum.client.terrain.TerrainWorkEventRecorderTest \
+            --tests com.metallum.client.terrain.VanillaTerrainWorkTrackerTest \
+            --tests com.metallum.client.terrain.TerrainWorkReportTest \
             --tests com.metallum.client.validation.SodiumValidationBridgeTest \
             | tee build/agent-evidence/test-no-optional-mods.log
 
