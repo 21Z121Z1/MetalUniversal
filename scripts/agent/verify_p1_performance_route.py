@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Static proof that P1 benchmark toggles reach the actual Minecraft client JVM."""
+"""Verify that P1 benchmark properties reach the Minecraft client JVM."""
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = (ROOT / "build.gradle").read_text(encoding="utf-8")
@@ -14,11 +15,54 @@ def require(condition: bool, message: str) -> None:
         raise SystemExit(f"P1 performance route invariant failed: {message}")
 
 
+def closure_block(source: str, opening_brace: int) -> str:
+    """Return one balanced Groovy closure block, including both braces."""
+    require(opening_brace >= 0 and source[opening_brace] == "{",
+            "could not locate the property-forwarding closure")
+    depth = 0
+    quote = None
+    escaped = False
+    for index in range(opening_brace, len(source)):
+        char = source[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening_brace:index + 1]
+    raise SystemExit("P1 performance route invariant failed: unterminated property-forwarding closure")
+
+
 pilot_default = BUILD.find('systemProperty "metallum.opt.metal4MainQueuePilot", "true"')
-forward_loop = BUILD.find('if (key.toString().startsWith("metallum.opt."))', pilot_default)
 require(pilot_default >= 0, "native render-efficiency default main-queue pilot assignment disappeared")
-require(forward_loop > pilot_default,
-        "explicit metallum.opt.* overrides are no longer forwarded after native benchmark defaults")
+
+forward_match = re.search(
+    r"System\.properties\.each\s*\{\s*key\s*,\s*value\s*->",
+    BUILD[pilot_default:],
+)
+require(forward_match is not None,
+        "the client JVM no longer has a generic system-property forwarding block")
+forward_start = pilot_default + forward_match.start()
+forward_open = BUILD.find("{", forward_start)
+forward_block = closure_block(BUILD, forward_open)
+normalized_forward_block = re.sub(r"\s+", "", forward_block)
+require('startsWith("metallum.opt.")' in forward_block,
+        "explicit metallum.opt.* overrides are not admitted by the forwarding block")
+require('startsWith("metallum.terrain.")' in forward_block,
+        "explicit metallum.terrain.* overrides are not admitted by the forwarding block")
+require('systemPropertykey.toString(),value.toString()' in normalized_forward_block,
+        "admitted system properties are not forwarded to the client JVM")
+
 require('"-Dmetallum.opt.metal4MainQueuePilot=false"' in RUNNER,
         "P1 runner does not explicitly override the legacy main-queue pilot")
 require('"-Dmetallum.opt.metal4MainRenderer=false"' in RUNNER,
@@ -35,9 +79,8 @@ require('"-Dmetallum.opt.residencySet=true"' in RUNNER,
         "P1 runner does not keep explicit residency common")
 
 # The Iris semantic gate is a static startup property in the product and
-# defaults false. build.gradle only forwards metallum.opt.* generically, so the
-# physical matrix must inject the semantic property into the actual Java
-# runtime rather than assuming a Gradle -D reaches Loom's child JVM.
+# defaults false. The physical matrix must inject it into the actual Java
+# runtime rather than assuming that a Gradle -D option reaches Loom's child JVM.
 require('System.getProperty("metallum.iris.semantic", "false")' in IRIS_COMPAT,
         "Iris semantic startup gate no longer has the expected fail-closed product contract")
 require('JAVA_TOOL_OPTIONS="$p1_java_tool_options"' in MATRIX,
@@ -51,8 +94,8 @@ require('grep -F "Iris-on-Metal semantic layer active:"' in MATRIX,
 require('grep -F "Using shaderpack: $STAGED_PACK_NAME"' in RUNNER,
         "I0/I1 profile runner does not prove the exact staged shader pack")
 
-# The matrix also proves that the performance worktree rebuilt to the exact
-# production JAR/native hashes that already passed the physical correctness pair.
+# Performance evidence must use the same product binaries that passed the
+# paired physical correctness run.
 require('LOCAL_JAR_SHA' in MATRIX and 'CORRECTNESS_JAR_SHA' in MATRIX,
         "matrix does not bind performance to the correctness-approved production JAR")
 require('LOCAL_DYLIB_SHA' in MATRIX and 'CORRECTNESS_DYLIB_SHA' in MATRIX,
