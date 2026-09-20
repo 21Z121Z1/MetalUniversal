@@ -124,6 +124,39 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
         VanillaTerrainAdmissionTelemetry.publish(admission, tasks.size(), System.nanoTime());
     }
 
+    @Inject(method = "poll", at = @At("RETURN"), cancellable = true)
+    private void metallum$recoverCancelledCohortRace(
+            final Vec3 cameraPos,
+            final CallbackInfoReturnable<SectionRenderDispatcher.RenderSection.SectionTask> cir
+    ) {
+        if (cir.getReturnValue() != null) {
+            return;
+        }
+        BoundedTerrainTaskAdmission<SectionRenderDispatcher.RenderSection.SectionTask> admission =
+                metallum$terrainAdmission;
+        if (admission == null || !admission.active() || admission.deferredSize() == 0) {
+            return;
+        }
+
+        admission.recordCompactedVanillaTasks(metallum$compactTerminalVanillaTasks());
+        if (!tasks.isEmpty()) {
+            return;
+        }
+        var ready = admission.drain(admission.queueCapacity(), System.nanoTime());
+        if (ready.tasks().isEmpty()) {
+            VanillaTerrainAdmissionTelemetry.publish(admission, 0, System.nanoTime());
+            return;
+        }
+
+        tasks.addAll(ready.tasks());
+        VanillaTerrainAdmissionTelemetry.publish(admission, tasks.size(), System.nanoTime());
+
+        // A task can become cancelled between our HEAD observation and vanilla's atomic-flag check.
+        // Re-enter the original synchronized poll only after replenishing a non-empty cohort; the
+        // nested call does not refill again and vanilla still owns distance/quota selection.
+        cir.setReturnValue(((SectionTaskDynamicQueue)(Object)this).poll(cameraPos));
+    }
+
     @Inject(method = "clear", at = @At("HEAD"))
     private void metallum$clearDeferredOwnership(final CallbackInfo ci) {
         BoundedTerrainTaskAdmission<SectionRenderDispatcher.RenderSection.SectionTask> admission =
