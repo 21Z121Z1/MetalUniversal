@@ -82,6 +82,21 @@ final class BoundedTerrainTaskAdmissionTest {
     }
 
     @Test
+    void equalFrozenOwnerValuesCoalesceEvenWhenRepresentedByDifferentObjects() {
+        Fixture f = new Fixture(new BoundedTerrainTaskAdmission.Config(true, 1, 2));
+        Task old = new Task(new String("section-42"), "compile");
+        assertEquals(BoundedTerrainTaskAdmission.Action.DEFER, f.offer(old, 1, 10).action());
+        old.terminal = true;
+
+        Task replacement = new Task(new String("section-42"), "compile");
+        assertEquals(
+                BoundedTerrainTaskAdmission.Action.REPLACE_DEFERRED,
+                f.offer(replacement, 1, 20).action()
+        );
+        assertEquals(List.of(replacement), f.admission.drain(1, 30).tasks());
+    }
+
+    @Test
     void backlogModeDefersNewArrivalsUntilTheCurrentVanillaCohortDrains() {
         Fixture f = new Fixture(new BoundedTerrainTaskAdmission.Config(true, 2, 4));
         Task firstDeferred = new Task(new Object(), "compile");
