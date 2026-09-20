@@ -1275,7 +1275,7 @@ if (minecraftMetalFxValidationRequested || lockedBackpressureValidationRequested
 		// Forward backend kill-switch overrides (-Dmetallum.opt.*) from the
 		// Gradle invocation to the client JVM for toggle validation runs.
 		System.properties.each { key, value ->
-			if (key.toString().startsWith("metallum.opt.")) {
+			if (key.toString().startsWith("metallum.opt.") || key.toString().startsWith("metallum.terrain.")) {
 				systemProperty key.toString(), value.toString()
 			}
 		}
