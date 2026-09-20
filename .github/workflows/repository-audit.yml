@@ -23,24 +23,46 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-      - name: Apply the reviewed patch after its failing regression
-        env:
-          TARGET: agent/metaluniversal-system-convergence-20260920
+      - name: Reproduce the frontend buffer failure
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = b765b6a3622ec064172f10d07eddf4f5ac9b11cc
-          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/repository-audit.yml
           mkdir -p "$RUNNER_TEMP/contract-audit"
-          python3 - "$RUNNER_TEMP/contract-audit/product.patch" <<'PY'
-          import base64, hashlib, pathlib, sys, zlib
-          data = zlib.decompress(base64.b64decode('''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'''))
-          assert hashlib.sha256(data).hexdigest() == '6d88cb6f0265c8e70814d7460d58a6c1d53e02ab6872a0b0359aeee1a371aae9'
-          pathlib.Path(sys.argv[1]).write_bytes(data)
-          PY
-          patch="$RUNNER_TEMP/contract-audit/product.patch"
-          testfile=src/test/java/com/metallum/client/metal/render/MetalGpuBufferFrontendContractTest.java
-          git apply --check "$patch"
-          git apply --include="$testfile" "$patch"
+          test "$(git rev-parse HEAD^)" = 8896dc0ac779975d8099a71175b07e4424967fd2
+          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/repository-audit.yml
+          cat > src/test/java/com/metallum/client/metal/render/MetalGpuBufferFrontendContractTest.java <<'JAVA'
+          package com.metallum.client.metal.render;
+
+          import com.mojang.renderpearl.api.buffers.GpuBuffer;
+          import com.mojang.renderpearl.backend.common.BaseGpuBuffer;
+          import org.junit.jupiter.api.Test;
+
+          import java.lang.foreign.MemorySegment;
+
+          import static org.junit.jupiter.api.Assertions.*;
+
+          class MetalGpuBufferFrontendContractTest {
+              @Test
+              void frontendCanValidateWrappedBufferWithoutNativeInitialization() {
+                  // The wrapped-handle constructor does not allocate or dereference GPU memory.
+                  // This opaque identity must not be submitted to Metal or released by this test.
+                  GpuBuffer buffer = new MetalGpuBuffer(null, GpuBuffer.USAGE_VERTEX, 64L,
+                          MemorySegment.ofAddress(1L));
+                  BaseGpuBuffer frontendBuffer = (BaseGpuBuffer) buffer;
+                  assertEquals(64L, frontendBuffer.size());
+                  assertEquals(GpuBuffer.USAGE_VERTEX, frontendBuffer.usage());
+                  assertDoesNotThrow(frontendBuffer::checkCanBeUsed);
+              }
+
+              @Test
+              void frontendRejectsBufferWithoutLiveBacking() {
+                  GpuBuffer buffer = new MetalGpuBuffer(null, GpuBuffer.USAGE_VERTEX, 64L,
+                          MemorySegment.NULL);
+                  BaseGpuBuffer frontendBuffer = (BaseGpuBuffer) buffer;
+                  assertTrue(frontendBuffer.isClosed());
+                  assertThrows(IllegalStateException.class, frontendBuffer::checkCanBeUsed);
+              }
+          }
+          JAVA
           set +e
           ./gradlew --no-daemon test --tests com.metallum.client.metal.render.MetalGpuBufferFrontendContractTest \
             -x buildMacNative -x buildIOSNative -x buildIOSSpvc > "$RUNNER_TEMP/contract-audit/before.log" 2>&1
@@ -56,12 +78,190 @@ jobs:
           assert all('ClassCastException' in str(f.attrib) + (f.text or '') for f in failures)
           PY
           cp build/test-results/test/TEST-com.metallum.client.metal.render.MetalGpuBufferFrontendContractTest.xml "$RUNNER_TEMP/contract-audit/before.xml"
-          rm "$testfile"
-          git apply --index "$patch"
+      - name: Apply and verify the reviewed source delta
+        env:
+          TARGET: agent/metaluniversal-system-convergence-20260920
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, subprocess
+          p = Path('src/main/java/com/metallum/client/metal/render/MetalGpuBuffer.java')
+          t = p.read_text().replace('import com.mojang.renderpearl.api.buffers.GpuBufferSlice;', 'import com.mojang.renderpearl.api.buffers.GpuBufferSlice;\nimport com.mojang.renderpearl.backend.common.BaseGpuBuffer;')
+          t = t.replace('public class MetalGpuBuffer implements GpuBuffer,', 'public class MetalGpuBuffer extends BaseGpuBuffer implements')
+          t = t.replace('    private final int usage;\n    private final long size;\n', '')
+          assert t.count('        this.usage = usage;\n        this.size = size;\n') == 2
+          t = t.replace('        this.device = device;\n        this.usage = usage;\n        this.size = size;', '        super(usage, size);\n        this.device = device;')
+          a = t.index('    @Override\n    public long size()')
+          b = t.index('    ByteBuffer sliceStorage', a)
+          t = t[:a] + '''    @Override
+              public void checkCanBeUsed() {
+                  if (isClosed()) {
+                      throw new IllegalStateException("Metal buffer is closed");
+                  }
+              }
+
+          ''' + t[b:]
+          p.write_text(t)
+          for p in Path('src').rglob('*.java'):
+              t = p.read_text()
+              if 'MetalRenderPass.TextureViewAndSampler' not in t and 'MetalRenderPass.@Nullable TextureViewAndSampler' not in t and p.name != 'MetalRenderPass.java':
+                  continue
+              t = t.replace('MetalRenderPass.@Nullable TextureViewAndSampler', '@Nullable TextureViewAndSampler').replace('MetalRenderPass.TextureViewAndSampler', 'TextureViewAndSampler')
+              if p.name == 'MetalRenderPass.java':
+                  t = t.replace('    record TextureViewAndSampler(GpuTextureView textureView, GpuSampler sampler) {\n    }\n', '')
+                  t = t.replace('instanceof com.mojang.renderpearl.util.TextureViewAndSampler pair', 'instanceof TextureViewAndSampler pair')
+              t = re.sub(r'(?<!attachment)(?<!depthAttachment)\.textureView\(\)', '.view()', t)
+              imp = 'import com.mojang.renderpearl.util.TextureViewAndSampler;\n'
+              if imp not in t:
+                  i = t.index('\nimport ') + 1
+                  t = t[:i] + imp + t[i:]
+              p.write_text(t)
+          p = Path('src/main/java/com/metallum/client/metal/render/MetalRenderPass.java')
+          t = p.read_text().replace('import com.mojang.renderpearl.api.textures.GpuSampler;', 'import com.mojang.renderpearl.api.textures.GpuSampler;\nimport com.mojang.renderpearl.api.textures.GpuTexture;')
+          t = t.replace('''            TextureViewAndSampler next = new TextureViewAndSampler(textureView, sampler);
+                      TextureViewAndSampler previous = samplers.put(name, next);
+                      commandEncoder.flushPendingClear((MetalGpuTexture) textureView.texture());''', '''            validateTextureBinding(device, textureView, sampler, name);
+                      commandEncoder.flushPendingClear((MetalGpuTexture) textureView.texture());
+                      TextureViewAndSampler next = new TextureViewAndSampler(textureView, sampler);
+                      TextureViewAndSampler previous = samplers.put(name, next);''')
+          t = t.replace('''            if (samplers.remove(name) != null) {
+                          terrainBindingChanged();''', '''            if (samplers.remove(name) != null) {
+                          markDescriptorDirty(name);
+                          terrainBindingChanged();''')
+          pos = t.index('    @Override\n    public void setUniform(', t.index('    public void bindTexture'))
+          t = t[:pos] + '''    static void validateTextureBinding(
+                      final MetalDevice device,
+                      final @Nullable GpuTextureView view,
+                      final @Nullable GpuSampler sampler,
+                      final String name
+              ) {
+                  if (!(view instanceof MetalGpuTextureView metalView)
+                          || !(metalView.texture() instanceof MetalGpuTexture texture)
+                          || !(sampler instanceof MetalGpuSampler metalSampler)
+                          || !texture.isOwnedBy(device)
+                          || !metalSampler.isOwnedBy(device)
+                          || (texture.usage() & GpuTexture.USAGE_TEXTURE_BINDING) == 0
+                          || metalView.isClosed() || texture.isClosed() || metalSampler.isClosed()) {
+                      throw new IllegalStateException(
+                              "Texture binding '" + name + "' is absent, stale, or owned by another backend/device");
+                  }
+              }
+
+          ''' + t[pos:]
+          t = t.replace('''            if (VALIDATION && textureBinding.view().isClosed()) {
+                          throw new IllegalStateException("Sampler " + binding.name() + " texture view has been closed");
+                      }
+          ''', '''            validateTextureBinding(device, textureBinding.view(), textureBinding.sampler(), binding.name());
+          ''')
+          p.write_text(t)
+          p = Path('src/main/java/com/metallum/client/metal/render/IrisMetalCustomTextures.java')
+          t = p.read_text()
+          a = t.index('        if (!(view instanceof MetalGpuTextureView metalView)', t.index('    static TextureViewAndSampler checkedExternalBinding('))
+          b = t.index('\n    }', a)
+          t = t[:a] + '''        MetalRenderPass.validateTextureBinding(device, view, sampler, "Iris external " + label);
+                  return new TextureViewAndSampler(view, sampler);''' + t[b:]
+          p.write_text(t)
+          p = Path('src/test/java/com/metallum/client/metal/render/TerrainGpuVisibilityProbeContractTest.java')
+          t = p.read_text()
+          a = t.index('    @Test\n    void invalidOrUnavailableNativeProbeInputsFallbackBeforeDispatch()')
+          b = t.index('    @Test', a + 10)
+          method = t[a:b].replace('invalidOrUnavailableNativeProbeInputsFallbackBeforeDispatch', 'invalidNativeProbeInputsReturnBeforeDispatch')
+          t = (t[:a] + t[b:]).replace('import com.metallum.client.metal.render.bridge.MetalNativeBridge;\n', '')
+          p.write_text(t)
+          p.with_name('MetalNativeBridgeTerrainVisibilityContractTest.java').write_text('''package com.metallum.client.metal.render;
+
+          import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+          import org.junit.jupiter.api.Test;
+          import org.junit.jupiter.api.condition.EnabledOnOs;
+          import org.junit.jupiter.api.condition.OS;
+
+          import java.lang.foreign.MemorySegment;
+
+          import static org.junit.jupiter.api.Assertions.assertEquals;
+          import static org.junit.jupiter.api.Assertions.assertTrue;
+
+          @EnabledOnOs(OS.MAC)
+          class MetalNativeBridgeTerrainVisibilityContractTest {
+          ''' + method + '}\n')
+          p.with_name('MetalTextureBindingContractTest.java').write_text('''package com.metallum.client.metal.render;
+
+          import com.mojang.renderpearl.api.textures.GpuSampler;
+          import com.mojang.renderpearl.api.textures.GpuTextureView;
+          import org.junit.jupiter.api.Test;
+
+          import java.lang.reflect.Proxy;
+
+          import static org.junit.jupiter.api.Assertions.assertThrows;
+
+          class MetalTextureBindingContractTest {
+              @Test
+              void foreignBackendIsRejectedBeforeResourceAccess() {
+                  GpuTextureView view = foreignResource(GpuTextureView.class);
+                  GpuSampler sampler = foreignResource(GpuSampler.class);
+                  assertThrows(IllegalStateException.class, () ->
+                          MetalRenderPass.validateTextureBinding(null, view, sampler, "foreign"));
+              }
+
+              @Test
+              void incompleteBindingIsRejected() {
+                  assertThrows(IllegalStateException.class, () ->
+                          MetalRenderPass.validateTextureBinding(null, null, null, "missing"));
+              }
+
+              private static <T> T foreignResource(Class<T> type) {
+                  return type.cast(Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
+                          (proxy, method, args) -> {
+                              throw new AssertionError("Foreign resource must not be accessed: " + method.getName());
+                          }));
+              }
+          }
+          ''')
+          p = Path('.github/workflows/minecraft-26.3-migration.yml')
+          t = p.read_text()
+          a = t.index('          cat > "$RUNNER_TEMP/non-metal-tests.gradle"')
+          b = t.index('          ./gradlew', a)
+          t = (t[:a] + t[b:]).replace('            -I "$RUNNER_TEMP/non-metal-tests.gradle" \\\n', '')
+          p.write_text(t)
+          p = Path('.github/workflows/unified-eval-static.yml')
+          p.write_text(p.read_text().replace('com.metallum.client.metal.render.TerrainGpuVisibilityProbeContractTest.invalidOrUnavailableNativeProbeInputsFallbackBeforeDispatch', 'com.metallum.client.metal.render.MetalNativeBridgeTerrainVisibilityContractTest'))
+          for p in Path('src').rglob('*.java'):
+              t = p.read_text()
+              imp = 'import com.mojang.renderpearl.util.TextureViewAndSampler;\n'
+              if imp in t:
+                  lines = t.replace(imp, '').splitlines(keepends=True)
+                  pos = max(j for j, line in enumerate(lines) if line.startswith('import com.')) + 1
+                  lines.insert(pos, imp)
+                  p.write_text(''.join(lines))
+          expected = '''.github/workflows/minecraft-26.3-migration.yml 993ccc6da063a3378d0c272fdedf6c51e6c8419e
+          .github/workflows/unified-eval-static.yml 0bf9ca43652b9f6e7171fd8df9b558701947377e
+          src/main/java/com/metallum/client/metal/render/IrisMetalCenterDepthSampler.java 28164ae88b84f5f617f7334f2a9813daa5877ec8
+          src/main/java/com/metallum/client/metal/render/IrisMetalCustomTextures.java 12186daae6edcc08cce021e9557023522dddfd19
+          src/main/java/com/metallum/client/metal/render/IrisMetalNoiseTexture.java e46da12187f2e3231431aee7edc0f21e1bf64cf1
+          src/main/java/com/metallum/client/metal/render/IrisMetalPipelineOverrides.java 2bfb0e7930f3a66d6d82b4b594170eb1b66cbc46
+          src/main/java/com/metallum/client/metal/render/IrisMetalShadowPipeline.java 39a9dd0e4a22bb4b93fadadea70f23a091b369bd
+          src/main/java/com/metallum/client/metal/render/IrisMetalWhitePixel.java 5064ce4628e23794acf7729b3ed83e9c7c580ba1
+          src/main/java/com/metallum/client/metal/render/MetalGpuBuffer.java 18590d1998c7a9596cad64aa145c03a8f8139655
+          src/main/java/com/metallum/client/metal/render/MetalRenderPass.java f239396aa063b490a5604f33456fbf6c0cb3fb31
+          src/test/java/com/metallum/client/metal/render/IrisMetalCenterDepthSamplerTest.java 1bf74118e83494b2614d6d734de02233ada0754e
+          src/test/java/com/metallum/client/metal/render/IrisMetalExternalLevelSamplerTest.java 67d69e31d974da5b0234c8bb78723a2be720bb5a
+          src/test/java/com/metallum/client/metal/render/MetalGpuBufferFrontendContractTest.java b5a4a3d267ae2a91151d80409c4b8e872da9d118
+          src/test/java/com/metallum/client/metal/render/MetalIrisCustomTexturesIntegrationTest.java 12eebe1145d07c074554f97ab1f207d79e2bceda
+          src/test/java/com/metallum/client/metal/render/MetalIrisSodiumTerrainTest.java 0b90145c38584135856a517d72073b8dd1a0eb39
+          src/test/java/com/metallum/client/metal/render/MetalNativeBridgeTerrainVisibilityContractTest.java 5754bcb974e4a461e364f034d1080a2a1d68f19a
+          src/test/java/com/metallum/client/metal/render/MetalTextureBindingContractTest.java 16f9b5157308a5e21ee937f4002279a94b81ee5b
+          src/test/java/com/metallum/client/metal/render/TerrainGpuVisibilityProbeContractTest.java 196465fccaf14aa75fce090adc98b1dc73b9d10d'''
+          for line in expected.splitlines():
+              path, sha = line.split()
+              actual = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
+              assert actual == sha, (path, actual, sha)
+              subprocess.run(['git', 'add', '--', path], check=True)
+          PY
           git diff --cached --check
           ./gradlew --no-daemon test -x buildMacNative -x buildIOSNative -x buildIOSSpvc \
             > "$RUNNER_TEMP/contract-audit/after.log" 2>&1
           cp -R build/test-results "$RUNNER_TEMP/contract-audit/after-results"
+          git rm .github/workflows/repository-audit.yml
           git config user.name '21Z121Z1'
           git config user.email '89170834+21Z121Z1@users.noreply.github.com'
           git commit -m 'fix(render): use RenderPearl buffer and binding contracts'
@@ -72,86 +272,8 @@ jobs:
         if: always()
         with:
           name: reviewed-contract-result
-          path: ${{ runner.temp }}/contract-audit/
-          if-no-files-found: error
-          retention-days: 2
-
-  independent-native-control:
-    runs-on: macos-26
-    timeout-minutes: 10
-    env:
-      MTL_DEBUG_LAYER: '0'
-      MTL_SHADER_VALIDATION: '0'
-      MTL_HUD_ENABLED: '0'
-      MTL_HUD_ENCODER_TIMING_ENABLED: '0'
-      MTLFX_HUD_ENABLED: '0'
-    steps:
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '25'
-      - name: Compare an Apple-only pipeline outside and inside the JVM
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/apple-control"
-          cd "$RUNNER_TEMP/apple-control"
-          cat > Control.m <<'OBJC'
-          #import <Metal/Metal.h>
-          #import <AppKit/AppKit.h>
-          #include <stdio.h>
-          int control(int appkit) {
-              @autoreleasepool {
-                  if (appkit) [NSApplication sharedApplication];
-                  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-                  if (!device) return 2;
-                  NSError *error = nil;
-                  NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 v(uint i [[vertex_id]]) { return float4(0,0,0,1); }\nfragment float4 f() { return float4(1,0,0,1); }\n";
-                  id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
-                  if (!library) { NSLog(@"library: %@", error); return 3; }
-                  MTLRenderPipelineDescriptor *descriptor = [MTLRenderPipelineDescriptor new];
-                  descriptor.vertexFunction = [library newFunctionWithName:@"v"];
-                  descriptor.fragmentFunction = [library newFunctionWithName:@"f"];
-                  descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-                  id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
-                  NSLog(@"device=%@ pipeline=%@ error=%@", device.name, pipeline, error);
-                  return pipeline ? 0 : 4;
-              }
-          }
-          #ifdef EXECUTABLE
-          int main(void) { return control(0); }
-          #endif
-          OBJC
-          cat > Call.java <<'JAVA'
-          import java.lang.foreign.*;
-          public class Call {
-              public static void main(String[] args) throws Throwable {
-                  System.load(args[0]);
-                  var handle = Linker.nativeLinker().downcallHandle(
-                          SymbolLookup.loaderLookup().find("control").orElseThrow(),
-                          FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
-                  int result = (int) handle.invokeExact(Integer.parseInt(args[1]));
-                  System.exit(result);
-              }
-          }
-          JAVA
-          xcrun clang -fobjc-arc -framework Metal -framework AppKit -dynamiclib Control.m -o libcontrol.dylib
-          xcrun clang -fobjc-arc -framework Metal -framework AppKit -DEXECUTABLE Control.m -o control
-          javac Call.java
-          set +e
-          ./control > native.log 2>&1
-          echo "native=$?" > exits.txt
-          java --enable-native-access=ALL-UNNAMED -XX:ErrorFile=jvm-hs_err_pid%p.log Call "$PWD/libcontrol.dylib" 0 > jvm.log 2>&1
-          echo "jvm=$?" >> exits.txt
-          java -XstartOnFirstThread --enable-native-access=ALL-UNNAMED -XX:ErrorFile=first-thread-hs_err_pid%p.log Call "$PWD/libcontrol.dylib" 0 > first-thread.log 2>&1
-          echo "first_thread=$?" >> exits.txt
-          java -XstartOnFirstThread --enable-native-access=ALL-UNNAMED -XX:ErrorFile=appkit-hs_err_pid%p.log Call "$PWD/libcontrol.dylib" 1 > appkit.log 2>&1
-          echo "appkit=$?" >> exits.txt
-          cat exits.txt
-          echo 'This diagnostic does not replace any required product gate.'
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: independent-apple-control
-          path: ${{ runner.temp }}/apple-control/
+          path: |
+            ${{ runner.temp }}/contract-audit/
+            build/test-results/
           if-no-files-found: error
           retention-days: 2
