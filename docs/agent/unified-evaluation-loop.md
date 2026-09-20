@@ -356,7 +356,11 @@ following the final GPU drain. The expected trace has exactly `2 * frames + 1`
 rows, with explicit window/frame/phase/sequence identity and monotonic probe
 intervals. Warmup observations cannot enter this trace. Capacity, failure, and
 invalid-event counters fail closed; a failed probe does not interrupt rendering.
-Collection only runs in the explicit performance validation timeline.
+Collection only runs in the explicit performance validation timeline. One
+`probeWarmup` query runs before frame timing is reanchored, so first-use bridge
+initialization is excluded from steady frame measurements. Its duration and
+values are reported separately and cannot enter the window maximum or probe
+sum. A failed warmup query does not substitute for any required window sample.
 
 `peak_resident_memory_bytes` is the **sampled maximum of current process RSS**
 (`resident_size`) under `frame-boundaries-and-final-drain`; transient peaks between

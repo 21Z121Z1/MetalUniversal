@@ -21,7 +21,7 @@ final class ProcessMemoryMeasurementTest {
 
     @Test
     void sampledWindowMaximumDoesNotUseLifetimeHighWaterMark() throws Exception {
-        long[] resident = {10, 30, 20, 50, 40};
+        long[] resident = {9_999, 10, 30, 20, 50, 40};
         var index = new AtomicInteger();
         var clock = new AtomicLong();
         var window = new ProcessMemoryMeasurement(16, () -> rss(resident[index.getAndIncrement()]),
@@ -34,6 +34,8 @@ final class ProcessMemoryMeasurementTest {
         var result = window.finish(9, 42);
         assertTrue(result.complete(), result.toString());
         assertEquals(5, result.sampleCount());
+        assertEquals(9_999, result.probeWarmup().sample().residentBytes());
+        assertEquals(10, result.probeWarmup().durationNanos());
         assertEquals(50, result.peakResidentBytes());
         assertEquals(60, result.peakPhysicalFootprintBytes());
         assertEquals(10_000, result.lifetimeResidentPeakBytesLast());
@@ -64,14 +66,14 @@ final class ProcessMemoryMeasurementTest {
         assertTrue(window.finish(9, 11).complete());
         window.beforeFrame(9, 11);
         window.afterFrame(9, 11);
-        assertEquals(3, calls.get());
+        assertEquals(4, calls.get(), "one explicit warmup probe precedes three window samples");
         window.begin(10, 20);
         window.beforeFrame(10, 20);
         window.afterFrame(10, 20);
         var next = window.finish(10, 21);
         assertTrue(next.complete());
         assertEquals(3, next.sampleCount());
-        assertEquals(6, next.peakResidentBytes());
+        assertEquals(8, next.peakResidentBytes());
         assertTrue(next.samples().stream().allMatch(row -> row.windowId() == 10));
     }
 

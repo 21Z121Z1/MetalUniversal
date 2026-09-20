@@ -26,6 +26,7 @@ final class ProcessMemoryMeasurement {
     private long dropped;
     private long failed;
     private long invalid;
+    private ProbeWarmup probeWarmup;
 
     ProcessMemoryMeasurement(int capacity, Supplier<NativeProcessMemory.Sample> probe, LongSupplier clock) {
         if (capacity < 1 || capacity > MAX_SAMPLES) throw new IllegalArgumentException("Invalid memory sample capacity");
@@ -42,6 +43,11 @@ final class ProcessMemoryMeasurement {
         firstFrame = nextFrame = frame;
         endFrame = endOffset = 0;
         framePending = finished = false;
+        // Resolve/JIT the diagnostic bridge before the caller reanchors frame timing.
+        // This observation is explicit warmup evidence, never a window RSS sample.
+        long warmupStart = clock.getAsLong();
+        NativeProcessMemory.Sample warmupSample = query();
+        probeWarmup = new ProbeWarmup(clock.getAsLong() - warmupStart, warmupSample);
         origin = clock.getAsLong();
         active = true;
     }
@@ -78,20 +84,24 @@ final class ProcessMemoryMeasurement {
             return;
         }
         long begin = clock.getAsLong() - origin;
-        NativeProcessMemory.Sample value;
-        try {
-            value = probe.get();
-            if (value == null) throw new IllegalStateException("Missing memory sample");
-        } catch (RuntimeException failure) {
-            // A failed diagnostic probe must make this metric unavailable, not change rendering.
-            value = new NativeProcessMemory.Sample(-4, 0, 0, 0, 0);
-        }
+        NativeProcessMemory.Sample value = query();
         long end = clock.getAsLong() - origin;
         if (!value.successful()) failed++;
         if (begin < 0 || end < begin || (!samples.isEmpty() && begin < samples.getLast().endOffsetNanos())) invalid++;
         samples.add(new Sample(samples.size(), window, frame, phase, begin, end,
                 value.kernelStatus(), value.returnedWordCount(), value.residentBytes(),
                 value.physicalFootprintBytes(), value.lifetimeResidentPeakBytes()));
+    }
+
+    private NativeProcessMemory.Sample query() {
+        try {
+            var value = probe.get();
+            if (value == null) throw new IllegalStateException("Missing memory sample");
+            return value;
+        } catch (RuntimeException failure) {
+            // A failed diagnostic probe must make the measured metric unavailable, not change rendering.
+            return new NativeProcessMemory.Sample(-4, 0, 0, 0, 0);
+        }
     }
 
     private Snapshot snapshot() {
@@ -116,8 +126,10 @@ final class ProcessMemoryMeasurement {
                 "sampled-maximum", windowId, firstFrame, endFrame, capacity, samples.size(), dropped,
                 failed, invalid, complete, complete ? "complete-sampled-process-rss" : "incomplete-process-memory-samples",
                 peak, footprintPeak, samples.isEmpty() ? 0 : samples.getLast().lifetimeResidentPeakBytes(),
-                totalProbe, maxProbe, endOffset, samples);
+                totalProbe, maxProbe, endOffset, probeWarmup, samples);
     }
+
+    record ProbeWarmup(long durationNanos, NativeProcessMemory.Sample sample) { }
 
     record Sample(long sequence, long windowId, long frameId, String phase,
                   long beginOffsetNanos, long endOffsetNanos, long kernelStatus, long returnedWordCount,
@@ -128,7 +140,8 @@ final class ProcessMemoryMeasurement {
                     int capacitySamples, long sampleCount, long droppedSamples, long failedSamples,
                     long invalidEvents, boolean complete, String status, long peakResidentBytes,
                     long peakPhysicalFootprintBytes, long lifetimeResidentPeakBytesLast,
-                    long totalProbeNanos, long maxProbeNanos, long endOffsetNanos, List<Sample> samples) {
+                    long totalProbeNanos, long maxProbeNanos, long endOffsetNanos,
+                    ProbeWarmup probeWarmup, List<Sample> samples) {
         Snapshot { samples = List.copyOf(samples); }
     }
 }
