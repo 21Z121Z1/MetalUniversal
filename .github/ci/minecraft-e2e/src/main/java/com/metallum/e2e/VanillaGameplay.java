@@ -85,10 +85,10 @@ final class VanillaGameplay {
 
             phase(context, output, report, phases, "inventory-place-break");
             input.pressKey(options -> options.keyInventory);
-            context.waitFor(client -> client.screen != null);
+            context.waitFor(client -> client.gui.screen() != null);
             context.waitTicks(30);
             input.pressKey(options -> options.keyInventory);
-            context.waitFor(client -> client.screen == null);
+            context.waitFor(client -> client.gui.screen() == null);
             world.getServer().runCommand("item replace entity @a hotbar.0 with minecraft:stone 64");
             input.lookAt(0, 75);
             context.waitTicks(10);
