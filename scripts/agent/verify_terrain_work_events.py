@@ -110,6 +110,10 @@ def evaluate(payload: Any) -> dict[str, Any]:
             "summary": {},
         }
 
+    version = payload.get("schemaVersion")
+    if type(version) is not int or version not in (1, 2):
+        errors.append("schemaVersion must be 1 or 2")
+
     expected_root = {
         "schemaVersion",
         "source",
@@ -127,10 +131,6 @@ def evaluate(payload: Any) -> dict[str, Any]:
         errors.append(f"report must contain exactly {sorted(expected_root)}")
     if version == 2 and payload.get("lossScope") != "observation":
         errors.append("schemaVersion 2 requires lossScope='observation'")
-
-    version = payload.get("schemaVersion")
-    if type(version) is not int or version not in (1, 2):
-        errors.append("schemaVersion must be 1 or 2")
 
     source = payload.get("source")
     source_epoch: str | None = None
