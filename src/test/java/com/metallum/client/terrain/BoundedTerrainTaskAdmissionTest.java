@@ -82,6 +82,23 @@ final class BoundedTerrainTaskAdmissionTest {
     }
 
     @Test
+    void backlogModeDefersNewArrivalsUntilTheCurrentVanillaCohortDrains() {
+        Fixture f = new Fixture(new BoundedTerrainTaskAdmission.Config(true, 2, 4));
+        Task firstDeferred = new Task(new Object(), "compile");
+        assertEquals(BoundedTerrainTaskAdmission.Action.DEFER, f.offer(firstDeferred, 2, 10).action());
+
+        // Even though the vanilla batch now has a free slot, a new arrival must not jump into it.
+        Task newer = new Task(new Object(), "compile");
+        assertEquals(BoundedTerrainTaskAdmission.Action.DEFER, f.offer(newer, 1, 20).action());
+        assertEquals(2, f.admission.deferredSize());
+
+        // At the cohort boundary the oldest deferred work is admitted first.
+        var nextBatch = f.admission.drain(2, 100);
+        assertEquals(List.of(firstDeferred, newer), nextBatch.tasks());
+        assertEquals(90L, nextBatch.oldestWaitNanos());
+    }
+
+    @Test
     void fifoDrainAndStableReplacementPreventStarvation() {
         Fixture f = new Fixture(new BoundedTerrainTaskAdmission.Config(true, 1, 8));
         Object firstSection = new Object();
