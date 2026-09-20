@@ -105,6 +105,8 @@ class IrisStageInterfaceTest {
                         locations.put(variable.name(), variable.location());
                     }
                     return locations;
+                } catch (Exception exception) {
+                    throw new AssertionError("SPIR-V reflection failed for " + stage, exception);
                 }
             } finally {
                 Shaderc.shaderc_result_release(result);
