@@ -33,6 +33,9 @@ abstract class LevelRendererTerrainDrawMixin {
 
         LevelRenderer renderer = (LevelRenderer)(Object)this;
         SectionRenderDispatcher dispatcher = renderer.sectionRenderDispatcher();
+        if (dispatcher == null) {
+            return;
+        }
         Map<Object, List<VanillaTerrainWorkTracker.DrawToken>> candidates = new IdentityHashMap<>();
 
         // Vanilla's extractSectionDrawGroups() owns this exact lock while deriving batch
