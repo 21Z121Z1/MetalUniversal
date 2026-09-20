@@ -9,6 +9,7 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContex
 import net.minecraft.core.BlockPos;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.GraphicsPreset;
+import com.mojang.renderpearl.api.device.GpuSurface;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -30,8 +31,10 @@ public final class VanillaGameplay {
     private static int invalidSettingsFrames;
     private static int throttledFrames;
     private static int droppedSamples;
+    private static GpuSurface.Configuration lastPresentedConfiguration;
 
-    public static void sourceFramePresented(Minecraft client) {
+    public static void sourceFramePresented(Minecraft client, GpuSurface.Configuration presented) {
+        lastPresentedConfiguration = presented;
         if (!recordingFrames) return;
         long now = System.nanoTime();
         if (frameCount < FRAME_TIMES.length) FRAME_TIMES[frameCount++] = now;
@@ -39,6 +42,7 @@ public final class VanillaGameplay {
         var target = client.gameRenderer.mainRenderTarget();
         if (client.getWindow().getWidth() != NATIVE_WIDTH || client.getWindow().getHeight() != NATIVE_HEIGHT
                 || target.width != NATIVE_WIDTH || target.height != NATIVE_HEIGHT
+                || presented == null || presented.width() != NATIVE_WIDTH || presented.height() != NATIVE_HEIGHT
                 || client.options.getEffectiveRenderDistance() != 32) invalidSettingsFrames++;
         if (client.getFramerateLimitTracker().getFramerateLimit() < 260) throttledFrames++;
     }
@@ -63,6 +67,10 @@ public final class VanillaGameplay {
             client.options.fullscreen().set(true);
             client.getWindow().setFullscreen(true);
         });
+        // Fabric intentionally decouples its virtual framebuffer from native
+        // resize events. Set the public test-input size as well as fullscreen.
+        input.resizeWindow(NATIVE_WIDTH, NATIVE_HEIGHT);
+        context.runOnClient(Minecraft::invalidateSurfaceConfiguration);
         context.waitFor(client -> client.getWindow().getWidth() == NATIVE_WIDTH
                 && client.getWindow().getHeight() == NATIVE_HEIGHT, 600);
         world.getServer().runCommand("gamemode creative @a");
@@ -86,6 +94,11 @@ public final class VanillaGameplay {
         require(settings.get("effectiveRenderDistance").getAsInt() == 32, "Maximum view distance did not activate");
         require(settings.get("renderWidth").getAsInt() == NATIVE_WIDTH
                 && settings.get("renderHeight").getAsInt() == NATIVE_HEIGHT, "Render target is not native resolution");
+        require(settings.get("nativeWindowPixelWidth").getAsInt() == NATIVE_WIDTH
+                && settings.get("nativeWindowPixelHeight").getAsInt() == NATIVE_HEIGHT
+                && settings.get("presentWidth").getAsInt() == NATIVE_WIDTH
+                && settings.get("presentHeight").getAsInt() == NATIVE_HEIGHT,
+                "Native window/present dimensions differ from the physical display: " + settings);
         report.addProperty("reuseEncoderState", Boolean.getBoolean("metallum.opt.reuseEncoderState"));
         int initialVisibleSections = context.computeOnClient(client -> client.levelRenderer.visibleSections().size());
         report.addProperty("initialVisibleSections", initialVisibleSections);
@@ -226,6 +239,11 @@ public final class VanillaGameplay {
 
     private static JsonObject settings(Minecraft client) {
         JsonObject value = new JsonObject();
+        var physical = client.getWindow().queryFramebufferSize();
+        value.addProperty("nativeWindowPixelWidth", physical.width());
+        value.addProperty("nativeWindowPixelHeight", physical.height());
+        value.addProperty("presentWidth", lastPresentedConfiguration == null ? 0 : lastPresentedConfiguration.width());
+        value.addProperty("presentHeight", lastPresentedConfiguration == null ? 0 : lastPresentedConfiguration.height());
         value.addProperty("framebufferWidth", client.getWindow().getWidth());
         value.addProperty("framebufferHeight", client.getWindow().getHeight());
         value.addProperty("renderWidth", client.gameRenderer.mainRenderTarget().width);
