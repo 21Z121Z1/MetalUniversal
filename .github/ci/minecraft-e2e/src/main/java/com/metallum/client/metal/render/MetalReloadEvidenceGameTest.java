@@ -25,7 +25,7 @@ public final class MetalReloadEvidenceGameTest implements FabricClientGameTest {
                 .toAbsolutePath().normalize();
 
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
-            singleplayer.getClientLevel().waitForChunksRender();
+            singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(20);
 
             CompletableFuture<?> reload = context.computeOnClient(client -> startResourceReload(client));
@@ -41,7 +41,7 @@ public final class MetalReloadEvidenceGameTest implements FabricClientGameTest {
                 return Boolean.TRUE;
             });
 
-            singleplayer.getClientLevel().waitForChunksRender();
+            singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(30);
 
             ReloadSnapshot snapshot = context.computeOnClient(client -> {
@@ -79,7 +79,7 @@ public final class MetalReloadEvidenceGameTest implements FabricClientGameTest {
             return future;
         } catch (NoSuchMethodException exception) {
             throw new IllegalStateException(
-                    "Minecraft 26.2 no longer exposes reloadResourcePacks(); update the P0 reload oracle",
+                    "Minecraft 26.3 no longer exposes reloadResourcePacks(); update the P0 reload oracle",
                     exception
             );
         } catch (IllegalAccessException | InvocationTargetException exception) {
