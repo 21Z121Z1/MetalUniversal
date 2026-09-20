@@ -1,0 +1,51 @@
+name: Bounded repository audit
+
+on:
+  push:
+    branches: [agent/metaluniversal-system-convergence-20260920]
+    paths: ['.github/workflows/repository-audit.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export repository history and public comparison inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mu-audit"
+          OUT="$RUNNER_TEMP/mu-audit"
+          git bundle create "$OUT/MetalUniversal.bundle" --all
+          git rev-parse HEAD > "$OUT/source-sha.txt"
+          gh api --paginate 'repos/21Z121Z1/MetalUniversal/pulls?state=all&per_page=100' > "$OUT/pulls.json"
+          gh api 'repos/21Z121Z1/MetalUniversal' > "$OUT/repository.json"
+          gh api 'repos/21Z121Z1/MetalUniversal/releases?per_page=100' > "$OUT/releases.json"
+          gh api 'repos/21Z121Z1/MetalUniversal/actions/runs?per_page=100' > "$OUT/runs.json"
+          gh api 'repos/21Z121Z1/MetalUniversal/rulesets' > "$OUT/rulesets.json"
+          gh api --paginate 'repos/EternityQwQ/MetalUniversal/forks?per_page=100&sort=newest' > "$OUT/forks.json"
+          for repo in EternityQwQ/MetalUniversal kokodio/metallum twoyears666/MetalUniversal PigeonCoders/MetalUniversal-Iris PigeonCoders/MetalUniversal-1.21.11; do
+            key="${repo//\//__}"
+            if git clone --bare "https://github.com/$repo.git" "$RUNNER_TEMP/$key.git"; then
+              git -C "$RUNNER_TEMP/$key.git" bundle create "$OUT/$key.bundle" --all
+              gh api "repos/$repo" > "$OUT/$key.json"
+            else
+              printf '%s\n' "Unavailable: $repo" >> "$OUT/unavailable.txt"
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repository-audit-inputs
+          path: ${{ runner.temp }}/mu-audit/
+          if-no-files-found: error
+          retention-days: 2
