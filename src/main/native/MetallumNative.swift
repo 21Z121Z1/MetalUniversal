@@ -7686,12 +7686,12 @@ public func metallum_create_system_default_device() -> UnsafeMutableRawPointer? 
         #if os(macOS)
         // Metal's HUD subsystem must be enabled before the device is created.
         // A mod cannot add MetalHUDEnabled to the host launcher's Info.plist,
-        // so prime the equivalent documented environment switch here. The
-        // persisted Sodium option supplies the layer request at next startup.
-        setenv("MTL_HUD_ENABLED", "1", 1)
-        // MetalFX registers its Temporal and Frame Interpolator sections only
-        // when this separate switch is present before the effects are built.
-        setenv("MTLFX_HUD_ENABLED", "1", 1)
+        // so provide the documented environment switch only when the launcher
+        // did not set it. An explicit 0 must remain authoritative.
+        setenv("MTL_HUD_ENABLED", "1", 0)
+        // MetalFX uses a separate startup switch. Preserve an explicit caller
+        // setting for the same reason.
+        setenv("MTLFX_HUD_ENABLED", "1", 0)
         #endif
         return retainedPointer(MTLCreateSystemDefaultDevice())
     }

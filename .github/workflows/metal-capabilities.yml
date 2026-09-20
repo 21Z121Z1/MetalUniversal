@@ -81,6 +81,7 @@ jobs:
             compileMetalMrtSmokeTest \
             compileMetal4PipelineSmokeTest \
             compileMetal4PipelinePathTest \
+            compileMetalHudRuntimeTest \
             compileMetalFxOffscreenValidation \
             compileMetalFxPerformanceValidation \
             compileMetalFrameGenerationPresentationValidation
@@ -91,6 +92,7 @@ jobs:
             | tee build/agent-evidence/metal-mrt.log
           ./gradlew --no-daemon --stacktrace \
             -I .github/ci/HostedMetalGradle.init.gradle \
+            metalHudDisabledEnvironmentTest \
             metal4PipelineSmokeTest \
             metal4PipelinePathTest \
             hostedMetalCoreIntegrationTest \
