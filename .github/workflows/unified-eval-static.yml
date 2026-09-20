@@ -79,6 +79,11 @@ jobs:
             compileJava \
             compileMetal4PipelineSmokeTest \
             compileMetal4PipelinePathTest
+      - name: Execute JVM-to-FFM native bridge contracts
+        run: |
+          ./gradlew --no-daemon test \
+            --tests com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest \
+            --tests com.metallum.client.metal.render.TerrainGpuVisibilityProbeContractTest.invalidOrUnavailableNativeProbeInputsFallbackBeforeDispatch
       - name: Verify native artifact and exported ABI
         run: |
           set -euo pipefail
@@ -92,8 +97,9 @@ jobs:
         run: |
           cat <<'BOUNDARY'
           Hosted macOS compilation proves toolchain compatibility, native build integration,
-          and exported-symbol presence for the exact candidate commit. Physical Apple Silicon
-          still owns attended presentation, visual parity, stable performance, thermals, and MetalFX quality.
+          exported-symbol presence, and the selected JVM-to-FFM contracts for the exact commit.
+          Physical Apple Silicon still owns attended presentation, visual parity, stable performance,
+          thermals, and MetalFX quality.
           BOUNDARY
       - uses: actions/upload-artifact@v4
         if: always()
@@ -102,6 +108,8 @@ jobs:
           path: |
             src/main/resources/natives/macos/libmetallum.dylib
             build/metallum-native-symbols.txt
+            build/reports/tests/
+            build/test-results/
             build/reports/problems/
           if-no-files-found: warn
           retention-days: 14
