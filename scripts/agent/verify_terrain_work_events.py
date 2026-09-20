@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 U64_MAX = (1 << 64) - 1
 I64_MIN = -(1 << 63)
 I64_MAX = (1 << 63) - 1
@@ -32,6 +32,7 @@ STAGES = {
     "GPU_DEPENDENCY_READY",
     "PUBLISHED",
     "FIRST_VALID_DRAW",
+    "DRAW_NOT_REQUIRED",
     "GPU_COMPLETED",
     "CANCELLED",
     "RETIRED",
@@ -120,11 +121,16 @@ def evaluate(payload: Any) -> dict[str, Any]:
         "failureReason",
         "events",
     }
+    if version == 2:
+        expected_root.add("lossScope")
     if set(payload) != expected_root:
         errors.append(f"report must contain exactly {sorted(expected_root)}")
+    if version == 2 and payload.get("lossScope") != "observation":
+        errors.append("schemaVersion 2 requires lossScope='observation'")
 
-    if payload.get("schemaVersion") != SCHEMA_VERSION:
-        errors.append(f"schemaVersion must be {SCHEMA_VERSION}")
+    version = payload.get("schemaVersion")
+    if type(version) is not int or version not in (1, 2):
+        errors.append("schemaVersion must be 1 or 2")
 
     source = payload.get("source")
     source_epoch: str | None = None
@@ -182,6 +188,7 @@ def evaluate(payload: Any) -> dict[str, Any]:
     groups: dict[tuple[str, ...], list[dict[str, Any]]] = {}
     previous_sequence = -1
     seen_sequences: set[int] = set()
+    work_id_owners: dict[str, tuple[str, ...]] = {}
     for index, raw in enumerate(events):
         if not isinstance(raw, dict):
             errors.append(f"events[{index}] must be an object")
@@ -197,6 +204,8 @@ def evaluate(payload: Any) -> dict[str, Any]:
             "frameIndex",
             "meshGeneration",
         }
+        if version == 2:
+            expected_event.add("workId")
         if set(raw) != expected_event:
             errors.append(f"events[{index}] must contain exactly {sorted(expected_event)}")
 
@@ -217,6 +226,13 @@ def evaluate(payload: Any) -> dict[str, Any]:
                 errors.append(
                     f"events[{index}] crosses world epoch: report={source_epoch}, event={key[0]}"
                 )
+            if version == 2:
+                work_id = raw.get("workId")
+                if _u64(work_id, f"events[{index}].workId", errors) is not None:
+                    previous_owner = work_id_owners.setdefault(work_id, key)
+                    if previous_owner != key:
+                        errors.append(f"workId {work_id} was rebound to a different content identity")
+                    key = key + (work_id,)
             groups.setdefault(key, []).append(raw)
 
         stage = raw.get("stage")
@@ -250,7 +266,7 @@ def evaluate(payload: Any) -> dict[str, Any]:
         mesh_generation = raw.get("meshGeneration")
         if mesh_generation is not None:
             _u64(mesh_generation, f"events[{index}].meshGeneration", errors)
-        if stage in {"PUBLISHED", "FIRST_VALID_DRAW"} and mesh_generation is None:
+        if stage in {"PUBLISHED", "FIRST_VALID_DRAW", "DRAW_NOT_REQUIRED"} and mesh_generation is None:
             errors.append(f"events[{index}] {stage} requires meshGeneration")
         if stage == "FIRST_VALID_DRAW" and frame_index is None:
             errors.append(f"events[{index}] FIRST_VALID_DRAW requires frameIndex")
@@ -261,6 +277,9 @@ def evaluate(payload: Any) -> dict[str, Any]:
     missing_first_draw_items = 0
     cancelled_items = 0
     retired_items = 0
+    no_draw_items = 0
+    unfinished_items = 0
+    durations: dict[str, list[int]] = {name: [] for name in ("queue", "build", "uploadToPublish")}
 
     for key, work_events in groups.items():
         timestamps: list[int] = []
@@ -280,6 +299,9 @@ def evaluate(payload: Any) -> dict[str, Any]:
             errors.append(f"work key reported FIRST_VALID_DRAW more than once: key={key}")
         if len(positions.get("RETIRED", [])) > 1:
             errors.append(f"work key retired more than once: key={key}")
+        for unique_stage in ("DATA_READY", "QUEUED", "BUILD_START", "BUILD_END", "CANCELLED", "DRAW_NOT_REQUIRED"):
+            if len(positions.get(unique_stage, [])) > 1:
+                errors.append(f"duplicate {unique_stage} for key={key}")
 
         for before, after in CAUSAL_PAIRS:
             if before in positions and after in positions and min(positions[before]) > min(positions[after]):
@@ -299,6 +321,13 @@ def evaluate(payload: Any) -> dict[str, Any]:
 
         published = [event for event in work_events if event.get("stage") == "PUBLISHED"]
         first_draw = [event for event in work_events if event.get("stage") == "FIRST_VALID_DRAW"]
+        no_draw = [event for event in work_events if event.get("stage") == "DRAW_NOT_REQUIRED"]
+        if no_draw:
+            no_draw_items += 1
+            if first_draw or not published or no_draw[0].get("meshGeneration") != published[0].get("meshGeneration"):
+                errors.append(f"DRAW_NOT_REQUIRED must identify a published generation with no draw: key={key}")
+            elif positions["DRAW_NOT_REQUIRED"][0] < positions["PUBLISHED"][0]:
+                errors.append(f"DRAW_NOT_REQUIRED precedes publication: key={key}")
         if published:
             published_items += 1
         if first_draw:
@@ -322,10 +351,21 @@ def evaluate(payload: Any) -> dict[str, Any]:
                 if draw_nanos >= start_nanos:
                     latencies.append(draw_nanos - start_nanos)
 
-        if published and not first_draw and not cancelled_positions:
+        if published and not first_draw and not no_draw and not cancelled_positions:
             missing_first_draw_items += 1
+        if not first_draw and not no_draw and not cancelled_positions and not retired_positions:
+            unfinished_items += 1
         if positions.get("RETIRED"):
             retired_items += 1
+        for name, before, after in (("queue", "QUEUED", "BUILD_START"),
+                                    ("build", "BUILD_START", "BUILD_END"),
+                                    ("uploadToPublish", "UPLOAD_QUEUED", "PUBLISHED")):
+            if before in positions and after in positions:
+                left = work_events[positions[before][0]].get("monotonicNanos")
+                right = work_events[positions[after][0]].get("monotonicNanos")
+                if isinstance(left, str) and isinstance(right, str) and left.isdigit() and right.isdigit():
+                    if int(right) >= int(left):
+                        durations[name].append(int(right) - int(left))
 
     if errors:
         return {
@@ -346,6 +386,7 @@ def evaluate(payload: Any) -> dict[str, Any]:
         and not lossy
         and len(latencies) > 0
         and missing_first_draw_items == 0
+        and unfinished_items == 0
     )
     if status == "failed":
         state = "valid-failed-trial"
@@ -371,9 +412,17 @@ def evaluate(payload: Any) -> dict[str, Any]:
             "missingFirstValidDrawItems": missing_first_draw_items,
             "cancelledItems": cancelled_items,
             "retiredItems": retired_items,
+            "noDrawRequiredItems": no_draw_items,
+            "unfinishedItems": unfinished_items,
             "droppedEvents": int(dropped),
             "latencySampleCount": len(latencies),
             "firstValidDrawP95Nanos": None if p95 is None else str(p95),
+            "stageDurationsNanos": {
+                name: {"samples": len(values), **{
+                    f"p{percentile}": str(sorted(values)[max(0, math.ceil(percentile / 100 * len(values)) - 1)]) if values else None
+                    for percentile in (50, 95, 99)}}
+                for name, values in durations.items()
+            },
         },
     }
 
