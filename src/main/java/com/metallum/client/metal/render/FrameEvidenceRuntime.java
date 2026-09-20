@@ -1,10 +1,13 @@
 package com.metallum.client.metal.render;
 
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.terrain.VanillaTerrainWorkTelemetry;
+import com.metallum.client.validation.storage.ValidationStorageBudget;
 import com.mojang.blaze3d.systems.RenderSystem;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -109,9 +112,34 @@ public final class FrameEvidenceRuntime {
             report.addProperty("validationStatus", validationStatus);
             report.addProperty("shutdownDrained", true);
             Files.createDirectories(output.toAbsolutePath().getParent());
+            writeTerrainEvidence(output.toAbsolutePath().getParent(), report);
             Files.writeString(output, new GsonBuilder().serializeNulls().setPrettyPrinting().create().toJson(report) + "\n");
         } catch (IOException exception) {
             Metallum.LOGGER.error("Could not export frame evidence to {}", output, exception);
+        }
+    }
+
+    private static void writeTerrainEvidence(Path directory, JsonObject frameReport) {
+        if (!Boolean.getBoolean(VanillaTerrainWorkTelemetry.ENABLE_PROPERTY)) return;
+        JsonArray files = new JsonArray();
+        frameReport.add("terrainEvidenceFiles", files);
+        try {
+            String sourceSha = IDENTITY.getAsJsonObject("build").get("sourceSha").getAsString();
+            String trialId = IDENTITY.get("trialId").getAsString();
+            // Shutdown drains GPU work; it does not certify a completed validation trial.
+            boolean passed = "passed".equals(validationStatus);
+            var reports = VanillaTerrainWorkTelemetry.reports(sourceSha, trialId, passed,
+                    passed ? null : validationStatus);
+            var storage = ValidationStorageBudget.shared(directory);
+            for (var entry : reports.entrySet()) {
+                String name = "terrain-work-epoch-" + entry.getKey() + ".json";
+                storage.writeString(directory.resolve(name),
+                        new GsonBuilder().serializeNulls().create().toJson(entry.getValue()) + "\n");
+                files.add(name);
+            }
+        } catch (IOException | RuntimeException exception) {
+            frameReport.addProperty("terrainEvidenceUnavailableReason", exception.toString());
+            Metallum.LOGGER.error("Could not export terrain evidence to {}", directory, exception);
         }
     }
 
