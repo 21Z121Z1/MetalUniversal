@@ -128,6 +128,10 @@ public final class TerrainPublicationGenerationGuard<T> {
             if (!active()) {
                 return;
             }
+            // Vanilla createCompileTask() cancels the prior task before creating its replacement.
+            // Remove those cancelled task-only identities eagerly; any already-staged mesh keeps
+            // its own token in meshTokens and can still be rejected at late publication.
+            taskTokens.entrySet().removeIf(entry -> taskOps.isCancelled(entry.getKey()));
             if (!taskTokens.containsKey(task) && taskTokens.size() >= config.maxTrackedTasks()) {
                 failOpenLocked(FailOpenReason.TASK_CAPACITY);
                 return;
