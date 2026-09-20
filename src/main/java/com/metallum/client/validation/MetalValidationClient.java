@@ -134,6 +134,12 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final int SCENE_BLOCK_UPDATE_FLAGS = Block.UPDATE_NEIGHBORS
             | Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE | Block.UPDATE_IMMEDIATE;
 
+    // Keep the reveal/capture at frame 46. Vanilla publishes rebuilt sections
+    // after drawing, so stage removal at 45; Sodium's supported synchronous
+    // important-rebuild path still removes it in frame 46.
+    private static final int OCCLUSION_WALL_REMOVAL_FRAME =
+            46 - (ENABLED ? SodiumValidationBridge.terrainMutationLeadFrames() : 0);
+
     private static final int WARMUP_FRAMES = 40;
     private static final long WARMUP_FRAME_SLEEP_MILLIS = 50L;
     // Static-camera hold on the cutout grass scene: only the Halton jitter
@@ -546,7 +552,7 @@ public final class MetalValidationClient implements ClientModInitializer {
 
         if (frame == 38) {
             installOcclusionWall(minecraft);
-        } else if (frame == 46) {
+        } else if (frame == OCCLUSION_WALL_REMOVAL_FRAME) {
             removeOcclusionWall(minecraft);
         } else if (frame == 54) {
             minecraft.gui.setScreen(new InventoryScreen(minecraft.player));
@@ -1244,7 +1250,7 @@ public final class MetalValidationClient implements ClientModInitializer {
 
     /** Frames whose handler mutates terrain and needs the section builder idle. */
     private static boolean isSceneMutationFrame(final int timelineFrame) {
-        return timelineFrame == 38 || timelineFrame == 46 || timelineFrame == 66
+        return timelineFrame == 38 || timelineFrame == OCCLUSION_WALL_REMOVAL_FRAME || timelineFrame == 66
                 || timelineFrame == 75 || timelineFrame == SKY_SCENE_FRAME
                 || timelineFrame == LOD_SCENE_FRAME
                 // Restores the sky scene's opened ceiling, so it re-meshes terrain.

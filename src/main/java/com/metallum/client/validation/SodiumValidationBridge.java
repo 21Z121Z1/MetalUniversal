@@ -28,6 +28,18 @@ final class SodiumValidationBridge {
     private SodiumValidationBridge() {
     }
 
+    /** Frames between a scripted block mutation and its first terrain draw. */
+    static int terrainMutationLeadFrames() {
+        if (RENDERER_API != null) {
+            return 0; // The supported Sodium important-rebuild path runs before drawing.
+        }
+        if (isSodiumClassPresent()) {
+            throw new IllegalStateException("Unsupported Sodium validation API; terrain publication timing is unknown");
+        }
+        // Vanilla 26.3 compiles/uploads sections after executing the frame graph.
+        return 1;
+    }
+
     static boolean terrainSettled() {
         RendererApi api = RENDERER_API;
         if (api == null) {
