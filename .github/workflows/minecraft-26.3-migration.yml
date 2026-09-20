@@ -344,11 +344,19 @@ jobs:
           root = Path(sys.argv[1])
           extractor = (root / "net/minecraft/client/renderer/extract/LevelExtractor.java").read_text()
           dispatcher = (root / "net/minecraft/client/renderer/chunk/SectionRenderDispatcher.java").read_text()
+          listener = (root / "net/minecraft/client/multiplayer/ClientPacketListener.java").read_text()
 
           checks = {
               "dirty mutation remains explicit": "setSectionDirty(final int sectionX" in extractor,
               "world transition remains explicit": "void setLevel(" in extractor,
               "full geometry invalidation remains explicit": "void allChanged(" in extractor,
+              "light packet still schedules rebuild-enabled application":
+                  "this.level.queueLightUpdate(() -> this.applyLightData(x, z, lightData, true));" in listener,
+              "light section application still dirties rebuild neighborhood": bool(re.search(
+                  r"readSectionList[\s\S]{0,2200}if\s*\(scheduleRebuild\)[\s\S]{0,220}"
+                  r"this\.level\.setSectionDirtyWithNeighbors\(chunkX,\s*sectionY,\s*chunkZ\)",
+                  listener,
+              )),
               "setSectionMesh has exactly two vanilla callers": dispatcher.count("setSectionMesh(") == 3,
               "compile task remains a private nested task": "private class CompileTask extends SectionRenderDispatcher.RenderSection.SectionTask" in dispatcher,
               "compile task still checks cancellation before compiler": bool(re.search(
