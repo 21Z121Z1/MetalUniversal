@@ -43,7 +43,13 @@ final class VanillaGameplay {
             client.player.getAbilities().flying = true;
             client.player.onUpdateAbilities();
         });
-        world.getConnection().waitForChunksRender();
+        // Profiling live streaming does not require Fabric's full square of
+        // downloaded chunks (including corners outside Vanilla's send radius).
+        // Let received geometry finish and retain ordinary generation during flight.
+        context.waitTicks(100);
+        world.getConnection().waitForChunksRender(false, 1200);
+        report.addProperty("initialVisibleSections", context.computeOnClient(
+                client -> client.levelRenderer.visibleSections().size()));
         report.addProperty("status", "ready");
         write(output.resolve("gameplay-ready.json"), report);
         if (Boolean.getBoolean("metallum.ci.waitForProfiler")) {
