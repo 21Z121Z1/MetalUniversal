@@ -70,6 +70,10 @@ public final class FrameEvidenceRuntime {
         if (ENABLED) RECORDER.submitted(submission);
     }
 
+    public static void presentationRequested(FrameEvidenceRecorder.Submission submission, long nativeId) {
+        if (ENABLED) RECORDER.presentationRequested(submission, nativeId);
+    }
+
     public static void completed(FrameEvidenceRecorder.Submission submission, boolean success, double start, double end) {
         if (ENABLED) RECORDER.completed(submission, success, start, end);
     }

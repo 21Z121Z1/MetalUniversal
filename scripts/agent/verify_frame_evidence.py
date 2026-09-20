@@ -43,6 +43,7 @@ def verify(report, expected_head, require_packaged=False):
     previous_frame = 0
     seen_frames = set()
     seen_submissions = set()
+    seen_presentations = set()
     cpu, crossings, abi_time, gpu_service = [], [], [], []
     for frame in report["frames"]:
         frame_id = integer(frame["frameId"], 1)
@@ -73,6 +74,20 @@ def verify(report, expected_head, require_packaged=False):
             require(sid not in seen_submissions, "duplicate submission identity")
             seen_submissions.add(sid)
             integer(submission["nativeSubmitIndex"])
+            # Additive v1 fields: older captures remain readable, but partial/contradictory
+            # presentation receipts must not turn a requested present into display evidence.
+            if {"presentationRequested", "nativePresentationId", "presentationIdUnavailableReason"} & submission.keys():
+                requested = submission["presentationRequested"]
+                require(type(requested) is bool, "invalid presentation request")
+                present_id = submission["nativePresentationId"]
+                if present_id is None:
+                    reason = "native-present-id-not-returned" if requested else "no-presentation-request"
+                else:
+                    integer(present_id, 1)
+                    require(requested and present_id not in seen_presentations, "unrequested/duplicate native presentation ID")
+                    seen_presentations.add(present_id)
+                    reason = ""
+                require(submission["presentationIdUnavailableReason"] == reason, "contradictory presentation ID availability")
             require(all(submission[k] is True for k in ("submitted", "completed", "success")), "pending/failed command buffer")
             ns = submission["gpuServiceNs"]
             if ns is not None:
@@ -112,6 +127,8 @@ def self_test():
                     "producerEntries": ["vanilla-terrain-layer-return"],
                     "abi": {"metallum_draw": {"calls": 2, "inclusiveNs": 50, "exclusiveNs": 40, "failures": 0}},
                     "commandBuffers": [{"submissionId": 1, "nativeSubmitIndex": 0, "submitted": True,
+                                        "presentationRequested": True, "nativePresentationId": 17,
+                                        "presentationIdUnavailableReason": "",
                                         "completed": True, "success": True, "gpuServiceNs": 80,
                                         "gpuUnavailableReason": ""}]}]}
     assert verify(fixture, head, True)["cpuFrameNs"]["p99"] == 100
@@ -121,6 +138,10 @@ def self_test():
     unavailable = copy.deepcopy(fixture)
     unavailable["frames"][0]["commandBuffers"][0].update(gpuServiceNs=None, gpuUnavailableReason="gpu-timestamp-unavailable")
     assert verify(unavailable, head)["commandBufferGpuServiceNs"]["samples"] == 0
+    deferred_present = copy.deepcopy(fixture)
+    deferred_present["frames"][0]["commandBuffers"][0].update(
+        nativePresentationId=None, presentationIdUnavailableReason="native-present-id-not-returned")
+    verify(deferred_present, head)
     mutations = [
         lambda x: x["identity"]["build"].update(sourceSha="e" * 40),
         lambda x: x["identity"]["build"].update(dirty=True),
@@ -136,6 +157,9 @@ def self_test():
         lambda x: x["frames"][0]["commandBuffers"][0].update(completed=False),
         lambda x: x["frames"][0]["commandBuffers"][0].update(success=False),
         lambda x: x["frames"][0]["commandBuffers"][0].update(gpuServiceNs=0),
+        lambda x: x["frames"][0]["commandBuffers"][0].update(presentationRequested=False),
+        lambda x: x["frames"][0]["commandBuffers"][0].update(nativePresentationId=0),
+        lambda x: x["frames"][0]["commandBuffers"][0].update(presentationIdUnavailableReason="presented"),
     ]
     for mutate in mutations:
         broken = copy.deepcopy(fixture)

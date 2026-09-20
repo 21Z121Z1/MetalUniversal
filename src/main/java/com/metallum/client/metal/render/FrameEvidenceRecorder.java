@@ -81,6 +81,18 @@ public final class FrameEvidenceRecorder {
         submission.submitted = true;
     }
 
+    /** The existing native ticket identifies scheduled presentation, not a displayed frame. */
+    public synchronized void presentationRequested(Submission submission, long nativeId) {
+        if (submission == null) return;
+        if (submission.presentationRequested || submission.submitted || nativeId < 0) {
+            submission.frame.failure = "invalid-presentation-request";
+            return;
+        }
+        if (submission.frame != current.get()) submission.frame.failure = "cross-frame-presentation";
+        submission.presentationRequested = true;
+        submission.nativePresentationId = nativeId;
+    }
+
     public synchronized void completed(Submission submission, boolean success, double start, double end) {
         if (submission == null) return;
         if (submission.completed || !submission.submitted) submission.frame.failure = "invalid-completion";
@@ -171,6 +183,11 @@ public final class FrameEvidenceRecorder {
                 JsonObject value = new JsonObject();
                 value.addProperty("submissionId", submission.id);
                 value.addProperty("nativeSubmitIndex", submission.nativeSubmitIndex);
+                value.addProperty("presentationRequested", submission.presentationRequested);
+                value.add("nativePresentationId", submission.nativePresentationId > 0
+                        ? new JsonPrimitive(submission.nativePresentationId) : JsonNull.INSTANCE);
+                value.addProperty("presentationIdUnavailableReason", submission.nativePresentationId > 0 ? ""
+                        : !submission.presentationRequested ? "no-presentation-request" : "native-present-id-not-returned");
                 value.addProperty("submitted", submission.submitted);
                 value.addProperty("completed", submission.completed);
                 value.addProperty("success", submission.success);
@@ -194,7 +211,8 @@ public final class FrameEvidenceRecorder {
         unavailable.addProperty("terrainLatency", "use generation-keyed terrain-work-epoch reports; no timestamp proximity join");
         unavailable.addProperty("memoryAndCopyBytes", "no frame-scoped allocation/copy authority connected");
         unavailable.addProperty("shaderCompileBlockingNs", "compile ABI time does not cover Java translation/cache work");
-        unavailable.addProperty("sourcePresentIdAndGeneratedFrames", "GPU completion does not prove display presentation");
+        unavailable.addProperty("presentedTimeAndGeneratedFrames", "native presentation tickets identify scheduling; GPU completion does not prove display presentation");
+        unavailable.addProperty("metal4NativePresentationId", "Metal 4 assigns its native ticket at commit and does not return it through the encode ABI");
         root.add("unavailable", unavailable);
         return root;
     }
@@ -237,6 +255,8 @@ public final class FrameEvidenceRecorder {
         private boolean completed;
         private boolean success;
         private long gpuNanos;
+        private boolean presentationRequested;
+        private long nativePresentationId;
         private Submission(Frame frame, long id, long nativeSubmitIndex) {
             this.frame = frame; this.id = id; this.nativeSubmitIndex = nativeSubmitIndex;
         }

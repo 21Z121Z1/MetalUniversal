@@ -14,12 +14,17 @@ native ABI descriptors, resource ownership and presentation unchanged.
 | CPU frame interval | `Minecraft.renderFrame` HEAD through RETURN, monotonic clock | Includes observer overhead, extraction and render work; not input latency or source FPS |
 | ABI count and inclusive/exclusive duration | All four central `MetalNativeBridge` downcall factories | Render-thread calls inside this frame only; worker/startup calls excluded; duration includes native waits/compilation |
 | GPU service time | Existing main command-buffer completion and GPU start/end timestamps | One row per submission; never renamed GPU frame critical-path time or present time |
+| Native presentation ticket | Existing ordinary-present encode return, attached to the owning command-buffer record before commit | Scheduling identity only, not a displayed frame; Metal 4 assigns its ticket at native commit and currently returns no encode-time ticket |
 | Producer entries | Vanilla completed layer submission, Sodium terrain setup, active Iris generation | Distinct facts; installed mods and producer entry do not prove an optimized draw executed |
 | Terrain latency | Existing generation-keyed `terrain-work-epoch-*.json` and oracle | No proximity or ordinal join with this observer; first encoded/drawn is not first presented |
 
 Frame IDs are observation-local joins. They do not replace semantic pass IDs,
 `ResourceIdentity`, terrain generations or MetalFX source-frame IDs. Command-buffer
 identity is captured at creation and carried through submission and completion.
+`presentationRequested` distinguishes an offscreen submission from an ordinary
+present attempt. `nativePresentationId` is the existing native ticket when returned,
+otherwise null with a reason. A failed command buffer retains its scheduled ticket;
+neither the ticket nor GPU completion is an assertion that the image was displayed.
 Delayed/out-of-order completion cannot be assigned to the latest frame. Reused buffers
 crossing frame boundaries invalidate evidence. Existing `Metallum frame <submitIndex>`
 command labels allow inspection in GPU captures; they remain diagnostic labels.

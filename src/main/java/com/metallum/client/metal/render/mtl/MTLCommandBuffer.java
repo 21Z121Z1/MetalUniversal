@@ -192,6 +192,11 @@ public final class MTLCommandBuffer {
         recordPresentSubmitted();
     }
 
+    /** Read before commit transfers cancellation ownership to native; zero means no returned ticket. */
+    public long nativePresentationTelemetryId() {
+        return nativePresentationTelemetryId;
+    }
+
     public void commitWithSignal(final MemorySegment semaphore) {
         MetalNativeBridge.MTLCommandBuffer_commitWithSignal(handle(), semaphore);
         recordMetal4Submitted();

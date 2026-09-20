@@ -1140,6 +1140,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         endEncoder();
         MTLCommandBuffer commandBuffer = commandBuffer();
         commandBuffer.encodePresentTextureToDrawable(layer, source.nativeHandle(), fence);
+        FrameEvidenceRuntime.presentationRequested(frameEvidenceSubmission, commandBuffer.nativePresentationTelemetryId());
     }
 
     boolean clearMotionInputs(

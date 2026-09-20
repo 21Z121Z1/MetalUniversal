@@ -53,21 +53,29 @@ class FrameEvidenceRecorderTest {
     @Test void delayedCompletionsKeepTheirOriginalFrameAndFailuresAreNotGpuSamples() {
         recorder.beginFrame(true);
         var first = recorder.commandBuffer(8);
+        recorder.presentationRequested(first, 101);
         recorder.submitted(first);
         recorder.endFrame();
         recorder.beginFrame(true);
         var second = recorder.commandBuffer(9);
+        recorder.presentationRequested(second, 102);
         recorder.submitted(second);
         recorder.completed(second, false, 1, 2);
         recorder.completed(first, true, 1, 1.002);
         recorder.endFrame();
         assertEquals(2_000_000, frame(0).getAsJsonArray("commandBuffers").get(0).getAsJsonObject().get("gpuServiceNs").getAsLong());
         assertEquals("command-buffer-failed", frame(1).getAsJsonArray("commandBuffers").get(0).getAsJsonObject().get("gpuUnavailableReason").getAsString());
+        assertEquals(101, frame(0).getAsJsonArray("commandBuffers").get(0).getAsJsonObject().get("nativePresentationId").getAsLong());
+        assertEquals(102, frame(1).getAsJsonArray("commandBuffers").get(0).getAsJsonObject().get("nativePresentationId").getAsLong());
     }
 
     @Test void openFramesCrossFrameSubmissionAndDuplicateCompletionRemainVisible() {
         recorder.beginFrame(true);
         var submission = recorder.commandBuffer(0);
+        recorder.presentationRequested(submission, 0);
+        JsonObject receipt = frame(0).getAsJsonArray("commandBuffers").get(0).getAsJsonObject();
+        assertTrue(receipt.get("nativePresentationId").isJsonNull());
+        assertEquals("native-present-id-not-returned", receipt.get("presentationIdUnavailableReason").getAsString());
         recorder.beginFrame(false);
         assertFalse(frame(0).get("ended").getAsBoolean());
         recorder.submitted(submission);

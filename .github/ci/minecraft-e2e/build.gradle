@@ -75,6 +75,7 @@ tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.Client
     jvmArgs.add("-Dmetallum.ci.e2e=true")
     jvmArgs.add("-Dmetallum.ci.noOptionalMods=${noOptionalRenderMods}")
     jvmArgs.add("-Dmetallum.ci.expectedSourceSha=${expectedSourceSha}")
+    jvmArgs.add("-Dmetallum.validation.sourceCommit=${expectedSourceSha}")
     jvmArgs.add("-Dmetallum.ci.p1Metal4Lane=${p1Metal4Lane}")
     jvmArgs.add("-Dmetallum.ci.p1SourceSha=${p1SourceSha}")
     jvmArgs.add("-Dmetallum.ci.p1ProductionJarSha256=${p1ProductionJarSha256}")
