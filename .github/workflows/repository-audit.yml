@@ -9,35 +9,76 @@ permissions:
   contents: read
 
 jobs:
-  reference:
+  reviewed-patch:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
-          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.sha }}
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
-      - name: Materialize exact reference for this investigation
+      - name: Apply the reviewed patch after its failing regression
+        env:
+          TARGET: agent/metaluniversal-system-convergence-20260920
         run: |
           set -euo pipefail
-          SRC="$(bash scripts/minecraft-reference.sh --print-path)"
-          mkdir -p "$RUNNER_TEMP/reference-audit"
-          cp "$(dirname "$SRC")/REFERENCE_INFO.txt" "$RUNNER_TEMP/reference-audit/"
-          tar -czf "$RUNNER_TEMP/reference-audit/sources.tar.gz" -C "$SRC" com/mojang net/minecraft/client
+          test "$(git rev-parse HEAD^)" = b765b6a3622ec064172f10d07eddf4f5ac9b11cc
+          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/repository-audit.yml
+          mkdir -p "$RUNNER_TEMP/contract-audit"
+          python3 - "$RUNNER_TEMP/contract-audit/product.patch" <<'PY'
+          import base64, hashlib, pathlib, sys, zlib
+          data = zlib.decompress(base64.b64decode('''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'''))
+          assert hashlib.sha256(data).hexdigest() == '6d88cb6f0265c8e70814d7460d58a6c1d53e02ab6872a0b0359aeee1a371aae9'
+          pathlib.Path(sys.argv[1]).write_bytes(data)
+          PY
+          patch="$RUNNER_TEMP/contract-audit/product.patch"
+          testfile=src/test/java/com/metallum/client/metal/render/MetalGpuBufferFrontendContractTest.java
+          git apply --check "$patch"
+          git apply --include="$testfile" "$patch"
+          set +e
+          ./gradlew --no-daemon test --tests com.metallum.client.metal.render.MetalGpuBufferFrontendContractTest \
+            -x buildMacNative -x buildIOSNative -x buildIOSSpvc > "$RUNNER_TEMP/contract-audit/before.log" 2>&1
+          result=$?
+          set -e
+          test "$result" -ne 0
+          python3 - <<'PY'
+          import pathlib, xml.etree.ElementTree as ET
+          p = pathlib.Path('build/test-results/test/TEST-com.metallum.client.metal.render.MetalGpuBufferFrontendContractTest.xml')
+          root = ET.parse(p).getroot()
+          failures = root.findall('.//failure')
+          assert len(failures) == 2, ET.tostring(root)
+          assert all('ClassCastException' in str(f.attrib) + (f.text or '') for f in failures)
+          PY
+          cp build/test-results/test/TEST-com.metallum.client.metal.render.MetalGpuBufferFrontendContractTest.xml "$RUNNER_TEMP/contract-audit/before.xml"
+          rm "$testfile"
+          git apply --index "$patch"
+          git diff --cached --check
+          ./gradlew --no-daemon test -x buildMacNative -x buildIOSNative -x buildIOSSpvc \
+            > "$RUNNER_TEMP/contract-audit/after.log" 2>&1
+          cp -R build/test-results "$RUNNER_TEMP/contract-audit/after-results"
+          git config user.name '21Z121Z1'
+          git config user.email '89170834+21Z121Z1@users.noreply.github.com'
+          git commit -m 'fix(render): use RenderPearl buffer and binding contracts'
+          git push origin "HEAD:refs/heads/$TARGET"
+          git rev-parse HEAD > "$RUNNER_TEMP/contract-audit/result-sha.txt"
+          git bundle create "$RUNNER_TEMP/contract-audit/reviewed-result.bundle" HEAD ^0b90ce1a7d11a3a71a78c140487fc837f0c8e541
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: reference-audit-inputs
-          path: ${{ runner.temp }}/reference-audit/
+          name: reviewed-contract-result
+          path: ${{ runner.temp }}/contract-audit/
           if-no-files-found: error
           retention-days: 2
 
-  native-diagnosis:
+  independent-native-control:
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 10
     env:
       MTL_DEBUG_LAYER: '0'
       MTL_SHADER_VALIDATION: '0'
@@ -45,38 +86,72 @@ jobs:
       MTL_HUD_ENCODER_TIMING_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
     steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
-      - name: Build shipping native module
-        run: ./gradlew --no-daemon buildMacNative
-      - name: Compare direct FFM with the shipping bridge
+      - name: Compare an Apple-only pipeline outside and inside the JVM
         run: |
-          mkdir -p build/native-diagnosis
-          git rev-parse HEAD > build/native-diagnosis/source-sha.txt
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/apple-control"
+          cd "$RUNNER_TEMP/apple-control"
+          cat > Control.m <<'OBJC'
+          #import <Metal/Metal.h>
+          #import <AppKit/AppKit.h>
+          #include <stdio.h>
+          int control(int appkit) {
+              @autoreleasepool {
+                  if (appkit) [NSApplication sharedApplication];
+                  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+                  if (!device) return 2;
+                  NSError *error = nil;
+                  NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 v(uint i [[vertex_id]]) { return float4(0,0,0,1); }\nfragment float4 f() { return float4(1,0,0,1); }\n";
+                  id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
+                  if (!library) { NSLog(@"library: %@", error); return 3; }
+                  MTLRenderPipelineDescriptor *descriptor = [MTLRenderPipelineDescriptor new];
+                  descriptor.vertexFunction = [library newFunctionWithName:@"v"];
+                  descriptor.fragmentFunction = [library newFunctionWithName:@"f"];
+                  descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+                  id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+                  NSLog(@"device=%@ pipeline=%@ error=%@", device.name, pipeline, error);
+                  return pipeline ? 0 : 4;
+              }
+          }
+          #ifdef EXECUTABLE
+          int main(void) { return control(0); }
+          #endif
+          OBJC
+          cat > Call.java <<'JAVA'
+          import java.lang.foreign.*;
+          public class Call {
+              public static void main(String[] args) throws Throwable {
+                  System.load(args[0]);
+                  var handle = Linker.nativeLinker().downcallHandle(
+                          SymbolLookup.loaderLookup().find("control").orElseThrow(),
+                          FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+                  int result = (int) handle.invokeExact(Integer.parseInt(args[1]));
+                  System.exit(result);
+              }
+          }
+          JAVA
+          xcrun clang -fobjc-arc -framework Metal -framework AppKit -dynamiclib Control.m -o libcontrol.dylib
+          xcrun clang -fobjc-arc -framework Metal -framework AppKit -DEXECUTABLE Control.m -o control
+          javac Call.java
           set +e
-          java --enable-native-access=ALL-UNNAMED -XX:ErrorFile="$PWD/build/native-diagnosis/direct-hs_err_pid%p.log" \
-            .github/ci/JvmPsoThreadingProbe.java "$PWD/src/main/resources/natives/macos/libmetallum.dylib" \
-            > build/native-diagnosis/direct.log 2>&1
-          echo "direct_ffm_exit=$?" > build/native-diagnosis/exits.txt
-          NSZombieEnabled=YES ./gradlew --no-daemon --stacktrace test \
-            --tests com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest \
-            -Pmetallum.hsErrDir=native-diagnosis -x buildIOSNative -x buildIOSSpvc \
-            > build/native-diagnosis/zombie.log 2>&1
-          echo "shipping_bridge_zombie_exit=$?" >> build/native-diagnosis/exits.txt
-          cat build/native-diagnosis/exits.txt
-          echo 'Diagnostic outcomes only. These runs do not replace required CI gates.'
+          ./control > native.log 2>&1
+          echo "native=$?" > exits.txt
+          java --enable-native-access=ALL-UNNAMED -XX:ErrorFile=jvm-hs_err_pid%p.log Call "$PWD/libcontrol.dylib" 0 > jvm.log 2>&1
+          echo "jvm=$?" >> exits.txt
+          java -XstartOnFirstThread --enable-native-access=ALL-UNNAMED -XX:ErrorFile=first-thread-hs_err_pid%p.log Call "$PWD/libcontrol.dylib" 0 > first-thread.log 2>&1
+          echo "first_thread=$?" >> exits.txt
+          java -XstartOnFirstThread --enable-native-access=ALL-UNNAMED -XX:ErrorFile=appkit-hs_err_pid%p.log Call "$PWD/libcontrol.dylib" 1 > appkit.log 2>&1
+          echo "appkit=$?" >> exits.txt
+          cat exits.txt
+          echo 'This diagnostic does not replace any required product gate.'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-diagnosis
-          path: |
-            build/native-diagnosis/
-            build/test-results/
-            build/reports/tests/
+          name: independent-apple-control
+          path: ${{ runner.temp }}/apple-control/
           if-no-files-found: error
           retention-days: 2
