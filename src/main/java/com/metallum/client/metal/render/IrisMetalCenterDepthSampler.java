@@ -17,6 +17,7 @@ import com.mojang.renderpearl.api.textures.AddressMode;
 import com.mojang.renderpearl.api.textures.FilterMode;
 import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.resources.Identifier;
@@ -243,9 +244,9 @@ final class IrisMetalCenterDepthSampler implements AutoCloseable {
         );
     }
 
-    MetalRenderPass.TextureViewAndSampler binding() {
+    TextureViewAndSampler binding() {
         ensureOpen();
-        return new MetalRenderPass.TextureViewAndSampler(this.historyView, this.sampler);
+        return new TextureViewAndSampler(this.historyView, this.sampler);
     }
 
     MetalGpuTexture currentTexture() {

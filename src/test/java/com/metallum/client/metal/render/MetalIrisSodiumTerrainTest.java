@@ -15,6 +15,7 @@ import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.device.GpuDebugOptions;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.gl.shader.StandardMacros;
@@ -661,8 +662,8 @@ final class MetalIrisSodiumTerrainTest {
             final GlslProgram program,
             final MetalCompiledRenderPipeline compiled
     ) {
-        MetalRenderPass.TextureViewAndSampler sodiumBinding = sodiumTexture.binding();
-        Map<String, MetalRenderPass.TextureViewAndSampler> boundBySodium = Map.of(
+        TextureViewAndSampler sodiumBinding = sodiumTexture.binding();
+        Map<String, TextureViewAndSampler> boundBySodium = Map.of(
                 "u_BlockTex", sodiumBinding,
                 "u_LightTex", sodiumBinding
         );
@@ -685,13 +686,13 @@ final class MetalIrisSodiumTerrainTest {
         IrisMetalPipelineOverrides.updateFrame();
 
         if (program.samplers().stream().anyMatch(sampler -> sampler.name().equals("noisetex"))) {
-            MetalRenderPass.TextureViewAndSampler noise = IrisMetalPipelineOverrides.fallbackTexture(
+            TextureViewAndSampler noise = IrisMetalPipelineOverrides.fallbackTexture(
                     device, compiled, "noisetex", boundBySodium
             );
             assertNotNull(noise, packName + " " + kind + ": noisetex was not resolved after prewarm");
             assertEquals(
                     "metallum:iris_noisetex",
-                    noise.textureView().texture().getLabel(),
+                    noise.view().texture().getLabel(),
                     packName + " " + kind + ": noisetex resolved to a placeholder instead of Iris noise"
             );
         }
@@ -702,7 +703,7 @@ final class MetalIrisSodiumTerrainTest {
             }
             switch (binding.kind()) {
                 case SAMPLED_IMAGE -> {
-                    MetalRenderPass.TextureViewAndSampler resolved = IrisMetalPipelineOverrides.fallbackTexture(
+                    TextureViewAndSampler resolved = IrisMetalPipelineOverrides.fallbackTexture(
                             device, compiled, binding.name(), boundBySodium
                     );
                     if (resolved == null && headlessLifecycleSampler(binding.name())) {
@@ -716,7 +717,7 @@ final class MetalIrisSodiumTerrainTest {
                             packName + " " + kind + ": nothing supplies sampler '" + binding.name() + "'"
                     );
                     assertFalse(
-                            resolved.textureView().texture().getLabel().contains("placeholder"),
+                            resolved.view().texture().getLabel().contains("placeholder"),
                             packName + " " + kind + ": sampler '" + binding.name() + "' used a placeholder"
                     );
                 }

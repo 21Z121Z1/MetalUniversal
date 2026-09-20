@@ -83,7 +83,7 @@ jobs:
         run: |
           ./gradlew --no-daemon test \
             --tests com.metallum.client.metal.render.MetalNativeBridgeRenderPipelineSmokeTest \
-            --tests com.metallum.client.metal.render.TerrainGpuVisibilityProbeContractTest.invalidOrUnavailableNativeProbeInputsFallbackBeforeDispatch
+            --tests com.metallum.client.metal.render.MetalNativeBridgeTerrainVisibilityContractTest
       - name: Verify native artifact and exported ABI
         run: |
           set -euo pipefail

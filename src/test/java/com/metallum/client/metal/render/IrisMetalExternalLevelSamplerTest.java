@@ -6,6 +6,7 @@ import com.mojang.renderpearl.api.device.GpuDebugOptions;
 import com.mojang.renderpearl.api.textures.AddressMode;
 import com.mojang.renderpearl.api.textures.FilterMode;
 import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import net.irisshaders.iris.pipeline.programs.ShaderKey;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -63,16 +64,16 @@ final class IrisMetalExternalLevelSamplerTest {
                      1,
                      OptionalDouble.empty()
              )) {
-            MetalRenderPass.TextureViewAndSampler binding =
+            TextureViewAndSampler binding =
                     IrisMetalPipelineOverrides.checkedMojangExternalOverlayBinding(
                             this.device, view, linear
                     );
-            assertSame(view, binding.textureView());
+            assertSame(view, binding.view());
             assertSame(linear, binding.sampler());
 
-            MetalRenderPass.TextureViewAndSampler external =
-                    new MetalRenderPass.TextureViewAndSampler(view, linear);
-            MetalRenderPass.TextureViewAndSampler selectedExternal =
+            TextureViewAndSampler external =
+                    new TextureViewAndSampler(view, linear);
+            TextureViewAndSampler selectedExternal =
                     IrisMetalPipelineOverrides.selectMojangExternalOverlayBinding(
                     this.device,
                     ShaderKey.SHADOW_ENTITIES_CUTOUT,
@@ -81,11 +82,11 @@ final class IrisMetalExternalLevelSamplerTest {
                     external
             );
             assertNotNull(selectedExternal);
-            assertSame(view, selectedExternal.textureView());
+            assertSame(view, selectedExternal.view());
             assertSame(linear, selectedExternal.sampler());
 
-            MetalRenderPass.TextureViewAndSampler drawLocal =
-                    new MetalRenderPass.TextureViewAndSampler(view, linear);
+            TextureViewAndSampler drawLocal =
+                    new TextureViewAndSampler(view, linear);
             assertSame(drawLocal, IrisMetalPipelineOverrides.selectMojangExternalOverlayBinding(
                     this.device,
                     ShaderKey.SHADOW_ENTITIES_CUTOUT,

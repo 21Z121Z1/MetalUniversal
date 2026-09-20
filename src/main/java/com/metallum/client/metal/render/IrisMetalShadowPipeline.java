@@ -20,6 +20,7 @@ import com.mojang.renderpearl.api.textures.GpuSampler;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import it.unimi.dsi.fastutil.objects.Object2ObjectMap;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -757,12 +758,12 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                     }
                     IrisMetalPostChain.TextureBinding binding = resources.texture(info, sampler);
                     if (binding == null) {
-                        MetalRenderPass.TextureViewAndSampler shadow = resolveShadowSampler(
+                        TextureViewAndSampler shadow = resolveShadowSampler(
                                 sampler, pass.readsFromAlt(), info.declaresSampler("watershadow")
                         );
                         if (shadow != null) {
                             binding = new IrisMetalPostChain.TextureBinding(
-                                    shadow.textureView(), shadow.sampler()
+                                    shadow.view(), shadow.sampler()
                             );
                         }
                     }
@@ -869,12 +870,12 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                 new MetalIrisShaderCompiler.SamplerDecl("shadowcolor0", "sampler2D");
         IrisMetalPostChain.TextureBinding primary = resources.texture(info, sampler);
         if (primary == null) {
-            MetalRenderPass.TextureViewAndSampler shadow = resolveShadowSampler(
+            TextureViewAndSampler shadow = resolveShadowSampler(
                     sampler, readsFromAlt, info.declaresSampler("watershadow")
             );
             if (shadow != null) {
                 primary = new IrisMetalPostChain.TextureBinding(
-                        shadow.textureView(), shadow.sampler()
+                        shadow.view(), shadow.sampler()
                 );
             }
         }
@@ -897,11 +898,11 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                 new MetalIrisShaderCompiler.SamplerDecl(name, "sampler2D");
         IrisMetalPostChain.TextureBinding binding = resources.texture(compute.info, sampler);
         if (binding == null) {
-            MetalRenderPass.TextureViewAndSampler shadow = resolveShadowSampler(
+            TextureViewAndSampler shadow = resolveShadowSampler(
                     sampler, compute.info.readsFromAlt(), compute.info.declaresSampler("watershadow")
             );
             if (shadow != null) {
-                binding = new IrisMetalPostChain.TextureBinding(shadow.textureView(), shadow.sampler());
+                binding = new IrisMetalPostChain.TextureBinding(shadow.view(), shadow.sampler());
             }
         }
         if (binding == null) {
@@ -1152,7 +1153,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
      * the caller can ask the atlas/custom-texture providers; known aliases
      * never fall back to a placeholder.
      */
-    MetalRenderPass.@Nullable TextureViewAndSampler resolveShadowSampler(
+    @Nullable TextureViewAndSampler resolveShadowSampler(
             final MetalIrisShaderCompiler.SamplerDecl sampler,
             final BitSet readsFromAlt,
             final boolean waterShadowDeclared
@@ -1168,7 +1169,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
      * therefore always observe the shadow-composite chain's published side.
      * Unknown names still delegate to the caller's other resource providers.
      */
-    MetalRenderPass.@Nullable TextureViewAndSampler resolveWorldShadowSampler(
+    @Nullable TextureViewAndSampler resolveWorldShadowSampler(
             final MetalIrisShaderCompiler.SamplerDecl sampler,
             final boolean waterShadowDeclared
     ) {
@@ -1195,7 +1196,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
         };
     }
 
-    MetalRenderPass.@Nullable TextureViewAndSampler resolveShadowSampler(
+    @Nullable TextureViewAndSampler resolveShadowSampler(
             final String name,
             final boolean comparison,
             final BitSet readsFromAlt,
@@ -1209,7 +1210,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
             default -> -1;
         };
         if (depth >= 0) {
-            return new MetalRenderPass.TextureViewAndSampler(
+            return new TextureViewAndSampler(
                     depth == 0 ? targets.shadowDepthView() : targets.shadowDepthNoTranslucentsView(),
                     targets.depthSampler(depth, comparison)
             );
@@ -1222,7 +1223,7 @@ final class IrisMetalShadowPipeline implements AutoCloseable {
                                 + " shadowcolor targets"
                 );
             }
-            return new MetalRenderPass.TextureViewAndSampler(
+            return new TextureViewAndSampler(
                     targets.colorView(color, readsFromAlt),
                     targets.colorSampler(color, this.activeShadowMipTargets.contains(color))
             );
