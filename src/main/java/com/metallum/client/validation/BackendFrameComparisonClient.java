@@ -15,8 +15,6 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.textures.GpuTexture;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.uniforms.SystemTimeUniforms;
-import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
-import net.caffeinemc.mods.sodium.client.util.FlawlessFrames;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.client.renderer.GameRenderer;
@@ -56,6 +54,7 @@ import java.util.UUID;
  * Metal.</p>
  */
 public final class BackendFrameComparisonClient {
+    private static final boolean IRIS_PRESENT = discoverIrisClasses();
     private static final boolean ENABLED = Boolean.getBoolean("metallum.backend.compare.enabled");
     private static final boolean AUTO_STOP = Boolean.parseBoolean(
             System.getProperty("metallum.backend.compare.auto-stop", "true")
@@ -433,7 +432,8 @@ public final class BackendFrameComparisonClient {
      * backend uploads pack uniforms.
      */
     public static void beforeLevelRender() {
-        if (!ENABLED || levelFrame < 0 || FIXED_IRIS_FRAME_MILLIS < 0L) {
+        if (!ENABLED || levelFrame < 0 || FIXED_IRIS_FRAME_MILLIS < 0L
+                || !irisClassPresent()) {
             return;
         }
         applyFixedIrisSystemTime(levelFrame, FIXED_IRIS_FRAME_MILLIS);
@@ -721,7 +721,7 @@ public final class BackendFrameComparisonClient {
     private static void observeDimensionSwitchSequence(final Minecraft minecraft) {
         DimensionSwitchRequest request = activeDimensionSequenceRequest();
         if (request == null || !dimensionSequenceAttempted || !dimensionSequenceServerApplied
-                || minecraft.level == null) {
+                || minecraft.level == null || !irisClassPresent()) {
             return;
         }
         String observedDimension = currentDimension(minecraft);
@@ -868,7 +868,7 @@ public final class BackendFrameComparisonClient {
 
     private static void observeDimensionSwitch(final Minecraft minecraft) {
         if (DIMENSION_SWITCH_REQUEST == null || !dimensionSwitchServerApplied
-                || dimensionSwitchCompleted || minecraft.level == null) {
+                || dimensionSwitchCompleted || minecraft.level == null || !irisClassPresent()) {
             return;
         }
         String observedDimension = currentDimension(minecraft);
@@ -923,6 +923,9 @@ public final class BackendFrameComparisonClient {
     }
 
     private static String pipelineClass() {
+        if (!irisClassPresent()) {
+            return "";
+        }
         var pipeline = Iris.getPipelineManager().getPipelineNullable();
         return pipeline == null ? "" : pipeline.getClass().getName();
     }
@@ -1012,13 +1015,17 @@ public final class BackendFrameComparisonClient {
             return;
         }
         try {
-            FlawlessFrames.getProvider()
-                    .apply("metallum-backend-compare")
-                    .accept(true);
+            if (!SodiumValidationBridge.enableFlawlessFrames("metallum-backend-compare")) {
+                Metallum.LOGGER.info(
+                        "[metallum-backend-compare] Sodium FlawlessFrames unavailable;"
+                                + " readiness still requires settled terrain"
+                );
+                return;
+            }
             Metallum.LOGGER.info(
                     "[metallum-backend-compare] FlawlessFrames enabled for scene readiness"
             );
-        } catch (Throwable throwable) {
+        } catch (RuntimeException throwable) {
             Metallum.LOGGER.warn(
                     "[metallum-backend-compare] FlawlessFrames unavailable;"
                             + " readiness still requires idle Sodium terrain",
@@ -1028,17 +1035,46 @@ public final class BackendFrameComparisonClient {
     }
 
     private static SceneReadinessSample sceneReadinessSample(final Minecraft minecraft) {
-        SodiumWorldRenderer renderer = SodiumWorldRenderer.instanceNullable();
         EntityReceipt entities = entityReceipt(minecraft);
+        int sodiumVisible = sodiumVisibleChunkCount();
         return new SceneReadinessSample(
                 minecraft.level == null
                         ? 0
                         : minecraft.level.getChunkSource().getLoadedChunksCount(),
-                renderer == null ? 0 : renderer.getVisibleChunkCount(),
-                renderer != null && renderer.isTerrainRenderComplete(),
+                sodiumVisible >= 0 ? sodiumVisible : minecraft.levelRenderer.visibleSections().size(),
+                sodiumVisible >= 0 ? SodiumValidationBridge.terrainSettled()
+                        : minecraft.levelRenderer.hasRenderedAllSections(),
                 entities.count(),
                 entities.sha256()
         );
+    }
+
+    /**
+     * Sodium is an optional runtime adapter. Keep its renderer API on the
+     * reflective side of this boundary so the vanilla/Vulkan lane can load
+     * this class when the Sodium jar is deliberately absent.
+     */
+    private static int sodiumVisibleChunkCount() {
+        try {
+            Class<?> rendererClass = Class.forName(
+                    "net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer",
+                    false,
+                    BackendFrameComparisonClient.class.getClassLoader()
+            );
+            Object renderer = rendererClass.getMethod("instanceNullable").invoke(null);
+            if (renderer == null) {
+                return -1;
+            }
+            Object count = rendererClass.getMethod("getVisibleChunkCount").invoke(renderer);
+            if (count instanceof Integer integer && integer >= 0) {
+                return integer;
+            }
+            throw new IllegalStateException("Invalid Sodium visible section count: " + count);
+        } catch (ClassNotFoundException absent) {
+            return -1;
+        } catch (ReflectiveOperationException | LinkageError exception) {
+            throw new IllegalStateException("Cannot observe Sodium terrain readiness", exception);
+        }
     }
 
     /**
@@ -1048,6 +1084,14 @@ public final class BackendFrameComparisonClient {
      */
     private static boolean resetIrisAtSceneStart() {
         sceneStartIrisResetAttempted = true;
+        if (!irisClassPresent()) {
+            sceneStartIrisResetCompleted = true;
+            Metallum.LOGGER.info(
+                    "[metallum-backend-compare] Iris scene-start reset skipped; Iris is absent for backend {}",
+                    backendName()
+            );
+            return true;
+        }
         // Iris deliberately remains dormant on the native Vulkan baseline;
         // its config singleton is not initialized in that mode. Reloading it
         // would turn a valid vanilla RenderPearl run into an NPE.
@@ -1212,6 +1256,19 @@ public final class BackendFrameComparisonClient {
 
     private static void reloadIris() {
         irisReloadAttempted = true;
+        if (!irisClassPresent()) {
+            failedCaptures++;
+            stopRequested = true;
+            IllegalStateException unavailable = new IllegalStateException(
+                    "scheduled Iris reload requested but Iris is absent"
+            );
+            writeFailure(levelFrame, unavailable);
+            Metallum.LOGGER.error(
+                    "[metallum-backend-compare] scheduled Iris reload unavailable",
+                    unavailable
+            );
+            return;
+        }
         String packBefore = Iris.getCurrentPackName();
         try {
             Iris.reload();
@@ -1303,6 +1360,19 @@ public final class BackendFrameComparisonClient {
 
     private static void applyScheduledShaderToggle(final Minecraft minecraft) {
         if (SHADER_TOGGLE_REQUEST == null) {
+            return;
+        }
+        if (!irisClassPresent()) {
+            failedCaptures++;
+            stopRequested = true;
+            IllegalStateException unavailable = new IllegalStateException(
+                    "scheduled Iris shader toggle requested but Iris is absent"
+            );
+            writeFailure(levelFrame, unavailable);
+            Metallum.LOGGER.error(
+                    "[metallum-backend-compare] scheduled Iris shader toggle unavailable",
+                    unavailable
+            );
             return;
         }
         if (!shaderDisableAttempted && levelFrame >= SHADER_TOGGLE_REQUEST.disableFrame()) {
@@ -2189,6 +2259,9 @@ public final class BackendFrameComparisonClient {
     }
 
     private static IrisRuntimeReceipt irisRuntimeReceipt() {
+        if (!irisClassPresent()) {
+            return new IrisRuntimeReceipt(false, false, null, null, -1);
+        }
         var irisConfig = Iris.getIrisConfig();
         boolean shadersEnabled = irisConfig != null && irisConfig.areShadersEnabled();
         boolean packPresent = irisConfig != null && Iris.getCurrentPack().isPresent();
@@ -2204,6 +2277,25 @@ public final class BackendFrameComparisonClient {
                 pipeline == null ? null : pipeline.getClass().getName(),
                 IrisMetalPipelineOverrides.activeGenerationForDiagnostics()
         );
+    }
+
+    private static boolean irisClassPresent() {
+        return IRIS_PRESENT;
+    }
+
+    private static boolean discoverIrisClasses() {
+        try {
+            Class.forName(
+                    "net.irisshaders.iris.Iris",
+                    false,
+                    BackendFrameComparisonClient.class.getClassLoader()
+            );
+            Class.forName("net.irisshaders.iris.uniforms.SystemTimeUniforms", false,
+                    BackendFrameComparisonClient.class.getClassLoader());
+            return true;
+        } catch (ClassNotFoundException | LinkageError exception) {
+            return false;
+        }
     }
 
     record SceneReadinessSample(

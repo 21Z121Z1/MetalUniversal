@@ -11,10 +11,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 final class BackendFrameComparisonClientTest {
     @Test
     void fixedIrisTimeReplaysTheCanonicalTimerAtAStableCadence() {
+        assumeTrue(!Boolean.getBoolean("metallum.test.noOptionalMods"));
         SystemTimeUniforms.TIMER.reset();
         SystemTimeUniforms.COUNTER.reset();
         try {
@@ -259,5 +261,20 @@ final class BackendFrameComparisonClientTest {
                 );
         assertFalse(tracker.observe(pendingTerrain, 3_000_000_000L));
         assertEquals(0, tracker.stableFrames());
+    }
+
+    @Test
+    void comparisonBoundaryLoadsWithoutOptionalRenderMods() throws Exception {
+        assumeTrue(Boolean.getBoolean("metallum.test.noOptionalMods"));
+
+        var visibleChunks = BackendFrameComparisonClient.class
+                .getDeclaredMethod("sodiumVisibleChunkCount");
+        visibleChunks.setAccessible(true);
+        assertEquals(-1, visibleChunks.invoke(null));
+
+        var irisPresent = BackendFrameComparisonClient.class
+                .getDeclaredMethod("irisClassPresent");
+        irisPresent.setAccessible(true);
+        assertFalse((Boolean) irisPresent.invoke(null));
     }
 }
