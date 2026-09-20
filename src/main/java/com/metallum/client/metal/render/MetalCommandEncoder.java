@@ -540,6 +540,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final float[] clearColorValues,
             final boolean clearDepthEnabled,
             final double clearDepthValue,
+            final boolean fullAttachmentRenderArea,
             final String label
     ) {
         if (colorTextureViews == null || colorTextureViews.length > Math.min(
@@ -578,20 +579,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         boolean deferredDepthStore = DEFERRED_DEPTH_STORE
                 && depthTextureView != null
                 && ((MetalGpuTexture) depthTextureView.texture()).mtlDepthPixelFormat() != MTLPixelFormat.Invalid;
-        boolean hasIncomingColorClear = hasClearColor(clearColorEnabled);
-        boolean[] colorStoreKilled = new boolean[colorAttachments.length];
+        boolean[] colorStoreKilled = new boolean[renderColorAttachments.length];
         if (renderPassDescriptorV3Active()) {
-            for (int index = 0; index < colorAttachments.length; index++) {
-                Object incomingTexture = colorTextureViews[index] == null ? null : colorTextureViews[index].texture();
-                colorStoreKilled[index] = hasIncomingColorClear
-                        && index < renderColorAttachments.length
-                        && index < renderColorTextures.length
-                        && renderColorAttachments[index] != null
-                        && !MetalPipelineSupport.sameHandle(
-                                renderColorAttachments[index], MemorySegment.NULL)
-                        && renderColorTextures[index] == incomingTexture
-                        && index < deferredColorStorePixelBytes.length
-                        && deferredColorStorePixelBytes[index] > 0;
+            for (int index = 0; index < Math.min(colorAttachments.length, colorStoreKilled.length); index++) {
+                MetalGpuTextureView view = colorTextureViews[index];
+                if (view == null) continue;
+                colorStoreKilled[index] = canDiscardColorStore(
+                        clearColorEnabled[index], renderColorAttachments[index], colorAttachments[index],
+                        index < renderColorTextures.length && renderColorTextures[index] == view.texture(),
+                        fullAttachmentRenderArea && viewportWidth == view.getWidth(0)
+                                && viewportHeight == view.getHeight(0) && view.texture().getDepthOrLayers() == 1
+                );
             }
         }
         endEncoder(incomingClearsSameDepth, colorStoreKilled, false);
@@ -681,6 +679,24 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 deferredDepthStore
         );
         return encoder;
+    }
+
+    /**
+     * A clear only kills the matching outgoing slot. Native V3 attaches level/slice
+     * zero of the supplied view; requiring that exact live view and allocation is
+     * deliberately conservative for different mip views or reordered attachments.
+     * Draw/scissor coverage and a clear of another slot are never kill evidence.
+     */
+    static boolean canDiscardColorStore(
+            final int clearEnabled,
+            final MemorySegment previousView,
+            final MemorySegment incomingView,
+            final boolean sameTexture,
+            final boolean fullClear
+    ) {
+        return clearEnabled != 0 && sameTexture && fullClear
+                && !MetalPipelineSupport.sameHandle(previousView, MemorySegment.NULL)
+                && MetalPipelineSupport.sameHandle(previousView, incomingView);
     }
 
     /**

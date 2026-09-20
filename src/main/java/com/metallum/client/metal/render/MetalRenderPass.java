@@ -1263,6 +1263,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 clearColorValues,
                 clearDepthNow,
                 clearDepthValue,
+                renderArea.fillsTexture(extent),
                 label == null ? "unlabeled render pass" : label
         );
         nativeEncoder = encoder;

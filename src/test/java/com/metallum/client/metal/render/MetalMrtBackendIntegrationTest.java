@@ -85,6 +85,13 @@ final class MetalMrtBackendIntegrationTest {
                 MemorySegment.NULL
         );
         encoder = device.commandEncoder();
+        if (Boolean.getBoolean("metallum.test.mrtMetal4Commands")) {
+            assertTrue(device.metal4Available(), "MTL4 command lane requires actual device capability");
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            assertEquals(1, MetalNativeBridge.metallum_metal4_main_renderer_enable(nativeDevice, MemorySegment.NULL),
+                    "the shipping offscreen MTL4 command queue must activate");
+        }
     }
 
     @AfterEach
@@ -102,8 +109,152 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     @Test
+    void deferredColorStoreClearIsAttachmentLocal() {
+        long submitsBefore = Boolean.getBoolean("metallum.test.mrtMetal4Commands")
+                ? MetalNativeBridge.metallum_metal4_main_renderer_stats()[2] : -1;
+        try {
+            for (String abi : List.of("v2", "v3")) {
+                MetalCommandEncoder.setRenderPassAbiModeForTests(abi);
+                for (int count = 1; count <= 8; count++) {
+                    List<MetalGpuTexture> textures = createTextures(
+                            java.util.Collections.nCopies(count, GpuFormat.RGBA8_UNORM), "local-store");
+                    List<MetalGpuTextureView> views = new ArrayList<>();
+                    try {
+                        for (MetalGpuTexture texture : textures) {
+                            views.add(new MetalGpuTextureView(texture, 0, 1));
+                        }
+                        // Retain a hole between live slots without renumbering the last slot.
+                        int hole = count > 2 ? 1 : -1;
+                        RenderPassDescriptor.Builder first = RenderPassDescriptor.builder(() -> "store first");
+                        RenderPassDescriptor.Builder second = RenderPassDescriptor.builder(() -> "store successor");
+                        for (int slot = 0; slot < count; slot++) {
+                            if (slot == hole) {
+                                first.withUnusedColorAttachment();
+                                second.withUnusedColorAttachment();
+                            } else {
+                                first.withColorAttachment(views.get(slot), Optional.of(new Vector4f(1, 0, 0, 1)));
+                                second.withColorAttachment(views.get(slot), slot == count - 1
+                                        ? Optional.of(new Vector4f(0, 1, 0, 1)) : Optional.empty());
+                            }
+                        }
+                        RenderGraphTelemetry.reset();
+                        encoder.createRenderPass(first.build());
+                        encoder.submitRenderPass();
+                        encoder.createRenderPass(second.build());
+                        encoder.submitRenderPass();
+                        assertEquals(abi.equals("v3") && MetalCommandEncoder.DEFERRED_COLOR_STORE
+                                        ? (long) WIDTH * HEIGHT * 4 : 0L,
+                                RenderGraphTelemetry.snapshot().get("colorStoreKilledBytes"),
+                                abi + ": only the cleared slot may discard its predecessor, count=" + count);
+                        encoder.submit();
+                        device.waitForSubmittedGpuWork();
+                        for (int slot = 0; slot < count; slot++) {
+                            if (slot == hole) continue;
+                            ByteBuffer pixels = readback(textures.get(slot));
+                            for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                                assertByteNear(pixels.get(pixel * 4), slot == count - 1 ? 0 : 255, "preserved red");
+                                assertByteNear(pixels.get(pixel * 4 + 1), slot == count - 1 ? 255 : 0, "clear green");
+                            }
+                        }
+                    } finally {
+                        views.forEach(MetalGpuTextureView::close);
+                        closeTextures(textures);
+                    }
+                }
+            }
+        } finally {
+            MetalCommandEncoder.setRenderPassAbiModeForTests("auto");
+        }
+        if (submitsBefore >= 0) {
+            long[] stats = MetalNativeBridge.metallum_metal4_main_renderer_stats();
+            assertEquals(1L, stats[0], "MTL4 queue remains active");
+            assertTrue(stats[2] > submitsBefore, "MRT readbacks must submit actual MTL4 command buffers");
+        }
+    }
+
+    @Test
     void fourAttachmentReadback() {
         runRgbaAttachmentCount(4);
+    }
+
+    @Test
+    void deferredColorStorePreservesOtherMipAndDistinctViews() {
+        try (MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "store mip views", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 2);
+             MetalGpuTextureView base = new MetalGpuTextureView(texture, 0, 1);
+             MetalGpuTextureView mip = new MetalGpuTextureView(texture, 1, 1);
+             MetalGpuTextureView anotherMipView = new MetalGpuTextureView(texture, 1, 1)) {
+            RenderGraphTelemetry.reset();
+            encoder.createRenderPass(RenderPassDescriptor.builder(() -> "base mip")
+                    .withColorAttachment(base, Optional.of(new Vector4f(1, 0, 0, 1))).build());
+            encoder.submitRenderPass();
+            encoder.createRenderPass(RenderPassDescriptor.builder(() -> "other mip")
+                    .withColorAttachment(mip, Optional.of(new Vector4f(0, 1, 0, 1))).build());
+            encoder.submitRenderPass();
+            assertEquals(0L, RenderGraphTelemetry.snapshot().get("colorStoreKilledBytes"));
+            encoder.createRenderPass(RenderPassDescriptor.builder(() -> "distinct view, same mip")
+                    .withColorAttachment(anotherMipView, Optional.of(new Vector4f(0, 0, 1, 1))).build());
+            encoder.submitRenderPass();
+            assertEquals(0L, RenderGraphTelemetry.snapshot().get("colorStoreKilledBytes"),
+                    "unproven view equivalence conservatively stores");
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            ByteBuffer basePixels = readback(texture);
+            for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                assertByteNear(basePixels.get(pixel * 4), 255, "other mip must preserve base red");
+                assertByteNear(basePixels.get(pixel * 4 + 2), 0, "other mip must preserve base blue");
+            }
+            ByteBuffer mipPixels = readback(texture, 1);
+            for (int pixel = 0; pixel < (WIDTH / 2) * (HEIGHT / 2); pixel++) {
+                assertByteNear(mipPixels.get(pixel * 4), 0, "mip red");
+                assertByteNear(mipPixels.get(pixel * 4 + 2), 255, "mip blue");
+            }
+        }
+    }
+
+    @Test
+    void deferredColorStorePreservesReorderedSlotsAndPartialArea() {
+        List<MetalGpuTexture> textures = createTextures(
+                List.of(GpuFormat.RGBA8_UNORM, GpuFormat.RGBA8_UNORM), "store reordered");
+        try (MetalGpuTextureView a = new MetalGpuTextureView(textures.get(0), 0, 1);
+             MetalGpuTextureView b = new MetalGpuTextureView(textures.get(1), 0, 1)) {
+            RenderGraphTelemetry.reset();
+            encoder.createRenderPass(RenderPassDescriptor.builder(() -> "original slots")
+                    .withColorAttachment(a, Optional.of(new Vector4f(1, 0, 0, 1)))
+                    .withColorAttachment(b, Optional.of(new Vector4f(0, 1, 0, 1))).build());
+            encoder.submitRenderPass();
+            encoder.createRenderPass(RenderPassDescriptor.builder(() -> "reordered slots")
+                    .withColorAttachment(b, Optional.of(new Vector4f(0, 0, 1, 1)))
+                    .withColorAttachment(a, Optional.empty()).build());
+            encoder.submitRenderPass();
+            assertEquals(0L, RenderGraphTelemetry.snapshot().get("colorStoreKilledBytes"));
+            encoder.createRenderPass(RenderPassDescriptor.builder(() -> "partial render area")
+                    .withColorAttachment(b, Optional.of(new Vector4f(0, 1, 0, 1)))
+                    .withColorAttachment(a, Optional.empty())
+                    .withRenderArea(new RenderPass.RenderArea(1, 1, WIDTH - 2, HEIGHT - 2)).build());
+            encoder.submitRenderPass();
+            assertEquals(0L, RenderGraphTelemetry.snapshot().get("colorStoreKilledBytes"),
+                    "partial area supplies no full-coverage discard proof");
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            ByteBuffer pixels = readback(textures.get(0));
+            for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+                assertByteNear(pixels.get(pixel * 4), 255, "reordered, uncleared attachment survives");
+            }
+        } finally {
+            closeTextures(textures);
+        }
+    }
+
+    @Test
+    void layeredColorAttachmentIsRejectedBeforeEncoding() {
+        try (MetalGpuTexture texture = (MetalGpuTexture) device.createTexture(
+                "layered store", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 2, 1);
+             MetalGpuTextureView view = new MetalGpuTextureView(texture, 0, 1)) {
+            assertThrows(UnsupportedOperationException.class, () -> encoder.createRenderPass(
+                    RenderPassDescriptor.builder(() -> "unsupported layered clear")
+                            .withColorAttachment(view, Optional.of(new Vector4f(1))).build()));
+        }
     }
 
     @Test
@@ -807,14 +958,18 @@ final class MetalMrtBackendIntegrationTest {
     }
 
     private ByteBuffer readback(MetalGpuTexture texture) {
-        int size = WIDTH * HEIGHT * texture.pixelSize();
+        return readback(texture, 0);
+    }
+
+    private ByteBuffer readback(MetalGpuTexture texture, int mipLevel) {
+        int size = texture.getWidth(mipLevel) * texture.getHeight(mipLevel) * texture.pixelSize();
         try (MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
                 () -> "MRT readback",
                 GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST,
                 size
         )) {
             encoder.copyTextureToBuffer(texture, buffer, 0L, () -> {
-            }, 0);
+            }, mipLevel);
             encoder.submit();
             device.waitForSubmittedGpuWork();
             ByteBuffer source = buffer.currentStorage().limit(size).slice().order(ByteOrder.nativeOrder());

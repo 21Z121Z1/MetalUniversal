@@ -3051,9 +3051,16 @@ def configureRenderContractNativeTest = { Test task, boolean metal4 ->
 	task.jvmArgs "--enable-native-access=ALL-UNNAMED"
 	task.systemProperty "metallum.opt.metal4", metal4.toString()
 	// The Metal 4 lane must exercise MTL4Compiler-backed PSO creation rather
-	// than merely observing the device family bit. Main-queue rendering remains
-	// covered by metal4PipelinePathTest and the named minecraft metal4 lane.
+	// than merely observing the device family bit. The MRT suite below also
+	// activates the offscreen main queue; client presentation has its own lane.
 	task.systemProperty "metallum.opt.metal4Compiler", metal4.toString()
+	if (metal4) {
+		// MRT readbacks also validate real MTL4 encoder/store actions. The native
+		// offscreen queue is process-wide, so isolate test classes from it.
+		task.systemProperty "metallum.test.mrtMetal4Commands", "true"
+		task.systemProperty "metallum.opt.residencySet", "true"
+		task.forkEvery = 1
+	}
 	task.environment "MTL_DEBUG_LAYER", metalApiValidation
 	task.environment "MTL_SHADER_VALIDATION", metalShaderValidation
 	task.testLogging {
