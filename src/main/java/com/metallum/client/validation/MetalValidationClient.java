@@ -46,6 +46,7 @@ import net.minecraft.world.entity.vehicle.minecart.OldMinecartBehavior;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.RailBlock;
 import net.minecraft.world.level.block.VineBlock;
@@ -126,6 +127,13 @@ public final class MetalValidationClient implements ClientModInitializer {
     // controlled entity's render section have settled; captures are frame-exact
     // afterwards. Section compilation runs on worker threads, so warm-up frames
     // yield wall-clock time instead of only render-loop iterations.
+    // Scripted mutations must render in their timeline frame. In vanilla 26.3,
+    // UPDATE_IMMEDIATE marks the section as playerChanged, selecting compileSync
+    // under the validation profile's PLAYER_AFFECTED chunk-update setting.
+    // The optional Sodium rebuild hook alone cannot provide that guarantee.
+    private static final int SCENE_BLOCK_UPDATE_FLAGS = Block.UPDATE_NEIGHBORS
+            | Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE | Block.UPDATE_IMMEDIATE;
+
     private static final int WARMUP_FRAMES = 40;
     private static final long WARMUP_FRAME_SLEEP_MILLIS = 50L;
     // Static-camera hold on the cutout grass scene: only the Halton jitter
@@ -1856,7 +1864,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                         target = air;
                     }
                     if (minecraft.level.getBlockState(pos) != target) {
-                        minecraft.level.setBlock(pos, target, 19);
+                        minecraft.level.setBlock(pos, target, SCENE_BLOCK_UPDATE_FLAGS);
                     }
                     touched.add(pos);
                 }
@@ -1877,7 +1885,7 @@ public final class MetalValidationClient implements ClientModInitializer {
                 BlockPos pos = BlockPos.containing(sample);
                 BlockState previous = minecraft.level.getBlockState(pos);
                 OCCLUSION_WALL.putIfAbsent(pos.immutable(), previous);
-                minecraft.level.setBlock(pos, Blocks.STONE.defaultBlockState(), 19);
+                minecraft.level.setBlock(pos, Blocks.STONE.defaultBlockState(), SCENE_BLOCK_UPDATE_FLAGS);
             }
         }
         requestImportantRebuild(OCCLUSION_WALL.keySet());
@@ -1891,7 +1899,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (minecraft.level == null || OCCLUSION_WALL.isEmpty()) {
             return;
         }
-        OCCLUSION_WALL.forEach((pos, state) -> minecraft.level.setBlock(pos, state, 19));
+        OCCLUSION_WALL.forEach((pos, state) -> minecraft.level.setBlock(pos, state, SCENE_BLOCK_UPDATE_FLAGS));
         requestImportantRebuild(OCCLUSION_WALL.keySet());
         Metallum.LOGGER.info(
                 "Removed automated validation occlusion wall with {} blocks",
@@ -2307,7 +2315,7 @@ public final class MetalValidationClient implements ClientModInitializer {
     ) {
         BlockPos immutable = pos.immutable();
         OBJECT_SCENE.putIfAbsent(immutable, minecraft.level.getBlockState(immutable));
-        minecraft.level.setBlock(immutable, state, 19);
+        minecraft.level.setBlock(immutable, state, SCENE_BLOCK_UPDATE_FLAGS);
     }
 
     private static void removeObjectMotionScene() {
@@ -2337,7 +2345,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         }
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level != null && !OBJECT_SCENE.isEmpty()) {
-            OBJECT_SCENE.forEach((pos, state) -> minecraft.level.setBlock(pos, state, 19));
+            OBJECT_SCENE.forEach((pos, state) -> minecraft.level.setBlock(pos, state, SCENE_BLOCK_UPDATE_FLAGS));
             requestImportantRebuild(OBJECT_SCENE.keySet());
         }
         OBJECT_SCENE.clear();
@@ -2350,14 +2358,14 @@ public final class MetalValidationClient implements ClientModInitializer {
     ) {
         BlockPos immutable = pos.immutable();
         CUTOUT_SCENE.putIfAbsent(immutable, minecraft.level.getBlockState(immutable));
-        minecraft.level.setBlock(immutable, state, 19);
+        minecraft.level.setBlock(immutable, state, SCENE_BLOCK_UPDATE_FLAGS);
     }
 
     private static void removeCutoutScene(final Minecraft minecraft) {
         if (minecraft.level == null || CUTOUT_SCENE.isEmpty()) {
             return;
         }
-        CUTOUT_SCENE.forEach((pos, state) -> minecraft.level.setBlock(pos, state, 19));
+        CUTOUT_SCENE.forEach((pos, state) -> minecraft.level.setBlock(pos, state, SCENE_BLOCK_UPDATE_FLAGS));
         requestImportantRebuild(CUTOUT_SCENE.keySet());
         Metallum.LOGGER.info(
                 "Removed automated validation CUTOUT scene with {} blocks",
