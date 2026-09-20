@@ -2437,6 +2437,17 @@ public final class MetalValidationClient implements ClientModInitializer {
                 }
             }
         }
+        if (Boolean.getBoolean("metallum.terrain.vanillaUploadPressure")) {
+            try {
+                var pressureReport = com.metallum.client.terrain.VanillaTerrainUploadPressure.report(
+                        sourceCommit, runId, status);
+                ValidationStorageBudget.shared(outputDirectory).writeString(
+                        outputDirectory.resolve("terrain-upload-pressure.json"),
+                        new GsonBuilder().create().toJson(pressureReport) + "\n");
+            } catch (IOException exception) {
+                throw new IllegalStateException("Could not write terrain upload pressure diagnostics", exception);
+            }
+        }
         if (Boolean.getBoolean("metallum.terrain.vanillaAdmission")) {
             if (!sourceCommit.matches("[0-9a-f]{40}")) {
                 Metallum.LOGGER.warn(

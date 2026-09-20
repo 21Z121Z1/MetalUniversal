@@ -34,6 +34,10 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     );
     private static final String VANILLA_TERRAIN_ADMISSION_PROPERTY = "metallum.terrain.vanillaAdmission";
     private static final String VANILLA_TERRAIN_GENERATION_PROPERTY = "metallum.terrain.vanillaGenerationGuard";
+    private static final Set<String> VANILLA_TERRAIN_UPLOAD_PRESSURE_MIXINS = Set.of(
+            "com.metallum.mixin.terrain.RenderSectionUploadPressureMixin",
+            "com.metallum.mixin.terrain.SectionDispatcherUploadPressureMixin"
+    );
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -83,6 +87,13 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             FabricLoader loader = FabricLoader.getInstance();
             return this.isDefaultGraphicsApi
                     && Boolean.getBoolean(VANILLA_TERRAIN_GENERATION_PROPERTY)
+                    && !loader.isModLoaded("sodium")
+                    && !loader.isModLoaded("iris");
+        }
+        if (VANILLA_TERRAIN_UPLOAD_PRESSURE_MIXINS.contains(mixinClassName)) {
+            FabricLoader loader = FabricLoader.getInstance();
+            return this.isDefaultGraphicsApi
+                    && Boolean.getBoolean("metallum.terrain.vanillaUploadPressure")
                     && !loader.isModLoaded("sodium")
                     && !loader.isModLoaded("iris");
         }

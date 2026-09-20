@@ -76,6 +76,8 @@
     "terrain.RenderSectionTerrainWorkMixin",
     "terrain.LevelRendererTerrainDrawMixin",
     "terrain.ChunkSectionsDrawTerrainWorkMixin",
+    "terrain.RenderSectionUploadPressureMixin",
+    "terrain.SectionDispatcherUploadPressureMixin",
     "terrain.SectionTaskTerrainAdmissionAccessor",
     "terrain.SectionTaskDynamicQueueAdmissionMixin",
     "terrain.LevelExtractorTerrainGenerationMixin",

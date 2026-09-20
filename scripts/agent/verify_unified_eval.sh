@@ -57,6 +57,8 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.terrain.VanillaTerrainAdmissionReportTest \
   --tests com.metallum.client.terrain.TerrainWorkEventRecorderTest \
   --tests com.metallum.client.terrain.TerrainWorkReportTest \
+  --tests com.metallum.client.terrain.TerrainUploadPressureCountersTest \
+  --tests com.metallum.client.terrain.VanillaTerrainUploadPressureTest \
   --tests com.metallum.client.terrain.VanillaTerrainWorkTrackerTest \
   --tests com.metallum.client.terrain.TerrainNativeSignalTest \
   --tests com.metallum.client.terrain.PresentationPacingSnapshotTest \
