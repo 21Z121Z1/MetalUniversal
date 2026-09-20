@@ -1439,7 +1439,9 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         }
 
         if (dirtyDescriptorMask != 0) {
-            for (MetalCompiledRenderPipeline.ResourceBinding binding : compiledPipeline.resources()) {
+            List<MetalCompiledRenderPipeline.ResourceBinding> resources = compiledPipeline.resources();
+            for (int index = 0; index < resources.size(); index++) {
+                MetalCompiledRenderPipeline.ResourceBinding binding = resources.get(index);
                 if ((dirtyDescriptorMask & (1L << binding.bindingIndex())) != 0L) {
                     pushDescriptor(enc, binding);
                 }

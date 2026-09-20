@@ -31,6 +31,8 @@ public final class RenderGraphTelemetry {
     private static final AtomicLong COLOR_STORE_KILLED_BYTES = new AtomicLong();
     private static final List<Map<String, Object>> EVENTS = new ArrayList<>();
     private static final int MAX_EVENTS = 4096;
+    // Check before constructing event maps; cumulative counters remain unbounded.
+    private static volatile boolean eventsFull;
 
     private RenderGraphTelemetry() {
     }
@@ -46,13 +48,16 @@ public final class RenderGraphTelemetry {
         COLOR_STORE_KILLED_BYTES.set(0);
         synchronized (EVENTS) {
             EVENTS.clear();
+            eventsFull = false;
         }
     }
 
     /** One semantic render pass reached the encoder boundary. */
     public static void onPassRequested(final String label) {
         PASSES_REQUESTED.incrementAndGet();
-        record(Map.of("event", "pass-requested", "label", label == null ? "" : label));
+        if (!eventsFull) {
+            record(Map.of("event", "pass-requested", "label", label == null ? "" : label));
+        }
     }
 
     /**
@@ -82,12 +87,14 @@ public final class RenderGraphTelemetry {
             }
             if (slotStoreKilled[index]) {
                 COLOR_STORE_KILLED_BYTES.addAndGet(pixels * bytes);
-                record(Map.of(
-                        "event", "color-store-killed",
-                        "slot", index,
-                        "pixels", pixels,
-                        "bytesPerPixel", bytes
-                ));
+                if (!eventsFull) {
+                    record(Map.of(
+                            "event", "color-store-killed",
+                            "slot", index,
+                            "pixels", pixels,
+                            "bytesPerPixel", bytes
+                    ));
+                }
             } else {
                 store += pixels * bytes;
             }
@@ -100,25 +107,29 @@ public final class RenderGraphTelemetry {
         }
         COLOR_STORE_BYTES.addAndGet(store);
         COLOR_LOAD_BYTES.addAndGet(load);
-        record(Map.of(
-                "event", "encoder-created",
-                "label", label == null ? "" : label,
-                "width", width,
-                "height", height,
-                "storeBytesEstimate", store,
-                "loadBytesEstimate", load
-        ));
+        if (!eventsFull) {
+            record(Map.of(
+                    "event", "encoder-created",
+                    "label", label == null ? "" : label,
+                    "width", width,
+                    "height", height,
+                    "storeBytesEstimate", store,
+                    "loadBytesEstimate", load
+            ));
+        }
     }
 
     /** A deferred depth store was resolved to dontCare by an incoming clear. */
     public static void onDepthStoreKilled(final long pixels, final int depthPixelBytes) {
         if (pixels > 0 && depthPixelBytes > 0) {
             DEPTH_STORE_KILLED_BYTES.addAndGet(pixels * depthPixelBytes);
-            record(Map.of(
-                    "event", "depth-store-killed",
-                    "pixels", pixels,
-                    "bytesPerPixel", depthPixelBytes
-            ));
+            if (!eventsFull) {
+                record(Map.of(
+                        "event", "depth-store-killed",
+                        "pixels", pixels,
+                        "bytesPerPixel", depthPixelBytes
+                ));
+            }
         }
     }
 
@@ -138,12 +149,14 @@ public final class RenderGraphTelemetry {
         for (int index = 0; index < killedPixelBytes.length; index++) {
             if (killedPixelBytes[index] > 0) {
                 COLOR_STORE_KILLED_BYTES.addAndGet(pixels * killedPixelBytes[index]);
-                record(Map.of(
-                        "event", "color-store-killed",
-                        "slot", index,
-                        "pixels", pixels,
-                        "bytesPerPixel", killedPixelBytes[index]
-                ));
+                if (!eventsFull) {
+                    record(Map.of(
+                            "event", "color-store-killed",
+                            "slot", index,
+                            "pixels", pixels,
+                            "bytesPerPixel", killedPixelBytes[index]
+                    ));
+                }
             }
         }
     }
@@ -151,13 +164,16 @@ public final class RenderGraphTelemetry {
     /** An incoming pass reused the already-open encoder (fusion candidate path). */
     public static void onEncoderReused(final String label) {
         ENCODERS_REUSED.incrementAndGet();
-        record(Map.of("event", "encoder-reused", "label", label == null ? "" : label));
+        if (!eventsFull) {
+            record(Map.of("event", "encoder-reused", "label", label == null ? "" : label));
+        }
     }
 
     private static void record(final Map<String, Object> event) {
         synchronized (EVENTS) {
             if (EVENTS.size() < MAX_EVENTS) {
                 EVENTS.add(new LinkedHashMap<>(event));
+                eventsFull = EVENTS.size() == MAX_EVENTS;
             }
         }
     }

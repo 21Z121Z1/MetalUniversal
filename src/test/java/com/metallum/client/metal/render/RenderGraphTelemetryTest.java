@@ -5,8 +5,27 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.util.Map;
+import java.util.List;
 
 final class RenderGraphTelemetryTest {
+    @Test
+    void fullEventBufferKeepsCountingAndResetResumesRecording() {
+        RenderGraphTelemetry.reset();
+        for (int index = 0; index < 5000; index++) {
+            RenderGraphTelemetry.onPassRequested("pass");
+        }
+        Map<String, Object> full = RenderGraphTelemetry.snapshot();
+        assertEquals(5000L, full.get("passesRequested"));
+        assertEquals(4096, ((List<?>) full.get("events")).size());
+
+        RenderGraphTelemetry.reset();
+        RenderGraphTelemetry.onEncoderReused("after-reset");
+        Map<String, Object> reset = RenderGraphTelemetry.snapshot();
+        assertEquals(0L, reset.get("passesRequested"));
+        assertEquals(1L, reset.get("encodersReused"));
+        assertEquals(List.of(Map.of("event", "encoder-reused", "label", "after-reset")), reset.get("events"));
+    }
+
     @Test
     void deferredDepthStoreIsNotCountedUntilKilled() {
         RenderGraphTelemetry.reset();

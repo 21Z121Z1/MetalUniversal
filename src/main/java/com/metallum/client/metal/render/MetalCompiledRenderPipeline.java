@@ -433,13 +433,14 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, Backe
             final MTLPixelFormat depthFormat,
             final MTLPixelFormat stencilFormat
     ) {
-        return List.of(
-                new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Invalid),
-                new DepthStencilFormats(MTLPixelFormat.Depth16Unorm, MTLPixelFormat.Invalid),
-                new DepthStencilFormats(MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid),
-                new DepthStencilFormats(MTLPixelFormat.Depth32Float_Stencil8, MTLPixelFormat.Depth32Float_Stencil8),
-                new DepthStencilFormats(MTLPixelFormat.Invalid, MTLPixelFormat.Stencil8)
-        ).contains(new DepthStencilFormats(depthFormat, stencilFormat));
+        if (stencilFormat == MTLPixelFormat.Invalid) {
+            return depthFormat == MTLPixelFormat.Invalid
+                    || depthFormat == MTLPixelFormat.Depth16Unorm
+                    || depthFormat == MTLPixelFormat.Depth32Float;
+        }
+        return (depthFormat == MTLPixelFormat.Invalid && stencilFormat == MTLPixelFormat.Stencil8)
+                || (depthFormat == MTLPixelFormat.Depth32Float_Stencil8
+                    && stencilFormat == MTLPixelFormat.Depth32Float_Stencil8);
     }
 
     private List<DepthStencilFormats> supportedDepthStencilFormats() {

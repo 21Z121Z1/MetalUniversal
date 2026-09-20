@@ -291,3 +291,11 @@ the same workload. A completed route proves only its reported actions; it does n
 replace image correctness, paired performance trials or GPU validation. Xcode's
 M3-only offline GPU-counter profiler is separate from the Instruments timeline and
 must not be reported as available on an M1 Pro.
+
+The native-max JFR capture also found compatibility binding-cache allocations on
+the Vanilla path. Those two mixins now load only with Sodium or Iris; their optional
+producer behavior is unchanged. Depth/stencil admission compares the same allowed
+format pairs without temporary records, and descriptor traversal avoids an iterator.
+The bounded render-graph event list stops constructing events at capacity while
+continuing all cumulative counters; reset reopens event capture. These are candidate
+CPU/allocation reductions, not a measured FPS improvement.

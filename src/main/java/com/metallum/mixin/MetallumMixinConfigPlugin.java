@@ -99,6 +99,14 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
         }
+        if (mixinClassName.equals("com.metallum.mixin.render.MetalRenderPassBindingCacheMixin")
+                || mixinClassName.equals("com.metallum.mixin.render.MetalCompiledRenderPipelineBindingPlanMixin")) {
+            // These name/token compatibility caches serve the optional producers.
+            // RenderPearl's indexed Vanilla path needs neither their per-pass maps
+            // nor their callbacks on every uniform binding.
+            FabricLoader loader = FabricLoader.getInstance();
+            return this.isDefaultGraphicsApi && (loader.isModLoaded("sodium") || loader.isModLoaded("iris"));
+        }
         if (mixinClassName.contains(".mixin.iris.")) {
             // Iris-dormancy compat shims: only meaningful when Iris is present
             // and the default (Metal-first) backend selection is active. The
