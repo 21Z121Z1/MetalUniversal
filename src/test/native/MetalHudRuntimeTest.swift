@@ -41,15 +41,28 @@ private struct MetalHudRuntimeTest {
             print("Metal HUD runtime toggle validation skipped: macOS 13 is required")
             return
         }
+        let expectDisabled = ProcessInfo.processInfo.environment["METALLUM_EXPECT_HUD_DISABLED"] == "1"
         guard let devicePointer = createSystemDefaultDevice() else {
             fatalError("No Metal device")
-        }
-        guard ProcessInfo.processInfo.environment["MTLFX_HUD_ENABLED"] == "1" else {
-            fatalError("MetalFX HUD was not enabled before effect construction")
         }
         let deviceObject = Unmanaged<AnyObject>.fromOpaque(devicePointer).takeRetainedValue()
         guard let device = deviceObject as? MTLDevice else {
             fatalError("Native device export returned a non-MTLDevice object")
+        }
+
+        let environment = ProcessInfo.processInfo.environment
+        if expectDisabled {
+            guard environment["MTL_HUD_ENABLED"] == "0",
+                  environment["MTLFX_HUD_ENABLED"] == "0" else {
+                fatalError("Native device creation overrode an explicit HUD disable")
+            }
+            print("Metal HUD explicit-disable environment validation passed")
+            return
+        }
+
+        guard environment["MTL_HUD_ENABLED"] == "1",
+              environment["MTLFX_HUD_ENABLED"] == "1" else {
+            fatalError("Metal HUD startup environment was not enabled")
         }
 
         let layer = CAMetalLayer()

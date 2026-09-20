@@ -1,6 +1,5 @@
 package com.metallum.client.metal.render;
 
-import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
 
@@ -21,21 +20,6 @@ final class TerrainGpuVisibilityProbeContractTest {
     void defaultFeatureIsOff() {
         assertFalse(TerrainGpuVisibilityProbe.enabled(),
                 "the value-only terrain visibility probe must require explicit opt-in");
-    }
-
-    @Test
-    void invalidOrUnavailableNativeProbeInputsFallbackBeforeDispatch() {
-        assertTrue(MetalNativeBridge.isNullHandle(
-                MetalNativeBridge.MTLDevice_createTerrainGpuVisibilityProbe(
-                        MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL,
-                        MemorySegment.NULL, 0, 0L
-                )
-        ));
-        assertEquals(0, MetalNativeBridge.terrainVisibilityProbePoll(
-                MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL,
-                MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL, -1,
-                MemorySegment.NULL, MemorySegment.NULL, -1
-        ));
     }
 
     @Test

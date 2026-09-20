@@ -9,6 +9,7 @@ import com.mojang.renderpearl.api.textures.GpuSampler;
 import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.metallum.client.metal.render.mtl.MTLSamplerMipFilter;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.irisshaders.iris.gl.texture.InternalTextureFormat;
@@ -108,7 +109,7 @@ final class IrisMetalCustomTextures implements AutoCloseable {
      * stage-local declaration overrides a same-name global declaration, and either kind overrides
      * standard samplers because callers ask this layer first.
      */
-    synchronized MetalRenderPass.@Nullable TextureViewAndSampler resolve(
+    synchronized @Nullable TextureViewAndSampler resolve(
             final TextureStage stage,
             final String... samplerNames
     ) {
@@ -127,7 +128,7 @@ final class IrisMetalCustomTextures implements AutoCloseable {
                     : this.globalDefinitions.get(samplerName);
             if (data instanceof CustomTextureData.LightmapMarker
                     || data instanceof CustomTextureData.ResourceData) {
-                MetalRenderPass.TextureViewAndSampler binding =
+                TextureViewAndSampler binding =
                         this.liveTextureResolver.resolve(stage, samplerName, data);
                 if (binding == null) {
                     throw unsupported(stage, samplerName, data, "live texture resolver returned no binding");
@@ -146,12 +147,12 @@ final class IrisMetalCustomTextures implements AutoCloseable {
     }
 
     /** Returns the stage override when present, otherwise the caller's standard binding. */
-    synchronized MetalRenderPass.@Nullable TextureViewAndSampler overrideOrDefault(
+    synchronized @Nullable TextureViewAndSampler overrideOrDefault(
             final TextureStage stage,
-            final MetalRenderPass.@Nullable TextureViewAndSampler standard,
+            final @Nullable TextureViewAndSampler standard,
             final String... samplerNames
     ) {
-        MetalRenderPass.TextureViewAndSampler override = resolve(stage, samplerNames);
+        TextureViewAndSampler override = resolve(stage, samplerNames);
         return override == null ? standard : override;
     }
 
@@ -247,7 +248,7 @@ final class IrisMetalCustomTextures implements AutoCloseable {
         throw unsupported(stage, samplerName, data, "no Metal resource alias exists for this data kind");
     }
 
-    private static MetalRenderPass.TextureViewAndSampler resolveMinecraftTexture(
+    private static TextureViewAndSampler resolveMinecraftTexture(
             final MetalDevice device,
             final TextureStage stage,
             final String samplerName,
@@ -331,30 +332,17 @@ final class IrisMetalCustomTextures implements AutoCloseable {
         );
     }
 
-    static MetalRenderPass.TextureViewAndSampler checkedExternalBinding(
+    static TextureViewAndSampler checkedExternalBinding(
             final MetalDevice device,
             final @Nullable GpuTextureView view,
             final @Nullable GpuSampler sampler,
             final String label
     ) {
-        if (!(view instanceof MetalGpuTextureView metalView)
-                || !(metalView.texture() instanceof MetalGpuTexture texture)
-                || !(sampler instanceof MetalGpuSampler metalSampler)
-                || metalView.isClosed()
-                || texture.isClosed()
-                || metalSampler.isClosed()
-                || !texture.isOwnedBy(device)
-                || !metalSampler.isOwnedBy(device)
-                || (texture.usage() & GpuTexture.USAGE_TEXTURE_BINDING) == 0) {
-            throw new IllegalStateException(
-                    "Iris external texture '" + label
-                            + "' is absent, stale, or owned by another backend/device"
-            );
-        }
-        return new MetalRenderPass.TextureViewAndSampler(metalView, metalSampler);
+        MetalRenderPass.validateTextureBinding(device, view, sampler, "Iris external " + label);
+        return new TextureViewAndSampler(view, sampler);
     }
 
-    private static MetalRenderPass.TextureViewAndSampler checkedLiveBinding(
+    private static TextureViewAndSampler checkedLiveBinding(
             final MetalDevice device,
             final TextureStage stage,
             final String samplerName,
@@ -820,7 +808,7 @@ final class IrisMetalCustomTextures implements AutoCloseable {
 
     @FunctionalInterface
     interface LiveTextureResolver {
-        MetalRenderPass.@Nullable TextureViewAndSampler resolve(
+        @Nullable TextureViewAndSampler resolve(
                 TextureStage stage,
                 String samplerName,
                 CustomTextureData data
@@ -854,8 +842,8 @@ final class IrisMetalCustomTextures implements AutoCloseable {
             this.sampler = sampler;
         }
 
-        private MetalRenderPass.TextureViewAndSampler binding() {
-            return new MetalRenderPass.TextureViewAndSampler(this.view, this.sampler);
+        private TextureViewAndSampler binding() {
+            return new TextureViewAndSampler(this.view, this.sampler);
         }
 
         @Override

@@ -1,155 +1,64 @@
-# MetalUniversal agent entrypoint
+# MetalUniversal agent guide
 
-MetalUniversal is one evidence-driven rendering system. The canonical continued-development base is `integration/iris-metal-next`; `master` is promoted stable; `feature/ios-amethyst-runtime` is the isolated mobile line. Treat task branches as disposable work queues, not memory.
+This file applies to the whole repository. Read a more specific `AGENTS.md` only when one exists in the directory that you change.
 
-This file is intentionally a map, not the repository encyclopedia. Current architecture lives in `docs/agent/system-model.md`; machine ownership/impact/proof policy lives in `docs/agent/system-registry.json`.
+## Objective
 
-## 60-second bootstrap
+MetalUniversal preserves Minecraft Java rendering semantics while it lowers work to a native Metal backend for Apple Silicon. The current product line targets Minecraft 26.3. Vanilla is a real client of the common renderer. Sodium and Iris are optional adapters.
 
-Run from the repository root:
+## Authority
 
-```bash
-python3 scripts/agent/context.py --task "<short task description>"
-```
+Use this order when facts disagree:
 
-Interpret the capsule precisely:
+1. Source code, tests, and build configuration at the exact commit.
+2. Exact-head CI evidence for that commit.
+3. Current contract documents and architecture decision records.
+4. Git history, old reports, branch names, and handoff notes.
 
-- **changed-component ownership** is path-derived and may be treated as a computed fact;
-- **planned component route** is task-derived inference until a diff establishes ownership;
-- **impact closure** is a conservative downstream inference, not an instruction to edit every impacted component;
-- **proof obligations** are the complete logical evidence closure;
-- **minimum execution schedule** collapses gates already integrated by larger executors while retaining cheap fail-fast preflight;
-- checkpoint PASS results only apply to the exact `source_sha` at which they ran.
+Do not treat a branch name, an old roadmap, or a generated status file as product authority.
 
-Read only the returned local `AGENTS.md`, canonical docs, nearest tests/schemas and concrete evidence needed for the task. Do not preload all of `docs/`, old prompts/handoffs or historical branches.
+## Start
 
-For multi-step work:
+Read `gradle.properties`, `build.gradle`, the files that own the behavior, and their nearest tests. Do not preload historical reports. Use `scripts/minecraft-reference.sh --print-path` only when the task needs Minecraft source evidence.
 
-```bash
-python3 scripts/agent/checkpoint.py init \
-  --task "<task>" \
-  --hypothesis "<falsifiable hypothesis>" \
-  --next-command "<next cheapest action>"
-```
+## Architecture invariants
 
-`build/agent-state/` is generated/ignored state, never canonical truth.
+- The GPU execution path is native Metal. SPIR-V can be a shader intermediate representation, but Vulkan and MoltenVK are not renderer runtimes.
+- Common rendering semantics must work without Sodium or Iris.
+- Sodium and Iris adapt producer-specific semantics to common contracts. They do not own the common renderer.
+- Metal 3 is the maintained fallback. Metal 4 is a capability-specific lowering path, not a second renderer.
+- MetalFX temporal scaling and frame generation are optional presentation features. They do not define core rendering or hide source performance.
+- Java, the Foreign Function and Memory API, and Swift form one native ABI contract. Check symbol names, fixed-width types, size, alignment, count, stride, ownership, lifetime, completion, and failure behavior together.
+- Terrain work and publication must be generation-safe. Old CPU work cannot replace newer geometry. Submitted GPU work retires through its real lifetime.
+- Prefer one explicit owner, immutable plans, direct code, and conservative fallback. Remove forwarding layers and parallel implementations that have no independent contract.
+- Keep the iOS and Amethyst lifecycle isolated from the macOS renderer. Share only contracts that are truly platform-neutral.
 
-## Authority and epistemic order
+## Validation
 
-When sources disagree:
+Run the cheapest relevant check first.
 
-1. shipping source, tests, schemas, generated manifests and exact Git/binary identity;
-2. structured runtime evidence produced by that exact identity;
-3. canonical design/acceptance documents named by the registry;
-4. prompts, handoffs, retired plans, migration records and other historical prose.
-
-Do not present task routing, suspected cause or expected performance effect as fact. Do not reuse PASS evidence from another SHA.
-
-## Abstraction tower
-
-```text
-operator intent
- -> Minecraft/Iris/Sodium observable semantics
- -> semantic pass + generation-aware resource identity
- -> immutable render/terrain plan + admission
- -> Java backend execution
- -> Java/FFM ABI
- -> Swift/Metal execution
- -> structured evidence
- -> acceptance/promotion
-```
-
-Component IDs:
-
-`product.semantics` · `render.plan` · `render.execution` · `native.abi` ·
-`native.execution` · `terrain.scene` · `validation.contract` ·
-`evaluation.control` · `platform.mobile`
-
-When ownership is ambiguous inside a renderer execution root, prefer the more conservative execution component/proof route rather than a cheaper guess. A diff directly owning more than two components should normally be split unless the interface itself is the task.
-
-## Non-negotiable renderer invariants
-
-- Preserve exact Iris/OpenGL-observable semantics; do not substitute approximations or shader-pack-name special cases.
-- Fail closed. Unsupported/unsafe optimization paths must reject/disable with stable reason evidence.
-- Hazard/liveness reasoning uses generation-aware physical resources and explicit RAW/WAR/WAW/barrier/attachment transitions.
-- Lower/native layers execute admitted intent; they must not independently re-derive semantic policy.
-- Extend the existing Java/FFM/Swift bridge; do not create a shadow native module/control plane.
-- Keep Java descriptors/downcalls and Swift exports aligned in symbol, layout, ownership, nullability and lifecycle.
-- Resource recreate/resize/reload/close/retirement paths are correctness.
-- Structured JSON is acceptance authority; log regex is not.
-- A changed oracle/analyzer must independently prove itself before judging the same candidate.
-- Never weaken tests, thresholds, Metal validation or error handling to produce a pass.
-- Never commit shader packs, worlds, binaries, captures, `.minecraft-reference/`, `build/agent-runs/`, `build/agent-evidence/` or `build/agent-state/`.
-
-## One implementation loop
-
-```text
-OBSERVE -> ORIENT -> DECIDE -> ACT -> VERIFY -> DISTILL
-```
-
-1. Generate context; create/update a checkpoint for long work.
-2. Separate ownership facts from task inference; inspect impact closure and named boundary contracts.
-3. Read the smallest returned component slice and nearest tests.
-4. State one falsifiable hypothesis, target behavior/metric, semantic risk, fastest falsifier and rollback condition.
-5. Implement the narrowest complete change with activation/admission and lifecycle evidence.
-6. Run the generated **minimum execution schedule** in increasing cost; stop when a cheap gate falsifies the candidate.
-7. Diagnose semantic failures from the first divergent pass/resource/producer before broad capture.
-8. Use physical/device proof only when the requested claim cannot be established elsewhere.
-9. Run paired performance only after correctness/activation and only for a performance claim.
-10. Self-review the final diff, then distill reusable knowledge into tests/contracts/ADR/registry + routing fixture/checker.
-
-## Evidence truth
-
-A valid decision binds:
-
-```text
-source SHA
- + binary/native identity
- + environment/scenario identity
- + activation/admission
- + correctness
- + performance when claimed
- + exact artifact locations
-```
-
-Compilation is not activation. Activation is not correctness. Correctness is not performance improvement. A screenshot without semantic linkage is diagnostic evidence. A PASS from another SHA is stale.
-
-For pull requests, **candidate-head** and **synthetic merge-result** are different proof subjects. A workflow may claim exact-head evidence only when it verifies the checked-out commit against the candidate head SHA. The general `build` PR job intentionally remains merge-result integration evidence. See `docs/agent/ci-proof-identity.md`.
-
-The unified runner already emits the canonical run manifest, correctness/admission/trial artifacts and `decision.json`; reuse those instead of copying metrics into another truth store.
-
-## Environment truth
-
-Hosted CI is an independent environment, not a substitute for attended Apple Silicon or a real iOS device when the claim depends on visible presentation, physical Metal behavior, stable GPU performance or device integration. Missing capability is `environment-blocked`, never silently passed.
-
-For vanilla Minecraft implementation details:
+For Java and contract changes:
 
 ```bash
-bash scripts/minecraft-reference.sh
+./gradlew --no-daemon compileJava test -x buildMacNative -x buildIOSNative -x buildIOSSpvc
 ```
 
-The generated `.minecraft-reference/26.2/sources/` tree is ignored and must not be committed.
-
-## Branch and memory discipline
-
-Normally retain only `master`, `integration/iris-metal-next`, `feature/ios-amethyst-runtime`, and `research/modernization-backlog`, plus bounded active task work. After the human merge/retire decision, delete disposable task branches. Preserve uniquely useful unlanded work by exact SHA + retirement ledger/research anchor, not per-task archive branches.
-
-For any task that spans branches, do not reason from a flat branch-name list or the historical migration matrix. Compile live topology explicitly:
+For repository evidence contracts:
 
 ```bash
-python3 scripts/agent/branch_topology.py --refresh
+bash scripts/agent/verify_unified_eval.sh
 ```
 
-Reason from lineage tips and their nearest covered ancestors. Use ancestry **and tree identity**: a history anchor can be hundreds of commits ahead while tree-identical to canonical. Open PR state is intent metadata, not proof of unique code. `covered-ancestor` is a read-only retirement advisory, never permission to delete a branch. See `docs/agent/branch-topology.md`.
+For the shipping macOS native module on a compatible runner:
 
-Durable knowledge should compile into the narrowest form:
+```bash
+./gradlew --no-daemon buildMacNative build -x metalFrameGenerationPresentationValidation -x metalFxOffscreenValidation
+```
 
-- invariant -> test/canonical contract;
-- ownership or proof rule -> registry + routing fixture/checker;
-- long-lived interface/lineage reason -> ADR;
-- runtime result -> exact-SHA structured evidence;
-- transient work -> ignored checkpoint.
+Hosted compilation does not prove physical Metal behavior, WindowServer presentation, Minecraft visual parity, stable performance, thermal behavior, or MetalFX quality. Record those as physical Apple Silicon validation.
 
-## Final report
+## Git safety
 
-Distinguish validated, environment-blocked/unvalidated, rejected/reverted, inconclusive/noise and pre-existing policy drift. Report starting/ending SHA, changed ownership/boundaries, actual gates and exit status, candidate-head CI identity, merge-result identity when promotion/integration is relevant, correctness/activation evidence, remaining physical limits and residual risk. For performance, include before/after, raw and direction-normalized delta, and paired block count.
+`integration/metaluniversal` is the canonical development line. `master` remains the existing stable line until a separately verified release decision changes it. `research/modernization-backlog` is the deliberate history anchor. The mobile lineage remains isolated.
+
+Do not force-push shared history. Do not merge an old task branch wholesale. Compare it with the canonical line, port only a coherent superior delta with its tests, and then retire the task branch after the result is reachable.

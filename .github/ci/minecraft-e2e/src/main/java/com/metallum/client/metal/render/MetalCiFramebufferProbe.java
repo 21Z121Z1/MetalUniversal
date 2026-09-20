@@ -1,19 +1,16 @@
 package com.metallum.client.metal.render;
 
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import org.joml.Vector4f;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
-import java.util.Locale;
 import java.util.Set;
 
 /** CI-only control probes for MetalUniversal's production GPU readback path. */
@@ -30,12 +27,19 @@ public final class MetalCiFramebufferProbe {
     public static ProbeSuite run(Path outputDirectory) {
         MetalDevice device = MetalDevice.current();
         if (device == null) throw new IllegalStateException("MetalDevice.current() is null inside production Minecraft");
-        GpuFormat rgba8 = resolveRgba8Format();
         device.waitForSubmittedGpuWork();
 
         ProbeResult bufferCopy = runBufferCopy(device, outputDirectory.resolve("01-buffer-copy"));
-        ProbeResult textureRoundTrip = runTextureRoundTrip(device, rgba8, outputDirectory.resolve("02-texture-roundtrip"));
-        ProbeResult renderClear = runRenderClear(device, rgba8, outputDirectory.resolve("03-render-clear"));
+        ProbeResult textureRoundTrip = runTextureRoundTrip(
+                device,
+                GpuFormat.RGBA8_UNORM,
+                outputDirectory.resolve("02-texture-roundtrip")
+        );
+        ProbeResult renderClear = runRenderClear(
+                device,
+                GpuFormat.RGBA8_UNORM,
+                outputDirectory.resolve("03-render-clear")
+        );
         ProbeSuite suite = new ProbeSuite(bufferCopy, textureRoundTrip, renderClear);
         writeSuite(outputDirectory, suite);
         return suite;
@@ -189,27 +193,6 @@ public final class MetalCiFramebufferProbe {
         byte[] bytes = new byte[length];
         buffer.get(bytes);
         return bytes;
-    }
-
-    private static GpuFormat resolveRgba8Format() {
-        for (String className : new String[]{"com.mojang.blaze3d.GpuFormats", "com.mojang.blaze3d.GpuFormat"}) {
-            try {
-                Class<?> owner = Class.forName(className);
-                for (Field field : owner.getDeclaredFields()) {
-                    if (!Modifier.isStatic(field.getModifiers()) || !GpuFormat.class.isAssignableFrom(field.getType())) continue;
-                    field.setAccessible(true);
-                    Object value = field.get(null);
-                    if (!(value instanceof GpuFormat format)) continue;
-                    String identity = (field.getName() + " " + format).toUpperCase(Locale.ROOT);
-                    if (identity.contains("RGBA8") && !identity.contains("SRGB") && !identity.contains("SNORM")
-                            && !identity.contains("UINT") && !identity.contains("SINT")) return format;
-                }
-            } catch (ClassNotFoundException ignored) {
-            } catch (ReflectiveOperationException exception) {
-                throw new IllegalStateException("Could not inspect Minecraft GPU formats", exception);
-            }
-        }
-        throw new IllegalStateException("Could not resolve Minecraft RGBA8 UNORM GpuFormat");
     }
 
     private static void writeResult(Path directory, ProbeResult result, byte[] actual) {

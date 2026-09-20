@@ -7,6 +7,7 @@ import com.metallum.client.metal.render.mtl.MTLStorageMode;
 import com.metallum.client.validation.contract.RenderContractRuntime;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.backend.common.BaseGpuBuffer;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.NonNull;
@@ -23,10 +24,8 @@ import java.util.function.Supplier;
  * deduplication hook. The generated bridge lives in a synthetic package and
  * must be able to resolve this method-descriptor type at runtime.
  */
-public class MetalGpuBuffer implements GpuBuffer, com.mojang.renderpearl.backend.util.TransientBlockAllocator.Allocator.Block {
+public class MetalGpuBuffer extends BaseGpuBuffer implements com.mojang.renderpearl.backend.util.TransientBlockAllocator.Allocator.Block {
     private final MetalDevice device;
-    private final int usage;
-    private final long size;
     private final String logicalLabel;
     private final boolean cpuAccessible;
     private final boolean dynamic;
@@ -56,9 +55,8 @@ public class MetalGpuBuffer implements GpuBuffer, com.mojang.renderpearl.backend
             @GpuBuffer.Usage final int usage,
             final long size
     ) {
+        super(usage, size);
         this.device = device;
-        this.usage = usage;
-        this.size = size;
         this.logicalLabel = normalizeLabel(label == null ? null : label.get());
         this.allocationIdentity = MetalAllocationIdentity.allocate(this.logicalLabel);
 
@@ -111,9 +109,8 @@ public class MetalGpuBuffer implements GpuBuffer, com.mojang.renderpearl.backend
     }
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size, final @Nullable MemorySegment wrappedHandle) {
+        super(usage, size);
         this.device = device;
-        this.usage = usage;
-        this.size = size;
         this.logicalLabel = "metal-buffer";
         this.allocationIdentity = MetalAllocationIdentity.allocate(this.logicalLabel);
         this.cpuAccessible = false;
@@ -125,13 +122,10 @@ public class MetalGpuBuffer implements GpuBuffer, com.mojang.renderpearl.backend
     }
 
     @Override
-    public long size() {
-        return this.size;
-    }
-
-    @Override
-    public int usage() {
-        return this.usage;
+    public void checkCanBeUsed() {
+        if (isClosed()) {
+            throw new IllegalStateException("Metal buffer is closed");
+        }
     }
 
     ByteBuffer sliceStorage(final long offset, final long length) {

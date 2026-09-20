@@ -464,6 +464,20 @@ tasks.register("metalHudRuntimeTest", Exec) {
 	commandLine metalHudRuntimeTestBinary.absolutePath
 }
 
+tasks.register("metalHudDisabledEnvironmentTest", Exec) {
+	group = "verification"
+	description = "Checks native device creation preserves an explicit Metal and MetalFX HUD disable."
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn "compileMetalHudRuntimeTest"
+	workingDir project.projectDir
+	environment "MTL_HUD_ENABLED", "0"
+	environment "MTLFX_HUD_ENABLED", "0"
+	environment "METALLUM_EXPECT_HUD_DISABLED", "1"
+	commandLine metalHudRuntimeTestBinary.absolutePath
+}
+
 tasks.register("compileMetalFrameGenerationLifecycleTest", Exec) {
 	onlyIf {
 		org.gradle.internal.os.OperatingSystem.current().isMacOsX()

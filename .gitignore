@@ -42,8 +42,9 @@ replay_*.log
 /src/main/resources/natives/ios/*
 libs/
 
-# stray client rotated logs at repo root (runClient cwd artifacts)
+# generated artifacts and client logs
 logs/
+dist/
 
-# local Minecraft client/reference sources generated for agents
+# local Minecraft client/reference sources
 .minecraft-reference/

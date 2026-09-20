@@ -5,6 +5,7 @@ import com.mojang.renderpearl.api.textures.AddressMode;
 import com.mojang.renderpearl.api.textures.FilterMode;
 import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 
@@ -46,11 +47,11 @@ final class IrisMetalWhitePixel implements AutoCloseable {
         device.createCommandEncoder().writeToTexture(this.texture, white, 0, 0, 0, 0, 1, 1);
     }
 
-    MetalRenderPass.TextureViewAndSampler binding() {
+    TextureViewAndSampler binding() {
         if (this.closed) {
             throw new IllegalStateException("Iris white pixel is closed");
         }
-        return new MetalRenderPass.TextureViewAndSampler(this.view, this.sampler);
+        return new TextureViewAndSampler(this.view, this.sampler);
     }
 
     @Override

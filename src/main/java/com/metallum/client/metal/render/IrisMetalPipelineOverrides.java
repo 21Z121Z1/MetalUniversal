@@ -25,6 +25,7 @@ import com.mojang.renderpearl.api.textures.GpuSampler;
 import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.api.vertex.VertexFormat;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import it.unimi.dsi.fastutil.objects.Object2ObjectMap;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -604,11 +605,11 @@ public final class IrisMetalPipelineOverrides {
      * @return the resolved binding, or {@code null} to let the caller raise the
      *         normal missing-resource error
      */
-    static MetalRenderPass.@Nullable TextureViewAndSampler fallbackTexture(
+    static @Nullable TextureViewAndSampler fallbackTexture(
             final MetalDevice device,
             final MetalCompiledRenderPipeline pipeline,
             final String name,
-            final Map<String, MetalRenderPass.TextureViewAndSampler> bound
+            final Map<String, TextureViewAndSampler> bound
     ) {
         Instance instance = active;
         if (instance == null) {
@@ -747,7 +748,7 @@ public final class IrisMetalPipelineOverrides {
         private @Nullable IrisMetalRenderTargets renderTargets;
         private @Nullable IrisMetalShadowPipeline shadowPipeline;
         /** Live Mojang-owned value of Iris's externally managed texture unit 1. */
-        private MetalRenderPass.@Nullable TextureViewAndSampler mojangExternalOverlay;
+        private @Nullable TextureViewAndSampler mojangExternalOverlay;
         private boolean postPrepared;
         private boolean setupRequiredThisFrame;
         /** The device the overrides were compiled on; needed to drop them again on teardown. */
@@ -1657,11 +1658,11 @@ public final class IrisMetalPipelineOverrides {
          * sampler fails closed; substituting a colour texture would silently
          * change the pack's resource semantics.</p>
          */
-        private MetalRenderPass.@Nullable TextureViewAndSampler resolveTexture(
+        private @Nullable TextureViewAndSampler resolveTexture(
                 final MetalDevice device,
                 final MetalCompiledRenderPipeline pipeline,
                 final String name,
-                final Map<String, MetalRenderPass.TextureViewAndSampler> bound
+                final Map<String, TextureViewAndSampler> bound
         ) {
             TerrainKind terrainKind = this.compiledKinds.get(pipeline);
             ShaderKey coreKey = this.compiledCoreKeys.get(pipeline);
@@ -1677,7 +1678,7 @@ public final class IrisMetalPipelineOverrides {
                         coreKey, declaresSampler(resourceProgram, "watershadow"), name
                 );
                 if (!aliases.isEmpty()) {
-                    MetalRenderPass.TextureViewAndSampler custom = customs.resolve(
+                    TextureViewAndSampler custom = customs.resolve(
                             TextureStage.GBUFFERS_AND_SHADOW, aliases.toArray(String[]::new)
                     );
                     if (custom != null) {
@@ -1698,9 +1699,9 @@ public final class IrisMetalPipelineOverrides {
                     && coreKey.patch != Patch.SODIUM
                     && coreUsesMojangExternalOverlay(coreKey, name)) {
                 String overlayAlias = coreSamplerAlias(name);
-                MetalRenderPass.TextureViewAndSampler drawLocal =
+                TextureViewAndSampler drawLocal =
                         overlayAlias == null ? null : bound.get(overlayAlias);
-                MetalRenderPass.TextureViewAndSampler overlay =
+                TextureViewAndSampler overlay =
                         selectMojangExternalOverlayBinding(
                                 device, coreKey, name, bound, this.mojangExternalOverlay
                         );
@@ -1714,7 +1715,7 @@ public final class IrisMetalPipelineOverrides {
                 }
                 return overlay;
             }
-            MetalRenderPass.TextureViewAndSampler alias;
+            TextureViewAndSampler alias;
             String aliasSource;
             if (coreKey != null && coreKey.patch != Patch.SODIUM) {
                 aliasSource = coreSamplerAlias(name);
@@ -1735,10 +1736,10 @@ public final class IrisMetalPipelineOverrides {
             }
 
             if ("normals".equals(name) || "specular".equals(name)) {
-                MetalRenderPass.TextureViewAndSampler albedo = coreKey == null
+                TextureViewAndSampler albedo = coreKey == null
                         ? bound.get("u_BlockTex")
                         : bound.get("Sampler0");
-                MetalRenderPass.TextureViewAndSampler pbr = resolvePbrTexture(
+                TextureViewAndSampler pbr = resolvePbrTexture(
                         device, albedo, "normals".equals(name) ? PBRType.NORMAL : PBRType.SPECULAR
                 );
                 if (pbr != null) {
@@ -1756,7 +1757,7 @@ public final class IrisMetalPipelineOverrides {
                 return noise.binding();
             }
 
-            MetalRenderPass.TextureViewAndSampler targetBinding = resolveRenderTargetSampler(name);
+            TextureViewAndSampler targetBinding = resolveRenderTargetSampler(name);
             if (targetBinding != null) {
                 IrisMetalPassTrace.observeSampler(
                         name,
@@ -1772,7 +1773,7 @@ public final class IrisMetalPipelineOverrides {
                 if (shadows == null) {
                     return null;
                 }
-                MetalRenderPass.TextureViewAndSampler shadow = coreKey != null && coreKey.isShadow()
+                TextureViewAndSampler shadow = coreKey != null && coreKey.isShadow()
                         ? shadows.resolveShadowSampler(
                                 sampler, shadows.finalReadsFromAlt(), declaresSampler(resourceProgram, "watershadow")
                         )
@@ -1793,12 +1794,12 @@ public final class IrisMetalPipelineOverrides {
         }
 
         /** Resolves fixed Iris's per-albedo PBR holder for normals/specular samplers. */
-        private static MetalRenderPass.@Nullable TextureViewAndSampler resolvePbrTexture(
+        private static @Nullable TextureViewAndSampler resolvePbrTexture(
                 final MetalDevice device,
-                final MetalRenderPass.@Nullable TextureViewAndSampler albedo,
+                final @Nullable TextureViewAndSampler albedo,
                 final PBRType type
         ) {
-            if (albedo == null || !(albedo.textureView().texture() instanceof MetalGpuTexture base)
+            if (albedo == null || !(albedo.view().texture() instanceof MetalGpuTexture base)
                     || base.isClosed() || !base.isOwnedBy(device)) {
                 return null;
             }
@@ -1817,14 +1818,14 @@ public final class IrisMetalPipelineOverrides {
         }
 
         /** Routes Iris sampler names to the generation's real target views. */
-        private MetalRenderPass.@Nullable TextureViewAndSampler resolveRenderTargetSampler(final String name) {
+        private @Nullable TextureViewAndSampler resolveRenderTargetSampler(final String name) {
             IrisMetalRenderTargets targets = this.renderTargets;
             if (targets == null) {
                 return null;
             }
             int colorTarget = gbufferRenderTargetIndex(name);
             if (colorTarget >= 0 && colorTarget < targets.colorTargets().targetCount()) {
-                return new MetalRenderPass.TextureViewAndSampler(
+                return new TextureViewAndSampler(
                         targets.colorTargets().sampleReadView(colorTarget), targets.colorSampler(colorTarget)
                 );
             }
@@ -1843,7 +1844,7 @@ public final class IrisMetalPipelineOverrides {
                     view = sceneDepth;
                 }
                 if (view != null) {
-                    return new MetalRenderPass.TextureViewAndSampler(view, targets.depthSampler());
+                    return new TextureViewAndSampler(view, targets.depthSampler());
                 }
             }
             return null;
@@ -1954,7 +1955,7 @@ public final class IrisMetalPipelineOverrides {
          * and device replacement cannot leave a generation holding a stale
          * view or sampler.
          */
-        private MetalRenderPass.@Nullable TextureViewAndSampler prewarmMojangExternalOverlay(
+        private @Nullable TextureViewAndSampler prewarmMojangExternalOverlay(
                 final MetalDevice device
         ) {
             if (!this.productionLifecycle) {
@@ -2203,10 +2204,10 @@ public final class IrisMetalPipelineOverrides {
                         if (IrisMetalCenterDepthSampler.SAMPLER_NAME.equals(samplerName)) {
                             IrisMetalCenterDepthSampler centerDepth = centerDepthSampler;
                             if (centerDepth != null) {
-                                MetalRenderPass.TextureViewAndSampler binding = centerDepth.binding();
+                                TextureViewAndSampler binding = centerDepth.binding();
                                 IrisMetalPassTrace.observeSampler(samplerName, "iris:center-depth-smooth");
                                 return new IrisMetalPostChain.TextureBinding(
-                                        binding.textureView(), binding.sampler()
+                                        binding.view(), binding.sampler()
                                 );
                             }
                             return null;
@@ -2214,18 +2215,18 @@ public final class IrisMetalPipelineOverrides {
                         TextureStage textureStage = pass.stage().textureStage;
                         IrisMetalCustomTextures customs = customTextures;
                         if (customs != null && pass.allowsCustomTextureOverride(samplerName)) {
-                            MetalRenderPass.TextureViewAndSampler custom = customs.resolve(textureStage, samplerName);
+                            TextureViewAndSampler custom = customs.resolve(textureStage, samplerName);
                             if (custom != null) {
                                 IrisMetalPassTrace.observeSampler(samplerName, "iris:custom-" + textureStage.name());
-                                return new IrisMetalPostChain.TextureBinding(custom.textureView(), custom.sampler());
+                                return new IrisMetalPostChain.TextureBinding(custom.view(), custom.sampler());
                             }
                         }
                         if ("noisetex".equals(samplerName)) {
                             IrisMetalNoiseTexture noise = noiseTexture;
                             if (noise != null) {
-                                MetalRenderPass.TextureViewAndSampler binding = noise.binding();
+                                TextureViewAndSampler binding = noise.binding();
                                 IrisMetalPassTrace.observeSampler(samplerName, "iris:" + noise.source());
-                                return new IrisMetalPostChain.TextureBinding(binding.textureView(), binding.sampler());
+                                return new IrisMetalPostChain.TextureBinding(binding.view(), binding.sampler());
                             }
                         }
                         IrisMetalComputeResources compute = computeResources;
@@ -2276,7 +2277,7 @@ public final class IrisMetalPipelineOverrides {
                         if (shadows == null) {
                             return null;
                         }
-                        MetalRenderPass.TextureViewAndSampler binding =
+                        TextureViewAndSampler binding =
                                 pass.stage() == IrisMetalPostChain.Stage.SHADOW_COMPOSITE
                                         ? shadows.resolveShadowSampler(
                                                 sampler,
@@ -2296,7 +2297,7 @@ public final class IrisMetalPipelineOverrides {
                                         : "iris:shadow-texture"
                         );
                         return new IrisMetalPostChain.TextureBinding(
-                                binding.textureView(), binding.sampler()
+                                binding.view(), binding.sampler()
                         );
                     }
 
@@ -2399,21 +2400,21 @@ public final class IrisMetalPipelineOverrides {
                 final MetalRenderPass pass
         ) {
             ShaderKey coreKey = this.compiledCoreKeys.get(pipeline);
-            MetalRenderPass.TextureViewAndSampler albedo = pass.boundTexture(
+            TextureViewAndSampler albedo = pass.boundTexture(
                     coreKey == null ? "u_BlockTex" : "Sampler0"
             );
             int atlasWidth = 0;
             int atlasHeight = 0;
-            if (albedo != null && albedo.textureView().texture() instanceof MetalGpuTexture texture
+            if (albedo != null && albedo.view().texture() instanceof MetalGpuTexture texture
                     && TextureTracker.INSTANCE.getTexture(texture.iris$getGlId()) instanceof TextureAtlas) {
-                atlasWidth = albedo.textureView().getWidth(0);
-                atlasHeight = albedo.textureView().getHeight(0);
+                atlasWidth = albedo.view().getWidth(0);
+                atlasHeight = albedo.view().getHeight(0);
             }
-            MetalRenderPass.TextureViewAndSampler gtexture = resolveTexture(
+            TextureViewAndSampler gtexture = resolveTexture(
                     device, pipeline, "gtexture", pass.boundTextures()
             );
             return new IrisMetalUniformValues.DrawUniformContext(
-                    gtexture == null ? null : gtexture.textureView(),
+                    gtexture == null ? null : gtexture.view(),
                     atlasWidth,
                     atlasHeight,
                     this.compiledGlobalBlends.getOrDefault(pipeline, Optional.empty())
@@ -2612,32 +2613,32 @@ public final class IrisMetalPipelineOverrides {
      * unit and wins; otherwise the validated Mojang-owned overlay snapshot
      * supplies the external state.
      */
-    static MetalRenderPass.@Nullable TextureViewAndSampler selectMojangExternalOverlayBinding(
+    static @Nullable TextureViewAndSampler selectMojangExternalOverlayBinding(
             final MetalDevice device,
             final ShaderKey key,
             final String name,
-            final Map<String, MetalRenderPass.TextureViewAndSampler> bound,
-            final MetalRenderPass.@Nullable TextureViewAndSampler external
+            final Map<String, TextureViewAndSampler> bound,
+            final @Nullable TextureViewAndSampler external
     ) {
         if (!coreUsesMojangExternalOverlay(key, name)) {
             return null;
         }
         String alias = coreSamplerAlias(name);
-        MetalRenderPass.TextureViewAndSampler drawLocal =
+        TextureViewAndSampler drawLocal =
                 alias == null ? null : bound.get(alias);
         return drawLocal != null
                 ? drawLocal
                 : checkedMojangExternalOverlayBinding(device, external);
     }
 
-    static MetalRenderPass.@Nullable TextureViewAndSampler checkedMojangExternalOverlayBinding(
+    static @Nullable TextureViewAndSampler checkedMojangExternalOverlayBinding(
             final MetalDevice device,
-            final MetalRenderPass.@Nullable TextureViewAndSampler binding
+            final @Nullable TextureViewAndSampler binding
     ) {
         return binding == null
                 ? null
                 : checkedMojangExternalOverlayBinding(
-                        device, binding.textureView(), binding.sampler()
+                        device, binding.view(), binding.sampler()
                 );
     }
 
@@ -2646,7 +2647,7 @@ public final class IrisMetalPipelineOverrides {
      * owning either resource. A wrong backend, device, lifetime or sampler
      * contract remains a required-input failure.
      */
-    static MetalRenderPass.@Nullable TextureViewAndSampler checkedMojangExternalOverlayBinding(
+    static @Nullable TextureViewAndSampler checkedMojangExternalOverlayBinding(
             final MetalDevice device,
             final @Nullable GpuTextureView view,
             final @Nullable GpuSampler sampler
@@ -2666,7 +2667,7 @@ public final class IrisMetalPipelineOverrides {
                 || metalSampler.getMagFilter() != FilterMode.LINEAR) {
             return null;
         }
-        return new MetalRenderPass.TextureViewAndSampler(metalView, metalSampler);
+        return new TextureViewAndSampler(metalView, metalSampler);
     }
 
     /**

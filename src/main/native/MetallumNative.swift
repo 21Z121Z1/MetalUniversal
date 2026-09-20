@@ -277,7 +277,7 @@ private enum NativeState {
     // non-critical-compliant (the calling thread blocks in a plain semaphore,
     // never inside compiler machinery) and gives the compiler scheduler a
     // thread domain the embedded VM has never touched. Disable with
-    // METALLUM_PSO_COMPILE_HOP=0.
+    // Set METALLUM_PSO_COMPILE_HOP=1 only for a bounded diagnostic.
     static let pipelineCompilerQueue = DispatchQueue(label: "com.metallum.pipeline-compiler", qos: .userInitiated)
     static var pipelineCompilerHopLogged = false
     static var pipelineCompilerHopDebug: Bool? = nil
@@ -296,7 +296,7 @@ private enum NativeState {
         if pipelineCompilerHopDebug == nil {
             pipelineCompilerHopDebug = ProcessInfo.processInfo.environment["METALLUM_PSO_HOP_DEBUG"] == "1"
         }
-        if ProcessInfo.processInfo.environment["METALLUM_PSO_COMPILE_HOP"] == "0" {
+        if ProcessInfo.processInfo.environment["METALLUM_PSO_COMPILE_HOP"] != "1" {
             return autoreleasepool { body() }
         }
         if !pipelineCompilerHopLogged {
@@ -7686,12 +7686,12 @@ public func metallum_create_system_default_device() -> UnsafeMutableRawPointer? 
         #if os(macOS)
         // Metal's HUD subsystem must be enabled before the device is created.
         // A mod cannot add MetalHUDEnabled to the host launcher's Info.plist,
-        // so prime the equivalent documented environment switch here. The
-        // persisted Sodium option supplies the layer request at next startup.
-        setenv("MTL_HUD_ENABLED", "1", 1)
-        // MetalFX registers its Temporal and Frame Interpolator sections only
-        // when this separate switch is present before the effects are built.
-        setenv("MTLFX_HUD_ENABLED", "1", 1)
+        // so provide the documented environment switch only when the launcher
+        // did not set it. An explicit 0 must remain authoritative.
+        setenv("MTL_HUD_ENABLED", "1", 0)
+        // MetalFX uses a separate startup switch. Preserve an explicit caller
+        // setting for the same reason.
+        setenv("MTLFX_HUD_ENABLED", "1", 0)
         #endif
         return retainedPointer(MTLCreateSystemDefaultDevice())
     }

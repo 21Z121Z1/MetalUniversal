@@ -14,6 +14,7 @@ import com.mojang.renderpearl.api.pipeline.ShaderType;
 import com.mojang.renderpearl.api.textures.AddressMode;
 import com.mojang.renderpearl.api.textures.FilterMode;
 import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import net.irisshaders.iris.gl.texture.InternalTextureFormat;
 import net.irisshaders.iris.gl.texture.PixelFormat;
@@ -95,10 +96,10 @@ final class MetalIrisCustomTexturesIntegrationTest {
                 png(false, true, 0xFFFF0000, 0x400080FF)
         );
         try (IrisMetalCustomTextures textures = new IrisMetalCustomTextures(device, definitions)) {
-            MetalRenderPass.TextureViewAndSampler binding =
+            TextureViewAndSampler binding =
                     textures.resolve(TextureStage.COMPOSITE_AND_FINAL, "colortex7");
             assertNotNull(binding);
-            ByteBuffer pixels = readback((MetalGpuTexture) binding.textureView().texture());
+            ByteBuffer pixels = readback((MetalGpuTexture) binding.view().texture());
             assertPixel(pixels, 0, 255, 0, 0, 255);
             assertPixel(pixels, 1, 0, 128, 255, 64);
             assertEquals(AddressMode.CLAMP_TO_EDGE, binding.sampler().getAddressModeU());
@@ -120,7 +121,7 @@ final class MetalIrisCustomTexturesIntegrationTest {
                      device,
                      definitions(TextureStage.BEGIN, "standardSampler", png(false, false, 0xFFFFFFFF))
              )) {
-            MetalRenderPass.TextureViewAndSampler standardBinding =
+            TextureViewAndSampler standardBinding =
                     standards.resolve(TextureStage.BEGIN, "standardSampler");
             assertNotNull(standardBinding);
 
@@ -139,7 +140,7 @@ final class MetalIrisCustomTexturesIntegrationTest {
                     )
             );
 
-            MetalRenderPass.TextureViewAndSampler override = textures.overrideOrDefault(
+            TextureViewAndSampler override = textures.overrideOrDefault(
                     TextureStage.COMPOSITE_AND_FINAL,
                     standardBinding,
                     "missingAlias",
@@ -164,24 +165,24 @@ final class MetalIrisCustomTexturesIntegrationTest {
                 definitions(TextureStage.BEGIN, "sharedSampler", png(false, false, 0xFF00FF00)),
                 globals
         )) {
-            MetalRenderPass.TextureViewAndSampler local =
+            TextureViewAndSampler local =
                     textures.resolve(TextureStage.BEGIN, "sharedSampler");
-            MetalRenderPass.TextureViewAndSampler global =
+            TextureViewAndSampler global =
                     textures.resolve(TextureStage.DEFERRED, "sharedSampler");
             assertNotNull(local);
             assertNotNull(global);
             assertNotSame(local, global);
-            assertPixel(readback((MetalGpuTexture) local.textureView().texture()), 0, 0, 255, 0, 255);
-            assertPixel(readback((MetalGpuTexture) global.textureView().texture()), 0, 255, 0, 0, 255);
+            assertPixel(readback((MetalGpuTexture) local.view().texture()), 0, 0, 255, 0, 255);
+            assertPixel(readback((MetalGpuTexture) global.view().texture()), 0, 255, 0, 0, 255);
 
-            MetalRenderPass.TextureViewAndSampler beginGlobal =
+            TextureViewAndSampler beginGlobal =
                     textures.resolve(TextureStage.BEGIN, "globalOnly");
-            MetalRenderPass.TextureViewAndSampler finalGlobal =
+            TextureViewAndSampler finalGlobal =
                     textures.resolve(TextureStage.COMPOSITE_AND_FINAL, "globalOnly");
             assertNotNull(beginGlobal);
             assertNotNull(finalGlobal);
             assertSame(
-                    beginGlobal.textureView(), finalGlobal.textureView(),
+                    beginGlobal.view(), finalGlobal.view(),
                     "global owned texture views must be generation-shared"
             );
             assertSame(
@@ -212,8 +213,8 @@ final class MetalIrisCustomTexturesIntegrationTest {
                 1,
                 OptionalDouble.of(0.0)
         );
-        MetalRenderPass.TextureViewAndSampler external =
-                new MetalRenderPass.TextureViewAndSampler(view, sampler);
+        TextureViewAndSampler external =
+                new TextureViewAndSampler(view, sampler);
         AtomicInteger resolutions = new AtomicInteger();
 
         try (IrisMetalCustomTextures textures = new IrisMetalCustomTextures(
@@ -247,15 +248,15 @@ final class MetalIrisCustomTexturesIntegrationTest {
                 device,
                 definitions(TextureStage.BEGIN, "customSampler", png(false, false, 0xFFFFFFFF))
         );
-        MetalRenderPass.TextureViewAndSampler binding = textures.resolve(TextureStage.BEGIN, "customSampler");
+        TextureViewAndSampler binding = textures.resolve(TextureStage.BEGIN, "customSampler");
         assertNotNull(binding);
-        MetalGpuTexture texture = (MetalGpuTexture) binding.textureView().texture();
+        MetalGpuTexture texture = (MetalGpuTexture) binding.view().texture();
         MetalGpuSampler sampler = (MetalGpuSampler) binding.sampler();
 
         textures.close();
         textures.close();
 
-        assertTrue(binding.textureView().isClosed());
+        assertTrue(binding.view().isClosed());
         assertTrue(texture.isClosed());
         assertTrue(sampler.isClosed());
         assertThrows(
@@ -274,9 +275,9 @@ final class MetalIrisCustomTexturesIntegrationTest {
         try (IrisMetalCustomTextures textures = new IrisMetalCustomTextures(
                 device, definitions(TextureStage.BEGIN, "oneD", oneD)
         )) {
-            MetalRenderPass.TextureViewAndSampler binding = textures.resolve(TextureStage.BEGIN, "oneD");
+            TextureViewAndSampler binding = textures.resolve(TextureStage.BEGIN, "oneD");
             assertNotNull(binding);
-            ByteBuffer pixels = readback((MetalGpuTexture) binding.textureView().texture());
+            ByteBuffer pixels = readback((MetalGpuTexture) binding.view().texture());
             assertPixel(pixels, 0, 255, 0, 0, 255);
             assertPixel(pixels, 1, 0, 128, 255, 255);
         }
@@ -289,9 +290,9 @@ final class MetalIrisCustomTexturesIntegrationTest {
         try (IrisMetalCustomTextures textures = new IrisMetalCustomTextures(
                 device, definitions(TextureStage.DEFERRED, "twoD", twoD)
         )) {
-            MetalRenderPass.TextureViewAndSampler binding = textures.resolve(TextureStage.DEFERRED, "twoD");
+            TextureViewAndSampler binding = textures.resolve(TextureStage.DEFERRED, "twoD");
             assertNotNull(binding);
-            assertPixel(readback((MetalGpuTexture) binding.textureView().texture()), 0, 10, 20, 30, 40);
+            assertPixel(readback((MetalGpuTexture) binding.view().texture()), 0, 10, 20, 30, 40);
         }
 
         CustomTextureData.RawDataRect rectangle = new CustomTextureData.RawDataRect(
@@ -302,11 +303,11 @@ final class MetalIrisCustomTexturesIntegrationTest {
         try (IrisMetalCustomTextures textures = new IrisMetalCustomTextures(
                 device, definitions(TextureStage.COMPOSITE_AND_FINAL, "rectangle", rectangle)
         )) {
-            MetalRenderPass.TextureViewAndSampler binding =
+            TextureViewAndSampler binding =
                     textures.resolve(TextureStage.COMPOSITE_AND_FINAL, "rectangle");
             assertNotNull(binding);
             assertFalse(((MetalGpuSampler) binding.sampler()).usesNormalizedCoordinates());
-            assertPixel(readback((MetalGpuTexture) binding.textureView().texture()), 0, 1, 2, 3, 4);
+            assertPixel(readback((MetalGpuTexture) binding.view().texture()), 0, 1, 2, 3, 4);
         }
 
         ByteBuffer volumeSource = ByteBuffer.allocate(2 * Float.BYTES).order(ByteOrder.nativeOrder());
@@ -318,9 +319,9 @@ final class MetalIrisCustomTexturesIntegrationTest {
         try (IrisMetalCustomTextures textures = new IrisMetalCustomTextures(
                 device, definitions(TextureStage.SHADOWCOMP, "threeD", threeD)
         )) {
-            MetalRenderPass.TextureViewAndSampler binding = textures.resolve(TextureStage.SHADOWCOMP, "threeD");
+            TextureViewAndSampler binding = textures.resolve(TextureStage.SHADOWCOMP, "threeD");
             assertNotNull(binding);
-            ByteBuffer pixels = readback((MetalGpuTexture) binding.textureView().texture())
+            ByteBuffer pixels = readback((MetalGpuTexture) binding.view().texture())
                     .order(ByteOrder.nativeOrder());
             assertEquals(0.25F, Float.float16ToFloat(pixels.getShort(0)), 0.0005F);
             assertEquals(0.75F, Float.float16ToFloat(pixels.getShort(2)), 0.0005F);
@@ -335,9 +336,9 @@ final class MetalIrisCustomTexturesIntegrationTest {
         try (IrisMetalCustomTextures textures = new IrisMetalCustomTextures(
                 device, definitions(TextureStage.PREPARE, "integer", integer)
         )) {
-            MetalRenderPass.TextureViewAndSampler binding = textures.resolve(TextureStage.PREPARE, "integer");
+            TextureViewAndSampler binding = textures.resolve(TextureStage.PREPARE, "integer");
             assertNotNull(binding);
-            ByteBuffer pixels = readback((MetalGpuTexture) binding.textureView().texture())
+            ByteBuffer pixels = readback((MetalGpuTexture) binding.view().texture())
                     .order(ByteOrder.nativeOrder());
             assertEquals(65535, Short.toUnsignedInt(pixels.getShort(0)));
             assertEquals(42, Short.toUnsignedInt(pixels.getShort(2)));
@@ -368,8 +369,8 @@ final class MetalIrisCustomTexturesIntegrationTest {
                     1,
                     OptionalDouble.of(0.0)
             );
-            MetalRenderPass.TextureViewAndSampler external =
-                    new MetalRenderPass.TextureViewAndSampler(view, sampler);
+            TextureViewAndSampler external =
+                    new TextureViewAndSampler(view, sampler);
             AtomicInteger resolutions = new AtomicInteger();
             try (IrisMetalCustomTextures textures = new IrisMetalCustomTextures(
                     device,

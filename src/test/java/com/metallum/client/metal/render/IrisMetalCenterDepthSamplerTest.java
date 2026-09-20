@@ -8,6 +8,7 @@ import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.renderpearl.api.textures.AddressMode;
 import com.mojang.renderpearl.api.textures.FilterMode;
 import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -65,8 +66,8 @@ final class IrisMetalCenterDepthSamplerTest {
             assertEquals(1, centerDepth.historyTexture().getWidth(0));
             assertEquals(1, centerDepth.historyTexture().getHeight(0));
 
-            MetalRenderPass.TextureViewAndSampler binding = centerDepth.binding();
-            assertSame(centerDepth.historyTexture(), binding.textureView().texture());
+            TextureViewAndSampler binding = centerDepth.binding();
+            assertSame(centerDepth.historyTexture(), binding.view().texture());
             assertEquals(AddressMode.CLAMP_TO_EDGE, binding.sampler().getAddressModeU());
             assertEquals(AddressMode.CLAMP_TO_EDGE, binding.sampler().getAddressModeV());
             assertEquals(FilterMode.NEAREST, binding.sampler().getMinFilter());

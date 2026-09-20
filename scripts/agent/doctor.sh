@@ -4,19 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-REGISTRY="$ROOT/docs/agent/system-registry.json"
-if [[ ! -f "$REGISTRY" ]]; then
-  echo "FAIL agent registry               missing docs/agent/system-registry.json" >&2
-  exit 1
-fi
-
-CANONICAL_BRANCH="$(python3 - "$REGISTRY" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as fh:
-    print(json.load(fh)['canonical']['development_branch'])
-PY
-)"
-
+CANONICAL_BRANCH="${METALLUM_CANONICAL_BRANCH:-integration/metaluniversal}"
 RUN_ROOT="${METALLUM_AGENT_RUN_ROOT:-$ROOT/build/agent-runs}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${METALLUM_AGENT_DOCTOR_OUT:-$RUN_ROOT/doctor-$STAMP}"
@@ -61,14 +49,11 @@ java_version="$(java -version 2>&1 | head -n1 || true)"
 java_major="$(java -version 2>&1 | sed -nE 's/.*version "([0-9]+).*/\1/p' | head -n1)"
 check "Java 25" "$([[ "$java_major" == "25" ]] && echo 1 || echo 0)" "${java_version:-unknown}"
 
-swift_version="$(swiftc --version 2>/dev/null | head -n1 || true)"
-xcode_version="$(xcodebuild -version 2>/dev/null | tr '\n' ' ' || true)"
 branch="$(git branch --show-current 2>/dev/null || true)"
 head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
 status_porcelain="$(git status --porcelain=v1 2>/dev/null || true)"
-
 if [[ -n "$status_porcelain" ]]; then
-  warn "working tree" "contains local changes; preserve or commit intentional work before baseline measurement"
+  warn "working tree" "contains local changes"
 fi
 
 canonical_ref=""
@@ -79,7 +64,7 @@ for candidate in "$CANONICAL_BRANCH" "origin/$CANONICAL_BRANCH"; do
   fi
 done
 
-branch_relation="unresolved-canonical-ref"
+branch_relation="unresolved"
 if [[ -n "$canonical_ref" ]]; then
   canonical_sha="$(git rev-parse "$canonical_ref")"
   if [[ "$head_sha" == "$canonical_sha" ]]; then
@@ -89,44 +74,43 @@ if [[ -n "$canonical_ref" ]]; then
   elif git merge-base --is-ancestor "$head_sha" "$canonical_sha" >/dev/null 2>&1; then
     branch_relation="behind-canonical"
   else
-    branch_relation="diverged-from-canonical"
+    branch_relation="diverged"
   fi
 fi
 
 case "$branch_relation" in
   at-canonical|descendant-of-canonical)
-    check "branch lineage" 1 "${branch:-detached} ($branch_relation vs $CANONICAL_BRANCH)"
+    check "branch lineage" 1 "${branch:-detached} ($branch_relation)"
     ;;
-  unresolved-canonical-ref)
-    warn "branch lineage" "cannot resolve $CANONICAL_BRANCH locally; context.py/GitHub inventory must establish lineage before implementation"
+  unresolved)
+    warn "branch lineage" "cannot resolve $CANONICAL_BRANCH locally"
     ;;
   *)
-    warn "branch lineage" "${branch:-detached} is $branch_relation vs $CANONICAL_BRANCH; re-orient before baseline measurement"
+    warn "branch lineage" "${branch:-detached} is $branch_relation from $CANONICAL_BRANCH"
     ;;
 esac
 
 if [[ ! -d run/shaderpacks ]] || ! find run/shaderpacks -maxdepth 1 -type f \( -name '*.zip' -o -name '*.jar' \) -print -quit | grep -q .; then
-  warn "shader-pack fixtures" "run/shaderpacks has no local pack archive; translation/client acceptance will be incomplete"
+  warn "shader-pack fixtures" "run/shaderpacks has no local pack archive"
 fi
 
 if [[ -n "${WORLD:-}" ]] && [[ ! -d "run/saves/$WORLD" ]]; then
   warn "WORLD" "run/saves/$WORLD does not exist"
 elif [[ -z "${WORLD:-}" ]]; then
-  warn "WORLD" "not set; client performance validation wrapper will require it"
+  warn "WORLD" "not set; client performance validation requires it"
 fi
 
 console_locked="unknown"
 if command -v ioreg >/dev/null 2>&1; then
   if ioreg -n Root -d1 2>/dev/null | grep -Eq '"(IOConsoleLocked|CGSSessionScreenIsLocked)" ?= ?Yes'; then
     console_locked="true"
-    warn "WindowServer" "console appears locked; visible presentation/client validation is not trustworthy"
+    warn "WindowServer" "console appears locked"
   else
     console_locked="false"
   fi
 fi
 
 printf '%s\n' "$status_porcelain" > "$OUT/git-status.txt"
-
 export METALLUM_AGENT_CANONICAL_BRANCH="$CANONICAL_BRANCH"
 export METALLUM_AGENT_BRANCH_RELATION="$branch_relation"
 export METALLUM_AGENT_CANONICAL_REF="$canonical_ref"
@@ -166,7 +150,6 @@ with open(sys.argv[1], "w", encoding="utf-8") as fh:
 PY
 
 printf '\nEnvironment artifact: %s\n' "$OUT/environment.json"
-printf 'Canonical development branch: %s\n' "$CANONICAL_BRANCH"
 printf 'Warnings: %d; failures: %d\n' "$warnings" "$failures"
 
 if (( failures > 0 )); then

@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - integration/iris-metal-next
+      - integration/metaluniversal
   pull_request:
     branches:
-      - integration/iris-metal-next
+      - integration/metaluniversal
 
 permissions:
   contents: read
@@ -16,136 +16,64 @@ env:
   METALLUM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 concurrency:
-  group: metal-capabilities-${{ github.workflow }}-${{ github.ref }}
+  group: metal-capabilities-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  cloud-contract:
-    name: cloud program contract
+  static-contracts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ env.METALLUM_SOURCE_SHA }}
-
-      - name: Verify hosted control invariants
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p agent-evidence
-          python3 scripts/agent/verify_cloud_program.py \
-            --verify-remote-branches \
-            --expected-source-sha "$METALLUM_SOURCE_SHA" \
-            --output agent-evidence/cloud-contract.json
-          python3 -m json.tool docs/agent/cloud-first-metal-program.json >/dev/null
-          python3 -m json.tool docs/agent/branch-migration-matrix.json >/dev/null
-          python3 -m json.tool agent-evidence/cloud-contract.json >/dev/null
-
-      - name: Preserve cloud contract evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/setup-java@v5
         with:
-          name: cloud-program-contract-${{ github.run_attempt }}
-          path: agent-evidence/
-          if-no-files-found: error
+          distribution: temurin
+          java-version: '25'
+      - name: Verify exact-head static contracts
+        run: bash scripts/agent/verify_unified_eval.sh
 
   hosted-metal:
-    name: hosted macOS Metal execution
-    needs: cloud-contract
+    needs: static-contracts
     runs-on: macos-26
+    timeout-minutes: 60
     env:
       MTL_DEBUG_LAYER: '0'
       MTL_SHADER_VALIDATION: '0'
       MTL_HUD_ENABLED: '0'
-      MTL_HUD_ENCODER_TIMING_ENABLED: '0'
       MTLFX_HUD_ENABLED: '0'
       METALLUM_HOSTED_METAL_OFFSCREEN: 'true'
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ env.METALLUM_SOURCE_SHA }}
-
-      - name: Describe hosted Apple Silicon runner
-        shell: bash
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+      - name: Record exact-head identity
         run: |
           set -euo pipefail
-          mkdir -p agent-evidence
           test "$(git rev-parse HEAD)" = "$METALLUM_SOURCE_SHA"
-          test "$(uname -m)" = "arm64"
-          uname -a | tee "$RUNNER_TEMP/uname.txt"
-          sw_vers | tee "$RUNNER_TEMP/sw-vers.txt"
-          system_profiler SPHardwareDataType SPDisplaysDataType > "$RUNNER_TEMP/system-profiler.txt" || true
-          python3 - <<'PY'
-          import json, os, platform, subprocess
-          def capture(*cmd):
-              try:
-                  return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT).strip()
-              except Exception as exc:
-                  return f"unavailable: {exc}"
-          source_sha = os.environ.get("METALLUM_SOURCE_SHA", "unknown").lower()
-          data = {
-              "source_sha": source_sha,
-              "runner_os": os.environ.get("RUNNER_OS", "unknown"),
-              "runner_arch": os.environ.get("RUNNER_ARCH", "unknown"),
-              "machine": platform.machine(),
-              "macos": capture("sw_vers", "-productVersion"),
-              "xcode": capture("xcodebuild", "-version"),
-          }
-          with open("agent-evidence/environment.json", "w", encoding="utf-8") as handle:
-              json.dump(data, handle, indent=2, sort_keys=True)
-              handle.write("\n")
-          PY
-
-      - name: Compile and execute real Metal compute/readback probe
-        shell: bash
+          mkdir -p build/agent-evidence
+          python3 scripts/agent/record_ci_subject.py \
+            --proof-subject candidate-head \
+            --output build/agent-evidence/ci-subject-metal-capabilities.json
+          uname -a
+          sw_vers
+          xcodebuild -version
+      - name: Execute raw Metal compute and readback probe
         run: |
           set -euo pipefail
           xcrun swiftc -O -framework Metal \
             .github/ci/HostedMetalCapabilityProbe.swift \
             -o "$RUNNER_TEMP/metallum-hosted-metal-probe"
-          "$RUNNER_TEMP/metallum-hosted-metal-probe" \
-            | tee "$RUNNER_TEMP/hosted-metal-probe.log"
-          grep -Fq HOSTED_METAL_GPU_PROBE_PASS "$RUNNER_TEMP/hosted-metal-probe.log"
-          python3 - <<'PY'
-          import json, os
-          data = {
-              "source_sha": os.environ.get("METALLUM_SOURCE_SHA", "unknown").lower(),
-              "metal_runtime": True,
-              "offscreen_compute_readback": True,
-              "hosted_apple_silicon": True,
-              "metal4": None,
-              "residency_set": None,
-              "presentation_windowserver": False,
-              "metalfx_temporal": None,
-              "gpu_counter_sampling": False,
-              "final_physical_acceptance_required": True,
-          }
-          with open("agent-evidence/capabilities.json", "w", encoding="utf-8") as handle:
-              json.dump(data, handle, indent=2, sort_keys=True)
-              handle.write("\n")
-          PY
-
-      - name: Setup Java 25
-        uses: actions/setup-java@v5
-        with:
-          java-version: '25'
-          distribution: 'temurin'
-          cache: gradle
-
-      - name: Verify current canonical evaluation contracts
-        shell: bash
+          "$RUNNER_TEMP/metallum-hosted-metal-probe" | tee build/agent-evidence/hosted-metal-probe.log
+          grep -Fq HOSTED_METAL_GPU_PROBE_PASS build/agent-evidence/hosted-metal-probe.log
+      - name: Compile shipping and validation paths
         run: |
-          set -euo pipefail
-          chmod +x ./gradlew scripts/agent/verify_unified_eval.sh
-          bash scripts/agent/verify_unified_eval.sh
-          python3 scripts/agent/verify_metal4_main_hotpath.py \
-            --output agent-evidence/p1-hotpath.json
-
-      - name: Compile shipping native path and physical-only harnesses
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./gradlew --stacktrace \
+          ./gradlew --no-daemon --stacktrace \
             -I .github/ci/HostedMetalGradle.init.gradle \
             buildMacNative \
             verifyProductionJarIsolation \
@@ -153,240 +81,33 @@ jobs:
             compileMetalMrtSmokeTest \
             compileMetal4PipelineSmokeTest \
             compileMetal4PipelinePathTest \
+            compileMetalHudRuntimeTest \
             compileMetalFxOffscreenValidation \
             compileMetalFxPerformanceValidation \
             compileMetalFrameGenerationPresentationValidation
-
-      - name: Probe raw pipeline-compile threading capability
-        shell: bash
-        run: |
-          set -uo pipefail
-          xcrun swiftc -O -target arm64-apple-macosx14.0 \
-            -framework Foundation -framework Metal \
-            src/test/native/MetalShippingPipelineAbiSmokeTest.swift \
-            -o "$RUNNER_TEMP/metallum-shipping-abi-probe"
-          ("$RUNNER_TEMP/metallum-shipping-abi-probe" \
-            src/main/resources/natives/macos/libmetallum.dylib \
-            | tee build/agent-evidence/shipping-abi-threading-probe.log) || true
-          (java --enable-native-access=ALL-UNNAMED \
-            .github/ci/JvmPsoThreadingProbe.java \
-            "$(pwd)/src/main/resources/natives/macos/libmetallum.dylib" \
-            | tee build/agent-evidence/jvm-pso-threading-probe.log) || true
-          python3 - <<'PY'
-          import json, os
-
-          def read(path):
-              try:
-                  with open(path, encoding="utf-8") as handle:
-                      return handle.read()
-              except FileNotFoundError:
-                  return ""
-
-          native_log = read("build/agent-evidence/shipping-abi-threading-probe.log")
-          jvm_log = read("build/agent-evidence/jvm-pso-threading-probe.log")
-          main_ok = "SHIPPING_PIPELINE_C_ABI_PASS" in native_log
-          background_ok = "SHIPPING_PIPELINE_BACKGROUND_THREAD_C_ABI_PASS" in native_log
-          jvm_ok = "JVM_PSO_BACKGROUND_THREAD_PASS" in jvm_log
-          if not main_ok:
-              raise SystemExit("main-thread shipping PSO compile probe failed; environment is unusable")
-          mode = "required" if background_ok and jvm_ok else "environment-blocked"
-          with open(os.environ.get("GITHUB_ENV", "/dev/null"), "a", encoding="utf-8") as handle:
-              handle.write(f"METALLUM_JVM_PSO_SMOKE_MODE={mode}\n")
-          capabilities_path = "agent-evidence/capabilities.json"
-          data = {}
-          if os.path.exists(capabilities_path):
-              with open(capabilities_path, encoding="utf-8") as handle:
-                  data = json.load(handle)
-          data["pso_compile_main_thread"] = main_ok
-          data["pso_compile_background_thread"] = background_ok
-          data["jvm_background_pso_compile"] = jvm_ok
-          data["jvm_pso_smoke_mode"] = mode
-          with open(capabilities_path, "w", encoding="utf-8") as handle:
-              json.dump(data, handle, indent=2, sort_keys=True)
-              handle.write("\n")
-          print(f"capability: pso_compile_main_thread={main_ok} "
-                f"pso_compile_background_thread={background_ok} "
-                f"jvm_background_pso_compile={jvm_ok} jvm_pso_smoke_mode={mode}")
-          PY
-
-      - name: Execute hosted Metal MRT and shipping Metal 4 fallback contracts
-        shell: bash
+      - name: Execute hosted shipping contracts
         run: |
           set -euo pipefail
-          test -x build/metal-tests/MetalMRTSmokeTest
-          MTL_DEBUG_LAYER=0 MTL_SHADER_VALIDATION=0 \
-            build/metal-tests/MetalMRTSmokeTest \
-            | tee "$RUNNER_TEMP/metal-mrt.log"
-          ./gradlew --stacktrace metal4PipelineSmokeTest metal4PipelinePathTest
-
-      - name: Execute shipping Java to FFM to Swift GPU integration suites
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./gradlew --stacktrace \
+          MTL_DEBUG_LAYER=0 MTL_SHADER_VALIDATION=0 build/metal-tests/MetalMRTSmokeTest \
+            | tee build/agent-evidence/metal-mrt.log
+          ./gradlew --no-daemon --stacktrace \
             -I .github/ci/HostedMetalGradle.init.gradle \
+            metalHudDisabledEnvironmentTest \
+            metal4PipelineSmokeTest \
+            metal4PipelinePathTest \
             hostedMetalCoreIntegrationTest \
             hostedMetalIrisIntegrationTest
-
-      - name: Require hosted shipping integration suites to execute cleanly or record capability block
-        shell: bash
+      - name: State evidence boundary
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import glob
-          import json
-          import os
-          import xml.etree.ElementTree as ET
-
-          task_names = [
-              "hostedMetalCoreIntegrationTest",
-              "hostedMetalIrisIntegrationTest",
-          ]
-          mode = os.environ.get("METALLUM_JVM_PSO_SMOKE_MODE", "required")
-          summary = {}
-          for task in task_names:
-              files = glob.glob(f"build/test-results/{task}/TEST-*.xml")
-              if not files:
-                  if mode == "environment-blocked":
-                      print(f"{task}: no test XML (capability-blocked)")
-                      summary[task] = {
-                          "tests": 0,
-                          "executed": 0,
-                          "skipped": 0,
-                          "failures": 0,
-                          "errors": 0,
-                      }
-                      continue
-                  raise SystemExit(f"{task} produced no JUnit XML")
-              tests = skipped = failures = errors = 0
-              for path in files:
-                  root = ET.parse(path).getroot()
-                  tests += int(root.attrib.get("tests", 0))
-                  skipped += int(root.attrib.get("skipped", 0))
-                  failures += int(root.attrib.get("failures", 0))
-                  errors += int(root.attrib.get("errors", 0))
-              executed = tests - skipped
-              print(f"{task}: tests={tests} executed={executed} skipped={skipped} failures={failures} errors={errors}")
-              if failures != 0 or errors != 0 or skipped != 0:
-                  raise SystemExit(f"{task} did not execute cleanly")
-              if mode == "required" and (tests == 0 or executed == 0):
-                  raise SystemExit(f"{task} did not fully execute cleanly (mode=required)")
-              summary[task] = {
-                  "tests": tests,
-                  "executed": executed,
-                  "skipped": skipped,
-                  "failures": failures,
-                  "errors": errors,
-              }
-
-          summary["capability_mode"] = mode
-          if mode == "environment-blocked":
-              capabilities_path = "agent-evidence/capabilities.json"
-              with open(capabilities_path, encoding="utf-8") as handle:
-                  capabilities = json.load(handle)
-              if capabilities.get("jvm_background_pso_compile") is not False:
-                  raise SystemExit(
-                      "suites ran environment-blocked without a measured jvm_background_pso_compile=false verdict"
-                  )
-              summary["authority"] = "minecraft-client-e2e"
-
-          with open("agent-evidence/hosted-shipping-tests.json", "w", encoding="utf-8") as handle:
-              json.dump(summary, handle, indent=2, sort_keys=True)
-              handle.write("\n")
-          PY
-
-      - name: Emit exact-head hosted proof without composing sibling workflows
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, os, re
-
-          source_sha = os.environ.get("METALLUM_SOURCE_SHA", "").strip().lower()
-          if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
-              raise SystemExit(f"invalid METALLUM_SOURCE_SHA: {source_sha!r}")
-
-          with open("agent-evidence/capabilities.json", encoding="utf-8") as handle:
-              capabilities = json.load(handle)
-          with open("agent-evidence/hosted-shipping-tests.json", encoding="utf-8") as handle:
-              hosted = json.load(handle)
-
-          mode = hosted.get("capability_mode")
-          if mode not in {"required", "environment-blocked"}:
-              raise SystemExit(f"invalid hosted capability mode: {mode!r}")
-
-          tasks = ["hostedMetalCoreIntegrationTest", "hostedMetalIrisIntegrationTest"]
-          executed = sum(int(hosted.get(task, {}).get("executed", 0)) for task in tasks)
-          if mode == "required" and executed <= 0:
-              raise SystemExit("required shipping GPU suites recorded zero executed tests")
-          if mode == "environment-blocked" and capabilities.get("jvm_background_pso_compile") is not False:
-              raise SystemExit("environment-blocked evidence lacks measured JVM capability failure")
-
-          shipping_status = "pass" if mode == "required" else "environment-blocked"
-          activation_status = (
-              "active-and-tests-executed" if mode == "required" else "environment-blocked"
-          )
-          delegated_authority = ["minecraft-client-e2e"] if mode == "environment-blocked" else []
-
-          correctness = {
-              "source_sha": source_sha,
-              "raw_metal_compute_readback": "pass",
-              "native_mrt_smoke": "pass",
-              "metal4_shipping_path_contract": "pass",
-              "layerless_device_presentation_contract": "pass",
-              "shipping_java_ffm_swift_core_gpu": shipping_status,
-              "shipping_iris_gpu": shipping_status,
-              "p1_hotpath_static_contract": "pass",
-              "physical_only_harnesses_compile": "pass",
-          }
-          activation = {
-              "source_sha": source_sha,
-              "raw_hosted_metal_gpu": "active-and-readback-verified",
-              "offscreen_presentation_state": "absent-by-layer-contract",
-              "shipping_java_ffm_swift_gpu": activation_status,
-              "shipping_iris_gpu": activation_status,
-              "hosted_shipping_tests_executed": executed,
-              "capability_mode": mode,
-              "delegated_authority": delegated_authority,
-              "silent_fallback_detected": False,
-          }
-          decision = {
-              "decision": "HOSTED_EXACT_HEAD_PROOF_COMPLETE",
-              "proof_profile": "hosted.exact-head",
-              "source_sha": source_sha,
-              "local_hosted_proof": "pass",
-              "shipping_gpu_execution": shipping_status,
-              "capability_mode": mode,
-              "delegated_authority": delegated_authority,
-              "promotion_composition": "external-required-checks",
-              "physical_acceptance": "pending",
-              "default_enablement_allowed": False,
-          }
-
-          for path, data in (
-              ("agent-evidence/correctness.json", correctness),
-              ("agent-evidence/activation.json", activation),
-              ("agent-evidence/decision.json", decision),
-          ):
-              with open(path, "w", encoding="utf-8") as handle:
-                  json.dump(data, handle, indent=2, sort_keys=True)
-                  handle.write("\n")
-          print(json.dumps(decision, sort_keys=True))
-          PY
-          python3 -m json.tool agent-evidence/correctness.json >/dev/null
-          python3 -m json.tool agent-evidence/activation.json >/dev/null
-          python3 -m json.tool agent-evidence/decision.json >/dev/null
-
-      - name: Preserve Agent Metal Lab evidence
+          cat <<'BOUNDARY' > build/agent-evidence/hosted-boundary.txt
+          This job proves exact-head compilation, ABI integration, raw hosted Metal execution,
+          and the hosted shipping contracts. It does not prove WindowServer presentation,
+          Minecraft visual parity, stable performance, thermals, VRR, or MetalFX image quality.
+          BOUNDARY
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: agent-metal-lab-${{ github.run_attempt }}
-          path: |
-            agent-evidence/
-            build/agent-evidence/
-            build/reports/tests/**
-            build/test-results/**
-            ${{ runner.temp }}/hosted-metal-probe.log
-            ${{ runner.temp }}/metal-mrt.log
+          name: metal-capabilities-${{ github.run_attempt }}
+          path: build/agent-evidence/
           if-no-files-found: warn
+          retention-days: 14

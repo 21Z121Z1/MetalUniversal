@@ -18,7 +18,9 @@ import com.mojang.renderpearl.backend.api.RenderPassBackend;
 import com.mojang.renderpearl.frontend.FrontendRenderPipeline;
 import com.mojang.blaze3d.systems.ScissorState;
 import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTexture;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.SharedConstants;
@@ -211,19 +213,39 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
 
     public void bindTexture(final @NonNull String name, @Nullable final GpuTextureView textureView, @Nullable final GpuSampler sampler) {
         if (textureView != null && sampler != null) {
+            validateTextureBinding(device, textureView, sampler, name);
+            commandEncoder.flushPendingClear((MetalGpuTexture) textureView.texture());
             TextureViewAndSampler next = new TextureViewAndSampler(textureView, sampler);
             TextureViewAndSampler previous = samplers.put(name, next);
-            commandEncoder.flushPendingClear((MetalGpuTexture) textureView.texture());
             markDescriptorDirty(name);
             if (!Objects.equals(previous, next)) {
                 terrainBindingChanged();
             }
         } else if (textureView == null && sampler == null) {
             if (samplers.remove(name) != null) {
+                markDescriptorDirty(name);
                 terrainBindingChanged();
             }
         } else {
             throw new IllegalArgumentException();
+        }
+    }
+
+    static void validateTextureBinding(
+            final MetalDevice device,
+            final @Nullable GpuTextureView view,
+            final @Nullable GpuSampler sampler,
+            final String name
+    ) {
+        if (!(view instanceof MetalGpuTextureView metalView)
+                || !(metalView.texture() instanceof MetalGpuTexture texture)
+                || !(sampler instanceof MetalGpuSampler metalSampler)
+                || !texture.isOwnedBy(device)
+                || !metalSampler.isOwnedBy(device)
+                || (texture.usage() & GpuTexture.USAGE_TEXTURE_BINDING) == 0
+                || metalView.isClosed() || texture.isClosed() || metalSampler.isClosed()) {
+            throw new IllegalStateException(
+                    "Texture binding '" + name + "' is absent, stale, or owned by another backend/device");
         }
     }
 
@@ -312,7 +334,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
             terrainBindingChanged();
             return;
         }
-        if (value instanceof com.mojang.renderpearl.util.TextureViewAndSampler pair) {
+        if (value instanceof TextureViewAndSampler pair) {
             if (binding.kind() != MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
                 throw new IllegalArgumentException("Texture uniform " + binding.name() + " is not a sampled image");
             }
@@ -1176,7 +1198,7 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         }
         Map<String, String> boundResources = new java.util.LinkedHashMap<>();
         for (Map.Entry<String, TextureViewAndSampler> entry : samplers.entrySet()) {
-            if (entry.getValue().textureView().texture() instanceof MetalGpuTexture texture) {
+            if (entry.getValue().view().texture() instanceof MetalGpuTexture texture) {
                 boundResources.put(entry.getKey(), texture.getLabel() + "@" + texture.allocationId());
             }
         }
@@ -1480,11 +1502,9 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
                 throw new IllegalStateException("Missing sampler " + binding.name());
             }
 
-            if (VALIDATION && textureBinding.textureView().isClosed()) {
-                throw new IllegalStateException("Sampler " + binding.name() + " texture view has been closed");
-            }
+            validateTextureBinding(device, textureBinding.view(), textureBinding.sampler(), binding.name());
 
-            MetalGpuTextureView textureView = (MetalGpuTextureView) textureBinding.textureView();
+            MetalGpuTextureView textureView = (MetalGpuTextureView) textureBinding.view();
             MetalGpuSampler sampler = (MetalGpuSampler) textureBinding.sampler();
             if (MetalFxManager.usesTemporalUpscaling()
                     && compiledPipeline.usesStableTerrainSampler(binding)) {
@@ -1586,8 +1606,6 @@ final class MetalRenderPass implements RenderPassBackend, RenderPass, AutoClosea
         commandEncoder.queueForDestroy(() -> MetalNativeBridge.metallum_release_object(texelTexture));
     }
 
-    record TextureViewAndSampler(GpuTextureView textureView, GpuSampler sampler) {
-    }
 
     private static boolean sameSlice(@Nullable final GpuBufferSlice left, @Nullable final GpuBufferSlice right) {
         if (left == null || right == null) {

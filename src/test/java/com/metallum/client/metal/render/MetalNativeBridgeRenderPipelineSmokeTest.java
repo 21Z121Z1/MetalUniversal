@@ -4,6 +4,8 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.metallum.client.metal.render.mtl.MTLRenderPipelineDescriptor;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 
 import java.lang.foreign.MemorySegment;
 
@@ -18,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
  * native passes and this test crashes, the first divergence is the JVM/FFM
  * boundary rather than the shipping C ABI or the Metal shader itself.</p>
  */
+@EnabledOnOs(OS.MAC)
 final class MetalNativeBridgeRenderPipelineSmokeTest {
     private static final String SHADER_SOURCE = """
             #include <metal_stdlib>
