@@ -2437,6 +2437,27 @@ public final class MetalValidationClient implements ClientModInitializer {
                 }
             }
         }
+        if (Boolean.getBoolean("metallum.terrain.vanillaAdmission")) {
+            if (!sourceCommit.matches("[0-9a-f]{40}")) {
+                Metallum.LOGGER.warn(
+                        "Skipping terrain admission diagnostics: metallum.validation.sourceCommit is not an exact SHA"
+                );
+            } else {
+                try {
+                    var admissionReport = com.metallum.client.terrain.VanillaTerrainAdmissionReport.create(
+                            sourceCommit,
+                            runId,
+                            status
+                    );
+                    ValidationStorageBudget.shared(outputDirectory).writeString(
+                            outputDirectory.resolve("terrain-admission.json"),
+                            new GsonBuilder().serializeNulls().create().toJson(admissionReport) + "\n"
+                    );
+                } catch (IOException exception) {
+                    throw new IllegalStateException("Could not write terrain admission diagnostics", exception);
+                }
+            }
+        }
         if ("failed".equals(status)) {
             RenderContractRuntime.markFailed();
         }
