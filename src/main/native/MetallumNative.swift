@@ -277,7 +277,7 @@ private enum NativeState {
     // non-critical-compliant (the calling thread blocks in a plain semaphore,
     // never inside compiler machinery) and gives the compiler scheduler a
     // thread domain the embedded VM has never touched. Disable with
-    // METALLUM_PSO_COMPILE_HOP=0.
+    // Set METALLUM_PSO_COMPILE_HOP=1 only for a bounded diagnostic.
     static let pipelineCompilerQueue = DispatchQueue(label: "com.metallum.pipeline-compiler", qos: .userInitiated)
     static var pipelineCompilerHopLogged = false
     static var pipelineCompilerHopDebug: Bool? = nil
@@ -296,7 +296,7 @@ private enum NativeState {
         if pipelineCompilerHopDebug == nil {
             pipelineCompilerHopDebug = ProcessInfo.processInfo.environment["METALLUM_PSO_HOP_DEBUG"] == "1"
         }
-        if ProcessInfo.processInfo.environment["METALLUM_PSO_COMPILE_HOP"] == "0" {
+        if ProcessInfo.processInfo.environment["METALLUM_PSO_COMPILE_HOP"] != "1" {
             return autoreleasepool { body() }
         }
         if !pipelineCompilerHopLogged {
