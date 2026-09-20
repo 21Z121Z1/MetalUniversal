@@ -142,6 +142,99 @@ final class TerrainPublicationGenerationGuardTest {
     }
 
     @Test
+    void unreferencedSectionMetadataEvictsWithinTheConfiguredBound() {
+        var bounded = new TerrainPublicationGenerationGuard<>(
+                new TerrainPublicationGenerationGuard.Config(true, 1, 4, 4),
+                OPS
+        );
+        Task first = new Task();
+        bounded.registerTask(first, 21L);
+        assertTrue(bounded.enterTask(first));
+        assertEquals(
+                TerrainPublicationGenerationGuard.PublicationDecision.ALLOW_CURRENT,
+                bounded.publicationDecision(21L, null)
+        );
+        bounded.exitTask(first);
+
+        Task second = new Task();
+        bounded.registerTask(second, 22L);
+        assertTrue(bounded.snapshot().active());
+        assertEquals(1, bounded.snapshot().sectionVersionEntries());
+        assertTrue(bounded.enterTask(second));
+        assertEquals(
+                TerrainPublicationGenerationGuard.PublicationDecision.ALLOW_CURRENT,
+                bounded.publicationDecision(22L, null)
+        );
+        bounded.exitTask(second);
+    }
+
+    @Test
+    void liveSectionCapacityFailsOpenInsteadOfGrowingWithoutBound() {
+        var bounded = new TerrainPublicationGenerationGuard<>(
+                new TerrainPublicationGenerationGuard.Config(true, 1, 4, 4),
+                OPS
+        );
+        Task first = new Task();
+        Object mesh = new Object();
+        bounded.registerTask(first, 31L);
+        assertTrue(bounded.enterTask(first));
+        bounded.bindMeshFromActiveTask(mesh);
+        bounded.exitTask(first);
+
+        bounded.registerTask(new Task(), 32L);
+        assertFalse(bounded.snapshot().active());
+        assertEquals(
+                TerrainPublicationGenerationGuard.FailOpenReason.SECTION_CAPACITY,
+                bounded.snapshot().failOpenReason()
+        );
+        assertEquals(1L, bounded.snapshot().sectionCapacityFailOpenCount());
+        assertEquals(0, bounded.snapshot().sectionVersionEntries());
+        assertEquals(0, bounded.snapshot().trackedTasks());
+        assertEquals(0, bounded.snapshot().trackedMeshes());
+
+        bounded.markDirty(33L);
+        assertEquals(0, bounded.snapshot().sectionVersionEntries(),
+                "fail-open must not rebuild diagnostic version state");
+        assertEquals(
+                TerrainPublicationGenerationGuard.PublicationDecision.BASELINE_ALLOW,
+                bounded.publicationDecision(31L, mesh)
+        );
+    }
+
+    @Test
+    void evictedSectionCannotRecreateARevisionForAStaleWorkerToken() {
+        var bounded = new TerrainPublicationGenerationGuard<>(
+                new TerrainPublicationGenerationGuard.Config(true, 1, 4, 4),
+                OPS
+        );
+        Task stale = new Task();
+        bounded.registerTask(stale, 41L);
+        assertTrue(bounded.enterTask(stale));
+        bounded.markDirty(41L);
+        assertTrue(stale.cancelled);
+
+        Task replacementSection = new Task();
+        bounded.registerTask(replacementSection, 42L);
+        assertTrue(bounded.snapshot().active());
+        assertEquals(1, bounded.snapshot().sectionVersionEntries());
+
+        assertEquals(
+                TerrainPublicationGenerationGuard.PublicationDecision.REJECT_STALE,
+                bounded.publicationDecision(41L, null)
+        );
+        assertEquals(1, bounded.snapshot().sectionVersionEntries(),
+                "stale validation must be lookup-only and must not recreate evicted metadata");
+
+        bounded.exitTask(stale);
+        assertTrue(bounded.enterTask(replacementSection));
+        assertEquals(
+                TerrainPublicationGenerationGuard.PublicationDecision.ALLOW_CURRENT,
+                bounded.publicationDecision(42L, null)
+        );
+        bounded.exitTask(replacementSection);
+    }
+
+    @Test
     void meshRebindAndCapacityFailuresNeverGuessOwnership() {
         var tiny = new TerrainPublicationGenerationGuard<>(
                 new TerrainPublicationGenerationGuard.Config(true, 2, 1),

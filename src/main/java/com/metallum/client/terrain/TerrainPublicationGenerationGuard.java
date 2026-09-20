@@ -1,10 +1,13 @@
 package com.metallum.client.terrain;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Generation-aware publication guard for vanilla 26.3 terrain work.
@@ -24,6 +27,7 @@ public final class TerrainPublicationGenerationGuard<T> {
 
     public enum FailOpenReason {
         NONE,
+        SECTION_CAPACITY,
         TASK_CAPACITY,
         MESH_CAPACITY,
         UNKNOWN_TASK,
@@ -36,14 +40,27 @@ public final class TerrainPublicationGenerationGuard<T> {
         void cancel(T task);
     }
 
-    public record Config(boolean requested, int maxTrackedTasks, int maxTrackedMeshes) {
+    public record Config(
+            boolean requested,
+            int maxTrackedSections,
+            int maxTrackedTasks,
+            int maxTrackedMeshes
+    ) {
         public Config {
+            if (maxTrackedSections < 1 || maxTrackedSections > 1_048_576) {
+                throw new IllegalArgumentException("maxTrackedSections out of range: " + maxTrackedSections);
+            }
             if (maxTrackedTasks < 1 || maxTrackedTasks > 1_048_576) {
                 throw new IllegalArgumentException("maxTrackedTasks out of range: " + maxTrackedTasks);
             }
             if (maxTrackedMeshes < 1 || maxTrackedMeshes > 1_048_576) {
                 throw new IllegalArgumentException("maxTrackedMeshes out of range: " + maxTrackedMeshes);
             }
+        }
+
+        /** Backward-compatible form: section metadata uses the task bound. */
+        public Config(final boolean requested, final int maxTrackedTasks, final int maxTrackedMeshes) {
+            this(requested, maxTrackedTasks, maxTrackedTasks, maxTrackedMeshes);
         }
     }
 
@@ -78,6 +95,7 @@ public final class TerrainPublicationGenerationGuard<T> {
             long rejectedStalePublications,
             long baselinePublicationsAfterFailOpen,
             long failOpenCount,
+            long sectionCapacityFailOpenCount,
             long taskCapacityFailOpenCount,
             long meshCapacityFailOpenCount,
             long unknownTaskFailOpenCount,
@@ -90,13 +108,17 @@ public final class TerrainPublicationGenerationGuard<T> {
 
     private final Config config;
     private final TaskOps<T> taskOps;
-    private final Map<Long, SectionVersion> sectionVersions = new java.util.HashMap<>();
+    // Access-order keeps the cold-path eviction deterministic without touching vanilla ownership.
+    private final Map<Long, SectionVersion> sectionVersions = new LinkedHashMap<>(16, 0.75F, true);
     private final IdentityHashMap<T, WorkToken<T>> taskTokens = new IdentityHashMap<>();
     private final IdentityHashMap<Object, WorkToken<T>> meshTokens = new IdentityHashMap<>();
     private final ThreadLocal<WorkToken<T>> activeTask = new ThreadLocal<>();
 
     private long worldEpoch = INITIAL_GENERATION;
     private long materialGeneration = INITIAL_GENERATION;
+    // Never reset this within the guard lifetime: an evicted/recreated section must not reuse a
+    // revision held by a stale worker-local token.
+    private long sectionRevisionSequence;
     private boolean failOpen;
     private FailOpenReason failOpenReason = FailOpenReason.NONE;
 
@@ -107,6 +129,7 @@ public final class TerrainPublicationGenerationGuard<T> {
     private long rejectedStalePublications;
     private long baselinePublicationsAfterFailOpen;
     private long failOpenCount;
+    private long sectionCapacityFailOpenCount;
     private long taskCapacityFailOpenCount;
     private long meshCapacityFailOpenCount;
     private long unknownTaskFailOpenCount;
@@ -136,7 +159,11 @@ public final class TerrainPublicationGenerationGuard<T> {
                 failOpenLocked(FailOpenReason.TASK_CAPACITY);
                 return;
             }
-            taskTokens.put(task, new WorkToken<>(task, currentVersionLocked(sectionId)));
+            ContentVersion version = captureCurrentVersionLocked(sectionId);
+            if (version == null) {
+                return;
+            }
+            taskTokens.put(task, new WorkToken<>(task, version));
             registeredTasks = saturatedIncrement(registeredTasks);
         }
     }
@@ -268,7 +295,7 @@ public final class TerrainPublicationGenerationGuard<T> {
     public void advanceMaterialGeneration() {
         final List<T> cancel;
         synchronized (this) {
-            if (!config.requested()) {
+            if (!active()) {
                 return;
             }
             materialGeneration = incrementGeneration(materialGeneration);
@@ -280,7 +307,7 @@ public final class TerrainPublicationGenerationGuard<T> {
     public void advanceWorldEpoch() {
         final List<T> cancel;
         synchronized (this) {
-            if (!config.requested()) {
+            if (!active()) {
                 return;
             }
             worldEpoch = incrementGeneration(worldEpoch);
@@ -308,6 +335,7 @@ public final class TerrainPublicationGenerationGuard<T> {
                 rejectedStalePublications,
                 baselinePublicationsAfterFailOpen,
                 failOpenCount,
+                sectionCapacityFailOpenCount,
                 taskCapacityFailOpenCount,
                 meshCapacityFailOpenCount,
                 unknownTaskFailOpenCount,
@@ -319,16 +347,20 @@ public final class TerrainPublicationGenerationGuard<T> {
     private void invalidateSection(final long sectionId, final boolean bothRevisions) {
         final List<T> cancel = new ArrayList<>();
         synchronized (this) {
-            if (!config.requested()) {
+            if (!active()) {
                 return;
             }
-            SectionVersion version = sectionVersions.computeIfAbsent(
-                    sectionId,
-                    ignored -> new SectionVersion(INITIAL_GENERATION, INITIAL_GENERATION)
-            );
-            version.geometryRevision = incrementGeneration(version.geometryRevision);
+            SectionVersion version = sectionVersions.get(sectionId);
+            if (version == null) {
+                if (!ensureSectionSlotLocked(sectionId)) {
+                    return;
+                }
+                version = newSectionVersionLocked();
+                sectionVersions.put(sectionId, version);
+            }
+            version.geometryRevision = nextSectionRevisionLocked();
             if (bothRevisions) {
-                version.lightingRevision = incrementGeneration(version.lightingRevision);
+                version.lightingRevision = nextSectionRevisionLocked();
             }
             var iterator = taskTokens.entrySet().iterator();
             while (iterator.hasNext()) {
@@ -342,11 +374,15 @@ public final class TerrainPublicationGenerationGuard<T> {
         cancelTasks(cancel);
     }
 
-    private ContentVersion currentVersionLocked(final long sectionId) {
-        SectionVersion version = sectionVersions.computeIfAbsent(
-                sectionId,
-                ignored -> new SectionVersion(INITIAL_GENERATION, INITIAL_GENERATION)
-        );
+    private ContentVersion captureCurrentVersionLocked(final long sectionId) {
+        SectionVersion version = sectionVersions.get(sectionId);
+        if (version == null) {
+            if (!ensureSectionSlotLocked(sectionId)) {
+                return null;
+            }
+            version = newSectionVersionLocked();
+            sectionVersions.put(sectionId, version);
+        }
         return new ContentVersion(
                 worldEpoch,
                 sectionId,
@@ -357,8 +393,53 @@ public final class TerrainPublicationGenerationGuard<T> {
     }
 
     private boolean isCurrentLocked(final WorkToken<T> token) {
-        ContentVersion current = currentVersionLocked(token.version().sectionId());
-        return current.equals(token.version());
+        ContentVersion captured = token.version();
+        SectionVersion current = sectionVersions.get(captured.sectionId());
+        return current != null
+                && captured.worldEpoch() == worldEpoch
+                && captured.materialGeneration() == materialGeneration
+                && captured.geometryRevision() == current.geometryRevision
+                && captured.lightingRevision() == current.lightingRevision;
+    }
+
+    /**
+     * Makes room for one previously unseen section without retaining an unbounded world history.
+     * Only metadata with no task/mesh ownership may be evicted. A capacity full of live ownership
+     * is not guessable, so mutation is disabled and vanilla resumes unchanged.
+     */
+    private boolean ensureSectionSlotLocked(final long sectionId) {
+        if (sectionVersions.containsKey(sectionId) || sectionVersions.size() < config.maxTrackedSections()) {
+            return true;
+        }
+
+        Set<Long> referencedSections = new HashSet<>();
+        for (WorkToken<T> token : taskTokens.values()) {
+            referencedSections.add(token.version().sectionId());
+        }
+        for (WorkToken<T> token : meshTokens.values()) {
+            referencedSections.add(token.version().sectionId());
+        }
+
+        var iterator = sectionVersions.keySet().iterator();
+        while (iterator.hasNext()) {
+            long candidate = iterator.next();
+            if (!referencedSections.contains(candidate)) {
+                iterator.remove();
+                return true;
+            }
+        }
+
+        failOpenLocked(FailOpenReason.SECTION_CAPACITY);
+        return false;
+    }
+
+    private SectionVersion newSectionVersionLocked() {
+        return new SectionVersion(nextSectionRevisionLocked(), nextSectionRevisionLocked());
+    }
+
+    private long nextSectionRevisionLocked() {
+        sectionRevisionSequence = incrementGeneration(sectionRevisionSequence);
+        return sectionRevisionSequence;
     }
 
     private void consumeTokenLocked(final WorkToken<T> token, final Object mesh) {
@@ -402,6 +483,8 @@ public final class TerrainPublicationGenerationGuard<T> {
         failOpenReason = reason;
         failOpenCount = saturatedIncrement(failOpenCount);
         switch (reason) {
+            case SECTION_CAPACITY ->
+                    sectionCapacityFailOpenCount = saturatedIncrement(sectionCapacityFailOpenCount);
             case TASK_CAPACITY -> taskCapacityFailOpenCount = saturatedIncrement(taskCapacityFailOpenCount);
             case MESH_CAPACITY -> meshCapacityFailOpenCount = saturatedIncrement(meshCapacityFailOpenCount);
             case UNKNOWN_TASK -> unknownTaskFailOpenCount = saturatedIncrement(unknownTaskFailOpenCount);
@@ -412,6 +495,7 @@ public final class TerrainPublicationGenerationGuard<T> {
         }
         // Metadata is no longer authoritative after fail-open. Drop strong identity references so
         // the diagnostic safety layer cannot retain vanilla tasks/meshes for the rest of the game.
+        sectionVersions.clear();
         taskTokens.clear();
         meshTokens.clear();
     }
