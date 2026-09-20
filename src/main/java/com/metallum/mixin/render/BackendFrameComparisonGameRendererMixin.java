@@ -13,6 +13,15 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(GameRenderer.class)
 abstract class BackendFrameComparisonGameRendererMixin {
+    @Inject(method = "extract", at = @At("TAIL"))
+    private void metallum$fixLightmapFlicker(final CallbackInfo ci) {
+        // Tick-driven random flicker keeps changing even when world simulation
+        // is frozen. Pin only that scenario input, before the lightmap is rendered.
+        if (Boolean.getBoolean("metallum.backend.compare.freeze-simulation")) {
+            ((GameRenderer) (Object) this).gameRenderState().lightmapRenderState.blockFactor = 1.4F;
+        }
+    }
+
     @Inject(
             method = "renderLevel",
             at = @At("HEAD")

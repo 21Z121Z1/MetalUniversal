@@ -1550,6 +1550,7 @@ public final class BackendFrameComparisonClient {
                         + "  \"observedOverworldClockTicks\": %s,\n"
                         + "  \"observedDefaultClockTicks\": %s,\n"
                         + "  \"freezeSimulationRequested\": %s,\n"
+                        + "  \"fixedLightmapBlockFactor\": %s,\n"
                         + "  \"integratedServerScenarioConfigured\": %s,\n"
                         + "  \"serverSimulationFrozen\": %s,\n"
                         + "  \"clientSimulationFrozen\": %s,\n"
@@ -1615,6 +1616,7 @@ public final class BackendFrameComparisonClient {
                 observedOverworldClock,
                 observedDefaultClock,
                 FREEZE_SIMULATION,
+                FREEZE_SIMULATION ? "1.4" : "null",
                 integratedServerConfigured,
                 serverSimulationFrozen,
                 clientSimulationFrozen,
