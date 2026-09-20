@@ -46,7 +46,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
         require(irisLoaded, "Iris was not loaded in the production client");
 
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
-            int chunkRenderTicks = singleplayer.getClientLevel().waitForChunksRender();
+            int chunkRenderTicks = singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(40);
 
             String backend = context.computeOnClient(
@@ -380,7 +380,7 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 {
                   "schema": 3,
                   "backend": "%s",
-                  "minecraft": "26.2",
+                  "minecraft": "26.3",
                   "productionRuntime": true,
                   "clientGameTest": true,
                   "metallumLoaded": %s,
