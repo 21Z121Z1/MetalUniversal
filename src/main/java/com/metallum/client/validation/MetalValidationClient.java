@@ -2450,6 +2450,17 @@ public final class MetalValidationClient implements ClientModInitializer {
         String failureReasonsJson = new GsonBuilder().create().toJson(validationFailureScenarios);
         String runId = System.getProperty("metallum.renderContract.runId", "minecraft-current");
         String sourceCommit = System.getProperty("metallum.validation.sourceCommit", "unknown");
+        if (Boolean.getBoolean("metallum.validation.worldStages")) {
+            try {
+                var stageReport = com.metallum.client.validation.telemetry.VanillaWorldStageTelemetry.report(
+                        sourceCommit, runId, status);
+                ValidationStorageBudget.shared(outputDirectory).writeString(
+                        outputDirectory.resolve("world-stages.json"),
+                        new GsonBuilder().create().toJson(stageReport) + "\n");
+            } catch (IOException exception) {
+                throw new IllegalStateException("Could not write whole-game stage diagnostics", exception);
+            }
+        }
         if (Boolean.getBoolean("metallum.terrain.vanillaWorkEvents")) {
             if (!sourceCommit.matches("[0-9a-f]{40}")) {
                 Metallum.LOGGER.warn(

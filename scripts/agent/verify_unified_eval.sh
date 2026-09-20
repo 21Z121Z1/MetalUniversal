@@ -23,6 +23,7 @@ python3 scripts/agent/verify_native_attachment_coverage.py --self-test
 python3 scripts/agent/verify_native_attachment_coverage.py
 python3 scripts/agent/verify_native_attachment_facts.py --self-test
 python3 scripts/agent/test_estimate_attachment_actions.py
+python3 scripts/agent/verify_world_stages.py --self-test
 python3 scripts/agent/verify_resource_allocations.py --self-test
 python3 scripts/agent/verify_resource_allocation_coverage.py --self-test
 python3 scripts/agent/verify_resource_allocation_coverage.py
@@ -77,6 +78,8 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.terrain.PresentationPacingSnapshotTest \
   --tests com.metallum.client.terrain.PresentationPacingEvidenceAdapterTest \
   --tests com.metallum.mixin.MetallumMixinRegistrationTest \
+  --tests com.metallum.client.validation.telemetry.WorldStageRecorderTest \
+  --tests com.metallum.mixin.world.WorldStageWrapperTest \
   --tests com.metallum.client.validation.FrameMeasurementWindowTest \
   --tests com.metallum.client.validation.GpuMeasurementWindowTest \
   --tests com.metallum.client.validation.EncoderMeasurementWindowTest \
@@ -100,5 +103,7 @@ if raw is None or errors:
     raise SystemExit("process-memory fixture invalid: " + repr(errors))
 print("Process-memory Java fixture: PASS")
 PY
+
+python3 scripts/agent/verify_world_stages.py build/agent-state/world-stage-java-fixture.json --output build/agent-state/world-stage-java-fixture.oracle.json
 
 echo "Unified evaluation static verification: PASS"

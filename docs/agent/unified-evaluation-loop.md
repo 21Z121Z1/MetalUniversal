@@ -396,3 +396,7 @@ Run `nativeProcessMemoryTest` for a current-process production-ABI query without
 a Minecraft window. `ProcessMemoryMeasurementTest` covers window boundaries,
 truncation, failures, malformed ABI records, and separation from lifetime peaks;
 its generated fixture is independently checked by the Python normalizer.
+
+Optional default-off [vanilla world-stage diagnostics](world-stage-telemetry.md)
+observe packet, chunk, light and integrated-server phases. Their inclusive,
+post-invocation process observations are not performance acceptance metrics.

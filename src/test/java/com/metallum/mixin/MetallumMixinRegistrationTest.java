@@ -31,8 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 final class MetallumMixinRegistrationTest {
     private static final Path CONFIG = Path.of("src/main/resources/metallum.mixins.json");
     private static final Path MIXIN_ROOT = Path.of("src/main/java/com/metallum/mixin");
-    private static final List<String> MIXIN_SUBPACKAGES = List.of("render", "terrain", "sodium", "iris");
-    private static final Pattern ENTRY = Pattern.compile("\"((?:render|terrain|sodium|iris)\\.[A-Za-z0-9_]+)\"");
+    private static final List<String> MIXIN_SUBPACKAGES = List.of("render", "terrain", "sodium", "iris", "world");
+    private static final Pattern ENTRY = Pattern.compile("\"((?:render|terrain|sodium|iris|world)\\.[A-Za-z0-9_]+)\"");
     private static final Pattern MIXIN_ANNOTATION = Pattern.compile("@Mixin\\s*\\(");
 
     private static List<String> registeredEntries() throws IOException {

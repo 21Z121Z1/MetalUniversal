@@ -62,6 +62,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         if (!this.isMacOs) {
             return false;
         }
+        if (mixinClassName.contains(".mixin.world.")) {
+            return Boolean.getBoolean("metallum.validation.worldStages");
+        }
         if (BACKEND_FRAME_COMPARISON_MIXIN.equals(mixinClassName)
                 || BACKEND_FRAME_COMPARISON_GAME_RENDERER_MIXIN.equals(mixinClassName)
                 || BACKEND_FRAME_COMPARISON_SERVER_MIXIN.equals(mixinClassName)

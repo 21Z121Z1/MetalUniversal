@@ -5,6 +5,11 @@
   "compatibilityLevel": "JAVA_25",
   "mixins": [],
   "client": [
+    "world.MinecraftWorldStagesMixin",
+    "world.ClientChunkCacheWorldStagesMixin",
+    "world.ClientLevelWorldStagesMixin",
+    "world.IntegratedServerWorldStagesMixin",
+    "world.MinecraftServerWorldStagesMixin",
     "render.FrontendRenderPassBackendAccessMixin",
     "render.PreferredGraphicsApiMixin",
     "render.BackendFrameComparisonMixin",
