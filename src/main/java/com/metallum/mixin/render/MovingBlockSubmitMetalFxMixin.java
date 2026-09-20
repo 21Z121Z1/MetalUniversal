@@ -28,6 +28,7 @@ public abstract class MovingBlockSubmitMetalFxMixin {
             final Matrix4fc pose,
             final MovingBlockRenderState movingBlockRenderState,
             final int outlineColor,
+            final boolean forceTranslucent,
             final CallbackInfo ci
     ) {
         MetalEntityMotionCapture.captureModelSubmit(movingBlockRenderState);
