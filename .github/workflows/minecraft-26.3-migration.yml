@@ -326,6 +326,8 @@ jobs:
             --tests com.metallum.client.metal.render.MetalRenderPearlBoundaryTest \
             --tests com.metallum.client.terrain.TerrainWorkEventRecorderTest \
             --tests com.metallum.client.terrain.BoundedTerrainTaskAdmissionTest \
+            --tests com.metallum.client.terrain.VanillaTerrainAdmissionTelemetryTest \
+            --tests com.metallum.client.terrain.VanillaTerrainAdmissionReportTest \
             --tests com.metallum.client.terrain.VanillaTerrainWorkTrackerTest \
             --tests com.metallum.client.terrain.TerrainWorkReportTest \
             --tests com.metallum.client.validation.SodiumValidationBridgeTest \
