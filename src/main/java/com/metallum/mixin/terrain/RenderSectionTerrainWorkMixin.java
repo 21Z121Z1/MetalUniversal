@@ -2,6 +2,10 @@ package com.metallum.mixin.terrain;
 
 import java.nio.ByteBuffer;
 
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.llamalad7.mixinextras.sugar.Local;
+import com.mojang.blaze3d.vertex.UberGpuBuffer;
 import com.metallum.client.terrain.VanillaTerrainWorkTelemetry;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.CompiledSectionMesh;
@@ -38,30 +42,29 @@ abstract class RenderSectionTerrainWorkMixin {
         );
     }
 
-    @Inject(method = "addSectionBuffersToUberBuffer", at = @At("RETURN"))
-    private void metallum$recordUploadAdmission(
-            final ChunkSectionLayer layer,
-            final CompiledSectionMesh mesh,
-            final ByteBuffer vertexBuffer,
-            final ByteBuffer indexBuffer,
-            final CallbackInfoReturnable<Boolean> cir
+    @WrapOperation(
+            method = "addSectionBuffersToUberBuffer",
+            at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/vertex/UberGpuBuffer;addAllocation("
+                    + "Ljava/lang/Object;Lcom/mojang/blaze3d/vertex/UberGpuBuffer$UploadCallback;Ljava/nio/ByteBuffer;)Z")
+    )
+    private boolean metallum$recordUploadAdmission(
+            final UberGpuBuffer<?> buffer,
+            final Object mesh,
+            final UberGpuBuffer.UploadCallback<?> callback,
+            final ByteBuffer data,
+            final Operation<Boolean> original,
+            @Local(argsOnly = true) final ChunkSectionLayer layer
     ) {
-        if (!Boolean.TRUE.equals(cir.getReturnValue())) {
-            return;
+        long bytes = data.remaining();
+        boolean admitted = original.call(buffer, mesh, callback, data);
+        if (admitted) {
+            // Still under vanilla's copyLock, before the render thread can consume
+            // this allocation. RETURN runs after unlock and can trail GPU_ENCODED.
+            // Record each success even when the other buffer needs a staging retry.
+            VanillaTerrainWorkTelemetry.bindConstructedMesh(mesh);
+            VanillaTerrainWorkTelemetry.uploadQueued(mesh, bytes, "staging-admitted/" + layer);
         }
-        VanillaTerrainWorkTelemetry.bindConstructedMesh(mesh);
-        long bytes = 0L;
-        if (vertexBuffer != null) {
-            bytes += vertexBuffer.remaining();
-        }
-        if (indexBuffer != null) {
-            bytes += indexBuffer.remaining();
-        }
-        VanillaTerrainWorkTelemetry.uploadQueued(
-                mesh,
-                bytes,
-                "staging-admitted/" + layer
-        );
+        return admitted;
     }
 
     @Inject(method = "vertexBufferUploadCallback", at = @At("HEAD"))
