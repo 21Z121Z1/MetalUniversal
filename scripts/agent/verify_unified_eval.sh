@@ -26,6 +26,8 @@ python3 scripts/agent/normalize_unified_trial.py --self-test
 python3 scripts/agent/test_normalize_unified_trial.py
 python3 scripts/agent/check_unified_eval_admission.py --self-test
 python3 scripts/agent/verify_terrain_work_events.py --self-test
+python3 scripts/agent/verify_terrain_generation.py --self-test
+python3 scripts/agent/test_verify_terrain_generation.py
 python3 -m py_compile \
   scripts/agent/context.py \
   scripts/agent/checkpoint.py \
@@ -54,6 +56,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.terrain.TerrainSchedulingControllerTest \
   --tests com.metallum.client.terrain.BoundedTerrainTaskAdmissionTest \
   --tests com.metallum.client.terrain.TerrainPublicationGenerationGuardTest \
+  --tests com.metallum.client.terrain.VanillaTerrainGenerationTelemetryTest \
   --tests com.metallum.client.terrain.VanillaTerrainAdmissionTelemetryTest \
   --tests com.metallum.client.terrain.VanillaTerrainAdmissionReportTest \
   --tests com.metallum.client.terrain.TerrainWorkEventRecorderTest \
@@ -69,5 +72,9 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.validation.GpuMeasurementWindowTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
+
+python3 scripts/agent/verify_terrain_generation.py \
+  build/agent-state/terrain-generation-java-fixture.json --require-active \
+  --output build/agent-state/terrain-generation-java-fixture.oracle.json
 
 echo "Unified evaluation static verification: PASS"

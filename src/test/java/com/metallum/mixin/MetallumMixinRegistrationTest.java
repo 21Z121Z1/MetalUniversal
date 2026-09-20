@@ -23,10 +23,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * reads as if the behaviour exists. A listed class with no source is the reverse
  * and takes the whole config down at load time.</p>
  *
- * <p>The render/terrain/sodium/iris packages also contain package-private helper classes used by
- * mixins. Those helpers are deliberately not entries in metallum.mixins.json, so
- * source discovery must identify {@code @Mixin} classes rather than treating every
- * Java source in the package as a mixin.</p>
+ * <p>Source discovery identifies {@code @Mixin} declarations rather than treating every
+ * Java source in the package as a mixin. This registration check does not prove that
+ * non-mixin helpers are loadable: ordinary runtime helpers must live outside the
+ * configured mixin package. Minecraft client runs validate that class-loading boundary.</p>
  */
 final class MetallumMixinRegistrationTest {
     private static final Path CONFIG = Path.of("src/main/resources/metallum.mixins.json");

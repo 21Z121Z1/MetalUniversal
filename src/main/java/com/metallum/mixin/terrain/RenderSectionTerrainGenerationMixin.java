@@ -1,6 +1,10 @@
 package com.metallum.mixin.terrain;
 
+import com.metallum.client.terrain.VanillaTerrainGenerationRuntime;
+
 import com.metallum.client.terrain.TerrainPublicationGenerationGuard;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import java.nio.ByteBuffer;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.CompiledSectionMesh;
@@ -51,18 +55,21 @@ abstract class RenderSectionTerrainGenerationMixin {
         VanillaTerrainGenerationRuntime.bindMeshFromActiveTask(mesh);
     }
 
-    @Inject(method = "setSectionMesh", at = @At("HEAD"), cancellable = true)
-    private void metallum$guardPublication(
+    @WrapMethod(method = "setSectionMesh")
+    private SectionMesh metallum$guardPublication(
             final SectionMesh candidate,
-            final CallbackInfoReturnable<SectionMesh> cir
+            final Operation<SectionMesh> original
     ) {
-        TerrainPublicationGenerationGuard.PublicationDecision decision =
-                VanillaTerrainGenerationRuntime.publicationDecision(getSectionNode(), candidate);
-        if (decision == TerrainPublicationGenerationGuard.PublicationDecision.REJECT_STALE) {
-            // Both vanilla callers immediately release the returned old mesh. Returning the stale
-            // candidate itself preserves that ownership flow while leaving sectionMesh untouched.
-            cir.setReturnValue(candidate);
-        }
+        // Keep the generation check and vanilla's synchronous pointer exchange in one monitor.
+        // Otherwise a content invalidation could land after admission but before publication.
+        return VanillaTerrainGenerationRuntime.withPublicationDecision(getSectionNode(), candidate, decision -> {
+            if (decision == TerrainPublicationGenerationGuard.PublicationDecision.REJECT_STALE) {
+                // Both callers release the returned old mesh. Return the rejected candidate so
+                // vanilla releases it once without publishing it or emitting a publication hook.
+                return candidate;
+            }
+            return original.call(candidate);
+        });
     }
 
     @Inject(method = "releaseSectionMesh", at = @At("HEAD"))

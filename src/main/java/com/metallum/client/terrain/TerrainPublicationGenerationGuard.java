@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * Generation-aware publication guard for vanilla 26.3 terrain work.
@@ -27,6 +28,33 @@ public final class TerrainPublicationGenerationGuard<T> {
 
     public enum FailOpenReason {
         NONE,
+        SECTION_CAPACITY,
+        TASK_CAPACITY,
+        MESH_CAPACITY,
+        UNKNOWN_TASK,
+        UNKNOWN_PUBLICATION,
+        MESH_REBOUND
+    }
+
+    /** Bounded diagnostic event categories; events never participate in guard decisions. */
+    public enum EventKind {
+        TASK_REGISTERED,
+        MESH_BOUND,
+        WORLD_EPOCH_ADVANCED,
+        MATERIAL_GENERATION_ADVANCED,
+        SECTION_INVALIDATED,
+        PUBLICATION,
+        FAIL_OPEN
+    }
+
+    /** Stable explanation attached to a diagnostic event. */
+    public enum EventReason {
+        NONE,
+        DISABLED,
+        FAIL_OPEN,
+        STALE_CONTENT,
+        SECTION_MISMATCH,
+        TASK_CANCELLED,
         SECTION_CAPACITY,
         TASK_CAPACITY,
         MESH_CAPACITY,
@@ -86,6 +114,7 @@ public final class TerrainPublicationGenerationGuard<T> {
             long worldEpoch,
             long materialGeneration,
             int sectionVersionEntries,
+            long untrackedInvalidations,
             int trackedTasks,
             int trackedMeshes,
             long registeredTasks,
@@ -104,10 +133,37 @@ public final class TerrainPublicationGenerationGuard<T> {
     ) {
     }
 
+    /** A bounded, immutable-at-read diagnostic event. No task or mesh identity is retained. */
+    public record Event(
+            long sequence,
+            EventKind kind,
+            long worldEpoch,
+            long materialGeneration,
+            Long sectionId,
+            ContentVersion captured,
+            ContentVersion current,
+            PublicationDecision decision,
+            boolean cancelled,
+            EventReason reason
+    ) {
+    }
+
+    /** Strongly consistent guard counters and trace view captured under one monitor. */
+    public record Evidence(
+            Snapshot snapshot,
+            List<Event> events,
+            long droppedEvents,
+            int eventCapacity
+    ) {
+    }
+
     private static final long INITIAL_GENERATION = 1L;
+    private static final int MAX_EVENT_CAPACITY = 1_048_576;
 
     private final Config config;
     private final TaskOps<T> taskOps;
+    private final int eventCapacity;
+    private final ArrayList<Event> events;
     // Access-order keeps the cold-path eviction deterministic without touching vanilla ownership.
     private final Map<Long, SectionVersion> sectionVersions = new LinkedHashMap<>(16, 0.75F, true);
     private final IdentityHashMap<T, WorkToken<T>> taskTokens = new IdentityHashMap<>();
@@ -135,10 +191,26 @@ public final class TerrainPublicationGenerationGuard<T> {
     private long unknownTaskFailOpenCount;
     private long unknownPublicationFailOpenCount;
     private long meshReboundFailOpenCount;
+    private long untrackedInvalidations;
+    private long eventSequence;
+    private long droppedEvents;
 
     public TerrainPublicationGenerationGuard(final Config config, final TaskOps<T> taskOps) {
+        this(config, taskOps, 0);
+    }
+
+    public TerrainPublicationGenerationGuard(
+            final Config config,
+            final TaskOps<T> taskOps,
+            final int eventCapacity
+    ) {
         this.config = Objects.requireNonNull(config, "config");
         this.taskOps = Objects.requireNonNull(taskOps, "taskOps");
+        if (eventCapacity < 0 || eventCapacity > MAX_EVENT_CAPACITY) {
+            throw new IllegalArgumentException("eventCapacity out of range: " + eventCapacity);
+        }
+        this.eventCapacity = eventCapacity;
+        this.events = eventCapacity == 0 ? null : new ArrayList<>(eventCapacity);
     }
 
     public synchronized boolean active() {
@@ -165,6 +237,15 @@ public final class TerrainPublicationGenerationGuard<T> {
             }
             taskTokens.put(task, new WorkToken<>(task, version));
             registeredTasks = saturatedIncrement(registeredTasks);
+            recordEventLocked(
+                    EventKind.TASK_REGISTERED,
+                    traceSectionId(sectionId),
+                    version,
+                    version,
+                    null,
+                    false,
+                    EventReason.NONE
+            );
         }
     }
 
@@ -238,42 +319,111 @@ public final class TerrainPublicationGenerationGuard<T> {
                 meshTokens.put(mesh, token);
                 boundMeshes = saturatedIncrement(boundMeshes);
             }
+            recordEventLocked(
+                    EventKind.MESH_BOUND,
+                    traceSectionId(token.version().sectionId()),
+                    token.version(),
+                    currentContentVersionLocked(token.version().sectionId()),
+                    null,
+                    false,
+                    EventReason.NONE
+            );
         }
     }
 
     /**
-     * Checks the only vanilla publication boundary. Direct empty/block-entity-only work uses the
-     * active task token; callback-driven mesh publication uses the mesh token captured at staging.
+     * Checks the only vanilla publication boundary without holding the monitor for a caller
+     * callback. Direct empty/block-entity-only work uses the active task token; callback-driven
+     * mesh publication uses the mesh token captured at staging.
      */
-    public PublicationDecision publicationDecision(final long sectionId, final Object mesh) {
-        synchronized (this) {
-            if (!config.requested() || failOpen) {
-                baselinePublicationsAfterFailOpen = saturatedIncrement(baselinePublicationsAfterFailOpen);
-                return PublicationDecision.BASELINE_ALLOW;
-            }
+    public synchronized PublicationDecision publicationDecision(final long sectionId, final Object mesh) {
+        return publicationDecisionLocked(sectionId, mesh);
+    }
 
-            WorkToken<T> token = mesh == null ? null : meshTokens.get(mesh);
-            WorkToken<T> active = activeTask.get();
-            if (token == null && active != null) {
-                token = active;
-            }
-            if (token == null) {
-                failOpenLocked(FailOpenReason.UNKNOWN_PUBLICATION);
-                baselinePublicationsAfterFailOpen = saturatedIncrement(baselinePublicationsAfterFailOpen);
-                return PublicationDecision.BASELINE_ALLOW;
-            }
+    /**
+     * Checks and consumes one publication token, then runs the short publication action while the
+     * same guard monitor is still held. The action must publish synchronously and must not retain a
+     * callback; exceptions are deliberately allowed to propagate without a fallback retry.
+     */
+    public synchronized <R> R withPublicationDecision(
+            final long sectionId,
+            final Object mesh,
+            final Function<PublicationDecision, R> action
+    ) {
+        Objects.requireNonNull(action, "action");
+        PublicationDecision decision = publicationDecisionLocked(sectionId, mesh);
+        return action.apply(decision);
+    }
 
-            boolean current = token.version().sectionId() == sectionId
-                    && isCurrentLocked(token)
-                    && !taskOps.isCancelled(token.task());
-            consumeTokenLocked(token, mesh);
-            if (!current) {
-                rejectedStalePublications = saturatedIncrement(rejectedStalePublications);
-                return PublicationDecision.REJECT_STALE;
-            }
-            allowedPublications = saturatedIncrement(allowedPublications);
-            return PublicationDecision.ALLOW_CURRENT;
+    private PublicationDecision publicationDecisionLocked(final long sectionId, final Object mesh) {
+        if (!config.requested() || failOpen) {
+            baselinePublicationsAfterFailOpen = saturatedIncrement(baselinePublicationsAfterFailOpen);
+            recordEventLocked(
+                    EventKind.PUBLICATION,
+                    traceSectionId(sectionId),
+                    null,
+                    currentContentVersionLocked(sectionId),
+                    PublicationDecision.BASELINE_ALLOW,
+                    false,
+                    config.requested() ? EventReason.FAIL_OPEN : EventReason.DISABLED
+            );
+            return PublicationDecision.BASELINE_ALLOW;
         }
+
+        WorkToken<T> token = mesh == null ? null : meshTokens.get(mesh);
+        WorkToken<T> active = activeTask.get();
+        if (token == null && active != null) {
+            token = active;
+        }
+        if (token == null) {
+            failOpenLocked(FailOpenReason.UNKNOWN_PUBLICATION);
+            baselinePublicationsAfterFailOpen = saturatedIncrement(baselinePublicationsAfterFailOpen);
+            recordEventLocked(
+                    EventKind.PUBLICATION,
+                    traceSectionId(sectionId),
+                    null,
+                    currentContentVersionLocked(sectionId),
+                    PublicationDecision.BASELINE_ALLOW,
+                    false,
+                    EventReason.UNKNOWN_PUBLICATION
+            );
+            return PublicationDecision.BASELINE_ALLOW;
+        }
+
+        ContentVersion captured = token.version();
+        ContentVersion currentVersion = currentContentVersionLocked(sectionId);
+        boolean currentGeneration = token.version().sectionId() == sectionId
+                && isCurrentLocked(token);
+        boolean cancelled = taskOps.isCancelled(token.task());
+        boolean current = currentGeneration && !cancelled;
+        consumeTokenLocked(token, mesh);
+        if (!current) {
+            rejectedStalePublications = saturatedIncrement(rejectedStalePublications);
+            EventReason reason = captured.sectionId() != sectionId
+                    ? EventReason.SECTION_MISMATCH
+                    : cancelled ? EventReason.TASK_CANCELLED : EventReason.STALE_CONTENT;
+            recordEventLocked(
+                    EventKind.PUBLICATION,
+                    traceSectionId(sectionId),
+                    captured,
+                    currentVersion,
+                    PublicationDecision.REJECT_STALE,
+                    cancelled,
+                    reason
+            );
+            return PublicationDecision.REJECT_STALE;
+        }
+        allowedPublications = saturatedIncrement(allowedPublications);
+        recordEventLocked(
+                EventKind.PUBLICATION,
+                traceSectionId(sectionId),
+                captured,
+                currentVersion,
+                PublicationDecision.ALLOW_CURRENT,
+                false,
+                EventReason.NONE
+        );
+        return PublicationDecision.ALLOW_CURRENT;
     }
 
     /** Forget ownership after vanilla releases a candidate or retired mesh. */
@@ -300,6 +450,15 @@ public final class TerrainPublicationGenerationGuard<T> {
             }
             materialGeneration = incrementGeneration(materialGeneration);
             cancel = removeAllTrackedTasksLocked();
+            recordEventLocked(
+                    EventKind.MATERIAL_GENERATION_ADVANCED,
+                    null,
+                    null,
+                    null,
+                    null,
+                    !cancel.isEmpty(),
+                    EventReason.NONE
+            );
         }
         cancelTasks(cancel);
     }
@@ -313,11 +472,38 @@ public final class TerrainPublicationGenerationGuard<T> {
             worldEpoch = incrementGeneration(worldEpoch);
             sectionVersions.clear();
             cancel = removeAllTrackedTasksLocked();
+            recordEventLocked(
+                    EventKind.WORLD_EPOCH_ADVANCED,
+                    null,
+                    null,
+                    null,
+                    null,
+                    !cancel.isEmpty(),
+                    EventReason.NONE
+            );
         }
         cancelTasks(cancel);
     }
 
     public synchronized Snapshot snapshot() {
+        return snapshotLocked();
+    }
+
+    /** Captures counters and the bounded trace under one monitor. */
+    public synchronized Evidence snapshotEvidence() {
+        return new Evidence(
+                snapshotLocked(),
+                eventCapacity == 0 ? List.of() : List.copyOf(events),
+                droppedEvents,
+                eventCapacity
+        );
+    }
+
+    public int eventCapacity() {
+        return eventCapacity;
+    }
+
+    private Snapshot snapshotLocked() {
         return new Snapshot(
                 config.requested(),
                 active(),
@@ -326,6 +512,7 @@ public final class TerrainPublicationGenerationGuard<T> {
                 worldEpoch,
                 materialGeneration,
                 sectionVersions.size(),
+                untrackedInvalidations,
                 taskTokens.size(),
                 meshTokens.size(),
                 registeredTasks,
@@ -345,19 +532,17 @@ public final class TerrainPublicationGenerationGuard<T> {
     }
 
     private void invalidateSection(final long sectionId, final boolean bothRevisions) {
-        final List<T> cancel = new ArrayList<>();
+        final List<T> cancel;
         synchronized (this) {
             if (!active()) {
                 return;
             }
             SectionVersion version = sectionVersions.get(sectionId);
             if (version == null) {
-                if (!ensureSectionSlotLocked(sectionId)) {
-                    return;
-                }
-                version = newSectionVersionLocked();
-                sectionVersions.put(sectionId, version);
+                untrackedInvalidations = saturatedIncrement(untrackedInvalidations);
+                return;
             }
+            cancel = new ArrayList<>();
             version.geometryRevision = nextSectionRevisionLocked();
             if (bothRevisions) {
                 version.lightingRevision = nextSectionRevisionLocked();
@@ -370,6 +555,15 @@ public final class TerrainPublicationGenerationGuard<T> {
                     iterator.remove();
                 }
             }
+            recordEventLocked(
+                    EventKind.SECTION_INVALIDATED,
+                    traceSectionId(sectionId),
+                    null,
+                    currentContentVersionLocked(sectionId),
+                    null,
+                    !cancel.isEmpty(),
+                    EventReason.NONE
+            );
         }
         cancelTasks(cancel);
     }
@@ -390,6 +584,61 @@ public final class TerrainPublicationGenerationGuard<T> {
                 version.lightingRevision,
                 materialGeneration
         );
+    }
+
+    /** Looks up a version without touching the access-order LRU used by scheduling. */
+    private ContentVersion currentContentVersionLocked(final long sectionId) {
+        if (eventCapacity == 0 || events.size() >= eventCapacity) {
+            return null;
+        }
+        for (Map.Entry<Long, SectionVersion> entry : sectionVersions.entrySet()) {
+            if (entry.getKey() == sectionId) {
+                SectionVersion version = entry.getValue();
+                return new ContentVersion(
+                        worldEpoch,
+                        sectionId,
+                        version.geometryRevision,
+                        version.lightingRevision,
+                        materialGeneration
+                );
+            }
+        }
+        return null;
+    }
+
+    private Long traceSectionId(final long sectionId) {
+        return eventCapacity == 0 ? null : sectionId;
+    }
+
+    private void recordEventLocked(
+            final EventKind kind,
+            final Long sectionId,
+            final ContentVersion captured,
+            final ContentVersion current,
+            final PublicationDecision decision,
+            final boolean cancelled,
+            final EventReason reason
+    ) {
+        if (eventCapacity == 0) {
+            return;
+        }
+        eventSequence = saturatedIncrement(eventSequence);
+        if (events.size() >= eventCapacity) {
+            droppedEvents = saturatedIncrement(droppedEvents);
+            return;
+        }
+        events.add(new Event(
+                eventSequence,
+                Objects.requireNonNull(kind, "kind"),
+                worldEpoch,
+                materialGeneration,
+                sectionId,
+                captured,
+                current,
+                decision,
+                cancelled,
+                Objects.requireNonNull(reason, "reason")
+        ));
     }
 
     private boolean isCurrentLocked(final WorkToken<T> token) {
@@ -493,11 +742,32 @@ public final class TerrainPublicationGenerationGuard<T> {
             case MESH_REBOUND -> meshReboundFailOpenCount = saturatedIncrement(meshReboundFailOpenCount);
             case NONE -> throw new IllegalArgumentException("fail-open reason must be explicit");
         }
+        recordEventLocked(
+                EventKind.FAIL_OPEN,
+                null,
+                null,
+                null,
+                null,
+                false,
+                eventReason(reason)
+        );
         // Metadata is no longer authoritative after fail-open. Drop strong identity references so
         // the diagnostic safety layer cannot retain vanilla tasks/meshes for the rest of the game.
         sectionVersions.clear();
         taskTokens.clear();
         meshTokens.clear();
+    }
+
+    private static EventReason eventReason(final FailOpenReason reason) {
+        return switch (reason) {
+            case SECTION_CAPACITY -> EventReason.SECTION_CAPACITY;
+            case TASK_CAPACITY -> EventReason.TASK_CAPACITY;
+            case MESH_CAPACITY -> EventReason.MESH_CAPACITY;
+            case UNKNOWN_TASK -> EventReason.UNKNOWN_TASK;
+            case UNKNOWN_PUBLICATION -> EventReason.UNKNOWN_PUBLICATION;
+            case MESH_REBOUND -> EventReason.MESH_REBOUND;
+            case NONE -> throw new IllegalArgumentException("fail-open reason must be explicit");
+        };
     }
 
     private static long incrementGeneration(final long value) {

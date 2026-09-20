@@ -161,6 +161,39 @@ not performance-eligible; do not add its totals to frame timing or use it for
 paired acceptance. Measure instrumentation overhead separately before treating
 an instrumented workload as a performance baseline.
 
+### Vanilla terrain generation diagnostics
+
+For opt-in vanilla T1 diagnostics, `metallum.terrain.vanillaAdmission=true`
+enables the bounded queue and emits `terrain-admission.json`.
+`metallum.terrain.vanillaGenerationGuard=true` emits `terrain-generation.json`;
+its `mixinHooksObserved` field distinguishes executed hooks from a requested
+flag. Add `metallum.terrain.vanillaGenerationEvents=true` to retain bounded
+generation/publication decision events. `vanillaGenerationEventCapacity`
+(under the same `metallum.terrain` prefix) defaults to 65,536 and accepts
+1–262,144. Overflow records dropped events and makes the decision trace
+incomplete; it never changes the guard's result.
+
+Only invalidations of tracked section metadata produce `SECTION_INVALIDATED`
+events. Unknown sections have no current token to invalidate and increment
+`snapshot.untrackedInvalidations` without allocating metadata. New registrations
+receive globally increasing revisions, so an old worker cannot match a section
+recreated after eviction. The aggregate includes initialization notifications;
+it is not a count of omitted decision events.
+
+Run `python3 scripts/agent/verify_terrain_generation.py <report> --require-active`
+to require observed guard activation, publication decisions, and complete
+decision evidence. Without `--require-active`, an explicitly unobserved or
+fail-open report may be a valid diagnostic; it is not proof of guarded execution.
+These reports do not establish the full task/mesh ownership chain, atomicity
+between decision and vanilla publication, lifecycle coverage, or performance
+acceptance. Keep both optimizations default-off until their remaining gates pass.
+
+The publication wrapper holds the guard monitor across the decision and vanilla's
+synchronous mesh exchange. Invalidation uses the same monitor; a concurrent
+invalidation cannot slip between admission and publication. Unit tests exercise
+that ordering and exception propagation; real-client reports establish hook
+execution only.
+
 ### Native fullscreen measurement windows
 
 The native fullscreen report identifies its measurement window with an explicit

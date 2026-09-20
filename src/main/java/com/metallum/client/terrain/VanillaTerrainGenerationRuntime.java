@@ -1,10 +1,11 @@
-package com.metallum.mixin.terrain;
+package com.metallum.client.terrain;
 
-import com.metallum.client.terrain.TerrainPublicationGenerationGuard;
+import com.metallum.mixin.terrain.SectionTaskTerrainAdmissionAccessor;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
+import java.util.function.Function;
 
 /** Minecraft-facing adapter for the pure T1b generation guard. */
-final class VanillaTerrainGenerationRuntime {
+public final class VanillaTerrainGenerationRuntime {
     static final String ENABLE_PROPERTY = "metallum.terrain.vanillaGenerationGuard";
     static final String TRACKED_CAPACITY_PROPERTY = "metallum.terrain.vanillaGenerationTrackedCapacity";
     private static final int DEFAULT_TRACKED_CAPACITY = 32768;
@@ -29,8 +30,13 @@ final class VanillaTerrainGenerationRuntime {
                         public void cancel(final SectionRenderDispatcher.RenderSection.SectionTask task) {
                             task.cancel();
                         }
-                    }
+                    },
+                    eventCapacity()
             );
+
+    static {
+        VanillaTerrainGenerationTelemetry.register(GUARD::snapshotEvidence);
+    }
 
     private static final Object LEVEL_LOCK = new Object();
     private static Object observedLevel;
@@ -38,11 +44,13 @@ final class VanillaTerrainGenerationRuntime {
     private VanillaTerrainGenerationRuntime() {
     }
 
-    static void markDirty(final long sectionId) {
+    public static void markDirty(final long sectionId) {
+        VanillaTerrainGenerationTelemetry.observeHook();
         GUARD.markDirty(sectionId);
     }
 
-    static void onLevelChanged(final Object level) {
+    public static void onLevelChanged(final Object level) {
+        VanillaTerrainGenerationTelemetry.observeHook();
         synchronized (LEVEL_LOCK) {
             if (observedLevel == level) {
                 return;
@@ -52,46 +60,61 @@ final class VanillaTerrainGenerationRuntime {
         GUARD.advanceWorldEpoch();
     }
 
-    static void onFullGeometryInvalidation() {
+    public static void onFullGeometryInvalidation() {
+        VanillaTerrainGenerationTelemetry.observeHook();
         GUARD.advanceMaterialGeneration();
     }
 
-    static void invalidateSectionLifetime(final long sectionId) {
+    public static void invalidateSectionLifetime(final long sectionId) {
+        VanillaTerrainGenerationTelemetry.observeHook();
         GUARD.invalidateSectionLifetime(sectionId);
     }
 
-    static void registerTask(
+    public static void registerTask(
             final SectionRenderDispatcher.RenderSection.SectionTask task,
             final long sectionId
     ) {
+        VanillaTerrainGenerationTelemetry.observeHook();
         GUARD.registerTask(task, sectionId);
     }
 
-    static boolean enterTask(final SectionRenderDispatcher.RenderSection.SectionTask task) {
+    public static boolean enterTask(final SectionRenderDispatcher.RenderSection.SectionTask task) {
+        VanillaTerrainGenerationTelemetry.observeHook();
         return GUARD.enterTask(task);
     }
 
-    static void exitTask(final SectionRenderDispatcher.RenderSection.SectionTask task) {
+    public static void exitTask(final SectionRenderDispatcher.RenderSection.SectionTask task) {
+        VanillaTerrainGenerationTelemetry.observeHook();
         GUARD.exitTask(task);
     }
 
-    static void bindMeshFromActiveTask(final Object mesh) {
+    public static void bindMeshFromActiveTask(final Object mesh) {
+        VanillaTerrainGenerationTelemetry.observeHook();
         GUARD.bindMeshFromActiveTask(mesh);
     }
 
-    static TerrainPublicationGenerationGuard.PublicationDecision publicationDecision(
-            final long sectionId,
-            final Object mesh
-    ) {
-        return GUARD.publicationDecision(sectionId, mesh);
+    public static <R> R withPublicationDecision(long sectionId, Object mesh,
+            Function<TerrainPublicationGenerationGuard.PublicationDecision, R> publication) {
+        VanillaTerrainGenerationTelemetry.observeHook();
+        return GUARD.withPublicationDecision(sectionId, mesh, publication);
     }
 
-    static void forgetMesh(final Object mesh) {
+    public static void forgetMesh(final Object mesh) {
+        VanillaTerrainGenerationTelemetry.observeHook();
         GUARD.forgetMesh(mesh);
     }
 
     static TerrainPublicationGenerationGuard.Snapshot snapshot() {
         return GUARD.snapshot();
+    }
+
+    private static int eventCapacity() {
+        if (!Boolean.getBoolean("metallum.terrain.vanillaGenerationEvents")) return 0;
+        int capacity = Integer.getInteger("metallum.terrain.vanillaGenerationEventCapacity", 65_536);
+        if (capacity < 1 || capacity > 262_144) {
+            throw new IllegalArgumentException("vanillaGenerationEventCapacity must be in [1, 262144]");
+        }
+        return capacity;
     }
 
     private static int trackedCapacity() {
