@@ -35,24 +35,36 @@ abstract class LevelRendererTerrainDrawMixin {
         SectionRenderDispatcher dispatcher = renderer.sectionRenderDispatcher();
         Map<Object, List<VanillaTerrainWorkTracker.DrawToken>> candidates = new IdentityHashMap<>();
 
-        for (SectionRenderDispatcher.RenderSection section : renderer.visibleSections()) {
-            SectionMesh mesh = section.getSectionMesh();
-            VanillaTerrainWorkTracker.DrawToken token =
-                    VanillaTerrainWorkTelemetry.drawTokenForMesh(mesh);
-            if (token == null) {
-                continue;
-            }
-            for (ChunkSectionLayer layer : ChunkSectionLayer.values()) {
-                if (mesh.getSectionDraw(layer) == null) {
+        // Vanilla's extractSectionDrawGroups() owns this exact lock while deriving batch
+        // membership from visibleSections. Re-take the same lock for the evidence snapshot so
+        // buffer-slice allocation cannot change between our per-section membership checks.
+        dispatcher.lock();
+        try {
+            for (SectionRenderDispatcher.RenderSection section : renderer.visibleSections()) {
+                SectionMesh mesh = section.getSectionMesh();
+                VanillaTerrainWorkTracker.DrawToken token =
+                        VanillaTerrainWorkTelemetry.drawTokenForMesh(mesh);
+                if (token == null) {
                     continue;
                 }
-                // Mirror vanilla's physical slice admission. If the final buffer slice cannot be
-                // resolved, this section is not an authority candidate for the prepared batch.
-                if (dispatcher.getRenderSectionSlice(mesh, layer) == null) {
-                    continue;
+                for (ChunkSectionLayer layer : ChunkSectionLayer.values()) {
+                    SectionMesh.SectionDraw draw = mesh.getSectionDraw(layer);
+                    SectionRenderDispatcher.RenderSectionBufferSlice slice =
+                            dispatcher.getRenderSectionSlice(mesh, layer);
+                    // Keep this predicate byte-for-byte semantic with vanilla 26.3
+                    // extractSectionDrawGroups(): custom-index draws are not submitted when their
+                    // index slice is unavailable. Over-admitting here would fabricate
+                    // FIRST_VALID_DRAW after a layer that never contained this section.
+                    if (slice == null
+                            || draw == null
+                            || (draw.hasCustomIndexBuffer() && slice.indexBuffer() == null)) {
+                        continue;
+                    }
+                    candidates.computeIfAbsent(layer, ignored -> new ArrayList<>()).add(token);
                 }
-                candidates.computeIfAbsent(layer, ignored -> new ArrayList<>()).add(token);
             }
+        } finally {
+            dispatcher.unlock();
         }
 
         VanillaTerrainWorkTelemetry.attachDrawBatch(
