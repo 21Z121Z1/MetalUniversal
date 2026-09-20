@@ -46,7 +46,7 @@ public final class Metal4MainRendererEvidenceGameTest implements FabricClientGam
                 "native main-renderer engagement disagrees with requested P1 lane: " + before);
 
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
-            singleplayer.getClientLevel().waitForChunksRender();
+            singleplayer.getConnection().waitForChunksRender();
             context.waitTicks(60);
 
             Result result = context.computeOnClient(client -> {
