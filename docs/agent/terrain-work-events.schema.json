@@ -163,6 +163,36 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schemaVersion"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "lossScope"
+          ]
+        },
+        "properties": {
+          "events": {
+            "items": {
+              "not": {
+                "required": [
+                  "workId"
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {
