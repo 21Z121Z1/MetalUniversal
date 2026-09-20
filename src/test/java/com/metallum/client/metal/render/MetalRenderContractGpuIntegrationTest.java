@@ -12,6 +12,7 @@ import com.metallum.client.validation.expectation.ExpectationSpec;
 import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.pipeline.IndexType;
 import com.mojang.renderpearl.api.pipeline.ColorTargetState;
 import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.renderpearl.api.device.GpuDebugOptions;
@@ -36,6 +37,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.stream.StreamSupport;
 
+import org.lwjgl.vulkan.VkDrawIndexedIndirectCommand;
+import org.lwjgl.vulkan.VkDrawIndirectCommand;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -70,6 +75,37 @@ final class MetalRenderContractGpuIntegrationTest {
                 color1 = vec4(0.0, 1.0, 0.0, 1.0);
             }
             """;
+    private static final String INDIRECT_VERTEX_SHADER = """
+            #version 450
+            layout(location=0) flat out vec4 instanceColor;
+            void main() {
+                vec2 positions[6] = vec2[](
+                    vec2(-1.0, -1.0),
+                    vec2( 1.0, -1.0),
+                    vec2(-1.0,  1.0),
+                    vec2(-1.0,  1.0),
+                    vec2( 1.0, -1.0),
+                    vec2( 1.0,  1.0)
+                );
+                int instance = gl_InstanceIndex;
+                float xOffset = instance == 1 ? -0.5 : instance == 2 ? 0.5 : 0.0;
+                instanceColor = instance == 1
+                        ? vec4(1.0, 0.0, 0.0, 1.0)
+                        : instance == 2
+                                ? vec4(0.0, 1.0, 0.0, 1.0)
+                                : vec4(0.0, 0.0, 1.0, 1.0);
+                gl_Position = vec4(positions[gl_VertexIndex] * vec2(0.5, 1.0)
+                        + vec2(xOffset, 0.0), 0.0, 1.0);
+            }
+            """;
+    private static final String INDIRECT_FRAGMENT_SHADER = """
+            #version 450
+            layout(location=0) flat in vec4 instanceColor;
+            layout(location=0) out vec4 color;
+            void main() {
+                color = instanceColor;
+            }
+            """;
 
     private final Map<String, String> shaders = new HashMap<>();
     private MetalDevice device;
@@ -95,11 +131,17 @@ final class MetalRenderContractGpuIntegrationTest {
 
         shaders.put("contract_vertex", VERTEX_SHADER);
         shaders.put("contract_fragment", FRAGMENT_SHADER);
+        shaders.put("indirect_vertex", INDIRECT_VERTEX_SHADER);
+        shaders.put("indirect_fragment", INDIRECT_FRAGMENT_SHADER);
         MemorySegment nativeDevice = MetalNativeBridge.metallum_create_system_default_device();
         assertFalse(MetalNativeBridge.isNullHandle(nativeDevice), "MTLCreateSystemDefaultDevice returned null");
-        ShaderSource source = MetalShaderSourceAdapters.from((identifier, type) -> type == ShaderType.VERTEX
-                ? shaders.get("contract_vertex")
-                : shaders.get("contract_fragment"));
+        ShaderSource source = MetalShaderSourceAdapters.from((identifier, type) -> {
+            boolean indirect = identifier.toString().contains("indirect_");
+            if (type == ShaderType.VERTEX) {
+                return shaders.get(indirect ? "indirect_vertex" : "contract_vertex");
+            }
+            return shaders.get(indirect ? "indirect_fragment" : "contract_fragment");
+        });
         device = new MetalDevice(
                 source,
                 new GpuDebugOptions(2, true, true, true),
@@ -202,6 +244,139 @@ final class MetalRenderContractGpuIntegrationTest {
 
         color0.close();
         color1.close();
+    }
+
+    @Test
+    void advertisesIndirectFeaturesThatTheMetalBackendImplements() {
+        var features = device.getDeviceInfo().features();
+        assertTrue(features.multiDrawIndirect(), "Metal must advertise the indirect draw route");
+        assertTrue(features.drawIndirect(), "Metal must advertise non-indexed indirect draws");
+        assertTrue(features.nonZeroFirstInstance(), "indirect commands must preserve firstInstance");
+    }
+
+    @Test
+    void nonIndexedIndirectCommandsProduceExpectedGpuReadback() throws Exception {
+        assertIndirectFeatures();
+        assertArrayEquals(expectedIndirectSplit(), runIndirectReadback(false));
+    }
+
+    @Test
+    void indexedIndirectCommandsProduceExpectedGpuReadback() throws Exception {
+        assertIndirectFeatures();
+        assertArrayEquals(expectedIndirectSplit(), runIndirectReadback(true));
+    }
+
+    private void assertIndirectFeatures() {
+        var features = device.getDeviceInfo().features();
+        assertTrue(features.multiDrawIndirect(), "frontend indirect admission requires multiDrawIndirect");
+        assertTrue(features.drawIndirect(), "frontend non-indexed admission requires drawIndirect");
+    }
+
+    /**
+     * Exercises the production RenderPass indirect entry points on a real Metal command buffer.
+     * The test intentionally asserts backend capabilities separately because constructing the
+     * full Minecraft frontend would require a client runtime; a false feature declaration must
+     * still fail before this backend readback can be accepted.
+     */
+    private byte[] runIndirectReadback(final boolean indexed) throws Exception {
+        String pipelineName = indexed ? "synthetic/indirect-indexed" : "synthetic/indirect-nonindexed";
+        RenderPipeline pipeline = RenderPipeline.builder()
+                .withLocation(pipelineName)
+                .withVertexShader("synthetic/indirect_vertex")
+                .withFragmentShader("synthetic/indirect_fragment")
+                .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                .withCull(false)
+                .withColorTargetState(0, new ColorTargetState(
+                        Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                .build();
+        MetalGpuTexture color = (MetalGpuTexture) device.createTexture(
+                indexed ? "indirect-indexed-color" : "indirect-nonindexed-color",
+                TEXTURE_USAGE,
+                GpuFormat.RGBA8_UNORM,
+                WIDTH,
+                HEIGHT,
+                1,
+                1
+        );
+        int commandSize = indexed ? VkDrawIndexedIndirectCommand.SIZEOF : VkDrawIndirectCommand.SIZEOF;
+        ByteBuffer commandBytes = ByteBuffer.allocateDirect(commandSize * 2).order(ByteOrder.nativeOrder());
+        if (indexed) {
+            putIndexedIndirectCommand(commandBytes, 1);
+            putIndexedIndirectCommand(commandBytes, 2);
+        } else {
+            putIndirectCommand(commandBytes, 1);
+            putIndirectCommand(commandBytes, 2);
+        }
+        commandBytes.flip();
+
+        int indexUsage = GpuBuffer.USAGE_INDEX | GpuBuffer.USAGE_MAP_WRITE;
+        try (MetalGpuBuffer commands = (MetalGpuBuffer) device.createBuffer(
+                     () -> pipelineName + " commands",
+                     GpuBuffer.USAGE_INDIRECT_PARAMETERS | GpuBuffer.USAGE_MAP_WRITE,
+                     commandBytes
+             );
+             MetalGpuBuffer indexBuffer = indexed
+                     ? (MetalGpuBuffer) device.createBuffer(
+                             () -> pipelineName + " indices",
+                             indexUsage,
+                             indices()
+                     )
+                     : null;
+             MetalGpuTextureView view = new MetalGpuTextureView(color, 0, 1)) {
+            RenderPassDescriptor descriptor = RenderPassDescriptor.builder(() -> pipelineName)
+                    .withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT))
+                    .withColorAttachment(view, Optional.of(new org.joml.Vector4f(0.0F)))
+                    .build();
+            try (MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor)) {
+                pass.setPipeline(pipeline);
+                if (indexed) {
+                    pass.setIndexBuffer(indexBuffer, IndexType.SHORT);
+                    pass.drawIndexedIndirect(commands.slice(), 2);
+                } else {
+                    pass.drawIndirect(commands.slice(), 2);
+                }
+                encoder.submitRenderPass();
+                encoder.submit();
+                device.waitForSubmittedGpuWork();
+            }
+            return readbackBytes(color);
+        } finally {
+            color.close();
+        }
+    }
+
+    private static void putIndirectCommand(final ByteBuffer commands, final int firstInstance) {
+        commands.putInt(6).putInt(1).putInt(0).putInt(firstInstance);
+    }
+
+    private static void putIndexedIndirectCommand(final ByteBuffer commands, final int firstInstance) {
+        commands.putInt(6).putInt(1).putInt(0).putInt(0).putInt(firstInstance);
+    }
+
+    private static ByteBuffer indices() {
+        return ByteBuffer.allocateDirect(6 * Short.BYTES)
+                .order(ByteOrder.nativeOrder())
+                .putShort((short) 0)
+                .putShort((short) 1)
+                .putShort((short) 2)
+                .putShort((short) 3)
+                .putShort((short) 4)
+                .putShort((short) 5)
+                .flip();
+    }
+
+    private byte[] readbackBytes(final MetalGpuTexture texture) {
+        int size = WIDTH * HEIGHT * texture.pixelSize();
+        try (MetalGpuBuffer buffer = (MetalGpuBuffer) device.createBuffer(
+                () -> "indirect readback",
+                GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST,
+                size
+        )) {
+            encoder.copyTextureToBuffer(texture, buffer, 0L, () -> { }, 0);
+            encoder.submit();
+            device.waitForSubmittedGpuWork();
+            return bytes(buffer, size);
+        }
     }
 
     @Test
@@ -452,6 +627,25 @@ final class MetalRenderContractGpuIntegrationTest {
             result[offset + 1] = (byte) green;
             result[offset + 2] = (byte) blue;
             result[offset + 3] = (byte) alpha;
+        }
+        return result;
+    }
+
+    private static byte[] expectedIndirectSplit() {
+        byte[] result = new byte[WIDTH * HEIGHT * 4];
+        for (int y = 0; y < HEIGHT; y++) {
+            for (int x = 0; x < WIDTH; x++) {
+                int offset = (y * WIDTH + x) * 4;
+                if (x < WIDTH / 2) {
+                    result[offset] = (byte) 255;
+                    result[offset + 1] = 0;
+                } else {
+                    result[offset] = 0;
+                    result[offset + 1] = (byte) 255;
+                }
+                result[offset + 2] = 0;
+                result[offset + 3] = (byte) 255;
+            }
         }
         return result;
     }
