@@ -32,8 +32,14 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
     private List<SectionRenderDispatcher.RenderSection.SectionTask> tasks;
 
     @Unique
+    private static final int METALLUM_MAX_CANCELLED_COHORT_RECOVERY_DEPTH = 1;
+
+    @Unique
     private BoundedTerrainTaskAdmission<SectionRenderDispatcher.RenderSection.SectionTask>
             metallum$terrainAdmission;
+
+    @Unique
+    private int metallum$cancelledCohortRecoveryDepth;
 
     @Unique
     private static final BoundedTerrainTaskAdmission.TaskOps<
@@ -144,6 +150,27 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
         if (!tasks.isEmpty()) {
             return;
         }
+        if (metallum$cancelledCohortRecoveryDepth >= METALLUM_MAX_CANCELLED_COHORT_RECOVERY_DEPTH) {
+            var fallback = admission.releaseDeferredToBaseline(
+                    BoundedTerrainTaskAdmission.FailOpenReason.CANCELLED_COHORT_RECOVERY_BOUND
+            );
+            tasks.addAll(fallback.failOpenTasks());
+            VanillaTerrainAdmissionTelemetry.publish(admission, tasks.size(), System.nanoTime());
+            if (tasks.isEmpty()) {
+                return;
+            }
+
+            // One final baseline poll is safe: releaseDeferredToBaseline() has permanently disabled
+            // this admission epoch, so the nested RETURN cannot recurse into recovery again.
+            metallum$cancelledCohortRecoveryDepth++;
+            try {
+                cir.setReturnValue(((SectionTaskDynamicQueue)(Object)this).poll(cameraPos));
+            } finally {
+                metallum$cancelledCohortRecoveryDepth--;
+            }
+            return;
+        }
+
         var ready = admission.drain(admission.queueCapacity(), System.nanoTime());
         if (ready.tasks().isEmpty()) {
             VanillaTerrainAdmissionTelemetry.publish(admission, 0, System.nanoTime());
@@ -154,9 +181,14 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
         VanillaTerrainAdmissionTelemetry.publish(admission, tasks.size(), System.nanoTime());
 
         // A task can become cancelled between our HEAD observation and vanilla's atomic-flag check.
-        // Re-enter the original synchronized poll only after replenishing a non-empty cohort; the
-        // nested call does not refill again and vanilla still owns distance/quota selection.
-        cir.setReturnValue(((SectionTaskDynamicQueue)(Object)this).poll(cameraPos));
+        // Retry one cohort only. A second all-cancelled cohort fails open instead of recursing
+        // through an attacker/user-sized deferred capacity and risking stack exhaustion.
+        metallum$cancelledCohortRecoveryDepth++;
+        try {
+            cir.setReturnValue(((SectionTaskDynamicQueue)(Object)this).poll(cameraPos));
+        } finally {
+            metallum$cancelledCohortRecoveryDepth--;
+        }
     }
 
     @Inject(method = "clear", at = @At("HEAD"))
