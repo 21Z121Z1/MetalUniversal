@@ -3,6 +3,7 @@ package com.metallum.e2e;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
 import net.minecraft.core.BlockPos;
@@ -48,8 +49,11 @@ final class VanillaGameplay {
         // Let received geometry finish and retain ordinary generation during flight.
         context.waitTicks(100);
         world.getConnection().waitForChunksRender(false, 1200);
-        report.addProperty("initialVisibleSections", context.computeOnClient(
-                client -> client.levelRenderer.visibleSections().size()));
+        int initialVisibleSections = context.computeOnClient(client -> client.levelRenderer.visibleSections().size());
+        report.addProperty("initialVisibleSections", initialVisibleSections);
+        long[] initialMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());
+        require(initialMetal4[0] == 1, "Gameplay profiling requires an active Metal 4 main renderer");
+        report.addProperty("metal4MainRendererActive", true);
         report.addProperty("status", "ready");
         write(output.resolve("gameplay-ready.json"), report);
         if (Boolean.getBoolean("metallum.ci.waitForProfiler")) {
@@ -121,6 +125,10 @@ final class VanillaGameplay {
                 context.waitTicks(30);
             }
             report.addProperty("status", "completed");
+            long[] finalMetal4 = context.computeOnClient(client -> MetalNativeBridge.metallum_metal4_main_renderer_stats());
+            require(finalMetal4[0] == 1 && finalMetal4[2] > initialMetal4[2],
+                    "Metal 4 did not submit work during gameplay");
+            report.addProperty("metal4Submissions", finalMetal4[2] - initialMetal4[2]);
             report.addProperty("completedAt", Instant.now().toString());
             write(output.resolve("gameplay.json"), report);
             context.takeScreenshot("vanilla-gameplay-completed");

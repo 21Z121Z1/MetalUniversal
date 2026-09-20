@@ -57,6 +57,20 @@ java {
     }
 }
 
+// The profiling run selects the input workload, not the separate conformance
+// suites whose readbacks and telemetry would perturb the measured route.
+tasks.named('processResources') {
+    inputs.property('gameplay', gameplay)
+    doLast {
+        if (gameplay) {
+            def manifest = new File(destinationDir, 'fabric.mod.json')
+            def json = new groovy.json.JsonSlurper().parse(manifest)
+            json.entrypoints.'fabric-client-gametest' = ['com.metallum.e2e.MetalUniversalClientGameTest']
+            manifest.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(json)) + '\n'
+        }
+    }
+}
+
 tasks.register("runProductionClientGameTest", net.fabricmc.loom.task.prod.ClientProductionRunTask) {
     dependsOn tasks.named("jar")
 

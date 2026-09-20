@@ -20,7 +20,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jar", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--metal4", action="store_true")
     parser.add_argument("--template", default="Game Performance")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
@@ -34,9 +33,8 @@ def main():
     command = [str(root / "gradlew"), "--no-daemon", "-p", str(root / ".github/ci/minecraft-e2e"),
                f"-PmetallumJar={jar}", f"-PmetallumSourceSha={identity['sourceSha']}",
                "-Pmetallum.noOptionalMods=true", "-Pgameplay=true", "-PwaitForProfiler=true",
+               "-Pp1Metal4Lane=candidate",
                f"-PevidenceDir={output}", "runProductionClientGameTest"]
-    if args.metal4:
-        command.append("-Pp1Metal4Lane=candidate")
     recording = None
     # Xcode 27 supplies a Darwin notification when all instruments are recording.
     # Do not guess readiness from a delay or let attachment startup consume the route.

@@ -244,6 +244,8 @@ python3 scripts/agent/record_vanilla_gameplay.py \
   --output build/agent-runs/gameplay-unique-run
 ```
 
+Performance recording uses the Metal 4 main renderer and proves native submissions
+at the workload boundaries. Metal 3 remains a correctness-tested compatibility path.
 The launcher attaches Instruments' `Game Performance` template to the exact client
 PID. A recording-start notification releases the input route, so attachment startup
 does not consume the workload. `gameplay.trace` contains CPU/Metal/system activity;
