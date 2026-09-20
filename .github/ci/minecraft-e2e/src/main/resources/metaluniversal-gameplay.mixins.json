@@ -1,6 +1,6 @@
 {
   "required": true,
-  "package": "com.metallum.e2e",
+  "package": "com.metallum.e2e.mixin",
   "compatibilityLevel": "JAVA_25",
   "client": ["GameplayFrameMixin"],
   "injectors": {"defaultRequire": 1}
