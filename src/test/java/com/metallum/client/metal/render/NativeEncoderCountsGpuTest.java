@@ -37,6 +37,7 @@ final class NativeEncoderCountsGpuTest {
     private MemorySegment queue;
     private MemorySegment texture;
     private MemorySegment readback;
+    private MemorySegment fence;
 
     @BeforeEach
     void createStandaloneMetalFixture() {
@@ -63,6 +64,9 @@ final class NativeEncoderCountsGpuTest {
                     device, MemorySegment.NULL
             ), "Metal 4 main renderer could not be enabled");
         }
+
+        fence = MetalNativeBridge.metallum_create_fence(device);
+        assertFalse(MetalNativeBridge.isNullHandle(fence));
 
         long usage = MTLTextureUsage.RenderTarget.value | MTLTextureUsage.ShaderRead.value;
         texture = MetalNativeBridge.metallum_create_texture_2d(
@@ -95,6 +99,8 @@ final class NativeEncoderCountsGpuTest {
             // as part of a failed test's measurement window.
             MetalNativeBridge.metallum_encoder_counts_reset(0);
         } finally {
+            release(fence);
+            fence = MemorySegment.NULL;
             if (!MetalNativeBridge.isNullHandle(readback)) {
                 MetalNativeBridge.metallum_release_object(readback);
                 readback = MemorySegment.NULL;
@@ -279,6 +285,7 @@ final class NativeEncoderCountsGpuTest {
                 0.0
         );
         assertFalse(MetalNativeBridge.isNullHandle(render), "real render encoder creation failed");
+        if (!METAL4) MetalNativeBridge.MTLRenderCommandEncoder_updateFence(render, fence, 3L);
         endAndRelease(render);
 
         if (!METAL4) {
@@ -291,6 +298,7 @@ final class NativeEncoderCountsGpuTest {
                 commandBuffer, "encoder-counts-readback"
         );
         assertFalse(MetalNativeBridge.isNullHandle(blit), "real blit encoder creation failed");
+        if (!METAL4) MetalNativeBridge.MTLBlitCommandEncoder_waitForFence(blit, fence);
         MetalNativeBridge.MTLBlitCommandEncoder_copyFromTextureToBuffer(
                 blit,
                 texture,

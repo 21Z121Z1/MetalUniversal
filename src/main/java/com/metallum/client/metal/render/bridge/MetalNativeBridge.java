@@ -821,6 +821,9 @@ public final class MetalNativeBridge {
             processMemorySample = downcallWithoutCritical(lookup, "metallum_process_memory_sample",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT));
             encoderCountsReset = downcallWithoutCritical(lookup, "metallum_encoder_counts_reset", FunctionDescriptor.of(INT, INT));
+            attachmentActionsReset = downcallWithoutCritical(lookup, "metallum_attachment_actions_reset", FunctionDescriptor.of(INT, INT));
+            attachmentActionsCopy = downcallWithoutCritical(lookup, "metallum_attachment_actions_copy",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT, ValueLayout.ADDRESS));
             encoderCountsBind = downcallWithoutCritical(lookup, "metallum_encoder_counts_bind",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG, LONG, LONG));
             encoderCountsCopy = downcallWithoutCritical(lookup, "metallum_encoder_counts_copy",
@@ -1237,6 +1240,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle setGpuEncoderTimingEnabled;
     private static final MethodHandle processMemorySample;
     private static final MethodHandle encoderCountsReset;
+    private static final MethodHandle attachmentActionsReset;
+    private static final MethodHandle attachmentActionsCopy;
     private static final MethodHandle encoderCountsBind;
     private static final MethodHandle encoderCountsCopy;
     private static final MethodHandle setGpuEncoderTimingContext;
@@ -3755,6 +3760,33 @@ public final class MetalNativeBridge {
             return sample;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_process_memory_sample", throwable);
+        }
+    }
+
+    public static void metallum_attachment_actions_reset(final int capacityRows) {
+        try {
+            if ((int) attachmentActionsReset.invokeExact(capacityRows) != 1) {
+                throw new IllegalArgumentException("Invalid native attachment ledger capacity: " + capacityRows);
+            }
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_attachment_actions_reset", throwable);
+        }
+    }
+
+    /** Raw descriptor/final-store facts; drain submitted work before taking the snapshot. */
+    public static com.metallum.client.metal.render.NativeAttachmentActions.Snapshot metallum_attachment_actions_snapshot() {
+        final int width = com.metallum.client.metal.render.NativeAttachmentActions.ROW_WORDS;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment metadata = arena.allocate(8L * Long.BYTES, Long.BYTES);
+            int count = (int) attachmentActionsCopy.invokeExact(MemorySegment.NULL, 0, metadata);
+            if (count < 0 || count > 65_536) throw new IllegalStateException("Invalid attachment row count: " + count);
+            MemorySegment rows = arena.allocate(Math.max(1L, (long) count * width) * Long.BYTES, Long.BYTES);
+            int copied = (int) attachmentActionsCopy.invokeExact(rows, count, metadata);
+            if (copied != count) throw new IllegalStateException("Attachment ledger changed during snapshot");
+            return com.metallum.client.metal.render.NativeAttachmentActions.decode(metadata.toArray(LONG),
+                    rows.asSlice(0, (long) count * width * Long.BYTES).toArray(LONG));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_attachment_actions_copy", throwable);
         }
     }
 

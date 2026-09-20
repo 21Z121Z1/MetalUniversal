@@ -19,6 +19,9 @@ python3 scripts/agent/verify_metal4_main_hotpath.py \
   --output build/agent-evidence/metal4-main-hotpath.json
 python3 scripts/agent/verify_p1_performance_route.py
 python3 scripts/agent/verify_native_encoder_coverage.py
+python3 scripts/agent/verify_native_attachment_coverage.py --self-test
+python3 scripts/agent/verify_native_attachment_coverage.py
+python3 scripts/agent/verify_native_attachment_facts.py --self-test
 python3 scripts/agent/check_metal4_main_e2e_pair.py --self-test
 python3 scripts/agent/check_metal4_main_profile_matrix.py --self-test
 python3 scripts/agent/check_metal4_main_trial.py --self-test
@@ -73,6 +76,7 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.validation.GpuMeasurementWindowTest \
   --tests com.metallum.client.validation.EncoderMeasurementWindowTest \
   --tests com.metallum.client.validation.ProcessMemoryMeasurementTest \
+  --tests com.metallum.client.metal.render.NativeAttachmentActionsTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
 

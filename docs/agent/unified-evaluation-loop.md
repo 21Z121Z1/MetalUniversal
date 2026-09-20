@@ -350,6 +350,11 @@ For performance report before/after, raw delta, direction-normalized improvement
 
 ### Process resident-memory sampling
 
+Optional raw native attachment facts are documented in
+[`native-attachment-actions.md`](native-attachment-actions.md). Their opt-in
+capture and independent integrity checker do not yet make attachment byte
+estimates available to the performance gate.
+
 `processMemory` samples the current client process with public Mach
 `task_info(TASK_VM_INFO)` at each measured frame's beginning and end, plus once
 following the final GPU drain. The expected trace has exactly `2 * frames + 1`

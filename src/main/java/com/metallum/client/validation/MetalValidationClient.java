@@ -88,6 +88,9 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final boolean PERFORMANCE_ONLY = Boolean.getBoolean(
             "metallum.validation.performanceOnly"
     );
+    private static final boolean ATTACHMENT_ACTIONS = Boolean.getBoolean(
+            "metallum.validation.attachmentActions"
+    );
     private static final boolean REQUIRE_METAL = Boolean.getBoolean(
             "metallum.validation.requireMetal"
     );
@@ -687,6 +690,10 @@ public final class MetalValidationClient implements ClientModInitializer {
         if (step == FrameMeasurementWindow.Step.START) {
             baselineFirstSubmitIndex = MetalGpuTimingRecorder.drainSubmittedWorkForMeasurement();
             MetalGpuTimingRecorder.beginMeasurementWindow(BASELINE_WINDOW_ID);
+            if (ATTACHMENT_ACTIONS) {
+                MetalNativeBridge.metallum_attachment_actions_reset(
+                        com.metallum.client.metal.render.NativeAttachmentActions.MAX_ROWS);
+            }
             IrisMetalPerformanceCounters.reset();
             IrisMetalArgumentBindingRuntime.resetStats();
             baselineMemory.begin(BASELINE_WINDOW_ID, frame);
@@ -703,7 +710,17 @@ public final class MetalValidationClient implements ClientModInitializer {
         baselineReported = true;
         long endSubmitIndex = MetalGpuTimingRecorder.drainSubmittedWorkForMeasurement();
         var processMemory = baselineMemory.finish(BASELINE_WINDOW_ID, baselineWindow.endFrame());
-        MetalGpuTimingRecorder.endMeasurementWindow();
+        com.metallum.client.metal.render.NativeAttachmentActions.Snapshot attachmentActions;
+        try {
+            attachmentActions = ATTACHMENT_ACTIONS
+                    ? MetalNativeBridge.metallum_attachment_actions_snapshot() : null;
+        } finally {
+            try {
+                if (ATTACHMENT_ACTIONS) MetalNativeBridge.metallum_attachment_actions_reset(0);
+            } finally {
+                MetalGpuTimingRecorder.endMeasurementWindow();
+            }
+        }
         List<Double> baselineFrameIntervalsMillis = baselineWindow.intervals();
         List<Double> baselineCpuFrameMillis = baselineWindow.cpuDurations();
         List<MetalGpuTimingRecorder.Sample> gpuSamples = MetalGpuTimingRecorder.snapshot(BASELINE_WINDOW_ID);
@@ -822,6 +839,9 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.add("nativeEncoderTimingSamples", new GsonBuilder().create().toJsonTree(gpuEncoderSamples));
             report.add("processMemory", new GsonBuilder().create().toJsonTree(processMemory));
             report.add("nativeEncoderLedger", new GsonBuilder().create().toJsonTree(encoderLedger));
+            if (attachmentActions != null) {
+                report.add("nativeAttachmentLedger", new GsonBuilder().create().toJsonTree(attachmentActions));
+            }
             addNativeEncoderCounts(report, encoderWindow, baselineFrameIntervalsMillis.size());
             addPerformanceCounters(report, IrisMetalPerformanceCounters.snapshot());
             report.add(
@@ -841,7 +861,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             }
             unavailable.addProperty(
                     "attachmentStoreLoadBytes",
-                    "unavailable — current native bridge does not expose per-attachment load/store byte accounting"
+                    "unavailable — raw attachment actions require independent coverage and byte-estimate validation"
             );
             unavailable.addProperty(
                     "residentRenderResourceBytes",

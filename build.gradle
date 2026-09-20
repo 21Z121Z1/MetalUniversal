@@ -108,6 +108,7 @@ tasks.test {
 	exclude "**/MetalIrisSodiumTerrainTest.class"
 	exclude "**/MetalRenderGraphBenchIntegrationTest.class"
 	exclude "**/NativeEncoderCountsGpuTest.class"
+	exclude "**/NativeAttachmentActionsGpuTest.class"
 	exclude "**/NativeProcessMemoryIntegrationTest.class"
 	exclude "**/MetalGpuTimingRecorderRetentionTest.class"
 	if (hostedCi) {
@@ -280,6 +281,7 @@ tasks.register("buildMacNative", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift"
 	)
@@ -302,6 +304,7 @@ tasks.register("buildMacNative", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift"
 }
@@ -393,6 +396,7 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/Metal4PipelinePathTest.swift"
@@ -420,6 +424,7 @@ tasks.register("compileMetal4PipelinePathTest", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/Metal4PipelinePathTest.swift"
@@ -537,6 +542,7 @@ tasks.register("compileNativePresentationTelemetryStateTest", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/NativePresentationTelemetryStateTest.swift"
@@ -557,6 +563,7 @@ tasks.register("compileNativePresentationTelemetryStateTest", Exec) {
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/MetallumInterface.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/NativePresentationTelemetryStateTest.swift"
@@ -578,6 +585,7 @@ tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
@@ -597,6 +605,7 @@ tasks.register("compileMetalFrameGenerationPresentationValidation", Exec) {
 		"-o", metalFrameGenerationPresentationValidationBinary.absolutePath,
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFrameGenerationPresentationValidation.swift"
@@ -725,6 +734,7 @@ tasks.register("compileMetalFxOffscreenValidation", Exec) {
 	inputs.files(
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFXOffscreenValidation.swift"
@@ -746,6 +756,7 @@ tasks.register("compileMetalFxOffscreenValidation", Exec) {
 		"-o", metalFxOffscreenValidationBinary.absolutePath,
 		"src/main/native/MetalFrameGenerationLifecycle.swift",
 		"src/main/native/EncoderCountLedger.swift",
+		"src/main/native/AttachmentActionLedger.swift",
 		"src/main/native/ProcessMemorySampler.swift",
 		"src/main/native/MetallumNative.swift",
 		"src/test/native/MetalFXOffscreenValidation.swift"
@@ -2673,7 +2684,8 @@ tasks.register("buildIOSNative", Exec) {
 			"-o", "src/main/resources/natives/ios/libmetallum.dylib",
 			"src/main/native/MetallumInterface.swift",
 			"src/main/native/EncoderCountLedger.swift",
-		"src/main/native/ProcessMemorySampler.swift",
+			"src/main/native/AttachmentActionLedger.swift",
+			"src/main/native/ProcessMemorySampler.swift",
 			"src/main/native/MetallumNative.swift"
 	}
 }
@@ -3125,6 +3137,27 @@ tasks.register("gpuTimingRecorderRetentionTest", Test) { task ->
 		task.filter { includeTestsMatching "com.metallum.client.metal.render.NativeEncoderCountsGpuTest" }
 		task.jvmArgs "--enable-native-access=ALL-UNNAMED"
 		task.systemProperty "metallum.test.encoderCountsMetal4", metal4.toString()
+		task.systemProperty "metallum.opt.metal4", metal4.toString()
+		task.systemProperty "metallum.opt.metal4Compiler", metal4.toString()
+		task.environment "MTL_DEBUG_LAYER", metalApiValidation
+		task.environment "MTL_SHADER_VALIDATION", metalShaderValidation
+		task.testLogging { showStandardStreams = true }
+	}
+}
+
+// Attachment facts use the production render factories and dynamic store setters.
+[false, true].each { metal4 ->
+	tasks.register("nativeAttachmentActionsMetal${metal4 ? 4 : 3}Test", Test) { task ->
+		task.group = "verification"
+		task.description = "Validates raw attachment actions on the Metal ${metal4 ? 4 : 3} main queue."
+		task.onlyIf { hardwareMetalValidationAvailable() }
+		task.dependsOn tasks.named("buildMacNative"), tasks.named("testClasses")
+		task.testClassesDirs = sourceSets.test.output.classesDirs
+		task.classpath = sourceSets.test.runtimeClasspath
+		task.useJUnitPlatform()
+		task.filter { includeTestsMatching "com.metallum.client.metal.render.NativeAttachmentActionsGpuTest" }
+		task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+		task.systemProperty "metallum.test.attachmentActionsMetal4", metal4.toString()
 		task.systemProperty "metallum.opt.metal4", metal4.toString()
 		task.systemProperty "metallum.opt.metal4Compiler", metal4.toString()
 		task.environment "MTL_DEBUG_LAYER", metalApiValidation

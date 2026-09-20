@@ -12984,10 +12984,12 @@ public func metallum_MTLRenderCommandEncoder_setDepthStoreAction(
     _ store: Int32
 ) {
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
+        AttachmentActionLedger.shared.setDepthStoreAction(bridge.encoder, Int64(store != 0 ? MTLStoreAction.store.rawValue : MTLStoreAction.dontCare.rawValue))
         bridge.encoder.setDepthStoreAction(store != 0 ? .store : .dontCare)
         return
     }
     let encoder = metal3RenderEncoder(pointer)
+    AttachmentActionLedger.shared.setDepthStoreAction(encoder, Int64(store != 0 ? MTLStoreAction.store.rawValue : MTLStoreAction.dontCare.rawValue))
     encoder.setDepthStoreAction(store != 0 ? .store : .dontCare)
 }
 
@@ -13008,10 +13010,12 @@ public func metallum_MTLRenderCommandEncoder_setColorStoreAction(
     _ store: Int32
 ) {
     if #available(macOS 26.0, iOS 26.0, *), let bridge = metal4RenderBridge(pointer) {
+        AttachmentActionLedger.shared.setColorStoreAction(bridge.encoder, index: Int64(index), store: Int64(store != 0 ? MTLStoreAction.store.rawValue : MTLStoreAction.dontCare.rawValue))
         bridge.encoder.setColorStoreAction(store != 0 ? .store : .dontCare, index: Int(index))
         return
     }
     let encoder = metal3RenderEncoder(pointer)
+    AttachmentActionLedger.shared.setColorStoreAction(encoder, index: Int64(index), store: Int64(store != 0 ? MTLStoreAction.store.rawValue : MTLStoreAction.dontCare.rawValue))
     encoder.setColorStoreAction(store != 0 ? .store : .dontCare, index: Int(index))
 }
 

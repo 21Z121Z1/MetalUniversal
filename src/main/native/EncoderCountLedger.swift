@@ -1,6 +1,13 @@
 import Foundation
 import Metal
 
+struct EncoderCountIdentity {
+    let windowId: Int64
+    let frameId: Int64
+    let submitIndex: Int64
+    let backend: Int64
+}
+
 // Bounded, identity-based encoder accounting used by the validation harness.
 // This intentionally does not use timestamps or completion callbacks: a row is
 // made complete by the command-buffer submit path after all encoders have been
@@ -127,6 +134,23 @@ final class EncoderCountLedger {
         let result = capacity != 0
         lock.unlock()
         return result
+    }
+
+    /// Returns the binding captured for a command buffer without exposing the
+    /// ledger's private row or binding types. Attachment diagnostics use this
+    /// identity at factory time; they never read the mutable global frame
+    /// context or infer identity from a completion callback.
+    func bindingIdentity(for object: AnyObject) -> EncoderCountIdentity? {
+        guard enabledFastPath else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let binding = bindings[ObjectIdentifier(object)], !binding.sealed else { return nil }
+        return EncoderCountIdentity(
+            windowId: binding.rowKey.windowId,
+            frameId: binding.rowKey.frameId,
+            submitIndex: binding.rowKey.submitIndex,
+            backend: binding.rowKey.backend
+        )
     }
 
     func bind(object: AnyObject, windowId: Int64, frameId: Int64, submitIndex: Int64, backend: Int64) -> Bool {
@@ -344,6 +368,7 @@ func encoderCountRecordEnd(_ encoder: AnyObject) {
 
 @inline(__always)
 func encoderCountUnsupported(_ commandBuffer: AnyObject) {
+    AttachmentActionLedger.shared.unsupported(commandBuffer)
     EncoderCountLedger.shared.unsupported(commandBuffer: commandBuffer)
 }
 
@@ -352,14 +377,23 @@ func encoderCountSeal(_ commandBuffer: AnyObject) {
     EncoderCountLedger.shared.seal(commandBuffer: commandBuffer)
 }
 
+@inline(__always)
+func encoderCountBindingIdentity(for commandBuffer: AnyObject) -> EncoderCountIdentity? {
+    EncoderCountLedger.shared.bindingIdentity(for: commandBuffer)
+}
+
 // Keep native encoder construction behind these small wrappers.  They are
 // deliberately overloads rather than a closure-based generic so the disabled
 // path does not allocate a closure or an accounting token.
 @inline(__always)
 func encoderCountMakeRender(_ commandBuffer: MTLCommandBuffer, descriptor: MTLRenderPassDescriptor) -> MTLRenderCommandEncoder? {
+    let attachmentToken = AttachmentActionLedger.shared.enabledFastPathValue()
+            ? AttachmentActionLedger.shared.factoryAttempt(commandBuffer, descriptor)
+            : AttachmentActionLedger.FactoryToken(rowIndex: -1, tracked: false)
     encoderCountFactoryAttempt(commandBuffer as AnyObject, backend: 3, kind: 0)
     let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor)
     encoderCountFactoryResult(commandBuffer as AnyObject, encoder, backend: 3, kind: 0)
+    AttachmentActionLedger.shared.result(attachmentToken, encoder: encoder as AnyObject?)
     return encoder
 }
 
@@ -395,9 +429,13 @@ func encoderCountMakeComputeUntracked(_ commandBuffer: MTL4CommandBuffer) -> MTL
 @available(macOS 26.0, iOS 26.0, *)
 @inline(__always)
 func encoderCountMakeRender(_ commandBuffer: MTL4CommandBuffer, descriptor: MTL4RenderPassDescriptor) -> MTL4RenderCommandEncoder? {
+    let attachmentToken = AttachmentActionLedger.shared.enabledFastPathValue()
+            ? AttachmentActionLedger.shared.factoryAttempt(commandBuffer, descriptor)
+            : AttachmentActionLedger.FactoryToken(rowIndex: -1, tracked: false)
     encoderCountFactoryAttempt(commandBuffer as AnyObject, backend: 4, kind: 0)
     let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor)
     encoderCountFactoryResult(commandBuffer as AnyObject, encoder, backend: 4, kind: 0)
+    AttachmentActionLedger.shared.result(attachmentToken, encoder: encoder as AnyObject?)
     return encoder
 }
 
@@ -430,6 +468,10 @@ func encoderCountMakeBlitAsCompute(_ commandBuffer: MTL4CommandBuffer) -> MTL4Co
 
 @inline(__always)
 func encoderCountEnd(_ encoder: MTLCommandEncoder) {
+    if AttachmentActionLedger.shared.enabledFastPathValue(),
+       let renderEncoder = encoder as? MTLRenderCommandEncoder {
+        AttachmentActionLedger.shared.end(renderEncoder)
+    }
     encoderCountRecordEnd(encoder)
     encoder.endEncoding()
 }
@@ -449,6 +491,7 @@ func encoderCountEndUntracked(_ encoder: MTL4RenderCommandEncoder) {
 @available(macOS 26.0, iOS 26.0, *)
 @inline(__always)
 func encoderCountEnd(_ encoder: MTL4RenderCommandEncoder) {
+    AttachmentActionLedger.shared.end(encoder)
     encoderCountRecordEnd(encoder)
     encoder.endEncoding()
 }
