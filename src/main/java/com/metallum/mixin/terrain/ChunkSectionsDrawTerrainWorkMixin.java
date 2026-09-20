@@ -26,6 +26,7 @@ abstract class ChunkSectionsDrawTerrainWorkMixin {
         ChunkSectionLayer layer = this.metallum$terrainLayer;
         this.metallum$terrainLayer = null;
         if (layer != null) {
+            com.metallum.client.metal.render.FrameEvidenceRuntime.producer("vanilla-terrain-layer-return");
             // RETURN is reached only after every vanilla indirect/separate draw call for this layer
             // has returned normally. This is the submission-authority boundary, not preparation.
             VanillaTerrainWorkTelemetry.layerRendered(this, layer);

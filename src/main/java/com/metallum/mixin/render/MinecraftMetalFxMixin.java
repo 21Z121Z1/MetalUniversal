@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalFxManager;
+import com.metallum.client.metal.render.FrameEvidenceRuntime;
 import com.metallum.client.validation.MetalValidationClient;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
@@ -14,8 +15,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(Minecraft.class)
 public abstract class MinecraftMetalFxMixin {
     @Inject(method = "renderFrame", at = @At("HEAD"))
-    private void metallum$beginFrameBeforeExtraction(final boolean renderLevel, final CallbackInfo ci) {
+    private void metallum$beginFrameBeforeExtraction(final boolean advanceGameTime, final CallbackInfo ci) {
         Minecraft minecraft = (Minecraft) (Object) this;
+        FrameEvidenceRuntime.beginFrame(advanceGameTime);
         MetalFxManager.beginFrame();
         MetalValidationClient.beforeFrame(minecraft.gameRenderer);
     }
@@ -24,6 +26,7 @@ public abstract class MinecraftMetalFxMixin {
     private void metallum$endValidationFrame(final boolean renderLevel, final CallbackInfo ci) {
         Minecraft minecraft = (Minecraft) (Object) this;
         MetalValidationClient.afterFrame(minecraft.gameRenderer);
+        FrameEvidenceRuntime.endFrame();
     }
 
     @Redirect(

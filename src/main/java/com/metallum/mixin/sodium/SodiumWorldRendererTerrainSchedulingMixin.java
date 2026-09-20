@@ -26,6 +26,7 @@ public abstract class SodiumWorldRendererTerrainSchedulingMixin {
             final Matrix4f cullingMatrix,
             final CallbackInfo ci
     ) {
+        com.metallum.client.metal.render.FrameEvidenceRuntime.producer("sodium-setup-terrain");
         TerrainSchedulingController controller = TerrainSchedulingController.runtime();
         if (!controller.observesFrames()) {
             return;

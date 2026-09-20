@@ -90,6 +90,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MetalRenderPass currentRenderPass;
     @Nullable
     private MTLCommandBuffer commandBuffer;
+    private FrameEvidenceRecorder.Submission frameEvidenceSubmission;
     @Nullable
     private MTLCommandEncoder currentEncoder;
     private boolean frameGenerationEncodeInCurrentCommandBuffer;
@@ -177,9 +178,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         if (commandBuffer != null) {
             return commandBuffer;
         }
-        return commandBuffer = device.commandQueue.makeCommandBuffer(
+        commandBuffer = device.commandQueue.makeCommandBuffer(
                 device.useLabels() ? "Metallum frame " + currentSubmitIndex : null
         );
+        frameEvidenceSubmission = FrameEvidenceRuntime.commandBuffer(currentSubmitIndex);
+        return commandBuffer;
     }
 
     MTLBlitCommandEncoder blitCommandEncoder() {
@@ -488,6 +491,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         boolean frameGenerationSubmit = frameGenerationEncodeInCurrentCommandBuffer;
         long submittedFrameId = frameGenerationFrameId;
         commandBuffer.commitWithSignal(completedSemaphore);
+        FrameEvidenceRuntime.submitted(frameEvidenceSubmission);
         for (SubmitCallback callback : callbacks) {
             callback.committed.run();
         }
@@ -501,9 +505,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 completedSemaphore,
                 callbacks,
                 frameGenerationSubmit,
-                submittedFrameId
+                submittedFrameId,
+                frameEvidenceSubmission
         );
         commandBuffer = null;
+        frameEvidenceSubmission = null;
         frameGenerationEncodeInCurrentCommandBuffer = false;
         frameGenerationFrameId = 0L;
         currentSubmitIndex++;
@@ -1998,6 +2004,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         private final List<SubmitCallback> callbacks;
         private final boolean frameGenerationSubmit;
         private final long frameGenerationFrameId;
+        private final FrameEvidenceRecorder.Submission frameEvidenceSubmission;
         private boolean completionHandled;
 
         private InFlight(
@@ -2006,7 +2013,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 final MemorySegment completedSemaphore,
                 final List<SubmitCallback> callbacks,
                 final boolean frameGenerationSubmit,
-                final long frameGenerationFrameId
+                final long frameGenerationFrameId,
+                final FrameEvidenceRecorder.Submission frameEvidenceSubmission
         ) {
             this.index = index;
             this.buffer = buffer;
@@ -2014,6 +2022,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             this.callbacks = callbacks;
             this.frameGenerationSubmit = frameGenerationSubmit;
             this.frameGenerationFrameId = frameGenerationFrameId;
+            this.frameEvidenceSubmission = frameEvidenceSubmission;
         }
 
         private void complete() {
@@ -2021,8 +2030,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 return;
             }
             completionHandled = true;
-            MetalGpuTimingRecorder.record(index, buffer.gpuStartTime(), buffer.gpuEndTime());
+            double gpuStart = buffer.gpuStartTime();
+            double gpuEnd = buffer.gpuEndTime();
+            MetalGpuTimingRecorder.record(index, gpuStart, gpuEnd);
             boolean success = buffer.completedSuccessfully();
+            FrameEvidenceRuntime.completed(frameEvidenceSubmission, success, gpuStart, gpuEnd);
             if (frameGenerationSubmit) {
                 MetalFxManager.recordFrameGenerationCompleted(frameGenerationFrameId, success);
             }

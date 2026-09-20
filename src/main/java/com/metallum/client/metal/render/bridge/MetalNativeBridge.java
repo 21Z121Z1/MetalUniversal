@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render.bridge;
 
 import com.metallum.client.metal.render.mtl.*;
+import com.metallum.client.metal.render.FrameEvidenceRuntime;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
@@ -1053,7 +1054,9 @@ public final class MetalNativeBridge {
             }
             Files.copy(stream, tempLib, StandardCopyOption.REPLACE_EXISTING);
         }
-        return SymbolLookup.libraryLookup(tempLib, Arena.global());
+        SymbolLookup loaded = SymbolLookup.libraryLookup(tempLib, Arena.global());
+        FrameEvidenceRuntime.nativeLoaded(tempLib);
+        return loaded;
     }
 
 
@@ -1274,17 +1277,19 @@ public final class MetalNativeBridge {
 
 
     private static MethodHandle downcall(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
-        return LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor, Linker.Option.critical(false));
+        return FrameEvidenceRuntime.instrument(symbol,
+                LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor, Linker.Option.critical(false)));
     }
 
     private static MethodHandle optionalDowncall(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
         return lookup.find(symbol)
-                .map(address -> LINKER.downcallHandle(address, descriptor, Linker.Option.critical(false)))
+                .map(address -> FrameEvidenceRuntime.instrument(symbol,
+                        LINKER.downcallHandle(address, descriptor, Linker.Option.critical(false))))
                 .orElse(null);
     }
 
     private static MethodHandle downcallWithoutCritical(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
-        return LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor);
+        return FrameEvidenceRuntime.instrument(symbol, LINKER.downcallHandle(lookup.findOrThrow(symbol), descriptor));
     }
 
     private static MethodHandle optionalDowncallWithoutCritical(
@@ -1293,7 +1298,7 @@ public final class MetalNativeBridge {
             final FunctionDescriptor descriptor
     ) {
         return lookup.find(symbol)
-                .map(address -> LINKER.downcallHandle(address, descriptor))
+                .map(address -> FrameEvidenceRuntime.instrument(symbol, LINKER.downcallHandle(address, descriptor)))
                 .orElse(null);
     }
 

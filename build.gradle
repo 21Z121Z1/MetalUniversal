@@ -219,8 +219,30 @@ tasks.withType(JavaExec).configureEach {
 	}
 }
 
+// Embedded provenance comes from this checkout, never a caller-supplied validation SHA.
+def frameEvidenceGit = { List<String> arguments ->
+	try {
+		def process = new ProcessBuilder((["git"] + arguments) as String[])
+				.directory(project.projectDir).redirectErrorStream(true).start()
+		def value = process.inputStream.getText("UTF-8").trim()
+		return process.waitFor() == 0 ? value : null
+	} catch (Exception ignored) {
+		return null
+	}
+}
+def frameEvidenceBuildIdentity = groovy.json.JsonOutput.toJson([
+		sourceSha: frameEvidenceGit(["rev-parse", "HEAD"]),
+		treeSha: frameEvidenceGit(["rev-parse", "HEAD^{tree}"]),
+		dirty: frameEvidenceGit(["status", "--porcelain", "--untracked-files=normal"]) != "",
+		minecraftVersion: project.minecraft_version
+])
+
 processResources {
 	inputs.property "version", project.version
+	inputs.property "frameEvidenceBuildIdentity", frameEvidenceBuildIdentity
+	doLast {
+		new File(destinationDir, "metallum-build-identity.json").text = frameEvidenceBuildIdentity + "\n"
+	}
 
 	filesMatching("fabric.mod.json") {
 		expand "version": inputs.properties.version

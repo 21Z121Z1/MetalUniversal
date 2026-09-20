@@ -691,6 +691,7 @@ final class MetalDevice implements GpuDeviceBackend {
         this.waitForSubmittedGpuWork();
         this.genericVertexAttributeBuffer.close();
         this.commandEncoder.close();
+        FrameEvidenceRuntime.writeAfterDrain();
         if (this.prewarmExecutor != null) {
             // Stop background compiles after lookup producers. A straggler past
             // the 5s bail-out still serializes with cache teardown via the lock.

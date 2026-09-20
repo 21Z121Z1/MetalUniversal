@@ -2,6 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+export PYTHONPYCACHEPREFIX="$ROOT/build/python-cache"
 
 python3 -m json.tool docs/agent/unified-evaluation-acceptance.json >/dev/null
 python3 -m json.tool docs/agent/presentation-pacing-evidence.schema.json >/dev/null
@@ -21,6 +22,7 @@ python3 scripts/agent/analyze_unified_eval.py --self-test
 python3 scripts/agent/normalize_unified_trial.py --self-test
 python3 scripts/agent/check_unified_eval_admission.py --self-test
 python3 scripts/agent/verify_terrain_work_events.py --self-test
+python3 scripts/agent/verify_frame_evidence.py --self-test
 python3 -m py_compile \
   scripts/agent/verify_benchmark_profiles.py \
   scripts/agent/verify_metal4_main_hotpath.py \
@@ -31,7 +33,8 @@ python3 -m py_compile \
   scripts/agent/analyze_unified_eval.py \
   scripts/agent/normalize_unified_trial.py \
   scripts/agent/check_unified_eval_admission.py \
-  scripts/agent/verify_terrain_work_events.py
+  scripts/agent/verify_terrain_work_events.py \
+  scripts/agent/verify_frame_evidence.py
 bash -n scripts/agent/doctor.sh
 bash -n scripts/agent/run_unified_eval_cycle.sh
 bash -n scripts/agent/run_metal4_main_p1_physical_correctness.sh
@@ -43,6 +46,7 @@ bash -n scripts/agent/verify.sh
   -x buildMacNative \
   -x buildIOSNative \
   -x buildIOSSpvc \
+  --tests com.metallum.client.metal.render.FrameEvidenceRecorderTest \
   --tests com.metallum.client.terrain.TerrainSchedulingControllerTest \
   --tests com.metallum.client.terrain.BoundedTerrainTaskAdmissionTest \
   --tests com.metallum.client.terrain.TerrainPublicationGenerationGuardTest \

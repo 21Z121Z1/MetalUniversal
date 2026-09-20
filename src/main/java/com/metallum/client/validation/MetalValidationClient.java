@@ -2411,6 +2411,7 @@ public final class MetalValidationClient implements ClientModInitializer {
             validationFailureScenarios.add("validation-run");
         }
         String failureReasonsJson = new GsonBuilder().create().toJson(validationFailureScenarios);
+        com.metallum.client.metal.render.FrameEvidenceRuntime.validationFinished(status);
         String runId = System.getProperty("metallum.renderContract.runId", "minecraft-current");
         String sourceCommit = System.getProperty("metallum.validation.sourceCommit", "unknown");
         if (Boolean.getBoolean("metallum.terrain.vanillaWorkEvents")) {
