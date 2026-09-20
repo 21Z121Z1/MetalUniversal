@@ -26,6 +26,7 @@ public final class TerrainWorkEventRecorder {
         GPU_DEPENDENCY_READY,
         PUBLISHED,
         FIRST_VALID_DRAW,
+        DRAW_NOT_REQUIRED,
         GPU_COMPLETED,
         CANCELLED,
         RETIRED
@@ -55,7 +56,8 @@ public final class TerrainWorkEventRecorder {
             String reason,
             String domain,
             long frameIndex,
-            long meshGeneration
+            long meshGeneration,
+            long workId
     ) {
         public boolean hasFrameIndex() {
             return frameIndex >= 0L;
@@ -99,6 +101,8 @@ public final class TerrainWorkEventRecorder {
     private final String[] domain;
     private final long[] frameIndex;
     private final long[] meshGeneration;
+    private final long[] workId;
+    private final AtomicLong externallyDropped = new AtomicLong();
     private final AtomicLong cursor = new AtomicLong();
     private final long observationStartNanos;
 
@@ -128,6 +132,7 @@ public final class TerrainWorkEventRecorder {
         this.frameIndex = new long[capacity];
         Arrays.fill(this.frameIndex, NO_FRAME);
         this.meshGeneration = new long[capacity];
+        this.workId = new long[capacity];
         Arrays.fill(this.meshGeneration, NO_MESH_GENERATION);
         this.observationStartNanos = System.nanoTime();
     }
@@ -150,6 +155,26 @@ public final class TerrainWorkEventRecorder {
             final long eventFrameIndex,
             final long eventMeshGeneration
     ) {
+        return record(key, eventStage, eventNanos, eventBytes, eventReason, eventDomain,
+                eventFrameIndex, eventMeshGeneration, 0L);
+    }
+
+    public void markDropped() {
+        externallyDropped.updateAndGet(value -> saturatedAdd(value, 1L));
+    }
+
+    public long record(
+            final WorkKey key,
+            final Stage eventStage,
+            final long eventNanos,
+            final long eventBytes,
+            final String eventReason,
+            final String eventDomain,
+            final long eventFrameIndex,
+            final long eventMeshGeneration,
+            final long eventWorkId
+    ) {
+        requireUnsigned("workId", eventWorkId);
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(eventStage, "eventStage");
         Objects.requireNonNull(eventReason, "eventReason");
@@ -172,7 +197,8 @@ public final class TerrainWorkEventRecorder {
         if (eventMeshGeneration < NO_MESH_GENERATION) {
             throw new IllegalArgumentException("eventMeshGeneration must be >= -1");
         }
-        if ((eventStage == Stage.PUBLISHED || eventStage == Stage.FIRST_VALID_DRAW)
+        if ((eventStage == Stage.PUBLISHED || eventStage == Stage.FIRST_VALID_DRAW
+                || eventStage == Stage.DRAW_NOT_REQUIRED)
                 && eventMeshGeneration == NO_MESH_GENERATION) {
             throw new IllegalArgumentException(eventStage + " requires meshGeneration");
         }
@@ -183,6 +209,11 @@ public final class TerrainWorkEventRecorder {
         final long eventSequence = cursor.getAndIncrement();
         final int slot = (int) Math.floorMod(eventSequence, capacity);
         synchronized (slotGuards[slot]) {
+            // A slow writer from an earlier wrap must not overwrite an already published newer
+            // sequence. The skipped old claim is counted as overwritten by snapshot().
+            if (this.sequence[slot] > eventSequence) {
+                return eventSequence;
+            }
             // Publish the sequence last. Snapshot readers holding the same monitor can therefore
             // never pair a sequence from one event with fields from another wrap of this slot.
             this.worldEpoch[slot] = key.worldEpoch();
@@ -197,6 +228,7 @@ public final class TerrainWorkEventRecorder {
             this.domain[slot] = eventDomain;
             this.frameIndex[slot] = eventFrameIndex;
             this.meshGeneration[slot] = eventMeshGeneration;
+            this.workId[slot] = eventWorkId;
             this.sequence[slot] = eventSequence;
         }
         return eventSequence;
@@ -234,12 +266,13 @@ public final class TerrainWorkEventRecorder {
                         reason[slot],
                         domain[slot],
                         frameIndex[slot],
-                        meshGeneration[slot]
+                        meshGeneration[slot],
+                        workId[slot]
                 ));
             }
         }
 
-        final long dropped = saturatedAdd(overwritten, unstableOrMissing);
+        final long dropped = saturatedAdd(saturatedAdd(overwritten, unstableOrMissing), externallyDropped.get());
         return new Snapshot(
                 observationStartNanos,
                 endNanos,
