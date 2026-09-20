@@ -106,11 +106,13 @@ public final class MetalValidationClient implements ClientModInitializer {
     private static final long BASELINE_SAMPLE_MILLIS = durationMillisProperty(
             "metallum.validation.sampleSeconds"
     );
-    private static final List<Double> baselineFrameIntervalsMillis = new ArrayList<>();
-    private static final List<Double> baselineCpuFrameMillis = new ArrayList<>();
-    private static long baselinePreviousFrameNanos;
-    private static long baselineTimelineStartNanos;
-    private static long baselineCpuFrameStartNanos;
+    private static final FrameMeasurementWindow baselineWindow = new FrameMeasurementWindow(
+            Math.multiplyExact(BASELINE_WARMUP_MILLIS, 1_000_000L),
+            Math.multiplyExact(BASELINE_SAMPLE_MILLIS, 1_000_000L),
+            BASELINE_SETTLE_FRAMES, BASELINE_MEASURED_FRAMES);
+    private static final long BASELINE_WINDOW_ID = 1L;
+    private static long baselineFirstSubmitIndex;
+    private static boolean baselineReported;
     private static final int CONTROLLED_ENTITY_ID = -2_147_000_001;
     private static final UUID CONTROLLED_ENTITY_UUID =
             UUID.fromString("7a294d59-ecbe-4b47-b864-66c57a3dbf01");
@@ -500,16 +502,10 @@ public final class MetalValidationClient implements ClientModInitializer {
                 IrisMetalComputeGroupingRuntime.reset();
                 IrisMetalDepthAllocationRuntime.reset();
                 IrisMetalArgumentBindingRuntime.resetStats();
-                baselineFrameIntervalsMillis.clear();
-                baselineCpuFrameMillis.clear();
-                baselinePreviousFrameNanos = 0L;
-                baselineTimelineStartNanos = 0L;
-                baselineCpuFrameStartNanos = 0L;
             }
         }
 
         if (PERFORMANCE_ONLY) {
-            baselineCpuFrameStartNanos = System.nanoTime();
             runNativeFullscreenBaseline(minecraft);
             return;
         }
@@ -654,12 +650,8 @@ public final class MetalValidationClient implements ClientModInitializer {
     public static void afterFrame(final GameRenderer renderer) {
         // GPU attachment capture is intentionally connected separately in the
         // MetalFX manager after temporal encoding and before present.
-        if (timelineAnchored && PERFORMANCE_ONLY && baselineCpuFrameStartNanos != 0L) {
-            long elapsed = System.nanoTime() - baselineCpuFrameStartNanos;
-            if (elapsed > 0L) {
-                baselineCpuFrameMillis.add(elapsed / 1_000_000.0);
-            }
-            baselineCpuFrameStartNanos = 0L;
+        if (timelineAnchored && PERFORMANCE_ONLY) {
+            baselineWindow.afterFrame(frame - 1L, System.nanoTime());
         }
         if (timelineAnchored && !PERFORMANCE_ONLY && frame > 0) {
             RenderContractRuntime.endFrame(frame - 1L);
@@ -681,51 +673,37 @@ public final class MetalValidationClient implements ClientModInitializer {
     }
 
     private static void runNativeFullscreenBaseline(final Minecraft minecraft) {
+        if (baselineReported) return;
         holdInitialPose(minecraft);
         if (!NATIVE_DIRECT_FRAME_GENERATION && frame == 16) {
             MetalFxManager.requestNativeOffReadback();
         }
         long now = System.nanoTime();
-        boolean durationProtocol = BASELINE_WARMUP_MILLIS > 0L || BASELINE_SAMPLE_MILLIS > 0L;
-        if (durationProtocol) {
-            if (baselineTimelineStartNanos == 0L) {
-                baselineTimelineStartNanos = now;
-            }
-            long elapsedMillis = (now - baselineTimelineStartNanos) / 1_000_000L;
-            if (elapsedMillis < BASELINE_WARMUP_MILLIS) {
-                baselinePreviousFrameNanos = now;
-                frame++;
-                return;
-            }
-            if (baselinePreviousFrameNanos != 0L) {
-                baselineFrameIntervalsMillis.add((now - baselinePreviousFrameNanos) / 1_000_000.0);
-            }
-            baselinePreviousFrameNanos = now;
-        } else {
-            if (baselinePreviousFrameNanos != 0L && frame > BASELINE_SETTLE_FRAMES) {
-                baselineFrameIntervalsMillis.add((now - baselinePreviousFrameNanos) / 1_000_000.0);
-            }
-            baselinePreviousFrameNanos = now;
+        FrameMeasurementWindow.Step step = baselineWindow.beforeFrame(frame, now);
+        if (step == FrameMeasurementWindow.Step.START) {
+            baselineFirstSubmitIndex = MetalGpuTimingRecorder.drainSubmittedWorkForMeasurement();
+            MetalGpuTimingRecorder.beginMeasurementWindow(BASELINE_WINDOW_ID);
+            IrisMetalPerformanceCounters.reset();
+            IrisMetalArgumentBindingRuntime.resetStats();
+            baselineWindow.reanchorStart(System.nanoTime());
         }
-        frame++;
-        if (durationProtocol) {
-            long elapsedMillis = (now - baselineTimelineStartNanos) / 1_000_000L;
-            if (elapsedMillis < BASELINE_WARMUP_MILLIS + BASELINE_SAMPLE_MILLIS) {
-                return;
+        if (step != FrameMeasurementWindow.Step.COMPLETE) {
+            if (step != FrameMeasurementWindow.Step.WARMUP) {
+                MetalGpuTimingRecorder.beginMeasurementFrame(BASELINE_WINDOW_ID, frame);
             }
-        } else if (frame < BASELINE_SETTLE_FRAMES + BASELINE_MEASURED_FRAMES + 1) {
+            frame++;
             return;
         }
-
-        List<Double> gpuMilliseconds = MetalGpuTimingRecorder.snapshot().stream()
-                .map(MetalGpuTimingRecorder.Sample::milliseconds)
-                .filter(value -> value > 0.0 && Double.isFinite(value))
-                .toList();
-        int keep = Math.min(baselineFrameIntervalsMillis.size(), gpuMilliseconds.size());
-        List<Double> steadyGpuMilliseconds = gpuMilliseconds.subList(
-                gpuMilliseconds.size() - keep,
-                gpuMilliseconds.size()
-        );
+        baselineReported = true;
+        long endSubmitIndex = MetalGpuTimingRecorder.drainSubmittedWorkForMeasurement();
+        MetalGpuTimingRecorder.endMeasurementWindow();
+        List<Double> baselineFrameIntervalsMillis = baselineWindow.intervals();
+        List<Double> baselineCpuFrameMillis = baselineWindow.cpuDurations();
+        List<MetalGpuTimingRecorder.Sample> gpuSamples = MetalGpuTimingRecorder.snapshot(BASELINE_WINDOW_ID);
+        var gpuWindow = GpuMeasurementWindow.summarize(gpuSamples, BASELINE_WINDOW_ID,
+                baselineWindow.firstFrame(), baselineWindow.endFrame(),
+                baselineFirstSubmitIndex, endSubmitIndex);
+        List<Double> steadyGpuMilliseconds = gpuWindow.frameMilliseconds();
         double frameP50 = percentile(baselineFrameIntervalsMillis, 0.50);
         double frameP95 = percentile(baselineFrameIntervalsMillis, 0.95);
         double frameMax = baselineFrameIntervalsMillis.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
@@ -743,7 +721,7 @@ public final class MetalValidationClient implements ClientModInitializer {
         boolean readbackValidated = NATIVE_DIRECT_FRAME_GENERATION
                 || (readbackDiagnostics.completed() && readbackDiagnostics.passed());
         boolean stable60 = baselineFrameIntervalsMillis.size() >= BASELINE_MEASURED_FRAMES
-                && steadyGpuMilliseconds.size() >= BASELINE_MEASURED_FRAMES - 8
+                && gpuWindow.complete()
                 && frameP95 <= 18.5
                 && offWorkEliminated
                 && readbackValidated;
@@ -759,9 +737,23 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.addProperty("drawableWidth", minecraft.getWindow().getWidth());
             report.addProperty("drawableHeight", minecraft.getWindow().getHeight());
             report.addProperty("measuredFrameIntervals", baselineFrameIntervalsMillis.size());
-            report.addProperty("measuredGpuCommandBuffers", steadyGpuMilliseconds.size());
+            report.addProperty("measuredGpuCommandBuffers", gpuSamples.size());
+            report.addProperty("measuredGpuFrames", steadyGpuMilliseconds.size());
+            JsonObject measurementWindow = new JsonObject();
+            measurementWindow.addProperty("id", BASELINE_WINDOW_ID);
+            measurementWindow.addProperty("startFrameInclusive", baselineWindow.firstFrame());
+            measurementWindow.addProperty("endFrameExclusive", baselineWindow.endFrame());
+            measurementWindow.addProperty("completedFrames", baselineFrameIntervalsMillis.size());
+            measurementWindow.addProperty("firstSubmitIndexInclusive", baselineFirstSubmitIndex);
+            measurementWindow.addProperty("lastSubmitIndexExclusive", endSubmitIndex);
+            measurementWindow.addProperty("gpuSubmissionIdentityComplete", gpuWindow.complete());
+            measurementWindow.addProperty("nativeEncoderIdentityComplete", false);
+            measurementWindow.addProperty("gpuMetric", "sum of main-queue command-buffer service time per frame");
+            report.add("measurementWindow", measurementWindow);
+            report.add("gpuSubmissionSamples", new GsonBuilder().create().toJsonTree(gpuSamples));
             report.addProperty("frameIntervalP50Milliseconds", frameP50);
             report.addProperty("frameIntervalP95Milliseconds", frameP95);
+            report.addProperty("frameIntervalP99Milliseconds", percentile(baselineFrameIntervalsMillis, 0.99));
             report.addProperty("frameIntervalMaxMilliseconds", frameMax);
             report.addProperty("sourceFpsFromP50", frameP50 > 0.0 ? 1_000.0 / frameP50 : 0.0);
             double stutterThreshold = frameP50 > 0.0 ? frameP50 * 2.0 : 0.0;
@@ -814,9 +806,10 @@ public final class MetalValidationClient implements ClientModInitializer {
             report.add("renderEncoderLookup", encoderLookup);
             report.add("cpuLogicalPasses", summarizeCpuPasses(MetalGpuTimingRecorder.cpuPassSnapshot()));
             List<MetalGpuTimingRecorder.GpuEncoderSample> gpuEncoderSamples =
-                    MetalGpuTimingRecorder.gpuEncoderSnapshot();
+                    MetalGpuTimingRecorder.gpuEncoderSnapshot(BASELINE_WINDOW_ID);
             report.add("gpuNativeEncoders", summarizeGpuEncoders(gpuEncoderSamples));
-            addNativeEncoderCounts(report, gpuEncoderSamples, keep);
+            report.add("nativeEncoderTimingSamples", new GsonBuilder().create().toJsonTree(gpuEncoderSamples));
+            addNativeEncoderCounts(report, gpuEncoderSamples, baselineFrameIntervalsMillis.size());
             addPerformanceCounters(report, IrisMetalPerformanceCounters.snapshot());
             report.add(
                     "metalfxMotionTelemetry",
@@ -829,6 +822,9 @@ public final class MetalValidationClient implements ClientModInitializer {
                     )
             );
             JsonObject unavailable = new JsonObject();
+            unavailable.addProperty("nativeEncoderCountPerFrame",
+                    "unavailable — window-tagged timing records do not yet prove complete encoder coverage; "
+                            + "counter sample failures, capacity limits and Metal 4 encoders can be absent");
             unavailable.addProperty(
                     "attachmentStoreLoadBytes",
                     "unavailable — current native bridge does not expose per-attachment load/store byte accounting"
@@ -944,6 +940,8 @@ public final class MetalValidationClient implements ClientModInitializer {
         long render = samples.stream().filter(sample -> "render".equals(sample.kind())).count();
         long blit = samples.stream().filter(sample -> "blit".equals(sample.kind())).count();
         JsonObject counts = new JsonObject();
+        counts.addProperty("status", "observed-timing-records-only");
+        counts.addProperty("complete", false);
         counts.addProperty("measuredFrames", measuredFrames);
         counts.addProperty("renderTotal", render);
         counts.addProperty("blitTotal", blit);

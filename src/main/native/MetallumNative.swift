@@ -567,6 +567,8 @@ private final class NativePresentationTelemetry {
 }
 
 private struct CompletedGpuEncoderTiming {
+    let windowId: Int64
+    let frameId: Int64
     let label: String
     let kind: Int32
     let milliseconds: Double
@@ -574,6 +576,8 @@ private struct CompletedGpuEncoderTiming {
 
 private final class GpuEncoderTimingContext {
     struct Record {
+        let windowId: Int64
+        let frameId: Int64
         let label: String
         let kind: Int32
         let startIndex: Int
@@ -582,10 +586,14 @@ private final class GpuEncoderTimingContext {
 
     static let sampleCapacity = 512
     let sampleBuffer: MTLCounterSampleBuffer
+    let windowId: Int64
+    let frameId: Int64
     var nextSample = 0
     var records: [Record] = []
 
-    init?(_ device: MTLDevice) {
+    init?(_ device: MTLDevice, windowId: Int64, frameId: Int64) {
+        self.windowId = windowId
+        self.frameId = frameId
         guard device.supportsCounterSampling(.atStageBoundary),
               let timestampSet = device.counterSets?.first(where: { $0.name == "timestamp" }) else {
             return nil
@@ -606,7 +614,14 @@ private final class GpuEncoderTimingContext {
         let start = nextSample
         let end = start + 1
         nextSample += 2
-        records.append(Record(label: label, kind: kind, startIndex: start, endIndex: end))
+        records.append(Record(
+            windowId: windowId,
+            frameId: frameId,
+            label: label,
+            kind: kind,
+            startIndex: start,
+            endIndex: end
+        ))
         return (start, end)
     }
 
@@ -627,6 +642,8 @@ private final class GpuEncoderTimingContext {
                     return nil
                 }
                 return CompletedGpuEncoderTiming(
+                    windowId: record.windowId,
+                    frameId: record.frameId,
                     label: record.label,
                     kind: record.kind,
                     milliseconds: Double(end - start) / 1_000_000.0
@@ -637,6 +654,8 @@ private final class GpuEncoderTimingContext {
 }
 
 private let gpuEncoderTimingLock = NSLock()
+private var gpuEncoderTimingWindowId: Int64 = 0
+private var gpuEncoderTimingFrameId: Int64 = -1
 private var gpuEncoderTimingContexts: [ObjectIdentifier: GpuEncoderTimingContext] = [:]
 private var completedGpuEncoderTimings: [CompletedGpuEncoderTiming] = []
 
@@ -648,7 +667,11 @@ private func gpuEncoderTimingContext(_ commandBuffer: MTLCommandBuffer) -> GpuEn
     if let existing = gpuEncoderTimingContexts[key] {
         return existing
     }
-    guard let created = GpuEncoderTimingContext(commandBuffer.device) else { return nil }
+    guard let created = GpuEncoderTimingContext(
+        commandBuffer.device,
+        windowId: gpuEncoderTimingWindowId,
+        frameId: gpuEncoderTimingFrameId
+    ) else { return nil }
     gpuEncoderTimingContexts[key] = created
     return created
 }
@@ -12991,6 +13014,21 @@ public func metallum_set_gpu_encoder_timing_enabled(_ enabled: Int32) {
     NativeState.gpuEncoderTimingEnabled = enabled != 0
 }
 
+/// Sets the explicit Java measurement identity used by subsequently reserved
+/// Metal 3 encoder samples. The values are copied into each timing context at
+/// command-buffer encoder reservation time; completion never consults this
+/// mutable context, so a later frame cannot relabel an asynchronous warmup.
+@_cdecl("metallum_set_gpu_encoder_timing_context")
+public func metallum_set_gpu_encoder_timing_context(
+    _ windowId: Int64,
+    _ frameId: Int64
+) {
+    gpuEncoderTimingLock.lock()
+    gpuEncoderTimingWindowId = windowId
+    gpuEncoderTimingFrameId = frameId
+    gpuEncoderTimingLock.unlock()
+}
+
 @_cdecl("metallum_gpu_encoder_timing_reset")
 public func metallum_gpu_encoder_timing_reset() {
     gpuEncoderTimingLock.lock()
@@ -13021,6 +13059,24 @@ public func metallum_gpu_encoder_timing_kind(_ index: Int32) -> Int32 {
     let offset = Int(index)
     guard offset >= 0, offset < completedGpuEncoderTimings.count else { return -1 }
     return completedGpuEncoderTimings[offset].kind
+}
+
+@_cdecl("metallum_gpu_encoder_timing_measurement_window_id")
+public func metallum_gpu_encoder_timing_measurement_window_id(_ index: Int32) -> Int64 {
+    gpuEncoderTimingLock.lock()
+    defer { gpuEncoderTimingLock.unlock() }
+    let offset = Int(index)
+    guard offset >= 0, offset < completedGpuEncoderTimings.count else { return 0 }
+    return completedGpuEncoderTimings[offset].windowId
+}
+
+@_cdecl("metallum_gpu_encoder_timing_frame_id")
+public func metallum_gpu_encoder_timing_frame_id(_ index: Int32) -> Int64 {
+    gpuEncoderTimingLock.lock()
+    defer { gpuEncoderTimingLock.unlock() }
+    let offset = Int(index)
+    guard offset >= 0, offset < completedGpuEncoderTimings.count else { return -1 }
+    return completedGpuEncoderTimings[offset].frameId
 }
 
 @_cdecl("metallum_gpu_encoder_timing_copy_label")

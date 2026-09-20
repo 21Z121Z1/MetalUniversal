@@ -266,6 +266,72 @@ final class MetalRenderContractGpuIntegrationTest {
         assertArrayEquals(expectedIndirectSplit(), runIndirectReadback(true));
     }
 
+    @Test
+    void nativeEncoderTimingRetainsReservationIdentityAcrossContextChange() throws Exception {
+        MetalNativeBridge.metallum_set_gpu_encoder_timing_enabled(1);
+        MetalNativeBridge.metallum_gpu_encoder_timing_reset();
+        MetalNativeBridge.metallum_set_gpu_encoder_timing_context(1L, 40L);
+        try {
+            RenderPipeline pipeline = RenderPipeline.builder()
+                    .withLocation("synthetic/timing-identity")
+                    .withVertexShader("synthetic/contract_vertex")
+                    .withFragmentShader("synthetic/contract_fragment")
+                    .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                    .withCull(false)
+                    .withColorTargetState(0, new ColorTargetState(
+                            Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                    .withColorTargetState(1, new ColorTargetState(
+                            Optional.empty(), GpuFormat.RGBA8_UNORM, ColorTargetState.WRITE_ALL))
+                    .build();
+            MetalGpuTexture color0 = (MetalGpuTexture) device.createTexture(
+                    "timing-identity-color0", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+            MetalGpuTexture color1 = (MetalGpuTexture) device.createTexture(
+                    "timing-identity-color1", TEXTURE_USAGE, GpuFormat.RGBA8_UNORM, WIDTH, HEIGHT, 1, 1);
+            try (MetalGpuTextureView view0 = new MetalGpuTextureView(color0, 0, 1);
+                 MetalGpuTextureView view1 = new MetalGpuTextureView(color1, 0, 1)) {
+                RenderPassDescriptor descriptor = RenderPassDescriptor.builder(() -> "timing-identity")
+                        .withRenderArea(new RenderPass.RenderArea(0, 0, WIDTH, HEIGHT))
+                        .withColorAttachment(view0, Optional.of(new org.joml.Vector4f(0.0F)))
+                        .withColorAttachment(view1, Optional.of(new org.joml.Vector4f(0.0F)))
+                        .build();
+                try (MetalRenderPass pass = (MetalRenderPass) encoder.createRenderPass(descriptor)) {
+                    pass.setPipeline(pipeline);
+                    pass.draw(3, 1, 0, 0);
+                    encoder.submitRenderPass();
+                    // The render encoder has now reserved its timestamp pair with (1, 40).
+                    // Changing the mutable context before completion must not relabel it.
+                    MetalNativeBridge.metallum_set_gpu_encoder_timing_context(2L, 41L);
+                    encoder.submit();
+                    MetalGpuTimingRecorder.drainSubmittedWorkForMeasurement();
+                }
+            } finally {
+                color0.close();
+                color1.close();
+            }
+
+            int count = MetalNativeBridge.metallum_gpu_encoder_timing_count();
+            assertTrue(count > 0,
+                    "Metal encoder timing ABI returned no samples for a submitted render encoder");
+            boolean foundExpected = false;
+            for (int index = 0; index < count; index++) {
+                double milliseconds = MetalNativeBridge.metallum_gpu_encoder_timing_milliseconds(index);
+                if (!(milliseconds > 0.0) || !Double.isFinite(milliseconds)) {
+                    continue;
+                }
+                long windowId = MetalNativeBridge.metallum_gpu_encoder_timing_measurement_window_id(index);
+                long frameId = MetalNativeBridge.metallum_gpu_encoder_timing_frame_id(index);
+                assertFalse(windowId == 2L && frameId == 41L,
+                        "completion must not read the later mutable timing context");
+                foundExpected |= windowId == 1L && frameId == 40L;
+            }
+            assertTrue(foundExpected, "no completed encoder sample retained its reservation identity");
+        } finally {
+            MetalNativeBridge.metallum_set_gpu_encoder_timing_context(0L, -1L);
+            MetalNativeBridge.metallum_gpu_encoder_timing_reset();
+            MetalNativeBridge.metallum_set_gpu_encoder_timing_enabled(0);
+        }
+    }
+
     private void assertIndirectFeatures() {
         var features = device.getDeviceInfo().features();
         assertTrue(features.multiDrawIndirect(), "frontend indirect admission requires multiDrawIndirect");

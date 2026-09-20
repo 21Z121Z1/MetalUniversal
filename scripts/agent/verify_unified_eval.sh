@@ -23,6 +23,7 @@ python3 scripts/agent/check_metal4_main_profile_matrix.py --self-test
 python3 scripts/agent/check_metal4_main_trial.py --self-test
 python3 scripts/agent/analyze_unified_eval.py --self-test
 python3 scripts/agent/normalize_unified_trial.py --self-test
+python3 scripts/agent/test_normalize_unified_trial.py
 python3 scripts/agent/check_unified_eval_admission.py --self-test
 python3 scripts/agent/verify_terrain_work_events.py --self-test
 python3 -m py_compile \
@@ -64,6 +65,8 @@ bash -n scripts/agent/verify.sh
   --tests com.metallum.client.terrain.PresentationPacingSnapshotTest \
   --tests com.metallum.client.terrain.PresentationPacingEvidenceAdapterTest \
   --tests com.metallum.mixin.MetallumMixinRegistrationTest \
+  --tests com.metallum.client.validation.FrameMeasurementWindowTest \
+  --tests com.metallum.client.validation.GpuMeasurementWindowTest \
   --tests com.metallum.client.validation.contract.RenderContractCoreTest \
   --tests com.metallum.client.validation.report.RenderContractReportTest
 

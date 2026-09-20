@@ -25,6 +25,146 @@ def finite_number(value: Any) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def strict_integer(value: Any) -> int | None:
+    """Return JSON integers only; booleans and numeric strings are not counts."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def validate_measurement_window(
+    report: dict[str, Any], measured_frames: int, gpu_submission_count: int
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Validate the shared frame window used by CPU, GPU, and encoder evidence."""
+    raw = report.get("measurementWindow")
+    if not isinstance(raw, dict):
+        return None, [
+            "measurementWindow is missing; historical reports cannot establish a shared measurement boundary"
+        ]
+
+    errors: list[str] = []
+    window_id = strict_integer(raw.get("id"))
+    start = strict_integer(raw.get("startFrameInclusive"))
+    end = strict_integer(raw.get("endFrameExclusive"))
+    completed = strict_integer(raw.get("completedFrames"))
+    first_submit = strict_integer(raw.get("firstSubmitIndexInclusive"))
+    last_submit = strict_integer(raw.get("lastSubmitIndexExclusive"))
+    if window_id is None or window_id <= 0:
+        errors.append("measurementWindow.id must be a positive integer")
+    if start is None or start < 0:
+        errors.append("measurementWindow.startFrameInclusive must be a non-negative integer")
+    if end is None or end <= 0:
+        errors.append("measurementWindow.endFrameExclusive must be a positive integer")
+    if completed is None or completed <= 0:
+        errors.append("measurementWindow.completedFrames must be a positive integer")
+    if first_submit is None or first_submit < 0:
+        errors.append("measurementWindow.firstSubmitIndexInclusive must be a non-negative integer")
+    if last_submit is None or last_submit <= 0:
+        errors.append("measurementWindow.lastSubmitIndexExclusive must be a positive integer")
+    if start is not None and end is not None and end <= start:
+        errors.append("measurementWindow frame bounds must be increasing")
+    if start is not None and end is not None and completed is not None and end - start != completed:
+        errors.append(
+            "measurementWindow frame-bound difference does not equal completedFrames"
+        )
+    if measured_frames > 0 and completed is not None and completed != measured_frames:
+        errors.append(
+            f"measurementWindow.completedFrames={completed} does not equal "
+            f"measuredFrameIntervals={measured_frames}"
+        )
+    if first_submit is not None and last_submit is not None and last_submit <= first_submit:
+        errors.append("measurementWindow submit bounds must be increasing")
+    if first_submit is not None and last_submit is not None and last_submit - first_submit != gpu_submission_count:
+        errors.append(
+            "measurementWindow submit-bound difference does not equal measuredGpuCommandBuffers"
+        )
+    if completed is not None and gpu_submission_count < completed:
+        errors.append(
+            f"measuredGpuCommandBuffers={gpu_submission_count} is less than completedFrames={completed}"
+        )
+    return raw, errors
+
+
+def validate_gpu_submission_samples(
+    report: dict[str, Any],
+    measurement_window: dict[str, Any] | None,
+    measured_gpu_frames: int,
+    measured_gpu_command_buffers: int,
+) -> tuple[float | None, list[str]]:
+    """Validate frame/submit identity and return the independent frame-time p50."""
+    raw = report.get("gpuSubmissionSamples")
+    if not isinstance(raw, list):
+        return None, ["gpuSubmissionSamples is missing or is not an array"]
+    if measurement_window is None:
+        return None, ["gpuSubmissionSamples cannot be checked without measurementWindow"]
+
+    window_id = strict_integer(measurement_window.get("id"))
+    first_frame = strict_integer(measurement_window.get("startFrameInclusive"))
+    last_frame = strict_integer(measurement_window.get("endFrameExclusive"))
+    first_submit = strict_integer(measurement_window.get("firstSubmitIndexInclusive"))
+    last_submit = strict_integer(measurement_window.get("lastSubmitIndexExclusive"))
+    errors: list[str] = []
+    submit_ids: list[int] = []
+    frame_ids: list[int] = []
+    frame_durations: dict[int, list[float]] = {}
+    for index, sample in enumerate(raw):
+        if not isinstance(sample, dict):
+            errors.append(f"gpuSubmissionSamples[{index}] is not an object")
+            continue
+        submit_id = strict_integer(sample.get("submitIndex"))
+        sample_window_id = strict_integer(sample.get("windowId"))
+        frame_id = strict_integer(sample.get("frameId"))
+        start = finite_number(sample.get("gpuStartTime"))
+        end = finite_number(sample.get("gpuEndTime"))
+        if submit_id is None or submit_id < 0:
+            errors.append(f"gpuSubmissionSamples[{index}].submitIndex is invalid")
+        else:
+            submit_ids.append(submit_id)
+        if sample_window_id != window_id:
+            errors.append(f"gpuSubmissionSamples[{index}].windowId does not match measurementWindow.id")
+        if frame_id is None:
+            errors.append(f"gpuSubmissionSamples[{index}].frameId is invalid")
+        else:
+            frame_ids.append(frame_id)
+        if start is None or end is None or end <= start:
+            errors.append(f"gpuSubmissionSamples[{index}] has an invalid GPU duration")
+        elif frame_id is not None:
+            frame_durations.setdefault(frame_id, []).append((end - start) * 1_000.0)
+
+    if len(raw) != measured_gpu_command_buffers:
+        errors.append(
+            f"gpuSubmissionSamples count={len(raw)} does not equal "
+            f"measuredGpuCommandBuffers={measured_gpu_command_buffers}"
+        )
+    if len(submit_ids) != len(set(submit_ids)):
+        errors.append("gpuSubmissionSamples contains duplicate submitIndex values")
+    if first_submit is not None and last_submit is not None:
+        ordered_submits = sorted(set(submit_ids))
+        if len(ordered_submits) != last_submit - first_submit or any(
+            value != first_submit + index for index, value in enumerate(ordered_submits)
+        ):
+            errors.append("gpuSubmissionSamples submitIndex set does not cover the declared submit window")
+    if first_frame is not None and last_frame is not None:
+        ordered_frames = sorted(set(frame_ids))
+        if len(ordered_frames) != last_frame - first_frame or any(
+            value != first_frame + index for index, value in enumerate(ordered_frames)
+        ):
+            errors.append("gpuSubmissionSamples frameId set does not cover the declared frame window")
+    if len(set(frame_ids)) != measured_gpu_frames:
+        errors.append(
+            f"gpuSubmissionSamples unique frames={len(set(frame_ids))} does not equal "
+            f"measuredGpuFrames={measured_gpu_frames}"
+        )
+    if errors:
+        return None, errors
+    frame_service_times = [sum(values) for values in frame_durations.values()]
+    if not frame_service_times or len(frame_service_times) != measured_gpu_frames:
+        return None, ["gpuSubmissionSamples did not produce one service-time total per frame"]
+    # The report's percentile contract uses nearest rank, including even sample counts.
+    ordered_times = sorted(frame_service_times)
+    return ordered_times[math.ceil(len(ordered_times) * 0.5) - 1], []
+
+
 def digest(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
@@ -86,13 +226,59 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             parse_error = str(exc)
 
-    measured_frames = int(report.get("measuredFrameIntervals") or 0) if report else 0
+    measured_frames = 0
+    if report:
+        measured_frames = strict_integer(report.get("measuredFrameIntervals")) or 0
     cpu = report.get("cpuRenderEncodeFrameMilliseconds", {}) if isinstance(report.get("cpuRenderEncodeFrameMilliseconds"), dict) else {}
-    cpu_samples = int(cpu.get("samples") or 0)
-    cpu_window_matches = measured_frames > 0 and cpu_samples == measured_frames
+    cpu_samples = strict_integer(cpu.get("samples")) or 0
     encoders = report.get("nativeEncoderCountsPerMeasuredFrame", {}) if isinstance(report.get("nativeEncoderCountsPerMeasuredFrame"), dict) else {}
-    encoder_frames = int(encoders.get("measuredFrames") or 0)
-    encoder_window_matches = measured_frames > 0 and encoder_frames == measured_frames
+    encoder_frames = strict_integer(encoders.get("measuredFrames")) or 0
+    gpu_submission_count = strict_integer(report.get("measuredGpuCommandBuffers")) or 0
+    measurement_window, window_errors = validate_measurement_window(
+        report, measured_frames, gpu_submission_count
+    )
+    window_valid = measurement_window is not None and not window_errors
+    completed_frames = (
+        strict_integer(measurement_window.get("completedFrames"))
+        if measurement_window is not None
+        else None
+    )
+    gpu_identity_complete = (
+        measurement_window is not None
+        and measurement_window.get("gpuSubmissionIdentityComplete") is True
+    )
+    encoder_identity_complete = (
+        measurement_window is not None
+        and measurement_window.get("nativeEncoderIdentityComplete") is True
+    )
+    gpu_frames = strict_integer(report.get("measuredGpuFrames")) or 0
+    gpu_submission_p50, gpu_sample_errors = validate_gpu_submission_samples(
+        report,
+        measurement_window,
+        gpu_frames,
+        gpu_submission_count,
+    )
+    reported_gpu_p50 = finite_number(report.get("gpuP50Milliseconds"))
+    gpu_numeric_matches = (
+        gpu_submission_p50 is not None
+        and reported_gpu_p50 is not None
+        and math.isclose(reported_gpu_p50, gpu_submission_p50, rel_tol=1e-9, abs_tol=1e-9)
+    )
+    cpu_window_matches = window_valid and completed_frames == measured_frames and cpu_samples == completed_frames
+    gpu_window_matches = (
+        window_valid
+        and gpu_identity_complete
+        and completed_frames == measured_frames
+        and gpu_frames == completed_frames
+        and gpu_submission_count >= completed_frames
+        and not gpu_sample_errors
+    )
+    encoder_window_matches = (
+        window_valid
+        and encoder_identity_complete
+        and completed_frames == measured_frames
+        and encoder_frames == completed_frames
+    )
     unavailable = report.get("unavailableMetrics", {}) if isinstance(report.get("unavailableMetrics"), dict) else {}
     render_per_frame = finite_number(encoders.get("renderPerFrame"))
     blit_per_frame = finite_number(encoders.get("blitPerFrame"))
@@ -100,20 +286,33 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
 
     metrics = {
         "fps_median": metric(report.get("sourceFpsFromP50"), "FPS", "higher", measured_frames),
-        "gpu_frame_time_ms_median": metric(report.get("gpuP50Milliseconds"), "ms", "lower", measured_frames),
+        "gpu_frame_time_ms_median": metric(
+            report.get("gpuP50Milliseconds") if gpu_window_matches and gpu_numeric_matches else None,
+            "ms", "lower", gpu_frames,
+            None if gpu_window_matches and gpu_numeric_matches else (
+                "GPU sample window lacks a valid measurementWindow or identified "
+                f"GPU frames={gpu_frames}, submissions={gpu_submission_count}, "
+                f"completed frames={completed_frames} are inconsistent"
+            ) if not gpu_window_matches else (
+                "reported gpuP50Milliseconds does not match the independently recomputed "
+                f"per-frame GPU service-time median={gpu_submission_p50}ms"
+            ),
+        ),
         "cpu_render_encode_time_ms_median": metric(
             cpu.get("p50Milliseconds") if cpu_window_matches else None,
             "ms", "lower", cpu_samples,
             None if cpu_window_matches else (
-                f"CPU sample window mismatch: cpu samples={cpu_samples}, measured frames={measured_frames}; "
-                "warmup and measurement data must not be mixed"
+                f"CPU sample window mismatch: cpu samples={cpu_samples}, measured frames={measured_frames}, "
+                f"completed frames={completed_frames}; warmup and measurement data must not be mixed"
             ),
         ),
         "native_encoder_count_per_frame_median": metric(
             encoder_total if encoder_window_matches else None,
             "encoders/frame", "lower", encoder_frames,
             None if encoder_window_matches else (
-                f"encoder sample window mismatch: encoder frames={encoder_frames}, measured frames={measured_frames}"
+                f"encoder sample window mismatch: encoder frames={encoder_frames}, "
+                f"measured frames={measured_frames}, completed frames={completed_frames}; "
+                "native encoder identity is required"
             ),
         ),
         "render_pass_store_load_bytes_estimate_median": metric(
@@ -134,6 +333,29 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
     identity_errors: list[str] = []
     if measured_frames <= 0:
         identity_errors.append("measuredFrameIntervals is missing or zero")
+    identity_errors.extend(window_errors)
+    if measurement_window is not None and not gpu_identity_complete:
+        identity_errors.append("measurementWindow.gpuSubmissionIdentityComplete is not true")
+    if measurement_window is not None and not encoder_identity_complete:
+        identity_errors.append("measurementWindow.nativeEncoderIdentityComplete is not true")
+    if measured_frames > 0 and not cpu_window_matches:
+        identity_errors.append(
+            f"CPU samples={cpu_samples} do not match the completed measurement window={completed_frames}"
+        )
+    if measured_frames > 0 and not gpu_window_matches:
+        identity_errors.append(
+            f"GPU frames={gpu_frames} or submissions={gpu_submission_count} do not match "
+            f"the identified measurement window={completed_frames}"
+        )
+    if measured_frames > 0 and gpu_window_matches and not gpu_numeric_matches:
+        identity_errors.append(
+            "reported gpuP50Milliseconds does not match gpuSubmissionSamples"
+        )
+    identity_errors.extend(f"GPU sample evidence: {error}" for error in gpu_sample_errors)
+    if measured_frames > 0 and not encoder_window_matches:
+        identity_errors.append(
+            f"native encoder evidence is not identity-complete for measurement window={completed_frames}"
+        )
     if not metrics["fps_median"]["available"]:
         identity_errors.append("sourceFpsFromP50 is missing or non-finite")
     if source_error:
@@ -151,6 +373,8 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
         "source_report_sha256": digest(source) if source is not None and source.is_file() else None,
         "identity_errors": identity_errors,
         "measured_frames": measured_frames,
+        "measurement_window": measurement_window,
+        "measurement_window_errors": window_errors,
         "metrics": metrics,
         "admission": {
             "renderFusionRuntime": report.get("renderFusionRuntime"),
@@ -164,7 +388,11 @@ def normalize(trial_dir: Path) -> dict[str, Any]:
             "frame_interval_p50_ms": report.get("frameIntervalP50Milliseconds"),
             "frame_interval_p95_ms": report.get("frameIntervalP95Milliseconds"),
             "gpu_p95_ms": report.get("gpuP95Milliseconds"),
+            "gpu_submission_p50_ms_recomputed": gpu_submission_p50,
+            "gpu_submission_sample_errors": gpu_sample_errors,
             "readback": report.get("nativeMainReadback"),
+            "measurement_window": measurement_window,
+            "measurement_window_errors": window_errors,
             "unavailable_metrics": unavailable,
         },
     }
@@ -178,11 +406,33 @@ def self_test() -> None:
         (trial / "exit-status.txt").write_text("0\n", encoding="utf-8")
         report = {
             "measuredFrameIntervals": 300,
+            "measuredGpuFrames": 300,
+            "measuredGpuCommandBuffers": 300,
+            "gpuSubmissionSamples": [
+                {
+                    "submitIndex": 100 + index,
+                    "windowId": 1,
+                    "frameId": 40 + index,
+                    "gpuStartTime": float(index),
+                    "gpuEndTime": float(index) + 0.020,
+                }
+                for index in range(300)
+            ],
             "sourceFpsFromP50": 40.0,
             "gpuP50Milliseconds": 20.0,
             "frameTimeStutterCount": 2,
             "cpuRenderEncodeFrameMilliseconds": {"samples": 300, "p50Milliseconds": 24.0},
             "nativeEncoderCountsPerMeasuredFrame": {"measuredFrames": 300, "renderPerFrame": 6.0, "blitPerFrame": 2.0},
+            "measurementWindow": {
+                "id": 1,
+                "startFrameInclusive": 40,
+                "endFrameExclusive": 340,
+                "completedFrames": 300,
+                "firstSubmitIndexInclusive": 100,
+                "lastSubmitIndexExclusive": 400,
+                "gpuSubmissionIdentityComplete": True,
+                "nativeEncoderIdentityComplete": True,
+            },
             "renderFusionRuntime": {"admissions": 1},
             "bindingPathRuntime": {"renderForwardedCalls": 30, "renderSuppressedCalls": 12, "packetCalls": 9},
         }
@@ -196,7 +446,36 @@ def self_test() -> None:
         result = normalize(trial)
         assert result["complete"]
         assert result["metrics"]["fps_median"]["median"] == 40.0
+        assert result["metrics"]["gpu_frame_time_ms_median"]["available"]
         assert result["metrics"]["native_encoder_count_per_frame_median"]["median"] == 8.0
+
+        legacy_report = dict(report)
+        legacy_report.pop("measurementWindow")
+        legacy = trial / "legacy" / "native-fullscreen-baseline.json"
+        legacy.parent.mkdir(parents=True)
+        # Keep the authoritative copy set homogeneous for this independent case.
+        second.unlink()
+        first.write_text(json.dumps(legacy_report, sort_keys=True), encoding="utf-8")
+        legacy.write_text(json.dumps(legacy_report, sort_keys=True), encoding="utf-8")
+        legacy_result = normalize(trial)
+        assert not legacy_result["complete"]
+        assert not legacy_result["metrics"]["cpu_render_encode_time_ms_median"]["available"]
+        assert not legacy_result["metrics"]["gpu_frame_time_ms_median"]["available"]
+        assert not legacy_result["metrics"]["native_encoder_count_per_frame_median"]["available"]
+
+        forged_report = dict(report)
+        forged_report["measurementWindow"] = dict(report["measurementWindow"])
+        forged_report["measurementWindow"]["nativeEncoderIdentityComplete"] = False
+        forged_report["nativeEncoderCountsPerMeasuredFrame"] = {
+            "measuredFrames": 300,
+            "renderPerFrame": 600.0,
+            "blitPerFrame": 200.0,
+        }
+        first.write_text(json.dumps(forged_report, sort_keys=True), encoding="utf-8")
+        legacy.unlink()
+        forged = normalize(trial)
+        assert not forged["complete"]
+        assert not forged["metrics"]["native_encoder_count_per_frame_median"]["available"]
     print("normalize_unified_trial self-test: PASS")
 
 

@@ -66,6 +66,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             Boolean.parseBoolean(System.getProperty("metallum.opt.blitBatch", "true"));
     private final MetalDevice device;
     private long currentSubmitIndex = MAX_SUBMITS_IN_FLIGHT;
+    private long commandBufferMeasurementWindow;
+    private long commandBufferMeasurementFrame;
     private final InFlight[] inFlight = new InFlight[MAX_SUBMITS_IN_FLIGHT];
     private final MemorySegment[] submitSemaphores = new MemorySegment[MAX_SUBMITS_IN_FLIGHT];
     private final MetalDestructionQueue destroyQueue = new MetalDestructionQueue(MAX_SUBMITS_IN_FLIGHT + 1);
@@ -177,6 +179,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         if (commandBuffer != null) {
             return commandBuffer;
         }
+        commandBufferMeasurementWindow = MetalGpuTimingRecorder.measurementWindowId();
+        commandBufferMeasurementFrame = MetalGpuTimingRecorder.measurementFrameId();
         return commandBuffer = device.commandQueue.makeCommandBuffer(
                 device.useLabels() ? "Metallum frame " + currentSubmitIndex : null
         );
@@ -501,7 +505,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 completedSemaphore,
                 callbacks,
                 frameGenerationSubmit,
-                submittedFrameId
+                submittedFrameId,
+                commandBufferMeasurementWindow,
+                commandBufferMeasurementFrame
         );
         commandBuffer = null;
         frameGenerationEncodeInCurrentCommandBuffer = false;
@@ -1908,6 +1914,16 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         dynamicBackingPool.clear();
     }
 
+    long drainValidationGpuWork() {
+        submit();
+        for (InFlight submitted : inFlight) {
+            if (submitted != null && !awaitInFlightCompletion(submitted, 5000L)) {
+                throw new IllegalStateException("5s timeout draining validation measurement work");
+            }
+        }
+        return currentSubmitIndex;
+    }
+
     void waitForSubmittedGpuWork() {
         if (commandBuffer != null || currentRenderPass != null || currentEncoder != null) {
             submit();
@@ -1998,6 +2014,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         private final List<SubmitCallback> callbacks;
         private final boolean frameGenerationSubmit;
         private final long frameGenerationFrameId;
+        private final long measurementWindowId;
+        private final long measurementFrameId;
         private boolean completionHandled;
 
         private InFlight(
@@ -2006,7 +2024,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 final MemorySegment completedSemaphore,
                 final List<SubmitCallback> callbacks,
                 final boolean frameGenerationSubmit,
-                final long frameGenerationFrameId
+                final long frameGenerationFrameId,
+                final long measurementWindowId,
+                final long measurementFrameId
         ) {
             this.index = index;
             this.buffer = buffer;
@@ -2014,6 +2034,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             this.callbacks = callbacks;
             this.frameGenerationSubmit = frameGenerationSubmit;
             this.frameGenerationFrameId = frameGenerationFrameId;
+            this.measurementWindowId = measurementWindowId;
+            this.measurementFrameId = measurementFrameId;
         }
 
         private void complete() {
@@ -2021,8 +2043,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 return;
             }
             completionHandled = true;
-            MetalGpuTimingRecorder.record(index, buffer.gpuStartTime(), buffer.gpuEndTime());
             boolean success = buffer.completedSuccessfully();
+            if (success) {
+                MetalGpuTimingRecorder.record(index, measurementWindowId, measurementFrameId,
+                        buffer.gpuStartTime(), buffer.gpuEndTime());
+            }
             if (frameGenerationSubmit) {
                 MetalFxManager.recordFrameGenerationCompleted(frameGenerationFrameId, success);
             }

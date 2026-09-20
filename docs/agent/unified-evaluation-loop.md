@@ -135,6 +135,56 @@ MODE=full WORLD="$WORLD" BLOCKS=4 \
 
 The runner emits a unique `build/agent-runs/<run>/` directory. `run-manifest.json` binds source/binary/environment/scenario identity; correctness/admission/trial artifacts contain source evidence; `decision.json` records the resulting decision. Reuse these artifacts rather than copying metrics into a parallel truth store.
 
+### Vanilla 26.3 terrain observation
+
+Use an isolated copy of the world with `-Pmetallum.noOptionalMods=true` for
+vanilla-only client checks. `metallum.terrain.vanillaWorkEvents=true` enables
+bounded work events; validate each `terrain-work-epoch-*.json` with
+`scripts/agent/verify_terrain_work_events.py`. Supply a unique
+`metallum.renderContract.runId` and output directory per trial. Native validation
+defaults the run ID to the output directory name when no explicit ID is given.
+
+The independent, default-off `metallum.terrain.vanillaUploadPressure=true` switch
+adds `terrain-upload-pressure.json` beside the existing client reports. Its
+fixed-space counters observe staging attempts (normal success, normal failure,
+exception), requested bytes including retries, staging call duration, copy-lock
+acquisition duration, and upload call duration. It does not change vanilla
+allocation, retries, publication, scheduling or completion. Hooks require the
+Metal backend and absence of Sodium/Iris; nonzero counters establish execution.
+
+This diagnostic covers the process observation, including warmup. Requested
+bytes can include partial allocations and repeated retries and are not uploaded
+bytes. Lock duration includes uncontended acquisition overhead. CPU call
+durations may overlap and are not GPU durations. GPU completion, in-flight bytes,
+and time inside `Thread.onSpinWait` remain explicitly unavailable. The report is
+not performance-eligible; do not add its totals to frame timing or use it for
+paired acceptance. Measure instrumentation overhead separately before treating
+an instrumented workload as a performance baseline.
+
+### Native fullscreen measurement windows
+
+The native fullscreen report identifies its measurement window with an explicit
+window ID, inclusive/exclusive frame bounds, and submit bounds. Each render CPU
+sample closes at `renderFrame` return; its frame interval closes at the next
+`renderFrame` entry. Warmup is excluded from both. The initial GPU drain and final
+completion drain happen outside measured intervals; normal frames keep their
+existing asynchronous submission behavior.
+
+`gpuSubmissionSamples` preserves submission and frame identity captured when the
+command buffer is created. GPU frame service time is the sum of command-buffer
+durations for that frame, not end-to-end GPU latency or CPU time. Missing frames,
+duplicate submissions, failed submissions, or recorder truncation invalidate the
+GPU window. Matching sample counts alone are insufficient; normalization checks
+the explicit evidence. A CPU duration is render-loop wall time and can include
+waits; it is not thread CPU utilization.
+
+Native encoder timing records carry their captured window/frame IDs through GPU
+completion. Their observed counts still do not prove complete coverage: unsupported
+counter sampling, timestamp failures, bounded buffers, and Metal 4 encoder paths
+can omit records. Until coverage is proven, `nativeEncoderIdentityComplete=false`
+keeps that metric unavailable. Reports predating window identity remain diagnostic
+artifacts and cannot be reused for performance acceptance.
+
 ## 6. Candidate record
 
 Before changing renderer behavior, record one falsifiable candidate:

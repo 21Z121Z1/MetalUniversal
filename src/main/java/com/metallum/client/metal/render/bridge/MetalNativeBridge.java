@@ -818,10 +818,25 @@ public final class MetalNativeBridge {
             setMetal4PresentEnabled = downcall(lookup, "metallum_set_metal4_present_enabled", FunctionDescriptor.ofVoid(INT));
             setMetal4BarrierEnabled = downcall(lookup, "metallum_set_metal4_barrier_enabled", FunctionDescriptor.ofVoid(INT));
             setGpuEncoderTimingEnabled = downcall(lookup, "metallum_set_gpu_encoder_timing_enabled", FunctionDescriptor.ofVoid(INT));
+            setGpuEncoderTimingContext = downcall(
+                    lookup,
+                    "metallum_set_gpu_encoder_timing_context",
+                    FunctionDescriptor.ofVoid(LONG, LONG)
+            );
             gpuEncoderTimingReset = downcall(lookup, "metallum_gpu_encoder_timing_reset", FunctionDescriptor.ofVoid());
             gpuEncoderTimingCount = downcall(lookup, "metallum_gpu_encoder_timing_count", FunctionDescriptor.of(INT));
             gpuEncoderTimingMilliseconds = downcall(lookup, "metallum_gpu_encoder_timing_milliseconds", FunctionDescriptor.of(DOUBLE, INT));
             gpuEncoderTimingKind = downcall(lookup, "metallum_gpu_encoder_timing_kind", FunctionDescriptor.of(INT, INT));
+            gpuEncoderTimingMeasurementWindowId = downcall(
+                    lookup,
+                    "metallum_gpu_encoder_timing_measurement_window_id",
+                    FunctionDescriptor.of(LONG, INT)
+            );
+            gpuEncoderTimingFrameId = downcall(
+                    lookup,
+                    "metallum_gpu_encoder_timing_frame_id",
+                    FunctionDescriptor.of(LONG, INT)
+            );
             gpuEncoderTimingCopyLabel = downcall(lookup, "metallum_gpu_encoder_timing_copy_label", FunctionDescriptor.of(INT, INT, ValueLayout.ADDRESS, LONG));
             // The archive open path performs disk IO inside the native call;
             // avoid the critical-linker fast path like other IO-adjacent calls.
@@ -1213,10 +1228,13 @@ public final class MetalNativeBridge {
     private static final MethodHandle setMetal4PresentEnabled;
     private static final MethodHandle setMetal4BarrierEnabled;
     private static final MethodHandle setGpuEncoderTimingEnabled;
+    private static final MethodHandle setGpuEncoderTimingContext;
     private static final MethodHandle gpuEncoderTimingReset;
     private static final MethodHandle gpuEncoderTimingCount;
     private static final MethodHandle gpuEncoderTimingMilliseconds;
     private static final MethodHandle gpuEncoderTimingKind;
+    private static final MethodHandle gpuEncoderTimingMeasurementWindowId;
+    private static final MethodHandle gpuEncoderTimingFrameId;
     private static final MethodHandle gpuEncoderTimingCopyLabel;
     private static final MethodHandle psoArchiveOpen;
     private static final MethodHandle psoArchiveFlush;
@@ -3716,6 +3734,17 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static void metallum_set_gpu_encoder_timing_context(
+            final long measurementWindowId,
+            final long frameId
+    ) {
+        try {
+            setGpuEncoderTimingContext.invokeExact(measurementWindowId, frameId);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_set_gpu_encoder_timing_context", throwable);
+        }
+    }
+
     public static void metallum_gpu_encoder_timing_reset() {
         try {
             gpuEncoderTimingReset.invokeExact();
@@ -3745,6 +3774,22 @@ public final class MetalNativeBridge {
             return (int) gpuEncoderTimingKind.invokeExact(index);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gpu_encoder_timing_kind", throwable);
+        }
+    }
+
+    public static long metallum_gpu_encoder_timing_measurement_window_id(final int index) {
+        try {
+            return (long) gpuEncoderTimingMeasurementWindowId.invokeExact(index);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gpu_encoder_timing_measurement_window_id", throwable);
+        }
+    }
+
+    public static long metallum_gpu_encoder_timing_frame_id(final int index) {
+        try {
+            return (long) gpuEncoderTimingFrameId.invokeExact(index);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gpu_encoder_timing_frame_id", throwable);
         }
     }
 
