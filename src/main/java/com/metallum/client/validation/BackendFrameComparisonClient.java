@@ -1,5 +1,6 @@
 package com.metallum.client.validation;
 
+import com.google.gson.Gson;
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.IrisMetalPerformanceCounters;
 import com.metallum.client.metal.render.IrisMetalPipelineOverrides;
@@ -1108,6 +1109,7 @@ public final class BackendFrameComparisonClient {
     private static void capture(final GameRenderer renderer, final int frame) {
         pendingCaptures++;
         GpuBuffer buffer = null;
+        GpuBuffer lightmapBuffer = null;
         GpuFence fence = null;
         try {
             // Backend/Iris comparisons deliberately require MetalFX OFF, so
@@ -1137,12 +1139,29 @@ public final class BackendFrameComparisonClient {
             CommandEncoder encoder = device.createCommandEncoder();
             fence = encoder.createFence();
             encoder.copyTextureToBuffer(texture, buffer, 0L, () -> { }, 0);
+            if (!IRIS_LOADED && !SODIUM_LOADED) {
+                GpuTexture lightmap = renderer.levelLightmap().texture();
+                lightmapBuffer = device.createBuffer(() -> "comparison lightmap " + frame,
+                        GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_COPY_DST,
+                        lightmap.getWidth(0) * lightmap.getHeight(0) * lightmap.getFormat().blockSize());
+                encoder.copyTextureToBuffer(lightmap, lightmapBuffer, 0L, () -> { }, 0);
+            }
             encoder.submit();
             boolean completed = fence.awaitCompletion(10_000_000_000L);
             if (!completed) {
                 throw new IllegalStateException("GPU readback fence timed out");
             }
             writeCapture(frame, target, texture, buffer);
+            if (lightmapBuffer != null) {
+                try (GpuBufferSlice.MappedView mapped = lightmapBuffer.map(true, false)) {
+                    ByteBuffer data = mapped.data().duplicate();
+                    data.clear();
+                    byte[] bytes = new byte[data.remaining()];
+                    data.get(bytes);
+                    Files.write(ROOT.resolve(backendName()).resolve(
+                            String.format(Locale.ROOT, "frame-%05d-lightmap.bin", frame)), bytes);
+                }
+            }
             COMPLETED_FRAMES.add(frame);
             if (COMPLETED_FRAMES.size() == CAPTURE_FRAMES.size()) {
                 stopRequested = true;
@@ -1157,6 +1176,9 @@ public final class BackendFrameComparisonClient {
             }
             if (buffer != null) {
                 buffer.close();
+            }
+            if (lightmapBuffer != null) {
+                lightmapBuffer.close();
             }
             pendingCaptures--;
         }
@@ -1551,6 +1573,7 @@ public final class BackendFrameComparisonClient {
                         + "  \"observedDefaultClockTicks\": %s,\n"
                         + "  \"freezeSimulationRequested\": %s,\n"
                         + "  \"fixedLightmapBlockFactor\": %s,\n"
+                        + "  \"lightmapInputs\": %s,\n"
                         + "  \"integratedServerScenarioConfigured\": %s,\n"
                         + "  \"serverSimulationFrozen\": %s,\n"
                         + "  \"clientSimulationFrozen\": %s,\n"
@@ -1617,6 +1640,7 @@ public final class BackendFrameComparisonClient {
                 observedDefaultClock,
                 FREEZE_SIMULATION,
                 FREEZE_SIMULATION ? "1.4" : "null",
+                new Gson().toJson(minecraft.gameRenderer.gameRenderState().lightmapRenderState),
                 integratedServerConfigured,
                 serverSimulationFrozen,
                 clientSimulationFrozen,
