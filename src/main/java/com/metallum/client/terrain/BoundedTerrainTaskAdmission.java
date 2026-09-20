@@ -30,6 +30,13 @@ public final class BoundedTerrainTaskAdmission<T> {
         FAIL_OPEN
     }
 
+    public enum FailOpenReason {
+        NONE,
+        LIVE_SLOT_CONFLICT,
+        DEFERRED_CAPACITY,
+        CANCELLED_COHORT_RECOVERY_BOUND
+    }
+
     public interface TaskOps<T> {
         Object ownerIdentity(T task);
 
@@ -101,6 +108,7 @@ public final class BoundedTerrainTaskAdmission<T> {
             long discardedTerminalTasks,
             long drainedTasks,
             long failOpenCount,
+            FailOpenReason failOpenReason,
             long compactedVanillaTasks,
             int maxDeferredDepth,
             long maxDeferredWaitNanos
@@ -118,6 +126,7 @@ public final class BoundedTerrainTaskAdmission<T> {
     private long discardedTerminalTasks;
     private long drainedTasks;
     private long failOpenCount;
+    private FailOpenReason failOpenReason = FailOpenReason.NONE;
     private long compactedVanillaTasks;
     private int maxDeferredDepth;
     private long maxDeferredWaitNanos;
@@ -177,7 +186,7 @@ public final class BoundedTerrainTaskAdmission<T> {
             // terminal. Otherwise there are two live semantic tasks in the same slot and this
             // experiment lacks enough identity to coalesce them safely.
             if (!taskOps.isTerminal(previous.task())) {
-                return failOpen();
+                return failOpen(FailOpenReason.LIVE_SLOT_CONFLICT);
             }
             taskOps.cancel(previous.task());
             deferred.put(slot, new Pending<>(task, previous.firstDeferredNanos()));
@@ -200,7 +209,23 @@ public final class BoundedTerrainTaskAdmission<T> {
             return OfferResult.of(Action.DEFER);
         }
 
-        return failOpen();
+        return failOpen(FailOpenReason.DEFERRED_CAPACITY);
+    }
+
+    /**
+     * Abandons this experimental admission epoch and returns every still-live deferred task to the
+     * caller for immediate baseline ownership. Used only when the queue integration can no longer
+     * prove bounded recovery without reimplementing vanilla scheduling.
+     */
+    public OfferResult<T> releaseDeferredToBaseline(final FailOpenReason reason) {
+        Objects.requireNonNull(reason, "reason");
+        if (reason == FailOpenReason.NONE) {
+            throw new IllegalArgumentException("fail-open reason must be explicit");
+        }
+        if (!config.active() || failOpen) {
+            return OfferResult.of(Action.BASELINE);
+        }
+        return failOpen(reason);
     }
 
     /**
@@ -255,6 +280,7 @@ public final class BoundedTerrainTaskAdmission<T> {
         }
         deferred.clear();
         failOpen = false;
+        failOpenReason = FailOpenReason.NONE;
     }
 
     public Snapshot snapshot() {
@@ -271,14 +297,16 @@ public final class BoundedTerrainTaskAdmission<T> {
                 discardedTerminalTasks,
                 drainedTasks,
                 failOpenCount,
+                failOpenReason,
                 compactedVanillaTasks,
                 maxDeferredDepth,
                 maxDeferredWaitNanos
         );
     }
 
-    private OfferResult<T> failOpen() {
+    private OfferResult<T> failOpen(final FailOpenReason reason) {
         failOpen = true;
+        failOpenReason = Objects.requireNonNull(reason, "reason");
         failOpenCount = saturatedIncrement(failOpenCount);
         List<T> tasks = new ArrayList<>(deferred.size());
         for (Pending<T> pending : deferred.values()) {
