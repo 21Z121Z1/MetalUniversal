@@ -111,8 +111,12 @@ public final class MetalUniversalClientGameTest implements FabricClientGameTest 
                 // A fixed seed still has a randomized player spawn within the spawn radius.
                 int x = 160 + (int) (frameId - 1) * 96;
                 int z = 160 + (int) (frameId - 1) * 48;
-                int y = singleplayer.getServer().computeOnServer(server ->
-                        server.overworld().getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) + 20);
+                int y = singleplayer.getServer().computeOnServer(server -> {
+                    // Level.getHeight returns the minimum height for an unloaded chunk.
+                    // Finish normal generation before choosing this route's camera altitude.
+                    server.overworld().getChunk(x >> 4, z >> 4);
+                    return server.overworld().getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) + 20;
+                });
                 singleplayer.getServer().runCommand("tp @a " + x + " " + y + " " + z + " -65 25");
                 if (frameId == 1) {
                     singleplayer.getServer().runCommand("summon minecraft:text_display " + (x + 8) + " " + (y - 3)

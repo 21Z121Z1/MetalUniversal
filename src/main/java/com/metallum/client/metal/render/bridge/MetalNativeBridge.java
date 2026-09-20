@@ -824,6 +824,8 @@ public final class MetalNativeBridge {
             setGpuEncoderTimingEnabled = downcall(lookup, "metallum_set_gpu_encoder_timing_enabled", FunctionDescriptor.ofVoid(INT));
             commandBufferPresentationId = optionalDowncall(lookup, "metallum_command_buffer_presentation_id_v1",
                     FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
+            commandBufferDrawableWaitNanos = optionalDowncall(lookup, "metallum_command_buffer_drawable_wait_ns_v1",
+                    FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
             presentationCopyEvidence = optionalDowncall(lookup, "metallum_presentation_copy_evidence_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT));
             frameEvidenceEnable = optionalDowncall(lookup, "metallum_frame_evidence_enable", FunctionDescriptor.ofVoid(INT));
@@ -1238,6 +1240,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle setGpuEncoderTimingEnabled;
     @Nullable
     private static final MethodHandle commandBufferPresentationId;
+    @Nullable
+    private static final MethodHandle commandBufferDrawableWaitNanos;
     @Nullable
     private static final MethodHandle presentationCopyEvidence;
     @Nullable
@@ -3765,6 +3769,16 @@ public final class MetalNativeBridge {
             return (long) commandBufferPresentationId.invokeExact(segment(commandBuffer));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_command_buffer_presentation_id_v1", throwable);
+        }
+    }
+
+    /** Borrowed completed command buffer; -1 means unobserved or an older native module. */
+    public static long commandBufferDrawableWaitNanos(MemorySegment commandBuffer) {
+        if (commandBufferDrawableWaitNanos == null) return -1;
+        try {
+            return (long) commandBufferDrawableWaitNanos.invokeExact(segment(commandBuffer));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_command_buffer_drawable_wait_ns_v1", throwable);
         }
     }
 

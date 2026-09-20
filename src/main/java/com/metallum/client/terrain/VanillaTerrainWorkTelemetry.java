@@ -124,7 +124,8 @@ public final class VanillaTerrainWorkTelemetry {
 
     /**
      * Called only after the vanilla layer render method returns normally, so every indirect/separate
-     * draw call belonging to that layer has actually been submitted.
+     * draw call belonging to that layer has returned. This is CPU encoding evidence; native
+     * command-buffer submission, completion and presentation are separate FrameEvidence fields.
      */
     public static void layerRendered(final Object batchIdentity, final Object layerIdentity) {
         DrawBatchContext batch = DRAW_BATCHES.get(batchIdentity);
@@ -135,6 +136,7 @@ public final class VanillaTerrainWorkTelemetry {
         if (tokens == null || tokens.isEmpty()) {
             return;
         }
+        com.metallum.client.metal.render.FrameEvidenceRuntime.terrainBatchEncoded(batch.frameIndex);
         long now = System.nanoTime();
         for (VanillaTerrainWorkTracker.DrawToken token : tokens) {
             TRACKER.firstValidDraw(token, batch.frameIndex, now);

@@ -604,6 +604,7 @@ private final class NativeCommandEncodingCounters {
     var directDraws: Int64 = 0
     var indirectDraws: Int64 = 0
     var presentationID: UInt64 = 0
+    var drawableWaitNanos: Int64?
 }
 
 private var nativeEncodingCountersKey: UInt8 = 0
@@ -633,6 +634,16 @@ public func metallum_command_buffer_presentation_id_v1(_ pointer: UnsafeMutableR
         return Int64(lease.encodingCounters?.presentationID ?? 0)
     }
     return Int64(encodingCounters(metal3CommandBuffer(pointer))?.presentationID ?? 0)
+}
+
+// Borrowed command-buffer pointer, read after completion. -1 means unobserved,
+// including offscreen work and disabled instrumentation; zero is a measured value.
+@_cdecl("metallum_command_buffer_drawable_wait_ns_v1")
+public func metallum_command_buffer_drawable_wait_ns_v1(_ pointer: UnsafeMutableRawPointer) -> Int64 {
+    if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
+        return lease.encodingCounters?.drawableWaitNanos ?? -1
+    }
+    return encodingCounters(metal3CommandBuffer(pointer))?.drawableWaitNanos ?? -1
 }
 
 // Synchronous borrowed arrays. No wait for WindowServer; pending stays pending.
@@ -12644,17 +12655,26 @@ private func encodePresentTextureToDrawable(
 ) -> Int64 {
     return autoreleasepool {
         let drawableWaitStart = DispatchTime.now().uptimeNanoseconds
-        guard let drawable: CAMetalDrawable = layer.nextDrawable() else {
-            NativePresentationTelemetry.shared.recordDrawableWait(
-                nanos: monotonicElapsedNanos(since: drawableWaitStart)
-            )
+        let nextDrawable = layer.nextDrawable()
+        let drawableWaitNanos = monotonicElapsedNanos(since: drawableWaitStart)
+        NativePresentationTelemetry.shared.recordDrawableWait(nanos: drawableWaitNanos)
+        if NativeState.frameEvidenceEnabled {
+            let counters: NativeCommandEncodingCounters?
+            if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
+                counters = lease.encodingCounters
+            } else {
+                counters = encodingCounters(metal3CommandBuffer(pointer))
+            }
+            if let counters {
+                let previous = counters.drawableWaitNanos ?? 0
+                counters.drawableWaitNanos = previous > Int64.max - drawableWaitNanos
+                    ? Int64.max : previous + drawableWaitNanos
+            }
+        }
+        guard let drawable = nextDrawable else {
             NSLog("[Metallum] WARNING: nextDrawable() returned nil (drawableSize=\(layer.drawableSize), frame=\(layer.frame), isOpaque=\(layer.isOpaque), device=\(layer.device != nil ? "set" : "nil"))")
             return 0
         }
-        NativePresentationTelemetry.shared.recordDrawableWait(
-            nanos: monotonicElapsedNanos(since: drawableWaitStart)
-        )
-
         if #available(macOS 26.0, iOS 26.0, *), let lease = metal4MainLease(pointer) {
             let renderPass = MTL4RenderPassDescriptor()
             renderPass.colorAttachments[0].texture = drawable.texture

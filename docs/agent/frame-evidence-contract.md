@@ -17,12 +17,19 @@ existing ABI descriptors, resource ownership and presentation unchanged.
 | GPU service time | Existing main command-buffer completion and GPU start/end timestamps | One row per submission; never renamed GPU frame critical-path time or present time |
 | Native presentation ticket | Ordinary-present encode return or the same owning command buffer at completion | Metal 4 assigns its ticket at native commit; never joined by timestamp proximity |
 | Presented timestamp | Existing `CAMetalDrawable.addPresentedHandler`, keyed by that native ticket | Source frames only; `presentedTimeSeconds` is not GPU completion, input latency or generated FPS |
+| Drawable acquisition wait | Existing timer around the ordinary present path's `nextDrawable`, carried by the same command buffer | `drawableWaitNs` is CPU wall time inside the present ABI; do not add it to ABI time or equate it with GPU work |
 | Producer entries | Vanilla completed layer submission, Sodium terrain setup, active Iris generation | Distinct facts; installed mods and producer entry do not prove an optimized draw executed |
-| Terrain latency | Existing generation-keyed `terrain-work-epoch-*.json` and oracle | No proximity or ordinal join with this observer; first encoded/drawn is not first presented |
+| Terrain latency | Existing generation-keyed `terrain-work-epoch-*.json` and oracle | `terrainBatchIndices` explicitly joins the existing terrain `frameIndex`; first encoded/drawn is not first presented |
 
 Frame IDs are observation-local joins. They do not replace semantic pass IDs,
 `ResourceIdentity`, terrain generations or MetalFX source-frame IDs. Command-buffer
 identity is captured at creation and carried through submission and completion.
+When both observers are enabled, `terrainBatchIndices` records the existing Vanilla
+draw-batch index after a nonempty layer returns. That index is the terrain report's
+`frameIndex`, not this observer's `frameId`. Repeated layers coalesce within the source
+frame; more than 64 distinct batches invalidates the observation. This joins generation
+events to source-frame evidence without timestamps, new mesh identities or GPU waits.
+It does not attribute individual meshes to command buffers or prove pixel visibility.
 `presentationRequested` distinguishes an offscreen submission from an ordinary
 present attempt. `nativePresentationId` is the existing native ticket when returned,
 otherwise null with a reason. A failed command buffer retains its scheduled ticket;
@@ -55,6 +62,12 @@ five signed 64-bit fields into caller-owned memory and retains no output pointer
 Metal 4 upload encoders count as compute encoders. These are encoded commands, not
 visible draws or whole-frame totals. Disabled observation allocates no counter object
 and performs no counter readback call.
+
+`commandBuffers[].drawableWaitNs` reuses the ordinary present path's existing timer,
+including failed drawable acquisition. A separate optional v1 export accepts the borrowed
+command-buffer pointer and returns signed 64-bit nanoseconds after completion, before
+release. The five-field encoding ABI stays unchanged. Offscreen/unobserved work and older
+native modules return `-1`, exported as null with a reason; measured zero remains zero.
 
 ## Capture and verification
 

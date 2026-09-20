@@ -62,6 +62,21 @@ public final class FrameEvidenceRecorder {
         if (frame != null && frame.retained) frame.producers.add(producer);
     }
 
+    /** Joins the terrain recorder's existing batch index to this source frame, never by time. */
+    public void terrainBatchEncoded(long terrainFrameIndex) {
+        Frame frame = current.get();
+        if (frame == null || !frame.retained) return;
+        if (terrainFrameIndex < 0) {
+            frame.failure = "invalid-terrain-batch-index";
+        } else if (frame.terrainBatchIndices.contains(terrainFrameIndex)) {
+            return; // The same batch is rendered once per layer (and possibly more than one pass).
+        } else if (frame.terrainBatchIndices.size() >= 64) {
+            frame.failure = "terrain-batch-evidence-overflow";
+        } else {
+            frame.terrainBatchIndices.add(terrainFrameIndex);
+        }
+    }
+
     public void context(JsonObject context) {
         Frame frame = current.get();
         if (frame != null && frame.retained) frame.context = context.deepCopy();
@@ -154,6 +169,15 @@ public final class FrameEvidenceRecorder {
         submission.nativeEncoding = counters.clone();
     }
 
+    public synchronized void drawableWait(Submission submission, long nanos) {
+        if (submission == null || nanos == -1) return;
+        if (nanos < -1) {
+            submission.frame.failure = "invalid-drawable-wait";
+            return;
+        }
+        submission.drawableWaitNanos = nanos;
+    }
+
     /** Keeps the exact ABI MethodType, including primitive/void returns and exceptional exits. */
     public MethodHandle instrument(String symbol, MethodHandle target) {
         try {
@@ -219,6 +243,9 @@ public final class FrameEvidenceRecorder {
             JsonArray producers = new JsonArray();
             frame.producers.forEach(producers::add);
             row.add("producerEntries", producers);
+            JsonArray terrainBatches = new JsonArray();
+            frame.terrainBatchIndices.forEach(terrainBatches::add);
+            row.add("terrainBatchIndices", terrainBatches);
             JsonObject abi = new JsonObject();
             frame.abi.forEach((symbol, counter) -> {
                 JsonObject value = new JsonObject();
@@ -246,6 +273,10 @@ public final class FrameEvidenceRecorder {
                 value.addProperty("submitted", submission.submitted);
                 value.addProperty("completed", submission.completed);
                 value.addProperty("success", submission.success);
+                value.add("drawableWaitNs", submission.drawableWaitNanos >= 0
+                        ? new JsonPrimitive(submission.drawableWaitNanos) : JsonNull.INSTANCE);
+                value.addProperty("drawableWaitUnavailableReason", submission.drawableWaitNanos >= 0 ? ""
+                        : "not-observed-or-native-unavailable");
                 if (submission.nativeEncoding == null) {
                     value.add("nativeEncoding", JsonNull.INSTANCE);
                 } else {
@@ -273,7 +304,8 @@ public final class FrameEvidenceRecorder {
         unavailable.addProperty("nativeInternalEncoderAndDrawCounts", "only the nativeEncodingScope paths are counted; uninstrumented helper/MetalFX/ICB work is not zero");
         unavailable.addProperty("psoSwitchesAndResourceBindingChanges", "ABI calls do not prove effective native state changes");
         unavailable.addProperty("workerAbiNs", "worker calls cannot be assigned to a render-thread frame");
-        unavailable.addProperty("terrainLatency", "use generation-keyed terrain-work-epoch reports; no timestamp proximity join");
+        root.addProperty("terrainScope", "terrainBatchIndices join TerrainWorkReport frameIndex only when vanillaWorkEvents is enabled; layer-return encoding evidence, not per-mesh GPU completion or visible presentation");
+        unavailable.addProperty("terrainLatency", "use generation-keyed terrain-work-epoch reports joined by terrainBatchIndices; per-mesh GPU completion and presentation remain unavailable");
         unavailable.addProperty("memoryAndCopyBytes", "no frame-scoped allocation/copy authority connected");
         unavailable.addProperty("shaderCompileBlockingNs", "compile ABI time does not cover Java translation/cache work");
         root.addProperty("presentationScope", "ordinary source frames only; exact native ID joined to CAMetalDrawable.presentedTime seconds; first 65536 native tickets retained when enabled; callbacks pending at export remain unavailable");
@@ -291,6 +323,7 @@ public final class FrameEvidenceRecorder {
         final boolean retained;
         final Map<String, Counter> abi = new LinkedHashMap<>();
         final LinkedHashSet<String> producers = new LinkedHashSet<>();
+        final LinkedHashSet<Long> terrainBatchIndices = new LinkedHashSet<>();
         final List<Submission> submissions = new ArrayList<>();
         final long[] started = new long[32];
         final long[] children = new long[32];
@@ -325,6 +358,7 @@ public final class FrameEvidenceRecorder {
         private boolean presentationRequested;
         private long nativePresentationId;
         private double presentedTimeSeconds;
+        private long drawableWaitNanos = -1;
         private String presentedUnavailableReason = "native-evidence-unavailable";
         private Submission(Frame frame, long id, long nativeSubmitIndex) {
             this.frame = frame; this.id = id; this.nativeSubmitIndex = nativeSubmitIndex;

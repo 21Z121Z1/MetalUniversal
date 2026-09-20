@@ -64,6 +64,10 @@ public final class FrameEvidenceRuntime {
         if (ENABLED) RECORDER.producer(source);
     }
 
+    public static void terrainBatchEncoded(long terrainFrameIndex) {
+        if (ENABLED) RECORDER.terrainBatchEncoded(terrainFrameIndex);
+    }
+
     public static FrameEvidenceRecorder.Submission commandBuffer(long submitIndex) {
         return ENABLED ? RECORDER.commandBuffer(submitIndex) : null;
     }
@@ -81,6 +85,7 @@ public final class FrameEvidenceRuntime {
         if (!ENABLED || submission == null) return;
         RECORDER.nativePresentationId(submission, MetalNativeBridge.commandBufferPresentationId(commandBuffer));
         RECORDER.nativeEncoding(submission, MetalNativeBridge.commandBufferEncodingCounters(commandBuffer));
+        RECORDER.drawableWait(submission, MetalNativeBridge.commandBufferDrawableWaitNanos(commandBuffer));
         RECORDER.completed(submission, success, start, end);
     }
 
@@ -119,6 +124,7 @@ public final class FrameEvidenceRuntime {
         }
         IDENTITY.addProperty("requestedSourceSha", System.getProperty("metallum.validation.sourceCommit", "unknown"));
         IDENTITY.addProperty("trialId", System.getProperty("metallum.frameEvidence.trialId", "unspecified"));
+        IDENTITY.addProperty("vanillaTerrainWorkEventsRequested", Boolean.getBoolean("metallum.terrain.vanillaWorkEvents"));
         IDENTITY.addProperty("world", System.getProperty("metallum.validation.world", "unspecified"));
         IDENTITY.addProperty("os", System.getProperty("os.name") + " " + System.getProperty("os.version"));
         IDENTITY.addProperty("architecture", System.getProperty("os.arch"));

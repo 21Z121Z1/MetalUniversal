@@ -57,6 +57,14 @@ def verify(report, expected_head, require_packaged=False):
         require(type(frame["renderLevel"]) is bool, "invalid renderLevel")
         require(isinstance(frame["producerEntries"], list) and all(isinstance(p, str) for p in frame["producerEntries"]),
                 "invalid producer labels")
+        if "terrainBatchIndices" in frame:
+            batches = frame["terrainBatchIndices"]
+            require(isinstance(batches, list) and len(batches) <= 64, "invalid terrain batch evidence")
+            for batch in batches:
+                integer(batch)
+            require(len(set(batches)) == len(batches), "duplicate terrain batch index in source frame")
+            require(not batches or "vanilla-terrain-layer-return" in frame["producerEntries"],
+                    "terrain batch without Vanilla layer encoding evidence")
         calls, exclusive = 0, 0
         for symbol, counter in frame["abi"].items():
             # The existing native ABI also exports legacy MTL* fence symbols.
@@ -100,6 +108,13 @@ def verify(report, expected_head, require_packaged=False):
                 else:
                     require(bool(reason), "missing presented timestamp needs an absence reason")
             require(all(submission[k] is True for k in ("submitted", "completed", "success")), "pending/failed command buffer")
+            if "drawableWaitNs" in submission:
+                wait = submission["drawableWaitNs"]
+                if wait is not None:
+                    integer(wait)
+                require(submission["drawableWaitUnavailableReason"] == (
+                    "" if wait is not None else "not-observed-or-native-unavailable"),
+                    "drawable wait contradicts absence reason")
             counters = submission.get("nativeEncoding")
             if counters is not None:
                 require(set(counters) == {"renderEncoders", "computeEncoders", "blitEncoders", "directDraws", "indirectDraws"},
