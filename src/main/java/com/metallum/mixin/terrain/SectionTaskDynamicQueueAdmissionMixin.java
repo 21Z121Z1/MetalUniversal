@@ -128,6 +128,14 @@ abstract class SectionTaskDynamicQueueAdmissionMixin {
                 metallum$terrainAdmission;
         if (admission != null) {
             admission.clearDeferredAndReset();
+        }
+    }
+
+    @Inject(method = "clear", at = @At("RETURN"))
+    private void metallum$recordClearedQueue(final CallbackInfo ci) {
+        BoundedTerrainTaskAdmission<SectionRenderDispatcher.RenderSection.SectionTask> admission =
+                metallum$terrainAdmission;
+        if (admission != null) {
             VanillaTerrainAdmissionTelemetry.publish(admission, tasks.size(), System.nanoTime());
         }
     }
