@@ -1,112 +1,82 @@
 # MetalUniversal
 
-MetalUniversal is an experimental Metal rendering backend for Minecraft Java on Apple platforms. It replaces the conventional graphics path with a Java/FFM/Swift Metal stack and is being developed toward exact Minecraft/Iris/Sodium semantic compatibility, correctness-gated Metal 3/4 optimization, terrain GPU submission and iOS support.
+[简体中文](README.zh-CN.md)
 
-The stable branch is `master`; continued renderer development uses `integration/iris-metal-next`. Experimental optimizations remain fail-closed/default-off until their correctness and runtime activation are proved.
+MetalUniversal is a Fabric rendering backend that preserves Minecraft Java rendering semantics and executes GPU work through native Metal on Apple Silicon. The codebase is also called Metallum in package names and build artifacts.
 
-## Agent entrypoint
+## Current support
 
-This repository is designed to be driven by coding agents without requiring them to reread the entire project history. Start with:
+| Area | Current state |
+| --- | --- |
+| Minecraft | 26.3 is the active source and build target. The current JAR does not claim 26.2 compatibility. |
+| Platform | macOS on Apple Silicon is the primary product target. |
+| Renderer | Vanilla uses the common renderer. Sodium and Iris are optional adapters. |
+| Metal | Metal 3 is the maintained fallback. Metal 4 is an experimental capability-specific execution path. |
+| MetalFX | Temporal scaling and frame generation are optional and experimental. |
+| Mobile | iOS and Amethyst work remains on an isolated platform lineage and is not part of the current macOS artifact. |
+
+The repository does not use Vulkan or MoltenVK as the Metal execution runtime. SPIR-V remains useful as shader intermediate representation before Metal Shading Language generation.
+
+## Build
+
+Requirements:
+
+- Java 25
+- Xcode with the macOS 26 SDK for the native module
+- An Apple Silicon macOS system or a compatible macOS runner for the shipping native build
+
+Build the Java and native macOS artifact:
 
 ```bash
-python3 scripts/agent/context.py --task "<what you are trying to change>"
+./gradlew --no-daemon buildMacNative build \
+  -x metalFrameGenerationPresentationValidation \
+  -x metalFxOffscreenValidation
 ```
 
-Then follow `AGENTS.md`. The system model is `docs/agent/system-model.md`; the machine-readable knowledge router is `docs/agent/system-registry.json`.
+Run Java and contract tests without a native Apple environment:
+
+```bash
+./gradlew --no-daemon compileJava test \
+  -x buildMacNative -x buildIOSNative -x buildIOSSpvc
+```
+
+Generate a local, ignored Minecraft source reference for the version in `gradle.properties`:
+
+```bash
+bash scripts/minecraft-reference.sh --print-path
+```
 
 ## Architecture
 
+The renderer has one semantic path:
+
 ```text
-Minecraft / Iris / Sodium semantics
-        |
-semantic pass + generation-aware resource identity
-        |
-immutable render / terrain plans
-        |
-Metal execution policy (Metal 3 / Metal 4 / ICB / residency)
-        |
-Java FFM ABI
-        |
-Swift / Metal
-        |
-structured correctness + performance evidence
+Minecraft 26.3 and RenderPearl semantics
+  -> vanilla, Sodium, or Iris adapter
+  -> stable resource and generation identity
+  -> minimal execution plan
+  -> Java Metal backend
+  -> Java/FFM native ABI
+  -> Swift Metal execution
+  -> Apple Silicon GPU
 ```
 
-Primary code ownership:
+Metal 4 lowers the same execution plan through additional capabilities. MetalFX consumes renderer outputs as an optional presentation feature. Neither creates a second renderer architecture.
 
-| Area | Path |
-|---|---|
-| Metal renderer/resources | `src/main/java/com/metallum/client/metal/render/` |
-| Render-contract validation | `src/main/java/com/metallum/client/validation/` |
-| Terrain/runtime telemetry | `src/main/java/com/metallum/client/terrain/` |
-| Java FFM bridge | `src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java` |
-| Swift Metal implementation | `src/main/native/` |
-| Minecraft/Iris/Sodium mixins | `src/main/java/com/metallum/mixin/` |
-| Agent/evaluation harness | `scripts/agent/` |
+Terrain work is judged by visible correctness and latency, not only build throughput. Publication must reject stale generations. Camera movement changes visibility and priority; it does not by itself invalidate correct geometry.
 
-For architecture authority and historical-document classification, see `docs/README.md`.
+## Validation
 
-## Supported targets
+GitHub-hosted checks can prove compilation, unit and contract behavior, ABI shape, exported symbols, and some hosted Metal paths for an exact commit. They do not prove physical GPU behavior, WindowServer presentation, Minecraft visual parity, stable performance, thermals, variable refresh timing, or MetalFX image quality.
 
-- macOS on Apple Silicon (M1 or newer), using the repository native bridge.
-- iOS arm64 through the isolated mobile/Amethyst platform line and packaged native libraries.
+Use `bash scripts/agent/verify_unified_eval.sh` for the maintained static evidence contract. Physical Apple Silicon results must record the source commit, JAR and native identities, environment, scenario, activation, correctness result, and measurement.
 
-Exact runtime compatibility remains dependent on the current Minecraft/Fabric/Sodium/Iris pins in the build. Treat README prose as orientation; source/build metadata is authoritative.
+## Contributing
 
-## Build and verification
+Read `AGENTS.md`, then inspect the source that owns the behavior and its nearest tests. Do not infer current architecture from old branch names, dated reports, or migration plans.
 
-Prerequisites for full native work include Java 25, Xcode/Swift and an Apple Silicon macOS environment. Hosted CI can prove a large static/native-compile subset but cannot replace attended physical Metal/presentation acceptance.
-
-Useful entry points:
-
-```bash
-# Agent/control-plane + headless static gates
-bash scripts/agent/verify_unified_eval.sh
-
-# Focused static compatibility
-bash scripts/agent/verify.sh static
-
-# Native/GPU-focused gate on a capable Apple host
-bash scripts/agent/verify.sh gpu
-
-# Build macOS native module
-./gradlew buildMacNative
-
-# Build iOS native libraries
-./gradlew buildIOSNative
-./gradlew buildIOSSpvc
-```
-
-Do not use plain `./gradlew build` as proof that the renderer works in Minecraft; runtime rendering, shader-pack correctness, presentation and performance have separate evidence gates.
-
-Generated native artifacts live under `src/main/resources/natives/` when built. Generated worlds, shader packs, screenshots, captures and agent evidence are not repository source and must not be committed.
-
-## Runtime evaluation
-
-Correctness and performance share one unified evaluation platform but use different instrumentation costs. The canonical workflow is documented in `docs/agent/unified-evaluation-loop.md`.
-
-Example:
-
-```bash
-MODE=conformance WORLD="<world>" CANDIDATE_PROFILE=compute-grouping \
-  bash scripts/agent/run_unified_eval_cycle.sh
-
-MODE=full WORLD="<world>" BLOCKS=4 CANDIDATE_PROFILE=compute-grouping \
-  bash scripts/agent/run_unified_eval_cycle.sh
-```
-
-Performance claims require passing correctness, activation proof and paired/interleaved trials. Structured reports are the acceptance authority.
-
-## Minecraft 26.2 source reference
-
-For tasks that require vanilla implementation details:
-
-```bash
-bash scripts/minecraft-reference.sh
-```
-
-This materializes `.minecraft-reference/26.2/sources/` locally from Mojang's client JAR. The generated tree is intentionally ignored and must not be committed.
+The canonical development line is `integration/metaluniversal`. `master` remains the existing stable line. Research history is preserved by `research/modernization-backlog`; mobile work remains isolated.
 
 ## License
 
-MIT License — see `LICENSE`.
+See `LICENSE`.
