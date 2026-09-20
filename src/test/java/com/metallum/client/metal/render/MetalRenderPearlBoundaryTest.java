@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.lwjgl.system.MemoryUtil.memAlloc;
 import static org.lwjgl.system.MemoryUtil.memFree;
@@ -82,5 +83,41 @@ final class MetalRenderPearlBoundaryTest {
         // Unlike signature-only linkage tests, this executes the class initializer
         // reached from MetalFxManager.beginFrame even with MetalFX disabled.
         assertTrue(IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven());
+    }
+
+    @Test
+    void vanillaDepthStateDoesNotResolveOptionalIrisClass() throws Exception {
+        assumeTrue(Boolean.getBoolean("metallum.test.noOptionalMods"));
+        // The unit-test tree supplies its own Iris stub, so explicitly exclude it
+        // to reproduce the production no-optional-mods class loader.
+        String depthClass = MetalIrisDepthConvention.class.getName();
+        try (var loader = new java.net.URLClassLoader(new java.net.URL[]{
+                MetalIrisDepthConvention.class.getProtectionDomain().getCodeSource().getLocation()
+        }, getClass().getClassLoader()) {
+            @Override
+            protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                if (name.startsWith("net.irisshaders.")) {
+                    throw new ClassNotFoundException(name);
+                }
+                if (name.equals(depthClass)) {
+                    Class<?> type = findLoadedClass(name);
+                    if (type == null) type = findClass(name);
+                    if (resolve) resolveClass(type);
+                    return type;
+                }
+                return super.loadClass(name, resolve);
+            }
+        }) {
+            assertThrows(ClassNotFoundException.class,
+                    () -> Class.forName("net.irisshaders.iris.Iris", false, loader));
+            var query = Class.forName(depthClass, true, loader).getDeclaredMethod("packInUseQuick");
+            query.setAccessible(true);
+            assertFalse((boolean) query.invoke(null));
+        }
+        assertEquals(0.0, MetalIrisDepthConvention.hardwareClear(0.0));
+        assertEquals(com.mojang.renderpearl.api.pipeline.CompareOp.GREATER_THAN,
+                MetalIrisDepthConvention.hardwareCompare(
+                        com.mojang.renderpearl.api.pipeline.CompareOp.GREATER_THAN));
+        assertEquals(2.0F, MetalIrisDepthConvention.hardwareDepthBias(2.0F));
     }
 }

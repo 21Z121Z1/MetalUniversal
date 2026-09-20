@@ -1,7 +1,6 @@
 package com.metallum.client.metal.render;
 
 import com.mojang.renderpearl.api.pipeline.CompareOp;
-import net.irisshaders.iris.Iris;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 
@@ -23,20 +22,16 @@ public final class MetalIrisDepthConvention {
      * Metal-only code can use the startup request for the backend half of the
      * gate: reaching these classes already proves that the selected backend is
      * Metal. Iris's own UndoReverseZ mixins additionally require
-     * {@link Iris#isPackInUseQuick()}, so shaders-off rendering must retain
+     * {@code Iris.isPackInUseQuick()}, so shaders-off rendering must retain
      * Mojang's reverse-Z convention even when the semantic layer was requested.
      */
     static boolean enabledForMetalBackend() {
-        return shouldAdaptDepth(
-                MetalIrisCompat.semanticLayerRequested(), packInUseQuick()
-        );
+        return MetalIrisCompat.semanticLayerRequested() && packInUseQuick();
     }
 
     /** Runtime guard for mixins which can also execute on a fallback backend. */
     public static boolean active() {
-        return shouldAdaptDepth(
-                MetalIrisCompat.semanticLayerEnabled(), packInUseQuick()
-        );
+        return MetalIrisCompat.semanticLayerEnabled() && packInUseQuick();
     }
 
     /**
@@ -47,7 +42,9 @@ public final class MetalIrisDepthConvention {
      */
     private static boolean packInUseQuick() {
         try {
-            return (boolean) Iris.class.getMethod("isPackInUseQuick").invoke(null);
+            return (boolean) Class.forName("net.irisshaders.iris.Iris", false,
+                    MetalIrisDepthConvention.class.getClassLoader())
+                    .getMethod("isPackInUseQuick").invoke(null);
         } catch (ReflectiveOperationException | RuntimeException ignored) {
             return false;
         }
