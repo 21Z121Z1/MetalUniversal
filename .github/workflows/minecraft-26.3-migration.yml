@@ -5,7 +5,6 @@ on:
     branches:
       - agent/minecraft-26.3-renderpearl-migration-20260916
       - 'agent/mc26.3-*'
-      - agent/mc26.3-p0b-terrain-observability-20260920
   workflow_dispatch:
 
 permissions:
@@ -182,6 +181,7 @@ jobs:
               "SectionTaskDynamicQueue.java",
               "ChunkSectionsToRender.java",
               "SectionUpdateTracker.java",
+              "DynamicGpuData.java",
               "ClientLevel.java",
           ]
           needles = (
@@ -199,11 +199,12 @@ jobs:
               "MAX_RECOMPILE_QUOTA",
               "poll(",
               "setDirty",
-    "setNotDirty",
-    "SectionDirtyState",
-    "IndexedDraw",
-    "ChunkDrawGroup",
-    "resetLevelRenderData",
+              "setNotDirty",
+              "SectionDirtyState",
+              "IndexedDraw",
+              "ChunkDrawGroup",
+              "extractSectionDrawGroups",
+              "resetLevelRenderData",
               "class SectionUpdateTracker",
               "setSectionDirty",
               "setSectionDirtyWithNeighbors",
