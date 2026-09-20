@@ -317,12 +317,14 @@ public final class BoundedTerrainTaskAdmission<T> {
         private IdentitySlot(final Object owner, final Object kind) {
             this.owner = owner;
             this.kind = kind;
-            this.hash = 31 * System.identityHashCode(owner) + System.identityHashCode(kind);
+            this.hash = 31 * owner.hashCode() + kind.hashCode();
         }
 
         @Override
         public boolean equals(final Object other) {
-            return other instanceof IdentitySlot slot && owner == slot.owner && kind == slot.kind;
+            return other instanceof IdentitySlot slot
+                    && owner.equals(slot.owner)
+                    && kind.equals(slot.kind);
         }
 
         @Override
