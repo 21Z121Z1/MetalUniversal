@@ -61,6 +61,7 @@ final class BoundedTerrainTaskAdmissionTest {
         assertEquals(BoundedTerrainTaskAdmission.Action.FAIL_OPEN, result.action());
         assertEquals(List.of(old), result.failOpenTasks());
         assertTrue(f.admission.snapshot().failOpen());
+        assertFalse(f.admission.snapshot().active(), "fail-open must report mutation as inactive");
         assertEquals(BoundedTerrainTaskAdmission.Action.BASELINE, f.offer(new Task(new Object(), "compile"), 999, 30).action());
     }
 
