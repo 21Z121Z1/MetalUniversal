@@ -204,6 +204,8 @@ jobs:
               "queueLightUpdate",
               "pollLightUpdates",
               "onLightUpdate",
+              "setLevel",
+              "this.level =",
           )
 
           for name in target_names:
@@ -228,6 +230,28 @@ jobs:
                       print(f"--- lines {lo + 1}-{hi} ---")
                       for lineno in range(lo, hi):
                           print(f"{lineno + 1:05d}: {lines[lineno]}")
+
+          print("===== global terrain mutation references =====")
+          global_needles = (
+              "setSectionDirtyWithNeighbors(",
+              "setSectionRangeDirty(",
+              "queueLightUpdate(",
+          )
+          for needle in global_needles:
+              print(f"--- refs for {needle} ---")
+              hit_count = 0
+              for path in sorted(root.rglob("*.java")):
+                  rel = path.relative_to(root)
+                  for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                      if needle in line:
+                          print(f"{rel}:{lineno}: {line.strip()}")
+                          hit_count += 1
+                          if hit_count >= 120:
+                              print("... truncated after 120 hits ...")
+                              break
+                  if hit_count >= 120:
+                      break
+              print(f"ref_count={hit_count}")
           PY
           cat build/agent-evidence/minecraft-26.3-terrain-probe.txt
 
