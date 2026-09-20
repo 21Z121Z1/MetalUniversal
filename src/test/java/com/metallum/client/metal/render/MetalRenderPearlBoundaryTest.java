@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.lwjgl.system.MemoryUtil.memAlloc;
 import static org.lwjgl.system.MemoryUtil.memFree;
@@ -71,5 +72,15 @@ final class MetalRenderPearlBoundaryTest {
             assertDoesNotThrow(type::getDeclaredMethods, className + " methods");
             assertDoesNotThrow(type::getDeclaredFields, className + " fields");
         }
+    }
+
+    @Test
+    void vanillaMotionGateInitializesWithoutIrisBlendAbi() {
+        assumeTrue(Boolean.getBoolean("metallum.test.noOptionalMods"));
+        assertThrows(ClassNotFoundException.class, () -> Class.forName(
+                "net.irisshaders.iris.gl.blending.BlendModeOverride"));
+        // Unlike signature-only linkage tests, this executes the class initializer
+        // reached from MetalFxManager.beginFrame even with MetalFX disabled.
+        assertTrue(IrisMetalPipelineOverrides.frameGenerationMotionSemanticsProven());
     }
 }
