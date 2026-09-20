@@ -61,9 +61,11 @@ def main():
     notify.notify_check(token, ctypes.byref(changed))
     receipt = {"source": identity, "clientCommand": command, "template": args.template,
                "display": main_display,
+               "clientEnvironment": {"SDL_VIDEO_MAC_FULLSCREEN_SPACES": "0"},
                "claim": "diagnostic gameplay recording; not a performance acceptance verdict"}
     with (output / "client.log").open("w") as log, (output / "instruments.log").open("w") as trace_log:
         client = subprocess.Popen(command, cwd=root, stdout=log, stderr=subprocess.STDOUT,
+                                  env={**os.environ, **receipt["clientEnvironment"]},
                                   start_new_session=True)
         try:
             deadline = time.monotonic() + 600

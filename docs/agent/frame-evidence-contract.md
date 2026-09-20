@@ -262,6 +262,11 @@ framebuffer/render-target dimensions, effective view distance below 32, throttli
 or timestamp overflow. A test-only hook counts source `GpuSurface.present` calls
 and frame intervals. These are source submissions, not monitor refresh or generated
 frames. Phase boundaries include source counts for a streaming-only breakdown.
+Fabric's virtual framebuffer is resized through `TestInput.resizeWindow` too.
+The launcher scopes SDL's documented `SDL_VIDEO_MAC_FULLSCREEN_SPACES=0` hint to
+the client process, using desktop fullscreen so a macOS fullscreen Space does not
+subtract the camera/menu strip from the drawable. Native SDL pixel size, source
+texture size and present configuration must all equal the physical display.
 
 `--reuse-encoder-state` enables the candidate CPU state-shadow and packet-scratch
 reuse. Each live encoder exclusively owns its state; both ordinary and retained
